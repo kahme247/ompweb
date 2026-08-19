@@ -1,5 +1,6 @@
 import { readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
 import { getRpcSession, resolveSpawnCwd, startRpcSession } from "@/lib/rpc-manager";
+import { isRemoteSessionId, remoteEventsResponse } from "@/lib/porbs/controller";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +10,7 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  if (isRemoteSessionId(id)) return remoteEventsResponse(id, req);
 
   // Fast path: already-running session. Otherwise only resolve the session file
   // here (cheap, and a miss must still answer 404); the omp spawn itself happens

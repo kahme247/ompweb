@@ -679,6 +679,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const ensuringNewSessionRef = useRef<Promise<string | null> | null>(null);
+  const remoteCreateOperationRef = useRef<string | null>(null);
   const newSessionPromotedRef = useRef(false);
   // Raw child-session events stream at token rate; coalesce the per-subagent
   // revision bumps to one per animation frame so an open dialog only re-pages
@@ -1092,17 +1093,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const selectedModel = newSessionModel ?? newSessionDefaultModel;
       if (selectedModel) setPendingModel(selectedModel);
       const toolNames = getToolNamesForPreset(toolPreset);
+      const remote = newSessionCwd.startsWith("porbs:");
+      if (remote && remoteCreateOperationRef.current === null) remoteCreateOperationRef.current = crypto.randomUUID();
+      const requestBody = remote
+        ? { cwd: newSessionCwd, type: "ensure_session", remote: true, operationId: remoteCreateOperationRef.current }
+        : {
+            cwd: newSessionCwd,
+            type: "ensure_session",
+            toolNames,
+            ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
+            ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
+            ...(advisorEnabled ? { advisor: true } : {}),
+          };
       const res = await fetch("/api/agent/new", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          cwd: newSessionCwd,
-          type: "ensure_session",
-          toolNames,
-          ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
-          ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
-          ...(advisorEnabled ? { advisor: true } : {}),
-        }),
+        body: JSON.stringify(requestBody),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const result = await res.json() as { sessionId: string };
@@ -1158,6 +1164,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // roster needs a fresh get_subagents snapshot) so the fatal-error reconnect
   // below can restore everything the mount flow sets up — not just the stream.
   const reconnectActionsRef = useRef<((sid: string) => void) | null>(null);
+  const resetReconcileRef = useRef<((sid: string) => void) | null>(null);
 
   const connectEvents = useCallback((sid: string): Promise<EventStreamConnectionResult> => {
     if (eventSourceRef.current) {
@@ -1186,7 +1193,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       es.onmessage = (e) => {
         try {
           const event = JSON.parse(e.data) as AgentEvent;
-          if (event.type === "connected") settle("connected");
+          if (event.type === "connected") {
+            settle("connected");
+            if (event.reset === true) resetReconcileRef.current?.(sid);
+          }
           // message_update frames arrive at network rate (often 30-100+/s);
           // the coalescer buffers the latest one and dispatches at display
           // rate, flushing synchronously before any other event type.
@@ -1643,8 +1653,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // agent_end never arrives and the UI stays in streaming state forever.
   // If the server reports idle while we still think it's running, finish
   // through the same path as prompt_done.
-  const reconcileAgentState = useCallback(async (sid: string) => {
-    if (!agentRunningRef.current) return;
+  const reconcileAgentState = useCallback(async (sid: string, force = false) => {
+    if (!force && !agentRunningRef.current) return;
     const runId = promptRunIdRef.current;
     try {
       const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
@@ -1679,6 +1689,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Network still down — the next poll / visibility / online tick retries.
     }
   }, [finishPromptWithoutStream, refreshSubagentRoster]);
+  resetReconcileRef.current = (sid: string) => { void reconcileAgentState(sid, true); };
 
   // Recovery net for missed SSE events: while the agent is running, verify
   // against the server periodically and whenever the tab returns to the

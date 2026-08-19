@@ -3,6 +3,7 @@ import { readSessionHeader } from "@/lib/session-reader";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
 import { startRpcSession, getRpcSession, resolveSpawnCwd, WebRpcError } from "@/lib/rpc-manager";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
+import { isRemoteSessionId, remoteCommand, remoteState, stopRemoteSession } from "@/lib/porbs/controller";
 
 /** omp-web's own failures carry a stable code the client can localize; omp's
  * errors stay opaque English text. */
@@ -26,6 +27,14 @@ export async function POST(
 ) {
   const { id } = await params;
 
+  if (isRemoteSessionId(id)) {
+    try {
+      const result = await remoteCommand(id, await req.json() as Record<string, unknown>);
+      return NextResponse.json({ success: true, data: result.result });
+    } catch (error) {
+      return commandErrorResponse(error);
+    }
+  }
   try {
     const body = await req.json() as { type?: unknown; [key: string]: unknown };
     if (typeof body.type !== "string" || !body.type.trim()) {
@@ -61,6 +70,16 @@ export async function GET(
 ) {
   const { id } = await params;
 
+  if (isRemoteSessionId(id)) {
+    try {
+      const remote = await remoteState(id);
+      return remote
+        ? NextResponse.json({ running: remote.session.lifecycle === "running", state: remote.state })
+        : NextResponse.json({ running: false });
+    } catch (error) {
+      return commandErrorResponse(error);
+    }
+  }
   try {
     const session = getRpcSession(id);
     if (!session || !session.isAlive()) {
@@ -69,6 +88,17 @@ export async function GET(
 
     const state = await session.send({ type: "get_state" });
     return NextResponse.json({ running: true, state });
+  } catch (error) {
+    return commandErrorResponse(error);
+  }
+}
+
+export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  if (!isRemoteSessionId(id)) return NextResponse.json({ error: "Not a remote session" }, { status: 400 });
+  try {
+    const data = await stopRemoteSession(id);
+    return NextResponse.json({ success: true, data });
   } catch (error) {
     return commandErrorResponse(error);
   }

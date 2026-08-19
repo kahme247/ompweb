@@ -6,6 +6,7 @@ import { allowFileRoot } from "@/lib/file-access";
 import { invalidateSessionListCache } from "@/lib/session-reader";
 import { WebRpcError, startRpcSession } from "@/lib/rpc-manager";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
+import { createRemoteSession } from "@/lib/porbs/controller";
 
 function newSessionErrorResponse(error: unknown) {
   if (error instanceof SyntaxError) {
@@ -31,6 +32,10 @@ export async function POST(req: Request) {
     const body = await req.json() as { cwd?: string; [key: string]: unknown };
     const { cwd, ...command } = body;
 
+    const remote = await createRemoteSession(body);
+    if (remote) {
+      return NextResponse.json({ success: true, sessionId: remote.sessionId, data: remote.data });
+    }
     if (!cwd || typeof cwd !== "string") {
       return NextResponse.json({ error: "cwd is required", code: "cwd_required" }, { status: 400 });
     }

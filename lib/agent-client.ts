@@ -8,15 +8,20 @@
 // hooks/useAgentSession.ts. This helper collapses that down to one line.
 
 import { formatApiError } from "@/lib/i18n/api-error";
+const remoteOperationIds = new Map<string, string>();
 
 export async function sendAgentCommand<T = unknown>(
   sessionId: string,
   command: Record<string, unknown>,
 ): Promise<T> {
+  const remote = sessionId.startsWith("w:");
+  const operationKey = remote ? `${sessionId}:${JSON.stringify(command)}` : "";
+  const operationId = remote ? (remoteOperationIds.get(operationKey) ?? crypto.randomUUID()) : undefined;
+  if (remote && operationId) remoteOperationIds.set(operationKey, operationId);
   const res = await fetch(`/api/agent/${encodeURIComponent(sessionId)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(command),
+    body: JSON.stringify(remote ? { ...command, operationId } : command),
   });
   const body = (await res.json().catch(() => ({}))) as {
     success?: boolean;
@@ -31,5 +36,6 @@ export async function sendAgentCommand<T = unknown>(
       body.error || body.code ? formatApiError(body) : `HTTP ${res.status}`,
     );
   }
+  if (remote) remoteOperationIds.delete(operationKey);
   return body.data as T;
 }

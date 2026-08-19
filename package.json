@@ -15,7 +15,8 @@
     "node": ">=22.19.0"
   },
   "bin": {
-    "ompweb": "bin/omp-web.js"
+    "ompweb": "bin/omp-web.js",
+    "porbs-worker": "bin/porbs-worker.mjs"
   },
   "files": [
     "bin",
@@ -38,6 +39,7 @@
     "start": "next start -H 127.0.0.1 -p 30177",
     "start:lan": "next start -H 0.0.0.0 -p 30177",
     "test": "node --experimental-strip-types --test lib/*.test.mjs lib/omp/*.test.mjs components/*.test.mjs components/ui/*.test.mjs hooks/*.test.mjs bin/*.test.mjs",
+    "porbs:worker": "node bin/porbs-worker.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "prepack": "npm run build",

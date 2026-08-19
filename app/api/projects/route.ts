@@ -14,6 +14,7 @@ import {
 import { listAllSessions } from "@/lib/session-reader";
 import { resolveProject } from "@/lib/worktree";
 import type { ManagedProject } from "@/lib/types";
+import { getPorbsRegistry } from "@/lib/porbs/controller";
 
 // GET /api/projects  →  { projects: ManagedProject[] }
 // Registered (non-hidden) projects plus session-discovered projects, excluding
@@ -27,11 +28,9 @@ export async function GET() {
     const discovered = sessions
       .map((s) => s.projectRoot ?? s.cwd)
       .filter((path): path is string => Boolean(path));
-    const projects = mergeProjects(registry, discovered);
-    // Keep the in-memory browse allowlist warm for registered projects that
-    // have no sessions (the in-memory list does not survive restarts, and an
-    // empty managed project derives no root from sessions).
-    for (const project of projects) allowFileRoot(project.path);
+    const localProjects = mergeProjects(registry, discovered);
+    for (const project of localProjects) allowFileRoot(project.path);
+    const projects: ManagedProject[] = [...localProjects, ...getPorbsRegistry().projects()];
     return NextResponse.json({ projects });
   } catch (error) {
     return apiErrorResponse(error);

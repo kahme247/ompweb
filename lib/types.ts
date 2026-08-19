@@ -437,6 +437,9 @@ export interface ManagedProject {
    *  projects and used to order the project list (most recently added
    *  first). The order is stable and never driven by session activity. */
   addedAt?: string;
+  /** Server-configured remote workspace; contains no origin or credential. */
+  remote?: boolean;
+  label?: string;
 }
 
 export interface SessionContext {

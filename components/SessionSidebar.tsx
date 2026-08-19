@@ -1865,7 +1865,7 @@ function ProjectRow({
   const [showAllSessions, setShowAllSessions] = useState(false);
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
   const actionButtonRef = useRef<HTMLButtonElement>(null);
-  const label = projectLabel(project.path);
+  const label = project.label ?? projectLabel(project.path);
   const hasActivity = Boolean(activity && (activity.running > 0 || activity.unread > 0));
   const visibleRoots = hiddenCount > 0 && !showAllSessions
     ? tree.slice(0, MAX_PROJECT_SESSIONS)

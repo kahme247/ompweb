@@ -51,6 +51,9 @@ export interface RpcProcessOptions {
   extraArgs?: string[];
   /** Environment overrides merged over process.env. */
   env?: Record<string, string>;
+  /** POSIX identity used to isolate worker sessions from daemon credentials. */
+  uid?: number;
+  gid?: number;
   /** Called for every non-response frame (events, extension UI, subagent frames). */
   onFrame?: (frame: RpcFrame) => void;
   /** Called once when the child exits, after pending commands are rejected. */
@@ -63,6 +66,15 @@ export interface RpcProcessOptions {
 }
 
 const STDERR_TAIL_LIMIT = 8 * 1024;
+const SECRET_ENV_PREFIXES = ["PORBS_", "OMP_WEB_"];
+
+export function curateOmpChildEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const safe: Record<string, string> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (value !== undefined && !SECRET_ENV_PREFIXES.some((prefix) => key.startsWith(prefix))) safe[key] = value;
+  }
+  return sanitizeProjectCommandEnvironment(safe as NodeJS.ProcessEnv);
+}
 
 export class RpcProcess {
   readonly cwd: string;
@@ -96,7 +108,9 @@ export class RpcProcess {
     const args = ["--mode", "rpc-ui", "--cwd", options.cwd, ...(options.extraArgs ?? [])];
     this.child = this.spawnProcess(bin, args, {
       cwd: options.cwd,
-      env: sanitizeProjectCommandEnvironment({ ...process.env, ...options.env }),
+      env: curateOmpChildEnvironment({ ...process.env, ...options.env }),
+      ...(options.uid === undefined ? {} : { uid: options.uid }),
+      ...(options.gid === undefined ? {} : { gid: options.gid }),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       // On POSIX, omp launches grandchildren (LSP servers, extension subprocesses). Run the

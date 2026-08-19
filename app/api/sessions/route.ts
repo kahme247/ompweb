@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createHash } from "crypto";
 import { listAllSessions } from "@/lib/session-reader";
 import { getRunningRpcSessionIds } from "@/lib/rpc-manager";
+import { remotePlacements } from "@/lib/porbs/controller";
 
 // The session list mixes on-disk sessions with the live runningSessionIds set,
 // which changes on every agent turn, so it must never be cached by proxies or
@@ -15,8 +16,21 @@ const SESSION_LIST_HEADERS = {
 
 export async function GET(req: Request) {
   try {
-    const sessions = await listAllSessions();
-    const runningSessionIds = getRunningRpcSessionIds();
+    const localSessions = await listAllSessions();
+    const placements = await remotePlacements();
+    const sessions = [...localSessions, ...placements.map((placement) => ({
+      path: "",
+      id: placement.sessionId,
+      cwd: `porbs:${placement.workspaceId}`,
+      name: `${placement.hostId} remote session`,
+      created: placement.createdAt,
+      modified: placement.updatedAt,
+      messageCount: 0,
+      firstMessage: "",
+      projectRoot: `porbs:${placement.workspaceId}`,
+      projectKey: `porbs:${placement.workspaceId}`,
+    }))];
+    const runningSessionIds = [...getRunningRpcSessionIds(), ...placements.filter((p) => p.lifecycle === "active").map((p) => p.sessionId)];
     const body = { sessions, runningSessionIds };
     const bodyJson = JSON.stringify(body);
     const etag = `"${createHash("sha1").update(bodyJson).digest("hex").slice(0, 16)}"`;

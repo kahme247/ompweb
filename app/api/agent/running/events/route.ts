@@ -1,4 +1,5 @@
 import { getRunningRpcSessionIds, subscribeRunningSessions } from "@/lib/rpc-manager";
+import { remotePlacements } from "@/lib/porbs/controller";
 
 export const dynamic = "force-dynamic";
 
@@ -18,21 +19,22 @@ export async function GET(req: Request) {
 
       // Subscribe BEFORE taking the initial snapshot so no state change can slip
       // through the gap between snapshot and subscription.
-      const unsubscribe = subscribeRunningSessions(({ ids, refreshSessionList }) => {
-        try {
+      const unsubscribe = subscribeRunningSessions(({ refreshSessionList }) => {
+        void remotePlacements().then((placements) => {
+          const remoteIds = placements.filter((p) => p.lifecycle === "active").map((p) => p.sessionId);
           encode({
             type: "running",
-            runningSessionIds: ids,
+            runningSessionIds: [...getRunningRpcSessionIds(), ...remoteIds],
             ...(refreshSessionList ? { refreshSessionList: true } : {}),
           });
-        } catch {
-          // controller already closed
-        }
+        }).catch(() => {});
       });
 
-      // Initial snapshot so the client renders the correct state immediately.
-      // (A duplicate frame here is harmless: the client just sets the same set.)
-      encode({ type: "running", runningSessionIds: getRunningRpcSessionIds() });
+      const encodeSnapshot = async () => {
+        const remoteIds = (await remotePlacements()).filter((p) => p.lifecycle === "active").map((p) => p.sessionId);
+        encode({ type: "running", runningSessionIds: [...getRunningRpcSessionIds(), ...remoteIds] });
+      };
+      void encodeSnapshot();
 
       // Heartbeat to keep the connection alive through proxies/timeouts.
       const heartbeat = setInterval(() => {
@@ -41,6 +43,7 @@ export async function GET(req: Request) {
         } catch {
           // controller already closed
         }
+        void encodeSnapshot();
       }, 30_000);
 
       const cleanup = () => {
