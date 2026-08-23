@@ -137,6 +137,7 @@
   "appShell.tooltipCacheWrite": "cache write: {value}",
   "appShell.tooltipContext": "context: {percent} of {tokens} tokens",
   "appShell.tooltipCost": "cost: ${value}",
+  "appShell.tooltipCacheRate": "cache hit: {percent}",
   "appShell.tooltipInput": "in: {value}",
   "appShell.tooltipOutput": "out: {value}",
   "appShell.tooltipCurrentSpeed": "current: {value}",

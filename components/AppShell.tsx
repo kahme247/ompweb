@@ -1074,6 +1074,8 @@ export function AppShell() {
             const tok = sessionStats?.tokens;
             const c = sessionStats?.cost ?? 0;
             const costStr = c > 0 ? (c >= 0.01 ? `$${c.toFixed(2)}` : `<$0.01`) : null;
+            const cacheDenomTop = tok ? tok.input + tok.cacheRead : 0;
+            const cacheRateTopStr = tok && cacheDenomTop > 0 ? formatPercent((tok.cacheRead / cacheDenomTop) * 100) : null;
             const currentSpeedStr = generationSpeed?.current !== null && generationSpeed?.current !== undefined
               ? `${generationSpeed.current.toFixed(1)} t/s`
               : null;
@@ -1097,6 +1099,7 @@ export function AppShell() {
               tooltipParts.push(t("appShell.tooltipCacheRead", { value: tok.cacheRead.toLocaleString(locale) }));
               tooltipParts.push(t("appShell.tooltipCacheWrite", { value: tok.cacheWrite.toLocaleString(locale) }));
               if (c > 0) tooltipParts.push(t("appShell.tooltipCost", { value: c.toFixed(4) }));
+              if (cacheRateTopStr) tooltipParts.push(t("appShell.tooltipCacheRate", { percent: cacheRateTopStr }));
             }
             if (contextUsage?.contextWindow) {
               const pct = contextUsage.percent;
@@ -1171,6 +1174,11 @@ export function AppShell() {
                       <path d="M8.5 5a3.5 3.5 0 1 1-1-2.45" /><polyline points="6.5 1.5 8.5 2.5 7.5 4.5" />
                     </svg>
                     {formatCompactNumber(tok.cacheRead)}
+                  </span>
+                )}
+                {!isMobile && cacheRateTopStr && (
+                  <span style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--text-muted)" }}>
+                    {cacheRateTopStr}
                   </span>
                 )}
                 {!isMobile && costStr && (

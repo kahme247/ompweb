@@ -137,6 +137,7 @@
   "appShell.tooltipCacheWrite": "キャッシュ書き込み: {value}",
   "appShell.tooltipContext": "コンテキスト: {tokens} トークン中 {percent}",
   "appShell.tooltipCost": "コスト: ${value}",
+  "appShell.tooltipCacheRate": "キャッシュヒット: {percent}",
   "appShell.tooltipInput": "入力: {value}",
   "appShell.tooltipOutput": "出力: {value}",
   "appShell.tooltipCurrentSpeed": "現在: {value}",

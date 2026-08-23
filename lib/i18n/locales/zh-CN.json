@@ -137,6 +137,7 @@
   "appShell.tooltipCacheWrite": "缓存写入：{value}",
   "appShell.tooltipContext": "上下文：{percent}（共 {tokens} token）",
   "appShell.tooltipCost": "费用：${value}",
+  "appShell.tooltipCacheRate": "缓存命中：{percent}",
   "appShell.tooltipInput": "输入：{value}",
   "appShell.tooltipOutput": "输出：{value}",
   "appShell.tooltipCurrentSpeed": "当前：{value}",
