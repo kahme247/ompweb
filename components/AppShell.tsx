@@ -11,7 +11,7 @@ import { ChatWindow } from "./ChatWindow";
 import { TabBar, type Tab } from "./TabBar";
 import { BranchNavigator } from "./BranchNavigator";
 import { LanguageSwitcher } from "./LanguageSwitcher";
-import { Check, History, Menu, Moon, PanelLeft, Sun, Terminal, Wand2 } from "lucide-react";
+import { Check, CircleCheck, History, Menu, Moon, PanelLeft, Sun, Terminal, Wand2 } from "lucide-react";
 import { useTheme } from "@/hooks/useTheme";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { translate, useI18n } from "@/lib/i18n";
@@ -1098,8 +1098,8 @@ export function AppShell() {
               tooltipParts.push(t("appShell.tooltipOutput", { value: tok.output.toLocaleString(locale) }));
               tooltipParts.push(t("appShell.tooltipCacheRead", { value: tok.cacheRead.toLocaleString(locale) }));
               tooltipParts.push(t("appShell.tooltipCacheWrite", { value: tok.cacheWrite.toLocaleString(locale) }));
-              if (c > 0) tooltipParts.push(t("appShell.tooltipCost", { value: c.toFixed(4) }));
               if (cacheRateTopStr) tooltipParts.push(t("appShell.tooltipCacheRate", { percent: cacheRateTopStr }));
+              if (c > 0) tooltipParts.push(t("appShell.tooltipCost", { value: c.toFixed(4) }));
             }
             if (contextUsage?.contextWindow) {
               const pct = contextUsage.percent;
@@ -1178,6 +1178,7 @@ export function AppShell() {
                 )}
                 {!isMobile && cacheRateTopStr && (
                   <span style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--text-muted)" }}>
+                    <CircleCheck size={12} strokeWidth={1.8} aria-hidden="true" />
                     {cacheRateTopStr}
                   </span>
                 )}
