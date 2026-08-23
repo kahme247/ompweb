@@ -106,6 +106,7 @@
   "appShell.skills": "Skills",
   "appShell.statAssistant": "Assistant",
   "appShell.statCacheRead": "Cache Read",
+  "appShell.statCacheRate": "Cache Hit",
   "appShell.statCacheWrite": "Cache Write",
   "appShell.statContext": "Context",
   "appShell.statCost": "Cost",

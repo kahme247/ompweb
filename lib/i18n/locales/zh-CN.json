@@ -106,6 +106,7 @@
   "appShell.skills": "技能",
   "appShell.statAssistant": "助手",
   "appShell.statCacheRead": "缓存读取",
+  "appShell.statCacheRate": "缓存命中",
   "appShell.statCacheWrite": "缓存写入",
   "appShell.statContext": "上下文",
   "appShell.statCost": "费用",

@@ -1272,7 +1272,10 @@ export function AppShell() {
                       [t("appShell.statTotal"), sessionStats.tokens.total.toLocaleString(locale)],
                     ];
                     const ctx = contextUsage ?? sessionStats.contextUsage;
+                    const cacheInputDenom = sessionStats.tokens.input + sessionStats.tokens.cacheRead;
+                    const cacheRate = cacheInputDenom > 0 ? (sessionStats.tokens.cacheRead / cacheInputDenom) * 100 : 0;
                     const extraTokenRows = [
+                      [t("appShell.statCacheRate"), formatPercent(cacheRate)],
                       ...(sessionStats.cost > 0 ? [[t("appShell.statCost"), `$${sessionStats.cost.toFixed(4)}`]] : []),
                       ...(ctx?.contextWindow ? [[t("appShell.statContext"), `${ctx.percent !== null ? formatPercent(ctx.percent) : "?"} / ${formatCompactNumber(ctx.contextWindow)}`]] : []),
                     ];
