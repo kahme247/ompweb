@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, Bot, Check, Copy, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
 import { toast } from "@/components/ui/toast";
+import { useI18n } from "@/lib/i18n";
 
 type AgentInfo = {
   name: string;
@@ -45,6 +46,7 @@ function fileStem(filePath: string): string {
 }
 
 export function AgentsConfig({ cwd }: { cwd: string | null }) {
+  const { t, tn } = useI18n();
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -92,7 +94,7 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
         if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
         setWorkspaceUnavailable(true);
         setWorkspaceCheckPending(false);
-        setMessage("Selected workspace is unavailable; showing global agents.");
+        setMessage(t("agentsConfig.workspaceUnavailableWarning"));
       } else {
         setWorkspaceUnavailable(false);
         setWorkspaceCheckPending(false);
@@ -119,9 +121,9 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
       const msg = e instanceof Error ? e.message : String(e);
       setWorkspaceCheckPending(false);
       setMessage(msg);
-      toast.error("Could not load agents", msg);
+      toast.error(t("agentsConfig.loadError"), msg);
     } finally { if (isCurrent()) { setLoading(false); setWorkspaceCheckPending(false); } }
-  }, [cwd, creating]);
+  }, [cwd, creating, t]);
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
     setWorkspaceUnavailable(false);
@@ -182,17 +184,17 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
       }
       if (!isCurrent()) return;
       const count = data.written ?? data.total ?? 0;
-      toast.success(`Unpacked ${count} bundled agents`);
-      setMessage(`Unpacked ${count} agents to ${scope}`);
+      toast.success(t("agentsConfig.unpackedToast", { count }));
+      setMessage(t("agentsConfig.unpackedMsg", { count, scope: scope === "project" ? t("agentsConfig.scopeProject") : t("agentsConfig.scopeUser") }));
       await load();
-    } catch (e) { if (!isCurrent()) return; const msg = e instanceof Error ? e.message : String(e); setMessage(msg); toast.error("Unpack failed", msg); }
+    } catch (e) { if (!isCurrent()) return; const msg = e instanceof Error ? e.message : String(e); setMessage(msg); toast.error(t("agentsConfig.unpackFailed"), msg); }
     finally { if (cwdRef.current === requestCwd) setSaving(false); }
   };
   const save = async () => {
     const trimmedName = name.trim();
-    if (!trimmedName) { setMessage("Name is required"); return; }
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(trimmedName)) { setMessage("Name must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"); return; }
-    if (!description.trim()) { setMessage("Description is required"); return; }
+    if (!trimmedName) { setMessage(t("agentsConfig.nameRequired")); return; }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(trimmedName)) { setMessage(t("agentsConfig.namePatternError")); return; }
+    if (!description.trim()) { setMessage(t("agentsConfig.descriptionRequired")); return; }
     const requestGeneration = loadGenerationRef.current;
     const requestCwd = cwd;
     const isCurrent = () => loadGenerationRef.current === requestGeneration && cwdRef.current === requestCwd;
@@ -208,7 +210,7 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
       if (thinkingLevel) payload.thinkingLevel = thinkingLevel;
       const scope: "user" | "project" = creating ? createScope : active && active.scope !== "bundled" ? (active.scope as "user" | "project") : canEditProject ? "project" : "user";
       if (scope === "project" && !canEditProject) {
-        setMessage("Select an existing workspace before saving project agents.");
+        setMessage(t("agentsConfig.selectWorkspaceRequired"));
         return;
       }
       const previousName = creating || isBundledActive || !active ? undefined : fileStem(active.filePath);
@@ -219,10 +221,10 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
         throw new Error(data.error || `HTTP ${res.status}`);
       }
       if (!isCurrent()) return;
-      toast.success(creating ? `Agent "${trimmedName}" created` : `Agent "${trimmedName}" saved`);
-      setMessage(creating ? "Agent created." : "Agent saved. Restart sessions to apply.");
+      toast.success(creating ? t("agentsConfig.agentCreatedToast", { name: trimmedName }) : t("agentsConfig.agentSavedToast", { name: trimmedName }));
+      setMessage(creating ? t("agentsConfig.agentCreatedMsg") : t("agentsConfig.agentSavedMsg"));
       selectedRef.current = trimmedName; setCreating(false); setSelected(trimmedName); await load(true);
-    } catch (e) { if (!isCurrent()) return; const msg = e instanceof Error ? e.message : String(e); setMessage(msg); toast.error("Could not save agent", msg); }
+    } catch (e) { if (!isCurrent()) return; const msg = e instanceof Error ? e.message : String(e); setMessage(msg); toast.error(t("agentsConfig.saveError"), msg); }
     finally { if (cwdRef.current === requestCwd) setSaving(false); }
   };
   const remove = async () => {
@@ -239,13 +241,13 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
         throw new Error(data.error || `HTTP ${res.status}`);
       }
       if (!isCurrent()) return;
-      toast.success(`Agent "${active.name}" removed`);
-      setMessage("Agent removed."); selectedRef.current = null; setSelected(null); clearForm(); await load();
-    } catch (e) { if (!isCurrent()) return; const msg = e instanceof Error ? e.message : String(e); setMessage(msg); toast.error("Could not remove agent", msg); }
+      toast.success(t("agentsConfig.agentRemovedToast", { name: active.name }));
+      setMessage(t("agentsConfig.agentRemovedMsg")); selectedRef.current = null; setSelected(null); clearForm(); await load();
+    } catch (e) { if (!isCurrent()) return; const msg = e instanceof Error ? e.message : String(e); setMessage(msg); toast.error(t("agentsConfig.removeError"), msg); }
     finally { if (cwdRef.current === requestCwd) setSaving(false); }
   };
   const copyPath = async (p: string) => {
-    try { await navigator.clipboard.writeText(p); toast.success("Path copied"); }
+    try { await navigator.clipboard.writeText(p); toast.success(t("agentsConfig.pathCopied")); }
     catch { setMessage(p); }
   };
 
@@ -254,32 +256,27 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text)" }}>
           <Bot size={14} aria-hidden="true" />
-          <span>All agents · {counts.total}</span>
+          <span>{t("agentsConfig.allAgents", { count: counts.total })}</span>
           <span style={{ color: "var(--text-muted)", font: "11px var(--font-mono)" }}>
-            {" · bundled "}
-            {counts.bundled}
-            {" · user "}
-            {counts.user}
-            {" · project "}
-            {counts.project}
+            {t("agentsConfig.countsSummary", { bundled: counts.bundled, user: counts.user, project: counts.project })}
           </span>
         </div>
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
-          <button type="button" onClick={() => void load()} disabled={loading} title="Reload" style={{ padding: "5px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: loading ? "wait" : "pointer", display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12 }}>
-            <RefreshCw size={13} aria-hidden="true" /> Reload
+          <button type="button" onClick={() => void load()} disabled={loading} title={t("agentsConfig.reload")} style={{ padding: "5px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: loading ? "wait" : "pointer", display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12 }}>
+            <RefreshCw size={13} aria-hidden="true" /> {t("agentsConfig.reload")}
           </button>
-          <button type="button" onClick={() => void unpack()} disabled={saving || workspaceCheckPending} title={workspaceUnavailable ? "Unpack bundled agents to user scope; select an existing workspace for project scope" : workspaceCheckPending ? "Checking workspace…" : "Unpack bundled agents to editable location"} style={{ padding: "5px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: saving || workspaceCheckPending ? "wait" : "pointer", fontSize: 12 }}>
-            Unpack bundled
+          <button type="button" onClick={() => void unpack()} disabled={saving || workspaceCheckPending} title={workspaceUnavailable ? t("agentsConfig.workspaceUnavailableWarning") : workspaceCheckPending ? t("agentsConfig.loadingAgents") : t("agentsConfig.unpackBundled")} style={{ padding: "5px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: saving || workspaceCheckPending ? "wait" : "pointer", fontSize: 12 }}>
+            {t("agentsConfig.unpackBundled")}
           </button>
-          <button type="button" onClick={startCreate} disabled={workspaceCheckPending} title={workspaceCheckPending ? "Checking workspace…" : "Create a new agent"} style={{ padding: "5px 10px", border: "1px solid var(--accent)", borderRadius: "var(--radius-control)", background: "var(--accent)", color: "white", cursor: workspaceCheckPending ? "wait" : "pointer", opacity: workspaceCheckPending ? 0.65 : 1, display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12 }}>
-            <Plus size={13} aria-hidden="true" /> New agent
+          <button type="button" onClick={startCreate} disabled={workspaceCheckPending} title={workspaceCheckPending ? t("agentsConfig.loadingAgents") : t("agentsConfig.newAgent")} style={{ padding: "5px 10px", border: "1px solid var(--accent)", borderRadius: "var(--radius-control)", background: "var(--accent)", color: "white", cursor: workspaceCheckPending ? "wait" : "pointer", opacity: workspaceCheckPending ? 0.65 : 1, display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12 }}>
+            <Plus size={13} aria-hidden="true" /> {t("agentsConfig.newAgent")}
           </button>
         </div>
       </div>
       {workspaceUnavailable ? (
         <div role="status" style={{ display: "flex", alignItems: "flex-start", gap: 7, padding: "8px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>
           <AlertCircle size={13} aria-hidden="true" style={{ flexShrink: 0, marginTop: 1, color: "var(--accent-strong)" }} />
-          <span>The selected workspace is unavailable. Showing global agents; project-scope create, unpack, and save actions are disabled until you select an existing workspace.</span>
+          <span>{t("agentsConfig.workspaceUnavailableWarning")}</span>
         </div>
       ) : null}
       {diagnostics.length > 0 ? (
@@ -291,23 +288,23 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
       ) : null}
       <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)" }}>
         <Search size={13} aria-hidden="true" style={{ color: "var(--text-muted)", flexShrink: 0 }} />
-        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="search: type to filter" aria-label="Filter agents" style={{ flex: 1, border: "none", outline: "none", background: "transparent", color: "var(--text)", font: "12px var(--font-mono)" }} />
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={t("agentsConfig.searchPlaceholder")} aria-label={t("agentsConfig.filterAgentsAria")} style={{ flex: 1, border: "none", outline: "none", background: "transparent", color: "var(--text)", font: "12px var(--font-mono)" }} />
         {search ? (
           <button type="button" onClick={() => setSearch("")} style={{ border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer", fontSize: 11 }}>
-            clear
+            {t("agentsConfig.clear")}
           </button>
         ) : null}
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "0.38fr 1fr", gap: 12, minHeight: 380, alignItems: "start" }}>
         <div style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", overflow: "hidden", display: "flex", flexDirection: "column", maxHeight: 520 }}>
           <div style={{ padding: "8px 10px", borderBottom: "1px solid var(--border)", fontSize: 11, color: "var(--text-muted)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <span>{filtered.length} agents</span>
-            {loading ? <span style={{ color: "var(--text-dim)" }}>loading…</span> : null}
+            <span>{tn("agentsConfig.agentsCount", filtered.length)}</span>
+            {loading ? <span style={{ color: "var(--text-dim)" }}>{t("agentsConfig.loadingAgents")}</span> : null}
           </div>
           <div style={{ overflowY: "auto", flex: 1 }}>
             {filtered.length === 0 ? (
               <div style={{ padding: 16, fontSize: 12, color: "var(--text-muted)", textAlign: "center" }}>
-                {loading ? "Loading agents…" : search ? "No match for filter." : "No agents found. Unpack bundled or create one."}
+                {loading ? t("agentsConfig.loadingAgents") : search ? t("agentsConfig.noMatch") : t("agentsConfig.noAgentsFound")}
               </div>
             ) : (
               filtered.map((a) => {
@@ -336,82 +333,94 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
             <>
               {isBundledActive ? (
                 <div style={{ padding: "8px 10px", background: "color-mix(in srgb, var(--accent) 10%, var(--bg-panel))", borderBottom: "1px solid var(--border)", fontSize: 11, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6 }}>
-                  <AlertCircle size={12} aria-hidden="true" /> Bundled agents are read-only. Save will create an editable copy in {canEditProject ? "project" : "user"} scope.
+                  <AlertCircle size={12} aria-hidden="true" /> {t("agentsConfig.bundledReadOnlyWarning", { scope: canEditProject ? t("agentsConfig.scopeProject") : t("agentsConfig.scopeUser") })}
                 </div>
               ) : null}
               <div style={{ padding: 14, display: "flex", flexDirection: "column", gap: 12, overflowY: "auto" }}>
                 <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
                   <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", display: "flex", alignItems: "center", gap: 6 }}><Bot size={14} aria-hidden="true" />{creating ? "New agent" : active?.name}</div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", display: "flex", alignItems: "center", gap: 6 }}>
+                      <Bot size={14} aria-hidden="true" />{creating ? t("agentsConfig.newAgent") : active?.name}
+                    </div>
                     {!creating && active ? (
                       <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 6, font: "11px var(--font-mono)", color: "var(--text-muted)" }}>
                         <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{shorten(active.filePath)}</span>
-                        <button type="button" onClick={() => void copyPath(active.filePath)} title="Copy file path" style={{ padding: "2px 6px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text-muted)", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11 }}><Copy size={11} aria-hidden="true" /> Copy</button>
+                        <button type="button" onClick={() => void copyPath(active.filePath)} title={t("agentsConfig.copyFilePath")} style={{ padding: "2px 6px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text-muted)", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11 }}>
+                          <Copy size={11} aria-hidden="true" /> {t("agentsConfig.copy")}
+                        </button>
                       </div>
                     ) : (
-                      <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-muted)" }}>Create a persistent OMP agent for delegated tasks and sessions.</div>
+                      <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-muted)" }}>{t("agentsConfig.createAgentDesc")}</div>
                     )}
                   </div>
                   {creating ? (
                     <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--text-muted)" }}>
-                      scope
+                      {t("agentsConfig.scope")}
                       <select value={createScope} onChange={(e) => setCreateScope(e.target.value as "user" | "project")} style={{ ...nativeSelectStyle, fontSize: 11, minHeight: 28 }}>
-                        <option value="user">user</option>
-                        <option value="project" disabled={!canEditProject}>project</option>
+                        <option value="user">{t("agentsConfig.scopeUser")}</option>
+                        <option value="project" disabled={!canEditProject}>{t("agentsConfig.scopeProject")}</option>
                       </select>
                     </label>
                   ) : null}
                 </div>
                 <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                  <span style={{ fontSize: 11, color: "var(--text-muted)" }}>Name</span>
+                  <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("agentsConfig.name")}</span>
                   <input value={name} onChange={(e) => setName(e.target.value)} placeholder="designer" style={inputStyle} />
                 </label>
                 <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                  <span style={{ fontSize: 11, color: "var(--text-muted)" }}>Description</span>
-                  <textarea value={description} onChange={(e) => setDescription(e.target.value)} placeholder="UI/UX specialist for design implementation" rows={2} style={textareaStyle} />
+                  <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("agentsConfig.description")}</span>
+                  <textarea value={description} onChange={(e) => setDescription(e.target.value)} placeholder={t("agentsConfig.descPlaceholder")} rows={2} style={textareaStyle} />
                 </label>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                   <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    <span style={{ fontSize: 11, color: "var(--text-muted)" }}>Model roles (csv)</span>
+                    <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("agentsConfig.modelRoles")}</span>
                     <input value={modelCsv} onChange={(e) => setModelCsv(e.target.value)} placeholder="@designer, @smol" style={inputStyle} />
                   </label>
                   <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    <span style={{ fontSize: 11, color: "var(--text-muted)" }}>Thinking level</span>
-                    <select value={thinkingLevel} onChange={(e) => setThinkingLevel(e.target.value)} style={nativeSelectStyle}>{THINKING_LEVELS.map((lv) => <option key={lv} value={lv}>{lv || "— default —"}</option>)}</select>
+                    <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("agentsConfig.thinkingLevel")}</span>
+                    <select value={thinkingLevel} onChange={(e) => setThinkingLevel(e.target.value)} style={nativeSelectStyle}>
+                      {THINKING_LEVELS.map((lv) => <option key={lv} value={lv}>{lv || t("agentsConfig.defaultThinking")}</option>)}
+                    </select>
                   </label>
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                   <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    <span style={{ fontSize: 11, color: "var(--text-muted)" }}>Spawns (csv or *)</span>
+                    <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("agentsConfig.spawns")}</span>
                     <input value={spawnsCsv} onChange={(e) => setSpawnsCsv(e.target.value)} placeholder="task, reviewer  or  *" style={inputStyle} />
                   </label>
                   <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                    <span style={{ fontSize: 11, color: "var(--text-muted)" }}>Tools (csv)</span>
+                    <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("agentsConfig.tools")}</span>
                     <input value={toolsCsv} onChange={(e) => setToolsCsv(e.target.value)} placeholder="read, edit, bash, task" style={inputStyle} />
                   </label>
                 </div>
                 <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                  <span style={{ fontSize: 11, color: "var(--text-muted)" }}>System prompt</span>
-                  <textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder="Agent instructions…" rows={6} style={{ ...textareaStyle, minHeight: 140 }} />
+                  <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("agentsConfig.systemPrompt")}</span>
+                  <textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder={t("agentsConfig.systemPromptPlaceholder")} rows={6} style={{ ...textareaStyle, minHeight: 140 }} />
                 </label>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <button type="button" onClick={() => void save()} disabled={saving || workspaceCheckPending || activeProjectUnavailable} title={workspaceCheckPending ? "Checking workspace…" : activeProjectUnavailable ? "Selected workspace is unavailable" : creating ? "Create agent" : "Save agent"} style={{ padding: "7px 14px", border: "1px solid var(--accent)", borderRadius: "var(--radius-control)", background: "var(--accent)", color: "white", cursor: saving || workspaceCheckPending || activeProjectUnavailable ? "not-allowed" : "pointer", opacity: workspaceCheckPending || activeProjectUnavailable ? 0.65 : 1, display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600 }}><Check size={13} aria-hidden="true" /> {creating ? "Create" : "Save"}</button>
+                  <button type="button" onClick={() => void save()} disabled={saving || workspaceCheckPending || activeProjectUnavailable} title={workspaceCheckPending ? t("agentsConfig.loadingAgents") : activeProjectUnavailable ? t("agentsConfig.workspaceUnavailableWarning") : creating ? t("agentsConfig.create") : t("agentsConfig.save")} style={{ padding: "7px 14px", border: "1px solid var(--accent)", borderRadius: "var(--radius-control)", background: "var(--accent)", color: "white", cursor: saving || workspaceCheckPending || activeProjectUnavailable ? "not-allowed" : "pointer", opacity: workspaceCheckPending || activeProjectUnavailable ? 0.65 : 1, display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600 }}>
+                    <Check size={13} aria-hidden="true" /> {creating ? t("agentsConfig.create") : t("agentsConfig.save")}
+                  </button>
                   {creating ? (
-                    <button type="button" onClick={cancelCreate} disabled={saving} style={{ padding: "7px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", cursor: "pointer", fontSize: 12 }}>Cancel</button>
+                    <button type="button" onClick={cancelCreate} disabled={saving} style={{ padding: "7px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", cursor: "pointer", fontSize: 12 }}>{t("agentsConfig.cancel")}</button>
                   ) : (
-                    <button type="button" onClick={() => void remove()} disabled={saving || isBundledActive || activeProjectUnavailable} title={isBundledActive ? "Bundled agents cannot be removed" : activeProjectUnavailable ? "Selected workspace is unavailable" : "Remove agent"} style={{ padding: "7px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: isBundledActive || activeProjectUnavailable ? "var(--text-dim)" : "var(--status-error, #e5484d)", cursor: isBundledActive || saving || activeProjectUnavailable ? "not-allowed" : "pointer", display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12 }}><Trash2 size={13} aria-hidden="true" /> Remove</button>
+                    <button type="button" onClick={() => void remove()} disabled={saving || isBundledActive || activeProjectUnavailable} title={isBundledActive ? t("agentsConfig.templatesNotice") : activeProjectUnavailable ? t("agentsConfig.workspaceUnavailableWarning") : t("agentsConfig.remove")} style={{ padding: "7px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: isBundledActive || activeProjectUnavailable ? "var(--text-dim)" : "var(--status-error, #e5484d)", cursor: isBundledActive || saving || activeProjectUnavailable ? "not-allowed" : "pointer", display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+                      <Trash2 size={13} aria-hidden="true" /> {t("agentsConfig.remove")}
+                    </button>
                   )}
                   {message ? <span style={{ fontSize: 11, color: message.toLowerCase().includes("fail") || message.toLowerCase().includes("error") ? "var(--status-error, #e5484d)" : "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{message}</span> : null}
                 </div>
-                <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5 }}>Writes are atomic (tmp file + rename), symlink-safe and capped at 512 KB. Paths are validated to stay inside the agents directory.</p>
+                <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5 }}>{t("agentsConfig.atomicNotice")}</p>
               </div>
             </>
           ) : (
             <div style={{ padding: 24, display: "flex", flexDirection: "column", alignItems: "center", gap: 8, textAlign: "center", color: "var(--text-muted)" }}>
               <Bot size={22} aria-hidden="true" style={{ color: "var(--text-dim)" }} />
-              <div style={{ fontSize: 12 }}>{loading ? "Loading…" : filtered.length ? "Select an agent to edit" : "No agents yet"}</div>
-              <div style={{ fontSize: 11, color: "var(--text-dim)" }}>Bundled agents are templates — unpack or create a copy to edit.</div>
-              <button type="button" onClick={startCreate} disabled={workspaceCheckPending} title={workspaceCheckPending ? "Checking workspace…" : "Create a new agent"} style={{ marginTop: 6, padding: "6px 12px", border: "1px solid var(--accent)", borderRadius: "var(--radius-control)", background: "var(--accent)", color: "white", cursor: workspaceCheckPending ? "not-allowed" : "pointer", opacity: workspaceCheckPending ? 0.65 : 1, fontSize: 12, display: "inline-flex", alignItems: "center", gap: 5 }}><Plus size={13} aria-hidden="true" /> New agent</button>
+              <div style={{ fontSize: 12 }}>{loading ? t("agentsConfig.loadingAgents") : filtered.length ? t("agentsConfig.selectAgentToEdit") : t("agentsConfig.noAgentsYet")}</div>
+              <div style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("agentsConfig.templatesNotice")}</div>
+              <button type="button" onClick={startCreate} disabled={workspaceCheckPending} title={workspaceCheckPending ? t("agentsConfig.loadingAgents") : t("agentsConfig.newAgent")} style={{ marginTop: 6, padding: "6px 12px", border: "1px solid var(--accent)", borderRadius: "var(--radius-control)", background: "var(--accent)", color: "white", cursor: workspaceCheckPending ? "not-allowed" : "pointer", opacity: workspaceCheckPending ? 0.65 : 1, fontSize: 12, display: "inline-flex", alignItems: "center", gap: 5 }}>
+                <Plus size={13} aria-hidden="true" /> {t("agentsConfig.newAgent")}
+              </button>
             </div>
           )}
         </div>

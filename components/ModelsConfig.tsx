@@ -161,6 +161,7 @@ type RetrySettings = {
 };
 
 function RetryFallbackDetail({ models }: { models: RuntimeModelEntry[] }) {
+  const { t } = useI18n();
   const [settings, setSettings] = useState<RetrySettings | null>(null);
   const [role, setRole] = useState("default");
   const [candidate, setCandidate] = useState("");
@@ -206,25 +207,25 @@ function RetryFallbackDetail({ models }: { models: RuntimeModelEntry[] }) {
     })();
   };
 
-  if (!settings) return <div style={{ color: "var(--text-muted)", fontSize: 12 }}>Loading native OMP retry settings...</div>;
+  if (!settings) return <div style={{ color: "var(--text-muted)", fontSize: 12 }}>{t("modelsConfig.retryLoading")}</div>;
   const retry = settings.retry ?? {};
   const chain = retry.fallbackChains?.[role] ?? [];
   const modelOptions = models.map((model) => `${model.provider}/${model.id}`);
   const updateChain = (next: string[]) => void save({ ...settings, retry: { ...retry, fallbackChains: { ...(retry.fallbackChains ?? {}), [role]: next } } });
 
   return <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-    <div><SectionTitle>Native OMP Retry & Fallback</SectionTitle><p style={{ margin: "4px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>OMP switches through these ordered model chains when a provider is rate-limited or unavailable.</p></div>
+    <div><SectionTitle>{t("modelsConfig.retryFallbackTitle")}</SectionTitle><p style={{ margin: "4px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>{t("modelsConfig.retryFallbackDesc")}</p></div>
     <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 9 }}>
-      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", fontSize: 12, color: "var(--text)" }}><input type="checkbox" checked={retry.enabled ?? true} onChange={(event) => void save({ ...settings, retry: { ...retry, enabled: event.target.checked } })} /> Retry transient provider errors</label>
-      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", fontSize: 12, color: "var(--text)" }}><input type="checkbox" checked={retry.modelFallback ?? true} onChange={(event) => void save({ ...settings, retry: { ...retry, modelFallback: event.target.checked } })} /> Allow model fallback</label>
-      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12 }}>Retry attempts <select value={retry.maxRetries ?? 10} onChange={(event) => void save({ ...settings, retry: { ...retry, maxRetries: Number(event.target.value) } })} style={{ marginLeft: 8, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}>{[0, 1, 2, 3, 5, 10, 15, 20].map((count) => <option key={count} value={count}>{count}</option>)}</select></label>
-      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12 }}>Return to primary <select value={retry.fallbackRevertPolicy ?? "cooldown-expiry"} onChange={(event) => void save({ ...settings, retry: { ...retry, fallbackRevertPolicy: event.target.value as "cooldown-expiry" | "never" } })} style={{ marginLeft: 8, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}><option value="cooldown-expiry">After cooldown</option><option value="never">Never</option></select></label>
+      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", fontSize: 12, color: "var(--text)" }}><input type="checkbox" checked={retry.enabled ?? true} onChange={(event) => void save({ ...settings, retry: { ...retry, enabled: event.target.checked } })} /> {t("modelsConfig.retryTransientErrors")}</label>
+      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", fontSize: 12, color: "var(--text)" }}><input type="checkbox" checked={retry.modelFallback ?? true} onChange={(event) => void save({ ...settings, retry: { ...retry, modelFallback: event.target.checked } })} /> {t("modelsConfig.allowModelFallback")}</label>
+      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12 }}>{t("modelsConfig.retryAttempts")} <select value={retry.maxRetries ?? 10} onChange={(event) => void save({ ...settings, retry: { ...retry, maxRetries: Number(event.target.value) } })} style={{ marginLeft: 8, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}>{[0, 1, 2, 3, 5, 10, 15, 20].map((count) => <option key={count} value={count}>{count}</option>)}</select></label>
+      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12 }}>{t("modelsConfig.returnToPrimary")} <select value={retry.fallbackRevertPolicy ?? "cooldown-expiry"} onChange={(event) => void save({ ...settings, retry: { ...retry, fallbackRevertPolicy: event.target.value as "cooldown-expiry" | "never" } })} style={{ marginLeft: 8, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}><option value="cooldown-expiry">{t("modelsConfig.afterCooldown")}</option><option value="never">{t("modelsConfig.never")}</option></select></label>
     </div>
     <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
-      <div style={{ padding: "10px 12px", background: "var(--bg-panel)", display: "flex", alignItems: "center", gap: 8 }}><span style={{ color: "var(--text)", fontSize: 12, fontWeight: 600 }}>Fallback chain for</span><select aria-label="Fallback chain role" value={role} onChange={(event) => setRole(event.target.value)} style={{ padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}>{NATIVE_MODEL_ROLES.map((value) => <option key={value} value={value}>{value}</option>)}</select></div>
-      <div style={{ padding: 12, display: "flex", gap: 8 }}><select aria-label="Select a fallback model" value={candidate} onChange={(event) => setCandidate(event.target.value)} style={{ flex: 1, minWidth: 0, padding: "6px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}><option value="">Select a fallback model</option>{modelOptions.filter((value) => !chain.includes(value)).map((value) => <option key={value} value={value}>{value}</option>)}</select><button type="button" disabled={!candidate} onClick={() => { updateChain([...chain, candidate]); setCandidate(""); }} style={{ padding: "6px 10px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent)", color: "var(--on-accent)", cursor: candidate ? "pointer" : "default" }}>Add</button></div>
+      <div style={{ padding: "10px 12px", background: "var(--bg-panel)", display: "flex", alignItems: "center", gap: 8 }}><span style={{ color: "var(--text)", fontSize: 12, fontWeight: 600 }}>{t("modelsConfig.fallbackChainFor")}</span><select aria-label="Fallback chain role" value={role} onChange={(event) => setRole(event.target.value)} style={{ padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}>{NATIVE_MODEL_ROLES.map((value) => <option key={value} value={value}>{value}</option>)}</select></div>
+      <div style={{ padding: 12, display: "flex", gap: 8 }}><select aria-label="Select a fallback model" value={candidate} onChange={(event) => setCandidate(event.target.value)} style={{ flex: 1, minWidth: 0, padding: "6px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}><option value="">{t("modelsConfig.selectFallbackModel")}</option>{modelOptions.filter((value) => !chain.includes(value)).map((value) => <option key={value} value={value}>{value}</option>)}</select><button type="button" disabled={!candidate} onClick={() => { updateChain([...chain, candidate]); setCandidate(""); }} style={{ padding: "6px 10px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent)", color: "var(--on-accent)", cursor: candidate ? "pointer" : "default" }}>{t("modelsConfig.add")}</button></div>
       {chain.length === 0 ? (
-        <div style={{ padding: "0 12px 12px", color: "var(--text-dim)", fontSize: 12 }}>No explicit chain. OMP uses the <code>default</code> chain when available.</div>
+        <div style={{ padding: "0 12px 12px", color: "var(--text-dim)", fontSize: 12 }}>{t("modelsConfig.noExplicitChain")}</div>
       ) : (
         <div style={{ borderTop: "1px solid var(--border)" }}>
           {chain.map((selector, index) => (
@@ -244,6 +245,7 @@ function RetryFallbackDetail({ models }: { models: RuntimeModelEntry[] }) {
 }
 
 function NativeRegistryDetail({ models, connectedProviders, onChanged }: { models: RuntimeModelEntry[]; connectedProviders: ConnectedProvider[]; onChanged: () => Promise<void> }) {
+  const { t } = useI18n();
   const [settings, setSettings] = useState<NativeRegistrySettings | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -291,7 +293,7 @@ function NativeRegistryDetail({ models, connectedProviders, onChanged }: { model
     })();
   };
 
-  if (!settings) return <div style={{ color: "var(--text-muted)", fontSize: 12 }}>Loading native OMP registry settings...</div>;
+  if (!settings) return <div style={{ color: "var(--text-muted)", fontSize: 12 }}>{t("modelsConfig.registryLoading")}</div>;
   const isReadOnly = settings.registryHasScopedEntries === true;
   const allModelKeys = models.map((model) => `${model.provider}/${model.id}`);
   const allowListEnabled = (settings.enabledModels?.length ?? 0) > 0;
@@ -303,28 +305,28 @@ function NativeRegistryDetail({ models, connectedProviders, onChanged }: { model
 
   return <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
     <div>
-      <SectionTitle>Native OMP Model Registry</SectionTitle>
-      <p style={{ margin: "4px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>These settings affect the models OMP itself can resolve. They are saved in <code>~/.omp/agent/config.yml</code>, unlike the Composer picker.</p>
+      <SectionTitle>{t("modelsConfig.nativeRegistryTitle")}</SectionTitle>
+      <p style={{ margin: "4px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>{t("modelsConfig.nativeRegistryDesc")}</p>
     </div>
     <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
-      <label style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12, fontWeight: 600 }}><input type="checkbox" checked={allowListEnabled} disabled={saving || isReadOnly} onChange={(event) => void save({ ...settings, enabledModels: event.target.checked ? allModelKeys : [] })} /> Restrict OMP to selected models</label>
-      <p style={{ margin: 0, padding: "8px 12px", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>{allowListEnabled ? "Unchecked models are unavailable to every OMP session." : "All currently available OMP models are allowed."}</p>
+      <label style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12, fontWeight: 600 }}><input type="checkbox" checked={allowListEnabled} disabled={saving || isReadOnly} onChange={(event) => void save({ ...settings, enabledModels: event.target.checked ? allModelKeys : [] })} /> {t("modelsConfig.restrictSelectedModels")}</label>
+      <p style={{ margin: 0, padding: "8px 12px", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>{allowListEnabled ? t("modelsConfig.uncheckedUnavailable") : t("modelsConfig.allModelsAllowed")}</p>
       {allowListEnabled && <div style={{ maxHeight: 260, overflowY: "auto", borderTop: "1px solid var(--border)" }}>{models.map((model) => {
         const key = `${model.provider}/${model.id}`;
         return <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", color: "var(--text-muted)", fontSize: 12 }}><input type="checkbox" checked={enabledModels.has(key)} disabled={saving || isReadOnly} onChange={(event) => { const next = new Set(enabledModels); if (event.target.checked) next.add(key); else next.delete(key); void save({ ...settings, enabledModels: [...next] }); }} /><code>{key}</code></label>;
       })}</div>}
     </section>
     <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
-      <div style={{ padding: "10px 12px", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12, fontWeight: 600 }}>Disabled Providers</div>
-      <p style={{ margin: 0, padding: "8px 12px", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>Disabling a provider removes it from OMP&apos;s model registry, even if it has credentials.</p>
+      <div style={{ padding: "10px 12px", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12, fontWeight: 600 }}>{t("modelsConfig.disabledProviders")}</div>
+      <p style={{ margin: 0, padding: "8px 12px", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>{t("modelsConfig.disabledProvidersDesc")}</p>
       <div style={{ borderTop: "1px solid var(--border)" }}>{providers.map((provider) => <label key={provider} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", color: "var(--text-muted)", fontSize: 12 }}><input type="checkbox" checked={disabledProviders.has(provider)} disabled={saving || isReadOnly} onChange={(event) => { const next = new Set(disabledProviders); if (event.target.checked) next.add(provider); else next.delete(provider); void save({ ...settings, disabledProviders: [...next] }); }} /><ProviderIcon id={provider} size={14} /><code>{provider}</code></label>)}</div>
     </section>
     <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
-      <div style={{ padding: "10px 12px", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12, fontWeight: 600 }}>Provider Preference</div>
-      <p style={{ margin: 0, padding: "8px 12px", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>Sets OMP&apos;s provider order when a model id is ambiguous.</p>
-      <div style={{ borderTop: "1px solid var(--border)" }}>{orderedProviders.map((provider, index) => <div key={provider} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", color: "var(--text-muted)", fontSize: 12 }}><ProviderIcon id={provider} size={14} /><code style={{ flex: 1 }}>{provider}</code><button type="button" disabled={saving || isReadOnly || index === 0} onClick={() => { const next = [...orderedProviders]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; void save({ ...settings, modelProviderOrder: next }); }} title="Move provider up" aria-label={`Move provider ${provider} up`} className="ui-focus-ring" style={{ width: 24, height: 24, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", border: "none", borderRadius: 4, background: "transparent", color: "var(--text-muted)", cursor: "pointer" }}><ArrowUp size={14} /></button><button type="button" disabled={saving || isReadOnly || index === orderedProviders.length - 1} onClick={() => { const next = [...orderedProviders]; [next[index + 1], next[index]] = [next[index], next[index + 1]]; void save({ ...settings, modelProviderOrder: next }); }} title="Move provider down" aria-label={`Move provider ${provider} down`} className="ui-focus-ring" style={{ width: 24, height: 24, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", border: "none", borderRadius: 4, background: "transparent", color: "var(--text-muted)", cursor: "pointer" }}><ArrowDown size={14} /></button></div>)}</div>
+      <div style={{ padding: "10px 12px", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12, fontWeight: 600 }}>{t("modelsConfig.providerPreference")}</div>
+      <p style={{ margin: 0, padding: "8px 12px", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>{t("modelsConfig.providerPreferenceDesc")}</p>
+      <div style={{ borderTop: "1px solid var(--border)" }}>{orderedProviders.map((provider, index) => <div key={provider} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", color: "var(--text-muted)", fontSize: 12 }}><ProviderIcon id={provider} size={14} /><code style={{ flex: 1 }}>{provider}</code><button type="button" disabled={saving || isReadOnly || index === 0} onClick={() => { const next = [...orderedProviders]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; void save({ ...settings, modelProviderOrder: next }); }} title={t("modelsConfig.moveProviderUp")} aria-label={t("modelsConfig.moveProviderUp")} className="ui-focus-ring" style={{ width: 24, height: 24, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", border: "none", borderRadius: 4, background: "transparent", color: "var(--text-muted)", cursor: "pointer" }}><ArrowUp size={14} /></button><button type="button" disabled={saving || isReadOnly || index === orderedProviders.length - 1} onClick={() => { const next = [...orderedProviders]; [next[index + 1], next[index]] = [next[index], next[index + 1]]; void save({ ...settings, modelProviderOrder: next }); }} title={t("modelsConfig.moveProviderDown")} aria-label={t("modelsConfig.moveProviderDown")} className="ui-focus-ring" style={{ width: 24, height: 24, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", border: "none", borderRadius: 4, background: "transparent", color: "var(--text-muted)", cursor: "pointer" }}><ArrowDown size={14} /></button></div>)}</div>
     </section>
-    {isReadOnly && <div role="status" style={{ padding: "9px 11px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.45 }}>OMP path-scoped registry entries are configured. Edit <code>config.yml</code> directly to preserve their path rules.</div>}
+    {isReadOnly && <div role="status" style={{ padding: "9px 11px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.45 }}>{t("modelsConfig.pathScopedNotice")}</div>}
     {error && <div role="alert" style={{ color: "var(--status-error)", fontSize: 12 }}>{error}</div>}
   </div>;
 }
@@ -333,6 +335,7 @@ const COMPOSER_MODELS_STORAGE_KEY = "omp-composer-models";
 const NATIVE_MODEL_ROLES = ["default", "smol", "slow", "vision", "plan", "designer", "commit", "tiny", "task", "advisor"];
 
 function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
+  const { t } = useI18n();
   const [roles, setRoles] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -353,7 +356,7 @@ function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
       const response = await fetch("/api/model-roles", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ roles }) });
       const data = await response.json() as { error?: string };
       if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-      toast.success("OMP model roles saved");
+      toast.success(t("modelsConfig.rolesSaved"));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -375,10 +378,10 @@ function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
 
   return <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
     <div>
-      <SectionTitle>OMP Model Roles</SectionTitle>
-      <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>Saved natively in <code>~/.omp/agent/config.yml</code>. Choose an OMP model and its supported reasoning level for each role.</p>
+      <SectionTitle>{t("modelsConfig.modelRolesTitle")}</SectionTitle>
+      <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>{t("modelsConfig.modelRolesDesc")}</p>
     </div>
-    {loading ? <div style={{ color: "var(--text-muted)", fontSize: 12 }}>Loading roles...</div> : NATIVE_MODEL_ROLES.map((role) => (
+    {loading ? <div style={{ color: "var(--text-muted)", fontSize: 12 }}>{t("modelsConfig.loadingRoles")}</div> : NATIVE_MODEL_ROLES.map((role) => (
       <div key={role} className="model-role-row" style={{ display: "grid", gridTemplateColumns: "82px minmax(0, 1fr) minmax(110px, 0.35fr)", alignItems: "center", gap: 10, fontSize: 12 }}>
         <code style={{ color: "var(--text-muted)" }}>{role}</code>
         {(() => {
@@ -389,12 +392,12 @@ function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
           const modelKnown = !selectedModel || Boolean(model);
           return <>
             <select aria-label={`Model override for ${role}`} value={selectedModel} onChange={(event) => updateRoleModel(role, event.target.value)} style={{ minWidth: 0, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12 }}>
-              <option value="">No override</option>
+              <option value="">{t("modelsConfig.noOverride")}</option>
               {!modelKnown && <option value={selectedModel}>{selectedModel} (not currently available)</option>}
               {models.map((item) => <option key={`${item.provider}:${item.id}`} value={`${item.provider}/${item.id}`}>{item.name || item.id} ({item.provider}/{item.id})</option>)}
             </select>
             <select aria-label={`Thinking level for ${role}`} value={selectedThinking} disabled={!model} onChange={(event) => updateRoleThinking(role, event.target.value)} style={{ minWidth: 0, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12, opacity: model ? 1 : 0.55 }}>
-              <option value="">Model default</option>
+              <option value="">{t("modelsConfig.modelDefault")}</option>
               {(model?.thinkingLevels ?? []).filter((level) => level !== "off").map((level) => <option key={level} value={level}>{level}</option>)}
             </select>
           </>;
@@ -402,7 +405,7 @@ function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
       </div>
     ))}
     {error && <div role="alert" style={{ color: "var(--status-error)", fontSize: 12 }}>{error}</div>}
-    <button type="button" onClick={() => void save()} disabled={loading || saving} style={{ alignSelf: "flex-start", padding: "7px 12px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent)", color: "var(--on-accent)", cursor: saving ? "wait" : "pointer", fontSize: 12, fontWeight: 600 }}>{saving ? "Saving..." : "Save OMP roles"}</button>
+    <button type="button" onClick={() => void save()} disabled={loading || saving} style={{ alignSelf: "flex-start", padding: "7px 12px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent)", color: "var(--on-accent)", cursor: saving ? "wait" : "pointer", fontSize: 12, fontWeight: 600 }}>{saving ? t("modelsConfig.saving") : t("modelsConfig.saveRoles")}</button>
   </div>;
 }
 
@@ -535,7 +538,7 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
   const apiKeyV = useFieldValidation(apiKeyValidate);
 
   const trimmedRename = editingName.trim();
-  const hostName = provider.baseUrl ? (provider.baseUrl.replace(/^https?:\/\//, "").split("/")[0] || provider.baseUrl) : "Default endpoint";
+  const hostName = provider.baseUrl ? (provider.baseUrl.replace(/^https?:\/\//, "").split("/")[0] || provider.baseUrl) : t("modelsConfig.defaultEndpoint");
 
   const applyPreset = (preset: EndpointPreset) => {
     onChange({
@@ -544,7 +547,7 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
       api: "openai-completions",
       auth: preset.auth === "keep" ? provider.auth : preset.auth,
     });
-    toast.success(`Applied ${preset.baseUrl} endpoint preset`);
+    toast.success(t("modelsConfig.appliedPreset", { url: preset.baseUrl }));
   };
 
   return (
@@ -564,21 +567,21 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             {provider.auth === "none" ? (
               <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 4, background: "var(--bg-subtle)", color: "var(--text-muted)", fontWeight: 500 }}>
-                Auth: None
+                {t("modelsConfig.authNone")}
               </span>
             ) : provider.apiKey ? (
               <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 4, background: "color-mix(in srgb, var(--accent) 15%, transparent)", color: "var(--accent)", fontWeight: 600 }}>
-                Key Set
+                {t("modelsConfig.keySet")}
               </span>
             ) : (
               <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 4, background: "color-mix(in srgb, var(--status-error) 15%, transparent)", color: "var(--status-error)", fontWeight: 600 }}>
-                Key Missing
+                {t("modelsConfig.keyMissing")}
               </span>
             )}
           </div>
         </div>
 
-        {/* Quick Endpoint Presets */}
+        {/* {t("modelsConfig.quickEndpointPresets")} */}
         <div style={{ borderTop: "1px solid var(--border)", paddingTop: 10, marginTop: 4 }}>
           <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>
             Quick Endpoint Presets
@@ -601,7 +604,7 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
       <FieldGroup
         label={
           <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-            <Settings size={12} aria-hidden="true" /> Configuration Details
+            <Settings size={12} aria-hidden="true" /> {t("modelsConfig.configurationDetails")}
           </span>
         }
       >
@@ -692,8 +695,8 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
       {/* Danger Zone */}
       <section style={{ padding: "14px 16px", border: "1px solid color-mix(in srgb, var(--status-error) 25%, transparent)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
         <div>
-          <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>Remove Provider</div>
-          <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>Delete {name} and remove its models from models.yml configuration.</div>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>{t("modelsConfig.removeProvider")}</div>
+          <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{t("modelsConfig.removeProviderDesc", { name })}</div>
         </div>
         <button
           type="button"
@@ -1707,7 +1710,7 @@ function AddProviderPicker({
 // ── Main component ────────────────────────────────────────────────────────────
 
 export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }: { onClose: () => void; onSelectTab?: (tab: SettingsTab) => void; onSaved?: () => void; embedded?: boolean }) {
-  const { t } = useI18n();
+  const { t, tn } = useI18n();
   const isMobile = useIsMobile();
   const [config, setConfig] = useState<ModelsFileData>({ providers: {} });
   const [loading, setLoading] = useState(true);
@@ -2007,32 +2010,33 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
           <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: "14px 16px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", boxShadow: "var(--shadow-card)" }}>
             <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
               <div>
-                <SectionTitle>Composer Model Picker</SectionTitle>
-                <p style={{ margin: "6px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>Choose which native OMP models appear in the composer. This is omp-web-only — it does not alter OMP&apos;s registry.</p>
+                <SectionTitle>{t("modelsConfig.composerPickerTitle")}</SectionTitle>
+                <p style={{ margin: "6px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>{t("modelsConfig.composerPickerDesc")}</p>
               </div>
-              <button type="button" onClick={() => void loadRuntimeModels()} disabled={runtimeModelsLoading} title="Refresh OMP runtime models" style={{ padding: 7, border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text-muted)", cursor: runtimeModelsLoading ? "wait" : "pointer", flexShrink: 0 }}><RefreshCw size={14} aria-hidden="true" /></button>
+              {/* Refresh OMP runtime models */}
+              <button type="button" onClick={() => void loadRuntimeModels()} disabled={runtimeModelsLoading} title={t("modelsConfig.refreshRuntimeModels")} style={{ padding: 7, border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text-muted)", cursor: runtimeModelsLoading ? "wait" : "pointer", flexShrink: 0 }}><RefreshCw size={14} aria-hidden="true" /></button>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-              <span style={{ fontSize: 11, padding: "3px 8px", borderRadius: 10, background: "var(--bg)", border: "1px solid var(--border)", color: "var(--text-muted)", fontWeight: 600 }}>{totalVisible} / {runtimeModels.length} visible</span>
+              <span style={{ fontSize: 11, padding: "3px 8px", borderRadius: 10, background: "var(--bg)", border: "1px solid var(--border)", color: "var(--text-muted)", fontWeight: 600 }}>{t("modelsConfig.modelsVisible", { visible: totalVisible, total: runtimeModels.length })}</span>
               <span style={{ fontSize: 11, color: "var(--text-dim)" }}>·</span>
-              <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{Object.keys(runtimeModelsByProvider).length} provider{Object.keys(runtimeModelsByProvider).length === 1 ? "" : "s"}</span>
+              <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{tn("modelsConfig.providerCount", Object.keys(runtimeModelsByProvider).length)}</span>
             </div>
             <label style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", cursor: "text" }}>
               <Search size={14} aria-hidden="true" style={{ color: "var(--text-dim)", flexShrink: 0 }} />
               <input
                 value={composerPickerSearch}
                 onChange={(e) => setComposerPickerSearch(e.target.value)}
-                placeholder="Filter models (e.g. gpt, deepseek, opencodex)…"
+                placeholder={t("modelsConfig.filterModelsPlaceholder")}
                 style={{ flex: 1, minWidth: 0, background: "none", border: "none", outline: "none", color: "var(--text)", fontSize: 12 }}
               />
               {composerPickerSearch && (
-                <button type="button" onClick={() => setComposerPickerSearch("")} style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", fontSize: 16, lineHeight: 1, padding: "0 2px" }} aria-label="Clear filter">×</button>
+                <button type="button" onClick={() => setComposerPickerSearch("")} style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", fontSize: 16, lineHeight: 1, padding: "0 2px" }} aria-label={t("modelsConfig.clearFilter")}>×</button>
               )}
             </label>
           </div>
-          {runtimeModelsLoading ? <div style={{ color: "var(--text-muted)", fontSize: 12 }}>Loading OMP runtime models…</div> : filteredProviders.length === 0 ? (
+          {runtimeModelsLoading ? <div style={{ color: "var(--text-muted)", fontSize: 12 }}>{t("modelsConfig.loadingRuntimeModels")}</div> : filteredProviders.length === 0 ? (
             <div style={{ padding: "24px 16px", border: "1px dashed var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", color: "var(--text-dim)", fontSize: 12, textAlign: "center" }}>
-              {pickerQuery ? `No models match “${composerPickerSearch}”.` : "OMP did not report any configured models."}
+              {pickerQuery ? t("modelsConfig.noModelsMatch", { query: composerPickerSearch }) : t("modelsConfig.noReportedModels")}
             </div>
           ) : filteredProviders.map(([provider, models]) => {
             const providerVisible = models.every((model) => visibleModelKeys === null || visibleModelKeys.has(`${model.provider}:${model.id}`));
@@ -2058,8 +2062,8 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
           {!runtimeModelsLoading && connectedProviders.filter((provider) => !runtimeModelsByProvider[provider.id]).map((provider) => (
             <section key={provider.id} style={{ border: "1px dashed var(--border)", borderRadius: "var(--radius-card)", padding: 14, background: "var(--bg-panel)" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--text)", fontSize: 12, fontWeight: 600 }}><ProviderIcon id={provider.id} size={15} />{provider.name}</div>
-              <p style={{ margin: "8px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>{provider.disabled ? "Connected, but disabled in OMP. Enable it to discover its models." : "Connected, but OMP has not reported models for this provider yet."}</p>
-              {provider.disabled && <button type="button" onClick={() => void enableConnectedProvider(provider.id).catch((error) => toast.error("Could not enable provider", error instanceof Error ? error.message : String(error)))} style={{ marginTop: 10, padding: "6px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", cursor: "pointer", fontSize: 12 }}>Enable in OMP</button>}
+              <p style={{ margin: "8px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>{provider.disabled ? t("modelsConfig.connectedDisabledDesc") : t("modelsConfig.connectedNoModelsDesc")}</p>
+              {provider.disabled && <button type="button" onClick={() => void enableConnectedProvider(provider.id).catch((error) => toast.error(t("modelsConfig.couldNotEnableProvider"), error instanceof Error ? error.message : String(error)))} style={{ marginTop: 10, padding: "6px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", cursor: "pointer", fontSize: 12 }}>{t("modelsConfig.enableInOmp")}</button>}
             </section>
           ))}
         </div>
@@ -2141,13 +2145,13 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
               {/* — OMP System — */}
               <section style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 6px", fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--text-dim)" }}>
-                  <Layers size={10} aria-hidden="true" style={{ opacity: 0.7 }} /> OMP System
+                  <Layers size={10} aria-hidden="true" style={{ opacity: 0.7 }} /> {t("modelsConfig.ompSystemSection")}
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 2, padding: 4, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg)" }}>
-                  <TreeNavButton icon={Layers} label="Native OMP registry" selected={selection?.type === "registry"} onClick={() => setSelection({ type: "registry" })} />
-                  <TreeNavButton icon={RotateCcw} label="Retry & fallback" selected={selection?.type === "fallbacks"} onClick={() => setSelection({ type: "fallbacks" })} />
-                  <TreeNavButton icon={BookOpen} label="Composer model picker" selected={selection?.type === "picker"} onClick={() => setSelection({ type: "picker" })} />
-                  <TreeNavButton icon={SlidersHorizontal} label="OMP model roles" selected={selection?.type === "roles"} onClick={() => setSelection({ type: "roles" })} />
+                  <TreeNavButton icon={Layers} label={t("modelsConfig.navNativeRegistry")} selected={selection?.type === "registry"} onClick={() => setSelection({ type: "registry" })} />
+                  <TreeNavButton icon={RotateCcw} label={t("modelsConfig.navRetryFallback")} selected={selection?.type === "fallbacks"} onClick={() => setSelection({ type: "fallbacks" })} />
+                  <TreeNavButton icon={BookOpen} label={t("modelsConfig.navComposerPicker")} selected={selection?.type === "picker"} onClick={() => setSelection({ type: "picker" })} />
+                  <TreeNavButton icon={SlidersHorizontal} label={t("modelsConfig.navModelRoles")} selected={selection?.type === "roles"} onClick={() => setSelection({ type: "roles" })} />
                 </div>
               </section>
 
@@ -2156,7 +2160,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 6px" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--text-dim)" }}>
                     <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: activeOAuth.length + activeApiKey.length > 0 ? "var(--status-success)" : "var(--border)", flexShrink: 0 }} />
-                    Connected accounts
+                    {t("modelsConfig.connectedAccounts")}
                   </div>
                   {(activeOAuth.length + activeApiKey.length) > 0 && (
                     <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 10, background: "var(--bg)", border: "1px solid var(--border)", color: "var(--text-dim)", fontWeight: 600 }}>
@@ -2166,9 +2170,9 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                 </div>
                 {(activeOAuth.length === 0 && activeApiKey.length === 0) ? (
                   <div style={{ padding: "10px 10px", border: "1px dashed var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg)", color: "var(--text-dim)", fontSize: 11, lineHeight: 1.5, textAlign: "center" }}>
-                    No OAuth or API-key accounts connected.
+                    {t("modelsConfig.noConnectedAccounts")}
                     <br />
-                    <span style={{ color: "var(--text-muted)" }}>Add one with the button below.</span>
+                    <span style={{ color: "var(--text-muted)" }}>{t("modelsConfig.addOneBelow")}</span>
                   </div>
                 ) : (
                   <div style={{ display: "flex", flexDirection: "column", gap: 4, padding: 4, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg)" }}>
@@ -2184,7 +2188,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                         >
                           <ProviderIcon id={p.id} size={16} />
                           <span style={{ fontSize: 12, color: "var(--text)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
-                          <span title={`OMP OAuth provider: ${p.id}`} style={{ padding: "2px 6px", borderRadius: 4, background: isSelected ? "var(--accent)" : "var(--bg-subtle)", color: isSelected ? "var(--on-accent)" : "var(--text-muted)", fontSize: 9, fontWeight: 600, flexShrink: 0 }}>OAuth</span>
+                          <span title={t("modelsConfig.oauthProviderTitle", { id: p.id })} style={{ padding: "2px 6px", borderRadius: 4, background: isSelected ? "var(--accent)" : "var(--bg-subtle)", color: isSelected ? "var(--on-accent)" : "var(--text-muted)", fontSize: 9, fontWeight: 600, flexShrink: 0 }}>OAuth</span>
                         </button>
                       );
                     })}
@@ -2200,7 +2204,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                         >
                           <ProviderIcon id={p.id} size={16} />
                           <span style={{ fontSize: 12, color: "var(--text)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.displayName}</span>
-                          <span title={`OMP API-key provider: ${p.id}`} style={{ padding: "2px 6px", borderRadius: 4, background: isSelected ? "var(--accent)" : "var(--bg-subtle)", color: isSelected ? "var(--on-accent)" : "var(--text-muted)", fontSize: 9, fontWeight: 600, flexShrink: 0 }}>API key</span>
+                          <span title={t("modelsConfig.apiKeyProviderTitle", { id: p.id })} style={{ padding: "2px 6px", borderRadius: 4, background: isSelected ? "var(--accent)" : "var(--bg-subtle)", color: isSelected ? "var(--on-accent)" : "var(--text-muted)", fontSize: 9, fontWeight: 600, flexShrink: 0 }}>API key</span>
                         </button>
                       );
                     })}
@@ -2212,7 +2216,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
               <section style={{ display: "flex", flexDirection: "column", gap: 6, flex: 1, minHeight: 0 }}>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 6px" }}>
                   <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
-                    Custom providers
+                    {t("modelsConfig.customProviders")}
                   </div>
                   <code style={{ fontSize: 9, padding: "1px 5px", borderRadius: 4, background: "var(--bg)", border: "1px solid var(--border)", color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>models.yml</code>
                 </div>
@@ -2220,9 +2224,9 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                   <div style={{ padding: "10px 8px", fontSize: 12, color: "var(--text-muted)" }}>{t("modelsConfig.loading")}</div>
                 ) : providers.length === 0 ? (
                   <div style={{ padding: "12px 10px", border: "1px dashed var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg)", color: "var(--text-dim)", fontSize: 11, lineHeight: 1.5, textAlign: "center" }}>
-                    No custom providers yet.
+                    {t("modelsConfig.noCustomProviders")}
                     <br />
-                    <span style={{ color: "var(--text-muted)" }}>Add an OpenAI-compatible endpoint.</span>
+                    <span style={{ color: "var(--text-muted)" }}>{t("modelsConfig.addOpenAiEndpoint")}</span>
                   </div>
                 ) : (
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>

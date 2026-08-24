@@ -19,7 +19,7 @@ function PluginsConfigSurface({ embedded, isMobile, onClose, children }: { embed
   if (embedded) return <>{children}</>;
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent ariaLabel="Plugins" style={{ width: isMobile ? "calc(100vw - 16px)" : 860, maxWidth: "calc(100vw - 16px)", height: isMobile ? "calc(100dvh - 16px)" : "78vh", maxHeight: "calc(100dvh - 16px)", padding: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      <DialogContent ariaLabel={translate("pluginsConfig.title")} style={{ width: isMobile ? "calc(100vw - 16px)" : 860, maxWidth: "calc(100vw - 16px)", height: isMobile ? "calc(100dvh - 16px)" : "78vh", maxHeight: "calc(100dvh - 16px)", padding: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
         {children}
       </DialogContent>
     </Dialog>
@@ -351,7 +351,7 @@ function AddPluginPanel({
         <input
           id="plugin-source"
           ref={inputRef}
-          aria-label="Plugin package or repository"
+          aria-label={t("pluginsConfig.source")}
             value={source}
           onChange={(e) => onSourceChange(e.target.value)}
           placeholder="npm:@scope/package"

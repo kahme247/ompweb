@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useSyncExternalStore } from "react";
 import en from "./locales/en.json";
 import ja from "./locales/ja.json";
 import zhCN from "./locales/zh-CN.json";
@@ -27,23 +27,30 @@ const dictionaries: Record<Locale, Record<string, string>> = {
 interface I18nState {
   listeners: Set<() => void>;
   locale: Locale | null;
+  hydrated: boolean;
 }
 
 declare global {
   var __ompI18nState: I18nState | undefined;
 }
 
-const state: I18nState = (globalThis.__ompI18nState ??= { listeners: new Set(), locale: null });
+const state: I18nState = (globalThis.__ompI18nState ??= {
+  listeners: new Set(),
+  locale: null,
+  hydrated: false,
+});
 const listeners = state.listeners;
 
 function detectLocale(): Locale {
   try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored === "en" || stored === "zh-CN" || stored === "ja") return stored;
+    if (typeof window !== "undefined" && typeof localStorage !== "undefined") {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (stored === "en" || stored === "zh-CN" || stored === "ja") return stored;
+    }
   } catch {
     // storage unavailable (private mode etc.)
   }
-  if (typeof navigator !== "undefined") {
+  if (typeof navigator !== "undefined" && navigator.language) {
     const lang = navigator.language.toLowerCase();
     if (lang.startsWith("zh")) return "zh-CN";
     if (lang.startsWith("ja")) return "ja";
@@ -52,15 +59,19 @@ function detectLocale(): Locale {
 }
 
 function getLocale(): Locale {
-  if (typeof document === "undefined") return "en";
+  // During SSR or the initial hydration pass, return "en" to guarantee server/client HTML match
+  if (typeof document === "undefined" || !state.hydrated) return "en";
   if (state.locale === null) state.locale = detectLocale();
   return state.locale;
 }
 
 export function setLocale(locale: Locale): void {
+  state.hydrated = true;
   state.locale = locale;
   try {
-    localStorage.setItem(STORAGE_KEY, locale);
+    if (typeof window !== "undefined" && typeof localStorage !== "undefined") {
+      localStorage.setItem(STORAGE_KEY, locale);
+    }
   } catch {
     // ignore storage errors
   }
@@ -73,7 +84,7 @@ export function setLocale(locale: Locale): void {
 /** Translate outside React (toasts, error helpers). Falls back key → en → key. */
 export function translate(key: string, vars?: Record<string, string | number>): string {
   const locale = getLocale();
-  const template = dictionaries[locale][key] ?? dictionaries.en[key] ?? key;
+  const template = dictionaries[locale]?.[key] ?? dictionaries.en[key] ?? key;
   if (!vars) return template;
   return template.replace(/\{(\w+)\}/g, (match, name: string) =>
     name in vars ? String(vars[name]) : match,
@@ -106,6 +117,17 @@ function getServerSnapshot(): Locale {
  * the locale is the subscribed snapshot. */
 export function useI18n() {
   const locale = useSyncExternalStore(subscribe, getLocale, getServerSnapshot);
+
+  useEffect(() => {
+    if (!state.hydrated) {
+      state.hydrated = true;
+      state.locale = detectLocale();
+      if (typeof document !== "undefined") {
+        document.documentElement.lang = state.locale;
+      }
+      listeners.forEach((cb) => cb());
+    }
+  }, []);
 
   const t = useCallback(
     (key: string, vars?: Record<string, string | number>) => translate(key, vars),
