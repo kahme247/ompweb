@@ -92,8 +92,12 @@ export function SettingsTabs({
         }}
       >
         {SETTINGS_CATEGORIES.map(({ id, label, description, Icon, needsWorkspace }, index) => {
-          const displayLabel = t(`settingsTabs.${id}.label`) || label;
-          const displayDescription = t(`settingsTabs.${id}.description`) || description;
+          const labelKey = `settingsTabs.${id}.label`;
+          const descKey = `settingsTabs.${id}.description`;
+          const trLabel = t(labelKey);
+          const trDesc = t(descKey);
+          const displayLabel = trLabel !== labelKey ? trLabel : label;
+          const displayDescription = trDesc !== descKey ? trDesc : description;
           const selected = id === currentActive;
           const disabled = Boolean(needsWorkspace && !workspaceReady);
           return (
@@ -143,8 +147,12 @@ export function SettingsTabs({
   return (
     <nav aria-label={t("settingsTabs.ariaLabel")} role="tablist" style={{ display: "flex", gap: 3, padding: "7px 12px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)", flexShrink: 0, overflowX: "auto" }}>
       {SETTINGS_CATEGORIES.map(({ id, label, description, Icon, needsWorkspace }, index) => {
-        const displayLabel = t(`settingsTabs.${id}.label`) || label;
-        const displayDescription = t(`settingsTabs.${id}.description`) || description;
+        const labelKey = `settingsTabs.${id}.label`;
+        const descKey = `settingsTabs.${id}.description`;
+        const trLabel = t(labelKey);
+        const trDesc = t(descKey);
+        const displayLabel = trLabel !== labelKey ? trLabel : label;
+        const displayDescription = trDesc !== descKey ? trDesc : description;
         const selected = id === currentActive;
         const disabled = Boolean(needsWorkspace && !workspaceReady);
         return (

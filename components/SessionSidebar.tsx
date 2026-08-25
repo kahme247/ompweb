@@ -3,7 +3,7 @@
 import { memo, useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo, useDeferredValue, type CSSProperties, type Dispatch, type ReactNode, type RefObject, type SetStateAction } from "react";
 import { createPortal } from "react-dom";
 import type { ManagedProject, SessionInfo } from "@/lib/types";
-import { translate, useI18n } from "@/lib/i18n";
+import { useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
@@ -642,11 +642,11 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       }
     } catch (e) {
       if ((e as Error)?.name === "AbortError") return;
-      setError(translate("sessionSidebar.loadFailed", { detail: e instanceof Error ? e.message : String(e) }));
+      setError(t("sessionSidebar.loadFailed", { detail: e instanceof Error ? e.message : String(e) }));
     } finally {
       if (showLoading) setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   const initialLoadDone = useRef(false);
   useEffect(() => {
@@ -664,9 +664,9 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       setProjectsError(null);
       projectsLoadedRef.current = true;
     } catch (e) {
-      setProjectsError(translate("projects.loadFailed", { detail: e instanceof Error ? e.message : String(e) }));
+      setProjectsError(t("projects.loadFailed", { detail: e instanceof Error ? e.message : String(e) }));
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     void loadProjects();
@@ -2691,9 +2691,9 @@ const SessionItem = memo(function SessionItem({
  onDeleted?.(session.id);
  } catch {
  setDeleting(false);
- toast.error(translate("sessionSidebar.archiveFailed"));
+ toast.error(t("sessionSidebar.archiveFailed"));
  }
- }, [session.id, onDeleted]);
+ }, [session.id, onDeleted, t]);
 
   const handleDelete = useCallback(async () => {
     setConfirmDelete(false);
@@ -2704,9 +2704,9 @@ const SessionItem = memo(function SessionItem({
       onDeleted?.(session.id);
     } catch {
       setDeleting(false);
-      toast.error(translate("sessionSidebar.deleteFailed"));
+      toast.error(t("sessionSidebar.deleteFailed"));
     }
-  }, [session.id, onDeleted]);
+  }, [session.id, onDeleted, t]);
 
  const closeConfirmation = useCallback(() => {
  setConfirmArchive(false);

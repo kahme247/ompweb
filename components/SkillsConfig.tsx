@@ -2,7 +2,7 @@
 
 import { Fragment, useState, useEffect, useCallback, useRef } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { translate, useI18n } from "@/lib/i18n";
+import { useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import {
   Dialog,
@@ -19,10 +19,11 @@ import type {
 } from "@/lib/api-types";
 
 function SkillsConfigSurface({ embedded, isMobile, onClose, children }: { embedded: boolean; isMobile: boolean; onClose: () => void; children: React.ReactNode }) {
+  const { t } = useI18n();
   if (embedded) return <>{children}</>;
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent ariaLabel={translate("skillsConfig.title")} style={{ width: isMobile ? "calc(100vw - 16px)" : 860, maxWidth: "calc(100vw - 16px)", height: isMobile ? "calc(100dvh - 16px)" : "78vh", maxHeight: "calc(100dvh - 16px)", padding: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      <DialogContent ariaLabel={t("skillsConfig.title")} style={{ width: isMobile ? "calc(100vw - 16px)" : 860, maxWidth: "calc(100vw - 16px)", height: isMobile ? "calc(100dvh - 16px)" : "78vh", maxHeight: "calc(100dvh - 16px)", padding: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
         {children}
       </DialogContent>
     </Dialog>
@@ -53,9 +54,8 @@ function updateKey(skill: Skill): string | null {
     ? `${skill.install.scope}\0${skill.install.package}`
     : null;
 }
-
-function shortVersion(version?: string): string {
-  return version ? version.slice(0, 8) : translate("skillsConfig.unknownVersion");
+function shortVersion(version: string | undefined, t: (key: string) => string): string {
+  return version ? version.slice(0, 8) : t("skillsConfig.unknownVersion");
 }
 
 function Toggle({
@@ -251,7 +251,7 @@ function SkillDetail({
                 color: "var(--text-muted)",
               }}
             >
-              {shortVersion(updateStatus?.currentVersion ?? skill.install.versionHash)}
+              {shortVersion(updateStatus?.currentVersion ?? skill.install.versionHash, t)}
             </span>
             {skill.install.canCheckForUpdates && (
               <button
@@ -279,7 +279,7 @@ function SkillDetail({
                   color: "var(--status-warning)",
                 }}
               >
-                {shortVersion(updateStatus.latestVersion)}
+                {shortVersion(updateStatus.latestVersion, t)}
               </span>
             )}
             {(checkingUpdate ||
@@ -411,13 +411,13 @@ function AddSkillPanel({
         return;
       }
       setResults(d.results ?? []);
-      if ((d.results ?? []).length === 0) setSearchError(translate("skillsConfig.noSkillsFound"));
+      if ((d.results ?? []).length === 0) setSearchError(t("skillsConfig.noSkillsFound"));
     } catch (e) {
       setSearchError(String(e));
     } finally {
       setSearching(false);
     }
-  }, []);
+  }, [t]);
 
   const install = useCallback(
     async (pkg: string) => {

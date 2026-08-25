@@ -488,17 +488,24 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
     if (!trimmedQuery) return [];
     const results: SearchResult[] = [];
     for (const category of SETTINGS_CATEGORIES) {
-      const localizedLabel = t(`settingsTabs.${category.id}.label`) || category.label;
-      const localizedDesc = t(`settingsTabs.${category.id}.description`) || category.description;
+      const labelKeyCat = `settingsTabs.${category.id}.label`;
+      const descKeyCat = `settingsTabs.${category.id}.description`;
+      const trLabelCat = t(labelKeyCat);
+      const trDescCat = t(descKeyCat);
+      const localizedLabel = trLabelCat !== labelKeyCat ? trLabelCat : category.label;
+      const localizedDesc = trDescCat !== descKeyCat ? trDescCat : category.description;
       const haystack = `${localizedLabel} ${localizedDesc} ${category.label} ${category.description}`.toLowerCase();
       if (haystack.includes(trimmedQuery)) {
         results.push({ id: `tab-${category.id}`, kind: "category", tab: category.id, label: localizedLabel, description: localizedDesc });
       }
     }
     for (const setting of SETTING_INDEX) {
-      const localizedLabel = t(setting.labelKey) || setting.fallbackLabel;
-      const localizedDesc = t(setting.descKey) || setting.fallbackDesc;
-      const localizedSection = t(setting.sectionKey) || setting.fallbackSection;
+      const trLabel = t(setting.labelKey);
+      const trDesc = t(setting.descKey);
+      const trSection = t(setting.sectionKey);
+      const localizedLabel = trLabel !== setting.labelKey ? trLabel : setting.fallbackLabel;
+      const localizedDesc = trDesc !== setting.descKey ? trDesc : setting.fallbackDesc;
+      const localizedSection = trSection !== setting.sectionKey ? trSection : setting.fallbackSection;
       const haystack = `${localizedLabel} ${localizedDesc} ${localizedSection} ${setting.fallbackLabel} ${setting.fallbackDesc} ${setting.fallbackSection}`.toLowerCase();
       if (haystack.includes(trimmedQuery)) {
         results.push({ id: setting.id, kind: "setting", tab: setting.tab, label: localizedLabel, description: localizedDesc, scope: setting.scope, section: localizedSection });

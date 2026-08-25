@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { translate, translatePlural, useI18n } from "@/lib/i18n";
+import { useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import {
   Dialog,
@@ -16,10 +16,11 @@ import { SettingsTabs, type SettingsTab } from "./SettingsTabs";
 import type { PluginPackageInfo, PluginsResponse } from "@/lib/api-types";
 
 function PluginsConfigSurface({ embedded, isMobile, onClose, children }: { embedded: boolean; isMobile: boolean; onClose: () => void; children: React.ReactNode }) {
+  const { t } = useI18n();
   if (embedded) return <>{children}</>;
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent ariaLabel={translate("pluginsConfig.title")} style={{ width: isMobile ? "calc(100vw - 16px)" : 860, maxWidth: "calc(100vw - 16px)", height: isMobile ? "calc(100dvh - 16px)" : "78vh", maxHeight: "calc(100dvh - 16px)", padding: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      <DialogContent ariaLabel={t("pluginsConfig.title")} style={{ width: isMobile ? "calc(100vw - 16px)" : 860, maxWidth: "calc(100vw - 16px)", height: isMobile ? "calc(100dvh - 16px)" : "78vh", maxHeight: "calc(100dvh - 16px)", padding: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
         {children}
       </DialogContent>
     </Dialog>
@@ -37,24 +38,25 @@ function packageKey(pkg: Pick<PluginPackageInfo, "source" | "scope">): string {
   return `${pkg.scope}\0${pkg.source}`;
 }
 
-function resourceSummary(pkg: PluginPackageInfo): string {
-  if (pkg.disabled) return translate("pluginsConfig.disabled");
+function resourceSummary(pkg: PluginPackageInfo, t: (key: string, vars?: Record<string, string | number>) => string, tn: (key: string, count: number, vars?: Record<string, string | number>) => string): string {
+  if (pkg.disabled) return t("pluginsConfig.disabled");
   const parts = [
-    pkg.counts.extensions ? translatePlural("pluginsConfig.extCount", pkg.counts.extensions) : "",
-    pkg.counts.skills ? translatePlural("pluginsConfig.skillCount", pkg.counts.skills) : "",
-    pkg.counts.prompts ? translatePlural("pluginsConfig.promptCount", pkg.counts.prompts) : "",
-    pkg.counts.themes ? translatePlural("pluginsConfig.themeCount", pkg.counts.themes) : "",
+    pkg.counts.extensions ? tn("pluginsConfig.extCount", pkg.counts.extensions) : "",
+    pkg.counts.skills ? tn("pluginsConfig.skillCount", pkg.counts.skills) : "",
+    pkg.counts.prompts ? tn("pluginsConfig.promptCount", pkg.counts.prompts) : "",
+    pkg.counts.themes ? tn("pluginsConfig.themeCount", pkg.counts.themes) : "",
   ].filter(Boolean);
-  return parts.length ? parts.join(" · ") : translate("pluginsConfig.noResources");
+  return parts.length ? parts.join(" · ") : t("pluginsConfig.noResources");
 }
 
-function versionSummary(pkg: PluginPackageInfo): string {
+function versionSummary(pkg: PluginPackageInfo, t: (key: string, vars?: Record<string, string | number>) => string): string {
+
   const parts = [];
-  if (pkg.version) parts.push(translate("pluginsConfig.installedVersion", { version: pkg.version }));
+  if (pkg.version) parts.push(t("pluginsConfig.installedVersion", { version: pkg.version }));
   if (pkg.configuredVersion) {
-    parts.push(translate("pluginsConfig.configuredVersion", { version: pkg.configuredVersion }));
+    parts.push(t("pluginsConfig.configuredVersion", { version: pkg.configuredVersion }));
   }
-  return parts.length ? parts.join(" · ") : translate("pluginsConfig.unknown");
+  return parts.length ? parts.join(" · ") : t("pluginsConfig.unknown");
 }
 
 function installLocation(scope: PluginScope, cwd: string): string {
@@ -456,7 +458,7 @@ function PackageDetail({
   onAction: (action: PluginAction, pkg: PluginPackageInfo) => void;
   onReloadSession: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, tn } = useI18n();
   const key = packageKey(pkg);
   const busy = busyKey?.endsWith(key) ?? false;
   const reloadBusy = busyKey === "reload";
@@ -551,13 +553,13 @@ function PackageDetail({
         <div style={{ color: "var(--text-dim)" }}>{t("pluginsConfig.status")}</div>
         <div style={{ color: statusColor(pkg.status) }}>{t(STATUS_KEYS[pkg.status])}</div>
         <div style={{ color: "var(--text-dim)" }}>{t("pluginsConfig.version")}</div>
-        <div style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{versionSummary(pkg)}</div>
+        <div style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{versionSummary(pkg, t)}</div>
         <div style={{ color: "var(--text-dim)" }}>{t("pluginsConfig.package")}</div>
         <div style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", overflowWrap: "anywhere" }}>
           {pkg.packageName ?? t("pluginsConfig.unknown")}
         </div>
         <div style={{ color: "var(--text-dim)" }}>{t("pluginsConfig.resources")}</div>
-        <div style={{ color: "var(--text-muted)" }}>{resourceSummary(pkg)}</div>
+        <div style={{ color: "var(--text-muted)" }}>{resourceSummary(pkg, t, tn)}</div>
         <div style={{ color: "var(--text-dim)" }}>{t("pluginsConfig.installedPath")}</div>
         <div
           style={{
@@ -686,7 +688,7 @@ export function PluginsConfig({
       if (action === "remove") {
         setSelected(next.packages[0] ? packageKey(next.packages[0]) : null);
         if (next.packages.length === 0) setAddMode(true);
-        setActionMessage(translate("pluginsConfig.packageRemoved"));
+        setActionMessage(t("pluginsConfig.packageRemoved"));
         toast.success(t("pluginsConfig.packageRemoved"));
       } else {
         const messageKeys: Record<Exclude<PluginAction, "remove">, string> = {
@@ -695,8 +697,8 @@ export function PluginsConfig({
           disable: "pluginsConfig.packageDisabledMsg",
           enable: "pluginsConfig.packageEnabledMsg",
         };
-        setActionMessage(translate(messageKeys[action]));
-        toast.success(translate(messageKeys[action]));
+        setActionMessage(t(messageKeys[action]));
+        toast.success(t(messageKeys[action]));
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -727,13 +729,13 @@ export function PluginsConfig({
       setSelected(installed ? packageKey(installed) : key);
       setAddMode(false);
       setInstallSource("");
-      setActionMessage(translate("pluginsConfig.packageInstalled"));
+      setActionMessage(t("pluginsConfig.packageInstalled"));
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusyKey(null);
     }
-  }, [cwd, installScope, installSource]);
+  }, [cwd, installScope, installSource, t]);
 
   const reloadSession = useCallback(async () => {
     if (!sessionId) return;
@@ -744,13 +746,13 @@ export function PluginsConfig({
       await sendAgentCommand(sessionId, { type: "reload" });
       onReloaded?.();
       await loadPlugins();
-      setActionMessage(translate("pluginsConfig.sessionReloaded"));
+      setActionMessage(t("pluginsConfig.sessionReloaded"));
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusyKey(null);
     }
-  }, [loadPlugins, onReloaded, sessionId]);
+  }, [loadPlugins, onReloaded, sessionId, t]);
 
   const addBusy = busyKey?.startsWith("install:") ?? false;
 
@@ -907,7 +909,7 @@ export function PluginsConfig({
                                 marginTop: 2,
                               }}
                             >
-                              {resourceSummary(pkg)}
+                              {resourceSummary(pkg, t, tn)}
                             </div>
                             {(pkg.version || pkg.configuredVersion) && (
                               <div
@@ -920,7 +922,7 @@ export function PluginsConfig({
                                   marginTop: 2,
                                 }}
                               >
-                                {versionSummary(pkg)}
+                                {versionSummary(pkg, t)}
                               </div>
                             )}
                           </div>
