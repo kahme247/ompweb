@@ -11,10 +11,10 @@ import { ChatWindow } from "./ChatWindow";
 import { TabBar, type Tab } from "./TabBar";
 import { BranchNavigator } from "./BranchNavigator";
 import { LanguageSwitcher } from "./LanguageSwitcher";
-import { BarChart3, Check, Ellipsis, GitBranch, Globe, History, Menu, Moon, PanelLeft, Plus, Search, Sun, Terminal, Wand2, X } from "lucide-react";
+import { BarChart3, Check, ChevronRight, Ellipsis, GitBranch, Globe, History, Menu, Moon, PanelLeft, Plus, Search, Settings, Sun, Terminal, Wand2, X } from "lucide-react";
 import { useTheme } from "@/hooks/useTheme";
 import { formatCompactNumber, formatPercent, getCacheHitRate } from "@/lib/format";
-import { translate, useI18n } from "@/lib/i18n";
+import { LOCALES, translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { copyText } from "@/lib/clipboard";
@@ -84,7 +84,7 @@ export function AppShell() {
   const searchParams = useSearchParams();
   const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
   const { isDark, preference, toggleTheme } = useTheme();
-  const { t, locale } = useI18n();
+  const { t, locale, setLocale } = useI18n();
   const isMobile = useIsMobile();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   // When user clicks +, we only store the cwd — no fake session id
@@ -1406,37 +1406,70 @@ export function AppShell() {
                   className="mobile-action-card"
                   style={{ padding: "10px 14px", flexDirection: "row", alignItems: "center", gap: 12 }}
                 >
-                  <div style={{ width: 18, height: 18, borderRadius: "50%", background: "var(--bg)", border: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11 }}>⚙</div>
+                  <Settings size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
                   <div style={{ flex: 1 }}>
                     <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>{t("settingsConfig.title") || "系统全局设置"}</div>
                     <div style={{ fontSize: 11, color: "var(--text-muted)" }}>模型、MCP 服务、插件与通用偏好</div>
                   </div>
+                  <ChevronRight size={14} style={{ color: "var(--text-dim)", flexShrink: 0 }} />
                 </button>
 
-                {/* Theme & Language row */}
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 4 }}>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      const rect = e.currentTarget.getBoundingClientRect();
-                      toggleTheme({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
-                    }}
-                    className="mobile-action-card"
-                    style={{ padding: "10px 12px", alignItems: "center", textAlign: "center" }}
-                  >
-                    {isDark ? <Sun size={18} style={{ color: "var(--accent)" }} /> : <Moon size={18} style={{ color: "var(--accent)" }} />}
-                    <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)", marginTop: 4 }}>
-                      {isDark ? "切换亮色" : "切换暗色"}
-                    </span>
-                  </button>
-                  <div
-                    className="mobile-action-card"
-                    style={{ padding: "10px 12px", alignItems: "center", justifyContent: "center", textAlign: "center" }}
-                  >
-                    <Globe size={18} style={{ color: "var(--accent)" }} />
-                    <div style={{ marginTop: 4 }}>
-                      <LanguageSwitcher />
+                {/* Theme toggle row */}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    const rect = e.currentTarget.getBoundingClientRect();
+                    toggleTheme({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+                  }}
+                  className="mobile-action-card"
+                  style={{ padding: "10px 14px", flexDirection: "row", alignItems: "center", gap: 12 }}
+                >
+                  {isDark ? <Sun size={18} style={{ color: "var(--accent)", flexShrink: 0 }} /> : <Moon size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />}
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>外观主题</div>
+                    <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                      当前: {preference === "system" ? "跟随系统" : isDark ? "暗色模式 (Dark)" : "亮色模式 (Light)"}
                     </div>
+                  </div>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: "var(--accent)", background: "color-mix(in srgb, var(--accent) 12%, transparent)", padding: "4px 9px", borderRadius: 6, flexShrink: 0 }}>
+                    {isDark ? "切为亮色" : "切为暗色"}
+                  </span>
+                </button>
+
+                {/* Language switcher row */}
+                <div
+                  className="mobile-action-card"
+                  style={{ padding: "10px 14px", flexDirection: "row", alignItems: "center", gap: 12 }}
+                >
+                  <Globe size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>界面语言</div>
+                    <div style={{ fontSize: 11, color: "var(--text-muted)" }}>多语言界面设置</div>
+                  </div>
+                  <div style={{ display: "flex", gap: 5, flexShrink: 0 }}>
+                    {LOCALES.map((l) => {
+                      const isCurrent = l.value === locale;
+                      return (
+                        <button
+                          key={l.value}
+                          type="button"
+                          onClick={() => setLocale(l.value)}
+                          style={{
+                            padding: "4px 8px",
+                            borderRadius: 6,
+                            border: isCurrent ? "1px solid var(--accent)" : "1px solid var(--border)",
+                            background: isCurrent ? "color-mix(in srgb, var(--accent) 12%, transparent)" : "var(--bg)",
+                            color: isCurrent ? "var(--accent)" : "var(--text-muted)",
+                            fontSize: 11,
+                            fontWeight: isCurrent ? 600 : 400,
+                            cursor: "pointer",
+                            transition: "all var(--dur-fast) var(--ease-out-warm)",
+                          }}
+                        >
+                          {l.label}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               </div>
