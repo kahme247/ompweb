@@ -1183,171 +1183,246 @@ function CompactionMessageView({
     ? Math.round(((tokensBefore - tokensAfter) / tokensBefore) * 100)
     : null;
   const { copied, copy } = useCopyFeedback();
+  const [detailsExpanded, setDetailsExpanded] = useState(false);
 
   const handleCopySummary = useCallback(() => {
     copy(parsedSummary.body || summary);
   }, [copy, parsedSummary.body, summary]);
-
   return (
-    <div style={{ marginBottom: 20, marginTop: 14 }}>
+    <div style={{ marginBottom: detailsExpanded ? 20 : 12, marginTop: detailsExpanded ? 14 : 10 }}>
       {/* Timeline Divider */}
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
-        <div style={{ flex: 1, height: 1, background: "color-mix(in srgb, var(--border) 70%, transparent)" }} />
-        <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
-          <Sparkles size={13} style={{ color: "var(--accent)" }} />
-          <span>{fullTime || shortTime || t("messageView.compactionLabel")}</span>
-        </div>
-        <div style={{ flex: 1, height: 1, background: "color-mix(in srgb, var(--border) 70%, transparent)" }} />
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: detailsExpanded ? 12 : 0 }}>
+        <div style={{ flex: 1, height: 1, background: "color-mix(in srgb, var(--border) 75%, transparent)" }} />
+        <button
+          type="button"
+          onClick={() => setDetailsExpanded((v) => !v)}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "5px 12px",
+            borderRadius: 20,
+            background: "var(--bg-panel)",
+            border: "1px solid var(--border)",
+            color: "var(--text-muted)",
+            fontSize: 11.5,
+            fontFamily: "var(--font-mono)",
+            cursor: "pointer",
+            boxShadow: "0 1px 2px rgba(0,0,0,0.03)",
+            transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-panel)"; e.currentTarget.style.color = "var(--text-muted)"; }}
+        >
+          <Sparkles size={12} style={{ color: "var(--accent)" }} />
+          <span>{shortTime || fullTime || t("messageView.compactionLabel")}</span>
+          <span style={{ color: "var(--text-dim)" }}>·</span>
+          <span style={{ fontWeight: 650, color: "var(--text)" }}>{t("messageView.conversationCompacted")}</span>
+          {tokensBefore !== null && (
+            <>
+              <span style={{ color: "var(--text-dim)" }}>·</span>
+              <span>{formatCompactNumber(tokensBefore, locale)} → {formatCompactNumber(tokensAfter ?? 0, locale)}</span>
+              {savingsPercent !== null && savingsPercent > 0 && (
+                <span style={{ color: "var(--status-success)", fontWeight: 700 }}>(-{savingsPercent}%)</span>
+              )}
+            </>
+          )}
+          <ChevronDown
+            size={13}
+            style={{
+              marginLeft: 2,
+              color: "var(--text-dim)",
+              transform: detailsExpanded ? "rotate(180deg)" : "none",
+              transition: "transform var(--dur-fast) var(--ease-out-warm)",
+            }}
+          />
+        </button>
+        <div style={{ flex: 1, height: 1, background: "color-mix(in srgb, var(--border) 75%, transparent)" }} />
       </div>
 
-      {/* Compaction Card */}
-      <div style={{
-        border: "1px solid color-mix(in srgb, var(--border) 80%, var(--accent))",
-        borderRadius: "var(--radius-card)",
-        overflow: "hidden",
-        background: "var(--bg)",
-        boxShadow: "var(--shadow-card)",
-      }}>
-        {/* Header */}
+      {/* Compaction Card (Rendered when expanded) */}
+      {detailsExpanded && (
         <div style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "10px 14px",
-          borderBottom: "1px solid var(--border)",
-          background: "color-mix(in srgb, var(--bg-panel) 85%, var(--bg))",
-          flexWrap: "wrap",
-          gap: 8,
+          border: "1px solid color-mix(in srgb, var(--border) 80%, var(--accent))",
+          borderRadius: "var(--radius-card)",
+          overflow: "hidden",
+          background: "var(--bg)",
+          boxShadow: "var(--shadow-card)",
+          animation: "ui-scale-in var(--dur-med) var(--ease-out-warm)",
         }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <div style={{
-              width: 24,
-              height: 24,
-              borderRadius: 6,
-              background: "color-mix(in srgb, var(--accent) 12%, transparent)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              color: "var(--accent)",
-            }}>
-              <Sparkles size={14} />
-            </div>
-            <span style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)", letterSpacing: "-0.01em" }}>
-              {t("messageView.conversationCompacted")}
-            </span>
-            {method ? (
-              <span style={{
-                padding: "2px 7px",
-                borderRadius: 4,
-                background: "var(--bg-subtle)",
-                color: "var(--text-muted)",
-                fontSize: 10.5,
-                fontFamily: "var(--font-mono)",
-                fontWeight: 650,
-                border: "1px solid var(--border)",
-              }}>
-                {method}
-              </span>
-            ) : (
-              <span style={{
-                padding: "2px 7px",
-                borderRadius: 4,
-                background: "var(--bg-subtle)",
-                color: "var(--text-muted)",
-                fontSize: 10.5,
-                fontWeight: 600,
-                border: "1px solid var(--border)",
-              }}>
-                {t("messageView.compactionAuto")}
-              </span>
-            )}
-          </div>
-
-          {fullTime && (
-            <div style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)" }}>
-              <Clock size={12} />
-              <span>{fullTime}</span>
-            </div>
-          )}
-        </div>
-
-        {/* Token Delta Metrics Banner */}
-        {tokensBefore !== null && (
+          {/* Header */}
           <div style={{
-            padding: "10px 14px",
-            background: "color-mix(in srgb, var(--bg-surface, var(--bg-subtle)) 60%, var(--bg))",
-            borderBottom: "1px solid var(--border)",
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
+            padding: "10px 14px",
+            borderBottom: "1px solid var(--border)",
+            background: "color-mix(in srgb, var(--bg-panel) 85%, var(--bg))",
             flexWrap: "wrap",
             gap: 8,
           }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, fontFamily: "var(--font-mono)" }}>
-              <span style={{ color: "var(--text-muted)" }}>Token 消耗:</span>
-              <span style={{ fontWeight: 650, color: "var(--text)" }}>
-                {formatCompactNumber(tokensBefore, locale)}
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{
+                width: 24,
+                height: 24,
+                borderRadius: 6,
+                background: "color-mix(in srgb, var(--accent) 12%, transparent)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "var(--accent)",
+              }}>
+                <Sparkles size={14} />
+              </div>
+              <span style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)", letterSpacing: "-0.01em" }}>
+                {t("messageView.conversationCompacted")}
               </span>
-              <ArrowRight size={13} style={{ color: "var(--text-dim)" }} />
-              <span style={{ fontWeight: 700, color: "var(--accent)" }}>
-                {formatCompactNumber(tokensAfter ?? 0, locale)}
-              </span>
+              {method ? (
+                <span style={{
+                  padding: "2px 7px",
+                  borderRadius: 4,
+                  background: "var(--bg-subtle)",
+                  color: "var(--text-muted)",
+                  fontSize: 10.5,
+                  fontFamily: "var(--font-mono)",
+                  fontWeight: 650,
+                  border: "1px solid var(--border)",
+                }}>
+                  {method}
+                </span>
+              ) : (
+                <span style={{
+                  padding: "2px 7px",
+                  borderRadius: 4,
+                  background: "var(--bg-subtle)",
+                  color: "var(--text-muted)",
+                  fontSize: 10.5,
+                  fontWeight: 600,
+                  border: "1px solid var(--border)",
+                }}>
+                  {t("messageView.compactionAuto")}
+                </span>
+              )}
             </div>
 
-            {savingsPercent !== null && savingsPercent > 0 && (
-              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                {savedTokens !== null && (
-                  <span style={{ fontSize: 11.5, color: "var(--text-muted)" }}>
-                    {t("messageView.compactionSavedTokens", { saved: formatCompactNumber(savedTokens, locale) })}
-                  </span>
-                )}
-                <span style={{
-                  padding: "2px 6px",
-                  borderRadius: 4,
-                  background: "color-mix(in srgb, var(--status-success) 14%, transparent)",
-                  color: "var(--status-success)",
-                  fontSize: 11,
-                  fontWeight: 700,
-                  fontFamily: "var(--font-mono)",
-                }}>
-                </span>
+            {fullTime && (
+              <div style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)" }}>
+                <Clock size={12} />
+                <span>{fullTime}</span>
               </div>
             )}
           </div>
-        )}
 
-        {/* Summary Content Body */}
-        <div style={{ padding: "14px" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8, color: "var(--text-muted)", fontSize: 12, fontWeight: 650 }}>
-            <FileText size={13} />
-            <span>{t("messageView.compactionSummaryTitle")}</span>
+          {/* Token Delta Metrics Banner */}
+          {tokensBefore !== null && (
+            <div style={{
+              padding: "10px 14px",
+              background: "color-mix(in srgb, var(--bg-surface, var(--bg-subtle)) 60%, var(--bg))",
+              borderBottom: "1px solid var(--border)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              flexWrap: "wrap",
+              gap: 8,
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, fontFamily: "var(--font-mono)" }}>
+                <span style={{ color: "var(--text-muted)" }}>Token 消耗:</span>
+                <span style={{ fontWeight: 650, color: "var(--text)" }}>
+                  {formatCompactNumber(tokensBefore, locale)}
+                </span>
+                <ArrowRight size={13} style={{ color: "var(--text-dim)" }} />
+                <span style={{ fontWeight: 700, color: "var(--accent)" }}>
+                  {formatCompactNumber(tokensAfter ?? 0, locale)}
+                </span>
+              </div>
+
+              {savingsPercent !== null && savingsPercent > 0 && (
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  {savedTokens !== null && (
+                    <span style={{ fontSize: 11.5, color: "var(--text-muted)" }}>
+                      {t("messageView.compactionSavedTokens", { saved: formatCompactNumber(savedTokens, locale) })}
+                    </span>
+                  )}
+                  <span style={{
+                    padding: "2px 6px",
+                    borderRadius: 4,
+                    background: "color-mix(in srgb, var(--status-success) 14%, transparent)",
+                    color: "var(--status-success)",
+                    fontSize: 11,
+                    fontWeight: 700,
+                    fontFamily: "var(--font-mono)",
+                  }}>
+                    -{savingsPercent}%
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Summary Content Body */}
+          <div style={{ padding: "14px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8, color: "var(--text-muted)", fontSize: 12, fontWeight: 650 }}>
+              <FileText size={13} />
+              <span>{t("messageView.compactionSummaryTitle")}</span>
+            </div>
+
+            <div style={{ color: "var(--text)", fontSize: 13.5, lineHeight: 1.6 }}>
+              {parsedSummary.body ? (
+                <MarkdownBody className="markdown-compaction-message">{parsedSummary.body}</MarkdownBody>
+              ) : (
+                <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("messageView.noSummary")}</span>
+              )}
+            </div>
+
+            <CompactionFileMetadata readFiles={parsedSummary.readFiles} modifiedFiles={parsedSummary.modifiedFiles} />
           </div>
 
-          <div style={{ color: "var(--text)", fontSize: 13.5, lineHeight: 1.6 }}>
-            {parsedSummary.body ? (
-              <MarkdownBody className="markdown-compaction-message">{parsedSummary.body}</MarkdownBody>
-            ) : (
-              <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("messageView.noSummary")}</span>
-            )}
-          </div>
+          {/* Action Footer */}
+          <div style={{
+            padding: "8px 14px",
+            borderTop: "1px solid var(--border)",
+            background: "var(--bg-panel)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 10,
+          }}>
+            {onTogglePreCompactionHistory ? (
+              <button
+                type="button"
+                onClick={onTogglePreCompactionHistory}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 5,
+                  padding: "4px 10px",
+                  borderRadius: 6,
+                  border: "1px solid var(--border)",
+                  background: "var(--bg)",
+                  color: "var(--text)",
+                  fontSize: 12,
+                  fontWeight: 550,
+                  cursor: "pointer",
+                }}
+              >
+                <ChevronDown
+                  size={14}
+                  style={{
+                    transform: showPreCompactionHistory ? "rotate(180deg)" : "none",
+                    transition: "transform 0.2s ease",
+                  }}
+                />
+                <span>
+                  {showPreCompactionHistory
+                    ? t("chatWindow.returnToCompactHistory")
+                    : t("chatWindow.viewPreCompactionHistory")}
+                </span>
+              </button>
+            ) : <div />}
 
-          <CompactionFileMetadata readFiles={parsedSummary.readFiles} modifiedFiles={parsedSummary.modifiedFiles} />
-        </div>
-
-        {/* Action Footer */}
-        <div style={{
-          padding: "8px 14px",
-          borderTop: "1px solid var(--border)",
-          background: "var(--bg-panel)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 10,
-        }}>
-          {onTogglePreCompactionHistory ? (
             <button
               type="button"
-              onClick={onTogglePreCompactionHistory}
+              onClick={handleCopySummary}
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -1356,48 +1431,17 @@ function CompactionMessageView({
                 borderRadius: 6,
                 border: "1px solid var(--border)",
                 background: "var(--bg)",
-                color: "var(--text)",
+                color: copied ? "var(--status-success)" : "var(--text-muted)",
                 fontSize: 12,
-                fontWeight: 550,
                 cursor: "pointer",
               }}
             >
-              <ChevronDown
-                size={14}
-                style={{
-                  transform: showPreCompactionHistory ? "rotate(180deg)" : "none",
-                  transition: "transform 0.2s ease",
-                }}
-              />
-              <span>
-                {showPreCompactionHistory
-                  ? t("chatWindow.returnToCompactHistory")
-                  : t("chatWindow.viewPreCompactionHistory")}
-              </span>
+              {copied ? <Check size={13} /> : <Copy size={13} />}
+              <span>{copied ? t("messageView.copied") : t("messageView.copy")}</span>
             </button>
-          ) : <div />}
-
-          <button
-            type="button"
-            onClick={handleCopySummary}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 5,
-              padding: "4px 10px",
-              borderRadius: 6,
-              border: "1px solid var(--border)",
-              background: "var(--bg)",
-              color: copied ? "var(--status-success)" : "var(--text-muted)",
-              fontSize: 12,
-              cursor: "pointer",
-            }}
-          >
-            {copied ? <Check size={13} /> : <Copy size={13} />}
-            <span>{copied ? t("messageView.copied") : t("messageView.copy")}</span>
-          </button>
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 }

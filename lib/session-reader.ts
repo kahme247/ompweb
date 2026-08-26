@@ -435,9 +435,8 @@ export function buildSessionContext(
 
   if (compaction && !options.includePreCompaction) {
     const activeCompaction = compaction;
-    // Agent-context view: active summary first, then entries kept from
-    // firstKeptEntryId up to the compaction, then everything after it.
-    appendEntry(activeCompaction);
+    // Agent-context view: entries kept from firstKeptEntryId up to the compaction,
+    // then the compaction entry itself, then everything after it.
     const compactionIdx = path.findIndex((e) => e.type === "compaction" && e.id === activeCompaction.id);
     let foundFirstKept = false;
     for (let i = 0; i < compactionIdx; i++) {
@@ -445,6 +444,7 @@ export function buildSessionContext(
       if (entry.id === activeCompaction.firstKeptEntryId) foundFirstKept = true;
       if (foundFirstKept) appendEntry(entry);
     }
+    appendEntry(activeCompaction);
     for (let i = compactionIdx + 1; i < path.length; i++) {
       appendEntry(path[i]);
     }
