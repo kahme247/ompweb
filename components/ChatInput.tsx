@@ -1,13 +1,14 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ArrowUp, Check, ChevronDown, ListChecks, Paperclip, Plus, Search, Shrink, Sparkles, Target, X, Zap } from "lucide-react";
+import { AlertTriangle, ArrowUp, Check, ChevronDown, ChevronRight, ListChecks, Paperclip, Plus, Search, Shrink, Sparkles, Target, X, Zap } from "lucide-react";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
 import { formatGoalElapsed } from "@/lib/web-mode-state";
 import { toast } from "@/components/ui/toast";
 import { formatCompactNumber } from "@/lib/format";
+import type { SessionStatsInfo } from "@/lib/pi-types";
 import { clearDraft, getDraft, setDraft, type ChatDraftFile, type ChatDraftImage } from "@/lib/draft-store";
 import { WEB_SLASH_COMMANDS, expandWebSlashCommand } from "@/lib/web-slash-commands";
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
@@ -81,6 +82,8 @@ interface Props {
   /** Resolved advisor role (display model + reasoning) for the composer tooltips. */
   advisorModel?: { name: string; reasoning: string | null } | null;
   /** Compact the session context from the composer toolbar. */
+  contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null } | null;
+  sessionStats?: SessionStatsInfo | null;
   onCompact?: () => void;
   /** Remove one queued message from the queue panel (Edit/Delete/Steer). */
   onRemoveQueuedMessage?: (text: string) => void;
@@ -398,6 +401,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   activePlan,
   advisorEnabled,
   onAdvisorChange,
+  contextUsage,
+  sessionStats,
 }: Props, ref) {
   const isMobile = useIsMobile();
   const { t, tn, locale } = useI18n();
@@ -412,6 +417,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [modelSearchQuery, setModelSearchQuery] = useState("");
   const [mobileModelDrawerOpen, setMobileModelDrawerOpen] = useState(false);
   const [mobilePlusDrawerOpen, setMobilePlusDrawerOpen] = useState(false);
+  const [contextDetailOpen, setContextDetailOpen] = useState(false);
+  const [confirmingCompact, setConfirmingCompact] = useState(false);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
   ));
@@ -2598,28 +2605,36 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 </span>
               )}
 
-              {/* Compact context */}
+              {/* Context usage & compaction indicator/button */}
               {onCompact && (
                 <button
                   type="button"
-                  onClick={isCompacting ? onAbortCompaction : onCompact}
-                  disabled={isStreaming && !isCompacting}
+                  onClick={() => {
+                    setConfirmingCompact(false);
+                    setContextDetailOpen((v) => !v);
+                  }}
                   title={isCompacting ? t("chatInput.stopCompaction") : t("chatInput.compactContext")}
                   aria-label={isCompacting ? t("chatInput.stopCompaction") : t("chatInput.compactContext")}
                   style={{
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    width: 28, height: 28, padding: 0,
-                    background: "none", border: "none",
+                    display: "flex", alignItems: "center", gap: 4,
+                    height: 28, padding: "0 6px",
+                    background: contextDetailOpen ? "var(--bg-selected)" : "none",
+                    border: "none",
                     borderRadius: 7,
-                    color: isCompacting ? "var(--accent)" : "var(--text-muted)",
-                    cursor: isStreaming && !isCompacting ? "not-allowed" : "pointer",
-                    opacity: isStreaming && !isCompacting ? 0.5 : 1,
+                    color: isCompacting ? "var(--accent)" : (contextUsage?.percent && contextUsage.percent > 90 ? "var(--status-error)" : contextUsage?.percent && contextUsage.percent > 70 ? "var(--status-warning)" : "var(--text-muted)"),
+                    cursor: "pointer",
+                    fontSize: 11.5,
+                    fontFamily: "var(--font-mono)",
+                    fontWeight: 600,
                     transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
                   }}
-                  onMouseEnter={(e) => { if (!(isStreaming && !isCompacting)) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = contextDetailOpen ? "var(--bg-selected)" : "none"; }}
                 >
-                  <Shrink size={14} strokeWidth={1.8} aria-hidden="true" />
+                  <Shrink size={13} strokeWidth={2} aria-hidden="true" />
+                  {contextUsage?.percent !== null && contextUsage?.percent !== undefined ? (
+                    <span>{Math.round(contextUsage.percent)}%</span>
+                  ) : null}
                 </button>
               )}
 
@@ -2854,6 +2869,60 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </div>
               <div className="mobile-sheet-body">
                 <div className="mobile-action-grid">
+                  {/* Top full-width: Context Usage & Compaction Card */}
+                  {onCompact && (
+                    <button
+                      type="button"
+                      className="mobile-action-card"
+                      onClick={() => {
+                        setMobilePlusDrawerOpen(false);
+                        setConfirmingCompact(false);
+                        setContextDetailOpen(true);
+                      }}
+                      style={{
+                        gridColumn: "1 / -1",
+                        padding: "14px 14px",
+                        flexDirection: "row",
+                        alignItems: "center",
+                        gap: 14,
+                      }}
+                    >
+                      {/* SVG Ring Gauge */}
+                      <div style={{ position: "relative", width: 42, height: 42, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        <svg width="42" height="42" viewBox="0 0 42 42" style={{ transform: "rotate(-90deg)" }}>
+                          <circle cx="21" cy="21" r="17" fill="none" stroke="var(--border)" strokeWidth="4" />
+                          <circle
+                            cx="21"
+                            cy="21"
+                            r="17"
+                            fill="none"
+                            stroke={isCompacting ? "var(--accent)" : (contextUsage?.percent && contextUsage.percent > 90 ? "var(--status-error)" : contextUsage?.percent && contextUsage.percent > 70 ? "var(--status-warning)" : "var(--accent)")}
+                            strokeWidth="4"
+                            strokeDasharray={106.8}
+                            strokeDashoffset={106.8 - (106.8 * Math.min(100, Math.max(0, contextUsage?.percent ?? 0))) / 100}
+                            strokeLinecap="round"
+                            style={{ transition: "stroke-dashoffset 0.3s ease" }}
+                          />
+                        </svg>
+                        <span style={{ position: "absolute", fontSize: 11, fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--text)" }}>
+                          {contextUsage?.percent !== null && contextUsage?.percent !== undefined ? `${Math.round(contextUsage.percent)}%` : "0%"}
+                        </span>
+                      </div>
+
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 14, fontWeight: 650, color: "var(--text)", display: "flex", alignItems: "center", gap: 6 }}>
+                          <span>{isCompacting ? "正在压缩上下文..." : "上下文用量与压缩"}</span>
+                          {isCompacting && <span style={{ fontSize: 11, color: "var(--accent)", fontWeight: 600 }}>压缩中</span>}
+                        </div>
+                        <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {contextUsage?.tokens ? `${formatCompactNumber(contextUsage.tokens)} / ${formatCompactNumber(contextUsage.contextWindow)} Tokens` : "点击查看详情与执行压缩"}
+                        </div>
+                      </div>
+
+                      <ChevronRight size={16} style={{ color: "var(--text-dim)", flexShrink: 0 }} />
+                    </button>
+                  )}
+
                   {/* Attachment */}
                   <button
                     type="button"
@@ -2872,32 +2941,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     <div className="mobile-action-card-title">{t("chatInput.attachFile") || "添加附件"}</div>
                     <div className="mobile-action-card-desc">上传本地图片或文档</div>
                   </button>
-
-                  {/* Fast Mode Toggle */}
-                  {fastModeSupported && onFastModeChange && (
-                    <button
-                      type="button"
-                      className="mobile-action-card"
-                      onClick={() => {
-                        onFastModeChange(!fastModeEnabled);
-                      }}
-                      style={{
-                        borderColor: fastModeEnabled ? "var(--accent)" : undefined,
-                        background: fastModeEnabled ? "color-mix(in srgb, var(--accent) 8%, var(--bg-panel))" : undefined,
-                      }}
-                    >
-                      <div className="mobile-action-card-header">
-                        <div className="mobile-action-card-icon" style={{ color: fastModeEnabled ? "var(--accent)" : undefined }}>
-                          <Zap size={16} />
-                        </div>
-                        <span style={{ fontSize: 11, fontWeight: 600, color: fastModeEnabled ? "var(--accent)" : "var(--text-muted)" }}>
-                          {fastModeEnabled ? "已开启" : "已关闭"}
-                        </span>
-                      </div>
-                      <div className="mobile-action-card-title">{t("chatInput.fastLabel") || "Fast 极速模式"}</div>
-                      <div className="mobile-action-card-desc">降低思考开销加速输出</div>
-                    </button>
-                  )}
 
                   {/* Advisor Review Toggle */}
                   {onAdvisorChange && (
@@ -2924,34 +2967,232 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                       <div className="mobile-action-card-desc">后台监督与审查当前回复</div>
                     </button>
                   )}
-
-                  {/* Compact Context */}
-                  {onCompact && (
-                    <button
-                      type="button"
-                      className="mobile-action-card"
-                      onClick={() => {
-                        setMobilePlusDrawerOpen(false);
-                        if (isCompacting && onAbortCompaction) {
-                          onAbortCompaction();
-                        } else {
-                          onCompact();
-                        }
-                      }}
-                    >
-                      <div className="mobile-action-card-header">
-                        <div className="mobile-action-card-icon">
-                          <Shrink size={16} />
-                        </div>
-                        {isCompacting && (
-                          <span style={{ fontSize: 11, fontWeight: 600, color: "var(--accent)" }}>压缩中</span>
-                        )}
-                      </div>
-                      <div className="mobile-action-card-title">{t("chatInput.compactContext") || "压缩上下文"}</div>
-                      <div className="mobile-action-card-desc">清理早期历史释放 Token</div>
-                    </button>
-                  )}
                 </div>
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* Context Detail Modal / Bottom Sheet */}
+        {contextDetailOpen && (
+          <>
+            <div
+              className="mobile-sheet-overlay"
+              onClick={() => {
+                setContextDetailOpen(false);
+                setConfirmingCompact(false);
+              }}
+              aria-hidden="true"
+            />
+            <div
+              className={isMobile ? "mobile-sheet-container" : "dropdown-surface"}
+              role="dialog"
+              aria-modal="true"
+              aria-label="上下文用量与压缩"
+              style={isMobile ? undefined : {
+                position: "fixed",
+                bottom: 60,
+                right: 20,
+                width: 360,
+                maxHeight: "80vh",
+                overflowY: "auto",
+                background: "var(--bg)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-modal)",
+                boxShadow: "var(--shadow-modal)",
+                zIndex: 610,
+                display: "flex",
+                flexDirection: "column",
+                animation: "ui-scale-in var(--dur-med) var(--ease-out-warm)",
+              }}
+            >
+              {isMobile && (
+                <div className="mobile-sheet-handle-wrap">
+                  <div className="mobile-sheet-handle" />
+                </div>
+              )}
+              <div className={isMobile ? "mobile-sheet-header" : "picker-panel-header"} style={isMobile ? undefined : { padding: "12px 16px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <span className={isMobile ? "mobile-sheet-title" : "picker-panel-title"} style={{ fontSize: 15, fontWeight: 650, color: "var(--text)" }}>
+                  上下文用量与健康度
+                </span>
+                <button
+                  type="button"
+                  className={isMobile ? "mobile-sheet-close" : "ui-focus-ring"}
+                  onClick={() => {
+                    setContextDetailOpen(false);
+                    setConfirmingCompact(false);
+                  }}
+                  aria-label="Close"
+                  style={isMobile ? undefined : { background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 18, lineHeight: 1, padding: "2px 6px" }}
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              <div style={{ padding: "16px", display: "flex", flexDirection: "column", gap: 16, overflowY: "auto" }}>
+                {/* Visual Ring Gauge & Key Metric */}
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "12px 0", background: "var(--bg-panel)", borderRadius: 14, border: "1px solid var(--border)" }}>
+                  <div style={{ position: "relative", width: 68, height: 68, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    <svg width="68" height="68" viewBox="0 0 68 68" style={{ transform: "rotate(-90deg)" }}>
+                      <circle cx="34" cy="34" r="28" fill="none" stroke="var(--border)" strokeWidth="6" />
+                      <circle
+                        cx="34"
+                        cy="34"
+                        r="28"
+                        fill="none"
+                        stroke={isCompacting ? "var(--accent)" : (contextUsage?.percent && contextUsage.percent > 90 ? "var(--status-error)" : contextUsage?.percent && contextUsage.percent > 70 ? "var(--status-warning)" : "var(--accent)")}
+                        strokeWidth="6"
+                        strokeDasharray={175.9}
+                        strokeDashoffset={175.9 - (175.9 * Math.min(100, Math.max(0, contextUsage?.percent ?? 0))) / 100}
+                        strokeLinecap="round"
+                        style={{ transition: "stroke-dashoffset 0.3s ease" }}
+                      />
+                    </svg>
+                    <span style={{ position: "absolute", fontSize: 16, fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--text)" }}>
+                      {contextUsage?.percent !== null && contextUsage?.percent !== undefined ? `${Math.round(contextUsage.percent)}%` : "0%"}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 14, fontWeight: 650, color: "var(--text)", marginTop: 10 }}>
+                    {contextUsage?.tokens ? `${formatCompactNumber(contextUsage.tokens)} / ${formatCompactNumber(contextUsage.contextWindow)} Tokens` : "当前对话上下文"}
+                  </div>
+                  <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2 }}>
+                    {contextUsage?.tokens && contextUsage.contextWindow
+                      ? `剩余安全空间约 ${formatCompactNumber(Math.max(0, contextUsage.contextWindow - contextUsage.tokens))} Tokens`
+                      : "健康度良好"}
+                  </div>
+                </div>
+
+                {/* Breakdown List */}
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--text-dim)", marginBottom: 2 }}>
+                    Token 构成与费用明细
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    <div style={{ background: "var(--bg-panel)", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--border)" }}>
+                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>输入 Tokens</div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-mono)", marginTop: 2 }}>
+                        {sessionStats?.tokens?.input?.toLocaleString() ?? "—"}
+                      </div>
+                    </div>
+                    <div style={{ background: "var(--bg-panel)", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--border)" }}>
+                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>输出 Tokens</div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-mono)", marginTop: 2 }}>
+                        {sessionStats?.tokens?.output?.toLocaleString() ?? "—"}
+                      </div>
+                    </div>
+                    <div style={{ background: "var(--bg-panel)", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--border)" }}>
+                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>缓存读取</div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-mono)", marginTop: 2 }}>
+                        {sessionStats?.tokens?.cacheRead?.toLocaleString() ?? "0"}
+                      </div>
+                    </div>
+                    <div style={{ background: "var(--bg-panel)", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--border)" }}>
+                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>预估费用</div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-mono)", marginTop: 2 }}>
+                        {sessionStats?.cost ? `$${sessionStats.cost.toFixed(4)}` : "$0.00"}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Actions Area with 2-step confirmation */}
+                {onCompact && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
+                    {isCompacting ? (
+                      <button
+                        type="button"
+                        onClick={onAbortCompaction}
+                        style={{
+                          width: "100%",
+                          height: 42,
+                          borderRadius: 10,
+                          background: "var(--status-error)",
+                          color: "#fff",
+                          border: "none",
+                          fontWeight: 650,
+                          fontSize: 13,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          gap: 6,
+                          cursor: "pointer",
+                        }}
+                      >
+                        <X size={16} strokeWidth={2.4} />
+                        终止上下文压缩
+                      </button>
+                    ) : confirmingCompact ? (
+                      <div style={{ background: "color-mix(in srgb, var(--status-warning) 10%, var(--bg-panel))", border: "1px solid var(--status-warning)", borderRadius: 10, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+                        <div style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 12, color: "var(--text)", lineHeight: 1.45 }}>
+                          <AlertTriangle size={16} style={{ color: "var(--status-warning)", flexShrink: 0, marginTop: 1 }} />
+                          <span>压缩将对早期对话生成结构化摘要以释放上下文空间，是否继续？</span>
+                        </div>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setConfirmingCompact(false);
+                              setContextDetailOpen(false);
+                              onCompact();
+                            }}
+                            style={{
+                              flex: 1,
+                              height: 36,
+                              borderRadius: 8,
+                              background: "var(--accent-strong)",
+                              color: "var(--on-accent)",
+                              border: "none",
+                              fontWeight: 650,
+                              fontSize: 12.5,
+                              cursor: "pointer",
+                            }}
+                          >
+                            确认执行压缩
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmingCompact(false)}
+                            style={{
+                              flex: 1,
+                              height: 36,
+                              borderRadius: 8,
+                              background: "var(--bg)",
+                              color: "var(--text-muted)",
+                              border: "1px solid var(--border)",
+                              fontWeight: 500,
+                              fontSize: 12.5,
+                              cursor: "pointer",
+                            }}
+                          >
+                            取消
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmingCompact(true)}
+                        style={{
+                          width: "100%",
+                          height: 42,
+                          borderRadius: 10,
+                          background: "var(--accent-strong)",
+                          color: "var(--on-accent)",
+                          border: "none",
+                          fontWeight: 650,
+                          fontSize: 13,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          gap: 6,
+                          cursor: "pointer",
+                        }}
+                      >
+                        <Shrink size={16} strokeWidth={2} />
+                        压缩上下文 (释放 Token 空间)
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           </>
