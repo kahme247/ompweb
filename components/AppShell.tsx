@@ -1837,8 +1837,17 @@ export function AppShell() {
         }}
       >
         {/* Right panel tab bar */}
-        <div style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", height: isMobile ? "calc(36px + env(safe-area-inset-top))" : 36, paddingTop: isMobile ? "env(safe-area-inset-top)" : 0, boxSizing: "border-box" }}>
-          <div style={{ flex: 1, overflow: "hidden" }}>
+        <div style={{
+          display: "flex",
+          alignItems: "center",
+          flexShrink: 0,
+          background: "var(--bg-panel)",
+          borderBottom: "1px solid var(--border)",
+          height: isMobile ? "calc(44px + env(safe-area-inset-top))" : 36,
+          paddingTop: isMobile ? "env(safe-area-inset-top)" : 0,
+          boxSizing: "border-box",
+        }}>
+          <div style={{ flex: 1, overflow: "hidden", height: "100%" }}>
             <TabBar
               tabs={fileTabs}
               activeTabId={activeFileTabId ?? ""}
@@ -1846,7 +1855,29 @@ export function AppShell() {
               onCloseTab={handleCloseFileTab}
             />
           </div>
-
+          {isMobile && (
+            <button
+              type="button"
+              onClick={() => setRightPanelOpen(false)}
+              title={t("appShell.hideFilePanel") || "关闭文件面板"}
+              aria-label={t("appShell.hideFilePanel") || "关闭文件面板"}
+              style={{
+                width: 44,
+                height: "100%",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                background: "none",
+                border: "none",
+                borderLeft: "1px solid var(--border)",
+                color: "var(--text-muted)",
+                cursor: "pointer",
+                flexShrink: 0,
+              }}
+            >
+              <X size={18} strokeWidth={2} />
+            </button>
+          )}
         </div>
 
         {/* Keep open viewers mounted so switching tabs preserves scroll and preview state. */}
@@ -1874,29 +1905,30 @@ export function AppShell() {
         </div>
       </div>
     </div>
-    {/* File panel toggle — always visible at top-right */}
-    <button
-      onClick={() => setRightPanelOpen((v) => !v)}
-      title={rightPanelOpen ? t("appShell.hideFilePanel") : t("appShell.showFilePanel")}
-      aria-label={rightPanelOpen ? t("appShell.hideFilePanel") : t("appShell.showFilePanel")}
-      style={{
-        position: "fixed", top: 0, right: 0, zIndex: 300,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        width: isMobile ? 44 : 36,
-        height: isMobile ? "calc(44px + env(safe-area-inset-top))" : 36,
-        paddingTop: isMobile ? "env(safe-area-inset-top)" : 0,
-        boxSizing: "border-box",
-        background: "var(--bg-panel)", border: "none", borderLeft: "1px solid var(--border)", borderBottom: "1px solid var(--border)",
-        color: rightPanelOpen ? "var(--text)" : "var(--text-muted)",
-        cursor: "pointer", transition: "color var(--dur-fast) var(--ease-out-warm)",
-      }}
-      onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-      onMouseLeave={(e) => { e.currentTarget.style.color = rightPanelOpen ? "var(--text)" : "var(--text-muted)"; }}
-    >
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
-      </svg>
-    </button>
+    {/* File panel toggle — desktop only */}
+    {!isMobile && (
+      <button
+        onClick={() => setRightPanelOpen((v) => !v)}
+        title={rightPanelOpen ? t("appShell.hideFilePanel") : t("appShell.showFilePanel")}
+        aria-label={rightPanelOpen ? t("appShell.hideFilePanel") : t("appShell.showFilePanel")}
+        style={{
+          position: "fixed", top: 0, right: 0, zIndex: 300,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          width: 36,
+          height: 36,
+          boxSizing: "border-box",
+          background: "var(--bg-panel)", border: "none", borderLeft: "1px solid var(--border)", borderBottom: "1px solid var(--border)",
+          color: rightPanelOpen ? "var(--text)" : "var(--text-muted)",
+          cursor: "pointer", transition: "color var(--dur-fast) var(--ease-out-warm)",
+        }}
+        onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.color = rightPanelOpen ? "var(--text)" : "var(--text-muted)"; }}
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
+        </svg>
+      </button>
+    )}
     {settingsTab && <SettingsConfig activeTab={settingsTab} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} onToolCallsDefaultCollapsedChange={handleToolCallsDefaultCollapsedChange} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd} sessionId={selectedSession?.id ?? null} onModelsSaved={() => setModelsRefreshKey((k) => k + 1)} onPluginsReloaded={() => setSessionKey((k) => k + 1)} onOmpUpdateAvailabilityChange={setOmpUpdateAvailable} onSelectTab={setSettingsTab} onClose={() => setSettingsTab(null)} />}
     {archiveBrowserOpen && (
       <ArchiveBrowser
