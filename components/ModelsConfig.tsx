@@ -22,7 +22,7 @@ import {
   ConfirmDialog,
   useFieldValidation,
 } from "@/components/ui/field";
-import { Plus, Trash2, RefreshCw, AlertCircle, Cpu, Settings, Sparkles, Check as CheckIcon, ArrowDown, ArrowUp, Layers, RotateCcw, SlidersHorizontal, BookOpen, Search, ChevronLeft } from "lucide-react";
+import { Plus, Trash2, RefreshCw, AlertCircle, Cpu, Settings, Sparkles, Check as CheckIcon, ArrowDown, ArrowUp, Layers, RotateCcw, SlidersHorizontal, BookOpen, Search, ChevronLeft, ChevronRight, X } from "lucide-react";
 import { toast } from "@/components/ui/toast";
 import { SettingsTabs, type SettingsTab } from "./SettingsTabs";
 import { ModelCatalogPicker } from "./ModelCatalogPicker";
@@ -163,6 +163,7 @@ type RetrySettings = {
 
 function RetryFallbackDetail({ models }: { models: RuntimeModelEntry[] }) {
   const { t } = useI18n();
+  const isMobile = useIsMobile();
   const [settings, setSettings] = useState<RetrySettings | null>(null);
   const [role, setRole] = useState("default");
   const [candidate, setCandidate] = useState("");
@@ -214,20 +215,24 @@ function RetryFallbackDetail({ models }: { models: RuntimeModelEntry[] }) {
   const modelOptions = models.map((model) => `${model.provider}/${model.id}`);
   const updateChain = (next: string[]) => void save({ ...settings, retry: { ...retry, fallbackChains: { ...(retry.fallbackChains ?? {}), [role]: next } } });
 
-  return <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-    <div><SectionTitle>{t("modelsConfig.retryFallbackTitle")}</SectionTitle><p style={{ margin: "4px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>{t("modelsConfig.retryFallbackDesc")}</p></div>
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 9 }}>
-      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", fontSize: 12, color: "var(--text)" }}><input type="checkbox" checked={retry.enabled ?? true} onChange={(event) => void save({ ...settings, retry: { ...retry, enabled: event.target.checked } })} /> {t("modelsConfig.retryTransientErrors")}</label>
-      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", fontSize: 12, color: "var(--text)" }}><input type="checkbox" checked={retry.modelFallback ?? true} onChange={(event) => void save({ ...settings, retry: { ...retry, modelFallback: event.target.checked } })} /> {t("modelsConfig.allowModelFallback")}</label>
-      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12 }}>{t("modelsConfig.retryAttempts")} <select value={retry.maxRetries ?? 10} onChange={(event) => void save({ ...settings, retry: { ...retry, maxRetries: Number(event.target.value) } })} style={{ marginLeft: 8, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}>{[0, 1, 2, 3, 5, 10, 15, 20].map((count) => <option key={count} value={count}>{count}</option>)}</select></label>
-      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12 }}>{t("modelsConfig.returnToPrimary")} <select value={retry.fallbackRevertPolicy ?? "cooldown-expiry"} onChange={(event) => void save({ ...settings, retry: { ...retry, fallbackRevertPolicy: event.target.value as "cooldown-expiry" | "never" } })} style={{ marginLeft: 8, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}><option value="cooldown-expiry">{t("modelsConfig.afterCooldown")}</option><option value="never">{t("modelsConfig.never")}</option></select></label>
-    </div>
-    <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
-      <div style={{ padding: "10px 12px", background: "var(--bg-panel)", display: "flex", alignItems: "center", gap: 8 }}><span style={{ color: "var(--text)", fontSize: 12, fontWeight: 600 }}>{t("modelsConfig.fallbackChainFor")}</span><select aria-label={t("modelsConfig.fallbackChainFor")} value={role} onChange={(event) => setRole(event.target.value)} style={{ padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}>{NATIVE_MODEL_ROLES.map((value) => <option key={value} value={value}>{value}</option>)}</select></div>
-      <div style={{ padding: 12, display: "flex", gap: 8 }}><select aria-label={t("modelsConfig.selectFallbackModel")} value={candidate} onChange={(event) => setCandidate(event.target.value)} style={{ flex: 1, minWidth: 0, padding: "6px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}><option value="">{t("modelsConfig.selectFallbackModel")}</option>{modelOptions.filter((value) => !chain.includes(value)).map((value) => <option key={value} value={value}>{value}</option>)}</select><button type="button" disabled={!candidate} onClick={() => { updateChain([...chain, candidate]); setCandidate(""); }} style={{ padding: "6px 10px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent)", color: "white", cursor: "pointer", fontSize: 12 }}>{t("modelsConfig.add")}</button></div>
-      {chain.length === 0 ? (
-        <div style={{ padding: "0 12px 12px", color: "var(--text-dim)", fontSize: 12 }}>{t("modelsConfig.noExplicitChain")}</div>
-      ) : (
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div>
+        <SectionTitle>{t("modelsConfig.retryFallbackTitle")}</SectionTitle>
+        <p style={{ margin: "4px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>{t("modelsConfig.retryFallbackDesc")}</p>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2, minmax(0, 1fr))", gap: 9 }}>
+        <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", fontSize: 12, color: "var(--text)" }}><input type="checkbox" checked={retry.enabled ?? true} onChange={(event) => void save({ ...settings, retry: { ...retry, enabled: event.target.checked } })} /> {t("modelsConfig.retryTransientErrors")}</label>
+        <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", fontSize: 12, color: "var(--text)" }}><input type="checkbox" checked={retry.modelFallback ?? true} onChange={(event) => void save({ ...settings, retry: { ...retry, modelFallback: event.target.checked } })} /> {t("modelsConfig.allowModelFallback")}</label>
+        <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12 }}>{t("modelsConfig.retryAttempts")} <select value={retry.maxRetries ?? 10} onChange={(event) => void save({ ...settings, retry: { ...retry, maxRetries: Number(event.target.value) } })} style={{ marginLeft: 8, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}>{[0, 1, 2, 3, 5, 10, 15, 20].map((count) => <option key={count} value={count}>{count}</option>)}</select></label>
+        <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12 }}>{t("modelsConfig.returnToPrimary")} <select value={retry.fallbackRevertPolicy ?? "cooldown-expiry"} onChange={(event) => void save({ ...settings, retry: { ...retry, fallbackRevertPolicy: event.target.value as "cooldown-expiry" | "never" } })} style={{ marginLeft: 8, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}><option value="cooldown-expiry">{t("modelsConfig.afterCooldown")}</option><option value="never">{t("modelsConfig.never")}</option></select></label>
+      </div>
+      <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
+        <div style={{ padding: "10px 12px", background: "var(--bg-panel)", display: "flex", alignItems: "center", gap: 8 }}><span style={{ color: "var(--text)", fontSize: 12, fontWeight: 600 }}>{t("modelsConfig.fallbackChainFor")}</span><select aria-label={t("modelsConfig.fallbackChainFor")} value={role} onChange={(event) => setRole(event.target.value)} style={{ padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}>{NATIVE_MODEL_ROLES.map((value) => <option key={value} value={value}>{value}</option>)}</select></div>
+        <div style={{ padding: 12, display: "flex", gap: 8 }}><select aria-label={t("modelsConfig.selectFallbackModel")} value={candidate} onChange={(event) => setCandidate(event.target.value)} style={{ flex: 1, minWidth: 0, padding: "6px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}><option value="">{t("modelsConfig.selectFallbackModel")}</option>{modelOptions.filter((value) => !chain.includes(value)).map((value) => <option key={value} value={value}>{value}</option>)}</select><button type="button" disabled={!candidate} onClick={() => { updateChain([...chain, candidate]); setCandidate(""); }} style={{ padding: "6px 10px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent)", color: "white", cursor: "pointer", fontSize: 12 }}>{t("modelsConfig.add")}</button></div>
+        {chain.length === 0 ? (
+          <div style={{ padding: "0 12px 12px", color: "var(--text-dim)", fontSize: 12 }}>{t("modelsConfig.noExplicitChain")}</div>
+        ) : (
         <div style={{ borderTop: "1px solid var(--border)" }}>
           {chain.map((selector, index) => (
             <div key={selector} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", color: "var(--text-muted)", fontSize: 12 }}>
@@ -242,7 +247,8 @@ function RetryFallbackDetail({ models }: { models: RuntimeModelEntry[] }) {
       )}
     </section>
     {error && <div role="alert" style={{ color: "var(--status-error)", fontSize: 12 }}>{error}</div>}
-  </div>;
+    </div>
+  );
 }
 
 function NativeRegistryDetail({ models, connectedProviders, onChanged }: { models: RuntimeModelEntry[]; connectedProviders: ConnectedProvider[]; onChanged: () => Promise<void> }) {
@@ -497,9 +503,26 @@ const presetButtonStyle = {
   cursor: "pointer",
 } as const;
 
-function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
-  name: string; provider: ProviderEntry;
-  onChange: (p: ProviderEntry) => void; onRename: (n: string) => void; onDelete: () => void;
+function ProviderDetail({
+  name,
+  provider,
+  onChange,
+  onRename,
+  onDelete,
+  onAddModel,
+  onAddFromCatalog,
+  onSelectModel,
+  onDeleteModel,
+}: {
+  name: string;
+  provider: ProviderEntry;
+  onChange: (p: ProviderEntry) => void;
+  onRename: (n: string) => void;
+  onDelete: () => void;
+  onAddModel?: () => void;
+  onAddFromCatalog?: () => void;
+  onSelectModel?: (index: number) => void;
+  onDeleteModel?: (index: number) => void;
 }) {
   const { t } = useI18n();
   const [editingName, setEditingName] = useState(name);
@@ -691,6 +714,149 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
             placeholder={t("modelsConfig.inheritNone")}
           />
         </FormField>
+      </FieldGroup>
+
+      {/* Embedded Models Management Card */}
+      <FieldGroup
+        label={
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <Cpu size={12} aria-hidden="true" />
+            <span>{t("modelsConfig.models") || "包含的模型"}</span>
+            <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 10, background: "var(--bg-subtle)", color: "var(--text-muted)", fontWeight: 600 }}>
+              {provider.models?.length ?? 0}
+            </span>
+          </span>
+        }
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {(provider.models ?? []).length === 0 ? (
+            <div style={{ padding: "14px 12px", border: "1px dashed var(--border)", borderRadius: "var(--radius-control)", color: "var(--text-muted)", fontSize: 12, textAlign: "center" }}>
+              {t("modelsConfig.noModelsInProvider") || "该服务商下暂未配置模型，请点击下方按钮添加。"}
+            </div>
+          ) : (
+            (provider.models ?? []).map((m, idx) => (
+              <div
+                key={idx}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "9px 12px",
+                  background: "var(--bg)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "var(--radius-control)",
+                }}
+              >
+                <div
+                  onClick={() => onSelectModel?.(idx)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    flex: 1,
+                    minWidth: 0,
+                    cursor: onSelectModel ? "pointer" : "default",
+                  }}
+                >
+                  <span style={{ fontSize: 12.5, fontWeight: 600, fontFamily: "var(--font-mono)", color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {m.id || t("modelsConfig.unnamedModel") || "未命名模型"}
+                  </span>
+                  {m.reasoning && (
+                    <span style={{ fontSize: 9, padding: "1px 5px", background: "color-mix(in srgb, var(--accent) 15%, transparent)", color: "var(--accent)", borderRadius: 3, fontWeight: 700 }}>
+                      Thinking
+                    </span>
+                  )}
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  {onSelectModel && (
+                    <button
+                      type="button"
+                      onClick={() => onSelectModel(idx)}
+                      title={t("modelsConfig.editModel") || "编辑模型参数"}
+                      style={{
+                        border: "none",
+                        background: "transparent",
+                        color: "var(--text-muted)",
+                        padding: "4px 6px",
+                        cursor: "pointer",
+                        fontSize: 11,
+                      }}
+                    >
+                      <SlidersHorizontal size={13} aria-hidden="true" />
+                    </button>
+                  )}
+                  {onDeleteModel && (
+                    <button
+                      type="button"
+                      onClick={() => onDeleteModel(idx)}
+                      title={t("modelsConfig.deleteModel") || "删除模型"}
+                      style={{
+                        border: "none",
+                        background: "transparent",
+                        color: "var(--status-error)",
+                        padding: "4px 6px",
+                        cursor: "pointer",
+                        fontSize: 11,
+                      }}
+                    >
+                      <Trash2 size={13} aria-hidden="true" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
+          <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+            {onAddModel && (
+              <button
+                type="button"
+                onClick={onAddModel}
+                style={{
+                  flex: 1,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 5,
+                  padding: "8px 10px",
+                  border: "1px dashed var(--border)",
+                  borderRadius: "var(--radius-control)",
+                  background: "var(--bg)",
+                  color: "var(--text)",
+                  cursor: "pointer",
+                  fontSize: 12,
+                  fontWeight: 500,
+                }}
+              >
+                <Plus size={13} aria-hidden="true" />
+                <span>{t("modelsConfig.addModel")}</span>
+              </button>
+            )}
+            {onAddFromCatalog && (
+              <button
+                type="button"
+                onClick={onAddFromCatalog}
+                style={{
+                  flex: 1,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 5,
+                  padding: "8px 10px",
+                  border: "1px dashed var(--border)",
+                  borderRadius: "var(--radius-control)",
+                  background: "var(--bg)",
+                  color: "var(--text)",
+                  cursor: "pointer",
+                  fontSize: 12,
+                  fontWeight: 500,
+                }}
+              >
+                <BookOpen size={13} aria-hidden="true" />
+                <span>{t("modelsConfig.addFromCatalog")}</span>
+              </button>
+            )}
+          </div>
+        </div>
       </FieldGroup>
 
       {/* Danger Zone */}
@@ -923,6 +1089,7 @@ function ModelDetail({
   onDelete: () => void;
 }) {
   const { t } = useI18n();
+  const isMobile = useIsMobile();
   const [testState, setTestState] = useState<ModelTestState>({ phase: "idle" });
   const [removeOpen, setRemoveOpen] = useState(false);
   const set = <K extends keyof ModelEntry>(k: K, v: ModelEntry[K]) => onChange({ ...model, [k]: v });
@@ -996,7 +1163,7 @@ function ModelDetail({
           </span>
         }
       >
-        <div className="model-detail-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <div className="model-detail-grid-2" style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 10 }}>
           <FormField label={t("modelsConfig.idRequired")} required error={idV.error}>
             <TextInput
               value={model.id}
@@ -1576,6 +1743,7 @@ function AddProviderPicker({
   onSelectOAuth, onSelectApiKey, onAddCustom, onClose,
 }: AddProviderPickerProps) {
   const { t, tn } = useI18n();
+  const isMobile = useIsMobile();
   const [search, setSearch] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -1588,8 +1756,8 @@ function AddProviderPicker({
   const totalCount = availableOAuth.length + availableApiKey.length + (showCustom ? 1 : 0);
 
   const cardStyle: CSSProperties = {
-    display: "flex", flexDirection: "row", alignItems: "center", gap: 8,
-    padding: "10px 12px",
+    display: "flex", flexDirection: "row", alignItems: "center", gap: 10,
+    padding: "11px 14px",
     background: "var(--bg-panel)",
     border: "1px solid var(--border)",
     borderRadius: "var(--radius-control)",
@@ -1605,18 +1773,51 @@ function AddProviderPicker({
     <Dialog open onOpenChange={(o) => { if (!o) onClose(); }}>
       <DialogContent
         ariaLabel={t("modelsConfig.addProvider")}
+        zIndex={1100}
         style={{
-          width: 820,
-          maxWidth: "min(92vw, 820px)",
-          maxHeight: "min(72dvh, calc(100dvh - 32px))",
+          width: isMobile ? "100vw" : 820,
+          maxWidth: isMobile ? "100vw" : "min(92vw, 820px)",
+          maxHeight: isMobile ? "88dvh" : "min(72dvh, calc(100dvh - 32px))",
+          height: isMobile ? "88dvh" : undefined,
+          position: "fixed",
+          top: isMobile ? "auto" : "50%",
+          bottom: isMobile ? 0 : "auto",
+          left: isMobile ? 0 : "50%",
+          transform: isMobile ? "none" : "translate(-50%, -50%)",
+          borderRadius: isMobile ? "20px 20px 0 0" : "var(--radius-modal)",
           padding: 0,
           display: "flex",
           flexDirection: "column",
           overflow: "hidden",
+          animation: "none",
         }}
       >
-        <DialogTitle style={{ margin: "14px 18px 8px", fontSize: 18 }}>{t("modelsConfig.addProvider")}</DialogTitle>
-
+        {isMobile && (
+          <div style={{ width: 36, height: 4, borderRadius: 2, background: "var(--border)", margin: "8px auto 0", flexShrink: 0 }} />
+        )}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px 8px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
+          <span style={{ fontSize: 16, fontWeight: 700, color: "var(--text)" }}>{t("modelsConfig.addProvider")}</span>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label={t("settingsConfig.closeSettings") || "Close"}
+            style={{
+              background: "none",
+              border: "none",
+              color: "var(--text-muted)",
+              cursor: "pointer",
+              padding: "4px 6px",
+              minWidth: 28,
+              minHeight: 28,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              borderRadius: "var(--radius-control)",
+            }}
+          >
+            <X size={17} aria-hidden="true" />
+          </button>
+        </div>
         {/* Search */}
         <div style={{ padding: "8px 14px 12px", flexShrink: 0 }}>
           <div style={{
@@ -2081,6 +2282,10 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
           onChange={(p) => updateProvider(selection.name, p)}
           onRename={(n) => renameProvider(selection.name, n)}
           onDelete={() => deleteProvider(selection.name)}
+          onAddModel={() => addModel(selection.name)}
+          onAddFromCatalog={() => setCatalogPicker(selection.name)}
+          onSelectModel={(idx) => setSelection({ type: "model", providerName: selection.name, index: idx })}
+          onDeleteModel={(idx) => removeModel(selection.name, idx)}
         />
       );
     }
@@ -2142,179 +2347,400 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
               display: "flex", flexDirection: "column", flexShrink: 0, background: "var(--bg-panel)",
               overflow: "hidden",
             }}>
-              <div style={{ flex: 1, overflowY: "auto", padding: "10px 8px", display: "flex", flexDirection: "column", gap: 14 }}>
-              {/* — OMP System — */}
-              <section style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 6px", fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--text-dim)" }}>
-                  <Layers size={10} aria-hidden="true" style={{ opacity: 0.7 }} /> {t("modelsConfig.ompSystemSection")}
-                </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 2, padding: 4, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg)" }}>
-                  <TreeNavButton icon={Layers} label={t("modelsConfig.navNativeRegistry")} selected={selection?.type === "registry"} onClick={() => setSelection({ type: "registry" })} />
-                  <TreeNavButton icon={RotateCcw} label={t("modelsConfig.navRetryFallback")} selected={selection?.type === "fallbacks"} onClick={() => setSelection({ type: "fallbacks" })} />
-                  <TreeNavButton icon={BookOpen} label={t("modelsConfig.navComposerPicker")} selected={selection?.type === "picker"} onClick={() => setSelection({ type: "picker" })} />
-                  <TreeNavButton icon={SlidersHorizontal} label={t("modelsConfig.navModelRoles")} selected={selection?.type === "roles"} onClick={() => setSelection({ type: "roles" })} />
-                </div>
-              </section>
-
-              {/* — Connected accounts — */}
-              <section style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 6px" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--text-dim)" }}>
-                    <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: activeOAuth.length + activeApiKey.length > 0 ? "var(--status-success)" : "var(--border)", flexShrink: 0 }} />
-                    {t("modelsConfig.connectedAccounts")}
-                  </div>
-                  {(activeOAuth.length + activeApiKey.length) > 0 && (
-                    <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 10, background: "var(--bg)", border: "1px solid var(--border)", color: "var(--text-dim)", fontWeight: 600 }}>
-                      {activeOAuth.length + activeApiKey.length}
-                    </span>
-                  )}
-                </div>
-                {(activeOAuth.length === 0 && activeApiKey.length === 0) ? (
-                  <div style={{ padding: "10px 10px", border: "1px dashed var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg)", color: "var(--text-dim)", fontSize: 11, lineHeight: 1.5, textAlign: "center" }}>
-                    {t("modelsConfig.noConnectedAccounts")}
-                    <br />
-                    <span style={{ color: "var(--text-muted)" }}>{t("modelsConfig.addOneBelow")}</span>
-                  </div>
-                ) : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 4, padding: 4, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg)" }}>
-                    {activeOAuth.map((p) => {
-                      const isSelected = selection?.type === "oauth" && selection.providerId === p.id;
-                      return (
-                        <button
-                          type="button"
-                          key={p.id}
-                          onClick={() => setSelection({ type: "oauth", providerId: p.id })}
-                          style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 8px", borderRadius: "var(--radius-control)", cursor: "pointer", width: "100%", border: isSelected ? "1px solid var(--accent)" : "1px solid transparent", textAlign: "left", fontFamily: "inherit", background: isSelected ? "var(--bg-selected)" : "none", fontWeight: isSelected ? 600 : 400 }}
-                          {...hoverRow(isSelected)}
-                        >
-                          <ProviderIcon id={p.id} size={16} />
-                          <span style={{ fontSize: 12, color: "var(--text)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
-                          <span title={t("modelsConfig.oauthProviderTitle", { id: p.id })} style={{ padding: "2px 6px", borderRadius: 4, background: isSelected ? "var(--accent)" : "var(--bg-subtle)", color: isSelected ? "var(--on-accent)" : "var(--text-muted)", fontSize: 9, fontWeight: 600, flexShrink: 0 }}>OAuth</span>
-                        </button>
-                      );
-                    })}
-                    {activeApiKey.map((p) => {
-                      const isSelected = selection?.type === "apikey" && selection.providerId === p.id;
-                      return (
-                        <button
-                          type="button"
-                          key={p.id}
-                          onClick={() => setSelection({ type: "apikey", providerId: p.id })}
-                          style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 8px", borderRadius: "var(--radius-control)", cursor: "pointer", width: "100%", border: isSelected ? "1px solid var(--accent)" : "1px solid transparent", textAlign: "left", fontFamily: "inherit", background: isSelected ? "var(--bg-selected)" : "none", fontWeight: isSelected ? 600 : 400 }}
-                          {...hoverRow(isSelected)}
-                        >
-                          <ProviderIcon id={p.id} size={16} />
-                          <span style={{ fontSize: 12, color: "var(--text)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.displayName}</span>
-                          <span title={t("modelsConfig.apiKeyProviderTitle", { id: p.id })} style={{ padding: "2px 6px", borderRadius: 4, background: isSelected ? "var(--accent)" : "var(--bg-subtle)", color: isSelected ? "var(--on-accent)" : "var(--text-muted)", fontSize: 9, fontWeight: 600, flexShrink: 0 }}>API key</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </section>
-
-              {/* — Custom providers (models.yml) — */}
-              <section style={{ display: "flex", flexDirection: "column", gap: 6, flex: 1, minHeight: 0 }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 6px" }}>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
-                    {t("modelsConfig.customProviders")}
-                  </div>
-                  <code style={{ fontSize: 9, padding: "1px 5px", borderRadius: 4, background: "var(--bg)", border: "1px solid var(--border)", color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>models.yml</code>
-                </div>
-                {loading ? (
-                  <div style={{ padding: "10px 8px", fontSize: 12, color: "var(--text-muted)" }}>{t("modelsConfig.loading")}</div>
-                ) : providers.length === 0 ? (
-                  <div style={{ padding: "12px 10px", border: "1px dashed var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg)", color: "var(--text-dim)", fontSize: 11, lineHeight: 1.5, textAlign: "center" }}>
-                    {t("modelsConfig.noCustomProviders")}
-                    <br />
-                    <span style={{ color: "var(--text-muted)" }}>{t("modelsConfig.addOpenAiEndpoint")}</span>
-                  </div>
-                ) : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {providers.map(([pName, pData]) => {
-                      const isProviderSelected = selection?.type === "provider" && selection.name === pName;
-                      const models = pData.models ?? [];
-                      return (
-                        <div key={pName} style={{ borderRadius: "var(--radius-card)", background: "var(--bg)", border: isProviderSelected ? "1px solid var(--accent)" : "1px solid var(--border)", overflow: "hidden", boxShadow: isProviderSelected ? "0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent)" : "none" }}>
-                          {/* Provider row */}
-                          <button
-                            type="button"
-                            onClick={() => setSelection({ type: "provider", name: pName })}
-                            style={{ display: "flex", alignItems: "center", gap: 7, padding: "8px 10px", cursor: "pointer", width: "100%", border: "none", textAlign: "left", fontFamily: "inherit", background: isProviderSelected ? "var(--bg-selected)" : "var(--bg)", borderBottom: models.length ? "1px solid var(--border)" : "none" }}
-                            {...hoverRow(isProviderSelected)}
+              {isMobile ? (
+                <div style={{ flex: 1, overflowY: "auto", padding: "14px 16px", display: "flex", flexDirection: "column", gap: 18, WebkitOverflowScrolling: "touch" }}>
+                  {/* Section 1: Configured Providers */}
+                  <div>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 4px 8px", gap: 10 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                        <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {t("modelsConfig.configuredProviders") || "已配置的服务商"}
+                        </span>
+                        <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 10, background: "var(--bg-panel)", border: "1px solid var(--border)", color: "var(--text-dim)", fontWeight: 600, flexShrink: 0 }}>
+                          {activeOAuth.length + activeApiKey.length + providers.length}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setPickerOpen(true)}
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          gap: 5,
+                          padding: "5px 11px",
+                          background: "var(--accent)",
+                          color: "var(--on-accent)",
+                          border: "none",
+                          borderRadius: "var(--radius-control)",
+                          fontSize: 12,
+                          fontWeight: 600,
+                          cursor: "pointer",
+                          whiteSpace: "nowrap",
+                          flexShrink: 0,
+                          height: 28,
+                        }}
+                      >
+                        <Plus size={13} aria-hidden="true" />
+                        <span>{t("modelsConfig.addProvider")}</span>
+                      </button>
+                    </div>
+                    <div style={{ background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 14, overflow: "hidden" }}>
+                      {/* Connected OAuth Accounts */}
+                      {activeOAuth.map((p, idx) => {
+                        const isLast = idx === activeOAuth.length - 1 && activeApiKey.length === 0 && providers.length === 0;
+                        return (
+                          <div
+                            key={p.id}
+                            onClick={() => setSelection({ type: "oauth", providerId: p.id })}
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "space-between",
+                              padding: "12px 14px",
+                              borderBottom: isLast ? "none" : "1px solid color-mix(in srgb, var(--border) 65%, transparent)",
+                              cursor: "pointer",
+                              transition: "background var(--dur-fast)",
+                            }}
                           >
-                            <ProviderIcon id={pName} size={15} />
-                            <span style={{ fontSize: 12, fontWeight: isProviderSelected ? 700 : 600, color: "var(--text)", fontFamily: "var(--font-mono)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                              {pName}
-                            </span>
-                            <span style={{ fontSize: 10, color: isProviderSelected ? "var(--accent)" : "var(--text-dim)", padding: "2px 6px", borderRadius: 10, background: isProviderSelected ? "color-mix(in srgb, var(--accent) 14%, transparent)" : "var(--bg-subtle)", border: `1px solid ${isProviderSelected ? "color-mix(in srgb, var(--accent) 22%, transparent)" : "var(--border)"}`, fontWeight: 600 }}>
-                              {models.length} model{models.length === 1 ? "" : "s"}
-                            </span>
-                          </button>
+                            <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0, paddingRight: 8 }}>
+                              <div style={{ width: 34, height: 34, borderRadius: 8, background: "var(--bg-subtle)", border: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                                <ProviderIcon id={p.id} size={18} />
+                              </div>
+                              <div style={{ minWidth: 0, flex: 1 }}>
+                                <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {p.name}
+                                </div>
+                                <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2, fontSize: 11, color: "var(--text-muted)" }}>
+                                  <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--status-success)", flexShrink: 0 }} />
+                                  <span>OAuth {t("modelsConfig.connectedAccount") || "已连接"}</span>
+                                </div>
+                              </div>
+                            </div>
+                            <ChevronRight size={16} style={{ color: "var(--text-dim)", flexShrink: 0 }} aria-hidden="true" />
+                          </div>
+                        );
+                      })}
 
-                          {/* Model rows */}
-                          {models.map((m, i) => {
-                            const isModelSelected = selection?.type === "model" && selection.providerName === pName && selection.index === i;
-                            return (
-                              <button
-                                type="button"
-                                key={i}
-                                onClick={() => setSelection({ type: "model", providerName: pName, index: i })}
-                                style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px 6px 32px", cursor: "pointer", width: "100%", border: "none", textAlign: "left", fontFamily: "inherit", background: isModelSelected ? "var(--bg-selected)" : "transparent", borderLeft: isModelSelected ? "2px solid var(--accent)" : "2px solid transparent", borderTop: "1px solid var(--border)" }}
-                                {...hoverRow(isModelSelected)}
-                              >
-                                <span style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: m.id ? (isModelSelected ? "var(--text)" : "var(--text-muted)") : "var(--text-dim)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: isModelSelected ? 600 : 400 }}>
-                                  {m.id || t("modelsConfig.newModel")}
-                                </span>
-                                {m.reasoning && (
-                                  <span style={{ fontSize: 9, padding: "1px 4px", background: isModelSelected ? "var(--accent)" : "color-mix(in srgb, var(--accent) 14%, transparent)", color: isModelSelected ? "var(--on-accent)" : "var(--accent)", borderRadius: 3, flexShrink: 0, fontWeight: 700 }}>T</span>
-                                )}
-                              </button>
-                            );
-                          })}
+                      {/* Connected API Key Accounts */}
+                      {activeApiKey.map((p, idx) => {
+                        const isLast = idx === activeApiKey.length - 1 && providers.length === 0;
+                        return (
+                          <div
+                            key={p.id}
+                            onClick={() => setSelection({ type: "apikey", providerId: p.id })}
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "space-between",
+                              padding: "12px 14px",
+                              borderBottom: isLast ? "none" : "1px solid color-mix(in srgb, var(--border) 65%, transparent)",
+                              cursor: "pointer",
+                              transition: "background var(--dur-fast)",
+                            }}
+                          >
+                            <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0, paddingRight: 8 }}>
+                              <div style={{ width: 34, height: 34, borderRadius: 8, background: "var(--bg-subtle)", border: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                                <ProviderIcon id={p.id} size={18} />
+                              </div>
+                              <div style={{ minWidth: 0, flex: 1 }}>
+                                <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {p.displayName}
+                                </div>
+                                <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2, fontSize: 11, color: "var(--text-muted)" }}>
+                                  <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--status-success)", flexShrink: 0 }} />
+                                  <span>API Key {t("modelsConfig.configuredStatus") || "已配置"}</span>
+                                </div>
+                              </div>
+                            </div>
+                            <ChevronRight size={16} style={{ color: "var(--text-dim)", flexShrink: 0 }} aria-hidden="true" />
+                          </div>
+                        );
+                      })}
 
-                          {/* Add model buttons */}
-                          <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 8px", background: "var(--bg-subtle)", borderTop: "1px solid var(--border)", flexWrap: "nowrap" }}>
-                            <button
-                              type="button"
-                              onClick={(e) => { e.stopPropagation(); addModel(pName); }}
-                              style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "4px 8px", borderRadius: "var(--radius-control)", cursor: "pointer", color: "var(--text-muted)", border: "1px solid var(--border)", background: "var(--bg)", fontFamily: "inherit", fontSize: 11, whiteSpace: "nowrap", flexShrink: 0, fontWeight: 500 }}
-                              {...hoverAccent}
-                            >
-                              <Plus size={11} aria-hidden="true" />
-                              <span>{t("modelsConfig.addModel")}</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={(e) => { e.stopPropagation(); setCatalogPicker(pName); }}
-                              style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "4px 8px", borderRadius: "var(--radius-control)", cursor: "pointer", color: "var(--text-muted)", border: "1px solid var(--border)", background: "var(--bg)", fontFamily: "inherit", fontSize: 11, whiteSpace: "nowrap", flexShrink: 0, fontWeight: 500 }}
-                              {...hoverAccent}
-                            >
-                              <BookOpen size={11} aria-hidden="true" />
-                              <span>{t("modelsConfig.addFromCatalog")}</span>
-                            </button>
+                      {/* Custom Providers (models.yml) */}
+                      {providers.map(([pName, pData], idx) => {
+                        const isLast = idx === providers.length - 1;
+                        const models = pData.models ?? [];
+                        const hostName = pData.baseUrl ? (pData.baseUrl.replace(/^https?:\/\//, "").split("/")[0] || pData.baseUrl) : "api.openai.com";
+                        const hasKey = pData.auth === "none" || Boolean(pData.apiKey);
+                        return (
+                          <div
+                            key={pName}
+                            onClick={() => setSelection({ type: "provider", name: pName })}
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "space-between",
+                              padding: "12px 14px",
+                              borderBottom: isLast ? "none" : "1px solid color-mix(in srgb, var(--border) 65%, transparent)",
+                              cursor: "pointer",
+                              transition: "background var(--dur-fast)",
+                            }}
+                          >
+                            <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0, paddingRight: 8 }}>
+                              <div style={{ width: 34, height: 34, borderRadius: 8, background: "var(--bg-subtle)", border: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                                <ProviderIcon id={pName} size={18} />
+                              </div>
+                              <div style={{ minWidth: 0, flex: 1 }}>
+                                <div style={{ fontSize: 13.5, fontWeight: 600, fontFamily: "var(--font-mono)", color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {pName}
+                                </div>
+                                <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2, fontSize: 11, color: "var(--text-muted)" }}>
+                                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{hostName}</span>
+                                  <span>·</span>
+                                  <span>{models.length} {t("modelsConfig.modelsShort") || "模型"}</span>
+                                  <span>·</span>
+                                  <span style={{ color: hasKey ? "var(--status-success)" : "var(--status-error)" }}>
+                                    {hasKey ? (t("modelsConfig.keySet") || "已设密钥") : (t("modelsConfig.keyMissing") || "未设密钥")}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                            <ChevronRight size={16} style={{ color: "var(--text-dim)", flexShrink: 0 }} aria-hidden="true" />
+                          </div>
+                        );
+                      })}
+
+                      {activeOAuth.length === 0 && activeApiKey.length === 0 && providers.length === 0 && (
+                        <div style={{ padding: "20px 14px", textAlign: "center", color: "var(--text-muted)", fontSize: 12 }}>
+                          {loading ? t("modelsConfig.loading") : t("modelsConfig.noConfiguredProviders") || "暂未配置任何模型服务商"}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Section 2: Advanced System & Model Scheduling */}
+                  <div>
+                    <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)", padding: "0 4px 8px" }}>
+                      {t("modelsConfig.ompSystemSection") || "高级系统模型设置"}
+                    </div>
+                    <div style={{ background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 14, overflow: "hidden" }}>
+                      <div
+                        onClick={() => setSelection({ type: "fallbacks" })}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          padding: "12px 14px",
+                          borderBottom: "1px solid color-mix(in srgb, var(--border) 65%, transparent)",
+                          cursor: "pointer",
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0, paddingRight: 8 }}>
+                          <div style={{ width: 32, height: 32, borderRadius: 8, background: "color-mix(in srgb, var(--accent) 12%, transparent)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--accent)", flexShrink: 0 }}>
+                            <RotateCcw size={16} aria-hidden="true" />
+                          </div>
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div style={{ fontSize: 13.5, fontWeight: 550, color: "var(--text)" }}>{t("modelsConfig.navRetryFallback")}</div>
+                            <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{t("modelsConfig.retryFallbackDescShort") || "服务商异常时的模型级联切换链"}</div>
                           </div>
                         </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </section>
-            </div>
+                        <ChevronRight size={16} style={{ color: "var(--text-dim)", flexShrink: 0 }} aria-hidden="true" />
+                      </div>
 
-            {/* Add provider — primary action */}
-            <div style={{ borderTop: "1px solid var(--border)", padding: "10px 8px", background: "var(--bg)", flexShrink: 0 }}>
-              <button onClick={() => setPickerOpen(true)} style={{
-                display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-                width: "100%", padding: "8px 0", background: "var(--accent)", border: "1px solid var(--accent)", borderRadius: "var(--radius-control)",
-                color: "var(--on-accent)", cursor: "pointer", fontSize: 12, fontWeight: 600,
-              }}
-                onMouseEnter={(e) => { e.currentTarget.style.filter = "brightness(1.05)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.filter = "none"; }}
-              >
-                <Plus size={13} aria-hidden="true" /> {t("modelsConfig.addProvider")}
-              </button>
-            </div>
+                      <div
+                        onClick={() => setSelection({ type: "picker" })}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          padding: "12px 14px",
+                          borderBottom: "1px solid color-mix(in srgb, var(--border) 65%, transparent)",
+                          cursor: "pointer",
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0, paddingRight: 8 }}>
+                          <div style={{ width: 32, height: 32, borderRadius: 8, background: "color-mix(in srgb, #3B82F6 12%, transparent)", display: "flex", alignItems: "center", justifyContent: "center", color: "#3B82F6", flexShrink: 0 }}>
+                            <BookOpen size={16} aria-hidden="true" />
+                          </div>
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div style={{ fontSize: 13.5, fontWeight: 550, color: "var(--text)" }}>{t("modelsConfig.navComposerPicker")}</div>
+                            <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{t("modelsConfig.composerPickerDescShort") || "输入框快捷弹窗模型列表配置"}</div>
+                          </div>
+                        </div>
+                        <ChevronRight size={16} style={{ color: "var(--text-dim)", flexShrink: 0 }} aria-hidden="true" />
+                      </div>
+
+                      <div
+                        onClick={() => setSelection({ type: "roles" })}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          padding: "12px 14px",
+                          borderBottom: "1px solid color-mix(in srgb, var(--border) 65%, transparent)",
+                          cursor: "pointer",
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0, paddingRight: 8 }}>
+                          <div style={{ width: 32, height: 32, borderRadius: 8, background: "color-mix(in srgb, #8B5CF6 12%, transparent)", display: "flex", alignItems: "center", justifyContent: "center", color: "#8B5CF6", flexShrink: 0 }}>
+                            <SlidersHorizontal size={16} aria-hidden="true" />
+                          </div>
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div style={{ fontSize: 13.5, fontWeight: 550, color: "var(--text)" }}>{t("modelsConfig.navModelRoles")}</div>
+                            <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{t("modelsConfig.modelRolesDescShort") || "OMP 系统角色与模型绑定"}</div>
+                          </div>
+                        </div>
+                        <ChevronRight size={16} style={{ color: "var(--text-dim)", flexShrink: 0 }} aria-hidden="true" />
+                      </div>
+
+                      <div
+                        onClick={() => setSelection({ type: "registry" })}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          padding: "12px 14px",
+                          cursor: "pointer",
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0, paddingRight: 8 }}>
+                          <div style={{ width: 32, height: 32, borderRadius: 8, background: "color-mix(in srgb, #10B981 12%, transparent)", display: "flex", alignItems: "center", justifyContent: "center", color: "#10B981", flexShrink: 0 }}>
+                            <Layers size={16} aria-hidden="true" />
+                          </div>
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div style={{ fontSize: 13.5, fontWeight: 550, color: "var(--text)" }}>{t("modelsConfig.navNativeRegistry")}</div>
+                            <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{t("modelsConfig.nativeRegistryDescShort") || "查看原生模型与提供商"}</div>
+                          </div>
+                        </div>
+                        <ChevronRight size={16} style={{ color: "var(--text-dim)", flexShrink: 0 }} aria-hidden="true" />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                /* Desktop Tree */
+                <div style={{ flex: 1, overflowY: "auto", padding: "10px 8px", display: "flex", flexDirection: "column", gap: 14 }}>
+                  {/* — OMP System — */}
+                  <section style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 6px", fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--text-dim)" }}>
+                      <Layers size={10} aria-hidden="true" style={{ opacity: 0.7 }} /> {t("modelsConfig.ompSystemSection")}
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 2, padding: 4, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg)" }}>
+                      <TreeNavButton icon={Layers} label={t("modelsConfig.navNativeRegistry")} selected={selection?.type === "registry"} onClick={() => setSelection({ type: "registry" })} />
+                      <TreeNavButton icon={RotateCcw} label={t("modelsConfig.navRetryFallback")} selected={selection?.type === "fallbacks"} onClick={() => setSelection({ type: "fallbacks" })} />
+                      <TreeNavButton icon={BookOpen} label={t("modelsConfig.navComposerPicker")} selected={selection?.type === "picker"} onClick={() => setSelection({ type: "picker" })} />
+                      <TreeNavButton icon={SlidersHorizontal} label={t("modelsConfig.navModelRoles")} selected={selection?.type === "roles"} onClick={() => setSelection({ type: "roles" })} />
+                    </div>
+                  </section>
+
+                  {/* — Connected accounts — */}
+                  <section style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 6px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--text-dim)" }}>
+                        <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: activeOAuth.length + activeApiKey.length > 0 ? "var(--status-success)" : "var(--border)", flexShrink: 0 }} />
+                        {t("modelsConfig.connectedAccounts")}
+                      </div>
+                      {(activeOAuth.length + activeApiKey.length) > 0 && (
+                        <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 10, background: "var(--bg)", border: "1px solid var(--border)", color: "var(--text-dim)", fontWeight: 600 }}>
+                          {activeOAuth.length + activeApiKey.length}
+                        </span>
+                      )}
+                    </div>
+                    {(activeOAuth.length === 0 && activeApiKey.length === 0) ? (
+                      <div style={{ padding: "10px 10px", border: "1px dashed var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg)", color: "var(--text-dim)", fontSize: 11, lineHeight: 1.5, textAlign: "center" }}>
+                        {t("modelsConfig.noConnectedAccounts")}
+                        <br />
+                        <span style={{ color: "var(--text-muted)" }}>{t("modelsConfig.addOneBelow")}</span>
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4, padding: 4, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg)" }}>
+                        {activeOAuth.map((p) => {
+                          const isSelected = selection?.type === "oauth" && selection.providerId === p.id;
+                          return (
+                            <button
+                              type="button"
+                              key={p.id}
+                              onClick={() => setSelection({ type: "oauth", providerId: p.id })}
+                              style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 8px", borderRadius: "var(--radius-control)", cursor: "pointer", width: "100%", border: isSelected ? "1px solid var(--accent)" : "1px solid transparent", textAlign: "left", fontFamily: "inherit", background: isSelected ? "var(--bg-selected)" : "none", fontWeight: isSelected ? 600 : 400 }}
+                              {...hoverRow(isSelected)}
+                            >
+                              <ProviderIcon id={p.id} size={16} />
+                              <span style={{ fontSize: 12, color: "var(--text)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+                              <span title={t("modelsConfig.oauthProviderTitle", { id: p.id })} style={{ padding: "2px 6px", borderRadius: 4, background: isSelected ? "var(--accent)" : "var(--bg-subtle)", color: isSelected ? "var(--on-accent)" : "var(--text-muted)", fontSize: 9, fontWeight: 600, flexShrink: 0 }}>OAuth</span>
+                            </button>
+                          );
+                        })}
+                        {activeApiKey.map((p) => {
+                          const isSelected = selection?.type === "apikey" && selection.providerId === p.id;
+                          return (
+                            <button
+                              type="button"
+                              key={p.id}
+                              onClick={() => setSelection({ type: "apikey", providerId: p.id })}
+                              style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 8px", borderRadius: "var(--radius-control)", cursor: "pointer", width: "100%", border: isSelected ? "1px solid var(--accent)" : "1px solid transparent", textAlign: "left", fontFamily: "inherit", background: isSelected ? "var(--bg-selected)" : "none", fontWeight: isSelected ? 600 : 400 }}
+                              {...hoverRow(isSelected)}
+                            >
+                              <ProviderIcon id={p.id} size={16} />
+                              <span style={{ fontSize: 12, color: "var(--text)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.displayName}</span>
+                              <span title={t("modelsConfig.apiKeyProviderTitle", { id: p.id })} style={{ padding: "2px 6px", borderRadius: 4, background: isSelected ? "var(--accent)" : "var(--bg-subtle)", color: isSelected ? "var(--on-accent)" : "var(--text-muted)", fontSize: 9, fontWeight: 600, flexShrink: 0 }}>API key</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </section>
+
+                  {/* — Custom providers (models.yml) — */}
+                  <section style={{ display: "flex", flexDirection: "column", gap: 6, flex: 1, minHeight: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 6px" }}>
+                      <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                        {t("modelsConfig.customProviders")}
+                      </div>
+                      <code style={{ fontSize: 9, padding: "1px 5px", borderRadius: 4, background: "var(--bg)", border: "1px solid var(--border)", color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>models.yml</code>
+                    </div>
+                    {loading ? (
+                      <div style={{ padding: "10px 8px", fontSize: 12, color: "var(--text-muted)" }}>{t("modelsConfig.loading")}</div>
+                    ) : providers.length === 0 ? (
+                      <div style={{ padding: "12px 10px", border: "1px dashed var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg)", color: "var(--text-dim)", fontSize: 11, lineHeight: 1.5, textAlign: "center" }}>
+                        {t("modelsConfig.noCustomProviders")}
+                        <br />
+                        <span style={{ color: "var(--text-muted)" }}>{t("modelsConfig.addOpenAiEndpoint")}</span>
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        {providers.map(([pName, pData]) => {
+                          const isProviderSelected = selection?.type === "provider" && selection.name === pName;
+                          const models = pData.models ?? [];
+                          return (
+                            <div key={pName} style={{ borderRadius: "var(--radius-card)", background: "var(--bg)", border: isProviderSelected ? "1px solid var(--accent)" : "1px solid var(--border)", overflow: "hidden", boxShadow: isProviderSelected ? "0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent)" : "none" }}>
+                              <button
+                                type="button"
+                                onClick={() => setSelection({ type: "provider", name: pName })}
+                                style={{ display: "flex", alignItems: "center", gap: 7, padding: "8px 10px", cursor: "pointer", width: "100%", border: "none", textAlign: "left", fontFamily: "inherit", background: isProviderSelected ? "var(--bg-selected)" : "var(--bg)", borderBottom: models.length ? "1px solid var(--border)" : "none" }}
+                                {...hoverRow(isProviderSelected)}
+                              >
+                                <ProviderIcon id={pName} size={15} />
+                                <span style={{ fontSize: 12, fontWeight: isProviderSelected ? 700 : 600, color: "var(--text)", fontFamily: "var(--font-mono)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {pName}
+                                </span>
+                                <span style={{ fontSize: 10, color: isProviderSelected ? "var(--accent)" : "var(--text-dim)", padding: "2px 6px", borderRadius: 10, background: isProviderSelected ? "color-mix(in srgb, var(--accent) 14%, transparent)" : "var(--bg-subtle)", border: `1px solid ${isProviderSelected ? "color-mix(in srgb, var(--accent) 22%, transparent)" : "var(--border)"}`, fontWeight: 600 }}>
+                                  {models.length} model{models.length === 1 ? "" : "s"}
+                                </span>
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </section>
+
+                  {/* Add provider on desktop sidebar bottom */}
+                  <div style={{ borderTop: "1px solid var(--border)", padding: "10px 8px", background: "var(--bg)", flexShrink: 0 }}>
+                    <button onClick={() => setPickerOpen(true)} style={{
+                      display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                      width: "100%", padding: "8px 0", background: "var(--accent)", border: "1px solid var(--accent)", borderRadius: "var(--radius-control)",
+                      color: "var(--on-accent)", cursor: "pointer", fontSize: 12, fontWeight: 600,
+                    }}
+                      onMouseEnter={(e) => { e.currentTarget.style.filter = "brightness(1.05)"; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.filter = "none"; }}
+                    >
+                      <Plus size={13} aria-hidden="true" /> {t("modelsConfig.addProvider")}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -2362,7 +2788,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
         )}
 
         {/* Footer */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10, padding: "10px 18px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
+        <div style={{ display: isMobile && selection === null ? "none" : "flex", alignItems: "center", justifyContent: "flex-end", gap: 10, padding: "10px 18px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
           {saveError && <span style={{ fontSize: 12, color: "var(--status-error)", flex: 1 }}>{saveError}</span>}
           <button onClick={onClose} style={{ padding: "6px 14px", background: "none", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", cursor: "pointer", fontSize: 13 }}>
             {t("modelsConfig.cancel")}

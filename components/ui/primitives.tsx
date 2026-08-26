@@ -5,12 +5,14 @@
  * Theming contract: CSS variables from globals.css (--bg, --accent, --radius-*,
  * --shadow-*, --dur-*, --ease-out-warm). No hardcoded colors here.
  */
+import { createContext, useContext, type CSSProperties, type ReactNode } from "react";
 import { Dialog as BaseDialog } from "@base-ui/react/dialog";
 import { Tooltip as BaseTooltip } from "@base-ui/react/tooltip";
 import { Collapsible as BaseCollapsible } from "@base-ui/react/collapsible";
-import type React from "react";
 
 /* ---------------------------------- Dialog --------------------------------- */
+
+const DialogCtx = createContext<{ onOpenChange?: (open: boolean) => void }>({});
 
 export function Dialog({ open, onOpenChange, children }: {
   open: boolean;
@@ -18,26 +20,41 @@ export function Dialog({ open, onOpenChange, children }: {
   children: React.ReactNode;
 }) {
   return (
-    <BaseDialog.Root open={open} onOpenChange={onOpenChange}>
-      {children}
-    </BaseDialog.Root>
+    <DialogCtx.Provider value={{ onOpenChange }}>
+      <BaseDialog.Root open={open} onOpenChange={onOpenChange}>
+        {children}
+      </BaseDialog.Root>
+    </DialogCtx.Provider>
   );
 }
-
-export function DialogContent({ children, className, style, ariaLabel }: {
+export function DialogContent({ children, className, style, ariaLabel, zIndex, onClose }: {
   children: React.ReactNode;
   className?: string;
   style?: React.CSSProperties;
   ariaLabel?: string;
+  zIndex?: number;
+  onClose?: () => void;
 }) {
+  const { onOpenChange } = useContext(DialogCtx);
+  const backdropZ = zIndex ?? 1000;
+  const popupZ = (zIndex ?? 1000) + 1;
+  const handleClose = () => {
+    onClose?.();
+    onOpenChange?.(false);
+  };
   return (
     <BaseDialog.Portal>
       <BaseDialog.Backdrop
+        onClick={(e) => {
+          e.stopPropagation();
+          handleClose();
+        }}
         style={{
           position: "fixed", inset: 0,
           background: "var(--overlay-backdrop)",
           backdropFilter: "blur(2px)",
-          zIndex: 1000,
+          zIndex: backdropZ,
+          cursor: "pointer",
         }}
       />
       <BaseDialog.Popup
@@ -50,7 +67,7 @@ export function DialogContent({ children, className, style, ariaLabel }: {
           // keyframes: an animation overrides the inline transform for its
           // whole (fill: both) lifetime.
           animation: "dialog-pop-in var(--dur-med) var(--ease-out-warm) both",
-           zIndex: 1001,
+          zIndex: popupZ,
           background: "var(--bg)",
           color: "var(--text)",
           border: "1px solid var(--border)",
