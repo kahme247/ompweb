@@ -463,6 +463,35 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
     if (!model || (!model.contextWindow && !model.maxTokens)) return null;
     return { contextWindow: model.contextWindow, maxTokens: model.maxTokens };
   }, [displayModelValue, modelList]);
+
+  const effectiveContextUsage = useMemo(() => {
+    if (contextUsage && contextUsage.tokens !== null && contextUsage.tokens !== undefined && contextUsage.tokens > 0) {
+      return contextUsage;
+    }
+    // First-principles fallback from messages on disk or after a turn:
+    let lastInput = 0;
+    let lastOutput = 0;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg.role === "assistant") {
+        const asst = msg as AssistantMessage;
+        if (asst.usage) {
+          lastInput = asst.usage.input ?? 0;
+          lastOutput = asst.usage.output ?? 0;
+          break;
+        }
+      }
+    }
+    const fallbackTokens = lastInput > 0 ? (lastInput + lastOutput) : (sessionStats?.tokens?.total ?? 0);
+    const fallbackWindow = contextUsage?.contextWindow ?? modelCapacity?.contextWindow ?? 128000;
+    const fallbackPercent = fallbackWindow > 0 ? (fallbackTokens / fallbackWindow) * 100 : 0;
+    return {
+      tokens: fallbackTokens,
+      contextWindow: fallbackWindow,
+      percent: fallbackPercent,
+    };
+  }, [contextUsage, messages, sessionStats, modelCapacity]);
+
   const modelCapacityKey = modelCapacity ? `${modelCapacity.contextWindow ?? ""}|${modelCapacity.maxTokens ?? ""}` : "";
   const modelCapacityRef = useRef(modelCapacity);
   modelCapacityRef.current = modelCapacity;
@@ -866,7 +895,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
       queuedMessages={queuedMessages}
       inputHistory={inputHistory}
       advisorActive={advisorActive}
-      contextUsage={contextUsage}
+      contextUsage={effectiveContextUsage}
       sessionStats={sessionStats}
       onCompact={handleCompact}
       onRemoveQueuedMessage={removeQueuedMessage}

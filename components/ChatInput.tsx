@@ -39,6 +39,12 @@ export interface AttachedImage {
 }
 
 export type AttachedTextFile = AttachedTextFileData;
+function formatTokenSize(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
 
 interface ModelOption {
   provider: string;
@@ -2869,59 +2875,68 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </div>
               <div className="mobile-sheet-body">
                 <div className="mobile-action-grid">
-                  {/* Top full-width: Context Usage & Compaction Card */}
-                  {onCompact && (
-                    <button
-                      type="button"
-                      className="mobile-action-card"
-                      onClick={() => {
-                        setMobilePlusDrawerOpen(false);
-                        setConfirmingCompact(false);
-                        setContextDetailOpen(true);
-                      }}
-                      style={{
-                        gridColumn: "1 / -1",
-                        padding: "14px 14px",
-                        flexDirection: "row",
-                        alignItems: "center",
-                        gap: 14,
-                      }}
-                    >
-                      {/* SVG Ring Gauge */}
-                      <div style={{ position: "relative", width: 42, height: 42, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                        <svg width="42" height="42" viewBox="0 0 42 42" style={{ transform: "rotate(-90deg)" }}>
-                          <circle cx="21" cy="21" r="17" fill="none" stroke="var(--border)" strokeWidth="4" />
-                          <circle
-                            cx="21"
-                            cy="21"
-                            r="17"
-                            fill="none"
-                            stroke={isCompacting ? "var(--accent)" : (contextUsage?.percent && contextUsage.percent > 90 ? "var(--status-error)" : contextUsage?.percent && contextUsage.percent > 70 ? "var(--status-warning)" : "var(--accent)")}
-                            strokeWidth="4"
-                            strokeDasharray={106.8}
-                            strokeDashoffset={106.8 - (106.8 * Math.min(100, Math.max(0, contextUsage?.percent ?? 0))) / 100}
-                            strokeLinecap="round"
-                            style={{ transition: "stroke-dashoffset 0.3s ease" }}
-                          />
-                        </svg>
-                        <span style={{ position: "absolute", fontSize: 11, fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--text)" }}>
-                          {contextUsage?.percent !== null && contextUsage?.percent !== undefined ? `${Math.round(contextUsage.percent)}%` : "0%"}
-                        </span>
-                      </div>
+                  {/* Top full-width: Context Usage Card */}
+                  {onCompact && (() => {
+                    const used = contextUsage?.tokens ?? 0;
+                    const total = contextUsage?.contextWindow ?? 128000;
+                    const pct = contextUsage?.percent !== null && contextUsage?.percent !== undefined
+                      ? Math.round(contextUsage.percent)
+                      : total > 0 ? Math.round((used / total) * 100) : 0;
+                    const ratioStr = `${formatTokenSize(used)} / ${formatTokenSize(total)}`;
 
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 14, fontWeight: 650, color: "var(--text)", display: "flex", alignItems: "center", gap: 6 }}>
-                          <span>{isCompacting ? "正在压缩上下文..." : "上下文用量与压缩"}</span>
-                          {isCompacting && <span style={{ fontSize: 11, color: "var(--accent)", fontWeight: 600 }}>压缩中</span>}
+                    return (
+                      <button
+                        type="button"
+                        className="mobile-action-card"
+                        onClick={() => {
+                          setMobilePlusDrawerOpen(false);
+                          setConfirmingCompact(false);
+                          setContextDetailOpen(true);
+                        }}
+                        style={{
+                          gridColumn: "1 / -1",
+                          padding: "14px 14px",
+                          flexDirection: "row",
+                          alignItems: "center",
+                          gap: 14,
+                        }}
+                      >
+                        {/* SVG Ring Gauge */}
+                        <div style={{ position: "relative", width: 44, height: 44, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                          <svg width="44" height="44" viewBox="0 0 44 44" style={{ transform: "rotate(-90deg)" }}>
+                            <circle cx="22" cy="22" r="18" fill="none" stroke="var(--border)" strokeWidth="4" />
+                            <circle
+                              cx="22"
+                              cy="22"
+                              r="18"
+                              fill="none"
+                              stroke={isCompacting ? "var(--accent)" : (pct > 90 ? "var(--status-error)" : pct > 70 ? "var(--status-warning)" : "var(--accent)")}
+                              strokeWidth="4"
+                              strokeDasharray={113.1}
+                              strokeDashoffset={113.1 - (113.1 * Math.min(100, Math.max(0, pct))) / 100}
+                              strokeLinecap="round"
+                              style={{ transition: "stroke-dashoffset 0.3s ease" }}
+                            />
+                          </svg>
+                          <span style={{ position: "absolute", fontSize: 11, fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--text)" }}>
+                            {pct}%
+                          </span>
                         </div>
-                        <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {contextUsage?.tokens ? `${formatCompactNumber(contextUsage.tokens)} / ${formatCompactNumber(contextUsage.contextWindow)} Tokens` : "点击查看详情与执行压缩"}
-                        </div>
-                      </div>
 
-                      <ChevronRight size={16} style={{ color: "var(--text-dim)", flexShrink: 0 }} />
-                    </button>
-                  )}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 15.5, fontWeight: 750, color: "var(--text)", fontFamily: "var(--font-mono)", letterSpacing: "-0.01em", display: "flex", alignItems: "center", gap: 6 }}>
+                            <span>{ratioStr}</span>
+                            {isCompacting && <span style={{ fontSize: 11, color: "var(--accent)", fontWeight: 600 }}>压缩中</span>}
+                          </div>
+                          <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            已占用 {pct}% · 点击管理与压缩
+                          </div>
+                        </div>
+
+                        <ChevronRight size={16} style={{ color: "var(--text-dim)", flexShrink: 0 }} />
+                      </button>
+                    );
+                  })()}
 
                   {/* Attachment */}
                   <button
@@ -3030,36 +3045,47 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </div>
               <div style={{ padding: "16px", display: "flex", flexDirection: "column", gap: 16, overflowY: "auto" }}>
                 {/* Visual Ring Gauge & Key Metric */}
-                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "12px 0", background: "var(--bg-panel)", borderRadius: 14, border: "1px solid var(--border)" }}>
-                  <div style={{ position: "relative", width: 68, height: 68, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                    <svg width="68" height="68" viewBox="0 0 68 68" style={{ transform: "rotate(-90deg)" }}>
-                      <circle cx="34" cy="34" r="28" fill="none" stroke="var(--border)" strokeWidth="6" />
-                      <circle
-                        cx="34"
-                        cy="34"
-                        r="28"
-                        fill="none"
-                        stroke={isCompacting ? "var(--accent)" : (contextUsage?.percent && contextUsage.percent > 90 ? "var(--status-error)" : contextUsage?.percent && contextUsage.percent > 70 ? "var(--status-warning)" : "var(--accent)")}
-                        strokeWidth="6"
-                        strokeDasharray={175.9}
-                        strokeDashoffset={175.9 - (175.9 * Math.min(100, Math.max(0, contextUsage?.percent ?? 0))) / 100}
-                        strokeLinecap="round"
-                        style={{ transition: "stroke-dashoffset 0.3s ease" }}
-                      />
-                    </svg>
-                    <span style={{ position: "absolute", fontSize: 16, fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--text)" }}>
-                      {contextUsage?.percent !== null && contextUsage?.percent !== undefined ? `${Math.round(contextUsage.percent)}%` : "0%"}
-                    </span>
-                  </div>
-                  <div style={{ fontSize: 14, fontWeight: 650, color: "var(--text)", marginTop: 10 }}>
-                    {contextUsage?.tokens ? `${formatCompactNumber(contextUsage.tokens)} / ${formatCompactNumber(contextUsage.contextWindow)} Tokens` : "当前对话上下文"}
-                  </div>
-                  <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2 }}>
-                    {contextUsage?.tokens && contextUsage.contextWindow
-                      ? `剩余安全空间约 ${formatCompactNumber(Math.max(0, contextUsage.contextWindow - contextUsage.tokens))} Tokens`
-                      : "健康度良好"}
-                  </div>
-                </div>
+                {(() => {
+                  const used = contextUsage?.tokens ?? 0;
+                  const total = contextUsage?.contextWindow ?? 128000;
+                  const pct = contextUsage?.percent !== null && contextUsage?.percent !== undefined
+                    ? Math.round(contextUsage.percent)
+                    : total > 0 ? Math.round((used / total) * 100) : 0;
+                  const ratioStr = `${formatTokenSize(used)} / ${formatTokenSize(total)}`;
+
+                  return (
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "14px 0", background: "var(--bg-panel)", borderRadius: 14, border: "1px solid var(--border)" }}>
+                      <div style={{ position: "relative", width: 68, height: 68, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        <svg width="68" height="68" viewBox="0 0 68 68" style={{ transform: "rotate(-90deg)" }}>
+                          <circle cx="34" cy="34" r="28" fill="none" stroke="var(--border)" strokeWidth="6" />
+                          <circle
+                            cx="34"
+                            cy="34"
+                            r="28"
+                            fill="none"
+                            stroke={isCompacting ? "var(--accent)" : (pct > 90 ? "var(--status-error)" : pct > 70 ? "var(--status-warning)" : "var(--accent)")}
+                            strokeWidth="6"
+                            strokeDasharray={175.9}
+                            strokeDashoffset={175.9 - (175.9 * Math.min(100, Math.max(0, pct))) / 100}
+                            strokeLinecap="round"
+                            style={{ transition: "stroke-dashoffset 0.3s ease" }}
+                          />
+                        </svg>
+                        <span style={{ position: "absolute", fontSize: 16, fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--text)" }}>
+                          {pct}%
+                        </span>
+                      </div>
+                      <div style={{ fontSize: 16, fontWeight: 750, color: "var(--text)", fontFamily: "var(--font-mono)", marginTop: 10 }}>
+                        {ratioStr} Tokens
+                      </div>
+                      <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2 }}>
+                        {total > 0
+                          ? `剩余安全空间约 ${formatTokenSize(Math.max(0, total - used))} Tokens`
+                          : "健康度良好"}
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 {/* Breakdown List */}
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
