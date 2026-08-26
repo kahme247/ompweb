@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useState, useRef, useEffect, useMemo, useCallback, type ComponentProps } from "react";
-import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, ChevronDown, Brain, EyeOff, CircleAlert, LoaderCircle } from "lucide-react";
+import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, ChevronDown, Brain, EyeOff, CircleAlert, LoaderCircle, Sparkles, Clock, ArrowRight, FileText } from "lucide-react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { MarkdownBody } from "./MarkdownBody";
 import { ClickableImage } from "./ImageLightbox";
@@ -118,8 +118,9 @@ interface Props {
   toolCallsDefaultCollapsed?: boolean;
   /** omp-reported output throughput (get_state.tokensPerSecond), live while streaming. */
   liveTokensPerSecond?: number | null;
+  onTogglePreCompactionHistory?: () => void;
+  showPreCompactionHistory?: boolean;
 }
-
 function formatTime(ts: number | undefined, locale: Locale): string | null {
   if (!ts) return null;
   const d = new Date(ts);
@@ -131,6 +132,19 @@ function formatTime(ts: number | undefined, locale: Locale): string | null {
   if (isToday) return time;
   const date = d.toLocaleDateString(locale, { month: "short", day: "numeric", year: d.getFullYear() !== now.getFullYear() ? "numeric" : undefined });
   return `${date} ${time}`;
+}
+
+function formatFullDateTime(ts: number | undefined, locale: Locale): string | null {
+  if (!ts || Number.isNaN(ts)) return null;
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return null;
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const min = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
 }
 
 function haveSameRelevantToolResults(
@@ -147,7 +161,7 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, liveTokensPerSecond }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, liveTokensPerSecond, onTogglePreCompactionHistory, showPreCompactionHistory }: Props) {
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onNavigate={onNavigate} prevAssistantEntryId={prevAssistantEntryId} onEditContent={onEditContent} />;
   }
@@ -164,7 +178,13 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
       return null;
     }
     if (custom.customType === "compaction") {
-      return <CompactionMessageView message={custom} />;
+      return (
+        <CompactionMessageView
+          message={custom}
+          onTogglePreCompactionHistory={onTogglePreCompactionHistory}
+          showPreCompactionHistory={showPreCompactionHistory}
+        />
+      );
     }
     if (custom.display === false) {
       return <HiddenExtensionView message={custom} cwd={cwd} onOpenFile={onOpenFile} />;
@@ -192,7 +212,9 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.prevTimestamp === next.prevTimestamp
     && prev.sessionId === next.sessionId
     && prev.toolCallsDefaultCollapsed === next.toolCallsDefaultCollapsed
-    && prev.liveTokensPerSecond === next.liveTokensPerSecond;
+    && prev.liveTokensPerSecond === next.liveTokensPerSecond
+    && prev.onTogglePreCompactionHistory === next.onTogglePreCompactionHistory
+    && prev.showPreCompactionHistory === next.showPreCompactionHistory;
 });
 
 function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent }: {  message: UserMessage;
@@ -1129,47 +1151,251 @@ function PairedResult({ text, isEmpty, isError }: {
   );
 }
 
-function CompactionMessageView({ message }: { message: CustomMessage }) {
+function CompactionMessageView({
+  message,
+  onTogglePreCompactionHistory,
+  showPreCompactionHistory,
+}: {
+  message: CustomMessage;
+  onTogglePreCompactionHistory?: () => void;
+  showPreCompactionHistory?: boolean;
+}) {
   const { t, locale } = useI18n();
   const summary = getMessageText(message.content);
   const parsedSummary = useMemo(() => parseCompactionSummary(summary), [summary]);
-  const time = formatTime(message.timestamp, locale);
-  // omp ≥17.4 compaction entries carry the maintenance method and the real
-  // post-compaction token count; older sessions only have tokensBefore.
-  const details = (message.details ?? null) as { tokensBefore?: unknown; tokensAfter?: unknown; method?: unknown } | null;
+
+  const fullTime = formatFullDateTime(message.timestamp, locale);
+  const shortTime = formatTime(message.timestamp, locale);
+
+  const details = (message.details ?? null) as {
+    tokensBefore?: unknown;
+    tokensAfter?: unknown;
+    method?: unknown;
+    shortSummary?: unknown;
+  } | null;
+
   const tokensBefore = typeof details?.tokensBefore === "number" ? details.tokensBefore : null;
   const tokensAfter = typeof details?.tokensAfter === "number" ? details.tokensAfter : null;
   const method = typeof details?.method === "string" && details.method ? details.method : null;
 
+  const savedTokens = tokensBefore !== null && tokensAfter !== null ? Math.max(0, tokensBefore - tokensAfter) : null;
+  const savingsPercent = tokensBefore !== null && tokensAfter !== null && tokensBefore > 0
+    ? Math.round(((tokensBefore - tokensAfter) / tokensBefore) * 100)
+    : null;
+  const { copied, copy } = useCopyFeedback();
+
+  const handleCopySummary = useCallback(() => {
+    copy(parsedSummary.body || summary);
+  }, [copy, parsedSummary.body, summary]);
+
   return (
-    <div style={{ marginBottom: 16 }}>
-      <div style={{ border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden", background: "var(--bg)" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)", color: "var(--text-muted)" }}>
-          <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 650 }}>{t("messageView.compactionLabel")}</span>
-          {time && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>{time}</span>}
+    <div style={{ marginBottom: 20, marginTop: 14 }}>
+      {/* Timeline Divider */}
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
+        <div style={{ flex: 1, height: 1, background: "color-mix(in srgb, var(--border) 70%, transparent)" }} />
+        <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
+          <Sparkles size={13} style={{ color: "var(--accent)" }} />
+          <span>{fullTime || shortTime || t("messageView.compactionLabel")}</span>
         </div>
-        <div style={{ padding: "11px 13px 12px" }}>
-          <div style={{ color: "var(--text)", fontSize: 15, fontWeight: 700, lineHeight: 1.35 }}>{t("messageView.conversationCompacted")}</div>
-          {(method || (tokensBefore !== null && tokensAfter !== null)) && (
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-              {method && (
-                <span style={{ padding: "1px 7px", borderRadius: 4, background: "var(--bg-subtle)", color: "var(--text-muted)", fontSize: 11, fontFamily: "var(--font-mono)", fontWeight: 600 }}>
-                  {method}
-                </span>
-              )}
-              {tokensBefore !== null && tokensAfter !== null && (
-                <span style={{ color: "var(--text-muted)", fontSize: 11 }}>
-                  {t("messageView.compactionTokenDelta", {
-                    before: formatCompactNumber(tokensBefore, locale),
-                    after: formatCompactNumber(tokensAfter, locale),
-                  })}
-                </span>
-              )}
+        <div style={{ flex: 1, height: 1, background: "color-mix(in srgb, var(--border) 70%, transparent)" }} />
+      </div>
+
+      {/* Compaction Card */}
+      <div style={{
+        border: "1px solid color-mix(in srgb, var(--border) 80%, var(--accent))",
+        borderRadius: "var(--radius-card)",
+        overflow: "hidden",
+        background: "var(--bg)",
+        boxShadow: "var(--shadow-card)",
+      }}>
+        {/* Header */}
+        <div style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "10px 14px",
+          borderBottom: "1px solid var(--border)",
+          background: "color-mix(in srgb, var(--bg-panel) 85%, var(--bg))",
+          flexWrap: "wrap",
+          gap: 8,
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{
+              width: 24,
+              height: 24,
+              borderRadius: 6,
+              background: "color-mix(in srgb, var(--accent) 12%, transparent)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "var(--accent)",
+            }}>
+              <Sparkles size={14} />
+            </div>
+            <span style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)", letterSpacing: "-0.01em" }}>
+              {t("messageView.conversationCompacted")}
+            </span>
+            {method ? (
+              <span style={{
+                padding: "2px 7px",
+                borderRadius: 4,
+                background: "var(--bg-subtle)",
+                color: "var(--text-muted)",
+                fontSize: 10.5,
+                fontFamily: "var(--font-mono)",
+                fontWeight: 650,
+                border: "1px solid var(--border)",
+              }}>
+                {method}
+              </span>
+            ) : (
+              <span style={{
+                padding: "2px 7px",
+                borderRadius: 4,
+                background: "var(--bg-subtle)",
+                color: "var(--text-muted)",
+                fontSize: 10.5,
+                fontWeight: 600,
+                border: "1px solid var(--border)",
+              }}>
+                {t("messageView.compactionAuto")}
+              </span>
+            )}
+          </div>
+
+          {fullTime && (
+            <div style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)" }}>
+              <Clock size={12} />
+              <span>{fullTime}</span>
             </div>
           )}
-          <div style={{ marginTop: 3, marginBottom: 10, color: "var(--text)", fontSize: 14, lineHeight: 1.5 }}>{t("messageView.compactionDescription")}</div>
-          {parsedSummary.body ? <MarkdownBody className="markdown-compaction-message">{parsedSummary.body}</MarkdownBody> : <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("messageView.noSummary")}</span>}
+        </div>
+
+        {/* Token Delta Metrics Banner */}
+        {tokensBefore !== null && (
+          <div style={{
+            padding: "10px 14px",
+            background: "color-mix(in srgb, var(--bg-surface, var(--bg-subtle)) 60%, var(--bg))",
+            borderBottom: "1px solid var(--border)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: 8,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, fontFamily: "var(--font-mono)" }}>
+              <span style={{ color: "var(--text-muted)" }}>Token 消耗:</span>
+              <span style={{ fontWeight: 650, color: "var(--text)" }}>
+                {formatCompactNumber(tokensBefore, locale)}
+              </span>
+              <ArrowRight size={13} style={{ color: "var(--text-dim)" }} />
+              <span style={{ fontWeight: 700, color: "var(--accent)" }}>
+                {formatCompactNumber(tokensAfter ?? 0, locale)}
+              </span>
+            </div>
+
+            {savingsPercent !== null && savingsPercent > 0 && (
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                {savedTokens !== null && (
+                  <span style={{ fontSize: 11.5, color: "var(--text-muted)" }}>
+                    {t("messageView.compactionSavedTokens", { saved: formatCompactNumber(savedTokens, locale) })}
+                  </span>
+                )}
+                <span style={{
+                  padding: "2px 6px",
+                  borderRadius: 4,
+                  background: "color-mix(in srgb, var(--status-success) 14%, transparent)",
+                  color: "var(--status-success)",
+                  fontSize: 11,
+                  fontWeight: 700,
+                  fontFamily: "var(--font-mono)",
+                }}>
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Summary Content Body */}
+        <div style={{ padding: "14px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8, color: "var(--text-muted)", fontSize: 12, fontWeight: 650 }}>
+            <FileText size={13} />
+            <span>{t("messageView.compactionSummaryTitle")}</span>
+          </div>
+
+          <div style={{ color: "var(--text)", fontSize: 13.5, lineHeight: 1.6 }}>
+            {parsedSummary.body ? (
+              <MarkdownBody className="markdown-compaction-message">{parsedSummary.body}</MarkdownBody>
+            ) : (
+              <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("messageView.noSummary")}</span>
+            )}
+          </div>
+
           <CompactionFileMetadata readFiles={parsedSummary.readFiles} modifiedFiles={parsedSummary.modifiedFiles} />
+        </div>
+
+        {/* Action Footer */}
+        <div style={{
+          padding: "8px 14px",
+          borderTop: "1px solid var(--border)",
+          background: "var(--bg-panel)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 10,
+        }}>
+          {onTogglePreCompactionHistory ? (
+            <button
+              type="button"
+              onClick={onTogglePreCompactionHistory}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 5,
+                padding: "4px 10px",
+                borderRadius: 6,
+                border: "1px solid var(--border)",
+                background: "var(--bg)",
+                color: "var(--text)",
+                fontSize: 12,
+                fontWeight: 550,
+                cursor: "pointer",
+              }}
+            >
+              <ChevronDown
+                size={14}
+                style={{
+                  transform: showPreCompactionHistory ? "rotate(180deg)" : "none",
+                  transition: "transform 0.2s ease",
+                }}
+              />
+              <span>
+                {showPreCompactionHistory
+                  ? t("chatWindow.returnToCompactHistory")
+                  : t("chatWindow.viewPreCompactionHistory")}
+              </span>
+            </button>
+          ) : <div />}
+
+          <button
+            type="button"
+            onClick={handleCopySummary}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 5,
+              padding: "4px 10px",
+              borderRadius: 6,
+              border: "1px solid var(--border)",
+              background: "var(--bg)",
+              color: copied ? "var(--status-success)" : "var(--text-muted)",
+              fontSize: 12,
+              cursor: "pointer",
+            }}
+          >
+            {copied ? <Check size={13} /> : <Copy size={13} />}
+            <span>{copied ? t("messageView.copied") : t("messageView.copy")}</span>
+          </button>
         </div>
       </div>
     </div>

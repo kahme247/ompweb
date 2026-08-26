@@ -1,7 +1,7 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, Sparkles } from "lucide-react";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
 import { countToolCallBlocks, getDisplayableAssistantBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
@@ -224,8 +224,9 @@ interface CommittedTranscriptProps {
   nearBottom: boolean;
   sentinelRef: React.RefObject<HTMLButtonElement | null>;
   handleLoadMoreClick: () => void;
+  onTogglePreCompactionHistory?: () => void;
+  showPreCompactionHistory?: boolean;
 }
-
 /**
  * The committed (non-streaming) transcript. Extracted from ChatWindow and
  * memoized over the committed messages so token-streaming updates (which only
@@ -236,6 +237,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
   messages, entryIds, conversationMeta, messageRefs, isStreaming, sessionBusy, isNew, forkingEntryId,
   handleFork, handleNavigate, handleEditContent, modelNames, messageCwd, onOpenFile, sessionId,
   toolCallsDefaultCollapsed, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
+  onTogglePreCompactionHistory, showPreCompactionHistory,
 }: CommittedTranscriptProps) {
   const { t } = useI18n();
   const { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage } = conversationMeta;
@@ -285,6 +287,8 @@ const CommittedTranscript = memo(function CommittedTranscript({
         prevTimestamp={idx > 0 ? (messages[idx - 1] as AgentMessage & { timestamp?: number }).timestamp : undefined}
         sessionId={sessionId}
         toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
+        onTogglePreCompactionHistory={onTogglePreCompactionHistory}
+        showPreCompactionHistory={showPreCompactionHistory}
       />
     );
     if (!isVisible || options.attachRef === false || currentRefIdx === undefined) return view;
@@ -1086,6 +1090,8 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
               nearBottom={nearBottom}
               sentinelRef={sentinelRef}
               handleLoadMoreClick={handleLoadMoreClick}
+              onTogglePreCompactionHistory={togglePreCompactionHistory}
+              showPreCompactionHistory={showPreCompactionHistory}
             />
             {streamState.isStreaming && streamState.streamingMessage && (
               <MessageView
@@ -1097,6 +1103,70 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
                 toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
                 liveTokensPerSecond={tokensPerSecond}
               />
+            )}
+
+            {/* Live Context Compaction State Indicator */}
+            {isCompacting && (
+              <div
+                style={{
+                  margin: "12px 0 16px",
+                  padding: "12px 14px",
+                  borderRadius: "var(--radius-card)",
+                  border: "1px solid color-mix(in srgb, var(--accent) 50%, var(--border))",
+                  background: "color-mix(in srgb, var(--accent) 8%, var(--bg))",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 12,
+                  boxShadow: "var(--shadow-card)",
+                  animation: "ui-scale-in var(--dur-med) var(--ease-out-warm)",
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div
+                    style={{
+                      width: 28,
+                      height: 28,
+                      borderRadius: 8,
+                      background: "var(--accent)",
+                      color: "#fff",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      flexShrink: 0,
+                    }}
+                  >
+                    <Sparkles size={16} />
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>
+                      {t("messageView.compactingLiveTitle")}
+                    </div>
+                    <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2 }}>
+                      {t("messageView.compactingLiveDesc")}
+                    </div>
+                  </div>
+                </div>
+                {handleAbortCompaction && (
+                  <button
+                    type="button"
+                    onClick={handleAbortCompaction}
+                    style={{
+                      padding: "5px 12px",
+                      borderRadius: "var(--radius-control)",
+                      border: "1px solid var(--border)",
+                      background: "var(--bg)",
+                      color: "var(--text)",
+                      fontSize: 12,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      flexShrink: 0,
+                    }}
+                  >
+                    {t("chatInput.stopCompaction")}
+                  </button>
+                )}
+              </div>
             )}
 
             {toolCallsDefaultCollapsed && pendingToolHeaders.map((tool) => (
