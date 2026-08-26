@@ -2880,8 +2880,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     const used = contextUsage?.tokens ?? 0;
                     const total = contextUsage?.contextWindow ?? 128000;
                     const pct = contextUsage?.percent !== null && contextUsage?.percent !== undefined
-                      ? Math.round(contextUsage.percent)
-                      : total > 0 ? Math.round((used / total) * 100) : 0;
+                      ? contextUsage.percent
+                      : total > 0 ? (used / total) * 100 : 0;
+                    const pctFormatted = pct >= 10 ? `${pct.toFixed(1)}%` : `${pct.toFixed(1)}%`;
                     const ratioStr = `${formatTokenSize(used)} / ${formatTokenSize(total)}`;
 
                     return (
@@ -2919,7 +2920,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                             />
                           </svg>
                           <span style={{ position: "absolute", fontSize: 11, fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--text)" }}>
-                            {pct}%
+                            {Math.round(pct)}%
                           </span>
                         </div>
 
@@ -2929,7 +2930,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                             {isCompacting && <span style={{ fontSize: 11, color: "var(--accent)", fontWeight: 600 }}>压缩中</span>}
                           </div>
                           <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                            已占用 {pct}% · 点击管理与压缩
+                            已占用 {pctFormatted} · 点击管理与压缩
                           </div>
                         </div>
 

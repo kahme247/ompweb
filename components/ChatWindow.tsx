@@ -469,20 +469,20 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
       return contextUsage;
     }
     // First-principles fallback from messages on disk or after a turn:
-    let lastInput = 0;
-    let lastOutput = 0;
+    // Include uncached input, cached prompt tokens (cacheRead/cacheWrite), and output tokens.
+    let lastContextTokens = 0;
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i];
       if (msg.role === "assistant") {
         const asst = msg as AssistantMessage;
         if (asst.usage) {
-          lastInput = asst.usage.input ?? 0;
-          lastOutput = asst.usage.output ?? 0;
+          const u = asst.usage;
+          lastContextTokens = u.totalTokens ?? ((u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0) + (u.output ?? 0));
           break;
         }
       }
     }
-    const fallbackTokens = lastInput > 0 ? (lastInput + lastOutput) : (sessionStats?.tokens?.total ?? 0);
+    const fallbackTokens = lastContextTokens > 0 ? lastContextTokens : (sessionStats?.tokens?.total ?? 0);
     const fallbackWindow = contextUsage?.contextWindow ?? modelCapacity?.contextWindow ?? 128000;
     const fallbackPercent = fallbackWindow > 0 ? (fallbackTokens / fallbackWindow) * 100 : 0;
     return {
