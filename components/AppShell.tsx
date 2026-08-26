@@ -11,7 +11,7 @@ import { ChatWindow } from "./ChatWindow";
 import { TabBar, type Tab } from "./TabBar";
 import { BranchNavigator } from "./BranchNavigator";
 import { LanguageSwitcher } from "./LanguageSwitcher";
-import { BarChart3, Check, ChevronRight, Ellipsis, GitBranch, Globe, History, Menu, Moon, PanelLeft, Plus, Search, Settings, Sun, Terminal, Wand2, X } from "lucide-react";
+import { BarChart3, Check, ChevronRight, Ellipsis, GitBranch, Globe, History, Menu, Moon, PanelLeft, Plus, Search, Settings, Sun, SunMoon, Terminal, Wand2, X } from "lucide-react";
 import { useTheme } from "@/hooks/useTheme";
 import { formatCompactNumber, formatPercent, getCacheHitRate } from "@/lib/format";
 import { LOCALES, translate, useI18n } from "@/lib/i18n";
@@ -83,7 +83,7 @@ export function AppShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
-  const { isDark, preference, toggleTheme } = useTheme();
+  const { isDark, preference, setTheme, toggleTheme } = useTheme();
   const { t, locale, setLocale } = useI18n();
   const isMobile = useIsMobile();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
@@ -1306,7 +1306,7 @@ export function AppShell() {
                   <X size={16} />
                 </button>
               </div>
-              <div className="mobile-sheet-body" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div className="mobile-sheet-body" style={{ display: "flex", flexDirection: "column", gap: 10, padding: "16px 14px 24px" }}>
                 {/* Branch / History Navigation */}
                 <button
                   type="button"
@@ -1315,13 +1315,14 @@ export function AppShell() {
                     toggleTopPanel("branches");
                   }}
                   className="mobile-action-card"
-                  style={{ padding: "10px 14px", flexDirection: "row", alignItems: "center", gap: 12 }}
+                  style={{ minHeight: 54, padding: "12px 14px", flexDirection: "row", alignItems: "center", gap: 12 }}
                 >
                   <GitBranch size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
                   <div style={{ flex: 1 }}>
                     <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>历史分支与版本导航</div>
                     <div style={{ fontSize: 11, color: "var(--text-muted)" }}>切换对话树分叉节点与历史上下文</div>
                   </div>
+                  <ChevronRight size={14} style={{ color: "var(--text-dim)", flexShrink: 0 }} />
                 </button>
 
                 {/* AI Generate Title */}
@@ -1333,7 +1334,7 @@ export function AppShell() {
                       void handleAutoName();
                     }}
                     className="mobile-action-card"
-                    style={{ padding: "10px 14px", flexDirection: "row", alignItems: "center", gap: 12 }}
+                    style={{ minHeight: 54, padding: "12px 14px", flexDirection: "row", alignItems: "center", gap: 12 }}
                   >
                     <Wand2 size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
                     <div style={{ flex: 1 }}>
@@ -1352,7 +1353,7 @@ export function AppShell() {
                       handleViewFullHistory();
                     }}
                     className="mobile-action-card"
-                    style={{ padding: "10px 14px", flexDirection: "row", alignItems: "center", gap: 12 }}
+                    style={{ minHeight: 54, padding: "12px 14px", flexDirection: "row", alignItems: "center", gap: 12 }}
                   >
                     <History size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
                     <div style={{ flex: 1 }}>
@@ -1370,7 +1371,7 @@ export function AppShell() {
                     toggleTopPanel("session");
                   }}
                   className="mobile-action-card"
-                  style={{ padding: "10px 14px", flexDirection: "row", alignItems: "center", gap: 12 }}
+                  style={{ minHeight: 54, padding: "12px 14px", flexDirection: "row", alignItems: "center", gap: 12 }}
                 >
                   <BarChart3 size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
                   <div style={{ flex: 1 }}>
@@ -1387,7 +1388,7 @@ export function AppShell() {
                     handleSystemPromptToggle();
                   }}
                   className="mobile-action-card"
-                  style={{ padding: "10px 14px", flexDirection: "row", alignItems: "center", gap: 12 }}
+                  style={{ minHeight: 54, padding: "12px 14px", flexDirection: "row", alignItems: "center", gap: 12 }}
                 >
                   <Terminal size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
                   <div style={{ flex: 1 }}>
@@ -1404,7 +1405,7 @@ export function AppShell() {
                     setSettingsTab("general");
                   }}
                   className="mobile-action-card"
-                  style={{ padding: "10px 14px", flexDirection: "row", alignItems: "center", gap: 12 }}
+                  style={{ minHeight: 54, padding: "12px 14px", flexDirection: "row", alignItems: "center", gap: 12 }}
                 >
                   <Settings size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
                   <div style={{ flex: 1 }}>
@@ -1414,39 +1415,78 @@ export function AppShell() {
                   <ChevronRight size={14} style={{ color: "var(--text-dim)", flexShrink: 0 }} />
                 </button>
 
-                {/* Theme toggle row */}
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    const rect = e.currentTarget.getBoundingClientRect();
-                    toggleTheme({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
-                  }}
-                  className="mobile-action-card"
-                  style={{ padding: "10px 14px", flexDirection: "row", alignItems: "center", gap: 12 }}
-                >
-                  {isDark ? <Sun size={18} style={{ color: "var(--accent)", flexShrink: 0 }} /> : <Moon size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />}
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>外观主题</div>
-                    <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                      当前: {preference === "system" ? "跟随系统" : isDark ? "暗色模式 (Dark)" : "亮色模式 (Light)"}
-                    </div>
-                  </div>
-                  <span style={{ fontSize: 11, fontWeight: 600, color: "var(--accent)", background: "color-mix(in srgb, var(--accent) 12%, transparent)", padding: "4px 9px", borderRadius: 6, flexShrink: 0 }}>
-                    {isDark ? "切为亮色" : "切为暗色"}
-                  </span>
-                </button>
-
-                {/* Language switcher row */}
+                {/* Theme 3-segment row */}
                 <div
                   className="mobile-action-card"
-                  style={{ padding: "10px 14px", flexDirection: "row", alignItems: "center", gap: 12 }}
+                  style={{ padding: "12px 14px", flexDirection: "column", gap: 10, cursor: "default" }}
                 >
-                  <Globe size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>界面语言</div>
-                    <div style={{ fontSize: 11, color: "var(--text-muted)" }}>多语言界面设置</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, width: "100%" }}>
+                    {preference === "system" ? (
+                      <SunMoon size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
+                    ) : isDark ? (
+                      <Moon size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
+                    ) : (
+                      <Sun size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
+                    )}
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>外观主题</div>
+                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                        {preference === "system" ? "跟随系统设定" : isDark ? "深色模式 (Dark)" : "浅色模式 (Light)"}
+                      </div>
+                    </div>
                   </div>
-                  <div style={{ display: "flex", gap: 5, flexShrink: 0 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, width: "100%" }}>
+                    {[
+                      { id: "system" as const, label: "跟随系统" },
+                      { id: "light" as const, label: "浅色模式" },
+                      { id: "dark" as const, label: "深色模式" },
+                    ].map((item) => {
+                      const isActive = preference === item.id;
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          onClick={(e) => {
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            setTheme(item.id, { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+                          }}
+                          style={{
+                            height: 36,
+                            padding: "0 4px",
+                            borderRadius: 8,
+                            border: isActive ? "1px solid var(--accent)" : "1px solid color-mix(in srgb, var(--border) 70%, transparent)",
+                            background: isActive ? "color-mix(in srgb, var(--accent) 12%, transparent)" : "var(--bg)",
+                            color: isActive ? "var(--accent)" : "var(--text-muted)",
+                            fontSize: 12,
+                            fontWeight: isActive ? 650 : 500,
+                            cursor: "pointer",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            transition: "all var(--dur-fast) var(--ease-out-warm)",
+                            touchAction: "manipulation",
+                          }}
+                        >
+                          {item.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Language 3-segment row */}
+                <div
+                  className="mobile-action-card"
+                  style={{ padding: "12px 14px", flexDirection: "column", gap: 10, cursor: "default" }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, width: "100%" }}>
+                    <Globe size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>界面语言</div>
+                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>多语言界面设置</div>
+                    </div>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, width: "100%" }}>
                     {LOCALES.map((l) => {
                       const isCurrent = l.value === locale;
                       return (
@@ -1455,15 +1495,20 @@ export function AppShell() {
                           type="button"
                           onClick={() => setLocale(l.value)}
                           style={{
-                            padding: "4px 8px",
-                            borderRadius: 6,
-                            border: isCurrent ? "1px solid var(--accent)" : "1px solid var(--border)",
+                            height: 36,
+                            padding: "0 4px",
+                            borderRadius: 8,
+                            border: isCurrent ? "1px solid var(--accent)" : "1px solid color-mix(in srgb, var(--border) 70%, transparent)",
                             background: isCurrent ? "color-mix(in srgb, var(--accent) 12%, transparent)" : "var(--bg)",
                             color: isCurrent ? "var(--accent)" : "var(--text-muted)",
-                            fontSize: 11,
-                            fontWeight: isCurrent ? 600 : 400,
+                            fontSize: 12,
+                            fontWeight: isCurrent ? 650 : 500,
                             cursor: "pointer",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
                             transition: "all var(--dur-fast) var(--ease-out-warm)",
+                            touchAction: "manipulation",
                           }}
                         >
                           {l.label}
