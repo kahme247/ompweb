@@ -904,6 +904,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
       onCompact={handleCompact}
       onRemoveQueuedMessage={removeQueuedMessage}
       onPromoteQueuedToSteer={promoteQueuedToSteer}
+      slashCommands={slashCommands}
       slashCommandsLoading={slashCommandsLoading}
       onLoadSlashCommands={loadSlashCommands}
       onBuiltinCommand={handleBuiltinSlashCommand}

@@ -472,10 +472,6 @@ const hoverRow = (selected: boolean) => ({
   onMouseLeave: (e: React.MouseEvent<HTMLElement>) => { if (!selected) e.currentTarget.style.background = "none"; },
 });
 
-const hoverAccent = {
-  onMouseEnter: (e: React.MouseEvent<HTMLElement>) => { e.currentTarget.style.color = "var(--accent)"; e.currentTarget.style.borderColor = "var(--accent)"; },
-  onMouseLeave: (e: React.MouseEvent<HTMLElement>) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.borderColor = "var(--border)"; },
-};
 
 // ── Provider detail ───────────────────────────────────────────────────────────
 
@@ -1987,7 +1983,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
       })
       .catch(() => setConfig({ providers: {} }))
       .finally(() => setLoading(false));
-  }, []);
+  }, [isMobile]);
 
   useEffect(() => {
     loadConfig();

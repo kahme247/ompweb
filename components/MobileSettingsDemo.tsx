@@ -17,9 +17,6 @@ import {
   Plus,
   Trash2,
   Copy,
-  SlidersHorizontal,
-  ExternalLink,
-  AlertCircle,
   Smartphone,
   Maximize2,
   CheckCircle2,
@@ -342,7 +339,7 @@ export function MobileSettingsDemo() {
   const [autoRetry, setAutoRetry] = useState(true);
 
   // Mock Providers & MCP
-  const [providers, setProviders] = useState([
+  const [providers] = useState([
     { id: "dashscope", name: "阿里云百炼 (DashScope)", models: ["qwen-max", "qwen-plus", "deepseek-r1"], active: true },
     { id: "openai", name: "OpenAI", models: ["gpt-4o", "o3-mini", "gpt-4o-mini"], active: true },
     { id: "anthropic", name: "Anthropic", models: ["claude-3-5-sonnet", "claude-3-5-haiku"], active: false },
@@ -354,7 +351,7 @@ export function MobileSettingsDemo() {
     { name: "memory", type: "stdio", enabled: false, valid: true },
   ]);
 
-  const [agents, setAgents] = useState([
+  const [agents] = useState([
     { name: "scout", description: "快速只读探索与代码定位专家", scope: "bundled", model: "qwen-plus" },
     { name: "task", description: "多步骤复杂任务执行代理", scope: "bundled", model: "qwen-max" },
     { name: "reviewer", description: "代码审查与架构规范验证", scope: "user", model: "qwen-max" },

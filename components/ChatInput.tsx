@@ -2957,10 +2957,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ fontSize: 15.5, fontWeight: 750, color: "var(--text)", fontFamily: "var(--font-mono)", letterSpacing: "-0.01em", display: "flex", alignItems: "center", gap: 6 }}>
                             <span>{ratioStr}</span>
-                            {isCompacting && <span style={{ fontSize: 11, color: "var(--accent)", fontWeight: 600 }}>压缩中</span>}
+                            {isCompacting && <span style={{ fontSize: 11, color: "var(--accent)", fontWeight: 600 }}>{t("chatInput.compactingShort")}</span>}
                           </div>
                           <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                            已占用 {pctFormatted} · 点击管理与压缩
+                            {t("chatInput.contextUsedClickManage", { pct: pctFormatted })}
                           </div>
                         </div>
 
@@ -3034,7 +3034,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               className={isMobile ? "mobile-sheet-container" : "dropdown-surface"}
               role="dialog"
               aria-modal="true"
-              aria-label="上下文用量与压缩"
+              aria-label={t("chatInput.contextModalTitle")}
               style={isMobile ? undefined : {
                 position: "fixed",
                 bottom: 60,
@@ -3059,7 +3059,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               )}
               <div className={isMobile ? "mobile-sheet-header" : "picker-panel-header"} style={isMobile ? undefined : { padding: "12px 16px", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <span className={isMobile ? "mobile-sheet-title" : "picker-panel-title"} style={{ fontSize: 15, fontWeight: 650, color: "var(--text)" }}>
-                  上下文用量与健康度
+                  {t("chatInput.contextModalTitle")}
                 </span>
                 <button
                   type="button"
@@ -3111,8 +3111,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                       </div>
                       <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2 }}>
                         {total > 0
-                          ? `剩余安全空间约 ${formatTokenSize(Math.max(0, total - used))} Tokens`
-                          : "健康度良好"}
+                          ? t("chatInput.contextRemainingSpace", { space: formatTokenSize(Math.max(0, total - used)) })
+                          : t("chatInput.contextHealthGood")}
                       </div>
                     </div>
                   );
@@ -3121,29 +3121,29 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 {/* Breakdown List */}
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                   <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--text-dim)", marginBottom: 2 }}>
-                    Token 构成与费用明细
+                    {t("chatInput.tokenCostBreakdown")}
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                     <div style={{ background: "var(--bg-panel)", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--border)" }}>
-                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>输入 Tokens</div>
+                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("chatInput.inputTokens")}</div>
                       <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-mono)", marginTop: 2 }}>
                         {sessionStats?.tokens?.input?.toLocaleString() ?? "—"}
                       </div>
                     </div>
                     <div style={{ background: "var(--bg-panel)", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--border)" }}>
-                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>输出 Tokens</div>
+                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("chatInput.outputTokens")}</div>
                       <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-mono)", marginTop: 2 }}>
                         {sessionStats?.tokens?.output?.toLocaleString() ?? "—"}
                       </div>
                     </div>
                     <div style={{ background: "var(--bg-panel)", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--border)" }}>
-                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>缓存读取</div>
+                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("chatInput.cacheRead")}</div>
                       <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-mono)", marginTop: 2 }}>
                         {sessionStats?.tokens?.cacheRead?.toLocaleString() ?? "0"}
                       </div>
                     </div>
                     <div style={{ background: "var(--bg-panel)", padding: "8px 10px", borderRadius: 8, border: "1px solid var(--border)" }}>
-                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>预估费用</div>
+                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("chatInput.estimatedCost")}</div>
                       <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-mono)", marginTop: 2 }}>
                         {sessionStats?.cost ? `$${sessionStats.cost.toFixed(4)}` : "$0.00"}
                       </div>
@@ -3175,13 +3175,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         }}
                       >
                         <X size={16} strokeWidth={2.4} />
-                        终止上下文压缩
+                        {t("chatInput.abortCompaction")}
                       </button>
                     ) : confirmingCompact ? (
                       <div style={{ background: "color-mix(in srgb, var(--status-warning) 10%, var(--bg-panel))", border: "1px solid var(--status-warning)", borderRadius: 10, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
                         <div style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 12, color: "var(--text)", lineHeight: 1.45 }}>
                           <AlertTriangle size={16} style={{ color: "var(--status-warning)", flexShrink: 0, marginTop: 1 }} />
-                          <span>压缩将对早期对话生成结构化摘要以释放上下文空间，是否继续？</span>
+                          <span>{t("chatInput.confirmCompactDesc")}</span>
                         </div>
                         <div style={{ display: "flex", gap: 8 }}>
                           <button
@@ -3203,7 +3203,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                               cursor: "pointer",
                             }}
                           >
-                            确认执行压缩
+                            {t("chatInput.confirmCompactButton")}
                           </button>
                           <button
                             type="button"
@@ -3220,7 +3220,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                               cursor: "pointer",
                             }}
                           >
-                            取消
+                            {t("chatInput.cancel")}
                           </button>
                         </div>
                       </div>
@@ -3245,7 +3245,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         }}
                       >
                         <Shrink size={16} strokeWidth={2} />
-                        压缩上下文 (释放 Token 空间)
+                        {t("chatInput.compactContextButton")}
                       </button>
                     )}
                   </div>

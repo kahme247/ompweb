@@ -259,7 +259,7 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
                     padding: 0,
                   }}
                 >
-                  <ChevronLeft size={16} /> {t("common.back") || "返回列表"}
+                  <ChevronLeft size={16} /> {t("mcpConfig.backToList") || t("common.back")}
                 </button>
                 <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text)" }}>
                   {name || t("mcpConfig.addServer")}

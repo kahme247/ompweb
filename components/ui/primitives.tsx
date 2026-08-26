@@ -5,7 +5,7 @@
  * Theming contract: CSS variables from globals.css (--bg, --accent, --radius-*,
  * --shadow-*, --dur-*, --ease-out-warm). No hardcoded colors here.
  */
-import { createContext, useContext, type CSSProperties, type ReactNode } from "react";
+import { createContext, useContext } from "react";
 import { Dialog as BaseDialog } from "@base-ui/react/dialog";
 import { Tooltip as BaseTooltip } from "@base-ui/react/tooltip";
 import { Collapsible as BaseCollapsible } from "@base-ui/react/collapsible";

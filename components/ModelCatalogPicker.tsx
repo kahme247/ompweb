@@ -160,7 +160,7 @@ export function ModelCatalogPicker({ open, providerName, providerBaseUrl, existi
           <div style={{ width: 36, height: 4, borderRadius: 2, background: "var(--border)", margin: "8px auto 0", flexShrink: 0 }} />
         )}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px 8px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
-          <span style={{ fontSize: 16, fontWeight: 700, color: "var(--text)" }}>{t("modelsConfig.catalogTitle")}</span>
+          <DialogTitle style={{ fontSize: 16, fontWeight: 700, color: "var(--text)", margin: 0 }}>{t("modelsConfig.catalogTitle")}</DialogTitle>
           <button
             type="button"
             onClick={onClose}

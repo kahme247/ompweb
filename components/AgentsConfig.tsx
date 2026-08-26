@@ -320,7 +320,7 @@ export function AgentsConfig({ cwd }: { cwd: string | null }) {
                   padding: 0,
                 }}
               >
-                <ChevronLeft size={16} /> {t("common.back") || "返回列表"}
+                <ChevronLeft size={16} /> {t("agentsConfig.backToList") || t("common.back")}
               </button>
               <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>
                 {creating ? t("agentsConfig.newAgent") : active?.name}

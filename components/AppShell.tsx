@@ -1291,12 +1291,12 @@ export function AppShell() {
               onClick={() => setMobileSessionSheetOpen(false)}
               aria-hidden="true"
             />
-            <div className="mobile-sheet-container" role="dialog" aria-modal="true" aria-label="会话选项">
+            <div className="mobile-sheet-container" role="dialog" aria-modal="true" aria-label={t("appShell.mobileSessionOptions")}>
               <div className="mobile-sheet-handle-wrap">
                 <div className="mobile-sheet-handle" />
               </div>
               <div className="mobile-sheet-header">
-                <span className="mobile-sheet-title">会话操作与设置</span>
+                <span className="mobile-sheet-title">{t("appShell.mobileSessionActionsAndSettings")}</span>
                 <button
                   type="button"
                   className="mobile-sheet-close"
@@ -1319,8 +1319,8 @@ export function AppShell() {
                 >
                   <GitBranch size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>历史分支与版本导航</div>
-                    <div style={{ fontSize: 11, color: "var(--text-muted)" }}>切换对话树分叉节点与历史上下文</div>
+                    <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>{t("appShell.historyBranchesAndVersions")}</div>
+                    <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("appShell.historyBranchesDesc")}</div>
                   </div>
                   <ChevronRight size={14} style={{ color: "var(--text-dim)", flexShrink: 0 }} />
                 </button>
@@ -1338,8 +1338,8 @@ export function AppShell() {
                   >
                     <Wand2 size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
                     <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>{t("appShell.generateTitle") || "智能提炼会话标题"}</div>
-                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>根据对话内容由 AI 自动生成简练标题</div>
+                      <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>{t("appShell.generateTitle")}</div>
+                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("appShell.generateTitleDesc")}</div>
                     </div>
                   </button>
                 )}
@@ -1357,8 +1357,8 @@ export function AppShell() {
                   >
                     <History size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
                     <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>{t("appShell.fullHistory") || "查看完整历史文件"}</div>
-                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>打开当前会话底层 .jsonl 与全量日志</div>
+                      <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>{t("appShell.fullHistory")}</div>
+                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("appShell.fullHistoryDesc")}</div>
                     </div>
                   </button>
                 )}
@@ -1375,8 +1375,8 @@ export function AppShell() {
                 >
                   <BarChart3 size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>{t("appShell.sessionInfo") || "用量与生成速度统计"}</div>
-                    <div style={{ fontSize: 11, color: "var(--text-muted)" }}>查看 Token 消耗、缓存命中率与上下文仪表</div>
+                    <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>{t("appShell.sessionInfo")}</div>
+                    <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("appShell.sessionStatsDesc")}</div>
                   </div>
                 </button>
 
@@ -1392,8 +1392,8 @@ export function AppShell() {
                 >
                   <Terminal size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>{t("appShell.system") || "系统提示词 (System Prompt)"}</div>
-                    <div style={{ fontSize: 11, color: "var(--text-muted)" }}>查看底层注入的系统设定与环境规范</div>
+                    <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>{t("appShell.system")}</div>
+                    <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("appShell.systemPromptDesc")}</div>
                   </div>
                 </button>
 
@@ -1409,8 +1409,8 @@ export function AppShell() {
                 >
                   <Settings size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>{t("settingsConfig.title") || "系统全局设置"}</div>
-                    <div style={{ fontSize: 11, color: "var(--text-muted)" }}>模型、MCP 服务、插件与通用偏好</div>
+                    <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>{t("settingsConfig.title")}</div>
+                    <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("appShell.appSettingsDesc")}</div>
                   </div>
                   <ChevronRight size={14} style={{ color: "var(--text-dim)", flexShrink: 0 }} />
                 </button>
@@ -1429,17 +1429,17 @@ export function AppShell() {
                       <Sun size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
                     )}
                     <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>外观主题</div>
+                      <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>{t("appShell.theme")}</div>
                       <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                        {preference === "system" ? "跟随系统设定" : isDark ? "深色模式 (Dark)" : "浅色模式 (Light)"}
+                        {preference === "system" ? t("appShell.themeSystemDesc") : isDark ? t("appShell.themeDarkDesc") : t("appShell.themeLightDesc")}
                       </div>
                     </div>
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, width: "100%" }}>
                     {[
-                      { id: "system" as const, label: "跟随系统" },
-                      { id: "light" as const, label: "浅色模式" },
-                      { id: "dark" as const, label: "深色模式" },
+                      { id: "system" as const, label: t("appShell.themeSystem") },
+                      { id: "light" as const, label: t("appShell.themeLight") },
+                      { id: "dark" as const, label: t("appShell.themeDark") },
                     ].map((item) => {
                       const isActive = preference === item.id;
                       return (
@@ -1482,8 +1482,8 @@ export function AppShell() {
                   <div style={{ display: "flex", alignItems: "center", gap: 12, width: "100%" }}>
                     <Globe size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>界面语言</div>
-                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>多语言界面设置</div>
+                      <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>{t("appShell.language")}</div>
+                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("appShell.languageDesc")}</div>
                     </div>
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, width: "100%" }}>

@@ -134,7 +134,7 @@ function formatTime(ts: number | undefined, locale: Locale): string | null {
   return `${date} ${time}`;
 }
 
-function formatFullDateTime(ts: number | undefined, locale: Locale): string | null {
+function formatFullDateTime(ts: number | undefined): string | null {
   if (!ts || Number.isNaN(ts)) return null;
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return null;
@@ -1164,7 +1164,7 @@ function CompactionMessageView({
   const summary = getMessageText(message.content);
   const parsedSummary = useMemo(() => parseCompactionSummary(summary), [summary]);
 
-  const fullTime = formatFullDateTime(message.timestamp, locale);
+  const fullTime = formatFullDateTime(message.timestamp);
   const shortTime = formatTime(message.timestamp, locale);
 
   const details = (message.details ?? null) as {
@@ -1326,7 +1326,7 @@ function CompactionMessageView({
               gap: 8,
             }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, fontFamily: "var(--font-mono)" }}>
-                <span style={{ color: "var(--text-muted)" }}>Token 消耗:</span>
+                <span style={{ color: "var(--text-muted)" }}>{t("messageView.compactionTokenUsage")}</span>
                 <span style={{ fontWeight: 650, color: "var(--text)" }}>
                   {formatCompactNumber(tokensBefore, locale)}
                 </span>

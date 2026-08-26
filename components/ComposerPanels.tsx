@@ -246,7 +246,7 @@ export function ComposerPanels({ todoPhases, subagents, onSelectSubagent, defaul
   defaultExpanded?: boolean;
 }) {
   const isMobile = useIsMobile();
-  const { t } = useI18n();
+  const { t, tn } = useI18n();
   const [agentSheetOpen, setAgentSheetOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<"todo" | "subagents">(() => (
     todoPhases.length > 0 ? "todo" : "subagents"
@@ -265,8 +265,8 @@ export function ComposerPanels({ todoPhases, subagents, onSelectSubagent, defaul
       : inProgressTask
         ? inProgressTask.content
         : tasks.length > 0
-          ? `${doneTasks}/${tasks.length} 任务已处理`
-          : `${subagents.length} 个子代理`;
+          ? t("composerPanels.tasksProcessed", { done: doneTasks, total: tasks.length })
+          : tn("composerPanels.subagentsCount", subagents.length, { count: subagents.length });
 
     const progressBadge = tasks.length > 0
       ? `${doneTasks}/${tasks.length}`
@@ -279,7 +279,7 @@ export function ComposerPanels({ todoPhases, subagents, onSelectSubagent, defaul
           onClick={() => setAgentSheetOpen(true)}
           role="button"
           tabIndex={0}
-          aria-label="查看任务与子代理看板"
+          aria-label={t("composerPanels.viewTasksAndSubagents")}
         >
           <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0, overflow: "hidden", flex: 1 }}>
             <span
@@ -307,7 +307,7 @@ export function ComposerPanels({ todoPhases, subagents, onSelectSubagent, defaul
               onClick={() => setAgentSheetOpen(false)}
               aria-hidden="true"
             />
-            <div className="mobile-sheet-container" role="dialog" aria-modal="true" aria-label="Agent 任务看板">
+            <div className="mobile-sheet-container" role="dialog" aria-modal="true" aria-label={t("composerPanels.agentBoard")}>
               <div className="mobile-sheet-handle-wrap">
                 <div className="mobile-sheet-handle" />
               </div>
@@ -328,7 +328,7 @@ export function ComposerPanels({ todoPhases, subagents, onSelectSubagent, defaul
                         cursor: "pointer",
                       }}
                     >
-                      {t("chatWindow.todoList") || "任务清单"} ({doneTasks}/{tasks.length})
+                      {t("chatWindow.todoList")} ({doneTasks}/{tasks.length})
                     </button>
                   )}
                   {subagents.length > 0 && (
@@ -346,7 +346,7 @@ export function ComposerPanels({ todoPhases, subagents, onSelectSubagent, defaul
                         cursor: "pointer",
                       }}
                     >
-                      {t("chatWindow.subagentsPanel") || "子代理矩阵"} ({subagents.length})
+                      {t("chatWindow.subagentsPanel")} ({subagents.length})
                     </button>
                   )}
                 </div>
