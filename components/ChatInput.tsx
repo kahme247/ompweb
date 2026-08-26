@@ -2612,37 +2612,67 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               )}
 
               {/* Context usage & compaction indicator/button */}
-              {onCompact && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setConfirmingCompact(false);
-                    setContextDetailOpen((v) => !v);
-                  }}
-                  title={isCompacting ? t("chatInput.stopCompaction") : t("chatInput.compactContext")}
-                  aria-label={isCompacting ? t("chatInput.stopCompaction") : t("chatInput.compactContext")}
-                  style={{
-                    display: "flex", alignItems: "center", gap: 4,
-                    height: 28, padding: "0 6px",
-                    background: contextDetailOpen ? "var(--bg-selected)" : "none",
-                    border: "none",
-                    borderRadius: 7,
-                    color: isCompacting ? "var(--accent)" : (contextUsage?.percent && contextUsage.percent > 90 ? "var(--status-error)" : contextUsage?.percent && contextUsage.percent > 70 ? "var(--status-warning)" : "var(--text-muted)"),
-                    cursor: "pointer",
-                    fontSize: 11.5,
-                    fontFamily: "var(--font-mono)",
-                    fontWeight: 600,
-                    transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
-                  }}
-                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.background = contextDetailOpen ? "var(--bg-selected)" : "none"; }}
-                >
-                  <Shrink size={13} strokeWidth={2} aria-hidden="true" />
-                  {contextUsage?.percent !== null && contextUsage?.percent !== undefined ? (
-                    <span>{Math.round(contextUsage.percent)}%</span>
-                  ) : null}
-                </button>
-              )}
+              {onCompact && (() => {
+                const used = contextUsage?.tokens ?? 0;
+                const total = contextUsage?.contextWindow ?? 128000;
+                const pct = contextUsage?.percent !== null && contextUsage?.percent !== undefined
+                  ? contextUsage.percent
+                  : total > 0 ? (used / total) * 100 : 0;
+                const roundedPct = Math.round(pct);
+                const strokeColor = isCompacting
+                  ? "var(--accent)"
+                  : (pct > 90 ? "var(--status-error)" : pct > 70 ? "var(--status-warning)" : "var(--accent)");
+
+                return (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConfirmingCompact(false);
+                      setContextDetailOpen((v) => !v);
+                    }}
+                    title={isCompacting ? t("chatInput.stopCompaction") : t("chatInput.compactContext")}
+                    aria-label={isCompacting ? t("chatInput.stopCompaction") : t("chatInput.compactContext")}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 5,
+                      height: 28,
+                      padding: "0 7px 0 5px",
+                      background: contextDetailOpen ? "var(--bg-selected)" : "none",
+                      border: "none",
+                      borderRadius: 7,
+                      color: isCompacting ? "var(--accent)" : (pct > 90 ? "var(--status-error)" : pct > 70 ? "var(--status-warning)" : "var(--text-muted)"),
+                      cursor: "pointer",
+                      fontSize: 11.5,
+                      fontFamily: "var(--font-mono)",
+                      fontWeight: 600,
+                      transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
+                    }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = contextDetailOpen ? "var(--bg-selected)" : "none"; }}
+                  >
+                    {/* Mini SVG Ring Gauge */}
+                    <div style={{ position: "relative", width: 14, height: 14, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                      <svg width="14" height="14" viewBox="0 0 16 16" style={{ transform: "rotate(-90deg)" }}>
+                        <circle cx="8" cy="8" r="6" fill="none" stroke="color-mix(in srgb, var(--border) 80%, transparent)" strokeWidth="2.2" />
+                        <circle
+                          cx="8"
+                          cy="8"
+                          r="6"
+                          fill="none"
+                          stroke={strokeColor}
+                          strokeWidth="2.2"
+                          strokeDasharray={37.7}
+                          strokeDashoffset={37.7 - (37.7 * Math.min(100, Math.max(0, pct))) / 100}
+                          strokeLinecap="round"
+                          style={{ transition: "stroke-dashoffset 0.3s ease" }}
+                        />
+                      </svg>
+                    </div>
+                    <span>{roundedPct}%</span>
+                  </button>
+                );
+              })()}
 
               {/* Primary action */}
               {primaryActionQueuesMessage ? (

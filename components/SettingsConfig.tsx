@@ -3,7 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useTransition, cloneElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { getSubmitDuringRunBehavior, setSubmitDuringRunBehavior, type SubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import dynamic from "next/dynamic";
-import { Copy, ExternalLink, RefreshCw, RotateCcw, Search, AlertCircle } from "lucide-react";
+import { Copy, ExternalLink, RefreshCw, RotateCcw, Search, AlertCircle, ChevronLeft, ChevronRight } from "lucide-react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
 import { SettingsTabs, type SettingsTab, SETTINGS_CATEGORIES, getNormalizedActive } from "./SettingsTabs";
@@ -345,6 +345,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   const workspaceReady = cwd !== null;
   const [searchQuery, setSearchQuery] = useState("");
   const [highlightId, setHighlightId] = useState<string | null>(null);
+  const [mobileView, setMobileView] = useState<"index" | "category">(() => (isMobile ? "index" : "category"));
   const [submitBehavior, setSubmitBehavior] = useState<SubmitDuringRunBehavior>(() => getSubmitDuringRunBehavior());
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
@@ -518,12 +519,13 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
     startTransition(() => onSelectTab(result.tab));
     setHighlightId(result.kind === "setting" ? result.id : null);
     setSearchQuery("");
-  }, [onSelectTab]);
+    if (isMobile) setMobileView("category");
+  }, [onSelectTab, isMobile]);
 
   const handleSelectTab = useCallback((tab: SettingsTab) => {
     startTransition(() => onSelectTab(tab));
-  }, [onSelectTab]);
-
+    if (isMobile) setMobileView("category");
+  }, [onSelectTab, isMobile]);
   const contentStyle = useMemo(() => ({
     flex: 1 as const,
     minHeight: 0,
@@ -534,52 +536,194 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
     opacity: isPending ? 0.92 : 1,
     transition: isPending ? "opacity 80ms ease-out" : "opacity 120ms ease-out",
   }), [isPending]);
+  const categoryColors: Record<string, string> = {
+    general: "#3B82F6",
+    safety: "#10B981",
+    models: "#8B5CF6",
+    providers: "#F59E0B",
+    intelligence: "#EC4899",
+    agents: "#06B6D4",
+    mcp: "#6366F1",
+    system: "#64748B",
+  };
+
+  const currentCategoryMeta = SETTINGS_CATEGORIES.find((c) => c.id === currentTab);
+  const currentCategoryLabel = currentCategoryMeta
+    ? (t(`settingsTabs.${currentCategoryMeta.id}.label`) !== `settingsTabs.${currentCategoryMeta.id}.label`
+        ? t(`settingsTabs.${currentCategoryMeta.id}.label`)
+        : currentCategoryMeta.label)
+    : t("settingsConfig.title");
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
       <DialogContent ariaLabel={t("settingsConfig.title")} style={{ width: isMobile ? "100vw" : 940, maxWidth: isMobile ? "100vw" : "calc(100vw - 16px)", height: isMobile ? "100dvh" : "82vh", maxHeight: isMobile ? "100dvh" : "calc(100dvh - 16px)", borderRadius: isMobile ? 0 : undefined, padding: 0, display: "flex", flexDirection: "column", overflow: "hidden", animation: "none", paddingTop: isMobile ? "max(12px, env(safe-area-inset-top))" : undefined, paddingBottom: isMobile ? "max(12px, env(safe-area-inset-bottom))" : undefined }}>
-        <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, padding: "12px 18px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <DialogTitle style={{ fontSize: 16, margin: 0, fontWeight: 600 }}>{t("settingsConfig.title")}</DialogTitle>
-            {nativeSavesInFlight > 0 ? (
-              <span style={{ fontSize: 11, color: "var(--accent)", padding: "2px 8px", borderRadius: 10, background: "var(--bg-subtle)", display: "inline-flex", alignItems: "center", gap: 4 }}>
-                <RefreshCw size={11} className="spin" aria-hidden="true" /> {t("settingsConfig.saving")}
-              </span>
-            ) : (
-              <span style={{ fontSize: 11, color: "var(--text-dim)", padding: "2px 8px", borderRadius: 10, background: "var(--bg-subtle)" }}>
-                {t("settingsConfig.autoSaved")}
-              </span>
-            )}
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, maxWidth: 360, justifyContent: "flex-end" }}>
-            <div style={{ position: "relative", width: "100%", maxWidth: 260 }}>
-              <Search size={13} aria-hidden="true" style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)", pointerEvents: "none" }} />
-              <input
-                type="text"
-                aria-label={t("settingsConfig.searchPlaceholder")}
-                placeholder={t("settingsConfig.searchPlaceholder")}
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") {
-                    setSearchQuery("");
-                    setHighlightId(null);
-                    (e.target as HTMLInputElement).blur();
-                  }
+        <header style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: isMobile ? "10px 14px" : "12px 18px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)", minHeight: isMobile ? 48 : undefined }}>
+          {isMobile && mobileView === "category" ? (
+            <>
+              <button
+                type="button"
+                onClick={() => setMobileView("index")}
+                aria-label={t("common.back")}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 2,
+                  border: "none",
+                  background: "transparent",
+                  color: "var(--accent)",
+                  fontSize: 14,
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  padding: "4px 0",
+                  zIndex: 2,
                 }}
-                style={{ width: "100%", height: 28, padding: "0 8px 0 28px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12, outline: "none" }}
-              />
-            </div>
-            <button type="button" onClick={onClose} aria-label={t("settingsConfig.closeSettings")} title={t("settingsConfig.closeSettings")} className="ui-focus-ring" style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 20, lineHeight: 1, padding: "4px 8px", minWidth: 28, minHeight: 28, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: "var(--radius-control)" }}>×</button>
-          </div>
+              >
+                <ChevronLeft size={19} aria-hidden="true" />
+                <span>{t("settingsConfig.backToCategories")}</span>
+              </button>
+              <DialogTitle style={{
+                position: "absolute",
+                left: "50%",
+                transform: "translateX(-50%)",
+                fontSize: 15,
+                margin: 0,
+                fontWeight: 650,
+                textAlign: "center",
+                maxWidth: "calc(100% - 150px)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                color: "var(--text)",
+                pointerEvents: "none",
+              }}>
+                {currentCategoryLabel}
+              </DialogTitle>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", zIndex: 2 }}>
+                <button type="button" onClick={onClose} aria-label={t("settingsConfig.closeSettings")} title={t("settingsConfig.closeSettings")} className="ui-focus-ring" style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 20, lineHeight: 1, padding: "4px 8px", minWidth: 28, minHeight: 28, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: "var(--radius-control)" }}>×</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <DialogTitle style={{ fontSize: 16, margin: 0, fontWeight: 600 }}>{t("settingsConfig.title")}</DialogTitle>
+                {nativeSavesInFlight > 0 ? (
+                  <span style={{ fontSize: 11, color: "var(--accent)", padding: "2px 8px", borderRadius: 10, background: "var(--bg-subtle)", display: "inline-flex", alignItems: "center", gap: 4 }}>
+                    <RefreshCw size={11} className="spin" aria-hidden="true" /> {t("settingsConfig.saving")}
+                  </span>
+                ) : (
+                  <span style={{ fontSize: 11, color: "var(--text-dim)", padding: "2px 8px", borderRadius: 10, background: "var(--bg-subtle)" }}>
+                    {t("settingsConfig.autoSaved")}
+                  </span>
+                )}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, maxWidth: 360, justifyContent: "flex-end" }}>
+                <div style={{ position: "relative", width: "100%", maxWidth: 260 }}>
+                  <Search size={13} aria-hidden="true" style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)", pointerEvents: "none" }} />
+                  <input
+                    type="text"
+                    aria-label={t("settingsConfig.searchPlaceholder")}
+                    placeholder={t("settingsConfig.searchPlaceholder")}
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") {
+                        setSearchQuery("");
+                        setHighlightId(null);
+                        (e.target as HTMLInputElement).blur();
+                      }
+                    }}
+                    style={{ width: "100%", height: 28, padding: "0 8px 0 28px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12, outline: "none" }}
+                  />
+                </div>
+                <button type="button" onClick={onClose} aria-label={t("settingsConfig.closeSettings")} title={t("settingsConfig.closeSettings")} className="ui-focus-ring" style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 20, lineHeight: 1, padding: "4px 8px", minWidth: 28, minHeight: 28, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: "var(--radius-control)" }}>×</button>
+              </div>
+            </>
+          )}
         </header>
 
         <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: isMobile ? "column" : "row", overflow: "hidden" }}>
           {searchActive ? (
             <SearchResultsList results={searchResults} query={searchQuery.trim()} onSelect={openSearchResult} />
+          ) : isMobile && mobileView === "index" ? (
+            <div style={{ flex: 1, overflowY: "auto", padding: "14px 16px", WebkitOverflowScrolling: "touch" }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)", padding: "0 4px 8px" }}>
+                {t("settingsConfig.allCategories")}
+              </div>
+              <div
+                style={{
+                  background: "var(--bg-panel)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 14,
+                  overflow: "hidden",
+                }}
+              >
+                {SETTINGS_CATEGORIES.map(({ id, label, description, Icon, needsWorkspace }, index) => {
+                  const labelKey = `settingsTabs.${id}.label`;
+                  const descKey = `settingsTabs.${id}.description`;
+                  const trLabel = t(labelKey);
+                  const trDesc = t(descKey);
+                  const displayLabel = trLabel !== labelKey ? trLabel : label;
+                  const displayDescription = trDesc !== descKey ? trDesc : description;
+                  const disabled = Boolean(needsWorkspace && !workspaceReady);
+                  const color = categoryColors[id] || "var(--accent)";
+                  const isLast = index === SETTINGS_CATEGORIES.length - 1;
+                  return (
+                    <div
+                      key={id}
+                      onClick={() => {
+                        if (disabled) return;
+                        handleSelectTab(id);
+                      }}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        padding: "13px 14px",
+                        minHeight: 52,
+                        borderBottom: isLast ? "none" : "1px solid color-mix(in srgb, var(--border) 65%, transparent)",
+                        cursor: disabled ? "not-allowed" : "pointer",
+                        opacity: disabled ? 0.45 : 1,
+                        transition: "background var(--dur-fast)",
+                      }}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0, paddingRight: 8 }}>
+                        <div
+                          style={{
+                            width: 34,
+                            height: 34,
+                            borderRadius: 9,
+                            background: `color-mix(in srgb, ${color} 14%, transparent)`,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            color: color,
+                            flexShrink: 0,
+                          }}
+                        >
+                          <Icon size={18} aria-hidden="true" />
+                        </div>
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div style={{ fontSize: 14, fontWeight: 550, color: "var(--text)", lineHeight: 1.35 }}>
+                            {displayLabel}
+                          </div>
+                          <div style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.35, marginTop: 2 }}>
+                            {disabled ? (t("settingsTabs.requiresWorkspace") || "需要打开工作区") : displayDescription}
+                          </div>
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+                        <ChevronRight size={16} style={{ color: "var(--text-dim)" }} aria-hidden="true" />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
           ) : (
             <SettingsHighlightContext.Provider value={highlightId}>
-              <SettingsTabs active={currentTab} onSelect={handleSelectTab} workspaceReady={workspaceReady} layout={isMobile ? "horizontal" : "vertical"} />
+              {!isMobile && (
+                <SettingsTabs active={currentTab} onSelect={handleSelectTab} workspaceReady={workspaceReady} layout="vertical" />
+              )}
 
               <div style={contentStyle}>
             {nativeSettingsError && (
@@ -590,7 +734,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
 
             {/* GENERAL & UI TAB */}
             {currentTab === "general" && (
-              <div role="tabpanel" id="settings-panel-general" aria-labelledby="settings-tab-general" style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16 }}>
+              <div role="tabpanel" id="settings-panel-general" aria-labelledby="settings-tab-general" style={{ padding: isMobile ? "14px 16px" : 20, display: "flex", flexDirection: "column", gap: 16 }}>
                 <div>
                   <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>{t("settingsConfig.interfaceBehavior")}</h3>
                   <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>{t("settingsConfig.interfaceBehaviorDesc")}</p>
@@ -629,7 +773,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
 
             {/* SAFETY & APPROVALS TAB */}
             {currentTab === "safety" && (
-              <div role="tabpanel" id="settings-panel-safety" aria-labelledby="settings-tab-safety" style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16 }}>
+              <div role="tabpanel" id="settings-panel-safety" aria-labelledby="settings-tab-safety" style={{ padding: isMobile ? "14px 16px" : 20, display: "flex", flexDirection: "column", gap: 16 }}>
                 <div>
                   <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>{t("settingsConfig.toolSafetyApprovals")}</h3>
                   <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>{t("settingsConfig.toolSafetyApprovalsDesc")}</p>
@@ -673,7 +817,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
 
             {/* AI MODEL DEFAULTS TAB */}
             {currentTab === "models" && (
-              <div role="tabpanel" id="settings-panel-models" aria-labelledby="settings-tab-models" style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16 }}>
+              <div role="tabpanel" id="settings-panel-models" aria-labelledby="settings-tab-models" style={{ padding: isMobile ? "14px 16px" : 20, display: "flex", flexDirection: "column", gap: 16 }}>
                 <div>
                   <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>{t("settingsConfig.modelDefaults")}</h3>
                   <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>{t("settingsConfig.modelDefaultsDesc")}</p>
@@ -738,7 +882,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
 
             {/* AGENT INTELLIGENCE TAB */}
             {currentTab === "intelligence" && (
-              <div role="tabpanel" id="settings-panel-intelligence" aria-labelledby="settings-tab-intelligence" style={{ padding: 20, display: "flex", flexDirection: "column", gap: 18 }}>
+              <div role="tabpanel" id="settings-panel-intelligence" aria-labelledby="settings-tab-intelligence" style={{ padding: isMobile ? "14px 16px" : 20, display: "flex", flexDirection: "column", gap: 18 }}>
                 {/* Context Compaction Section */}
                 <section style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: "1px solid var(--border)", paddingTop: 16 }}>
                   <div style={{ fontSize: 13, fontWeight: 600 }}>{t("settingsConfig.contextCompaction")}</div>
@@ -868,7 +1012,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
 
             {/* EXTENSIONS & TOOLS TAB (MCP, SKILLS, PLUGINS) */}
             {currentTab === "mcp" && (
-              <div role="tabpanel" id="settings-panel-mcp" aria-labelledby="settings-tab-mcp" style={{ display: currentTab === "mcp" ? "flex" : "none", height: "100%", minHeight: 0, flexDirection: "column", overflowY: "auto", padding: 20, gap: 16 }}>
+              <div role="tabpanel" id="settings-panel-mcp" aria-labelledby="settings-tab-mcp" style={{ display: currentTab === "mcp" ? "flex" : "none", height: "100%", minHeight: 0, flexDirection: "column", overflowY: "auto", padding: isMobile ? "14px 16px" : 20, gap: 16 }}>
                 <div>
                   <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>{t("settingsConfig.extensionsTools")}</h3>
                   <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>{t("settingsConfig.extensionsToolsDesc")}</p>
@@ -926,7 +1070,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   minHeight: 0,
                   flexDirection: "column",
                   overflowY: "auto",
-                  padding: 20,
+                  padding: isMobile ? "14px 16px" : 20,
                   gap: 16,
                   ...(highlightId && ["agent-roster", "agent-model", "agent-tools"].includes(highlightId)
                     ? { border: "1px solid var(--accent)", boxShadow: "0 0 0 2px var(--accent)" }
@@ -945,7 +1089,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
 
             {/* SYSTEM & UPDATES TAB */}
             {currentTab === "system" && (
-              <div role="tabpanel" id="settings-panel-system" aria-labelledby="settings-tab-system" style={{ padding: 20, display: "flex", flexDirection: "column", gap: 18 }}>
+              <div role="tabpanel" id="settings-panel-system" aria-labelledby="settings-tab-system" style={{ padding: isMobile ? "14px 16px" : 20, display: "flex", flexDirection: "column", gap: 18 }}>
                 <div>
                   <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>{t("settingsConfig.systemUpdates")}</h3>
                   <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>{t("settingsConfig.systemUpdatesDescription")}</p>

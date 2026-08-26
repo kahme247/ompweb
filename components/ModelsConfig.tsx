@@ -22,7 +22,7 @@ import {
   ConfirmDialog,
   useFieldValidation,
 } from "@/components/ui/field";
-import { Plus, Trash2, RefreshCw, AlertCircle, Cpu, Settings, Sparkles, Check as CheckIcon, ArrowDown, ArrowUp, Layers, RotateCcw, SlidersHorizontal, BookOpen, Search } from "lucide-react";
+import { Plus, Trash2, RefreshCw, AlertCircle, Cpu, Settings, Sparkles, Check as CheckIcon, ArrowDown, ArrowUp, Layers, RotateCcw, SlidersHorizontal, BookOpen, Search, ChevronLeft } from "lucide-react";
 import { toast } from "@/components/ui/toast";
 import { SettingsTabs, type SettingsTab } from "./SettingsTabs";
 import { ModelCatalogPicker } from "./ModelCatalogPicker";
@@ -1782,7 +1782,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
         const normalized = d.providers ? d : { ...d, providers: {} };
         setConfig(normalized);
         const keys = Object.keys(normalized.providers ?? {});
-        if (keys.length > 0) setSelection({ type: "provider", name: keys[0] });
+        if (keys.length > 0 && !isMobile) setSelection({ type: "provider", name: keys[0] });
       })
       .catch(() => setConfig({ providers: {} }))
       .finally(() => setLoading(false));
@@ -2133,16 +2133,16 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
           </div>
         ) : (
         <div style={{ flex: 1, display: "flex", flexDirection: isMobile ? "column" : "row", overflow: "hidden" }}>
-          {/* Left: tree — zoned navigation */}
-          <div style={{
-            width: isMobile ? "100%" : 258,
-            maxHeight: isMobile ? "40vh" : undefined,
-            borderRight: isMobile ? "none" : "1px solid var(--border)",
-            borderBottom: isMobile ? "1px solid var(--border)" : "none",
-            display: "flex", flexDirection: "column", flexShrink: 0, background: "var(--bg-panel)",
-            overflow: "hidden",
-          }}>
-            <div style={{ flex: 1, overflowY: "auto", padding: "10px 8px", display: "flex", flexDirection: "column", gap: 14 }}>
+          {/* Left: tree — zoned navigation (on mobile, shown only when selection is null) */}
+          {(!isMobile || selection === null) && (
+            <div style={{
+              width: isMobile ? "100%" : 258,
+              flex: isMobile ? 1 : undefined,
+              borderRight: isMobile ? "none" : "1px solid var(--border)",
+              display: "flex", flexDirection: "column", flexShrink: 0, background: "var(--bg-panel)",
+              overflow: "hidden",
+            }}>
+              <div style={{ flex: 1, overflowY: "auto", padding: "10px 8px", display: "flex", flexDirection: "column", gap: 14 }}>
               {/* — OMP System — */}
               <section style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 6px", fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--text-dim)" }}>
@@ -2315,21 +2315,49 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                 <Plus size={13} aria-hidden="true" /> {t("modelsConfig.addProvider")}
               </button>
             </div>
-          </div>
-          <div style={{ flex: 1, overflowY: "auto", padding: 20, background: "var(--bg)" }}>
-            {loading ? (
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                <div className="skeleton" style={{ height: 18, width: "40%" }} />
-                <div className="skeleton" style={{ height: 12, width: "70%" }} />
-                <div className="skeleton" style={{ height: 12, width: "55%" }} />
-                <div className="skeleton" style={{ height: 90, width: "100%" }} />
-              </div>
-            ) : detailContent ?? (
-              <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 13 }}>
-                {t("modelsConfig.selectProviderOrModel")}
-              </div>
-            )}
-          </div>
+            </div>
+          )}
+
+          {/* Right: detail pane (on mobile, shown only when selection is not null) */}
+          {(!isMobile || selection !== null) && (
+            <div style={{ flex: 1, overflowY: "auto", padding: isMobile ? "14px 14px" : 20, background: "var(--bg)" }}>
+              {isMobile && selection !== null && (
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12, paddingBottom: 8, borderBottom: "1px solid var(--border)" }}>
+                  <button
+                    type="button"
+                    onClick={() => setSelection(null)}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 2,
+                      border: "none",
+                      background: "transparent",
+                      color: "var(--accent)",
+                      fontSize: 13,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      padding: "2px 0",
+                    }}
+                  >
+                    <ChevronLeft size={16} aria-hidden="true" />
+                    <span>{t("modelsConfig.backToList") || "返回服务商列表"}</span>
+                  </button>
+                </div>
+              )}
+              {loading ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div className="skeleton" style={{ height: 18, width: "40%" }} />
+                  <div className="skeleton" style={{ height: 12, width: "70%" }} />
+                  <div className="skeleton" style={{ height: 12, width: "55%" }} />
+                  <div className="skeleton" style={{ height: 90, width: "100%" }} />
+                </div>
+              ) : detailContent ?? (
+                <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 13 }}>
+                  {t("modelsConfig.selectProviderOrModel")}
+                </div>
+              )}
+            </div>
+          )}
         </div>
         )}
 

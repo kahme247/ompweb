@@ -1,9 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Check, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Check, Plus, RefreshCw, Trash2, ChevronLeft, ChevronRight } from "lucide-react";
 import { toast } from "@/components/ui/toast";
 import { useI18n } from "@/lib/i18n";
+import { useIsMobile } from "@/hooks/useIsMobile";
 
 type McpServer = { name: string; config: Record<string, unknown> };
 // User-level servers arrive as a sanitized DTO (no raw config — env/headers
@@ -34,6 +35,7 @@ function serverSummary(config: Record<string, unknown>): { type: string; target:
 
 export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: string | null }) {
   const { t } = useI18n();
+  const isMobile = useIsMobile();
   const [servers, setServers] = useState<McpServer[]>([]);
   const [userConfig, setUserConfig] = useState<McpUserConfig | null>(null);
   const [liveServers, setLiveServers] = useState<McpLiveServer[] | null>(null);
@@ -46,7 +48,7 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-
+  const [mobileEditing, setMobileEditing] = useState(false);
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -79,6 +81,7 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
     setName(server.name);
     setSource(JSON.stringify(server.config, null, 2));
     setMessage(null);
+    if (isMobile) setMobileEditing(true);
   };
 
   const add = () => {
@@ -86,6 +89,7 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
     setName("");
     setSource(newServer());
     setMessage(null);
+    if (isMobile) setMobileEditing(true);
   };
 
   const parse = (): Record<string, unknown> | null => {
@@ -129,6 +133,7 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
       setSelected(name);
       setMessage(t("mcpConfig.savedMsg"));
       toast.success(t("mcpConfig.serverSaved", { name }));
+      if (isMobile) setMobileEditing(false);
       await load();
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -143,12 +148,14 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
     if (!selected) return;
     setSaving(true);
     try {
-      const response = await fetch("/api/mcp", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cwd, name: selected }) });
+      const response = await fetch(`/api/mcp?cwd=${encodeURIComponent(cwd ?? "")}&name=${encodeURIComponent(selected)}`, { method: "DELETE" });
       const data = await response.json() as { error?: string };
       if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+      const removed = selected;
       add();
+      if (isMobile) setMobileEditing(false);
       setMessage(t("mcpConfig.removedMsg"));
-      toast.success(t("mcpConfig.serverRemoved", { name: selected }));
+      toast.success(t("mcpConfig.serverRemoved", { name: removed }));
       await load();
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -219,57 +226,169 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
         )}
       </div>
     </section>
-    {cwd && <div style={{ marginTop: 12, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden", background: "var(--bg-panel)" }}>
-    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderBottom: "1px solid var(--border)" }}>
-      <strong style={{ fontSize: 12, color: "var(--text)", flexShrink: 0 }}>{t("mcpConfig.projectServers")}</strong>
-      <code style={{ flex: 1, minWidth: 0, color: "var(--text-dim)", fontSize: 10, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{path ?? "Loading..."}</code>
-      {(() => {
-        const total = servers.length;
-        if (total === 0) return null;
-        const enabled = servers.filter((s) => serverSummary(s.config).enabled && serverSummary(s.config).valid).length;
-        const invalid = servers.filter((s) => !serverSummary(s.config).valid).length;
-        return <span style={{ marginLeft: 4, fontSize: 10, color: "var(--text-dim)", whiteSpace: "nowrap" }}>{t("mcpConfig.serverCounts", { enabled, total })}{invalid > 0 ? t("mcpConfig.invalidSuffix", { count: invalid }) : ""}</span>;
-      })()}
-    </div>
-    <div className="mcp-editor-grid" style={{ display: "grid", gridTemplateColumns: "minmax(120px, 0.35fr) minmax(0, 1fr)", minHeight: 250 }}>
-      <div style={{ borderRight: "1px solid var(--border)", padding: 6 }}>
-        {servers.map((server) => {
-          const summary = serverSummary(server.config);
-          return (
-            <button key={server.name} type="button" onClick={() => choose(server)} title={`${server.name} — ${summary.type} · ${summary.target || "invalid"}`} style={{ display: "block", width: "100%", padding: "7px 8px", border: "none", borderRadius: 5, background: selected === server.name ? "var(--bg-selected)" : "transparent", color: "var(--text)", textAlign: "left", font: "11px var(--font-mono)", cursor: "pointer", overflow: "hidden" }}>
-              <span style={{ display: "flex", alignItems: "center", gap: 5, overflow: "hidden" }}>
-                <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", flexShrink: 0, background: summary.valid ? (summary.enabled ? "var(--accent)" : "var(--border)") : "var(--status-error)" }} />
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{server.name}</span>
-              </span>
-              <span style={{ display: "block", marginTop: 2, fontSize: 9, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {summary.type}{summary.enabled ? "" : " · off"}{!summary.valid ? " · invalid" : ""}
-                {summary.target ? ` · ${summary.target}` : ""}
-              </span>
-            </button>
-          );
-        })}
-        {!loading && servers.length === 0 && <div style={{ padding: "7px 8px", color: "var(--text-dim)", fontSize: 11 }}>{t("mcpConfig.noServers")}</div>}
-        <button type="button" onClick={add} style={{ display: "flex", alignItems: "center", gap: 4, width: "100%", marginTop: 5, padding: "6px 8px", border: "1px dashed var(--border)", borderRadius: 5, background: "transparent", color: "var(--text-muted)", cursor: "pointer", fontSize: 11 }}><Plus size={13} /> {t("mcpConfig.addServer")}</button>
-      </div>
-      <div style={{ minWidth: 0, padding: 12 }}>
-        <label style={{ display: "block", color: "var(--text-muted)", fontSize: 11 }}>{t("mcpConfig.serverName")}<input value={name} onChange={(event) => setName(event.target.value)} placeholder="filesystem" style={{ ...inputStyle, marginTop: 4 }} /></label>
-        <label style={{ display: "block", marginTop: 9, color: "var(--text-muted)", fontSize: 11 }}>{t("mcpConfig.serverConfigJson")}<textarea value={source} onChange={(event) => setSource(event.target.value)} spellCheck={false} style={{ ...inputStyle, minHeight: 125, marginTop: 4, resize: "vertical", lineHeight: 1.45 }} /></label>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginTop: 9 }}>
-          <button type="button" onClick={() => void check()} disabled={saving} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "6px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", cursor: saving ? "wait" : "pointer", fontSize: 11 }}>
-            <Check size={13} /> {t("mcpConfig.check")}
-          </button>
-          <button type="button" onClick={() => void save()} disabled={saving || !name.trim()} style={{ padding: "6px 9px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent)", color: "var(--on-accent)", cursor: saving || !name.trim() ? "default" : "pointer", fontSize: 11 }}>
-            {saving ? t("mcpConfig.saving") : t("mcpConfig.saveServer")}
-          </button>
-          {selected && (
-            <button type="button" onClick={() => void remove()} disabled={saving} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "6px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text-muted)", cursor: saving ? "wait" : "pointer", fontSize: 11 }}>
-              <Trash2 size={13} /> {t("mcpConfig.remove")}
-            </button>
-          )}
+    {cwd && (
+      <div style={{ marginTop: 12, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden", background: "var(--bg-panel)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderBottom: "1px solid var(--border)" }}>
+          <strong style={{ fontSize: 12, color: "var(--text)", flexShrink: 0 }}>{t("mcpConfig.projectServers")}</strong>
+          <code style={{ flex: 1, minWidth: 0, color: "var(--text-dim)", fontSize: 10, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{path ?? "Loading..."}</code>
+          {(() => {
+            const total = servers.length;
+            if (total === 0) return null;
+            const enabled = servers.filter((s) => serverSummary(s.config).enabled && serverSummary(s.config).valid).length;
+            const invalid = servers.filter((s) => !serverSummary(s.config).valid).length;
+            return <span style={{ marginLeft: 4, fontSize: 10, color: "var(--text-dim)", whiteSpace: "nowrap" }}>{t("mcpConfig.serverCounts", { enabled, total })}{invalid > 0 ? t("mcpConfig.invalidSuffix", { count: invalid }) : ""}</span>;
+          })()}
         </div>
-        {message && <div role="status" style={{ marginTop: 9, color: "var(--text-muted)", fontSize: 11, lineHeight: 1.4 }}>{message}</div>}
+        {isMobile ? (
+          mobileEditing ? (
+            <div style={{ padding: 14, display: "flex", flexDirection: "column", gap: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", paddingBottom: 8, borderBottom: "1px solid var(--border)" }}>
+                <button
+                  type="button"
+                  onClick={() => setMobileEditing(false)}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 2,
+                    border: "none",
+                    background: "transparent",
+                    color: "var(--accent)",
+                    fontSize: 13,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    padding: 0,
+                  }}
+                >
+                  <ChevronLeft size={16} /> {t("common.back") || "返回列表"}
+                </button>
+                <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text)" }}>
+                  {name || t("mcpConfig.addServer")}
+                </span>
+              </div>
+              <label style={{ display: "block", color: "var(--text-muted)", fontSize: 12 }}>
+                {t("mcpConfig.serverName")}
+                <input value={name} onChange={(event) => setName(event.target.value)} placeholder="filesystem" style={{ ...inputStyle, marginTop: 6, height: 36 }} />
+              </label>
+              <label style={{ display: "block", color: "var(--text-muted)", fontSize: 12 }}>
+                {t("mcpConfig.serverConfigJson")}
+                <textarea value={source} onChange={(event) => setSource(event.target.value)} spellCheck={false} rows={8} style={{ ...inputStyle, marginTop: 6, resize: "vertical", lineHeight: 1.45 }} />
+              </label>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 4 }}>
+                <button type="button" onClick={() => void check()} disabled={saving} style={{ flex: 1, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, padding: "8px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", cursor: saving ? "wait" : "pointer", fontSize: 12 }}>
+                  <Check size={13} /> {t("mcpConfig.check")}
+                </button>
+                <button type="button" onClick={() => void save()} disabled={saving || !name.trim()} style={{ flex: 1, padding: "8px 12px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent)", color: "var(--on-accent)", cursor: saving || !name.trim() ? "default" : "pointer", fontSize: 12, fontWeight: 600 }}>
+                  {saving ? t("mcpConfig.saving") : t("mcpConfig.saveServer")}
+                </button>
+                {selected && (
+                  <button type="button" onClick={() => void remove()} disabled={saving} style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4, padding: "8px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--status-error)", cursor: saving ? "wait" : "pointer", fontSize: 12 }}>
+                    <Trash2 size={13} /> {t("mcpConfig.remove")}
+                  </button>
+                )}
+              </div>
+              {message && <div role="status" style={{ color: "var(--text-muted)", fontSize: 11, lineHeight: 1.4 }}>{message}</div>}
+            </div>
+          ) : (
+            <div style={{ padding: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+              {servers.map((server) => {
+                const summary = serverSummary(server.config);
+                return (
+                  <div
+                    key={server.name}
+                    onClick={() => choose(server)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      padding: "10px 12px",
+                      borderRadius: "var(--radius-control)",
+                      background: "var(--bg)",
+                      border: "1px solid var(--border)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0, paddingRight: 8 }}>
+                      <span aria-hidden="true" style={{ width: 8, height: 8, borderRadius: "50%", flexShrink: 0, background: summary.valid ? (summary.enabled ? "var(--status-success)" : "var(--border)") : "var(--status-error)" }} />
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-mono)" }}>
+                          {server.name}
+                        </div>
+                        <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
+                          {summary.type}{summary.enabled ? " · enabled" : " · disabled"}{!summary.valid ? " · invalid" : ""}
+                        </div>
+                      </div>
+                    </div>
+                    <ChevronRight size={16} style={{ color: "var(--text-dim)", flexShrink: 0 }} />
+                  </div>
+                );
+              })}
+              {!loading && servers.length === 0 && <div style={{ padding: "8px 10px", color: "var(--text-dim)", fontSize: 12 }}>{t("mcpConfig.noServers")}</div>}
+              <button
+                type="button"
+                onClick={add}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 6,
+                  width: "100%",
+                  marginTop: 6,
+                  padding: "10px 12px",
+                  border: "1px dashed var(--border)",
+                  borderRadius: "var(--radius-control)",
+                  background: "transparent",
+                  color: "var(--accent)",
+                  fontWeight: 500,
+                  cursor: "pointer",
+                  fontSize: 13,
+                }}
+              >
+                <Plus size={14} /> {t("mcpConfig.addServer")}
+              </button>
+            </div>
+          )
+        ) : (
+          <div className="mcp-editor-grid" style={{ display: "grid", gridTemplateColumns: "minmax(120px, 0.35fr) minmax(0, 1fr)", minHeight: 250 }}>
+            <div style={{ borderRight: "1px solid var(--border)", padding: 6 }}>
+              {servers.map((server) => {
+                const summary = serverSummary(server.config);
+                return (
+                  <button key={server.name} type="button" onClick={() => choose(server)} title={`${server.name} — ${summary.type} · ${summary.target || "invalid"}`} style={{ display: "block", width: "100%", padding: "7px 8px", border: "none", borderRadius: 5, background: selected === server.name ? "var(--bg-selected)" : "transparent", color: "var(--text)", textAlign: "left", font: "11px var(--font-mono)", cursor: "pointer", overflow: "hidden" }}>
+                    <span style={{ display: "flex", alignItems: "center", gap: 5, overflow: "hidden" }}>
+                      <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", flexShrink: 0, background: summary.valid ? (summary.enabled ? "var(--accent)" : "var(--border)") : "var(--status-error)" }} />
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{server.name}</span>
+                    </span>
+                    <span style={{ display: "block", marginTop: 2, fontSize: 9, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {summary.type}{summary.enabled ? "" : " · off"}{!summary.valid ? " · invalid" : ""}
+                      {summary.target ? ` · ${summary.target}` : ""}
+                    </span>
+                  </button>
+                );
+              })}
+              {!loading && servers.length === 0 && <div style={{ padding: "7px 8px", color: "var(--text-dim)", fontSize: 11 }}>{t("mcpConfig.noServers")}</div>}
+              <button type="button" onClick={add} style={{ display: "flex", alignItems: "center", gap: 4, width: "100%", marginTop: 5, padding: "6px 8px", border: "1px dashed var(--border)", borderRadius: 5, background: "transparent", color: "var(--text-muted)", cursor: "pointer", fontSize: 11 }}><Plus size={13} /> {t("mcpConfig.addServer")}</button>
+            </div>
+            <div style={{ minWidth: 0, padding: 12 }}>
+              <label style={{ display: "block", color: "var(--text-muted)", fontSize: 11 }}>{t("mcpConfig.serverName")}<input value={name} onChange={(event) => setName(event.target.value)} placeholder="filesystem" style={{ ...inputStyle, marginTop: 4 }} /></label>
+              <label style={{ display: "block", marginTop: 9, color: "var(--text-muted)", fontSize: 11 }}>{t("mcpConfig.serverConfigJson")}<textarea value={source} onChange={(event) => setSource(event.target.value)} spellCheck={false} style={{ ...inputStyle, minHeight: 125, marginTop: 4, resize: "vertical", lineHeight: 1.45 }} /></label>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginTop: 9 }}>
+                <button type="button" onClick={() => void check()} disabled={saving} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "6px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", cursor: saving ? "wait" : "pointer", fontSize: 11 }}>
+                  <Check size={13} /> {t("mcpConfig.check")}
+                </button>
+                <button type="button" onClick={() => void save()} disabled={saving || !name.trim()} style={{ padding: "6px 9px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent)", color: "var(--on-accent)", cursor: saving || !name.trim() ? "default" : "pointer", fontSize: 11 }}>
+                  {saving ? t("mcpConfig.saving") : t("mcpConfig.saveServer")}
+                </button>
+                {selected && (
+                  <button type="button" onClick={() => void remove()} disabled={saving} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "6px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text-muted)", cursor: saving ? "wait" : "pointer", fontSize: 11 }}>
+                    <Trash2 size={13} /> {t("mcpConfig.remove")}
+                  </button>
+                )}
+              </div>
+              {message && <div role="status" style={{ marginTop: 9, color: "var(--text-muted)", fontSize: 11, lineHeight: 1.4 }}>{message}</div>}
+            </div>
+          </div>
+        )}
       </div>
-    </div>
-    </div>}
+    )}
   </>;
 }
