@@ -1,0 +1,1108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>omp-web 移动端极简线框 - 极度克制版</title>
+  <style>
+    /* Warm Minimalist Tokens */
+    :root {
+      --bg: #FBFBFA;
+      --bg-surface: #F3F1EC;
+      --bg-hover: #E9E6DE;
+      --border: #E5E1D8;
+      --border-subtle: rgba(60, 50, 35, 0.08);
+      --text: #1F1D1A;
+      --text-muted: #736D63;
+      --text-dim: #9C9588;
+      --accent: #B03E22;
+      --accent-soft: rgba(176, 62, 34, 0.09);
+      --accent-hover: #96331B;
+      --user-bubble: #EFECE4;
+      --on-accent: #FFFFFF;
+      --overlay: rgba(20, 18, 15, 0.45);
+      --radius-sm: 8px;
+      --radius-md: 14px;
+      --radius-lg: 22px;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.03);
+      --shadow-md: 0 4px 16px rgba(0,0,0,0.06);
+      --shadow-sheet: 0 -8px 36px rgba(0,0,0,0.14);
+      --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang SC", sans-serif;
+      --font-mono: "SF Mono", Menlo, Monaco, Consolas, monospace;
+    }
+
+    html.dark {
+      --bg: #141311;
+      --bg-surface: #1E1C19;
+      --bg-hover: #272420;
+      --border: #2E2A24;
+      --border-subtle: rgba(255, 255, 255, 0.06);
+      --text: #EFECE6;
+      --text-muted: #9E978C;
+      --text-dim: #6E685E;
+      --accent: #E07B54;
+      --accent-soft: rgba(224, 123, 84, 0.14);
+      --accent-hover: #E89371;
+      --user-bubble: #25221E;
+      --overlay: rgba(0, 0, 0, 0.72);
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
+      --shadow-md: 0 4px 20px rgba(0,0,0,0.5);
+      --shadow-sheet: 0 -8px 40px rgba(0,0,0,0.75);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    body {
+      font-family: var(--font-sans);
+      background: #0C0B0A;
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Outer Demo Controller */
+    .demo-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      width: 100%;
+      max-width: 860px;
+      margin-bottom: 14px;
+      background: #181715;
+      border: 1px solid #282521;
+      border-radius: 12px;
+      padding: 8px 14px;
+      color: #EFECE6;
+      font-size: 13px;
+    }
+    .demo-btn {
+      background: #24221E;
+      border: 1px solid #36322C;
+      color: #EFECE6;
+      border-radius: 6px;
+      padding: 5px 12px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s;
+    }
+    .demo-btn:hover { background: #2E2B25; border-color: #48433B; }
+    .demo-btn.active { background: var(--accent); border-color: var(--accent); color: #FFF; }
+
+    /* Phone Device Simulator */
+    .device {
+      width: 390px;
+      height: 844px;
+      background: var(--bg);
+      border-radius: 50px;
+      border: 10px solid #24221E;
+      box-shadow: 0 30px 80px rgba(0,0,0,0.8), 0 0 0 1px rgba(255,255,255,0.06);
+      position: relative;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      transition: background 0.25s, width 0.3s;
+    }
+    .device.responsive-mode {
+      width: 100%;
+      max-width: 440px;
+      height: 92vh;
+      border-radius: 20px;
+      border-width: 3px;
+    }
+
+    .island {
+      position: absolute;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 122px;
+      height: 32px;
+      background: #000;
+      border-radius: 20px;
+      z-index: 1000;
+      pointer-events: none;
+    }
+    .device.responsive-mode .island { display: none; }
+
+    /* Main App Layout */
+    .app {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      width: 100%;
+      background: var(--bg);
+      color: var(--text);
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* 1. Header */
+    .header {
+      height: 52px;
+      margin-top: 38px; /* island gap */
+      padding: 0 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border-subtle);
+      background: var(--bg);
+      flex-shrink: 0;
+      z-index: 30;
+    }
+    .device.responsive-mode .header { margin-top: 0; }
+
+    .nav-btn {
+      width: 38px;
+      height: 38px;
+      border-radius: 10px;
+      border: none;
+      background: transparent;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .nav-btn:active { background: var(--bg-surface); }
+    .nav-btn svg { width: 20px; height: 20px; stroke-width: 1.9; }
+
+    .header-center {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-width: 0;
+      padding: 0 6px;
+      cursor: pointer;
+    }
+    .header-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text);
+      letter-spacing: -0.01em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .header-sub {
+      font-size: 11px;
+      color: var(--text-dim);
+      font-family: var(--font-mono);
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 0 2px var(--accent-soft);
+      animation: pulse 1.8s infinite;
+      flex-shrink: 0;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 0.8; transform: scale(1); }
+      50% { opacity: 1; transform: scale(1.25); }
+    }
+
+    /* 2. Chat Feed */
+    .feed {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px 14px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .msg-user {
+      align-self: flex-end;
+      max-width: 85%;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+    }
+    .user-card {
+      background: var(--user-bubble);
+      border-radius: 18px 18px 4px 18px;
+      padding: 10px 14px;
+      font-size: 14.5px;
+      line-height: 1.55;
+      color: var(--text);
+      box-shadow: var(--shadow-sm);
+    }
+
+    .msg-ai {
+      align-self: flex-start;
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .ai-text {
+      font-size: 14.5px;
+      line-height: 1.65;
+      color: var(--text);
+    }
+    .ai-text p { margin-bottom: 8px; }
+    .ai-text p:last-child { margin-bottom: 0; }
+
+    /* Minimalist Inline Tool Chip */
+    .tool-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 5px 9px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-muted);
+      cursor: pointer;
+      width: fit-content;
+      user-select: none;
+      transition: background 0.15s;
+    }
+    .tool-chip:active { background: var(--bg-hover); }
+    .tool-chip-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #18794E;
+    }
+
+    /* 3. Live Agent Status Line */
+    .agent-status-bar {
+      padding: 0 14px 6px;
+      flex-shrink: 0;
+    }
+    .agent-pill {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 24px;
+      padding: 6px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .agent-pill:active { background: var(--bg-hover); }
+    .agent-pill-left {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 12.5px;
+      font-weight: 500;
+      color: var(--text);
+      min-width: 0;
+    }
+    .agent-pill-text {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .agent-pill-count {
+      font-size: 11px;
+      font-family: var(--font-mono);
+      color: var(--accent);
+      background: var(--accent-soft);
+      padding: 1px 7px;
+      border-radius: 10px;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+
+    /* 4. Ultra-clean Composer (Only 3 Items: [+] | Model Pill | Send) */
+    .composer {
+      padding: 4px 14px 16px;
+      background: var(--bg);
+      flex-shrink: 0;
+      position: relative;
+      z-index: 20;
+    }
+    .composer-card {
+      background: var(--bg-surface);
+      border-radius: 22px;
+      padding: 8px 10px 8px 12px;
+      border: 1px solid var(--border-subtle);
+      box-shadow: var(--shadow-sm);
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .composer-card:focus-within {
+      background: var(--bg);
+      border-color: var(--border);
+      box-shadow: var(--shadow-md);
+    }
+    .composer-input {
+      width: 100%;
+      min-height: 36px;
+      max-height: 120px;
+      background: transparent;
+      border: none;
+      outline: none;
+      resize: none;
+      color: var(--text);
+      font-family: inherit;
+      font-size: 15px;
+      line-height: 1.45;
+    }
+    .composer-input::placeholder { color: var(--text-dim); }
+
+    .composer-bottom {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-top: 2px;
+    }
+
+    .composer-actions-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* Plus Button for Attachments & Extra Tools */
+    .plus-circle-btn {
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      background: var(--bg);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .plus-circle-btn:active { background: var(--bg-hover); transform: scale(0.95); }
+    .plus-circle-btn svg { width: 16px; height: 16px; stroke-width: 2; }
+
+    /* Single Unified Model Pill */
+    .model-chip {
+      height: 30px;
+      padding: 0 12px;
+      border-radius: 15px;
+      background: var(--bg);
+      border: 1px solid var(--border-subtle);
+      color: var(--text);
+      font-size: 12.5px;
+      font-weight: 550;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      user-select: none;
+      transition: all 0.15s;
+    }
+    .model-chip:active { background: var(--bg-hover); }
+    .model-chip-tag {
+      font-size: 10px;
+      color: var(--accent);
+      background: var(--accent-soft);
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-family: var(--font-mono);
+      font-weight: 600;
+    }
+
+    /* Send Button */
+    .send-circle {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background: var(--accent);
+      color: #FFF;
+      border: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: transform 0.15s, background 0.15s;
+      flex-shrink: 0;
+    }
+    .send-circle:active { transform: scale(0.92); }
+    .send-circle svg { width: 16px; height: 16px; stroke-width: 2.2; }
+
+    /* 5. Bottom Sheets */
+    .overlay {
+      position: absolute;
+      inset: 0;
+      background: var(--overlay);
+      backdrop-filter: blur(4px);
+      z-index: 100;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease;
+    }
+    .overlay.show {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .sheet {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: var(--bg);
+      border-radius: 24px 24px 0 0;
+      box-shadow: var(--shadow-sheet);
+      z-index: 110;
+      transform: translateY(105%);
+      transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      max-height: 82%;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .sheet.show { transform: translateY(0); }
+
+    .sheet-handle-wrap {
+      padding: 10px 0 4px;
+      display: flex;
+      justify-content: center;
+      cursor: grab;
+    }
+    .sheet-handle {
+      width: 36px;
+      height: 4px;
+      border-radius: 2px;
+      background: var(--border);
+    }
+    .sheet-top {
+      padding: 6px 18px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .sheet-heading { font-size: 16px; font-weight: 650; }
+    .sheet-close {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      border: none;
+      background: var(--bg-surface);
+      color: var(--text-muted);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .sheet-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+    }
+
+    /* Thinking Segmented Control (Top of Model Sheet) */
+    .thinking-section {
+      background: var(--bg-surface);
+      border-radius: 14px;
+      padding: 12px;
+      margin-bottom: 16px;
+      border: 1px solid var(--border-subtle);
+    }
+    .section-label {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text-dim);
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .thinking-segments {
+      display: flex;
+      gap: 5px;
+      background: var(--bg);
+      padding: 3px;
+      border-radius: 10px;
+      border: 1px solid var(--border-subtle);
+    }
+    .thinking-btn {
+      flex: 1;
+      padding: 6px 0;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-muted);
+      border: none;
+      background: transparent;
+      border-radius: 7px;
+      cursor: pointer;
+      transition: all 0.15s;
+      text-align: center;
+    }
+    .thinking-btn.active {
+      background: var(--bg-surface);
+      color: var(--accent);
+      font-weight: 650;
+      box-shadow: var(--shadow-sm);
+    }
+
+    /* Model Item Rows */
+    .model-item {
+      padding: 11px 12px;
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      margin-bottom: 3px;
+      transition: background 0.15s;
+    }
+    .model-item:active { background: var(--bg-surface); }
+    .model-item.active {
+      background: var(--accent-soft);
+    }
+    .model-title { font-size: 14px; font-weight: 600; }
+    .model-desc { font-size: 11.5px; color: var(--text-muted); margin-top: 1px; }
+
+    /* Plus Sheet Action Grid */
+    .action-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+    }
+    .action-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 14px;
+      padding: 14px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .action-card:active { background: var(--bg-hover); }
+    .action-icon {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      background: var(--bg);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--accent);
+    }
+    .action-title { font-size: 13.5px; font-weight: 600; color: var(--text); }
+    .action-desc { font-size: 11px; color: var(--text-muted); }
+
+    /* Drawer */
+    .drawer {
+      position: absolute;
+      top: 0;
+      left: 0;
+      bottom: 0;
+      width: 80%;
+      max-width: 310px;
+      background: var(--bg-surface);
+      border-right: 1px solid var(--border);
+      z-index: 120;
+      transform: translateX(-105%);
+      transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      display: flex;
+      flex-direction: column;
+      padding-top: max(38px, env(safe-area-inset-top, 24px));
+    }
+    .drawer.show { transform: translateX(0); }
+    .drawer-top {
+      padding: 14px 16px 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .drawer-logo {
+      font-size: 17px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .new-chat-btn {
+      background: var(--accent);
+      color: #FFF;
+      border: none;
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 12.5px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .drawer-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px 10px;
+    }
+    .project-header {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text-dim);
+      padding: 6px 8px;
+    }
+    .session-link {
+      padding: 9px 10px;
+      border-radius: 8px;
+      font-size: 13.5px;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      margin-bottom: 2px;
+    }
+    .session-link:active { background: var(--bg-hover); }
+    .session-link.active {
+      background: var(--bg);
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .drawer-bottom {
+      padding: 12px 16px;
+      border-top: 1px solid var(--border-subtle);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--bg-surface);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Demo Control Bar -->
+  <div class="demo-bar">
+    <div style="display:flex; align-items:center; gap:8px;">
+      <span style="font-weight:700; color:var(--accent);">omp-web</span>
+      <span>移动端方案 v3 (极度克制布局)</span>
+    </div>
+    <div style="display:flex; align-items:center; gap:8px;">
+      <button class="demo-btn active" id="btnPhone" onclick="setDevice('phone')">📱 手机尺寸</button>
+      <button class="demo-btn" id="btnFluid" onclick="setDevice('fluid')">📟 响应式视口</button>
+      <button class="demo-btn" id="btnTheme" onclick="toggleDark()">🌗 明/暗主题</button>
+      <button class="demo-btn" id="btnAgentToggle" onclick="toggleAgent()">⚡ 切换 Agent 运行</button>
+    </div>
+  </div>
+
+  <!-- Device Frame -->
+  <div class="device" id="device">
+    <div class="island"></div>
+
+    <div class="app">
+      <!-- 1. Header -->
+      <header class="header">
+        <button class="nav-btn" onclick="openDrawer()" title="侧边栏">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/></svg>
+        </button>
+
+        <div class="header-center" onclick="openSheet('moreSheet')">
+          <div class="header-title">
+            <span class="status-dot" id="statusDot"></span>
+            <span>移动端 UI 体验全面优化</span>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+          </div>
+          <div class="header-sub">ompweb · main</div>
+        </div>
+
+        <button class="nav-btn" onclick="openSheet('plusSheet')" title="快捷功能">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        </button>
+      </header>
+
+      <!-- 2. Message Feed -->
+      <main class="feed" id="feed">
+        <!-- User Msg -->
+        <div class="msg-user">
+          <div class="user-card">
+            底部还是有点拥挤，模型和思考强度都放到模型抽屉里（思考强度放上方），其他功能收到加号抽屉里。
+          </div>
+          <span style="font-size:10px; color:var(--text-dim); margin-top:3px; padding-right:4px;">14:32</span>
+        </div>
+
+        <!-- Assistant Msg -->
+        <div class="msg-ai">
+          <div class="ai-text">
+            <p>明白！已按您的要求彻底重构底部空间，达到极致清爽：</p>
+            <p>1. <strong>底部输入栏只留 3 项</strong>：<code>[+] 抽屉</code>、<code>[模型 (思考强度) ▾]</code>、<code>[发送]</code>。<br/>
+            2. <strong>模型抽屉一体化</strong>：上方为<strong>思考强度</strong>分段器，下方为<strong>模型列表</strong>。<br/>
+            3. <strong>加号抽屉内聚</strong>：附件、Fast 模式、Advisor、压缩、终端均收纳于 <code>+</code> 抽屉中。</p>
+          </div>
+
+          <!-- Minimal Tool Chip -->
+          <div class="tool-chip" onclick="openSheet('agentSheet')">
+            <span class="tool-chip-dot"></span>
+            <span>↳ 正在调用 update_composer_layout</span>
+          </div>
+
+          <div class="ai-text">
+            <p>请点击下方的 <code>[+]</code> 和 <code>[Claude 3.5 Sonnet]</code> 胶囊体验全新抽屉！</p>
+          </div>
+        </div>
+      </main>
+
+      <!-- 3. Live Agent Status Line -->
+      <div class="agent-status-bar" id="agentBar">
+        <div class="agent-pill" onclick="openSheet('agentSheet')">
+          <div class="agent-pill-left">
+            <span class="status-dot"></span>
+            <span class="agent-pill-text">Scout 正在重构抽屉组件...</span>
+          </div>
+          <span class="agent-pill-count">2/4 任务 ›</span>
+        </div>
+      </div>
+
+      <!-- 4. Ultra-clean Composer (Only 3 Items) -->
+      <footer class="composer">
+        <div class="composer-card">
+          <textarea
+            class="composer-input"
+            placeholder="输入消息或指令..."
+            rows="1"
+            id="chatInput"
+            oninput="grow(this)"
+          ></textarea>
+
+          <div class="composer-bottom">
+            <div class="composer-actions-left">
+              <!-- Plus Button (Opens Action Drawer) -->
+              <button class="plus-circle-btn" onclick="openSheet('plusSheet')" title="快捷功能与附件">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              </button>
+
+              <!-- Unified Model Pill (Opens Model & Thinking Drawer) -->
+              <button class="model-chip" onclick="openSheet('modelSheet')" title="切换模型与思考强度">
+                <span id="labelModel">Claude 3.5 Sonnet</span>
+                <span class="model-chip-tag" id="labelThinking">auto</span>
+                <span style="font-size:9px;opacity:0.6;">▾</span>
+              </button>
+            </div>
+
+            <!-- Send Button -->
+            <button class="send-circle" onclick="sendMessage()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+            </button>
+          </div>
+        </div>
+      </footer>
+
+      <!-- Backdrop Overlay -->
+      <div class="overlay" id="overlay" onclick="closeAll()"></div>
+
+      <!-- 5. Unified Model & Thinking Bottom Sheet -->
+      <div class="sheet" id="modelSheet">
+        <div class="sheet-handle-wrap"><div class="sheet-handle"></div></div>
+        <div class="sheet-top">
+          <div class="sheet-heading">模型与思考强度</div>
+          <button class="sheet-close" onclick="closeAll()">✕</button>
+        </div>
+        <div class="sheet-content">
+          <!-- Top Section: Thinking Intensity -->
+          <div class="thinking-section">
+            <div class="section-label">
+              <span>思考强度 (Reasoning Effort)</span>
+              <span style="color:var(--accent);font-family:var(--font-mono);" id="currentThinkingText">auto</span>
+            </div>
+            <div class="thinking-segments">
+              <button class="thinking-btn active" onclick="setThinking('auto', this)">Auto</button>
+              <button class="thinking-btn" onclick="setThinking('high', this)">High</button>
+              <button class="thinking-btn" onclick="setThinking('medium', this)">Medium</button>
+              <button class="thinking-btn" onclick="setThinking('low', this)">Low</button>
+              <button class="thinking-btn" onclick="setThinking('none', this)">None</button>
+            </div>
+          </div>
+
+          <!-- Bottom Section: Model List -->
+          <div class="section-label">
+            <span>选择基座模型 (Models)</span>
+          </div>
+          <div class="model-item active" onclick="pickModel('Claude 3.5 Sonnet')">
+            <div>
+              <div class="model-title">Claude 3.5 Sonnet</div>
+              <div class="model-desc">代码与复杂逻辑推理首选</div>
+            </div>
+            <span style="color:var(--accent);font-weight:bold;">✓</span>
+          </div>
+          <div class="model-item" onclick="pickModel('Claude 3.5 Haiku')">
+            <div>
+              <div class="model-title">Claude 3.5 Haiku</div>
+              <div class="model-desc">极速响应与简单问答</div>
+            </div>
+          </div>
+          <div class="model-item" onclick="pickModel('GPT-4o')">
+            <div>
+              <div class="model-title">GPT-4o</div>
+              <div class="model-desc">OpenAI 多模态与通用问答</div>
+            </div>
+          </div>
+          <div class="model-item" onclick="pickModel('DeepSeek-R1')">
+            <div>
+              <div class="model-title">DeepSeek-R1</div>
+              <div class="model-desc">开源深度思考推理大模型</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 6. Plus (+) Actions Bottom Sheet -->
+      <div class="sheet" id="plusSheet">
+        <div class="sheet-handle-wrap"><div class="sheet-handle"></div></div>
+        <div class="sheet-top">
+          <div class="sheet-heading">快捷功能与工具</div>
+          <button class="sheet-close" onclick="closeAll()">✕</button>
+        </div>
+        <div class="sheet-content">
+          <div class="action-grid">
+            <div class="action-card" onclick="alert('触发文件与图片选择器'); closeAll();">
+              <div class="action-icon">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+              </div>
+              <div>
+                <div class="action-title">添加附件/图片</div>
+                <div class="action-desc">上传文件或截图作为参考</div>
+              </div>
+            </div>
+
+            <div class="action-card" onclick="toggleFastMode();">
+              <div class="action-icon">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+              </div>
+              <div>
+                <div class="action-title" id="fastTitle">⚡ Fast 模式: 关</div>
+                <div class="action-desc">更快的推理与输出速度</div>
+              </div>
+            </div>
+
+            <div class="action-card" onclick="alert('顾问模型将在后台审查生成结果'); closeAll();">
+              <div class="action-icon">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+              </div>
+              <div>
+                <div class="action-title">Advisor 顾问审查</div>
+                <div class="action-desc">让高智力模型监督执行</div>
+              </div>
+            </div>
+
+            <div class="action-card" onclick="alert('已发起上下文摘要压缩'); closeAll();">
+              <div class="action-icon">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+              </div>
+              <div>
+                <div class="action-title">压缩上下文</div>
+                <div class="action-desc">缩减 Token 占用释放空间</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 7. Agent Bottom Sheet -->
+      <div class="sheet" id="agentSheet">
+        <div class="sheet-handle-wrap"><div class="sheet-handle"></div></div>
+        <div class="sheet-top">
+          <div class="sheet-heading">Agent 任务进度</div>
+          <button class="sheet-close" onclick="closeAll()">✕</button>
+        </div>
+
+        <div class="sheet-content">
+          <div class="todo-row done">
+            <span class="check-circle completed"></span>
+            <span>调研 Claude / ChatGPT 移动端极简设计</span>
+          </div>
+          <div class="todo-row done">
+            <span class="check-circle completed"></span>
+            <span>梳理 ompweb 核心视觉噪点与层级</span>
+          </div>
+          <div class="todo-row">
+            <span class="check-circle"></span>
+            <span style="font-weight:600;">底部栏克制化：仅保留 [+], 模型, 发送</span>
+          </div>
+          <div class="todo-row">
+            <span class="check-circle" style="border-color:var(--text-dim);"></span>
+            <span>实施落地到 Next.js 正式组件</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 8. More Options Sheet -->
+      <div class="sheet" id="moreSheet">
+        <div class="sheet-handle-wrap"><div class="sheet-handle"></div></div>
+        <div class="sheet-top">
+          <div class="sheet-heading">会话选项</div>
+          <button class="sheet-close" onclick="closeAll()">✕</button>
+        </div>
+        <div class="sheet-content">
+          <div class="model-item" onclick="alert('查看分支导航')">
+            <span>🌿 切换历史分支 (3 分支)</span>
+            <span style="color:var(--text-dim);">›</span>
+          </div>
+          <div class="model-item" onclick="alert('已重新提炼标题')">
+            <span>✨ 重新生成会话标题</span>
+            <span style="color:var(--text-dim);">›</span>
+          </div>
+          <div class="model-item" onclick="alert('消耗统计: 14.8k tokens')">
+            <span>📊 会话用量与统计 (14.8k tokens)</span>
+            <span style="color:var(--text-dim);">›</span>
+          </div>
+          <div class="model-item" onclick="toggleDark(); closeAll();">
+            <span>🌗 切换明暗主题</span>
+            <span style="color:var(--text-dim);">›</span>
+          </div>
+          <div class="model-item" style="color:var(--accent);" onclick="if(confirm('确认删除？')) alert('已删除');">
+            <span>🗑️ 删除当前会话</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 9. Sidebar Drawer -->
+      <div class="drawer" id="drawer">
+        <div class="drawer-top">
+          <div class="drawer-logo">
+            <span style="color:var(--accent);">●</span>
+            <span>omp-web</span>
+          </div>
+          <button class="new-chat-btn" onclick="alert('已创建新会话'); closeAll();">+ 新建</button>
+        </div>
+
+        <div class="drawer-list">
+          <div class="project-header">ompweb (当前项目 · main)</div>
+          <div class="session-link active">
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">移动端 UI 体验全面优化</span>
+            <span style="font-size:10.5px;color:var(--text-dim);">刚刚</span>
+          </div>
+          <div class="session-link">
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">feat: git worktree 管理接入</span>
+            <span style="font-size:10.5px;color:var(--text-dim);">2天前</span>
+          </div>
+          <div class="session-link">
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">fix: visualViewport 键盘适配</span>
+            <span style="font-size:10.5px;color:var(--text-dim);">8月24日</span>
+          </div>
+        </div>
+
+        <div class="drawer-bottom">
+          <span style="font-size:13px;color:var(--text-muted);cursor:pointer;" onclick="alert('打开应用设置')">⚙️ 设置</span>
+          <span style="font-size:11px;color:var(--text-dim);font-family:var(--font-mono);">v0.3.5</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+    let isDark = false;
+    let agentActive = true;
+    let fastEnabled = false;
+
+    function setDevice(mode) {
+      const d = document.getElementById("device");
+      const b1 = document.getElementById("btnPhone");
+      const b2 = document.getElementById("btnFluid");
+      b1.classList.toggle("active", mode === "phone");
+      b2.classList.toggle("active", mode === "fluid");
+      d.classList.toggle("responsive-mode", mode === "fluid");
+    }
+
+    function toggleDark() {
+      isDark = !isDark;
+      document.documentElement.classList.toggle("dark", isDark);
+    }
+
+    function toggleAgent() {
+      agentActive = !agentActive;
+      document.getElementById("agentBar").style.display = agentActive ? "block" : "none";
+      document.getElementById("statusDot").style.display = agentActive ? "block" : "none";
+    }
+
+    function grow(el) {
+      el.style.height = "auto";
+      el.style.height = Math.min(el.scrollHeight, 120) + "px";
+    }
+
+    const overlay = document.getElementById("overlay");
+    const drawer = document.getElementById("drawer");
+
+    function openDrawer() {
+      closeAll();
+      overlay.classList.add("show");
+      drawer.classList.add("show");
+    }
+
+    function openSheet(id) {
+      closeAll();
+      overlay.classList.add("show");
+      document.getElementById(id).classList.add("show");
+    }
+
+    function closeAll() {
+      overlay.classList.remove("show");
+      drawer.classList.remove("show");
+      document.querySelectorAll(".sheet").forEach(s => s.classList.remove("show"));
+    }
+
+    function setThinking(val, btn) {
+      document.querySelectorAll(".thinking-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      document.getElementById("currentThinkingText").innerText = val;
+      document.getElementById("labelThinking").innerText = val;
+    }
+
+    function pickModel(name) {
+      document.getElementById("labelModel").innerText = name;
+      closeAll();
+    }
+
+    function toggleFastMode() {
+      fastEnabled = !fastEnabled;
+      document.getElementById("fastTitle").innerText = "⚡ Fast 模式: " + (fastEnabled ? "开" : "关");
+      alert("Fast 模式已" + (fastEnabled ? "开启" : "关闭"));
+      closeAll();
+    }
+
+    function sendMessage() {
+      const input = document.getElementById("chatInput");
+      const val = input.value.trim();
+      if (!val) return;
+
+      const feed = document.getElementById("feed");
+      const userMsg = document.createElement("div");
+      userMsg.className = "msg-user";
+      userMsg.innerHTML = `
+        <div class="user-card">${val}</div>
+        <span style="font-size:10px; color:var(--text-dim); margin-top:3px; padding-right:4px;">刚刚</span>
+      `;
+      feed.appendChild(userMsg);
+      input.value = "";
+      input.style.height = "36px";
+      feed.scrollTop = feed.scrollHeight;
+    }
+  </script>
+</body>
+</html>

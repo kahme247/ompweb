@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import { useI18n } from "@/lib/i18n";
 import { Bot, Cable, Cpu, KeyRound, RefreshCw, Settings2, ShieldCheck, Sparkles } from "lucide-react";
 import type { ComponentType, CSSProperties } from "react";
@@ -54,6 +55,25 @@ export function SettingsTabs({
 }) {
   const { t } = useI18n();
   const currentActive = getNormalizedActive(active);
+
+  const navRef = useRef<HTMLElement>(null);
+  const [canScrollLeft, setCanScrollLeft] = useState(false);
+  const [canScrollRight, setCanScrollRight] = useState(false);
+
+  useEffect(() => {
+    if (layout === "vertical") return;
+    const el = navRef.current;
+    if (!el) return;
+    const update = () => {
+      setCanScrollLeft(el.scrollLeft > 2);
+      setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 2);
+    };
+    update();
+    el.addEventListener("scroll", update, { passive: true });
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => { el.removeEventListener("scroll", update); ro.disconnect(); };
+  }, [layout]);
 
   const onKeyDown = (event: React.KeyboardEvent, index: number) => {
     const enabled = SETTINGS_CATEGORIES.filter((tab) => !(tab.needsWorkspace && !workspaceReady));
@@ -145,7 +165,9 @@ export function SettingsTabs({
   }
 
   return (
-    <nav aria-label={t("settingsTabs.ariaLabel")} role="tablist" style={{ display: "flex", gap: 3, padding: "7px 12px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)", flexShrink: 0, overflowX: "auto" }}>
+    <nav ref={navRef} aria-label={t("settingsTabs.ariaLabel")} role="tablist" style={{ position: "relative", display: "flex", gap: 3, padding: "7px 12px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)", flexShrink: 0, overflowX: "auto" }}>
+      <div aria-hidden="true" style={{ position: "absolute", top: 0, bottom: 0, left: 0, width: 24, pointerEvents: "none", zIndex: 1, opacity: canScrollLeft ? 1 : 0, transition: "opacity var(--dur-fast) var(--ease-out-warm)", background: "linear-gradient(to right, var(--bg-panel), transparent)" }} />
+      <div aria-hidden="true" style={{ position: "absolute", top: 0, bottom: 0, right: 0, width: 24, pointerEvents: "none", zIndex: 1, opacity: canScrollRight ? 1 : 0, transition: "opacity var(--dur-fast) var(--ease-out-warm)", background: "linear-gradient(to left, var(--bg-panel), transparent)" }} />
       {SETTINGS_CATEGORIES.map(({ id, label, description, Icon, needsWorkspace }, index) => {
         const labelKey = `settingsTabs.${id}.label`;
         const descKey = `settingsTabs.${id}.description`;

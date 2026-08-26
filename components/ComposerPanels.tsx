@@ -4,8 +4,9 @@ import { useState, type ReactNode } from "react";
 import {
   Activity, Bot, ChevronDown,
   CircleDollarSign, Clock3, Cpu, Gauge, GitBranch, Network, RefreshCw,
-  UserRound, Wrench, type LucideIcon,
+  UserRound, Wrench, X, type LucideIcon,
 } from "lucide-react";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/lib/i18n";
 import type { SubagentInfo } from "@/hooks/useAgentSession";
 import type { TodoPhase } from "@/lib/pi-types";
@@ -244,7 +245,178 @@ export function ComposerPanels({ todoPhases, subagents, onSelectSubagent, defaul
   /** Initial expansion of both panels (default: collapsed). */
   defaultExpanded?: boolean;
 }) {
+  const isMobile = useIsMobile();
+  const { t } = useI18n();
+  const [agentSheetOpen, setAgentSheetOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<"todo" | "subagents">(() => (
+    todoPhases.length > 0 ? "todo" : "subagents"
+  ));
+
   if (todoPhases.length === 0 && subagents.length === 0) return null;
+
+  if (isMobile) {
+    const tasks = todoPhases.flatMap((phase) => phase.tasks);
+    const doneTasks = tasks.filter((t) => t.status === "completed").length;
+    const activeSubagent = subagents.find((s) => s.status === "started" && s.source !== "history");
+    const inProgressTask = tasks.find((t) => t.status === "in_progress");
+
+    const statusText = activeSubagent
+      ? `${activeSubagent.agent}: ${activeSubagent.task ?? activeSubagent.progress?.lastIntent ?? activeSubagent.description ?? t("chatWindow.subagentState.started")}`
+      : inProgressTask
+        ? inProgressTask.content
+        : tasks.length > 0
+          ? `${doneTasks}/${tasks.length} 任务已处理`
+          : `${subagents.length} 个子代理`;
+
+    const progressBadge = tasks.length > 0
+      ? `${doneTasks}/${tasks.length}`
+      : `${subagents.length}`;
+
+    return (
+      <>
+        <div
+          className="mobile-agent-capsule"
+          onClick={() => setAgentSheetOpen(true)}
+          role="button"
+          tabIndex={0}
+          aria-label="查看任务与子代理看板"
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 7, minWidth: 0, overflow: "hidden", flex: 1 }}>
+            <span
+              style={{
+                width: 7,
+                height: 7,
+                borderRadius: "50%",
+                background: activeSubagent ? "var(--accent)" : "var(--status-success)",
+                flexShrink: 0,
+              }}
+            />
+            <span style={{ fontSize: 12, fontWeight: 550, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {statusText}
+            </span>
+          </div>
+          <span style={{ fontSize: 11, color: "var(--text-muted)", flexShrink: 0, display: "flex", alignItems: "center", gap: 3, fontFamily: "var(--font-mono)" }}>
+            {progressBadge} ›
+          </span>
+        </div>
+
+        {agentSheetOpen && (
+          <>
+            <div
+              className="mobile-sheet-overlay"
+              onClick={() => setAgentSheetOpen(false)}
+              aria-hidden="true"
+            />
+            <div className="mobile-sheet-container" role="dialog" aria-modal="true" aria-label="Agent 任务看板">
+              <div className="mobile-sheet-handle-wrap">
+                <div className="mobile-sheet-handle" />
+              </div>
+              <div className="mobile-sheet-header">
+                <div style={{ display: "flex", gap: 8 }}>
+                  {todoPhases.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab("todo")}
+                      style={{
+                        background: activeTab === "todo" ? "var(--bg-hover)" : "none",
+                        border: "none",
+                        borderRadius: 8,
+                        padding: "5px 10px",
+                        fontSize: 13,
+                        fontWeight: activeTab === "todo" ? 650 : 500,
+                        color: activeTab === "todo" ? "var(--accent)" : "var(--text-muted)",
+                        cursor: "pointer",
+                      }}
+                    >
+                      {t("chatWindow.todoList") || "任务清单"} ({doneTasks}/{tasks.length})
+                    </button>
+                  )}
+                  {subagents.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab("subagents")}
+                      style={{
+                        background: activeTab === "subagents" ? "var(--bg-hover)" : "none",
+                        border: "none",
+                        borderRadius: 8,
+                        padding: "5px 10px",
+                        fontSize: 13,
+                        fontWeight: activeTab === "subagents" ? 650 : 500,
+                        color: activeTab === "subagents" ? "var(--accent)" : "var(--text-muted)",
+                        cursor: "pointer",
+                      }}
+                    >
+                      {t("chatWindow.subagentsPanel") || "子代理矩阵"} ({subagents.length})
+                    </button>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  className="mobile-sheet-close"
+                  onClick={() => setAgentSheetOpen(false)}
+                  aria-label="Close"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              <div className="mobile-sheet-body">
+                {activeTab === "todo" && (
+                  <TodoList phases={todoPhases} collapsible={false} defaultExpanded />
+                )}
+                {activeTab === "subagents" && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {subagents.map((subagent) => {
+                      const stateLabel = t(SUBAGENT_STATE_KEYS[subagent.status]);
+                      const label = `${subagent.agent} · ${stateLabel} · ${subagent.task ?? subagent.description ?? ""}`.replace(/\s+$/, "");
+                      const live = subagent.source !== "history";
+                      return (
+                        <button
+                          key={subagent.id}
+                          type="button"
+                          onClick={() => {
+                            setAgentSheetOpen(false);
+                            onSelectSubagent(subagent);
+                          }}
+                          style={{
+                            width: "100%",
+                            display: "flex",
+                            flexDirection: "column",
+                            alignItems: "flex-start",
+                            gap: 4,
+                            padding: "10px 12px",
+                            border: "1px solid var(--border)",
+                            borderRadius: 10,
+                            background: "var(--bg-panel)",
+                            textAlign: "left",
+                            cursor: "pointer",
+                          }}
+                        >
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, width: "100%" }}>
+                            <SubagentStatusBadge subagent={subagent} />
+                            <span style={{ fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 12, color: "var(--accent)" }}>
+                              {subagent.agent}
+                            </span>
+                            <span style={{ fontSize: 11, color: live && subagent.status === "started" ? "var(--accent)" : "var(--text-muted)", marginLeft: "auto", textTransform: "capitalize" }}>
+                              {stateLabel}
+                            </span>
+                          </div>
+                          <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.4 }}>
+                            {subagent.task ?? subagent.description ?? label}
+                          </div>
+                          <SubagentActivityLine subagent={subagent} />
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          </>
+        )}
+      </>
+    );
+  }
+
   return (
     <div style={{ display: "grid", gap: 6, marginBottom: 8 }}>
       <TodoList phases={todoPhases} collapsible defaultExpanded={defaultExpanded} />

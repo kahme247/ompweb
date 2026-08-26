@@ -330,6 +330,7 @@ pre, code {
 .markdown-body table {
   border-collapse: separate;
   border-spacing: 0;
+  width: max-content;
   min-width: 100%;
   font-size: 13px;
 }
@@ -1774,8 +1775,8 @@ html.dark .dropdown-surface :is(select, option) {
 }
 @media (max-width: 640px) {
   .shell-toolbar-btn {
-    width: 40px;
-    height: 40px;
+    width: 44px;
+    height: 44px;
   }
   .shell-toolbar-divider {
     margin: 0 4px;
@@ -2101,6 +2102,7 @@ html.dark .dropdown-surface :is(select, option) {
     bottom: 0;
     width: 280px;
     max-width: 85vw;
+    padding-top: env(safe-area-inset-top);
     transition: transform var(--dur-slow) var(--ease-out-warm), box-shadow var(--dur-slow) var(--ease-out-warm);
   }
   .sidebar-container.sidebar-open {
@@ -2139,4 +2141,321 @@ html.dark .dropdown-surface :is(select, option) {
     flex-wrap: wrap;
     padding-bottom: max(10px, env(safe-area-inset-bottom)) !important;
   }
+  /* Touch targets: keep visuals, expand hit area (24px → ~38px). */
+  .session-item-icon-button,
+  .sidebar-project-action,
+  .sidebar-project-toggle,
+  .sidebar-icon-button {
+    position: relative;
+  }
+  .session-item-icon-button::after,
+  .sidebar-project-action::after,
+  .sidebar-project-toggle::after,
+  .sidebar-icon-button::after {
+    content: "";
+    position: absolute;
+    inset: -7px;
+  }
 }
+
+/* Mobile-first bottom sheet and minimal composer tokens */
+@media (max-width: 640px) {
+  .mobile-sheet-overlay {
+    position: fixed;
+    inset: 0;
+    background: color-mix(in srgb, var(--overlay, rgba(0, 0, 0, 0.45)) 80%, transparent);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    z-index: 600;
+    animation: fadeIn var(--dur-fast) var(--ease-out-warm);
+  }
+  .mobile-sheet-container {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: var(--bg);
+    border-top: 1px solid var(--border);
+    border-radius: 20px 20px 0 0;
+    box-shadow: var(--shadow-modal);
+    z-index: 610;
+    max-height: 85dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
+    animation: slideUp var(--dur-med) var(--ease-out-warm);
+  }
+  .mobile-sheet-handle-wrap {
+    padding: 10px 0 4px;
+    display: flex;
+    justify-content: center;
+    cursor: grab;
+    flex-shrink: 0;
+  }
+  .mobile-sheet-handle {
+    width: 36px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--border);
+  }
+  .mobile-sheet-header {
+    padding: 6px 18px 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+    flex-shrink: 0;
+  }
+  .mobile-sheet-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .mobile-sheet-close {
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    border: none;
+    background: var(--bg-hover);
+    color: var(--text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    line-height: 1;
+  }
+  .mobile-sheet-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    overscroll-behavior: contain;
+  }
+  .mobile-composer-bottom {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    gap: 8px;
+    margin-top: 4px;
+  }
+  .mobile-plus-btn {
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    background: var(--bg-surface, var(--bg-panel));
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background var(--dur-fast) var(--ease-out-warm), transform var(--dur-fast) var(--ease-out-warm);
+  }
+  .mobile-plus-btn:active {
+    background: var(--bg-hover);
+    transform: scale(0.94);
+  }
+  .mobile-model-pill {
+    height: 30px;
+    max-width: calc(100vw - 120px);
+    padding: 0 10px;
+    border-radius: 15px;
+    background: var(--bg-surface, var(--bg-panel));
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 550;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    user-select: none;
+    overflow: hidden;
+    transition: background var(--dur-fast) var(--ease-out-warm);
+  }
+  .mobile-model-pill:active {
+    background: var(--bg-hover);
+  }
+  .mobile-model-pill-tag {
+    font-size: 10px;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-weight: 600;
+    text-transform: capitalize;
+    flex-shrink: 0;
+  }
+  .mobile-send-btn {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: var(--accent-strong);
+    color: var(--on-accent);
+    border: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: transform var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm);
+  }
+  .mobile-send-btn:active:not(:disabled) {
+    transform: scale(0.92);
+  }
+  .mobile-send-btn:disabled {
+    background: var(--bg-panel);
+    color: var(--text-dim);
+    cursor: not-allowed;
+  }
+  .mobile-action-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+  }
+  .mobile-action-card {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    cursor: pointer;
+    text-align: left;
+    transition: background var(--dur-fast) var(--ease-out-warm), border-color var(--dur-fast) var(--ease-out-warm);
+  }
+  .mobile-action-card:active {
+    background: var(--bg-hover);
+    border-color: var(--accent);
+  }
+  .mobile-action-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+  }
+  .mobile-action-card-icon {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    background: var(--bg);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--accent);
+  }
+  .mobile-action-card-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .mobile-action-card-desc {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .mobile-thinking-segments {
+    display: flex;
+    gap: 4px;
+    background: var(--bg);
+    padding: 3px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+  }
+  .mobile-thinking-btn {
+    flex: 1;
+    padding: 6px 0;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-muted);
+    border: none;
+    background: transparent;
+    border-radius: 7px;
+    cursor: pointer;
+    text-align: center;
+    transition: all var(--dur-fast) var(--ease-out-warm);
+    text-transform: capitalize;
+  }
+  .mobile-thinking-btn.active {
+    background: var(--bg-panel);
+    color: var(--accent);
+    font-weight: 650;
+    box-shadow: var(--shadow-sm);
+  }
+  .mobile-agent-capsule {
+    height: 30px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 15px;
+    padding: 0 12px;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    user-select: none;
+    box-shadow: var(--shadow-card);
+    animation: fadeIn var(--dur-fast) var(--ease-out-warm);
+  }
+  .mobile-agent-capsule:active {
+    background: var(--bg-hover);
+  }
+  /* Mobile Code Block & Line Numbers optimization */
+  .markdown-code-block {
+    margin: 4px 0;
+    border-radius: 8px;
+  }
+  .markdown-body span.linenumber,
+  span.linenumber {
+    min-width: 28px !important;
+    width: 28px !important;
+    padding-right: 4px !important;
+    font-size: 11px !important;
+  }
+  .activity-row {
+    margin: 3px 0;
+  }
+  .activity-row-trigger {
+    padding: 4px 8px;
+    font-size: 12px;
+  }
+}
+
+@keyframes slideUp {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+
+
+/* Chat column must never collapse below the sizes its UI needs. */
+.shell-main {
+  min-width: 0;
+}
+
+/* Tablet (641–1024): with all three columns open, prioritize the chat width. */
+@media (min-width: 641px) and (max-width: 1024px) {
+  .sidebar-container {
+    --sidebar-width: 220px;
+  }
+  .right-panel-container {
+    flex-shrink: 1;
+  }
+  .right-panel-container.right-panel-open {
+    width: min(42%, 440px);
+    min-width: 240px;
+  }
+  /* Inner content follows the shrunken container instead of its desktop fixed width. */
+  .right-panel-container > * {
+    width: 100%;
+    min-width: 0;
+  }
+  main.shell-main {
+    min-width: min(300px, 60vw);
+  }
+}
+
+/* watcher-check */

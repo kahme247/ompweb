@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, ListChecks, Search, Shrink, Sparkles, Target, Zap } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, ListChecks, Paperclip, Plus, Search, Shrink, Sparkles, Target, X, Zap } from "lucide-react";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
@@ -410,6 +410,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [modelDropdownRect, setModelDropdownRect] = useState<{ top: number; left: number; width: number } | null>(null);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [modelSearchQuery, setModelSearchQuery] = useState("");
+  const [mobileModelDrawerOpen, setMobileModelDrawerOpen] = useState(false);
+  const [mobilePlusDrawerOpen, setMobilePlusDrawerOpen] = useState(false);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
   ));
@@ -1459,7 +1461,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       style={{
         flexShrink: 0,
         background: "transparent",
-         padding: "0 16px calc(8px + env(safe-area-inset-bottom))",
+        padding: isMobile ? "0 10px max(8px, env(safe-area-inset-bottom))" : "0 16px calc(8px + env(safe-area-inset-bottom))",
       }}
     >
       {/* Hidden file input */}
@@ -2204,436 +2206,756 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           {/* Toolbar: attachment · advisor · model · settings · reasoning · fast · compact · send/queue/stop */}
 
           {/* Toolbar: attachment · model · settings · reasoning · fast · context ring · send/stop */}
-          <div style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 2,
-            marginTop: 8,
-            paddingTop: 8,
-            borderTop: "1px solid color-mix(in srgb, var(--border) 62%, transparent)",
-            flexWrap: isMobile ? "wrap" : "nowrap",
-          }}>
-            {/* Attachment */}
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              disabled={isStreaming}
-              title={t("chatInput.attachFile")}
-              aria-label={t("chatInput.attachFile")}
-              style={{
-                flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
-                width: 28, height: 28, padding: 0,
-                background: "none", border: "none",
-                borderRadius: 7,
-                color: (attachedImages.length || attachedTextFiles.length) ? "var(--accent)" : "var(--text-muted)",
-                cursor: isStreaming ? "not-allowed" : "pointer",
-                opacity: isStreaming ? 0.5 : 1,
-                transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
-              }}
-              onMouseEnter={(e) => {
-                if (isStreaming) return;
-                e.currentTarget.style.background = "var(--bg-hover)";
-                e.currentTarget.style.color = (attachedImages.length || attachedTextFiles.length) ? "var(--accent)" : "var(--text)";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = "none";
-                e.currentTarget.style.color = (attachedImages.length || attachedTextFiles.length) ? "var(--accent)" : "var(--text-muted)";
-              }}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                <polyline points="14 2 14 8 20 8" />
-              </svg>
-            </button>
+          {isMobile ? (
+            <div className="mobile-composer-bottom">
+              <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, flex: 1 }}>
+                {/* Mobile Plus button */}
+                <button
+                  type="button"
+                  className="mobile-plus-btn"
+                  onClick={() => setMobilePlusDrawerOpen(true)}
+                  aria-label={t("chatInput.attachFile") || "More actions"}
+                  title={t("chatInput.attachFile")}
+                >
+                  <Plus size={16} strokeWidth={2} />
+                </button>
 
-            {/* Advisor toggle — per-chat: gates the /advisor command and the
-                thunder indicator; active state follows this session only. */}
-            {onAdvisorChange && (
+                {/* Mobile Model & Thinking unified pill */}
+                {(modelOptions.length > 0 || currentName || modelError || showModelsLoading) && (
+                  <button
+                    type="button"
+                    className="mobile-model-pill"
+                    onClick={() => setMobileModelDrawerOpen(true)}
+                    title={t("chatInput.changeModel")}
+                    aria-label={t("chatInput.changeModel")}
+                  >
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "calc(100vw - 190px)" }}>
+                      {currentName ?? (modelOptions.length > 0 ? t("chatInput.selectModel") : t("chatInput.noModels"))}
+                    </span>
+                    <span className="mobile-model-pill-tag">
+                      {thinkingDisplayLabel}
+                    </span>
+                    <ChevronDown size={12} strokeWidth={1.8} style={{ opacity: 0.7, flexShrink: 0 }} />
+                  </button>
+                )}
+              </div>
+
+              {/* Primary action send / queue / stop circle button */}
+              {primaryActionQueuesMessage ? (
+                <button
+                  type="button"
+                  onClick={() => sendQueued("followup")}
+                  title={t("chatInput.queueMessage")}
+                  className="mobile-send-btn"
+                  aria-label={t("chatInput.queue")}
+                >
+                  <ListChecks size={15} strokeWidth={2.2} aria-hidden="true" />
+                </button>
+              ) : isStreaming ? (
+                <button
+                  type="button"
+                  onClick={isCompacting ? onAbortCompaction : onAbort}
+                  title={t("chatInput.stopAgent")}
+                  className="mobile-send-btn"
+                  aria-label={t("chatInput.stop")}
+                >
+                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+                    <rect x="1.5" y="1.5" width="7" height="7" rx="1.5" fill="currentColor" />
+                  </svg>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleSend}
+                  disabled={!value.trim() && !attachedImages.length && !attachedTextFiles.length}
+                  className="mobile-send-btn"
+                  title={t("chatInput.send")}
+                  aria-label={t("chatInput.send")}
+                >
+                  <ArrowUp size={16} strokeWidth={2.4} />
+                </button>
+              )}
+            </div>
+          ) : (
+            <div style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 2,
+              marginTop: 8,
+              paddingTop: 8,
+              borderTop: "1px solid color-mix(in srgb, var(--border) 62%, transparent)",
+              flexWrap: "nowrap",
+            }}>
+              {/* Attachment */}
               <button
-                type="button"
-                onClick={() => onAdvisorChange(!advisorEnabled)}
-                aria-pressed={advisorEnabled}
-                title={advisorEnabled
-                  ? t("chatInput.advisorDisableTitle", { model: advisorModel?.name ?? t("messageView.advisorLabel"), reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault") })
-                  : t("chatInput.advisorEnableTitle")}
-                aria-label={advisorEnabled
-                  ? t("chatInput.advisorDisableTitle", { model: advisorModel?.name ?? t("messageView.advisorLabel"), reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault") })
-                  : t("chatInput.advisorEnableTitle")}
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isStreaming}
+                title={t("chatInput.attachFile")}
+                aria-label={t("chatInput.attachFile")}
                 style={{
                   flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
                   width: 28, height: 28, padding: 0,
                   background: "none", border: "none",
                   borderRadius: 7,
-                  color: advisorEnabled ? "var(--accent)" : "var(--text-muted)",
-                  cursor: "pointer",
+                  color: (attachedImages.length || attachedTextFiles.length) ? "var(--accent)" : "var(--text-muted)",
+                  cursor: isStreaming ? "not-allowed" : "pointer",
+                  opacity: isStreaming ? 0.5 : 1,
                   transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
                 }}
-                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
+                onMouseEnter={(e) => {
+                  if (isStreaming) return;
+                  e.currentTarget.style.background = "var(--bg-hover)";
+                  e.currentTarget.style.color = (attachedImages.length || attachedTextFiles.length) ? "var(--accent)" : "var(--text)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "none";
+                  e.currentTarget.style.color = (attachedImages.length || attachedTextFiles.length) ? "var(--accent)" : "var(--text-muted)";
+                }}
               >
-                <Sparkles size={14} strokeWidth={2} aria-hidden="true" />
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                  <polyline points="14 2 14 8 20 8" />
+                </svg>
               </button>
-            )}
 
-            {/* Model selector — compact text button with dropdown */}
-            {(modelOptions.length > 0 || currentName || modelError || showModelsLoading) && onModelChange && (
-              <div ref={dropdownRef} style={{ position: "relative", minWidth: 0 }}>
+              {/* Advisor toggle */}
+              {onAdvisorChange && (
                 <button
-                  onClick={(e) => {
-                    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                    setModelDropdownRect({ top: rect.top, left: rect.left, width: rect.width });
-                    setModelDropdownOpen((v) => !v);
+                  type="button"
+                  onClick={() => onAdvisorChange(!advisorEnabled)}
+                  aria-pressed={advisorEnabled}
+                  title={advisorEnabled
+                    ? t("chatInput.advisorDisableTitle", { model: advisorModel?.name ?? t("messageView.advisorLabel"), reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault") })
+                    : t("chatInput.advisorEnableTitle")}
+                  aria-label={advisorEnabled
+                    ? t("chatInput.advisorDisableTitle", { model: advisorModel?.name ?? t("messageView.advisorLabel"), reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault") })
+                    : t("chatInput.advisorEnableTitle")}
+                  style={{
+                    flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
+                    width: 28, height: 28, padding: 0,
+                    background: "none", border: "none",
+                    borderRadius: 7,
+                    color: advisorEnabled ? "var(--accent)" : "var(--text-muted)",
+                    cursor: "pointer",
+                    transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
                   }}
-                  disabled={modelSelectorDisabled}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
+                >
+                  <Sparkles size={14} strokeWidth={2} aria-hidden="true" />
+                </button>
+              )}
+
+              {/* Model selector */}
+              {(modelOptions.length > 0 || currentName || modelError || showModelsLoading) && onModelChange && (
+                <div ref={dropdownRef} style={{ position: "relative", minWidth: 0 }}>
+                  <button
+                    onClick={(e) => {
+                      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                      setModelDropdownRect({ top: rect.top, left: rect.left, width: rect.width });
+                      setModelDropdownOpen((v) => !v);
+                    }}
+                    disabled={modelSelectorDisabled}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 5,
+                      height: 28,
+                      maxWidth: 190,
+                      padding: "0 8px",
+                      overflow: "hidden",
+                      background: modelDropdownOpen ? "var(--bg-hover)" : "none",
+                      border: "none",
+                      borderRadius: 7,
+                      color: "var(--text-muted)",
+                      cursor: modelSelectorDisabled ? "not-allowed" : "pointer",
+                      fontSize: 12,
+                      opacity: modelSelectorDisabled ? 0.5 : 1,
+                      transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
+                    }}
+                    onMouseEnter={(e) => {
+                      if (isStreaming) return;
+                      e.currentTarget.style.background = "var(--bg-hover)";
+                      e.currentTarget.style.color = "var(--text)";
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = modelDropdownOpen ? "var(--bg-hover)" : "none";
+                      e.currentTarget.style.color = "var(--text-muted)";
+                    }}
+                    title={modelOptions.length > 0
+                      ? t("chatInput.changeModel")
+                      : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noAvailableModels")}
+                    aria-expanded={modelDropdownOpen}
+                    aria-haspopup="dialog"
+                  >
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                      <rect x="4" y="4" width="16" height="16" rx="2" />
+                      <rect x="9" y="9" width="6" height="6" />
+                      <line x1="9" y1="1" x2="9" y2="4" /><line x1="15" y1="1" x2="15" y2="4" />
+                      <line x1="9" y1="20" x2="9" y2="23" /><line x1="15" y1="20" x2="15" y2="23" />
+                      <line x1="20" y1="9" x2="23" y2="9" /><line x1="20" y1="14" x2="23" y2="14" />
+                      <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
+                    </svg>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
+                      {currentName ?? (modelOptions.length > 0
+                        ? t("chatInput.selectModel")
+                        : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noModels"))}
+                    </span>
+                    <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7 }} aria-hidden="true" />
+                  </button>
+                  {modelDropdownOpen && modelDropdownRect && (() => {
+                    const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+                    const bottom = viewportHeight - modelDropdownRect.top + 6;
+                    const maxH = Math.max(120, Math.min(modelDropdownRect.top - 8, viewportHeight * 0.6));
+                    return (
+                      <div ref={modelDropdownPanelRef} className="picker-panel" style={{
+                        position: "fixed",
+                        bottom,
+                        left: modelDropdownRect.left, width: "max-content", minWidth: modelDropdownRect.width, maxWidth: "calc(100vw - 16px)",
+                        zIndex: 500,
+                        display: "flex", flexDirection: "column",
+                        maxHeight: maxH,
+                      }}>
+                        <div className="picker-panel-header">
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ color: "var(--text-muted)" }}>
+                            <rect x="4" y="4" width="16" height="16" rx="2" />
+                            <rect x="9" y="9" width="6" height="6" />
+                          </svg>
+                          <span className="picker-panel-title">{t("chatInput.modelsLabel")}</span>
+                          <span className="picker-panel-count">{modelOptions.length}</span>
+                        </div>
+                        <label className="picker-search">
+                          <Search size={13} strokeWidth={1.8} color="var(--text-dim)" aria-hidden="true" />
+                          <input
+                            ref={modelSearchInputRef}
+                            type="search"
+                            autoComplete="off"
+                            spellCheck={false}
+                            value={modelSearchQuery}
+                            onChange={(e) => setModelSearchQuery(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Escape") {
+                                e.preventDefault();
+                                setModelDropdownOpen(false);
+                              }
+                            }}
+                            placeholder={t("chatInput.searchModels")}
+                            aria-label={t("chatInput.searchModels")}
+                          />
+                        </label>
+                        <div className="picker-list">
+                          {modelsByProvider.length === 0 ? (
+                            <div style={{ padding: "9px 8px", color: "var(--text-dim)", fontSize: 12, whiteSpace: "nowrap" }}>
+                              {modelSearchQuery.trim() ? t("chatInput.noMatchingModels") : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noAvailableModels")}
+                            </div>
+                          ) : modelsByProvider.map((group) => (
+                            <div key={group.provider}>
+                              <div className="picker-group-label">{group.provider}</div>
+                              {group.options.map((opt) => {
+                                const isActive = opt.modelId === model?.modelId && opt.provider === model?.provider;
+                                return (
+                                  <button
+                                    className="picker-row"
+                                    data-active={isActive}
+                                    key={`${opt.provider}:${opt.modelId}`}
+                                    onClick={() => { setModelDropdownOpen(false); if (!isActive || isAutoModelSelection) onModelChange(opt.provider, opt.modelId); }}
+                                  >
+                                    <span className="picker-check">
+                                      {isActive && <svg width="11" height="11" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>}
+                                    </span>
+                                    <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{opt.name}</span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+
+              {/* Thinking selector */}
+              {onThinkingLevelChange && (
+                <div ref={thinkingDropdownRef} style={{ position: "relative" }}>
+                  <button
+                    onClick={() => setThinkingDropdownOpen((v) => !v)}
+                    disabled={isStreaming}
+                    title={t("chatInput.changeReasoningTitle", { level: thinkingDisplayLabel })}
+                    aria-label={`${t("chatInput.changeReasoning")}: ${thinkingDisplayLabel}`}
+                    aria-expanded={thinkingDropdownOpen}
+                    aria-haspopup="menu"
+                    style={{
+                      display: "flex", alignItems: "center", gap: 5,
+                      height: 28, padding: "0 8px", background: thinkingDropdownOpen ? "var(--bg-hover)" : "none",
+                      border: "none", borderRadius: 7, color: "var(--text-muted)", cursor: isStreaming ? "not-allowed" : "pointer",
+                      opacity: isStreaming ? 0.5 : 1, fontSize: 12,
+                      transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
+                    }}
+                    onMouseEnter={(e) => { if (!isStreaming) { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; } }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = thinkingDropdownOpen ? "var(--bg-hover)" : "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
+                  >
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true">
+                      <path d="M9.5 2A5.5 5.5 0 0 0 4 7.5c0 1.7.78 3.21 2 4.21V14a1 1 0 0 0 1 1h5a1 1 0 0 0 1-1v-2.29c1.22-1 2-2.51 2-4.21A5.5 5.5 0 0 0 9.5 2z" />
+                      <line x1="7" y1="18" x2="12" y2="18" /><line x1="8" y1="21" x2="11" y2="21" />
+                    </svg>
+                    <span style={{ whiteSpace: "nowrap", textTransform: "capitalize" }}>{thinkingDisplayLabel}</span>
+                    <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7, transform: thinkingDropdownOpen ? "rotate(180deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }} aria-hidden="true" />
+                  </button>
+                  {thinkingDropdownOpen && (
+                    <div
+                      className="picker-panel"
+                      role="menu"
+                      style={{
+                        position: "absolute", bottom: "calc(100% + 6px)", left: 0,
+                        zIndex: 100, width: 190, maxWidth: "calc(100vw - 32px)",
+                      }}
+                    >
+                      <div className="picker-panel-header">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ color: "var(--text-muted)" }}>
+                          <path d="M9.5 2A5.5 5.5 0 0 0 4 7.5c0 1.7.78 3.21 2 4.21V14a1 1 0 0 0 1 1h5a1 1 0 0 0 1-1v-2.29c1.22-1 2-2.51 2-4.21A5.5 5.5 0 0 0 9.5 2z" />
+                          <line x1="7" y1="18" x2="12" y2="18" />
+                        </svg>
+                        <span className="picker-panel-title">{t("chatInput.reasoningLabel")}</span>
+                        <span className="picker-panel-count">{thinkingLevelOptions.length}</span>
+                      </div>
+                      <div className="picker-thinking-cards">
+                        {thinkingLevelOptions.map((lvl) => {
+                          const isActive = (thinkingLevel ?? "auto") === lvl;
+                          const mappedVal = (lvl !== "auto" && thinkingLevelMap) ? thinkingLevelMap[lvl] : undefined;
+                          const displayLabel = (mappedVal != null && mappedVal !== lvl) ? mappedVal : lvl;
+                          return (
+                            <button
+                              className="picker-thinking-card"
+                              data-active={isActive}
+                              role="menuitemradio"
+                              aria-checked={isActive}
+                              key={lvl}
+                              onClick={() => { setThinkingDropdownOpen(false); if (!isActive && !isStreaming) onThinkingLevelChange(lvl); }}
+                            >
+                              <span className="picker-check">
+                                {isActive && <svg width="11" height="11" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>}
+                              </span>
+                              <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textTransform: "capitalize" }}>{displayLabel}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <div className="picker-panel-footer">
+                        <span>{t("chatInput.appliesNextPrompt")}</span>
+                        <span style={{ fontWeight: 600, color: "var(--text-muted)", textTransform: "capitalize" }}>{thinkingDisplayLabel}</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Fast toggle */}
+              {fastModeSupported && onFastModeChange && (
+                <button
+                  type="button"
+                  onClick={() => { if (isStreaming) return; onFastModeChange(!fastModeEnabled); }}
+                  disabled={isStreaming}
+                  title={fastModeEnabled && fastModeActive === false ? "Fast mode is enabled but inactive for this model" : `Turn OMP Fast mode ${fastModeEnabled ? "off" : "on"} for this model`}
+                  aria-pressed={fastModeEnabled}
                   style={{
                     display: "flex", alignItems: "center", gap: 5,
                     height: 28,
-                    maxWidth: 190,
                     padding: "0 8px",
-                    overflow: "hidden",
-                    background: modelDropdownOpen ? "var(--bg-hover)" : "none",
+                    background: fastModeEnabled ? "var(--bg-selected)" : "none",
                     border: "none",
                     borderRadius: 7,
-                    color: "var(--text-muted)",
-                    cursor: modelSelectorDisabled ? "not-allowed" : "pointer",
+                    color: fastModeEnabled && fastModeActive === false ? "var(--status-warning)" : fastModeEnabled ? "var(--accent)" : "var(--text-muted)",
+                    cursor: isStreaming ? "not-allowed" : "pointer",
+                    opacity: isStreaming ? 0.5 : 1,
                     fontSize: 12,
-                    opacity: modelSelectorDisabled ? 0.5 : 1,
+                    fontWeight: 600,
                     transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
                   }}
-                  onMouseEnter={(e) => {
-                    if (isStreaming) return;
-                    e.currentTarget.style.background = "var(--bg-hover)";
-                    e.currentTarget.style.color = "var(--text)";
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.background = modelDropdownOpen ? "var(--bg-hover)" : "none";
-                    e.currentTarget.style.color = "var(--text-muted)";
-                  }}
-                  title={modelOptions.length > 0
-                    ? t("chatInput.changeModel")
-                    : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noAvailableModels")}
-                  aria-expanded={modelDropdownOpen}
-                  aria-haspopup="dialog"
                 >
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                    <rect x="4" y="4" width="16" height="16" rx="2" />
-                    <rect x="9" y="9" width="6" height="6" />
-                    <line x1="9" y1="1" x2="9" y2="4" /><line x1="15" y1="1" x2="15" y2="4" />
-                    <line x1="9" y1="20" x2="9" y2="23" /><line x1="15" y1="20" x2="15" y2="23" />
-                    <line x1="20" y1="9" x2="23" y2="9" /><line x1="20" y1="14" x2="23" y2="14" />
-                    <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
                   </svg>
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
-                    {currentName ?? (modelOptions.length > 0
-                      ? t("chatInput.selectModel")
-                      : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noModels"))}
-                  </span>
-                  <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7 }} aria-hidden="true" />
+                  {t("chatInput.fastLabel")}
                 </button>
-                {modelDropdownOpen && modelDropdownRect && (() => {
-                  const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
-                  const bottom = viewportHeight - modelDropdownRect.top + 6;
-                  const maxH = Math.max(120, Math.min(modelDropdownRect.top - 8, viewportHeight * 0.6));
-                  const panelPos: React.CSSProperties = isMobile
-                    ? { left: 8, right: 8, maxWidth: "calc(100vw - 16px)" }
-                    : { left: modelDropdownRect.left, width: "max-content", minWidth: modelDropdownRect.width, maxWidth: "calc(100vw - 16px)" };
-                  return (
-                    <div ref={modelDropdownPanelRef} className="picker-panel" style={{
-                      position: "fixed",
-                      bottom,
-                      ...panelPos,
-                      zIndex: 500,
-                      display: "flex", flexDirection: "column",
-                      maxHeight: maxH,
-                    }}>
-                      <div className="picker-panel-header">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ color: "var(--text-muted)" }}>
-                          <rect x="4" y="4" width="16" height="16" rx="2" />
-                          <rect x="9" y="9" width="6" height="6" />
-                        </svg>
-                        <span className="picker-panel-title">{t("chatInput.modelsLabel")}</span>
-                        <span className="picker-panel-count">{modelOptions.length}</span>
-                      </div>
-                      <label className="picker-search">
-                        <Search size={13} strokeWidth={1.8} color="var(--text-dim)" aria-hidden="true" />
-                        <input
-                          ref={modelSearchInputRef}
-                          type="search"
-                          autoComplete="off"
-                          spellCheck={false}
-                          value={modelSearchQuery}
-                          onChange={(e) => setModelSearchQuery(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Escape") {
-                              e.preventDefault();
-                              setModelDropdownOpen(false);
-                            }
-                          }}
-                          placeholder={t("chatInput.searchModels")}
-                          aria-label={t("chatInput.searchModels")}
-                        />
-                      </label>
-                      <div className="picker-list">
-                        {modelsByProvider.length === 0 ? (
-                          <div style={{ padding: "9px 8px", color: "var(--text-dim)", fontSize: 12, whiteSpace: "nowrap" }}>
-                            {modelSearchQuery.trim() ? t("chatInput.noMatchingModels") : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noAvailableModels")}
-                          </div>
-                        ) : modelsByProvider.map((group) => (
-                          <div key={group.provider}>
-                            <div className="picker-group-label">{group.provider}</div>
-                            {group.options.map((opt) => {
-                              const isActive = opt.modelId === model?.modelId && opt.provider === model?.provider;
-                              return (
-                                <button
-                                  className="picker-row"
-                                  data-active={isActive}
-                                  key={`${opt.provider}:${opt.modelId}`}
-                                  onClick={() => { setModelDropdownOpen(false); if (!isActive || isAutoModelSelection) onModelChange(opt.provider, opt.modelId); }}
-                                >
-                                  <span className="picker-check">
-                                    {isActive && <svg width="11" height="11" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>}
-                                  </span>
-                                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{opt.name}</span>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })()}
-              </div>
-            )}
+              )}
 
-            {/* Thinking selector — compact, expressive, and consistent with models */}
-            {onThinkingLevelChange && (
-              <div ref={thinkingDropdownRef} style={{ position: "relative" }}>
+              <div style={{ flex: 1 }} />
+
+              {/* Advisor activity */}
+              {advisorActive && (
+                <span
+                  title={t("chatInput.advisorReviewingTitle", {
+                    model: advisorModel?.name ?? t("messageView.advisorLabel"),
+                    reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault"),
+                  })}
+                  aria-label={t("chatInput.advisorReviewingTitle", {
+                    model: advisorModel?.name ?? t("messageView.advisorLabel"),
+                    reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault"),
+                  })}
+                  style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, flexShrink: 0, color: "var(--accent)" }}
+                >
+                  <Zap size={14} strokeWidth={2} fill="currentColor" aria-hidden="true" />
+                </span>
+              )}
+
+              {/* Compact context */}
+              {onCompact && (
                 <button
-                  onClick={() => setThinkingDropdownOpen((v) => !v)}
-                  disabled={isStreaming}
-                  title={t("chatInput.changeReasoningTitle", { level: thinkingDisplayLabel })}
-                  aria-label={`${t("chatInput.changeReasoning")}: ${thinkingDisplayLabel}`}
-                  aria-expanded={thinkingDropdownOpen}
-                  aria-haspopup="menu"
+                  type="button"
+                  onClick={isCompacting ? onAbortCompaction : onCompact}
+                  disabled={isStreaming && !isCompacting}
+                  title={isCompacting ? t("chatInput.stopCompaction") : t("chatInput.compactContext")}
+                  aria-label={isCompacting ? t("chatInput.stopCompaction") : t("chatInput.compactContext")}
                   style={{
-                    display: "flex", alignItems: "center", gap: 5,
-                    height: 28, padding: "0 8px", background: thinkingDropdownOpen ? "var(--bg-hover)" : "none",
-                    border: "none", borderRadius: 7, color: "var(--text-muted)", cursor: isStreaming ? "not-allowed" : "pointer",
-                    opacity: isStreaming ? 0.5 : 1, fontSize: 12,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    width: 28, height: 28, padding: 0,
+                    background: "none", border: "none",
+                    borderRadius: 7,
+                    color: isCompacting ? "var(--accent)" : "var(--text-muted)",
+                    cursor: isStreaming && !isCompacting ? "not-allowed" : "pointer",
+                    opacity: isStreaming && !isCompacting ? 0.5 : 1,
                     transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
                   }}
-                  onMouseEnter={(e) => { if (!isStreaming) { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; } }}
-                  onMouseLeave={(e) => { e.currentTarget.style.background = thinkingDropdownOpen ? "var(--bg-hover)" : "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
+                  onMouseEnter={(e) => { if (!(isStreaming && !isCompacting)) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
                 >
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true">
-                    <path d="M9.5 2A5.5 5.5 0 0 0 4 7.5c0 1.7.78 3.21 2 4.21V14a1 1 0 0 0 1 1h5a1 1 0 0 0 1-1v-2.29c1.22-1 2-2.51 2-4.21A5.5 5.5 0 0 0 9.5 2z" />
-                    <line x1="7" y1="18" x2="12" y2="18" /><line x1="8" y1="21" x2="11" y2="21" />
-                  </svg>
-                  <span style={{ whiteSpace: "nowrap", textTransform: "capitalize" }}>{thinkingDisplayLabel}</span>
-                  <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7, transform: thinkingDropdownOpen ? "rotate(180deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }} aria-hidden="true" />
+                  <Shrink size={14} strokeWidth={1.8} aria-hidden="true" />
                 </button>
-                {thinkingDropdownOpen && (
-                  <div
-                    className="picker-panel"
-                    role="menu"
-                    style={{
-                      position: "absolute", bottom: "calc(100% + 6px)", left: 0,
-                      zIndex: 100, width: 190, maxWidth: "calc(100vw - 32px)",
-                    }}
-                  >
-                    <div className="picker-panel-header">
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ color: "var(--text-muted)" }}>
-                        <path d="M9.5 2A5.5 5.5 0 0 0 4 7.5c0 1.7.78 3.21 2 4.21V14a1 1 0 0 0 1 1h5a1 1 0 0 0 1-1v-2.29c1.22-1 2-2.51 2-4.21A5.5 5.5 0 0 0 9.5 2z" />
-                        <line x1="7" y1="18" x2="12" y2="18" />
-                      </svg>
-                      <span className="picker-panel-title">{t("chatInput.reasoningLabel")}</span>
-                      <span className="picker-panel-count">{thinkingLevelOptions.length}</span>
+              )}
+
+              {/* Primary action */}
+              {primaryActionQueuesMessage ? (
+                <button
+                  type="button"
+                  onClick={() => sendQueued("followup")}
+                  title={t("chatInput.queueMessage")}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 6,
+                    height: 28,
+                    padding: "0 14px",
+                    background: "var(--accent-strong)",
+                    border: "none",
+                    borderRadius: 8,
+                    color: "var(--on-accent)",
+                    cursor: "pointer",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    transition: "background var(--dur-fast) var(--ease-out-warm)",
+                  }}
+                >
+                  <ListChecks size={13} strokeWidth={2} aria-hidden="true" />
+                  {t("chatInput.queue")}
+                </button>
+              ) : isStreaming ? (
+                <button
+                  type="button"
+                  onClick={isCompacting ? onAbortCompaction : onAbort}
+                  title={t("chatInput.stopAgent")}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 6,
+                    height: 28,
+                    padding: "0 14px",
+                    background: "var(--accent-strong)",
+                    border: "none",
+                    borderRadius: 8,
+                    color: "var(--on-accent)",
+                    cursor: "pointer",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    transition: "background var(--dur-fast) var(--ease-out-warm)",
+                  }}
+                >
+                  <svg width="9" height="9" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+                    <rect x="1.5" y="1.5" width="7" height="7" rx="1.5" fill="currentColor" />
+                  </svg>
+                  {t("chatInput.stop")}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleSend}
+                  disabled={!value.trim() && !attachedImages.length && !attachedTextFiles.length}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 6,
+                    height: 28,
+                    padding: "0 14px",
+                    background: (value.trim() || attachedImages.length || attachedTextFiles.length) ? "var(--accent-strong)" : "var(--bg-panel)",
+                    border: "none",
+                    borderRadius: 8,
+                    color: (value.trim() || attachedImages.length || attachedTextFiles.length) ? "var(--on-accent)" : "var(--text-dim)",
+                    cursor: (value.trim() || attachedImages.length || attachedTextFiles.length) ? "pointer" : "not-allowed",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    boxShadow: (value.trim() || attachedImages.length || attachedTextFiles.length) ? "var(--shadow-card)" : "none",
+                    transition: "background var(--dur-fast) var(--ease-out-warm), box-shadow var(--dur-fast) var(--ease-out-warm)",
+                  }}
+                >
+                  <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="2" y1="7" x2="11" y2="7" />
+                    <polyline points="7.5 3 12 7 7.5 11" />
+                  </svg>
+                  {t("chatInput.send")}
+                </button>
+              )}
+            </div>
+          )}
+          </div>
+        </div>
+
+        {/* Mobile Model & Thinking Bottom Sheet */}
+        {isMobile && mobileModelDrawerOpen && (
+          <>
+            <div
+              className="mobile-sheet-overlay"
+              onClick={() => setMobileModelDrawerOpen(false)}
+              aria-hidden="true"
+            />
+            <div className="mobile-sheet-container" role="dialog" aria-modal="true" aria-label={t("chatInput.modelsLabel")}>
+              <div className="mobile-sheet-handle-wrap">
+                <div className="mobile-sheet-handle" />
+              </div>
+              <div className="mobile-sheet-header">
+                <span className="mobile-sheet-title">{t("chatInput.changeModel") || "模型与思考强度"}</span>
+                <button
+                  type="button"
+                  className="mobile-sheet-close"
+                  onClick={() => setMobileModelDrawerOpen(false)}
+                  aria-label="Close"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              <div className="mobile-sheet-body">
+                {/* Thinking Section */}
+                {onThinkingLevelChange && (
+                  <div style={{ background: "var(--bg-panel)", borderRadius: 14, padding: 12, marginBottom: 16, border: "1px solid var(--border)" }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--text-dim)", marginBottom: 8, display: "flex", justifyContent: "space-between" }}>
+                      <span>{t("chatInput.reasoningLabel") || "思考强度 (Reasoning Effort)"}</span>
+                      <span style={{ color: "var(--accent)" }}>{thinkingDisplayLabel}</span>
                     </div>
-                    <div className="picker-thinking-cards">
+                    <div className="mobile-thinking-segments">
                       {thinkingLevelOptions.map((lvl) => {
                         const isActive = (thinkingLevel ?? "auto") === lvl;
                         const mappedVal = (lvl !== "auto" && thinkingLevelMap) ? thinkingLevelMap[lvl] : undefined;
                         const displayLabel = (mappedVal != null && mappedVal !== lvl) ? mappedVal : lvl;
                         return (
                           <button
-                            className="picker-thinking-card"
-                            data-active={isActive}
-                            role="menuitemradio"
-                            aria-checked={isActive}
                             key={lvl}
-                            onClick={() => { setThinkingDropdownOpen(false); if (!isActive && !isStreaming) onThinkingLevelChange(lvl); }}
+                            type="button"
+                            className={`mobile-thinking-btn ${isActive ? "active" : ""}`}
+                            onClick={() => {
+                              if (!isStreaming) onThinkingLevelChange(lvl);
+                            }}
                           >
-                            <span className="picker-check">
-                              {isActive && <svg width="11" height="11" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>}
-                            </span>
-                            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textTransform: "capitalize" }}>{displayLabel}</span>
+                            {displayLabel}
                           </button>
                         );
                       })}
                     </div>
-                    <div className="picker-panel-footer">
-                      <span>{t("chatInput.appliesNextPrompt")}</span>
-                      <span style={{ fontWeight: 600, color: "var(--text-muted)", textTransform: "capitalize" }}>{thinkingDisplayLabel}</span>
-                    </div>
                   </div>
                 )}
+
+                {/* Models List Section */}
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--text-dim)", marginBottom: 8 }}>
+                    {t("chatInput.modelsLabel") || "基座模型"}
+                  </div>
+                  <label className="picker-search" style={{ marginBottom: 10, display: "flex", alignItems: "center", gap: 8, background: "var(--bg-panel)", padding: "6px 10px", borderRadius: 8, border: "1px solid var(--border)" }}>
+                    <Search size={14} strokeWidth={1.8} color="var(--text-dim)" aria-hidden="true" />
+                    <input
+                      type="search"
+                      autoComplete="off"
+                      spellCheck={false}
+                      value={modelSearchQuery}
+                      onChange={(e) => setModelSearchQuery(e.target.value)}
+                      placeholder={t("chatInput.searchModels") || "搜索模型..."}
+                      style={{ background: "none", border: "none", outline: "none", color: "var(--text)", width: "100%", fontSize: 13 }}
+                    />
+                  </label>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    {modelsByProvider.length === 0 ? (
+                      <div style={{ padding: "12px 8px", color: "var(--text-dim)", fontSize: 13, textAlign: "center" }}>
+                        {modelSearchQuery.trim() ? t("chatInput.noMatchingModels") : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noAvailableModels")}
+                      </div>
+                    ) : (
+                      modelsByProvider.map((group) => (
+                        <div key={group.provider} style={{ marginBottom: 8 }}>
+                          <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", padding: "4px 8px" }}>
+                            {group.provider}
+                          </div>
+                          {group.options.map((opt) => {
+                            const isActive = opt.modelId === model?.modelId && opt.provider === model?.provider;
+                            return (
+                              <button
+                                key={`${opt.provider}:${opt.modelId}`}
+                                type="button"
+                                onClick={() => {
+                                  setMobileModelDrawerOpen(false);
+                                  if (onModelChange && (!isActive || isAutoModelSelection)) {
+                                    onModelChange(opt.provider, opt.modelId);
+                                  }
+                                }}
+                                style={{
+                                  width: "100%",
+                                  padding: "10px 12px",
+                                  borderRadius: 10,
+                                  display: "flex",
+                                  alignItems: "center",
+                                  justifyContent: "space-between",
+                                  background: isActive ? "color-mix(in srgb, var(--accent) 12%, transparent)" : "var(--bg-panel)",
+                                  border: `1px solid ${isActive ? "var(--accent)" : "color-mix(in srgb, var(--border) 60%, transparent)"}`,
+                                  color: "var(--text)",
+                                  textAlign: "left",
+                                  cursor: "pointer",
+                                  marginBottom: 4,
+                                }}
+                              >
+                                <span style={{ fontSize: 13.5, fontWeight: isActive ? 600 : 500 }}>{opt.name}</span>
+                                {isActive && (
+                                  <span style={{ color: "var(--accent)", display: "flex", alignItems: "center" }}>
+                                    <Check size={16} strokeWidth={2.2} />
+                                  </span>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
               </div>
-            )}
+            </div>
+          </>
+        )}
 
-            {/* Fast toggle — only for models that support fast mode. Stays
-                visible while the agent runs (disabled) so it does not look
-                like fast mode was reset; the toggle affects the family tier
-                for the next prompt. */}
-            {fastModeSupported && onFastModeChange && (
-              <button
-                type="button"
-                onClick={() => { if (isStreaming) return; onFastModeChange(!fastModeEnabled); }}
-                disabled={isStreaming}
-                title={fastModeEnabled && fastModeActive === false ? "Fast mode is enabled but inactive for this model" : `Turn OMP Fast mode ${fastModeEnabled ? "off" : "on"} for this model`}
-                aria-pressed={fastModeEnabled}
-                style={{
-                  display: "flex", alignItems: "center", gap: 5,
-                  height: 28,
-                  padding: "0 8px",
-                  background: fastModeEnabled ? "var(--bg-selected)" : "none",
-                  border: "none",
-                  borderRadius: 7,
-                  color: fastModeEnabled && fastModeActive === false ? "var(--status-warning)" : fastModeEnabled ? "var(--accent)" : "var(--text-muted)",
-                  cursor: isStreaming ? "not-allowed" : "pointer",
-                  opacity: isStreaming ? 0.5 : 1,
-                  fontSize: 12,
-                  fontWeight: 600,
-                  transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
-                }}
-              >
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-                </svg>
-                {t("chatInput.fastLabel")}
-              </button>
-            )}
+        {/* Mobile Plus Actions Bottom Sheet */}
+        {isMobile && mobilePlusDrawerOpen && (
+          <>
+            <div
+              className="mobile-sheet-overlay"
+              onClick={() => setMobilePlusDrawerOpen(false)}
+              aria-hidden="true"
+            />
+            <div className="mobile-sheet-container" role="dialog" aria-modal="true" aria-label="快捷功能">
+              <div className="mobile-sheet-handle-wrap">
+                <div className="mobile-sheet-handle" />
+              </div>
+              <div className="mobile-sheet-header">
+                <span className="mobile-sheet-title">快捷功能与工具</span>
+                <button
+                  type="button"
+                  className="mobile-sheet-close"
+                  onClick={() => setMobilePlusDrawerOpen(false)}
+                  aria-label="Close"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              <div className="mobile-sheet-body">
+                <div className="mobile-action-grid">
+                  {/* Attachment */}
+                  <button
+                    type="button"
+                    className="mobile-action-card"
+                    onClick={() => {
+                      setMobilePlusDrawerOpen(false);
+                      fileInputRef.current?.click();
+                    }}
+                    disabled={isStreaming}
+                  >
+                    <div className="mobile-action-card-header">
+                      <div className="mobile-action-card-icon">
+                        <Paperclip size={16} />
+                      </div>
+                    </div>
+                    <div className="mobile-action-card-title">{t("chatInput.attachFile") || "添加附件"}</div>
+                    <div className="mobile-action-card-desc">上传本地图片或文档</div>
+                  </button>
 
-            <div style={{ flex: 1 }} />
+                  {/* Fast Mode Toggle */}
+                  {fastModeSupported && onFastModeChange && (
+                    <button
+                      type="button"
+                      className="mobile-action-card"
+                      onClick={() => {
+                        onFastModeChange(!fastModeEnabled);
+                      }}
+                      style={{
+                        borderColor: fastModeEnabled ? "var(--accent)" : undefined,
+                        background: fastModeEnabled ? "color-mix(in srgb, var(--accent) 8%, var(--bg-panel))" : undefined,
+                      }}
+                    >
+                      <div className="mobile-action-card-header">
+                        <div className="mobile-action-card-icon" style={{ color: fastModeEnabled ? "var(--accent)" : undefined }}>
+                          <Zap size={16} />
+                        </div>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: fastModeEnabled ? "var(--accent)" : "var(--text-muted)" }}>
+                          {fastModeEnabled ? "已开启" : "已关闭"}
+                        </span>
+                      </div>
+                      <div className="mobile-action-card-title">{t("chatInput.fastLabel") || "Fast 极速模式"}</div>
+                      <div className="mobile-action-card-desc">降低思考开销加速输出</div>
+                    </button>
+                  )}
 
-            {/* Advisor activity — thunder while the advisor model reviews this run */}
-            {advisorActive && (
-              <span
-                title={t("chatInput.advisorReviewingTitle", {
-                  model: advisorModel?.name ?? t("messageView.advisorLabel"),
-                  reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault"),
-                })}
-                aria-label={t("chatInput.advisorReviewingTitle", {
-                  model: advisorModel?.name ?? t("messageView.advisorLabel"),
-                  reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault"),
-                })}
-                style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, flexShrink: 0, color: "var(--accent)" }}
-              >
-                <Zap size={14} strokeWidth={2} fill="currentColor" aria-hidden="true" />
-              </span>
-            )}
+                  {/* Advisor Review Toggle */}
+                  {onAdvisorChange && (
+                    <button
+                      type="button"
+                      className="mobile-action-card"
+                      onClick={() => {
+                        onAdvisorChange(!advisorEnabled);
+                      }}
+                      style={{
+                        borderColor: advisorEnabled ? "var(--accent)" : undefined,
+                        background: advisorEnabled ? "color-mix(in srgb, var(--accent) 8%, var(--bg-panel))" : undefined,
+                      }}
+                    >
+                      <div className="mobile-action-card-header">
+                        <div className="mobile-action-card-icon" style={{ color: advisorEnabled ? "var(--accent)" : undefined }}>
+                          <Sparkles size={16} />
+                        </div>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: advisorEnabled ? "var(--accent)" : "var(--text-muted)" }}>
+                          {advisorEnabled ? "已开启" : "已关闭"}
+                        </span>
+                      </div>
+                      <div className="mobile-action-card-title">{t("messageView.advisorLabel") || "Advisor 顾问"}</div>
+                      <div className="mobile-action-card-desc">后台监督与审查当前回复</div>
+                    </button>
+                  )}
 
-            {/* Compact context — replaces the context ring (usage lives in the top bar) */}
-            {onCompact && (
-              <button
-                type="button"
-                onClick={isCompacting ? onAbortCompaction : onCompact}
-                disabled={isStreaming && !isCompacting}
-                title={isCompacting ? t("chatInput.stopCompaction") : t("chatInput.compactContext")}
-                aria-label={isCompacting ? t("chatInput.stopCompaction") : t("chatInput.compactContext")}
-                style={{
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  width: 28, height: 28, padding: 0,
-                  background: "none", border: "none",
-                  borderRadius: 7,
-                  color: isCompacting ? "var(--accent)" : "var(--text-muted)",
-                  cursor: isStreaming && !isCompacting ? "not-allowed" : "pointer",
-                  opacity: isStreaming && !isCompacting ? 0.5 : 1,
-                  transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
-                }}
-                onMouseEnter={(e) => { if (!(isStreaming && !isCompacting)) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
-              >
-                <Shrink size={14} strokeWidth={1.8} aria-hidden="true" />
-              </button>
-            )}
-
-            {/* Primary action: Send (idle) / Queue (typed while running) / Stop (running) */}
-            {primaryActionQueuesMessage ? (
-              <button
-                type="button"
-                onClick={() => sendQueued("followup")}
-                title={t("chatInput.queueMessage")}
-                style={{
-                  display: "flex", alignItems: "center", gap: 6,
-                  height: 28,
-                  padding: "0 14px",
-                  background: "var(--accent-strong)",
-                  border: "none",
-                  borderRadius: 8,
-                  color: "var(--on-accent)",
-                  cursor: "pointer",
-                  fontSize: 12,
-                  fontWeight: 600,
-                  transition: "background var(--dur-fast) var(--ease-out-warm)",
-                }}
-              >
-                <ListChecks size={13} strokeWidth={2} aria-hidden="true" />
-                {t("chatInput.queue")}
-              </button>
-            ) : isStreaming ? (
-              <button
-                type="button"
-                onClick={isCompacting ? onAbortCompaction : onAbort}
-                title={t("chatInput.stopAgent")}
-                style={{
-                  display: "flex", alignItems: "center", gap: 6,
-                  height: 28,
-                  padding: "0 14px",
-                  background: "var(--accent-strong)",
-                  border: "none",
-                  borderRadius: 8,
-                  color: "var(--on-accent)",
-                  cursor: "pointer",
-                  fontSize: 12,
-                  fontWeight: 600,
-                  transition: "background var(--dur-fast) var(--ease-out-warm)",
-                }}
-              >
-                <svg width="9" height="9" viewBox="0 0 10 10" fill="none" aria-hidden="true">
-                  <rect x="1.5" y="1.5" width="7" height="7" rx="1.5" fill="currentColor" />
-                </svg>
-                {t("chatInput.stop")}
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={handleSend}
-                disabled={!value.trim() && !attachedImages.length && !attachedTextFiles.length}
-                style={{
-                  display: "flex", alignItems: "center", gap: 6,
-                  height: 28,
-                  padding: "0 14px",
-                  background: (value.trim() || attachedImages.length || attachedTextFiles.length) ? "var(--accent-strong)" : "var(--bg-panel)",
-                  border: "none",
-                  borderRadius: 8,
-                  color: (value.trim() || attachedImages.length || attachedTextFiles.length) ? "var(--on-accent)" : "var(--text-dim)",
-                  cursor: (value.trim() || attachedImages.length || attachedTextFiles.length) ? "pointer" : "not-allowed",
-                  fontSize: 12,
-                  fontWeight: 600,
-                  boxShadow: (value.trim() || attachedImages.length || attachedTextFiles.length) ? "var(--shadow-card)" : "none",
-                  transition: "background var(--dur-fast) var(--ease-out-warm), box-shadow var(--dur-fast) var(--ease-out-warm)",
-                }}
-              >
-                <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="2" y1="7" x2="11" y2="7" />
-                  <polyline points="7.5 3 12 7 7.5 11" />
-                </svg>
-                {t("chatInput.send")}
-              </button>
-            )}
-          </div>
-          </div>
-        </div>
+                  {/* Compact Context */}
+                  {onCompact && (
+                    <button
+                      type="button"
+                      className="mobile-action-card"
+                      onClick={() => {
+                        setMobilePlusDrawerOpen(false);
+                        if (isCompacting && onAbortCompaction) {
+                          onAbortCompaction();
+                        } else {
+                          onCompact();
+                        }
+                      }}
+                    >
+                      <div className="mobile-action-card-header">
+                        <div className="mobile-action-card-icon">
+                          <Shrink size={16} />
+                        </div>
+                        {isCompacting && (
+                          <span style={{ fontSize: 11, fontWeight: 600, color: "var(--accent)" }}>压缩中</span>
+                        )}
+                      </div>
+                      <div className="mobile-action-card-title">{t("chatInput.compactContext") || "压缩上下文"}</div>
+                      <div className="mobile-action-card-desc">清理早期历史释放 Token</div>
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </>
+        )}
 
         {/* Bash mode status label */}
         {bashMode && (

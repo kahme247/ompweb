@@ -15,6 +15,7 @@ import { groupSessionsByProject, projectActivityCounts, sortManagedProjects } fr
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { Archive, Check, ChevronDown, ChevronRight, FileUp, Folder, GitBranch, MoreHorizontal, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, Trash2, Upload } from "lucide-react";
 import { publishSessionsChanged } from "@/lib/session-change-bus";
+import { useIsMobile } from "@/hooks/useIsMobile";
 
 declare global {
   interface Window {
@@ -228,6 +229,7 @@ function SidebarIconButton({
   return (
     <button
       type="button"
+      className="sidebar-icon-button"
       aria-label={label}
       title={title ?? label}
       onClick={onClick}
@@ -1822,7 +1824,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       )}
 
       {/* Pinned footer: Settings */}
-      <div style={{ borderTop: "1px solid var(--border)", flexShrink: 0 }}>
+      <div style={{ borderTop: "1px solid var(--border)", flexShrink: 0, paddingBottom: "max(4px, env(safe-area-inset-bottom))" }}>
         <button
           className="sidebar-settings-row"
           onClick={onOpenSettings}
@@ -2632,13 +2634,14 @@ const SessionItem = memo(function SessionItem({
   onToggleCollapse?: () => void;
 }) {
   const { t, locale } = useI18n();
+  const isMobile = useIsMobile();
   const [hovered, setHovered] = useState(false);
   const [focusWithin, setFocusWithin] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const renameCancelRef = useRef(false);
- const [confirmArchive, setConfirmArchive] = useState(false);
- const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmArchive, setConfirmArchive] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -2646,8 +2649,8 @@ const SessionItem = memo(function SessionItem({
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const title = session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
   const relativeTime = formatRelativeTime(session.modified, locale, relativeTimeNow);
- const confirming = confirmArchive || confirmDelete;
- const showActions = hovered || focusWithin || actionMenuOpen;
+  const confirming = confirmArchive || confirmDelete;
+  const showActions = isMobile || hovered || focusWithin || actionMenuOpen;
   const rowBackground = confirming
     ? "color-mix(in srgb, var(--accent) 6%, transparent)"
     : isSelected
@@ -2731,7 +2734,7 @@ const SessionItem = memo(function SessionItem({
         }
       }}
       style={{
-        height: confirming ? 34 : 30,
+        height: isMobile ? 44 : (confirming ? 34 : 30),
         display: "flex",
         alignItems: "center",
         gap: 6,

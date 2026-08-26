@@ -3,6 +3,7 @@
 import { useState, useCallback, useMemo, memo, useRef, useEffect } from "react";
 import { GitBranch } from "lucide-react";
 import { translate, useI18n } from "@/lib/i18n";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import type { BranchPreview, SessionEntry, SessionTreeNode } from "@/lib/types";
 
 interface Props {
@@ -256,6 +257,7 @@ const TreeNodeView = memo(function TreeNodeView({ node, activePathIds, depth, is
 
 export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, containerRef, open: openProp, onToggle, hasSession }: Props) {
   const { t } = useI18n();
+  const isMobile = useIsMobile();
   const [openInternal, setOpenInternal] = useState(false);
   const open = openProp !== undefined ? openProp : openInternal;
   const btnRef = useRef<HTMLButtonElement>(null);
@@ -267,6 +269,11 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
     if (!anchor) return;
     const update = () => {
       const rect = anchor.getBoundingClientRect();
+      if (isMobile) {
+        const height = Math.min(260, window.innerHeight - rect.bottom - 8);
+        setDropdownPos({ top: rect.bottom, left: 8, width: window.innerWidth - 16, height: Math.max(60, height) });
+        return;
+      }
       const width = rect.width;
       const height = Math.min(260, window.innerHeight - rect.bottom - 8);
       setDropdownPos({ top: rect.bottom, left: Math.max(0, Math.min(rect.left, window.innerWidth - width)), width, height: Math.max(60, height) });
@@ -281,7 +288,7 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
       window.removeEventListener("scroll", update, true);
       window.removeEventListener("resize", update);
     };
-  }, [open, inline, containerRef]);
+  }, [open, inline, containerRef, isMobile]);
 
   // Close the inline dropdown on outside click or Escape.
   useEffect(() => {

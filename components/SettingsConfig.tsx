@@ -537,7 +537,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent ariaLabel={t("settingsConfig.title")} style={{ width: isMobile ? "calc(100vw - 16px)" : 940, maxWidth: "calc(100vw - 16px)", height: isMobile ? "calc(100dvh - 16px)" : "82vh", maxHeight: "calc(100dvh - 16px)", padding: 0, display: "flex", flexDirection: "column", overflow: "hidden", animation: "none" }}>
+      <DialogContent ariaLabel={t("settingsConfig.title")} style={{ width: isMobile ? "100vw" : 940, maxWidth: isMobile ? "100vw" : "calc(100vw - 16px)", height: isMobile ? "100dvh" : "82vh", maxHeight: isMobile ? "100dvh" : "calc(100dvh - 16px)", borderRadius: isMobile ? 0 : undefined, padding: 0, display: "flex", flexDirection: "column", overflow: "hidden", animation: "none", paddingTop: isMobile ? "max(12px, env(safe-area-inset-top))" : undefined, paddingBottom: isMobile ? "max(12px, env(safe-area-inset-bottom))" : undefined }}>
         <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, padding: "12px 18px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <DialogTitle style={{ fontSize: 16, margin: 0, fontWeight: 600 }}>{t("settingsConfig.title")}</DialogTitle>

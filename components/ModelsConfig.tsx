@@ -128,6 +128,7 @@ function ModelsConfigSurface({ embedded, isMobile, onClose, children }: { embedd
           display: "flex",
           flexDirection: "column",
           overflow: "hidden",
+          paddingTop: isMobile ? "env(safe-area-inset-top)" : undefined,
         }}
       >
         {children}

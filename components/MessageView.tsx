@@ -2,6 +2,7 @@
 
 import { memo, useState, useRef, useEffect, useMemo, useCallback, type ComponentProps } from "react";
 import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, ChevronDown, Brain, EyeOff, CircleAlert, LoaderCircle } from "lucide-react";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { MarkdownBody } from "./MarkdownBody";
 import { ClickableImage } from "./ImageLightbox";
 import { translate, useI18n, type Locale } from "@/lib/i18n";
@@ -205,10 +206,11 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
   onEditContent?: (content: string) => void;
 }) {
   const { t, locale } = useI18n();
+  const isMobile = useIsMobile();
   const [hovered, setHovered] = useState(false);
   const [actionsActive, setActionsActive] = useState(false);
+  const [actionsPinned, setActionsPinned] = useState(false);
   const { copied, copy: copyContent } = useCopyFeedback();
-
   const content =
     typeof message.content === "string"
       ? message.content
@@ -232,17 +234,18 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", maxWidth: "85%", minWidth: 0 }}>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", maxWidth: isMobile ? "92%" : "85%", minWidth: 0 }}>
         <div
           className="chat-message-card"
+          onClick={isMobile ? () => setActionsPinned((p) => !p) : undefined}
           style={{
             maxWidth: "100%",
             minWidth: 0,
             background: "var(--user-bg)",
             border: "1px solid color-mix(in srgb, var(--accent) 28%, transparent)",
-            borderRadius: "var(--radius-card)",
+            borderRadius: isMobile ? "18px 18px 4px 18px" : "var(--radius-card)",
             boxShadow: "var(--shadow-card)",
-            padding: "8px 12px",
+            padding: isMobile ? "10px 14px" : "8px 12px",
             fontSize: 14,
             lineHeight: 1.6,
             color: "var(--text)",
@@ -288,8 +291,8 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
           <div
             style={{
               display: "flex", gap: 3,
-              opacity: hovered || actionsActive ? 1 : 0,
-              pointerEvents: hovered || actionsActive ? "auto" : "none",
+              opacity: isMobile || hovered || actionsActive || actionsPinned ? 1 : 0,
+              pointerEvents: isMobile || hovered || actionsActive || actionsPinned ? "auto" : "none",
               transition: "opacity var(--dur-fast) var(--ease-out-warm)",
             }}
             onFocusCapture={() => setActionsActive(true)}
@@ -322,8 +325,8 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
             <div
               style={{
                 display: "flex", gap: 3,
-                opacity: (hovered || actionsActive || forking) ? 1 : 0,
-                pointerEvents: (hovered || actionsActive || forking) ? "auto" : "none",
+                opacity: (isMobile || hovered || actionsActive || forking || actionsPinned) ? 1 : 0,
+                pointerEvents: (isMobile || hovered || actionsActive || forking || actionsPinned) ? "auto" : "none",
                 transition: "opacity var(--dur-fast) var(--ease-out-warm)",
               }}
               onFocusCapture={() => setActionsActive(true)}
@@ -380,7 +383,30 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
               )}
             </div>
           )}
-          {time && <span style={{ fontSize: 10, color: "var(--text-dim)" }}>{time}</span>}
+          {time && (
+            <button
+              type="button"
+              onClick={() => setActionsPinned((v) => !v)}
+              aria-label={t("messageView.showActions")}
+              title={t("messageView.showActions")}
+              aria-expanded={actionsPinned}
+              style={{
+                fontSize: 10,
+                color: actionsPinned ? "var(--accent)" : "var(--text-dim)",
+                background: "none",
+                border: "none",
+                padding: "2px 4px",
+                margin: "-2px -4px",
+                cursor: "pointer",
+                fontFamily: "inherit",
+                textDecoration: "underline",
+                textDecorationStyle: "dotted",
+                textUnderlineOffset: 2,
+              }}
+            >
+              {time}
+            </button>
+          )}
           </div>
         )}
       </div>
