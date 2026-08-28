@@ -587,6 +587,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   const [explorerOpen, setExplorerOpen] = useState(true);
   const [explorerKey, setExplorerKey] = useState(0);
   const [explorerUploadBusy, setExplorerUploadBusy] = useState(false);
+  const [fileSearchOpen, setFileSearchOpen] = useState(false);
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
@@ -1800,6 +1801,29 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
                 transition: "opacity var(--dur-fast) var(--ease-out-warm)",
               }}
             >
+              <Tooltip content={t("fileExplorer.searchFiles")} side="top">
+                <button
+                  onClick={() => setFileSearchOpen((open) => !open)}
+                  title={t("fileExplorer.searchFiles")}
+                  aria-label={t("fileExplorer.searchFiles")}
+                  aria-pressed={fileSearchOpen}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    width: 26, height: 26, padding: 0,
+                    background: fileSearchOpen ? "var(--bg-hover)" : "none",
+                    border: "none",
+                    color: fileSearchOpen ? "var(--accent)" : "var(--text-dim)",
+                    cursor: "pointer",
+                    borderRadius: "var(--radius-control)",
+                    flexShrink: 0,
+                    transition: "color var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm)",
+                  }}
+                  onMouseEnter={(e) => { if (fileSearchOpen) return; e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+                  onMouseLeave={(e) => { if (fileSearchOpen) return; e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
+                >
+                  <Search size={13} strokeWidth={2} aria-hidden="true" />
+                </button>
+              </Tooltip>
               <Tooltip content={t("sessionSidebar.uploadFilesTitle")} side="top">
                 <button
                   onClick={() => fileExplorerRef.current?.openUploadPicker()}
@@ -1873,6 +1897,8 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
                 onAtMentions={onAtMentions}
                 onUploadBusyChange={setExplorerUploadBusy}
                 onRefreshDone={onExplorerRefreshDone}
+                fileSearchOpen={fileSearchOpen}
+                onFileSearchOpenChange={setFileSearchOpen}
               />
             </div>
           </div>

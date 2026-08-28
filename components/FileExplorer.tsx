@@ -26,6 +26,8 @@ import {
   normalizeFilePathSlashes,
 } from "@/lib/file-paths";
 import type { GitFileStatus, GitFileStatusKind, GitStatusResponse } from "@/lib/git-types";
+import type { FileIndexEntry } from "@/lib/file-fuzzy";
+import { buildSearchTree, type SearchTreeNode } from "@/lib/search-tree";
 
 interface FileEntry {
   name: string;
@@ -51,6 +53,8 @@ interface Props {
   onAtMentions?: (relativePaths: string[]) => void;
   onUploadBusyChange?: (busy: boolean) => void;
   onRefreshDone?: () => void;
+  fileSearchOpen?: boolean;
+  onFileSearchOpenChange?: (open: boolean) => void;
 }
 
 export interface FileExplorerHandle {
@@ -215,7 +219,8 @@ function TreeNode({
   onAtMention?: (relativePath: string, isDir: boolean) => void;
   expandedPaths: Set<string>;
   onToggleExpanded: (fullPath: string, open: boolean) => void;
-  refreshToken: string;
+  /** Undefined for search-result nodes, whose children are pre-resolved. */
+  refreshToken?: string;
   highlightedPaths: Set<string>;
   gitStatusByPath: Map<string, GitFileStatus>;
   changedDirectoryPaths: Set<string>;
@@ -252,6 +257,7 @@ function TreeNode({
   // place; collapsed directories are marked stale so the next expand re-fetches
   // instead of showing a listing captured before the refresh.
   useEffect(() => {
+    if (refreshToken === undefined) return;
     if (open) {
       if (loaded) loadChildren(true);
     } else {
@@ -526,6 +532,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   onAtMentions,
   onUploadBusyChange,
   onRefreshDone,
+  fileSearchOpen = false,
+  onFileSearchOpenChange,
 }, ref) {
   const { t, tn } = useI18n();
   const [roots, setRoots] = useState<FileNode[]>([]);
@@ -540,10 +548,100 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSummary, setUploadSummary] = useState<UploadSummary | null>(null);
   const [pendingConflict, setPendingConflict] = useState<PendingConflict | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchPaths, setSearchPaths] = useState<string[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchFailed, setSearchFailed] = useState(false);
+  const [searchExpanded, setSearchExpanded] = useState<Set<string>>(new Set());
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const prevCwdRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const refreshToken = `${refreshKey ?? 0}:${treeRefreshKey}`;
   const uploadBusy = uploadPhase !== "idle";
+  const searchActive = fileSearchOpen && searchQuery.trim().length > 0;
+
+  // Opening the panel focuses the input; closing it resets the whole search,
+  // mirroring how the session search behaves.
+  useEffect(() => {
+    if (fileSearchOpen) {
+      searchInputRef.current?.focus();
+      return;
+    }
+    setSearchQuery("");
+    setSearchPaths([]);
+    setSearchLoading(false);
+    setSearchFailed(false);
+    setSearchExpanded(new Set());
+  }, [fileSearchOpen]);
+
+  // Debounced query against the same cached, bounded file index that backs
+  // the @ mention autocomplete. No second index.
+  useEffect(() => {
+    if (!fileSearchOpen) return;
+    const query = searchQuery.trim();
+    if (!query) {
+      setSearchPaths([]);
+      setSearchLoading(false);
+      setSearchFailed(false);
+      return;
+    }
+    const controller = new AbortController();
+    setSearchLoading(true);
+    setSearchFailed(false);
+    const timer = setTimeout(() => {
+      fetch(`/api/file-index?cwd=${encodeURIComponent(cwd)}&q=${encodeURIComponent(query)}`, { signal: controller.signal })
+        .then((res) => res.ok
+          ? res.json() as Promise<{ matches?: FileIndexEntry[] }>
+          : Promise.reject(new Error(`HTTP ${res.status}`)))
+        .then((data) => setSearchPaths((data.matches ?? []).filter((m) => !m.isDir).map((m) => m.path)))
+        .catch(() => {
+          if (!controller.signal.aborted) {
+            setSearchPaths([]);
+            setSearchFailed(true);
+          }
+        })
+        .finally(() => { if (!controller.signal.aborted) setSearchLoading(false); });
+    }, 150);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [cwd, fileSearchOpen, searchQuery]);
+
+  // Results render as a tree; keep every directory that contains a match
+  // expanded, while preserving the user's manual collapses as they type.
+  useEffect(() => {
+    if (searchPaths.length === 0) return;
+    const dirs = new Set<string>();
+    for (const relative of searchPaths) {
+      const parts = relative.split("/");
+      let partial = "";
+      for (let i = 0; i < parts.length - 1; i++) {
+        partial = partial ? `${partial}/${parts[i]}` : parts[i];
+        dirs.add(joinFilePath(cwd, partial));
+      }
+    }
+    setSearchExpanded((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      for (const dir of dirs) {
+        if (!next.has(dir)) {
+          next.add(dir);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [cwd, searchPaths]);
+
+  const searchRoots = useMemo(() => {
+    const toFileNode = (node: SearchTreeNode): FileNode => ({
+      name: node.name,
+      fullPath: joinFilePath(cwd, node.path),
+      isDir: node.isDir,
+      size: 0,
+      children: node.isDir ? node.children.map(toFileNode) : undefined,
+      loaded: true,
+    });
+    return buildSearchTree(searchPaths).map(toFileNode);
+  }, [cwd, searchPaths]);
 
   const gitStatusByPath = useMemo(() => new Map(
     gitFiles.map((status) => [normalizeFilePathSlashes(status.filePath), status]),
@@ -567,6 +665,14 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
 
   const handleToggleExpanded = useCallback((fullPath: string, open: boolean) => {
     setExpandedPaths((prev) => {
+      const next = new Set(prev);
+      if (open) next.add(fullPath); else next.delete(fullPath);
+      return next;
+    });
+  }, []);
+
+  const handleToggleSearchExpanded = useCallback((fullPath: string, open: boolean) => {
+    setSearchExpanded((prev) => {
       const next = new Set(prev);
       if (open) next.add(fullPath); else next.delete(fullPath);
       return next;
@@ -724,6 +830,70 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   return (
     <div style={{ minHeight: "100%" }}>
       <input ref={uploadInputRef} type="file" multiple hidden onChange={handleUploadInput} />
+      {fileSearchOpen && (
+        <div style={{ position: "relative", padding: "6px 8px 4px" }}>
+          <input
+            ref={searchInputRef}
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.preventDefault();
+                onFileSearchOpenChange?.(false);
+              }
+            }}
+            placeholder={t("fileExplorer.searchPlaceholder")}
+            aria-label={t("fileExplorer.searchFiles")}
+            style={{
+              width: "100%",
+              height: 27,
+              boxSizing: "border-box",
+              padding: searchQuery ? "0 26px 0 9px" : "0 9px",
+              background: "var(--bg)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-control)",
+              outline: "none",
+              color: "var(--text)",
+              fontSize: 12,
+            }}
+            onFocus={(e) => { e.currentTarget.style.borderColor = "var(--accent)"; }}
+            onBlur={(e) => { e.currentTarget.style.borderColor = "var(--border)"; }}
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => {
+                setSearchQuery("");
+                searchInputRef.current?.focus();
+              }}
+              title={t("fileExplorer.clearSearch")}
+              aria-label={t("fileExplorer.clearSearch")}
+              style={{
+                position: "absolute",
+                right: 12,
+                top: "50%",
+                transform: "translateY(calc(-50% + 1px))",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: 18,
+                height: 18,
+                padding: 0,
+                border: "none",
+                borderRadius: "var(--radius-control)",
+                background: "none",
+                color: "var(--text-dim)",
+                cursor: "pointer",
+                transition: `color var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm)`,
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = "none"; e.currentTarget.style.color = "var(--text-dim)"; }}
+            >
+              <X size={11} strokeWidth={2.4} aria-hidden="true" />
+            </button>
+          )}
+        </div>
+      )}
       {showUploadFeedback && (
         <div style={{ padding: "6px 8px", borderBottom: "1px solid var(--border)" }}>
         {uploadBusy && (
@@ -835,32 +1005,60 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       )}
 
       <div role="tree" aria-label={t("sessionSidebar.explorer")} style={{ padding: "2px 4px" }}>
-        {loading ? (
-          <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>{t("fileExplorer.loadingFiles")}</div>
-        ) : error ? (
-          <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--status-error)" }}>{error}</div>
+        {searchActive ? (
+          searchLoading ? (
+            <div role="status" style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>{t("fileExplorer.searching")}</div>
+          ) : searchFailed ? (
+            <div role="alert" style={{ padding: "8px 12px", fontSize: 11, color: "var(--status-error)" }}>{t("fileExplorer.searchFailed")}</div>
+          ) : searchRoots.length === 0 ? (
+            <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>{t("fileExplorer.noMatchingFiles")}</div>
+          ) : (
+            searchRoots.map((node) => (
+              <TreeNode
+                key={`${searchQuery}:${node.fullPath}`}
+                node={node}
+                depth={0}
+                cwd={cwd}
+                onOpenFile={onOpenFile}
+                onAtMention={onAtMention}
+                expandedPaths={searchExpanded}
+                onToggleExpanded={handleToggleSearchExpanded}
+                highlightedPaths={highlightedPaths}
+                gitStatusByPath={gitStatusByPath}
+                changedDirectoryPaths={changedDirectoryPaths}
+              />
+            ))
+          )
         ) : (
-          roots.map((node) => (
-            <TreeNode
-              key={node.fullPath}
-              node={node}
-              depth={0}
-              cwd={cwd}
-              onOpenFile={onOpenFile}
-              onAtMention={onAtMention}
-              expandedPaths={expandedPaths}
-              onToggleExpanded={handleToggleExpanded}
-              refreshToken={refreshToken}
-              highlightedPaths={highlightedPaths}
-              gitStatusByPath={gitStatusByPath}
-              changedDirectoryPaths={changedDirectoryPaths}
-            />
-          ))
-        )}
-        {!loading && !error && roots.length === 0 && (
-          <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>
-            {t("fileExplorer.noFilesFound")}
-          </div>
+          <>
+            {loading ? (
+              <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>{t("fileExplorer.loadingFiles")}</div>
+            ) : error ? (
+              <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--status-error)" }}>{error}</div>
+            ) : (
+              roots.map((node) => (
+                <TreeNode
+                  key={node.fullPath}
+                  node={node}
+                  depth={0}
+                  cwd={cwd}
+                  onOpenFile={onOpenFile}
+                  onAtMention={onAtMention}
+                  expandedPaths={expandedPaths}
+                  onToggleExpanded={handleToggleExpanded}
+                  refreshToken={refreshToken}
+                  highlightedPaths={highlightedPaths}
+                  gitStatusByPath={gitStatusByPath}
+                  changedDirectoryPaths={changedDirectoryPaths}
+                />
+              ))
+            )}
+            {!loading && !error && roots.length === 0 && (
+              <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>
+                {t("fileExplorer.noFilesFound")}
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
