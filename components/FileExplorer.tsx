@@ -338,7 +338,11 @@ function TreeNode({
         tabIndex={0}
         aria-selected={highlighted}
         aria-expanded={node.isDir ? open : undefined}
-        aria-label={node.isDir ? (node.name + " (folder" + (open ? ", expanded" : ", collapsed") + ")") : (node.name + " (file)")}
+        // Search rows repeat names such as route.ts, so the directory has to be
+        // part of the accessible name, not just the dimmed text beside it.
+        aria-label={node.isDir
+          ? (node.name + " (folder" + (open ? ", expanded" : ", collapsed") + ")")
+          : (secondaryLabel ? (node.name + " (file, " + secondaryLabel + ")") : (node.name + " (file)"))}
         style={{
           position: "relative",
           display: "flex",
@@ -581,6 +585,9 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const [searchQuery, setSearchQuery] = useState("");
   const [searchPaths, setSearchPaths] = useState<string[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
+  // Tracks which refresh the search request has already answered, so an
+  // explicit refresh forces one uncached listing and typing does not.
+  const consumedRefreshTokenRef = useRef<string | null>(null);
   const [searchFailed, setSearchFailed] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const prevCwdRef = useRef<string | null>(null);
@@ -617,13 +624,27 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     setSearchLoading(true);
     setSearchFailed(false);
     const timer = setTimeout(() => {
-      fetch(`/api/file-index?cwd=${encodeURIComponent(cwd)}&q=${encodeURIComponent(query)}&limit=${MAX_RESULT_LIMIT}`, { signal: controller.signal })
+      // Only a real refresh bypasses the index cache; typing must not force a
+      // fresh listing on every keystroke. The token is consumed here rather
+      // than in the effect body so an aborted debounce keeps it pending.
+      const forceRefresh = consumedRefreshTokenRef.current !== refreshToken;
+      consumedRefreshTokenRef.current = refreshToken;
+      const params = new URLSearchParams({
+        cwd,
+        q: query,
+        limit: String(MAX_RESULT_LIMIT),
+        // The panel lists files, so directories must be dropped before the
+        // limit is applied, not after.
+        kind: "file",
+      });
+      if (forceRefresh) params.set("refresh", "1");
+      fetch(`/api/file-index?${params.toString()}`, { signal: controller.signal })
         .then((res) => res.ok
           ? res.json() as Promise<{ matches?: FileIndexEntry[] }>
           : Promise.reject(new Error(`HTTP ${res.status}`)))
         .then((data) => {
           if (controller.signal.aborted) return;
-          setSearchPaths((data.matches ?? []).filter((m) => !m.isDir).map((m) => m.path));
+          setSearchPaths((data.matches ?? []).map((m) => m.path));
         })
         .catch(() => {
           if (!controller.signal.aborted) {
@@ -635,9 +656,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     }, 150);
     return () => { clearTimeout(timer); controller.abort(); };
     // refreshToken participates so the toolbar refresh button and a finished
-    // upload re-run the visible query instead of leaving stale rows. The index
-    // itself has a short server-side TTL, so a re-run right after a write can
-    // still answer from that cache.
+    // upload re-run the visible query against a freshly built listing.
   }, [cwd, fileSearchOpen, searchQuery, refreshToken]);
 
   // Rows stay in the order the index ranked them, so the closest name matches

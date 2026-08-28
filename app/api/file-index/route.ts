@@ -45,6 +45,8 @@ interface CacheEntry {
   listing: FileListing;
   /** Derived lazily on the first ?q= search against this listing */
   entries?: FileIndexEntry[];
+  /** Same, restricted to files, for callers that never show directories */
+  fileEntries?: FileIndexEntry[];
   expiresAt: number;
 }
 
@@ -109,13 +111,15 @@ function listWithWalk(cwd: string): FileListing {
   return { files, hardTruncated: false };
 }
 
-// GET /api/file-index?cwd=/abs/path[&q=query][&limit=n]
+// GET /api/file-index?cwd=/abs/path[&q=query][&limit=n][&kind=file][&refresh=1]
 // Without q: { files: string[] (relative to cwd, capped at MAX_FILES),
 // truncated: boolean } — the client-side index for local filtering.
 // With q: { matches: { path, isDir }[] } — ranked against the FULL listing so
 // repos larger than MAX_FILES still find deep files (cap applied after
 // matching, like the TUI passing the query to fd). limit defaults to the `@`
-// menu size and is clamped to MAX_RESULT_LIMIT.
+// menu size and is clamped to MAX_RESULT_LIMIT; kind=file drops directories
+// before ranking; refresh=1 rebuilds the listing instead of using the TTL
+// cache, for the explorer's refresh button.
 // Guarded by the same allow-list as /api/files.
 export async function GET(req: NextRequest) {
   try {
@@ -145,8 +149,11 @@ export async function GET(req: NextRequest) {
 
     const cache = getIndexCache();
     const now = Date.now();
+    // An explicit refresh in the UI must not be answered from the TTL window,
+    // or a file the agent just wrote stays invisible for another few seconds.
+    const forceRefresh = req.nextUrl.searchParams.get("refresh") === "1";
     let cached = cache.get(cwd);
-    if (!cached || cached.expiresAt <= now) {
+    if (!cached || cached.expiresAt <= now || forceRefresh) {
       const listing = (await listWithGit(cwd)) ?? listWithWalk(cwd);
       for (const [key, entry] of cache) {
         if (entry.expiresAt <= now) cache.delete(key);
@@ -157,8 +164,17 @@ export async function GET(req: NextRequest) {
     }
 
     if (query) {
-      cached.entries ??= buildEntriesFromFiles(cached.listing.files);
       const limit = parseResultLimit(req.nextUrl.searchParams.get("limit"));
+      // Directories score a ranking bonus, so a caller that only renders files
+      // must drop them before the limit is applied: "api" in this repo matches
+      // 67 directories, which would otherwise consume half the budget and
+      // silently push matching files out of the response.
+      if (req.nextUrl.searchParams.get("kind") === "file") {
+        cached.fileEntries ??= (cached.entries ?? buildEntriesFromFiles(cached.listing.files))
+          .filter((entry) => !entry.isDir);
+        return NextResponse.json({ matches: filterFileEntries(cached.fileEntries, query, limit) });
+      }
+      cached.entries ??= buildEntriesFromFiles(cached.listing.files);
       return NextResponse.json({ matches: filterFileEntries(cached.entries, query, limit) });
     }
 
