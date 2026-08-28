@@ -18,6 +18,7 @@ import {
   getDocumentMime,
   getFileExt,
   getImageMime,
+  getStreamSecurityHeaders,
 } from "@/lib/file-types";
 import { resolveDirentIsDirectory } from "@/lib/file-dirent";
 import { isFilePathReferencedBySession } from "@/lib/session-file-references";
@@ -308,6 +309,8 @@ function streamFile(filePath: string, stat: fs.Stats, contentType: string, range
     "Cache-Control": "no-cache",
     "Accept-Ranges": "bytes",
     "Content-Disposition": getContentDisposition(filePath, asDownload),
+    // Shared by the full-body, 206, and 416 paths below.
+    ...getStreamSecurityHeaders(contentType),
   };
 
   if (!rangeHeader) {

@@ -60,6 +60,23 @@ export function documentPreviewKind(filePath: string): DocumentPreviewKind | nul
   return null;
 }
 
+/**
+ * SVG is the only streamed preview type a browser executes as a document.
+ * Serving it without a restrictive Content-Security-Policy would let a
+ * repo-controlled SVG, opened as a direct navigation, run script in the
+ * omp-web origin where every /api route is reachable. These headers only
+ * affect document rendering; <img> preview embedding ignores them. The
+ * directives mirror the DOCX preview policy in app/api/files/[...path]/route.ts
+ * so legit SVGs keep inline styles and data-URI images.
+ */
+export function getStreamSecurityHeaders(contentType: string): Record<string, string> {
+  if (contentType !== "image/svg+xml") return {};
+  return {
+    "Content-Security-Policy":
+      "default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+  };
+}
+
 export function isImagePath(filePath: string): boolean {
   return getImageMime(filePath) !== null;
 }

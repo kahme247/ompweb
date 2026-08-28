@@ -55,34 +55,51 @@ const nextConfig = (phase: string): NextConfig => {
         { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
         { key: "Content-Security-Policy", value: "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self' ws: wss:; font-src 'self' data:" },
       ];
-      const headers = [
-        {
-          source: "/:path*",
-          headers: securityHeaders,
-        },
-        {
-          // Hashed build output never changes, so browsers/proxies may cache it
-          // immutably for a year and skip revalidation entirely.
-          // NOTE: scoped to /_next/static/ only — broader /_next/ patterns would
-          // shadow the HMR WebSocket in development.
-          source: "/_next/static/:path*",
-          headers: [
-            { key: "Cache-Control", value: "public, max-age=31536000, immutable" },
-          ],
-        },
-        {
-          source: "/",
-          headers: [
-            { key: "Cache-Control", value: "private, no-cache, max-age=0, must-revalidate" },
-          ],
-        },
+      // /api/files streams workspace files whose document policy depends on the
+      // content type (strict CSP for SVG, the DOCX preview policy, none for
+      // media the browser renders natively). Config-level headers overwrite
+      // same-key headers set by route handlers, so the global CSP must not
+      // match these paths — it would both reopen script execution for SVG
+      // documents and block the same-origin <iframe> previews (DOCX/PDF) with
+      // frame-ancestors 'none'. The handler-agnostic protections stay here.
+      const fileResponseHeaders = [
+        { key: "X-Content-Type-Options", value: "nosniff" },
+        { key: "X-Frame-Options", value: "SAMEORIGIN" },
+        { key: "Referrer-Policy", value: "no-referrer" },
+        { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
       ];
+      const globalRule = {
+        // Everything except /api/files (negative lookahead, same pattern style
+        // as the proxy matcher).
+        source: "/((?!api/files/).*)",
+        headers: securityHeaders,
+      };
+      const fileRule = {
+        source: "/api/files/:path*",
+        headers: fileResponseHeaders,
+      };
+      const rootNoCacheRule = {
+        source: "/",
+        headers: [
+          { key: "Cache-Control", value: "private, no-cache, max-age=0, must-revalidate" },
+        ],
+      };
+      const staticImmutableRule = {
+        // Hashed build output never changes, so browsers/proxies may cache it
+        // immutably for a year and skip revalidation entirely.
+        // NOTE: scoped to /_next/static/ only — broader /_next/ patterns would
+        // shadow the HMR WebSocket in development.
+        source: "/_next/static/:path*",
+        headers: [
+          { key: "Cache-Control", value: "public, max-age=31536000, immutable" },
+        ],
+      };
 
       // Dev chunks have stable URLs whose content changes in place; caching
       // them immutably would serve stale module factories after a restart.
-      if (isDev) return [headers[0], headers[2]];
+      if (isDev) return [globalRule, fileRule, rootNoCacheRule];
 
-      return headers;
+      return [globalRule, fileRule, staticImmutableRule, rootNoCacheRule];
     },
     env: {
       NEXT_PUBLIC_APP_VERSION: version,
