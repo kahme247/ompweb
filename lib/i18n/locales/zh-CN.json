@@ -471,6 +471,7 @@
   "fileExplorer.searchFailed": "搜索失败",
   "fileExplorer.searchFiles": "搜索文件",
   "fileExplorer.searchPlaceholder": "搜索文件...",
+  "fileExplorer.searchTruncated": "仅显示前 {count} 个匹配项。缩小查询范围可查看更多。",
   "fileExplorer.searching": "搜索中...",
   "fileExplorer.skipExisting": "跳过已存在",
   "fileExplorer.skippedCount": "{count} 个已跳过",

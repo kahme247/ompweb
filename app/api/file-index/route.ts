@@ -90,12 +90,20 @@ function loadListing(cwd: string): Promise<FileListing> {
 
 async function listWithGit(cwd: string): Promise<FileListing | null> {
   try {
-    const { stdout } = await execFileAsync(
-      "git",
-      ["-C", cwd, "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
-      { timeout: 10_000, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } },
-    );
-    const all = stdout.split("\0").filter(Boolean);
+    const gitOptions = {
+      timeout: 10_000,
+      maxBuffer: 64 * 1024 * 1024,
+      env: { ...process.env, LC_ALL: "C" },
+    };
+    // --cached lists index entries, including files already removed from the
+    // working tree. Those would show up as results that 404 the moment anyone
+    // opens them, so subtract what git reports as deleted.
+    const [listed, deleted] = await Promise.all([
+      execFileAsync("git", ["-C", cwd, "ls-files", "--cached", "--others", "--exclude-standard", "-z"], gitOptions),
+      execFileAsync("git", ["-C", cwd, "ls-files", "--deleted", "-z"], gitOptions),
+    ]);
+    const missing = new Set(deleted.stdout.split("\0").filter(Boolean));
+    const all = listed.stdout.split("\0").filter((file) => file && !missing.has(file));
     if (all.length > GIT_HARD_CAP) {
       return { files: all.slice(0, GIT_HARD_CAP), hardTruncated: true };
     }
@@ -180,9 +188,13 @@ export async function GET(req: NextRequest) {
     // It is client-driven, so it only counts once per cooldown window.
     const forceRefresh = req.nextUrl.searchParams.get("refresh") === "1";
     let cached = cache.get(cwd);
+    // A missing or non-monotonic builtAt (an entry cached before this field
+    // existed, or a clock stepped backwards) must not suppress a refresh.
+    const buildAge = cached ? now - cached.builtAt : Infinity;
+    const cooling = Number.isFinite(buildAge) && buildAge >= 0 && buildAge < REFRESH_COOLDOWN_MS;
     if (!cached
       || cached.expiresAt <= now
-      || (forceRefresh && now - cached.builtAt >= REFRESH_COOLDOWN_MS)) {
+      || (forceRefresh && !cooling)) {
       const listing = await loadListing(cwd);
       for (const [key, entry] of cache) {
         if (entry.expiresAt <= now) cache.delete(key);
@@ -204,7 +216,14 @@ export async function GET(req: NextRequest) {
       // silently push matching files out of the response.
       if (req.nextUrl.searchParams.get("kind") === "file") {
         cached.fileEntries ??= cached.entries.filter((entry) => !entry.isDir);
-        return NextResponse.json({ matches: filterFileEntries(cached.fileEntries, query, limit) });
+        // Ask for one past the limit: the extra row never ships, it only tells
+        // the panel that the list it shows is incomplete.
+        const ranked = filterFileEntries(cached.fileEntries, query, limit + 1);
+        const truncated = ranked.length > limit;
+        return NextResponse.json({
+          matches: truncated ? ranked.slice(0, limit) : ranked,
+          truncated,
+        });
       }
       return NextResponse.json({ matches: filterFileEntries(cached.entries, query, limit) });
     }

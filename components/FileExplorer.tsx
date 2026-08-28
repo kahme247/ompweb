@@ -584,15 +584,15 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const [pendingConflict, setPendingConflict] = useState<PendingConflict | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchPaths, setSearchPaths] = useState<string[]>([]);
+  const [searchTruncated, setSearchTruncated] = useState(false);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchFailed, setSearchFailed] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const prevCwdRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const refreshToken = `${refreshKey ?? 0}:${treeRefreshKey}`;
-  // Which refresh the search request has already answered. It stays null until
-  // the first search, because the sidebar bumps the explorer key once on mount
-  // and that is not a refresh the user asked for.
+  // Which refresh the search request has already answered; re-baselined every
+  // time the panel opens.
   const consumedRefreshTokenRef = useRef<string | null>(null);
   const uploadBusy = uploadPhase !== "idle";
   const searchActive = fileSearchOpen && searchQuery.trim().length > 0;
@@ -601,13 +601,21 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   // mirroring how the session search behaves.
   useEffect(() => {
     if (fileSearchOpen) {
+      // Baseline for forced refreshes: only a refresh after the panel opened
+      // counts. The sidebar bumps the explorer key once on mount, and nobody
+      // asked for that one.
+      consumedRefreshTokenRef.current = refreshToken;
       searchInputRef.current?.focus();
       return;
     }
     setSearchQuery("");
     setSearchPaths([]);
+    setSearchTruncated(false);
     setSearchLoading(false);
     setSearchFailed(false);
+    // refreshToken is read as the value at open time on purpose: adding it to
+    // the deps would re-baseline on every refresh and swallow it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fileSearchOpen]);
 
   // Debounced query against the same cached, bounded file index that backs
@@ -617,6 +625,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     const query = searchQuery.trim();
     if (!query) {
       setSearchPaths([]);
+      setSearchTruncated(false);
       setSearchLoading(false);
       setSearchFailed(false);
       return;
@@ -628,10 +637,6 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       // Only a real refresh bypasses the index cache; typing must not force a
       // fresh listing on every keystroke.
       const requestedToken = refreshToken;
-      // Seed on the first scheduled request, not on the first successful one:
-      // otherwise a refresh clicked while that first request is still in flight
-      // finds a null baseline and is silently answered from the TTL cache.
-      consumedRefreshTokenRef.current ??= requestedToken;
       const forceRefresh = consumedRefreshTokenRef.current !== requestedToken;
       const params = new URLSearchParams({
         cwd,
@@ -644,7 +649,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       if (forceRefresh) params.set("refresh", "1");
       fetch(`/api/file-index?${params.toString()}`, { signal: controller.signal })
         .then((res) => res.ok
-          ? res.json() as Promise<{ matches?: FileIndexEntry[] }>
+          ? res.json() as Promise<{ matches?: FileIndexEntry[]; truncated?: boolean }>
           : Promise.reject(new Error(`HTTP ${res.status}`)))
         .then((data) => {
           if (controller.signal.aborted) return;
@@ -652,10 +657,12 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
           // leave it pending so the next one still asks for a fresh listing.
           consumedRefreshTokenRef.current = requestedToken;
           setSearchPaths((data.matches ?? []).map((m) => m.path));
+          setSearchTruncated(Boolean(data.truncated));
         })
         .catch(() => {
           if (!controller.signal.aborted) {
             setSearchPaths([]);
+            setSearchTruncated(false);
             setSearchFailed(true);
           }
         })
@@ -1044,22 +1051,31 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
           ) : searchRows.length === 0 ? (
             <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>{t("fileExplorer.noMatchingFiles")}</div>
           ) : (
-            searchRows.map((row) => (
-              <TreeNode
-                key={row.path}
-                node={row.node}
-                depth={0}
-                cwd={cwd}
-                onOpenFile={onOpenFile}
-                onAtMention={onAtMention}
-                expandedPaths={EMPTY_PATH_SET}
-                onToggleExpanded={noop}
-                secondaryLabel={row.directory}
-                highlightedPaths={highlightedPaths}
-                gitStatusByPath={gitStatusByPath}
-                changedDirectoryPaths={changedDirectoryPaths}
-              />
-            ))
+            <>
+              {searchRows.map((row) => (
+                <TreeNode
+                  key={row.path}
+                  node={row.node}
+                  depth={0}
+                  cwd={cwd}
+                  onOpenFile={onOpenFile}
+                  onAtMention={onAtMention}
+                  expandedPaths={EMPTY_PATH_SET}
+                  onToggleExpanded={noop}
+                  secondaryLabel={row.directory}
+                  highlightedPaths={highlightedPaths}
+                  gitStatusByPath={gitStatusByPath}
+                  changedDirectoryPaths={changedDirectoryPaths}
+                />
+              ))}
+              {searchTruncated && (
+                // Without this the list looks complete, and a broad query in a
+                // large repo silently hides everything past the cap.
+                <div style={{ padding: "6px 12px 8px", fontSize: 10, color: "var(--text-dim)" }}>
+                  {t("fileExplorer.searchTruncated", { count: searchRows.length })}
+                </div>
+              )}
+            </>
           )
         ) : (
           <>

@@ -471,6 +471,7 @@
   "fileExplorer.searchFailed": "Search failed",
   "fileExplorer.searchFiles": "Search files",
   "fileExplorer.searchPlaceholder": "Search files...",
+  "fileExplorer.searchTruncated": "Showing the first {count} matches. Narrow the query to see more.",
   "fileExplorer.searching": "Searching...",
   "fileExplorer.skipExisting": "Skip existing",
   "fileExplorer.skippedCount": "{count} skipped",

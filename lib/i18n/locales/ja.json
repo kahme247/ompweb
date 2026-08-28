@@ -471,6 +471,7 @@
   "fileExplorer.searchFailed": "検索に失敗しました",
   "fileExplorer.searchFiles": "ファイルを検索",
   "fileExplorer.searchPlaceholder": "ファイルを検索...",
+  "fileExplorer.searchTruncated": "最初の {count} 件を表示しています。絞り込むとさらに表示されます。",
   "fileExplorer.searching": "検索中...",
   "fileExplorer.skipExisting": "既存をスキップ",
   "fileExplorer.skippedCount": "{count} 件スキップ",
