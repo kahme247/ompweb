@@ -33,6 +33,13 @@ const MAX_WALK_DEPTH = 8;
 const MAX_QUERY_LENGTH = 500;
 const CACHE_TTL_MS = 10_000;
 const CACHE_MAX_ENTRIES = 20;
+/**
+ * A client-driven `refresh=1` skips the TTL, so it must not become a way to
+ * spawn one Git scan per request. Concurrent rebuilds share a single scan, and
+ * this window caps a runaway caller. It stays short on purpose: the point of
+ * the flag is to see a file that was written a moment ago.
+ */
+const REFRESH_COOLDOWN_MS = 250;
 
 interface FileListing {
   /** Full listing up to the hard cap (not the client cap) */
@@ -47,6 +54,8 @@ interface CacheEntry {
   entries?: FileIndexEntry[];
   /** Same, restricted to files, for callers that never show directories */
   fileEntries?: FileIndexEntry[];
+  /** When the listing was produced, used to throttle forced rebuilds */
+  builtAt: number;
   expiresAt: number;
 }
 
@@ -55,11 +64,28 @@ interface CacheEntry {
 // not be recomputed within a short window.
 declare global {
   var __piFileIndexCache: Map<string, CacheEntry> | undefined;
+  var __piFileIndexPending: Map<string, Promise<FileListing>> | undefined;
 }
 
 function getIndexCache(): Map<string, CacheEntry> {
   if (!globalThis.__piFileIndexCache) globalThis.__piFileIndexCache = new Map();
   return globalThis.__piFileIndexCache;
+}
+
+/**
+ * Build the listing for one cwd, collapsing concurrent callers onto the same
+ * scan. Without this, several refreshes in flight would each run `git ls-files`
+ * and the slowest one could overwrite a newer cache entry.
+ */
+function loadListing(cwd: string): Promise<FileListing> {
+  if (!globalThis.__piFileIndexPending) globalThis.__piFileIndexPending = new Map();
+  const pending = globalThis.__piFileIndexPending;
+  const inFlight = pending.get(cwd);
+  if (inFlight) return inFlight;
+  const scan = (async () => (await listWithGit(cwd)) ?? listWithWalk(cwd))()
+    .finally(() => { pending.delete(cwd); });
+  pending.set(cwd, scan);
+  return scan;
 }
 
 async function listWithGit(cwd: string): Promise<FileListing | null> {
@@ -151,30 +177,35 @@ export async function GET(req: NextRequest) {
     const now = Date.now();
     // An explicit refresh in the UI must not be answered from the TTL window,
     // or a file the agent just wrote stays invisible for another few seconds.
+    // It is client-driven, so it only counts once per cooldown window.
     const forceRefresh = req.nextUrl.searchParams.get("refresh") === "1";
     let cached = cache.get(cwd);
-    if (!cached || cached.expiresAt <= now || forceRefresh) {
-      const listing = (await listWithGit(cwd)) ?? listWithWalk(cwd);
+    if (!cached
+      || cached.expiresAt <= now
+      || (forceRefresh && now - cached.builtAt >= REFRESH_COOLDOWN_MS)) {
+      const listing = await loadListing(cwd);
       for (const [key, entry] of cache) {
         if (entry.expiresAt <= now) cache.delete(key);
       }
-      if (cache.size >= CACHE_MAX_ENTRIES) cache.clear();
-      cached = { listing, expiresAt: now + CACHE_TTL_MS };
+      // Replacing an existing key does not grow the cache, so it must not wipe
+      // the listings of unrelated projects.
+      if (!cache.has(cwd) && cache.size >= CACHE_MAX_ENTRIES) cache.clear();
+      const builtAt = Date.now();
+      cached = { listing, builtAt, expiresAt: builtAt + CACHE_TTL_MS };
       cache.set(cwd, cached);
     }
 
     if (query) {
       const limit = parseResultLimit(req.nextUrl.searchParams.get("limit"));
+      cached.entries ??= buildEntriesFromFiles(cached.listing.files);
       // Directories score a ranking bonus, so a caller that only renders files
       // must drop them before the limit is applied: "api" in this repo matches
       // 67 directories, which would otherwise consume half the budget and
       // silently push matching files out of the response.
       if (req.nextUrl.searchParams.get("kind") === "file") {
-        cached.fileEntries ??= (cached.entries ?? buildEntriesFromFiles(cached.listing.files))
-          .filter((entry) => !entry.isDir);
+        cached.fileEntries ??= cached.entries.filter((entry) => !entry.isDir);
         return NextResponse.json({ matches: filterFileEntries(cached.fileEntries, query, limit) });
       }
-      cached.entries ??= buildEntriesFromFiles(cached.listing.files);
       return NextResponse.json({ matches: filterFileEntries(cached.entries, query, limit) });
     }
 

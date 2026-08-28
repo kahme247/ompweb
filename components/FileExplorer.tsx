@@ -585,14 +585,15 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const [searchQuery, setSearchQuery] = useState("");
   const [searchPaths, setSearchPaths] = useState<string[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
-  // Tracks which refresh the search request has already answered, so an
-  // explicit refresh forces one uncached listing and typing does not.
-  const consumedRefreshTokenRef = useRef<string | null>(null);
   const [searchFailed, setSearchFailed] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const prevCwdRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const refreshToken = `${refreshKey ?? 0}:${treeRefreshKey}`;
+  // Which refresh the search request has already answered. It stays null until
+  // the first search, because the sidebar bumps the explorer key once on mount
+  // and that is not a refresh the user asked for.
+  const consumedRefreshTokenRef = useRef<string | null>(null);
   const uploadBusy = uploadPhase !== "idle";
   const searchActive = fileSearchOpen && searchQuery.trim().length > 0;
 
@@ -625,10 +626,13 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     setSearchFailed(false);
     const timer = setTimeout(() => {
       // Only a real refresh bypasses the index cache; typing must not force a
-      // fresh listing on every keystroke. The token is consumed here rather
-      // than in the effect body so an aborted debounce keeps it pending.
-      const forceRefresh = consumedRefreshTokenRef.current !== refreshToken;
-      consumedRefreshTokenRef.current = refreshToken;
+      // fresh listing on every keystroke.
+      const requestedToken = refreshToken;
+      // Seed on the first scheduled request, not on the first successful one:
+      // otherwise a refresh clicked while that first request is still in flight
+      // finds a null baseline and is silently answered from the TTL cache.
+      consumedRefreshTokenRef.current ??= requestedToken;
+      const forceRefresh = consumedRefreshTokenRef.current !== requestedToken;
       const params = new URLSearchParams({
         cwd,
         q: query,
@@ -644,6 +648,9 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
           : Promise.reject(new Error(`HTTP ${res.status}`)))
         .then((data) => {
           if (controller.signal.aborted) return;
+          // Acknowledge the refresh only now: a failed or aborted request must
+          // leave it pending so the next one still asks for a fresh listing.
+          consumedRefreshTokenRef.current = requestedToken;
           setSearchPaths((data.matches ?? []).map((m) => m.path));
         })
         .catch(() => {
