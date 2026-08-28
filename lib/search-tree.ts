@@ -16,16 +16,23 @@ export function buildSearchTree(paths: string[]): SearchTreeNode[] {
   const roots: SearchTreeNode[] = [];
   const byPath = new Map<string, SearchTreeNode>();
   for (const relative of paths) {
-    const segments = relative.split("/");
+    // Index results are clean relative paths, but a stray leading, trailing or
+    // doubled slash would otherwise produce nameless nodes.
+    const segments = relative.split("/").filter((segment) => segment.length > 0);
     let current = roots;
     let currentPath = "";
     for (let i = 0; i < segments.length; i++) {
       currentPath = currentPath ? `${currentPath}/${segments[i]}` : segments[i];
+      const isDir = i < segments.length - 1;
       let node = byPath.get(currentPath);
       if (!node) {
-        node = { name: segments[i], path: currentPath, isDir: i < segments.length - 1, children: [] };
+        node = { name: segments[i], path: currentPath, isDir, children: [] };
         byPath.set(currentPath, node);
         current.push(node);
+      } else if (isDir && !node.isDir) {
+        // The same name already arrived as a leaf ("a" before "a/b"). Keeping it
+        // a file would render it without its children, which are matches too.
+        node.isDir = true;
       }
       current = node.children;
     }

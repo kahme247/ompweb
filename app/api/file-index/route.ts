@@ -10,7 +10,7 @@ import {
   isFilePathAllowed,
   isWindowsAbsolutePath,
 } from "@/lib/file-access";
-import { buildEntriesFromFiles, filterFileEntries, type FileIndexEntry } from "@/lib/file-fuzzy";
+import { buildEntriesFromFiles, filterFileEntries, parseResultLimit, type FileIndexEntry } from "@/lib/file-fuzzy";
 
 const execFileAsync = promisify(execFile);
 
@@ -109,12 +109,13 @@ function listWithWalk(cwd: string): FileListing {
   return { files, hardTruncated: false };
 }
 
-// GET /api/file-index?cwd=/abs/path[&q=query]
+// GET /api/file-index?cwd=/abs/path[&q=query][&limit=n]
 // Without q: { files: string[] (relative to cwd, capped at MAX_FILES),
 // truncated: boolean } — the client-side index for local filtering.
 // With q: { matches: { path, isDir }[] } — ranked against the FULL listing so
 // repos larger than MAX_FILES still find deep files (cap applied after
-// matching, like the TUI passing the query to fd).
+// matching, like the TUI passing the query to fd). limit defaults to the `@`
+// menu size and is clamped to MAX_RESULT_LIMIT.
 // Guarded by the same allow-list as /api/files.
 export async function GET(req: NextRequest) {
   try {
@@ -157,7 +158,8 @@ export async function GET(req: NextRequest) {
 
     if (query) {
       cached.entries ??= buildEntriesFromFiles(cached.listing.files);
-      return NextResponse.json({ matches: filterFileEntries(cached.entries, query) });
+      const limit = parseResultLimit(req.nextUrl.searchParams.get("limit"));
+      return NextResponse.json({ matches: filterFileEntries(cached.entries, query, limit) });
     }
 
     const { files, hardTruncated } = cached.listing;

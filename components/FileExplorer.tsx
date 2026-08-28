@@ -26,7 +26,7 @@ import {
   normalizeFilePathSlashes,
 } from "@/lib/file-paths";
 import type { GitFileStatus, GitFileStatusKind, GitStatusResponse } from "@/lib/git-types";
-import type { FileIndexEntry } from "@/lib/file-fuzzy";
+import { MAX_RESULT_LIMIT, type FileIndexEntry } from "@/lib/file-fuzzy";
 import { buildSearchTree, type SearchTreeNode } from "@/lib/search-tree";
 
 interface FileEntry {
@@ -589,11 +589,14 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     setSearchLoading(true);
     setSearchFailed(false);
     const timer = setTimeout(() => {
-      fetch(`/api/file-index?cwd=${encodeURIComponent(cwd)}&q=${encodeURIComponent(query)}`, { signal: controller.signal })
+      fetch(`/api/file-index?cwd=${encodeURIComponent(cwd)}&q=${encodeURIComponent(query)}&limit=${MAX_RESULT_LIMIT}`, { signal: controller.signal })
         .then((res) => res.ok
           ? res.json() as Promise<{ matches?: FileIndexEntry[] }>
           : Promise.reject(new Error(`HTTP ${res.status}`)))
-        .then((data) => setSearchPaths((data.matches ?? []).filter((m) => !m.isDir).map((m) => m.path)))
+        .then((data) => {
+          if (controller.signal.aborted) return;
+          setSearchPaths((data.matches ?? []).filter((m) => !m.isDir).map((m) => m.path));
+        })
         .catch(() => {
           if (!controller.signal.aborted) {
             setSearchPaths([]);
@@ -603,7 +606,11 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         .finally(() => { if (!controller.signal.aborted) setSearchLoading(false); });
     }, 150);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [cwd, fileSearchOpen, searchQuery]);
+    // refreshToken participates so the toolbar refresh button and a finished
+    // upload re-run the visible query instead of leaving stale rows. The index
+    // itself has a short server-side TTL, so a re-run right after a write can
+    // still answer from that cache.
+  }, [cwd, fileSearchOpen, searchQuery, refreshToken]);
 
   // Results render as a tree; keep every directory that contains a match
   // expanded, while preserving the user's manual collapses as they type.
