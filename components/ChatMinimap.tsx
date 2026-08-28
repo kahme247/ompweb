@@ -75,6 +75,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
   const dragListenersRef = useRef<{ onMove: (ev: MouseEvent) => void; onUp: () => void } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const overflowPanelRef = useRef<HTMLDivElement>(null);
+  const [minimapHeightPx, setMinimapHeightPx] = useState(600);
   // RAF gate for mousemove so a pixel-level pointer event doesn't re-render
   // the whole minimap (every node + tooltip) on every frame.
   const mouseMoveRafRef = useRef<number | null>(null);
@@ -218,8 +219,10 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
     if (!el) return;
     const scrollable = el.scrollHeight - el.clientHeight;
     if (scrollable <= 0) return;
-    const clamped = Math.max(0, Math.min(1 - viewportRatio, viewportTopRatio));
-    el.scrollTop = (clamped / (1 - viewportRatio)) * scrollable;
+    const denom = 1 - viewportRatio;
+    if (denom < 1e-6) return;
+    const clamped = Math.max(0, Math.min(denom, viewportTopRatio));
+    el.scrollTop = (clamped / denom) * scrollable;
   }, [scrollContainer, viewportRatio]);
 
   // Coalesce mousemove updates to one per animation frame: writing state on
@@ -254,7 +257,9 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
 
     const onMove = (ev: MouseEvent) => {
       if (!draggingRef.current) return;
-      const r = (ev.clientY - rect.top) / rect.height;
+      const curRect = containerRef.current?.getBoundingClientRect();
+      if (!curRect) return;
+      const r = (ev.clientY - curRect.top) / curRect.height;
       scrollToMinimapRatio(r - offset);
     };
     const onUp = () => {
@@ -282,10 +287,20 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
 
 
 
+  // Keep minimap height in state so tooltip layout updates on resize (ref reads don't trigger renders)
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const update = () => setMinimapHeightPx(el.clientHeight || 600);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [visible]);
+
   // Compute collision-free tooltip positions for all nodes
   const TOOLTIP_HEIGHT = 22;
   const TOOLTIP_GAP = 2;
-  const minimapHeightPx = containerRef.current?.clientHeight ?? 600;
   const tooltipListOverflows = nodes.length * (TOOLTIP_HEIGHT + TOOLTIP_GAP) > minimapHeightPx;
 
   // Per-node colors and previews are pure functions of each node's message;
@@ -455,9 +470,9 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
             overflowX: "hidden",
           }}
         >
-          {nodes.map((node) => {
-            const preview = nodePreviews[node.index] ?? getMessagePreview(node.msg);
-            const color = nodeColors[node.index] ?? getNodeColor(node.msg);
+          {nodes.map((node, i) => {
+            const preview = nodePreviews[i] ?? getMessagePreview(node.msg);
+            const color = nodeColors[i] ?? getNodeColor(node.msg);
             const isNearest = nearestIndex === node.index;
             if (!preview) return null;
             return (
@@ -470,7 +485,8 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
                   e.stopPropagation();
                   const el = scrollContainer.current;
                   if (!el) return;
-                  el.scrollTop = node.topRatio * el.scrollHeight;
+                  const max = el.scrollHeight - el.clientHeight;
+                  el.scrollTop = node.topRatio * Math.max(0, max);
                 }}
                 style={{
                   padding: "2px 7px",
@@ -537,7 +553,8 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
               e.stopPropagation();
               const el = scrollContainer.current;
               if (!el) return;
-              el.scrollTop = node.topRatio * el.scrollHeight;
+              const max = el.scrollHeight - el.clientHeight;
+              el.scrollTop = node.topRatio * Math.max(0, max);
             }}
             style={{
               position: "absolute",
