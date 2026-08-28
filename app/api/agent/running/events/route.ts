@@ -10,65 +10,83 @@ export async function GET(req: Request) {
   // Hoisted so the stream's cancel() (half-open disconnects that never fire
   // the abort signal) can release the heartbeat and the subscriber.
   let streamCleanup: (() => void) | null = null;
+  const encoder = new TextEncoder();
+
   const stream = new ReadableStream({
     start(controller) {
-      const encode = (data: unknown) => {
-        const text = `data: ${JSON.stringify(data)}\n\n`;
-        controller.enqueue(new TextEncoder().encode(text));
-      };
-
-      // Subscribe BEFORE taking the initial snapshot so no state change can slip
-      // through the gap between snapshot and subscription.
-      const unsubscribe = subscribeRunningSessions(({ ids, refreshSessionList }) => {
-        try {
-          encode({
-            type: "running",
-            runningSessionIds: ids,
-            ...(refreshSessionList ? { refreshSessionList: true } : {}),
-          });
-        } catch {
-          // controller already closed
-        }
-      });
-
-      // Sessions omp writes outside the web UI produce no RPC events, so the
-      // only signal that they advanced is the file itself.
-      const holder: { fn: (() => void) | null } = { fn: null };
-      holder.fn = subscribeSessionFileChanges((sessionIds) => {
-        try {
-          encode({ type: "sessions-changed", sessionIds, refreshSessionList: true });
-        } catch {
-          try { holder.fn?.(); } catch { /* already cleaned up */ }
-        }
-      });
-      const unsubscribeFiles = holder.fn;
-
-      // Initial snapshot so the client renders the correct state immediately.
-      // (A duplicate frame here is harmless: the client just sets the same set.)
-      encode({ type: "running", runningSessionIds: getRunningRpcSessionIds() });
-
-      // Heartbeat to keep the connection alive through proxies/timeouts.
-      const heartbeat = setInterval(() => {
-        try {
-          controller.enqueue(new TextEncoder().encode(":\n\n"));
-        } catch {
-          // controller already closed
-        }
-      }, 30_000);
+      let closed = false;
+      let cleaned = false;
+      let unsubscribeRunning: (() => void) | null = null;
+      let unsubscribeFiles: (() => void) | null = null;
+      let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
       const cleanup = () => {
-        clearInterval(heartbeat);
-        unsubscribe();
-        unsubscribeFiles();
-        try { controller.close(); } catch { /* already closed */ }
+        if (cleaned) return;
+        closed = true;
+        cleaned = true;
+        if (heartbeatTimer !== null) {
+          clearInterval(heartbeatTimer);
+          heartbeatTimer = null;
+        }
+        if (unsubscribeRunning) {
+          try { unsubscribeRunning(); } catch {}
+          unsubscribeRunning = null;
+        }
+        if (unsubscribeFiles) {
+          try { unsubscribeFiles(); } catch {}
+          unsubscribeFiles = null;
+        }
+        req.signal?.removeEventListener("abort", cleanup);
+        try {
+          controller.close();
+        } catch {
+          // controller already closed
+        }
       };
       streamCleanup = cleanup;
+
+      const encode = (data: unknown) => {
+        if (closed) return;
+        try {
+          const text = `data: ${JSON.stringify(data)}\n\n`;
+          controller.enqueue(encoder.encode(text));
+        } catch {
+          cleanup();
+        }
+      };
 
       req.signal?.addEventListener("abort", cleanup);
       if (req.signal?.aborted) {
         cleanup();
         return;
       }
+
+      // Subscribe BEFORE taking the initial snapshot so no state change can slip
+      // through the gap between snapshot and subscription.
+      unsubscribeRunning = subscribeRunningSessions(({ ids, refreshSessionList }) => {
+        encode({
+          type: "running",
+          runningSessionIds: ids,
+          ...(refreshSessionList ? { refreshSessionList: true } : {}),
+        });
+      });
+
+      unsubscribeFiles = subscribeSessionFileChanges((sessionIds) => {
+        encode({ type: "sessions-changed", sessionIds, refreshSessionList: true });
+      });
+
+      // Initial snapshot so the client renders the correct state immediately.
+      encode({ type: "running", runningSessionIds: getRunningRpcSessionIds() });
+
+      // Heartbeat to keep the connection alive through proxies/timeouts.
+      heartbeatTimer = setInterval(() => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(":\n\n"));
+        } catch {
+          cleanup();
+        }
+      }, 30_000);
     },
     cancel() {
       streamCleanup?.();

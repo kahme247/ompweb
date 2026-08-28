@@ -6,8 +6,8 @@ export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json() as { action?: unknown };
-    if (body.action === "check") return NextResponse.json(await checkOmpUpdate());
+    const body = await request.json() as { action?: unknown; force?: boolean };
+    if (body.action === "check") return NextResponse.json(await checkOmpUpdate(body.force === true));
     if (body.action === "update") {
       return NextResponse.json({ error: "Automatic self-updating is disabled. Run 'omp update' in your terminal.", code: "update_disabled" }, { status: 400 });
     }

@@ -23,6 +23,7 @@ export async function GET(
   const stream = new ReadableStream({
     start(controller) {
       let closed = false;
+      let cleaned = false;
       let unsubscribe: (() => void) | null = null;
       // Backpressure slot: while the consumer is behind (desiredSize < 0),
       // replaceable `message_update` frames collapse to the latest one (omp
@@ -30,16 +31,40 @@ export async function GET(
       // Control/terminal frames are small and never dropped; they flush the
       // pending update first so ordering is preserved.
       let pendingUpdate: unknown | null = null;
+      let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
+      const cleanup = () => {
+        if (cleaned) return;
+        closed = true;
+        cleaned = true;
+        pendingUpdate = null;
+        if (heartbeatTimer !== null) {
+          clearInterval(heartbeatTimer);
+          heartbeatTimer = null;
+        }
+        if (unsubscribe) {
+          try { unsubscribe(); } catch {}
+          unsubscribe = null;
+        }
+        req.signal?.removeEventListener("abort", cleanup);
+        try {
+          controller.close();
+        } catch {
+          // controller already closed
+        }
+      };
+      streamCleanup = cleanup;
 
       const flushPendingUpdate = (): boolean => {
         const data = pendingUpdate;
         pendingUpdate = null;
         if (data === null) return true;
+        if (closed) return false;
         try {
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
           return true;
         } catch {
-          closed = true;
+          cleanup();
           return false;
         }
       };
@@ -56,33 +81,20 @@ export async function GET(
         try {
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
         } catch {
-          closed = true;
+          cleanup();
         }
       };
 
       // Heartbeat every 30s to prevent server/proxy timeout (Next.js default ~120-150s)
-      const heartbeat = setInterval(() => {
+      heartbeatTimer = setInterval(() => {
         if (closed) return;
         if (!flushPendingUpdate()) return;
         try {
           controller.enqueue(encoder.encode(":\n\n"));
         } catch {
-          closed = true;
+          cleanup();
         }
       }, 30_000);
-
-      const cleanup = () => {
-        if (closed) return;
-        closed = true;
-        clearInterval(heartbeat);
-        unsubscribe?.();
-        try {
-          controller.close();
-        } catch {
-          // controller already closed
-        }
-      };
-      streamCleanup = cleanup;
 
       // Detect client disconnect via abort signal
       req.signal?.addEventListener("abort", cleanup);
@@ -99,7 +111,6 @@ export async function GET(
       streamCleanup?.();
     },
   });
-
   return new Response(stream, {
     headers: {
       "Content-Type": "text/event-stream",

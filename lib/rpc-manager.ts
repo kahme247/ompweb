@@ -2,7 +2,7 @@ import { existsSync } from "fs";
 import { homedir } from "os";
 import { validateAgentImages } from "./image-attachments";
 import { invalidateModelsCache } from "./models-cache";
-import { RpcCommandError, RpcProcess, type RpcFrame } from "./omp/rpc-process";
+import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame } from "./omp/rpc-process";
 import { readNativeSettings } from "./omp/settings-config";
 import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
 import { PRESET_FULL } from "./tool-presets";
@@ -38,7 +38,8 @@ interface CompactionResultLike {
 const IDLE_DESTROY_MS = 10 * 60 * 1000;
 const READY_TIMEOUT_MS = 120_000;
 const MCP_LIST_TIMEOUT_MS = 15_000;
-
+const GET_STATE_TIMEOUT_MS = 5_000;
+const NON_TERMINAL_CONTINUATION_GRACE_MS = 2_000;
 const RESTARTING_MESSAGE = "This session is restarting — retry in a moment.";
 const BASH_EXCLUDE_MESSAGE =
   "omp cannot run a shell command with its output excluded from the model context (`!!`): the RPC bash command has no exclusion option, so the output would silently enter the context anyway. Run it with a single `!` to share the output with the model, or use a terminal outside omp web.";
@@ -206,6 +207,8 @@ export class AgentSessionWrapper {
   private extensionStatuses = new Map<string, string>();
   private extensionWidgets = new Map<string, ExtensionWidgetItem>();
   private promptRunning = false;
+  private promptDispatchPending = false;
+  private continuationGraceUntil = 0;
   private bashRunning = false;
   private streaming = false;
   private compacting = false;
@@ -349,7 +352,9 @@ export class AgentSessionWrapper {
         break;
       }
       case "agent_start":
+        this.promptRunning = true;
         this.streaming = true;
+        this.continuationGraceUntil = 0;
         // The session file can appear just after the prompt acknowledgement.
         // Invalidate and signal the sidebar now rather than waiting for the
         // agent's first reply or terminal event.
@@ -369,7 +374,10 @@ export class AgentSessionWrapper {
         if (event.isTerminal !== false) {
           this.streaming = false;
           this.promptRunning = false;
+          this.continuationGraceUntil = 0;
           invalidateSessionListCache();
+        } else {
+          this.continuationGraceUntil = Date.now() + NON_TERMINAL_CONTINUATION_GRACE_MS;
         }
         break;
       case "prompt_result":
@@ -739,6 +747,8 @@ export class AgentSessionWrapper {
   }
 
   private buildWebState(state: RpcSessionState): WebSessionState {
+    const wasRunning = this.isRunning();
+
     // Reconcile process-side flags with authoritative child state.
     this.streaming = state.isStreaming;
     this.compacting = state.isCompacting;
@@ -746,6 +756,19 @@ export class AgentSessionWrapper {
     if (state.sessionId) {
       this._sessionId = state.sessionId;
       this._sessionFile = state.sessionFile ?? this._sessionFile;
+    }
+
+    if (
+      state.isStreaming === false &&
+      state.isCompacting === false &&
+      !this.promptDispatchPending &&
+      Date.now() >= this.continuationGraceUntil
+    ) {
+      this.promptRunning = false;
+    }
+
+    if (wasRunning && !this.isRunning()) {
+      notifyRunningChange();
     }
     return {
       sessionId: state.sessionId,
@@ -820,10 +843,11 @@ export class AgentSessionWrapper {
       this.extensionWidgets.clear();
       this.clearPendingUiRequests();
       this.promptRunning = false;
+      this.promptDispatchPending = false;
+      this.continuationGraceUntil = 0;
       this.bashRunning = false;
       this.streaming = false;
       this.compacting = false;
-
       const proc = new RpcProcess({
         cwd: this.cwd,
         extraArgs: buildSessionSpawnArgs(resumable ? sessionFile : ""),
@@ -879,6 +903,8 @@ export class AgentSessionWrapper {
         const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
         if (!streamingBehavior) {
           this.promptRunning = true;
+          this.promptDispatchPending = true;
+          this.continuationGraceUntil = 0;
           notifyRunningChange();
         }
         try {
@@ -901,6 +927,10 @@ export class AgentSessionWrapper {
           this.promptRunning = false;
           notifyRunningChange();
           throw error;
+        } finally {
+          if (!streamingBehavior) {
+            this.promptDispatchPending = false;
+          }
         }
         return null;
       }
@@ -926,8 +956,16 @@ export class AgentSessionWrapper {
         return null;
 
       case "get_state": {
-        const state = await this.proc.sendCommand<RpcSessionState>({ type: "get_state" });
-        return this.buildWebState(state);
+        try {
+          const state = await this.proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS);
+          return this.buildWebState(state);
+        } catch (error) {
+          if (error instanceof RpcCommandTimeoutError || (error instanceof Error && error.name === "RpcCommandTimeoutError")) {
+            await this.destroyAndWait();
+            throw new WebRpcError("The OMP session stopped responding and was reset.", "session_unresponsive");
+          }
+          throw error;
+        }
       }
 
       case "set_model": {

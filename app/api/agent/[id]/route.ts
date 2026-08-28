@@ -84,9 +84,15 @@ export async function GET(
     if (!session || !session.isAlive()) {
       return NextResponse.json({ running: false });
     }
-
-    const state = await session.send({ type: "get_state" });
-    return NextResponse.json({ running: true, state });
+    try {
+      const state = await session.send({ type: "get_state" });
+      return NextResponse.json({ running: true, state });
+    } catch (error) {
+      if (error instanceof WebRpcError && error.code === "session_unresponsive") {
+        return NextResponse.json({ running: false, recovered: true });
+      }
+      throw error;
+    }
   } catch (error) {
     return commandErrorResponse(error);
   }

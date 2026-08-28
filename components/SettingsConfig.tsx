@@ -432,7 +432,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
     setChecking(true);
     setMessage(null);
     try {
-      const response = await fetch("/api/omp-update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "check" }) });
+      const response = await fetch("/api/omp-update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "check", force: true }) });
       const data = (await response.json()) as UpdateState & { error?: string };
       if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
       setUpdate(data);
