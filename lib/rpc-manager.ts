@@ -1198,6 +1198,10 @@ export class AgentSessionWrapper {
     }
     this.unsubscribeFrames?.();
     this.clearPendingUiRequests();
+    this.promptDispatchPendingCount = 0;
+    this.awaitingAgentStart = false;
+    this.awaitingAgentStartDeadline = 0;
+    this.continuationGraceUntil = 0;
     if (this.mcpListWaiter) {
       clearTimeout(this.mcpListWaiter.timer);
       this.mcpListWaiter.reject(new Error("Session was closed while loading MCP servers"));
@@ -1209,9 +1213,9 @@ export class AgentSessionWrapper {
     this.hostToolNames.clear();
     this.pendingHostUris.clear();
     this.hostUriSchemes.clear();
-    this.onDestroyCallback?.();
     notifyRunningChange();
     await disposed;
+    this.onDestroyCallback?.();
   }
 }
 

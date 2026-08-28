@@ -428,11 +428,11 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
     void saveNativeSettings({ ...base, tools: { ...tools, approval: { ...(tools.approval ?? {}), ...patch } } });
   }, [nativeSettings, saveNativeSettings]);
 
-  const checkForUpdate = useCallback(async () => {
+  const checkForUpdate = useCallback(async (force = false) => {
     setChecking(true);
     setMessage(null);
     try {
-      const response = await fetch("/api/omp-update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "check", force: true }) });
+      const response = await fetch("/api/omp-update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "check", ...(force ? { force: true } : {}) }) });
       const data = (await response.json()) as UpdateState & { error?: string };
       if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
       setUpdate(data);
@@ -994,7 +994,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                         {checking ? t("settingsConfig.checkingUpdates") : update?.updateAvailable ? t("appShell.updateVersion", { current: update.currentVersion ?? "?", available: update.availableVersion ?? "?" }) : update?.currentVersion ? t("settingsConfig.upToDate", { version: update.currentVersion }) : t("settingsConfig.versionUnavailable")}
                       </div>
                     </div>
-                    <button type="button" onClick={() => void checkForUpdate()} disabled={checking} aria-label={t("settingsConfig.checkOmpUpdates")} style={{ padding: "6px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", cursor: checking ? "wait" : "pointer", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 5 }}>
+                    <button type="button" onClick={() => void checkForUpdate(true)} disabled={checking} aria-label={t("settingsConfig.checkOmpUpdates")} style={{ padding: "6px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", cursor: checking ? "wait" : "pointer", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 5 }}>
                       <RefreshCw size={13} aria-hidden="true" /> {t("settingsConfig.refresh")}
                     </button>
                   </div>
