@@ -11,7 +11,7 @@ import { ExtensionDialog } from "./ExtensionDialog";
 import { SubagentTranscriptDialog } from "./SubagentTranscriptDialog";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ComposerPanels } from "./ComposerPanels";
-import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
+import { CHAT_COLUMN_MAX_WIDTH, MINIMAP_WIDTH } from "@/lib/chat-layout";
 import { useAgentSession, type AgentPhase, type NoticeItem, type SubagentInfo } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
@@ -60,6 +60,10 @@ function phaseLabel(phase: AgentPhase): string {
 }
 
 const CHAT_COLUMN_PADDING = 16;
+// Symmetric centering halves maxWidth reduction across both sides; compensate
+// so the right clearance (padding + half-reduction) equals the minimap width.
+const MINIMAP_CLEARANCE = 2 * (MINIMAP_WIDTH - CHAT_COLUMN_PADDING);
+const CHAT_COLUMN_MAX_WIDTH_DESKTOP = `min(${CHAT_COLUMN_MAX_WIDTH}px, calc(100% - ${MINIMAP_CLEARANCE}px))`;
 // Trigger the next history page while the sentinel is still this far below
 // the top edge, so a normal upward scroll seamlessly continues into the newly
 // loaded messages. Triggering only at the very top made the load invisible:
@@ -999,7 +1003,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
             pointerEvents: "none",
           }}
         >
-          <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
+          <div style={{ maxWidth: isMobile ? CHAT_COLUMN_MAX_WIDTH : CHAT_COLUMN_MAX_WIDTH_DESKTOP, margin: "0 auto" }}>
             <NoticeShelf notices={notices} floating align="right" />
           </div>
         </div>
@@ -1008,7 +1012,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
             users need the scrollbar (Chrome's overlay scrollbar still shows). */}
         <div ref={scrollContainerRef} className={`flex-1 overflow-y-auto pt-6` + (isMobile ? "" : " [scrollbar-width:none]")}>
           <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
-            <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
+            <div style={{ maxWidth: isMobile ? CHAT_COLUMN_MAX_WIDTH : CHAT_COLUMN_MAX_WIDTH_DESKTOP, margin: "0 auto" }}>
               <ExtensionStatusBar statuses={extensionStatuses} />
               <ExtensionWidgets widgets={aboveEditorWidgets} />
 
