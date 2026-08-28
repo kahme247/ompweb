@@ -656,6 +656,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useEffect(() => () => {
     clearTerminalReconcileTimer();
   }, [clearTerminalReconcileTimer]);
+  // Blocks prompt submission while the initial hydration's live-state fetch is
+  // still pending. Without this, showLoading=false after disk messages lets
+  // a prompt increment runId before the stale pre-prompt state arrives and
+  // clobbers the new run's derived state (model/fast-mode).
+  const initialHydrationPendingRef = useRef(false);
   const [extensionCustomUi, setExtensionCustomUi] = useState<ExtensionUiCustomRequest | null>(null);
   const [extensionStatuses, setExtensionStatuses] = useState<ExtensionStatusItem[]>([]);
   const [extensionWidgets, setExtensionWidgets] = useState<ExtensionWidgetItem[]>([]);
@@ -1049,6 +1054,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         return null;
       }
 
+      // Track initial hydration so prompt submission waits for the live state.
+      const isInitialHydration = showLoading && includeState;
+      if (isInitialHydration) initialHydrationPendingRef.current = true;
+
       try {
         // Capture the sequence token BEFORE the fetch: a response snapshotted
         // earlier must not mint a fresh token on arrival and clobber a newer
@@ -1092,12 +1101,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         console.error("Failed to load agent state:", e);
         if (showLoading) setLoading(false);
         return null;
+      } finally {
+        if (isInitialHydration) initialHydrationPendingRef.current = false;
       }
     } catch (e) {
       setError(String(e));
+      if (showLoading && includeState) initialHydrationPendingRef.current = false;
       return null;
     } finally {
       if (showLoading && !messagesLoaded) setLoading(false);
+      // Ensure the flag is cleared even if the pre-state early-return path was taken
+      if (showLoading && includeState && !messagesLoaded) initialHydrationPendingRef.current = false;
     }
   }, [refreshSubagentHistory, applyAuthoritativeModel, beginAuthoritativeModelSync]);
 
@@ -2317,6 +2331,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const trimmedMessage = message.trim();
     if (!trimmedMessage && !images?.length) return false;
     if (agentRunningRef.current || bashRunningRef.current) return false;
+    if (initialHydrationPendingRef.current) return false;
     const isSlashCommandPrompt = !images?.length && trimmedMessage.startsWith("/");
 
     const isBashCommand = !images?.length && trimmedMessage.startsWith("!");
