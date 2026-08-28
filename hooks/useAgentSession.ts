@@ -2447,6 +2447,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = sessionIdRef.current;
     if (!sid || !agentRunningRef.current) return false;
 
+    clearTerminalReconcileTimer();
+    // Advance the run generation so late agent_end / prompt_error / stale
+    // loadSession from the aborted turn cannot stop or clobber the replacement.
+    promptRunIdRef.current += 1;
+
     const { userMsg, piImages: interruptPiImages } = buildOutgoingPrompt(message, images);
     setMessages((prev) => [...prev, userMsg]);
     optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
@@ -2479,7 +2484,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
       return false;
     }
-  }, [addNotice, ensureEventsConnected, refreshSubagentRoster]);
+  }, [addNotice, ensureEventsConnected, refreshSubagentRoster, clearTerminalReconcileTimer]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current) return;
