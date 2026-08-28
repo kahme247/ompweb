@@ -27,7 +27,7 @@ import {
 } from "@/lib/file-paths";
 import type { GitFileStatus, GitFileStatusKind, GitStatusResponse } from "@/lib/git-types";
 import { MAX_RESULT_LIMIT, type FileIndexEntry } from "@/lib/file-fuzzy";
-import { buildSearchTree, type SearchTreeNode } from "@/lib/search-tree";
+import { buildSearchRows } from "@/lib/search-results";
 
 interface FileEntry {
   name: string;
@@ -35,6 +35,10 @@ interface FileEntry {
   size: number;
   modified: string;
 }
+
+// Flat search rows never expand, so every row shares these.
+const EMPTY_PATH_SET: Set<string> = new Set();
+const noop = () => {};
 
 interface FileNode {
   name: string;
@@ -208,6 +212,7 @@ function TreeNode({
   expandedPaths,
   onToggleExpanded,
   refreshToken,
+  secondaryLabel,
   highlightedPaths,
   gitStatusByPath,
   changedDirectoryPaths,
@@ -224,6 +229,8 @@ function TreeNode({
   highlightedPaths: Set<string>;
   gitStatusByPath: Map<string, GitFileStatus>;
   changedDirectoryPaths: Set<string>;
+  /** Dimmed directory shown next to the name in flat search results. */
+  secondaryLabel?: string;
 }) {
   const { t } = useI18n();
   const open = expandedPaths.has(node.fullPath);
@@ -377,12 +384,35 @@ function TreeNode({
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
-            flex: 1,
+            // The name is the answer the user is looking for, so the directory
+            // gives up width first.
+            flex: secondaryLabel ? "0 1 auto" : 1,
+            maxWidth: secondaryLabel ? "72%" : undefined,
+            flexShrink: secondaryLabel ? 0 : undefined,
           }}
           title={node.fullPath}
         >
           {node.name}
         </span>
+        {secondaryLabel && (
+          // Search rows are flat, so the directory is the only context a row has.
+          <span
+            style={{
+              flex: "1 1 auto",
+              minWidth: 0,
+              fontSize: 11,
+              color: "var(--text-dim)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              direction: "rtl",
+              textAlign: "left",
+            }}
+            title={node.fullPath}
+          >
+            {secondaryLabel}
+          </span>
+        )}
         {highlighted && (
           <span
             title={t("fileExplorer.newlyUploaded")}
@@ -552,7 +582,6 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const [searchPaths, setSearchPaths] = useState<string[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchFailed, setSearchFailed] = useState(false);
-  const [searchExpanded, setSearchExpanded] = useState<Set<string>>(new Set());
   const searchInputRef = useRef<HTMLInputElement>(null);
   const prevCwdRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
@@ -571,7 +600,6 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     setSearchPaths([]);
     setSearchLoading(false);
     setSearchFailed(false);
-    setSearchExpanded(new Set());
   }, [fileSearchOpen]);
 
   // Debounced query against the same cached, bounded file index that backs
@@ -612,43 +640,20 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     // still answer from that cache.
   }, [cwd, fileSearchOpen, searchQuery, refreshToken]);
 
-  // Results render as a tree; keep every directory that contains a match
-  // expanded, while preserving the user's manual collapses as they type.
-  useEffect(() => {
-    if (searchPaths.length === 0) return;
-    const dirs = new Set<string>();
-    for (const relative of searchPaths) {
-      const parts = relative.split("/");
-      let partial = "";
-      for (let i = 0; i < parts.length - 1; i++) {
-        partial = partial ? `${partial}/${parts[i]}` : parts[i];
-        dirs.add(joinFilePath(cwd, partial));
-      }
-    }
-    setSearchExpanded((prev) => {
-      let changed = false;
-      const next = new Set(prev);
-      for (const dir of dirs) {
-        if (!next.has(dir)) {
-          next.add(dir);
-          changed = true;
-        }
-      }
-      return changed ? next : prev;
-    });
-  }, [cwd, searchPaths]);
-
-  const searchRoots = useMemo(() => {
-    const toFileNode = (node: SearchTreeNode): FileNode => ({
-      name: node.name,
-      fullPath: joinFilePath(cwd, node.path),
-      isDir: node.isDir,
+  // Rows stay in the order the index ranked them, so the closest name matches
+  // sit at the top. Folding them into a directory tree would re-sort them
+  // alphabetically and push, say, AGENTS.md below every app/api/agent/… file
+  // that only matched on its parent directory.
+  const searchRows = useMemo(() => buildSearchRows(searchPaths).map((row) => ({
+    ...row,
+    node: {
+      name: row.name,
+      fullPath: joinFilePath(cwd, row.path),
+      isDir: false,
       size: 0,
-      children: node.isDir ? node.children.map(toFileNode) : undefined,
       loaded: true,
-    });
-    return buildSearchTree(searchPaths).map(toFileNode);
-  }, [cwd, searchPaths]);
+    } satisfies FileNode,
+  })), [cwd, searchPaths]);
 
   const gitStatusByPath = useMemo(() => new Map(
     gitFiles.map((status) => [normalizeFilePathSlashes(status.filePath), status]),
@@ -678,13 +683,6 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     });
   }, []);
 
-  const handleToggleSearchExpanded = useCallback((fullPath: string, open: boolean) => {
-    setSearchExpanded((prev) => {
-      const next = new Set(prev);
-      if (open) next.add(fullPath); else next.delete(fullPath);
-      return next;
-    });
-  }, []);
 
   const applyUploadResult = useCallback((data: UploadResponse) => {
     const uploaded = data.uploaded ?? [];
@@ -1017,19 +1015,20 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
             <div role="status" style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>{t("fileExplorer.searching")}</div>
           ) : searchFailed ? (
             <div role="alert" style={{ padding: "8px 12px", fontSize: 11, color: "var(--status-error)" }}>{t("fileExplorer.searchFailed")}</div>
-          ) : searchRoots.length === 0 ? (
+          ) : searchRows.length === 0 ? (
             <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>{t("fileExplorer.noMatchingFiles")}</div>
           ) : (
-            searchRoots.map((node) => (
+            searchRows.map((row) => (
               <TreeNode
-                key={`${searchQuery}:${node.fullPath}`}
-                node={node}
+                key={row.path}
+                node={row.node}
                 depth={0}
                 cwd={cwd}
                 onOpenFile={onOpenFile}
                 onAtMention={onAtMention}
-                expandedPaths={searchExpanded}
-                onToggleExpanded={handleToggleSearchExpanded}
+                expandedPaths={EMPTY_PATH_SET}
+                onToggleExpanded={noop}
+                secondaryLabel={row.directory}
                 highlightedPaths={highlightedPaths}
                 gitStatusByPath={gitStatusByPath}
                 changedDirectoryPaths={changedDirectoryPaths}
