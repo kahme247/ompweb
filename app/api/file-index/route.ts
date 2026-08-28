@@ -33,13 +33,6 @@ const MAX_WALK_DEPTH = 8;
 const MAX_QUERY_LENGTH = 500;
 const CACHE_TTL_MS = 10_000;
 const CACHE_MAX_ENTRIES = 20;
-/**
- * A client-driven `refresh=1` skips the TTL, so it must not become a way to
- * spawn one Git scan per request. Concurrent rebuilds share a single scan, and
- * this window caps a runaway caller. It stays short on purpose: the point of
- * the flag is to see a file that was written a moment ago.
- */
-const REFRESH_COOLDOWN_MS = 250;
 
 interface FileListing {
   /** Full listing up to the hard cap (not the client cap) */
@@ -54,8 +47,6 @@ interface CacheEntry {
   entries?: FileIndexEntry[];
   /** Same, restricted to files, for callers that never show directories */
   fileEntries?: FileIndexEntry[];
-  /** When the listing was produced, used to throttle forced rebuilds */
-  builtAt: number;
   expiresAt: number;
 }
 
@@ -97,12 +88,14 @@ async function listWithGit(cwd: string): Promise<FileListing | null> {
     };
     // --cached lists index entries, including files already removed from the
     // working tree. Those would show up as results that 404 the moment anyone
-    // opens them, so subtract what git reports as deleted.
+    // opens them, so subtract what git reports as deleted. That query is
+    // auxiliary: a stale-but-complete listing beats throwing away the git
+    // listing over it, which would fall back to the depth-capped readdir walk.
     const [listed, deleted] = await Promise.all([
       execFileAsync("git", ["-C", cwd, "ls-files", "--cached", "--others", "--exclude-standard", "-z"], gitOptions),
-      execFileAsync("git", ["-C", cwd, "ls-files", "--deleted", "-z"], gitOptions),
+      execFileAsync("git", ["-C", cwd, "ls-files", "--deleted", "-z"], gitOptions).catch(() => null),
     ]);
-    const missing = new Set(deleted.stdout.split("\0").filter(Boolean));
+    const missing = new Set((deleted?.stdout ?? "").split("\0").filter(Boolean));
     const all = listed.stdout.split("\0").filter((file) => file && !missing.has(file));
     if (all.length > GIT_HARD_CAP) {
       return { files: all.slice(0, GIT_HARD_CAP), hardTruncated: true };
@@ -152,8 +145,8 @@ function listWithWalk(cwd: string): FileListing {
 // repos larger than MAX_FILES still find deep files (cap applied after
 // matching, like the TUI passing the query to fd). limit defaults to the `@`
 // menu size and is clamped to MAX_RESULT_LIMIT; kind=file drops directories
-// before ranking; refresh=1 rebuilds the listing instead of using the TTL
-// cache, for the explorer's refresh button.
+// before ranking and reports a `truncated` flag; refresh=1 rebuilds the listing
+// instead of using the TTL cache, for the explorer's refresh button.
 // Guarded by the same allow-list as /api/files.
 export async function GET(req: NextRequest) {
   try {
@@ -184,17 +177,12 @@ export async function GET(req: NextRequest) {
     const cache = getIndexCache();
     const now = Date.now();
     // An explicit refresh in the UI must not be answered from the TTL window,
-    // or a file the agent just wrote stays invisible for another few seconds.
-    // It is client-driven, so it only counts once per cooldown window.
+    // or a file the agent just wrote stays invisible. loadListing collapses
+    // concurrent rebuilds onto one scan, which is the whole bound: an age gate
+    // on top of it can only suppress the refresh the user actually asked for.
     const forceRefresh = req.nextUrl.searchParams.get("refresh") === "1";
     let cached = cache.get(cwd);
-    // A missing or non-monotonic builtAt (an entry cached before this field
-    // existed, or a clock stepped backwards) must not suppress a refresh.
-    const buildAge = cached ? now - cached.builtAt : Infinity;
-    const cooling = Number.isFinite(buildAge) && buildAge >= 0 && buildAge < REFRESH_COOLDOWN_MS;
-    if (!cached
-      || cached.expiresAt <= now
-      || (forceRefresh && !cooling)) {
+    if (!cached || cached.expiresAt <= now || forceRefresh) {
       const listing = await loadListing(cwd);
       for (const [key, entry] of cache) {
         if (entry.expiresAt <= now) cache.delete(key);
@@ -202,8 +190,9 @@ export async function GET(req: NextRequest) {
       // Replacing an existing key does not grow the cache, so it must not wipe
       // the listings of unrelated projects.
       if (!cache.has(cwd) && cache.size >= CACHE_MAX_ENTRIES) cache.clear();
-      const builtAt = Date.now();
-      cached = { listing, builtAt, expiresAt: builtAt + CACHE_TTL_MS };
+      // Timed after the scan, not from `now`: a large repo can take longer to
+      // list than the whole TTL, which would store an already-expired entry.
+      cached = { listing, expiresAt: Date.now() + CACHE_TTL_MS };
       cache.set(cwd, cached);
     }
 
@@ -217,9 +206,11 @@ export async function GET(req: NextRequest) {
       if (req.nextUrl.searchParams.get("kind") === "file") {
         cached.fileEntries ??= cached.entries.filter((entry) => !entry.isDir);
         // Ask for one past the limit: the extra row never ships, it only tells
-        // the panel that the list it shows is incomplete.
+        // the panel that the list it shows is incomplete. A listing that hit the
+        // hard cap is incomplete the same way, and is worth reporting even
+        // though fewer than `limit` rows matched what survived.
         const ranked = filterFileEntries(cached.fileEntries, query, limit + 1);
-        const truncated = ranked.length > limit;
+        const truncated = ranked.length > limit || cached.listing.hardTruncated;
         return NextResponse.json({
           matches: truncated ? ranked.slice(0, limit) : ranked,
           truncated,

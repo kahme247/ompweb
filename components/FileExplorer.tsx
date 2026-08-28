@@ -36,7 +36,8 @@ interface FileEntry {
   modified: string;
 }
 
-// Flat search rows never expand, so every row shares these.
+// Search rows are always files (the panel asks for kind=file), so they never
+// expand and every row shares these.
 const EMPTY_PATH_SET: Set<string> = new Set();
 const noop = () => {};
 
@@ -390,9 +391,8 @@ function TreeNode({
             whiteSpace: "nowrap",
             // The name is the answer the user is looking for, so the directory
             // gives up width first.
-            flex: secondaryLabel ? "0 1 auto" : 1,
+            flex: secondaryLabel ? "0 0 auto" : 1,
             maxWidth: secondaryLabel ? "72%" : undefined,
-            flexShrink: secondaryLabel ? 0 : undefined,
           }}
           title={node.fullPath}
         >
@@ -716,7 +716,6 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     });
   }, []);
 
-
   const applyUploadResult = useCallback((data: UploadResponse) => {
     const uploaded = data.uploaded ?? [];
     const skipped = data.skipped ?? [];
@@ -868,12 +867,26 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   return (
     <div style={{ minHeight: "100%" }}>
       <input ref={uploadInputRef} type="file" multiple hidden onChange={handleUploadInput} />
+      {/* Pinned: the result list scrolls, so an un-sticky box leaves you
+          unable to edit the query that produced it. */}
       {fileSearchOpen && (
-        <div style={{ position: "relative", padding: "6px 8px 4px" }}>
+        <div style={{
+          position: "sticky",
+          top: 0,
+          zIndex: 1,
+          background: "var(--bg-panel)",
+          padding: "6px 8px 4px",
+        }}>
           <input
             ref={searchInputRef}
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            onChange={(e) => {
+              // Arm the loading state in the same batch as the query: the
+              // debounce effect only runs after paint, so the first keystroke
+              // would otherwise show "No matching files" for a frame.
+              setSearchQuery(e.target.value);
+              setSearchLoading(true);
+            }}
             onKeyDown={(e) => {
               if (e.key === "Escape") {
                 e.preventDefault();
