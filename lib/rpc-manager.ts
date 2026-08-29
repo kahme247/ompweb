@@ -39,6 +39,13 @@ const IDLE_DESTROY_MS = 10 * 60 * 1000;
 const READY_TIMEOUT_MS = 120_000;
 const MCP_LIST_TIMEOUT_MS = 15_000;
 const GET_STATE_TIMEOUT_MS = 5_000;
+/** Cap on the *acknowledgement* of a prompt frame — not on model execution.
+ * omp acks a prompt as soon as it accepts it and the run then reports through
+ * events (agent_start/agent_end), so an ack that never arrives means the child
+ * is wedged: without this the API request (and the UI spinner behind it) would
+ * stay pending forever. Generous enough to cover slow local startup work the
+ * child does before acking. */
+const PROMPT_ACK_TIMEOUT_MS = 30_000;
 const NON_TERMINAL_CONTINUATION_GRACE_MS = 2_000;
 const AWAITING_AGENT_START_TIMEOUT_MS = 10_000;
 const RESTARTING_MESSAGE = "This session is restarting — retry in a moment.";
@@ -945,7 +952,7 @@ export class AgentSessionWrapper {
             message: command.message as string,
             ...(toImageContents(command.images) ? { images: toImageContents(command.images) } : {}),
             ...(streamingBehavior ? { streamingBehavior } : {}),
-          });
+          }, PROMPT_ACK_TIMEOUT_MS);
           // Slash commands fully consumed by a builtin report agentInvoked:false
           // in the ack itself — no prompt_result frame follows.
           if (ack?.agentInvoked === false && !streamingBehavior) {
@@ -965,6 +972,14 @@ export class AgentSessionWrapper {
           this.awaitingAgentStart = false;
           this.awaitingAgentStartDeadline = 0;
           notifyRunningChange();
+          if (error instanceof RpcCommandTimeoutError || (error instanceof Error && error.name === "RpcCommandTimeoutError")) {
+            // The child took the frame but never acked it, so nothing will ever
+            // report this run: recycle it exactly like the get_state timeout
+            // path so the next request spawns a fresh child instead of talking
+            // to a wedged one.
+            await this.destroyAndWait();
+            throw new WebRpcError("The OMP session stopped responding and was reset.", "session_unresponsive");
+          }
           throw error;
         } finally {
           if (!streamingBehavior) {
