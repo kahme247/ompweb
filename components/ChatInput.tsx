@@ -21,6 +21,7 @@ import {
   MAX_ATTACHED_IMAGE_BYTES,
   MAX_ATTACHED_IMAGES,
   isBase64ImageWithinLimits,
+  validateOutgoingPrompt,
 } from "@/lib/image-attachments";
 import {
   buildEntriesFromFiles, buildAtInsertText, extractAtQuery, filterFileEntries,
@@ -732,6 +733,17 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     };
   }, []);
 
+  /** The routes reject an oversized prompt with 413, but the session hook has
+   * already shown the optimistic user bubble and Waiting for model by then, and
+   * the composer has been cleared. Refuse here instead, keeping text and
+   * images so the user can trim the message. */
+  const rejectsOversizedPrompt = useCallback((message: string, images: AttachedImage[]): boolean => {
+    const error = validateOutgoingPrompt(message, images);
+    if (!error) return false;
+    setAttachError(error);
+    return true;
+  }, []);
+
   const handleSend = useCallback(async () => {
     const msg = value.trim();
     if (!msg && !attachedImages.length && !attachedTextFiles.length) return;
@@ -739,15 +751,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     onAudioUnlock?.();
     const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFiles);
     if (!attachedImages.length && !attachedTextFiles.length && msg.startsWith("/") && onBuiltinCommand) {
+      const expansion = expandWebSlashCommand(msg);
+      if (expansion.kind === "expand" && rejectsOversizedPrompt(expansion.prompt, attachedImages)) return;
       const result = await onBuiltinCommand(msg);
       if (result.handled) {
         if (!result.error && !result.retainInput) clearInput();
         return;
       }
     }
+    if (rejectsOversizedPrompt(composedMessage, attachedImages)) return;
     onSend(composedMessage, attachedImages.length ? attachedImages : undefined);
     clearInput();
-  }, [value, attachedImages, attachedTextFiles, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock]);
+  }, [value, attachedImages, attachedTextFiles, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, rejectsOversizedPrompt]);
 
   const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
@@ -1035,6 +1050,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       // own ACP handlers can run them.
       const expansion = expandWebSlashCommand(msg);
       if (expansion.kind === "expand") {
+        if (rejectsOversizedPrompt(expansion.prompt, attachedImages)) return;
         onPromptWithStreamingBehavior(expansion.prompt, streamingBehavior, attachedImages.length ? attachedImages : undefined);
         clearInput();
         return;
@@ -1046,17 +1062,19 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }));
         return;
       }
+      if (rejectsOversizedPrompt(msg, attachedImages)) return;
       onPromptWithStreamingBehavior(msg, streamingBehavior, attachedImages.length ? attachedImages : undefined);
       clearInput();
       return;
     }
+    if (rejectsOversizedPrompt(msg, attachedImages)) return;
     if (mode === "steer" && onSteer) {
       onSteer(msg, attachedImages.length ? attachedImages : undefined);
     } else if (mode === "followup" && onFollowUp) {
       onFollowUp(msg, attachedImages.length ? attachedImages : undefined);
     }
     clearInput();
-  }, [value, attachedImages, attachedTextFiles, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, t, advisorEnabled]);
+  }, [value, attachedImages, attachedTextFiles, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, t, advisorEnabled, rejectsOversizedPrompt]);
   // A typed, text-only message during a run is a queued follow-up. Keep Stop
   // as the action while the composer is empty or contains attachments.
   const primaryActionQueuesMessage =

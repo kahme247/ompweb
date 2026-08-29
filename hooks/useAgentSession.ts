@@ -20,6 +20,7 @@ import { getToolNamesForPreset, type ToolPreset } from "@/lib/tool-presets";
 import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-preset-preference";
 import { toast } from "@/components/ui/toast";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
+import { validateOutgoingPrompt } from "@/lib/image-attachments";
 import { createActiveGoal, parseActiveGoal, type ActiveGoal, type ActivePlan } from "@/lib/web-mode-state";
 import type { HostToolDefinition, HostUriSchemeDefinition, RpcAvailableSlashCommand, SessionStatsInfo, TodoPhase } from "@/lib/pi-types";
 import { isRecord } from "@/lib/type-guards";
@@ -2343,6 +2344,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return true;
     }
 
+    // This is the final dispatch boundary, after web slash commands have been
+    // expanded. Keep programmatic callers from entering optimistic state with
+    // a body the agent route will reject.
+    const promptError = validateOutgoingPrompt(message, images);
+    if (promptError) {
+      addNotice({ type: "error", message: promptError });
+      return false;
+    }
+
     const promptRunId = promptRunIdRef.current + 1;
     clearTerminalReconcileTimer();
 
@@ -2447,6 +2457,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = sessionIdRef.current;
     if (!sid || !agentRunningRef.current) return false;
 
+    // Same dispatch boundary as handleSend: refuse a body the agent route
+    // would reject with 413 before the optimistic bubble and run state exist.
+    const promptError = validateOutgoingPrompt(trimmedMessage, images);
+    if (promptError) {
+      addNotice({ type: "error", message: promptError });
+      return false;
+    }
+
     clearTerminalReconcileTimer();
     // Advance the run generation so late agent_end / prompt_error / stale
     // loadSession from the aborted turn cannot stop or clobber the replacement.
@@ -2482,9 +2500,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       optimisticUserMessageKeyRef.current = null;
       addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      // Mirror handleSend: the interrupt never started, so hand the text back
+      // instead of losing it with the rolled-back bubble.
+      if (trimmedMessage) opts.chatInputRef?.current?.insertIfEmpty(trimmedMessage);
       return false;
     }
-  }, [addNotice, ensureEventsConnected, refreshSubagentRoster, clearTerminalReconcileTimer]);
+  }, [addNotice, ensureEventsConnected, refreshSubagentRoster, clearTerminalReconcileTimer, opts.chatInputRef]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current) return;

@@ -4,8 +4,7 @@ import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
 import { startRpcSession, getRpcSession, resolveSpawnCwdResult, WebRpcError } from "@/lib/rpc-manager";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
-
-const MAX_AGENT_COMMAND_REQUEST_BYTES = 4 * 1024 * 1024;
+import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "@/lib/image-attachments";
 
 /** omp-web's own failures carry a stable code the client can localize; omp's
  * errors stay opaque English text. */

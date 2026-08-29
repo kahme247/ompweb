@@ -92,6 +92,11 @@ const PASSTHROUGH_COMMANDS = new Set([
   "login",
 ]);
 
+// Commands that can carry user-attached images to the model. All of them must
+// pass the same server-side per-image/count/aggregate validation before the
+// payload reaches omp — a client is free to POST any of them directly.
+const IMAGE_BEARING_COMMANDS = new Set(["prompt", "steer", "follow_up", "abort_and_prompt"]);
+
 // pi-web commands with no omp RPC equivalent. The UI tolerates these failing.
 const UNSUPPORTED_COMMANDS: Record<string, string> = {
   navigate_tree: "Branch navigation is not supported over the omp RPC protocol",
@@ -915,7 +920,7 @@ export class AgentSessionWrapper {
     this.resetIdleTimer();
     const type = command.type as string;
 
-    if (type === "prompt" || type === "steer" || type === "follow_up") {
+    if (IMAGE_BEARING_COMMANDS.has(type)) {
       const imageError = validateAgentImages(command.images);
       if (imageError) throw new Error(imageError);
     }

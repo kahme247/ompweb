@@ -7,8 +7,7 @@ import { invalidateSessionListCache } from "@/lib/session-reader";
 import { WebRpcError, startRpcSession } from "@/lib/rpc-manager";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
-
-const MAX_NEW_AGENT_REQUEST_BYTES = 4 * 1024 * 1024;
+import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "@/lib/image-attachments";
 
 function newSessionErrorResponse(error: unknown) {
   if (error instanceof RequestBodyTooLargeError) {
@@ -34,7 +33,7 @@ function newSessionErrorResponse(error: unknown) {
 // the live model catalog (incl. background discovery) is consulted.
 export async function POST(req: Request) {
   try {
-    const body = await parseJsonWithinLimit<{ cwd?: string; [key: string]: unknown }>(req, MAX_NEW_AGENT_REQUEST_BYTES);
+    const body = await parseJsonWithinLimit<{ cwd?: string; [key: string]: unknown }>(req, MAX_AGENT_COMMAND_REQUEST_BYTES);
     const { cwd, ...command } = body;
 
     if (!cwd || typeof cwd !== "string") {
