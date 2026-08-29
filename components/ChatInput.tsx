@@ -736,12 +736,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   /** The routes reject an oversized prompt with 413, but the session hook has
    * already shown the optimistic user bubble and Waiting for model by then, and
    * the composer has been cleared. Refuse here instead, keeping text and
-   * images so the user can trim the message. */
+   * images so the user can trim the message.
+   *
+   * The check owns the banner it raises: a dispatch that now fits clears it,
+   * because a text-only prompt has no attachment chip whose removal would. */
   const rejectsOversizedPrompt = useCallback((message: string, images: AttachedImage[]): boolean => {
     const error = validateOutgoingPrompt(message, images);
-    if (!error) return false;
     setAttachError(error);
-    return true;
+    return error !== null;
   }, []);
 
   const handleSend = useCallback(async () => {
