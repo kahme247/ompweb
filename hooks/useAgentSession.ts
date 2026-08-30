@@ -26,6 +26,7 @@ import type { HostToolDefinition, HostUriSchemeDefinition, RpcAvailableSlashComm
 import { isRecord } from "@/lib/type-guards";
 import { subscribeSessionsChanged } from "@/lib/session-change-bus";
 import {
+  mergeSubagentRoster,
   parseSubagentActivityEvent,
   parseSubagentLifecycle,
   parseSubagentProgress,
@@ -130,6 +131,8 @@ function historyEntryToSubagentInfo(entry: SubagentHistoryEntry): SubagentInfo {
     task: entry.task,
     assignment: entry.assignment,
     index: entry.index,
+    parentToolCallId: entry.parentToolCallId,
+    batchSeq: entry.batchSeq,
     sessionFile: entry.sessionFile,
     source: "history",
     detached: entry.detached,
@@ -852,31 +855,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, []);
 
-  // Merge a batch of roster entries, keeping live frames over history.
-  // `skipNewerThan` lets callers refuse to overwrite entries updated by live
-  // frames after a point-in-time snapshot was requested (a snapshot taken
-  // while a child ran must not regress its later terminal lifecycle status).
+  // Merge a batch of roster entries; ordering and live-over-history precedence
+  // live in `mergeSubagentRoster` so both rules stay testable outside React.
   const mergeSubagents = useCallback((incoming: SubagentInfo[], options?: { skipNewerThan?: number }) => {
     if (!incoming.length) return;
-    const skipNewerThan = options?.skipNewerThan;
-    setSubagents((prev) => {
-      const byId = new Map(prev.map((subagent) => [subagent.id, subagent]));
-      for (const entry of incoming) {
-        const existing = byId.get(entry.id);
-        if (existing && skipNewerThan !== undefined && (existing.lastUpdate ?? 0) >= skipNewerThan) continue;
-        if (!existing) {
-          byId.set(entry.id, entry);
-          continue;
-        }
-        if (entry.source === "history" && existing.source !== "history") continue;
-        if (entry.source !== "history" && existing.source === "history") {
-          byId.set(entry.id, entry);
-          continue;
-        }
-        byId.set(entry.id, { ...existing, ...entry });
-      }
-      return [...byId.values()].sort((a, b) => a.index - b.index || a.id.localeCompare(b.id));
-    });
+    setSubagents((prev) => mergeSubagentRoster(prev, incoming, options?.skipNewerThan));
   }, []);
 
   // Recover the ON-DISK roster from the parent session's task toolResults.

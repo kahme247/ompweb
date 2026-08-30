@@ -93,9 +93,32 @@ export function extractSubagentHistory(sessionFilePath: string): SubagentHistory
   }
 
   const byId = new Map<string, SubagentHistoryEntry>();
+  // Authoritative launch order: the assistant message that spawns a batch lists
+  // its `task` toolCall blocks in the order the model issued them. Ordering by
+  // toolResult arrival instead would misplace parallel calls, whose results are
+  // appended as each one finishes rather than as each one started.
+  const callOrder = new Map<string, number>();
+  for (const entry of entries) {
+    if (entry.type !== "message" || !isRecord(entry.message) || entry.message.role !== "assistant") continue;
+    const content = entry.message.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!isRecord(block) || block.type !== "toolCall" || block.name !== "task") continue;
+      const callId = asString(block.id);
+      if (callId !== undefined && !callOrder.has(callId)) callOrder.set(callId, callOrder.size);
+    }
+  }
+
+  // `index` is the position inside ONE `task` call's batch and restarts at 0 for
+  // every call, so sorting by it alone interleaves the agents of separate calls.
+  // Pair it with the ordinal of the call that spawned each agent.
+  const batchSeqById = new Map<string, number>();
+  let batchSeq = -1;
+  let unannouncedCalls = 0;
   const upsert = (entry: SubagentHistoryEntry) => {
     const existing = byId.get(entry.id);
     if (!existing) {
+      batchSeqById.set(entry.id, batchSeq);
       byId.set(entry.id, entry);
       return;
     }
@@ -103,9 +126,14 @@ export function extractSubagentHistory(sessionFilePath: string): SubagentHistory
   };
 
   for (const entry of entries) {
-    if (entry.type !== "message" || entry.message?.role !== "toolResult") continue;
-    const message = entry.message as { toolName?: unknown; details?: unknown };
+    if (entry.type !== "message" || !isRecord(entry.message) || entry.message.role !== "toolResult") continue;
+    const message = entry.message;
     if (message.toolName !== "task") continue;
+    const toolCallId = asString(message.toolCallId);
+    // A result whose call block never made it into the file (truncated or
+    // imported session) keeps arrival order, placed after every announced call.
+    const announced = toolCallId !== undefined ? callOrder.get(toolCallId) : undefined;
+    batchSeq = announced ?? callOrder.size + unannouncedCalls++;
     const details = isRecord(message.details) ? message.details : {};
     const progressArr = Array.isArray(details.progress) ? details.progress : [];
     const resultsArr = Array.isArray(details.results) ? details.results : [];
@@ -123,6 +151,7 @@ export function extractSubagentHistory(sessionFilePath: string): SubagentHistory
         assignment: progress.assignment,
         description: progress.description,
         index: progress.index ?? 0,
+        ...(toolCallId !== undefined ? { parentToolCallId: toolCallId } : {}),
         lastIntent: progress.lastIntent,
         toolCount: progress.toolCount,
         requests: progress.requests,
@@ -181,6 +210,7 @@ export function extractSubagentHistory(sessionFilePath: string): SubagentHistory
         assignment: asString(raw.assignment) ?? prior?.assignment,
         description: asString(raw.description) ?? prior?.description,
         index: asNumber(raw.index) ?? prior?.index ?? 0,
+        ...(toolCallId !== undefined ? { parentToolCallId: toolCallId } : {}),
         lastIntent: asString(raw.lastIntent) ?? prior?.lastIntent,
         toolCount: asNumber(raw.toolCount) ?? prior?.toolCount,
         requests: asNumber(raw.requests) ?? prior?.requests,
@@ -209,6 +239,7 @@ export function extractSubagentHistory(sessionFilePath: string): SubagentHistory
           agent: "task",
           status: asyncInfo.state === "completed" ? "completed" : asyncInfo.state === "failed" ? "failed" : "started",
           index: byId.size,
+          ...(toolCallId !== undefined ? { parentToolCallId: toolCallId } : {}),
           transcriptAvailable: false,
         });
       }
@@ -229,6 +260,9 @@ export function extractSubagentHistory(sessionFilePath: string): SubagentHistory
   }
   const roster = [...byId.values()];
   for (const entry of roster) {
+    // The client cannot derive this: neither a live snapshot nor a partial
+    // history fetch reveals which call came first.
+    entry.batchSeq = batchSeqById.get(entry.id) ?? 0;
     if (detachedIds.has(entry.id)) entry.detached = true;
     const candidate = join(dir, `${entry.id}.jsonl`);
     const available = existsSync(candidate);
@@ -237,7 +271,11 @@ export function extractSubagentHistory(sessionFilePath: string): SubagentHistory
       entry.transcriptAvailable = true;
     }
   }
-  return roster.sort((a, b) => a.index - b.index || a.id.localeCompare(b.id));
+  return roster.sort((a, b) =>
+    (batchSeqById.get(a.id) ?? 0) - (batchSeqById.get(b.id) ?? 0)
+    || a.index - b.index
+    || a.id.localeCompare(b.id)
+  );
 }
 
 /** Cap on transcript bytes materialized for the dialog (files are small). */

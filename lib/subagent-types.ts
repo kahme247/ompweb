@@ -1,6 +1,7 @@
 // Shared subagent wire + history types (mirrors of oh-my-pi task/types.ts
 // AgentProgress / SubagentLifecyclePayload / SingleResult, kept small and
-// defensive: every field is optional because payloads are parsed leniently).
+// defensive: every field is optional because payloads are parsed leniently),
+// plus the roster fold both the hook and its tests run on (mergeSubagentRoster).
 
 import { asNumber, asString, isRecord } from "./type-guards";
 export type SubagentAgentSource = "bundled" | "user" | "project";
@@ -77,6 +78,11 @@ export interface SubagentHistoryEntry {
   assignment?: string;
   description?: string;
   index: number;
+  /** Id of the `task` call that spawned this agent, and that call's position in
+   * the session's sequence of `task` calls. Together with `index` they place the
+   * agent without relying on the order entries happen to arrive in. */
+  parentToolCallId?: string;
+  batchSeq?: number;
   sessionFile?: string;
   transcriptAvailable: boolean;
   /** True when the spawn was detached/async (parent turn kept working). */
@@ -319,6 +325,9 @@ export interface SubagentInfo {
   assignment?: string;
   sessionFile?: string;
   parentToolCallId?: string;
+  /** Position inside the spawning `task` call's batch. Restarts at 0 for every
+   * call, so it orders siblings but never the roster — pair it with `batchSeq`.
+   * Also the matching key for id-less progress frames. */
   index: number;
   detached?: boolean;
   progress?: SubagentProgress;
@@ -327,4 +336,61 @@ export interface SubagentInfo {
   result?: SubagentHistoryResult;
   /** Roster origin: live frames/snapshots (default) vs on-disk history. */
   source?: "live" | "history";
+  /** Ordinal of the `task` call that spawned this agent, as recorded in the
+   * session file. Authoritative launch order, but only available once that
+   * call's result is on disk — `extractSubagentHistory` supplies it. */
+  batchSeq?: number;
+}
+
+/** Ordinal for sorting: a batch the file has not recorded yet sorts last. */
+const batchSeqOf = (subagent: SubagentInfo): number =>
+  subagent.batchSeq ?? Number.MAX_SAFE_INTEGER;
+
+/** Spawning call first, then position inside that call, then id. */
+export function compareSubagents(a: SubagentInfo, b: SubagentInfo): number {
+  return batchSeqOf(a) - batchSeqOf(b) || a.index - b.index || a.id.localeCompare(b.id);
+}
+
+/**
+ * Fold roster entries into the previous list, ordered by spawning call and then
+ * position within that call.
+ *
+ * Live frames win over on-disk history for the same id. `skipNewerThan` lets a
+ * caller refuse to overwrite entries that live frames touched after a
+ * point-in-time snapshot was requested, so a stale snapshot cannot regress a
+ * child's terminal status.
+ *
+ * `batchSeq` is the one field that survives every precedence rule: only the
+ * session file knows launch order, and the history entry carrying it is often
+ * the one that loses to a newer live frame. A batch the file has not recorded
+ * yet simply sorts last until the next history merge supplies its ordinal.
+ */
+export function mergeSubagentRoster(
+  prev: SubagentInfo[],
+  incoming: SubagentInfo[],
+  skipNewerThan?: number,
+): SubagentInfo[] {
+  const byId = new Map(prev.map((subagent) => [subagent.id, subagent]));
+  for (const entry of incoming) {
+    const existing = byId.get(entry.id);
+    if (!existing) {
+      byId.set(entry.id, entry);
+      continue;
+    }
+    const batchSeq = existing.batchSeq ?? entry.batchSeq;
+    if (skipNewerThan !== undefined && (existing.lastUpdate ?? 0) >= skipNewerThan) {
+      if (batchSeq !== existing.batchSeq) byId.set(entry.id, { ...existing, batchSeq });
+      continue;
+    }
+    if (entry.source === "history" && existing.source !== "history") {
+      if (batchSeq !== existing.batchSeq) byId.set(entry.id, { ...existing, batchSeq });
+      continue;
+    }
+    if (entry.source !== "history" && existing.source === "history") {
+      byId.set(entry.id, { ...entry, batchSeq });
+      continue;
+    }
+    byId.set(entry.id, { ...existing, ...entry, batchSeq });
+  }
+  return [...byId.values()].sort(compareSubagents);
 }
