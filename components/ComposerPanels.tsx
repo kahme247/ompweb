@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import {
   Activity, Bot, ChevronDown,
   CircleDollarSign, Clock3, Cpu, Gauge, GitBranch, Network, RefreshCw,
@@ -121,6 +121,13 @@ function SubagentActivityLine({ subagent }: { subagent: SubagentInfo }) {
   );
 }
 
+/** Active work, as opposed to a settled run. A history entry frozen at
+ * "started" is a finished run whose terminal frame never reached the client,
+ * so `source` has to be part of the test. */
+function isRunningSubagent(subagent: SubagentInfo): boolean {
+  return subagent.source !== "history" && subagent.status === "started";
+}
+
 function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }: {
   subagents: SubagentInfo[];
   onSelectSubagent: (subagent: SubagentInfo) => void;
@@ -129,7 +136,19 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(!defaultExpanded);
-  const runningCount = subagents.filter((subagent) => subagent.source !== "history" && subagent.status === "started").length;
+  const runningCount = subagents.filter(isRunningSubagent).length;
+  // This panel is a live HUD in a 240px window, so running agents are hoisted
+  // to the top instead of sitting wherever they were launched. Both groups keep
+  // the roster's order. This does trade positional stability away: a card
+  // changes group once, when it settles, but every card behind the mover shifts
+  // with it, and in a wrapping row of chips that reflows the rows after it.
+  // Only terminal frames reorder anything — progress frames leave status alone.
+  const ordered = useMemo(() => {
+    const running = subagents.filter(isRunningSubagent);
+    return running.length === 0 || running.length === subagents.length
+      ? subagents
+      : [...running, ...subagents.filter((subagent) => !isRunningSubagent(subagent))];
+  }, [subagents]);
 
   if (subagents.length === 0) return null;
 
@@ -172,7 +191,7 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
           className="flex flex-wrap gap-1.5 px-3 py-2.5 animate-slide-down"
           style={{ maxHeight: "min(30vh, 240px)", overflowY: "auto" }}
         >
-          {subagents.map((subagent) => {
+          {ordered.map((subagent) => {
             const stateLabel = t(SUBAGENT_STATE_KEYS[subagent.status]);
             const label = `${subagent.agent} · ${stateLabel} · ${subagent.task ?? subagent.description ?? ""}`.replace(/\s+$/, "");
             const live = subagent.source !== "history";
@@ -180,30 +199,20 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
               <button
                 key={subagent.id}
                 type="button"
-                className="ui-focus-ring"
+                className="ui-focus-ring subagent-chip"
                 onClick={() => onSelectSubagent(subagent)}
                 aria-label={label}
                 title={`${label}${subagent.detached ? " (async)" : ""}`}
                 style={{
                   display: "inline-flex", flexDirection: "column", alignItems: "flex-start", gap: 1,
                   maxWidth: 320, padding: "5px 9px",
-                  border: "1px solid color-mix(in srgb, var(--border) 86%, transparent)",
                   borderRadius: "var(--radius-control)",
-                  background: "var(--bg)",
                   fontSize: 11.5,
                   fontFamily: "inherit",
                   cursor: "pointer",
                   color: live && subagent.status === "started" ? "var(--text)" : "var(--text-dim)",
                   opacity: live && subagent.status === "started" ? 1 : 0.72,
                   transition: "border-color var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm), opacity var(--dur-fast) var(--ease-out-warm)",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.borderColor = "color-mix(in srgb, var(--accent) 40%, var(--border))";
-                  e.currentTarget.style.background = "var(--bg-hover)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.borderColor = "color-mix(in srgb, var(--border) 86%, transparent)";
-                  e.currentTarget.style.background = "var(--bg)";
                 }}
               >
                 <span style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0, maxWidth: "100%" }}>

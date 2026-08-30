@@ -205,3 +205,58 @@ test("zero context tokens never print a null gauge", () => {
   assert.match(html, /read/);
 });
 
+/** Order of the roster cards as rendered, by task label. */
+function cardOrder(html) {
+  return [...html.matchAll(/aria-label="[^"]*?·[^"]*?·\s*([^"]+)"/g)].map((match) => match[1]);
+}
+
+const rosterHtml = (subagents) => renderToStaticMarkup(React.createElement(ComposerPanels, {
+  todoPhases: [],
+  subagents,
+  onSelectSubagent: noop,
+  defaultExpanded: true,
+}));
+
+test("running subagents are hoisted above settled ones", () => {
+  const order = cardOrder(rosterHtml([
+    { id: "s1", agent: "scout", status: "completed", task: "finished first", index: 0 },
+    { id: "s2", agent: "worker", status: "started", task: "still running", index: 1 },
+  ]));
+
+  assert.deepEqual(order, ["still running", "finished first"]);
+});
+
+test("launch order survives inside each group", () => {
+  const order = cardOrder(rosterHtml([
+    { id: "s1", agent: "scout", status: "completed", task: "settled one", index: 0 },
+    { id: "s2", agent: "worker", status: "started", task: "running one", index: 1 },
+    { id: "s3", agent: "sonic", status: "aborted", task: "settled two", index: 2 },
+    { id: "s4", agent: "worker", status: "started", task: "running two", index: 3 },
+  ]));
+
+  assert.deepEqual(order, ["running one", "running two", "settled one", "settled two"]);
+});
+
+test("a history entry stuck at started counts as settled", () => {
+  // Its terminal frame never reached the client; it is not active work, so it
+  // must not outrank a live agent.
+  const order = cardOrder(rosterHtml([
+    { id: "s1", agent: "scout", status: "started", task: "stale history", index: 0, source: "history" },
+    { id: "s2", agent: "worker", status: "started", task: "live worker", index: 1, source: "live" },
+  ]));
+
+  assert.deepEqual(order, ["live worker", "stale history"]);
+});
+
+test("an all-running or all-settled roster keeps its incoming order", () => {
+  assert.deepEqual(cardOrder(rosterHtml([
+    { id: "s1", agent: "scout", status: "started", task: "first", index: 0 },
+    { id: "s2", agent: "worker", status: "started", task: "second", index: 1 },
+  ])), ["first", "second"]);
+
+  assert.deepEqual(cardOrder(rosterHtml([
+    { id: "s1", agent: "scout", status: "completed", task: "first", index: 0 },
+    { id: "s2", agent: "worker", status: "failed", task: "second", index: 1 },
+  ])), ["first", "second"]);
+});
+

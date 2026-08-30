@@ -1729,6 +1729,19 @@ html.dark .dropdown-surface :is(select, option) {
   background: var(--bg-panel);
   color: var(--text-muted);
 }
+/* Subagent roster chips. The surface and its hover live here rather than in
+   inline styles with mouseenter/mouseleave handlers because the roster reorders
+   when an agent settles: an inline style set on enter would stay painted on a
+   chip that moved out from under the pointer, while the chip that took its
+   place would stay plain until the pointer moved again. */
+.subagent-chip {
+  border: 1px solid color-mix(in srgb, var(--border) 86%, transparent);
+  background: var(--bg);
+}
+.subagent-chip:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: var(--bg-hover);
+}
 /* Compact icon-led top-toolbar buttons: consistent 28x28px invisible hit
    areas inside the 36px bar (40px on mobile within the 44px bar) — strong
    default contrast, restrained hover, visible pressed/disabled states. */
