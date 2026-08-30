@@ -73,3 +73,65 @@ test("collapsible mode collapses to a toggle header and expands again", () => {
   assert.match(expandedHtml, /aria-expanded="true"/);
   assert.match(expandedHtml, /Wire panels/);
 });
+
+/** A plan long enough that an uncapped panel would run off the viewport. */
+const longPlan = [{
+  name: "Migration",
+  tasks: Array.from({ length: 56 }, (_, i) => ({ content: `Task number ${i + 1}`, status: "pending" })),
+}];
+
+const expandedPanel = () => renderToStaticMarkup(React.createElement(TodoList, {
+  phases: longPlan,
+  collapsible: true,
+  defaultExpanded: true,
+}));
+
+test("the expanded task list is capped and scrolls on its own", () => {
+  const html = expandedPanel();
+
+  // The panel is pinned above the composer, outside the chat scroller, so
+  // without its own cap the tail of a long plan is unreachable.
+  assert.match(html, /max-height:min\(30vh,\s*240px\)/);
+  assert.match(html, /overflow-y:auto/);
+});
+
+/** Index of the `</div>` that closes the div opening at `openIndex`. */
+function divCloseIndex(html, openIndex) {
+  const tags = /<(\/?)div\b[^>]*?>/g;
+  tags.lastIndex = openIndex;
+  let depth = 0;
+  for (let match; (match = tags.exec(html)) !== null; ) {
+    depth += match[1] === "/" ? -1 : 1;
+    if (depth === 0) return match.index;
+  }
+  return -1;
+}
+
+test("the show-all footer stays outside the scrolling area", () => {
+  const html = expandedPanel();
+  const scrollerOpen = html.lastIndexOf("<div", html.indexOf("overflow-y:auto"));
+  assert.notEqual(scrollerOpen, -1);
+
+  // Preview mode renders only the first few tasks, so anchor on the container
+  // itself rather than on any task text: a footer inside the scroller would
+  // scroll away with the very list it controls.
+  const scrollerClose = divCloseIndex(html, scrollerOpen);
+  assert.notEqual(scrollerClose, -1);
+  const footer = html.indexOf("Show all tasks");
+  assert.notEqual(footer, -1);
+  assert.ok(footer > scrollerClose, "footer button must render after the scroll container closes");
+});
+
+test("the scroll area is reachable by keyboard and named", () => {
+  const html = expandedPanel();
+
+  // Todo rows are static text, unlike the button cards of the subagents panel,
+  // so the container itself has to take focus for a keyboard-only reader.
+  assert.match(html, /tabindex="0"/);
+  assert.match(html, /role="group"[^>]*aria-label="Task list"|aria-label="Task list"[^>]*role="group"/);
+
+  // Its name must differ from the enclosing section's, or a screen reader
+  // announces "Tasks" for the region and again for the scroll area inside it.
+  assert.match(html, /<section[^>]*aria-label="Tasks"/);
+  assert.doesNotMatch(html, /role="group"[^>]*aria-label="Tasks"/);
+});

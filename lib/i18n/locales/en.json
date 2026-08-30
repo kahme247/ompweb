@@ -330,6 +330,7 @@
   "chatWindow.todoBlocker": "Blocked: {blocker}",
   "chatWindow.todoList": "Tasks",
   "chatWindow.todoPhaseStatus": "{name} {done}/{total}",
+  "chatWindow.todoPlanScroll": "Task list",
   "chatWindow.todoProgress": "{done}/{total} complete",
   "chatWindow.todoShowAll": "Show all tasks",
   "chatWindow.todoShowLess": "Show fewer tasks",

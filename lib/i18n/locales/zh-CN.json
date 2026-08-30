@@ -330,6 +330,7 @@
   "chatWindow.todoBlocker": "已阻塞：{blocker}",
   "chatWindow.todoList": "任务",
   "chatWindow.todoPhaseStatus": "{name} {done}/{total}",
+  "chatWindow.todoPlanScroll": "任务列表",
   "chatWindow.todoProgress": "已完成 {done}/{total}",
   "chatWindow.todoShowAll": "显示全部任务",
   "chatWindow.todoShowLess": "显示更少任务",

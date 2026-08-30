@@ -330,6 +330,7 @@
   "chatWindow.todoBlocker": "ブロック中: {blocker}",
   "chatWindow.todoList": "タスク",
   "chatWindow.todoPhaseStatus": "{name} {done}/{total}",
+  "chatWindow.todoPlanScroll": "タスク一覧",
   "chatWindow.todoProgress": "{done}/{total} 完了",
   "chatWindow.todoShowAll": "すべてのタスクを表示",
   "chatWindow.todoShowLess": "表示を減らす",

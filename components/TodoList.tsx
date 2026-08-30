@@ -82,7 +82,24 @@ export function TodoList({ phases = [], collapsible = false, defaultExpanded = f
       )}
       {!collapsed && (
         <>
-      <div className="grid gap-3 px-3 py-2.5 animate-slide-down">
+      {/* Capped and scrolled like the sibling subagents panel in
+          ComposerPanels. Both panels are pinned above the composer, outside the
+          chat scroller, so an uncapped list runs its own rows off-screen with
+          nothing able to reach them — a 56-task plan was unreadable past the
+          first screenful. The Show all/less footer sits outside this element so
+          it stays put instead of scrolling away with the list.
+          Unlike the subagents panel, whose cards are buttons and therefore
+          reachable by Tab, todo rows are static text: without an explicit
+          tabIndex a keyboard-only reader could not scroll this at all. Its name
+          differs from the section's so a screen reader does not announce
+          "Tasks" twice on the way in. */}
+      <div
+        className="grid gap-3 px-3 py-2.5 animate-slide-down"
+        style={{ maxHeight: "min(30vh, 240px)", overflowY: "auto" }}
+        role="group"
+        aria-label={t("chatWindow.todoPlanScroll")}
+        tabIndex={0}
+      >
         {displayedPhases.map((phase, phaseIndex) => (
           <div key={phase.id ?? `${phase.name}-${phaseIndex}`} className="grid gap-1.5">
             <div className="text-[11px] font-medium text-text-muted">{phase.name}</div>
