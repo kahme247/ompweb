@@ -65,6 +65,8 @@ function asAgentSource(value: unknown): SubagentAgentSource | undefined {
   return value === "bundled" || value === "user" || value === "project" ? value : undefined;
 }
 
+const SUBAGENT_ID_RE = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/;
+
 function progressStatusToRoster(status: string | undefined): SubagentHistoryEntry["status"] {
   if (status === "completed") return "completed";
   if (status === "failed") return "failed";
@@ -116,13 +118,24 @@ export function extractSubagentHistory(sessionFilePath: string): SubagentHistory
   let batchSeq = -1;
   let unannouncedCalls = 0;
   const upsert = (entry: SubagentHistoryEntry) => {
+    if (!SUBAGENT_ID_RE.test(entry.id)) return;
     const existing = byId.get(entry.id);
     if (!existing) {
       batchSeqById.set(entry.id, batchSeq);
       byId.set(entry.id, entry);
       return;
     }
-    byId.set(entry.id, { ...existing, ...entry, result: entry.result ?? existing.result });
+    // Preserve batchSeq/parentToolCallId that may not be present on the incoming entry (results-only,
+    // async placeholder) — spreading undefined would erase the existing ordinal.
+    const preservedBatchSeq = batchSeqById.get(entry.id) ?? batchSeq;
+    batchSeqById.set(entry.id, preservedBatchSeq);
+    byId.set(entry.id, {
+      ...existing,
+      ...entry,
+      parentToolCallId: entry.parentToolCallId ?? existing.parentToolCallId,
+      batchSeq: preservedBatchSeq,
+      result: entry.result ?? existing.result,
+    });
   };
 
   for (const entry of entries) {
@@ -264,7 +277,11 @@ export function extractSubagentHistory(sessionFilePath: string): SubagentHistory
     // history fetch reveals which call came first.
     entry.batchSeq = batchSeqById.get(entry.id) ?? 0;
     if (detachedIds.has(entry.id)) entry.detached = true;
+    if (!SUBAGENT_ID_RE.test(entry.id)) continue;
     const candidate = join(dir, `${entry.id}.jsonl`);
+    // Guard against crafted ids probing outside sibling dir (e.g. "../../");
+    // route already validates via SUBAGENT_ID_RE + realpath, but roster path is
+    // derived from untrusted session content.
     const available = existsSync(candidate);
     if (available) {
       entry.sessionFile = candidate;

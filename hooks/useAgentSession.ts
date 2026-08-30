@@ -859,7 +859,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // live in `mergeSubagentRoster` so both rules stay testable outside React.
   const mergeSubagents = useCallback((incoming: SubagentInfo[], options?: { skipNewerThan?: number }) => {
     if (!incoming.length) return;
-    setSubagents((prev) => mergeSubagentRoster(prev, incoming, options?.skipNewerThan));
+    const generation = subagentRosterGenerationRef.current;
+    const runId = promptRunIdRef.current;
+    const sid = sessionIdRef.current;
+    setSubagents((prev) => {
+      if (subagentRosterGenerationRef.current !== generation || promptRunIdRef.current !== runId || sessionIdRef.current !== sid) return prev;
+      return mergeSubagentRoster(prev, incoming, options?.skipNewerThan);
+    });
   }, []);
 
   // Recover the ON-DISK roster from the parent session's task toolResults.
@@ -2208,7 +2214,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const task = typeof payload?.task === "string" && payload.task.trim() ? payload.task : (progress?.task ?? null);
         const assignment = typeof payload?.assignment === "string" ? payload.assignment : progress?.assignment;
         if (!progressId && !task && !parentToolCallId && index < 0) break;
+        // Fence progress frames against roster clear / new run (same as mergeSubagents).
+        const progressGeneration = subagentRosterGenerationRef.current;
+        const progressRunId = promptRunIdRef.current;
+        const progressSid = sessionIdRef.current;
         setSubagents((prev) => {
+          if (subagentRosterGenerationRef.current !== progressGeneration || promptRunIdRef.current !== progressRunId || sessionIdRef.current !== progressSid) return prev;
           if (prev.length === 0) return prev;
           let target = -1;
           if (progressId) {
