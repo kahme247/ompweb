@@ -201,6 +201,11 @@ export class RpcProcess {
     });
   }
 
+  /** OS process identifier for diagnostics. The child handle remains private. */
+  get pid(): number | undefined {
+    return this.child.pid;
+  }
+
   get isAlive(): boolean {
     return !this.exited;
   }

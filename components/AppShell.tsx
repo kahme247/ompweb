@@ -29,6 +29,15 @@ import type { SessionStatsInfo, GenerationSpeedInfo } from "@/lib/pi-types";
 import type { ProviderUsageContext, ProviderUsageReport, ProviderUsageSnapshot } from "@/lib/provider-usage-types";
 import type { SettingsTab } from "./SettingsTabs";
 import { SettingsConfig } from "./SettingsConfig";
+import {
+  AppUpdateDialog,
+  getAppUpdateStageIndex,
+  getNextAppUpdateStage,
+  getMonotonicAppUpdateStage,
+  type AppUpdateInfo,
+  type AppUpdatePhase,
+  type AppUpdateStage,
+} from "./AppUpdateDialog";
 import { ArchiveBrowser } from "./ArchiveBrowser";
 import { publishSessionsChanged } from "@/lib/session-change-bus";
 // The settings shell is part of the app bundle so opening it does not fetch or compile a modal chunk. The file viewer remains on demand.
@@ -42,9 +51,77 @@ const FileViewer = dynamic(() => import("./FileViewer").then((m) => m.FileViewer
 const SIDEBAR_WIDTH_STORAGE_KEY = "omp-web:sidebar-width";
 const TOOL_CALLS_COLLAPSED_STORAGE_KEY = "omp-web:tool-calls-collapsed";
 const PROVIDER_USAGE_VISIBLE_STORAGE_KEY = "omp-web:provider-usage-visible";
+const DISMISSED_APP_UPDATE_KEY = "omp-web:dismissed-app-update";
+const COMPLETED_APP_UPDATE_KEY = "omp-web:completed-app-update";
 const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 520;
 const SIDEBAR_DEFAULT_WIDTH = 260;
+const APP_UPDATE_POLL_MS = 1_000;
+const APP_UPDATE_STOPPING_POLL_MS = 200;
+const APP_UPDATE_TIMEOUT_MS = 15 * 60 * 1_000;
+const APP_UPDATE_PREPARING_MIN_MS = 2_000;
+const APP_UPDATE_VISIBLE_STAGE_MIN_MS = 1_000;
+const APP_UPDATE_COMPLETED_RELOAD_MS = 3_000;
+const APP_UPDATE_ERROR_MAX_LENGTH = 240;
+
+async function waitForAppUpdateDwell(startedAt: number | null, minimumMs: number): Promise<void> {
+  if (startedAt == null) return;
+  const remainingMs = minimumMs - (Date.now() - startedAt);
+  if (remainingMs <= 0) return;
+  await new Promise<void>((resolve) => window.setTimeout(resolve, remainingMs));
+}
+
+function sanitizeAppUpdateError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  return raw
+    .replace(/[\u0000-\u001F\u007F]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, APP_UPDATE_ERROR_MAX_LENGTH);
+}
+
+function isExactLegacyTargetCompletion(update: AppUpdateInfo | null, targetVersion: string): boolean {
+  return update?.selfUpdateStatus == null && update?.currentVersion === targetVersion;
+}
+
+class AppUpdateTransportError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : "Update service connection failed");
+    this.name = "AppUpdateTransportError";
+  }
+}
+
+async function fetchAppUpdateJson<T>(input: string, init?: RequestInit, expectedStatus?: number): Promise<T> {
+  let response: Response;
+  let responseBody: string;
+  try {
+    response = await fetch(input, init);
+    responseBody = await response.text();
+  } catch (error) {
+    throw new AppUpdateTransportError(error);
+  }
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(responseBody);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "Malformed JSON";
+    const prefix = response.ok ? "Invalid update response" : `HTTP ${response.status}: invalid update response`;
+    throw new Error(`${prefix}: ${detail}`);
+  }
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error(response.ok ? "Invalid update response" : `HTTP ${response.status}: invalid update response`);
+  }
+
+  const data = payload as T & { error?: unknown };
+  if (typeof data.error === "string" && data.error.trim()) throw new Error(data.error);
+  if (data.error != null) throw new Error("Invalid update error response");
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  if (expectedStatus !== undefined && response.status !== expectedStatus) {
+    throw new Error(`Expected HTTP ${expectedStatus}, received HTTP ${response.status}`);
+  }
+  return data;
+}
 
 function clampSidebarWidth(width: number): number {
   return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)));
@@ -234,7 +311,60 @@ export function AppShell() {
       // ignore storage quota / privacy-mode errors
     }
   }, [sidebarWidth, sidebarResizing]);
-  const [appUpdateAvailable, setAppUpdateAvailable] = useState(false);
+  const [appUpdate, setAppUpdate] = useState<AppUpdateInfo | null>(null);
+  const [appUpdateDialogOpen, setAppUpdateDialogOpen] = useState(false);
+  const [appUpdatePhase, setAppUpdatePhase] = useState<AppUpdatePhase>("idle");
+  const [appUpdateError, setAppUpdateError] = useState<string | null>(null);
+  const appUpdateAttemptRef = useRef<string | null>(null);
+  const appUpdateStartInFlightRef = useRef(false);
+  const appUpdateCompletingRef = useRef(false);
+  const [appUpdateVisibleStage, setAppUpdateVisibleStage] = useState<AppUpdateStage | undefined>();
+  const appUpdateVisibleStageRef = useRef<AppUpdateStage | undefined>(undefined);
+  const appUpdateVisibleStageStartedAtRef = useRef<number | null>(null);
+  const appUpdateCommittedAttemptRef = useRef<string | null>(null);
+  const appUpdateRecoveryCommitAttemptRef = useRef<string | null>(null);
+  const appUpdateStageFlowRef = useRef(0);
+  const appUpdateAcknowledgementsRef = useRef<Map<string, Promise<boolean>>>(new Map());
+  const advanceAppUpdateVisibleStage = useCallback((next: AppUpdateStage) => {
+    const visible = getMonotonicAppUpdateStage(appUpdateVisibleStageRef.current, next);
+    if (visible === appUpdateVisibleStageRef.current) return;
+    appUpdateVisibleStageRef.current = visible;
+    appUpdateVisibleStageStartedAtRef.current = Date.now();
+    setAppUpdateVisibleStage(visible);
+  }, []);
+  const resetAppUpdateVisibleStage = useCallback(() => {
+    appUpdateVisibleStageRef.current = undefined;
+    appUpdateStageFlowRef.current += 1;
+    appUpdateVisibleStageStartedAtRef.current = null;
+    appUpdateCommittedAttemptRef.current = null;
+    appUpdateRecoveryCommitAttemptRef.current = null;
+    setAppUpdateVisibleStage(undefined);
+    setAppUpdate((current) => current?.appUpdateDrain
+      ? { ...current, appUpdateDrain: undefined }
+      : current);
+  }, []);
+  const showAppUpdateStagesThrough = useCallback(async (target: AppUpdateStage) => {
+    const stageFlow = appUpdateStageFlowRef.current;
+    const targetIndex = getAppUpdateStageIndex(target);
+    if (appUpdateVisibleStageRef.current === undefined) {
+      advanceAppUpdateVisibleStage(target);
+      return;
+    }
+    while (true) {
+      const current = appUpdateVisibleStageRef.current;
+      if (current === undefined || getAppUpdateStageIndex(current) >= targetIndex) return;
+      await waitForAppUpdateDwell(
+        appUpdateVisibleStageStartedAtRef.current,
+        current === "preparing" ? APP_UPDATE_PREPARING_MIN_MS : APP_UPDATE_VISIBLE_STAGE_MIN_MS,
+      );
+      if (appUpdateStageFlowRef.current !== stageFlow) return;
+      const latest = appUpdateVisibleStageRef.current;
+      if (latest === undefined || getAppUpdateStageIndex(latest) >= targetIndex) return;
+      const next = getNextAppUpdateStage(latest);
+      if (next === undefined) return;
+      advanceAppUpdateVisibleStage(next);
+    }
+  }, [advanceAppUpdateVisibleStage]);
   const [ompUpdateAvailable, setOmpUpdateAvailable] = useState(false);
   // On mobile the sidebar is an overlay drawer; hide it by default so the chat
   // is visible on load. Runs once the breakpoint resolves after hydration.
@@ -296,13 +426,28 @@ export function AppShell() {
       .catch(() => {});
     return () => controller.abort();
   }, []);
-  useEffect(() => {
-    const controller = new AbortController();
-    void fetch("/api/app-update", { signal: controller.signal })
-      .then((response) => response.ok ? response.json() : null)
-      .then((data: { currentVersion?: string; availableVersion?: string | null; updateAvailable?: boolean; updateCommand?: string } | null) => {
-        setAppUpdateAvailable(Boolean(data?.updateAvailable));
-        if (!data?.updateAvailable || !data.availableVersion) return;
+  const refreshAppUpdate = useCallback(async (force = false, autoOpen = false): Promise<AppUpdateInfo | null> => {
+    const data = await fetchAppUpdateJson<AppUpdateInfo>(
+      force ? "/api/app-update?force=1" : "/api/app-update",
+      { cache: "no-store" },
+    );
+    if (
+      autoOpen
+      && (appUpdateStartInFlightRef.current || appUpdateAttemptRef.current !== null || appUpdateCompletingRef.current)
+    ) return null;
+
+    setAppUpdate(data);
+
+    if (autoOpen && !data.selfUpdateStatus && data.updateAvailable && data.availableVersion) {
+      if (data.selfUpdateSupported === true) {
+        let dismissed: string | null = null;
+        try { dismissed = window.localStorage.getItem(DISMISSED_APP_UPDATE_KEY); } catch {}
+        if (dismissed !== data.availableVersion) {
+          setAppUpdatePhase("idle");
+          setAppUpdateError(null);
+          setAppUpdateDialogOpen(true);
+        }
+      } else {
         const cmd = data.updateCommand || "npm install -g @kahme247/ompweb";
         toast.info(
           translate("appShell.appUpdateAvailable"),
@@ -324,12 +469,238 @@ export function AppShell() {
                 {translate("appShell.copyCommand")}
               </button>
             </div>
-          </div>
+          </div>,
         );
+      }
+    }
+    return data;
+  }, []);
+
+  const acknowledgeAppUpdate = useCallback((attemptId: string): Promise<boolean> => {
+    const existing = appUpdateAcknowledgementsRef.current.get(attemptId);
+    if (existing) return existing;
+    const request = (async () => {
+      try {
+        const response = await fetch("/api/app-update", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "acknowledge", attemptId }),
+        });
+        return response.ok;
+      } catch {
+        return false;
+      }
+    })();
+    appUpdateAcknowledgementsRef.current.set(attemptId, request);
+    void request.then((acknowledged) => {
+      if (!acknowledged && appUpdateAcknowledgementsRef.current.get(attemptId) === request) {
+        appUpdateAcknowledgementsRef.current.delete(attemptId);
+      }
+    });
+    return request;
+  }, []);
+
+  const showAppUpdateFailure = useCallback((error: unknown) => {
+    appUpdateAttemptRef.current = null;
+    appUpdateStartInFlightRef.current = false;
+    appUpdateCommittedAttemptRef.current = null;
+    setAppUpdateError(sanitizeAppUpdateError(error) || null);
+    setAppUpdatePhase("failed");
+    appUpdateStageFlowRef.current += 1;
+    setAppUpdateDialogOpen(true);
+  }, []);
+
+  const submitAppUpdateCommit = useCallback((attemptId: string) => {
+    void fetchAppUpdateJson<{ error?: string }>("/api/app-update", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "commit", attemptId }),
+      keepalive: true,
+    }, 202).then(() => {
+      if (appUpdateAttemptRef.current === attemptId) {
+        appUpdateCommittedAttemptRef.current = attemptId;
+      }
+    }).catch((error) => {
+      if (error instanceof AppUpdateTransportError) {
+        if (appUpdateRecoveryCommitAttemptRef.current === attemptId) {
+          appUpdateRecoveryCommitAttemptRef.current = null;
+        }
+        return;
+      }
+      if (appUpdateAttemptRef.current !== attemptId) return;
+      showAppUpdateFailure(error);
+    });
+  }, [showAppUpdateFailure]);
+
+  const recoverPreparedAppUpdate = useCallback((data: AppUpdateInfo, attemptId: string) => {
+    const status = data.selfUpdateStatus;
+    if (
+      status?.attemptId !== attemptId
+      || status.state !== "prepared"
+      || (status.stage !== "preparing" && status.stage !== "stopping")
+    ) return;
+    if (appUpdateRecoveryCommitAttemptRef.current === attemptId) return;
+    appUpdateRecoveryCommitAttemptRef.current = attemptId;
+    submitAppUpdateCommit(attemptId);
+  }, [submitAppUpdateCommit]);
+
+  const completeAppUpdate = useCallback(async (targetVersion: string) => {
+    if (appUpdateCompletingRef.current) return;
+    appUpdateCompletingRef.current = true;
+    appUpdateAttemptRef.current = null;
+    appUpdateCommittedAttemptRef.current = null;
+    appUpdateStartInFlightRef.current = false;
+    await showAppUpdateStagesThrough("finalizing");
+    await waitForAppUpdateDwell(appUpdateVisibleStageStartedAtRef.current, APP_UPDATE_VISIBLE_STAGE_MIN_MS);
+    setAppUpdateError(null);
+    setAppUpdatePhase("completed");
+    setAppUpdateDialogOpen(true);
+    try {
+      window.sessionStorage.setItem(COMPLETED_APP_UPDATE_KEY, JSON.stringify({ version: targetVersion }));
+    } catch {}
+    await new Promise<void>((resolve) => window.setTimeout(resolve, APP_UPDATE_COMPLETED_RELOAD_MS));
+    appUpdateRecoveryCommitAttemptRef.current = null;
+    window.location.reload();
+  }, [showAppUpdateStagesThrough]);
+
+  const handleTerminalAppUpdate = useCallback(async (
+    data: AppUpdateInfo,
+    attemptId: string,
+    targetVersion: string,
+  ): Promise<boolean> => {
+    const status = data.selfUpdateStatus;
+    if (status?.attemptId !== attemptId || status.cleanupReady !== true) return false;
+    if (status.state === "failed") {
+      if (!await acknowledgeAppUpdate(attemptId)) return false;
+      showAppUpdateFailure(status.error);
+      return true;
+    }
+    if (status.state === "succeeded" && data.currentVersion === targetVersion) {
+      if (!await acknowledgeAppUpdate(attemptId)) return false;
+      await completeAppUpdate(targetVersion);
+      return true;
+    }
+    return false;
+  }, [acknowledgeAppUpdate, completeAppUpdate, showAppUpdateFailure]);
+
+  const monitorAppUpdate = useCallback(async (attemptId: string, targetVersion: string) => {
+    if (appUpdateAttemptRef.current === attemptId) return;
+    appUpdateAttemptRef.current = attemptId;
+    const deadline = Date.now() + APP_UPDATE_TIMEOUT_MS;
+    while (appUpdateAttemptRef.current === attemptId && Date.now() < deadline) {
+      await new Promise<void>((resolve) => window.setTimeout(
+        resolve,
+        appUpdateVisibleStageRef.current === "stopping" ? APP_UPDATE_STOPPING_POLL_MS : APP_UPDATE_POLL_MS,
+      ));
+      try {
+        const data = await refreshAppUpdate();
+        if (!data) continue;
+        const status = data.selfUpdateStatus;
+        if (status?.attemptId === attemptId && status.stage !== undefined) {
+          if (status.stage !== "preparing") appUpdateCommittedAttemptRef.current = attemptId;
+          await showAppUpdateStagesThrough(status.stage);
+        }
+        recoverPreparedAppUpdate(data, attemptId);
+        if (await handleTerminalAppUpdate(data, attemptId, targetVersion)) return;
+        if (isExactLegacyTargetCompletion(data, targetVersion)) {
+          // Legacy targets do not expose the status/acknowledge contract. Exact
+          // version equality is the completion proof; updater artifacts expire
+          // through the backend's terminal-status TTL instead of UI cleanup.
+          await completeAppUpdate(targetVersion);
+          return;
+        }
+      } catch (error) {
+        if (error instanceof AppUpdateTransportError) {
+          if (appUpdateCommittedAttemptRef.current === attemptId) {
+            advanceAppUpdateVisibleStage("installing");
+          }
+          // Connection failures are expected after commit while the server is offline.
+          continue;
+        }
+        showAppUpdateFailure(error);
+        return;
+      }
+    }
+    if (appUpdateAttemptRef.current === attemptId) {
+      showAppUpdateFailure(t("appUpdateDialog.timeout"));
+    }
+  }, [advanceAppUpdateVisibleStage, completeAppUpdate, handleTerminalAppUpdate, recoverPreparedAppUpdate, refreshAppUpdate, showAppUpdateFailure, showAppUpdateStagesThrough, t]);
+
+  useEffect(() => {
+    try {
+      const raw = window.sessionStorage.getItem(COMPLETED_APP_UPDATE_KEY);
+      if (raw) {
+        const completed = JSON.parse(raw) as { version?: unknown };
+        window.sessionStorage.removeItem(COMPLETED_APP_UPDATE_KEY);
+        if (typeof completed.version === "string") {
+          toast.success(t("appUpdateDialog.completed", { version: completed.version }));
+        }
+      }
+    } catch {}
+    void refreshAppUpdate(false, true)
+      .then(async (data) => {
+        const status = data?.selfUpdateStatus;
+        if (!data || !status) return;
+        const recoveredStage = status.stage ?? "stopping";
+        const initialStage = recoveredStage === "preparing" ? "preparing" : "stopping";
+        if (initialStage === "stopping") appUpdateCommittedAttemptRef.current = status.attemptId;
+        advanceAppUpdateVisibleStage(initialStage);
+        setAppUpdatePhase(initialStage === "preparing" ? "preparing" : "restarting");
+        setAppUpdateDialogOpen(true);
+        await showAppUpdateStagesThrough(recoveredStage);
+        if (await handleTerminalAppUpdate(data, status.attemptId, status.targetVersion)) return;
+        void monitorAppUpdate(status.attemptId, status.targetVersion);
+        recoverPreparedAppUpdate(data, status.attemptId);
       })
       .catch(() => {});
-    return () => controller.abort();
-  }, []);
+  }, [advanceAppUpdateVisibleStage, handleTerminalAppUpdate, monitorAppUpdate, recoverPreparedAppUpdate, refreshAppUpdate, showAppUpdateStagesThrough, t]);
+
+  const proceedWithAppUpdate = useCallback(async () => {
+    if (appUpdateStartInFlightRef.current) return;
+    appUpdateStartInFlightRef.current = true;
+    appUpdateCompletingRef.current = false;
+    resetAppUpdateVisibleStage();
+    advanceAppUpdateVisibleStage("preparing");
+    setAppUpdatePhase("preparing");
+    setAppUpdateError(null);
+    try {
+      const prepared = await fetchAppUpdateJson<{ attemptId?: string; targetVersion?: string }>("/api/app-update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "prepare" }),
+      });
+      if (!prepared.attemptId || !prepared.targetVersion) {
+        throw new Error("Invalid update response");
+      }
+      submitAppUpdateCommit(prepared.attemptId);
+      void monitorAppUpdate(prepared.attemptId, prepared.targetVersion);
+      await showAppUpdateStagesThrough("stopping");
+      if (appUpdateAttemptRef.current !== prepared.attemptId) return;
+      setAppUpdatePhase("restarting");
+    } catch (error) {
+      showAppUpdateFailure(error);
+    }
+  }, [advanceAppUpdateVisibleStage, monitorAppUpdate, resetAppUpdateVisibleStage, showAppUpdateFailure, showAppUpdateStagesThrough, submitAppUpdateCommit]);
+
+  const dismissAppUpdate = useCallback(() => {
+    if (appUpdatePhase === "idle" && appUpdate?.availableVersion) {
+      try { window.localStorage.setItem(DISMISSED_APP_UPDATE_KEY, appUpdate.availableVersion); } catch {}
+      toast.info(t("appUpdateDialog.settingsLater"));
+    }
+    setAppUpdateDialogOpen(false);
+    setAppUpdatePhase("idle");
+    setAppUpdateError(null);
+    appUpdateAttemptRef.current = null;
+    resetAppUpdateVisibleStage();
+  }, [appUpdate?.availableVersion, appUpdatePhase, resetAppUpdateVisibleStage, t]);
+
+  const requestAppUpdateFromSettings = useCallback(() => {
+    setSettingsTab(null);
+    resetAppUpdateVisibleStage();
+    setAppUpdateError(null);
+    setAppUpdatePhase("idle");
+    window.requestAnimationFrame(() => setAppUpdateDialogOpen(true));
+  }, [resetAppUpdateVisibleStage]);
   const chatInputRef = useRef<ChatInputHandle | null>(null);
   const topBarRef = useRef<HTMLDivElement>(null);
 
@@ -950,7 +1321,7 @@ export function AppShell() {
         onAtMentions={handleAtMentions}
         onOpenSettings={() => setSettingsTab("general")}
         onOpenArchive={() => setArchiveBrowserOpen(true)}
-        updateAvailable={appUpdateAvailable || ompUpdateAvailable}
+        updateAvailable={Boolean(appUpdate?.updateAvailable) || ompUpdateAvailable}
       />
     </>
   );
@@ -1801,7 +2172,8 @@ export function AppShell() {
         <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
       </svg>
     </button>
-    {settingsTab && <SettingsConfig activeTab={settingsTab} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} onToolCallsDefaultCollapsedChange={handleToolCallsDefaultCollapsedChange} providerUsageVisible={providerUsageVisible} onProviderUsageVisibleChange={handleProviderUsageVisibleChange} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd} sessionId={selectedSession?.id ?? null} onModelsSaved={() => setModelsRefreshKey((k) => k + 1)} onPluginsReloaded={() => setSessionKey((k) => k + 1)} onOmpUpdateAvailabilityChange={setOmpUpdateAvailable} onSelectTab={setSettingsTab} onClose={() => setSettingsTab(null)} />}
+    {settingsTab && <SettingsConfig activeTab={settingsTab} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} onToolCallsDefaultCollapsedChange={handleToolCallsDefaultCollapsedChange} providerUsageVisible={providerUsageVisible} onProviderUsageVisibleChange={handleProviderUsageVisibleChange} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd} sessionId={selectedSession?.id ?? null} onModelsSaved={() => setModelsRefreshKey((k) => k + 1)} onPluginsReloaded={() => setSessionKey((k) => k + 1)} appUpdate={appUpdate} onRefreshAppUpdate={refreshAppUpdate} onOmpUpdateAvailabilityChange={setOmpUpdateAvailable} onRequestAppUpdate={requestAppUpdateFromSettings} onSelectTab={setSettingsTab} onClose={() => setSettingsTab(null)} />}
+    <AppUpdateDialog open={appUpdateDialogOpen} update={appUpdate} phase={appUpdatePhase} visibleStage={appUpdateVisibleStage} error={appUpdateError} onProceed={() => void proceedWithAppUpdate()} onNotNow={dismissAppUpdate} />
     {archiveBrowserOpen && (
       <ArchiveBrowser
         open={archiveBrowserOpen}

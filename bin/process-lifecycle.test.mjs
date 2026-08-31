@@ -7,6 +7,7 @@ import { wireChildProcessLifecycle } from "./process-lifecycle.js";
 
 function createProcesses() {
   const parent = new EventEmitter();
+  parent.platform = "linux";
   const child = new EventEmitter();
   const forwardedSignals = [];
   const exitCodes = [];

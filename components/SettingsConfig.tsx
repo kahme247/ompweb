@@ -3,12 +3,13 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useTransition, cloneElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { getSubmitDuringRunBehavior, setSubmitDuringRunBehavior, type SubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import dynamic from "next/dynamic";
-import { Copy, ExternalLink, RefreshCw, RotateCcw, Search, AlertCircle } from "lucide-react";
+import { Copy, Download, ExternalLink, RefreshCw, RotateCcw, Search, AlertCircle } from "lucide-react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
 import { SettingsTabs, type SettingsTab, SETTINGS_CATEGORIES, getNormalizedActive } from "./SettingsTabs";
 import { useI18n } from "@/lib/i18n";
 import { copyText } from "@/lib/clipboard";
+import type { AppUpdateInfo } from "./AppUpdateDialog";
 
 const SettingsTabLoading = () => {
   const { t } = useI18n();
@@ -20,12 +21,7 @@ const PluginsConfig = dynamic(() => import("./PluginsConfig").then((module) => m
 const McpConfig = dynamic(() => import("./McpConfig").then((module) => module.McpConfig), { loading: SettingsTabLoading, ssr: false });
 const AgentsConfig = dynamic(() => import("./AgentsConfig").then((module) => module.AgentsConfig), { loading: SettingsTabLoading, ssr: false });
 
-type UpdateState = {
-  currentVersion: string | null;
-  availableVersion: string | null;
-  updateAvailable: boolean;
-  updateCommand?: string;
-};
+type UpdateState = AppUpdateInfo;
 
 type NativeSettings = {
   defaultThinkingLevel?: "auto" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -329,7 +325,7 @@ function NativeSetting({ label, description, scope, searchId, children }: { labe
   );
 }
 
-export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, providerUsageVisible, onProviderUsageVisibleChange, cwd, sessionId, onModelsSaved, onPluginsReloaded, onOmpUpdateAvailabilityChange, onSelectTab, onClose }: {
+export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, providerUsageVisible, onProviderUsageVisibleChange, cwd, sessionId, onModelsSaved, onPluginsReloaded, appUpdate, onRefreshAppUpdate, onOmpUpdateAvailabilityChange, onRequestAppUpdate, onSelectTab, onClose }: {
   activeTab: SettingsTab;
   toolCallsDefaultCollapsed: boolean;
   onToolCallsDefaultCollapsedChange: (collapsed: boolean) => void;
@@ -339,7 +335,10 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   sessionId: string | null;
   onModelsSaved: () => void;
   onPluginsReloaded: () => void;
+  appUpdate: AppUpdateInfo | null;
+  onRefreshAppUpdate: (force?: boolean) => Promise<AppUpdateInfo | null>;
   onOmpUpdateAvailabilityChange: (available: boolean) => void;
+  onRequestAppUpdate: () => void;
   onSelectTab: (tab: SettingsTab) => void;
   onClose: () => void;
 }) {
@@ -360,8 +359,8 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   });
   const [update, setUpdate] = useState<UpdateState | null>(null);
   const [checking, setChecking] = useState(false);
-  const [appUpdate, setAppUpdate] = useState<UpdateState | null>(null);
   const [checkingAppUpdate, setCheckingAppUpdate] = useState(false);
+  const [appUpdateMessage, setAppUpdateMessage] = useState<string | null>(null);
   const [hasCheckedUpdates, setHasCheckedUpdates] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -449,17 +448,15 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
 
   const checkForAppUpdate = useCallback(async (force = false) => {
     setCheckingAppUpdate(true);
+    setAppUpdateMessage(null);
     try {
-      const response = await fetch(force ? "/api/app-update?force=1" : "/api/app-update");
-      const data = (await response.json()) as UpdateState & { error?: string };
-      if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-      setAppUpdate(data);
+      await onRefreshAppUpdate(force);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
+      setAppUpdateMessage(error instanceof Error ? error.message : String(error));
     } finally {
       setCheckingAppUpdate(false);
     }
-  }, []);
+  }, [onRefreshAppUpdate]);
 
   const restartSessions = useCallback(async () => {
     setRestarting(true);
@@ -481,8 +478,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
     if (currentTab !== "system" || hasCheckedUpdates) return;
     setHasCheckedUpdates(true);
     void checkForUpdate();
-    void checkForAppUpdate();
-  }, [currentTab, hasCheckedUpdates, checkForUpdate, checkForAppUpdate]);
+  }, [currentTab, hasCheckedUpdates, checkForUpdate]);
 
   const trimmedQuery = searchQuery.trim().toLowerCase();
   const searchActive = trimmedQuery.length > 0;
@@ -971,24 +967,40 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                     </button>
                   </div>
                   {appUpdate?.updateAvailable && (
-                    <div style={{ marginTop: 6, padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", display: "flex", flexDirection: "column", gap: 6 }}>
-                      <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{t("settingsConfig.runAppUpdateCommand")}</div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <code style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent)", wordBreak: "break-all" }}>{appUpdate.updateCommand || "npm install -g @kahme247/ompweb"}</code>
+                    <div style={{ marginTop: 6, padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", display: "flex", flexDirection: "column", gap: 8 }}>
+                      {appUpdate.selfUpdateSupported ? (
                         <button
                           type="button"
-                          onClick={() => {
-                            void copyText(appUpdate.updateCommand || "npm install -g @kahme247/ompweb")
-                              .then(() => setMessage(t("appShell.commandCopied")))
-                              .catch(() => setMessage(t("appShell.commandCopyFailed")));
-                          }}
-                          style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}
+                          onClick={onRequestAppUpdate}
+                          style={{ alignSelf: "flex-start", display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px", border: "1px solid var(--accent-strong)", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "var(--on-accent)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}
                         >
-                          <Copy size={12} aria-hidden="true" /> {t("appShell.copyCommand")}
+                          <Download size={13} aria-hidden="true" />
+                          {t("settingsConfig.appUpdateAction")}
                         </button>
-                      </div>
+                      ) : (
+                        <>
+                          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                            {t("settingsConfig.runAppUpdateCommand")}
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <code style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent)", wordBreak: "break-all" }}>{appUpdate.updateCommand || "npm install -g @kahme247/ompweb"}</code>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void copyText(appUpdate.updateCommand || "npm install -g @kahme247/ompweb")
+                                  .then(() => setAppUpdateMessage(t("appShell.commandCopied")))
+                                  .catch(() => setAppUpdateMessage(t("appShell.commandCopyFailed")));
+                              }}
+                              style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}
+                            >
+                              <Copy size={12} aria-hidden="true" /> {t("appShell.copyCommand")}
+                            </button>
+                          </div>
+                        </>
+                      )}
                     </div>
                   )}
+                  {appUpdateMessage && <p role="status" style={{ margin: "2px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>{appUpdateMessage}</p>}
                 </section>
 
                 {/* OMP runtime update card */}

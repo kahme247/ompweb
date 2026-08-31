@@ -278,6 +278,16 @@ export class AgentSessionWrapper {
     return this._sessionFile;
   }
 
+  /** Session label captured from OMP state for process-drain diagnostics. */
+  get diagnosticName(): string | undefined {
+    return this._sessionName;
+  }
+
+  /** Child PID for diagnostics; the RpcProcess handle remains private. */
+  get diagnosticPid(): number | undefined {
+    return this.proc.pid;
+  }
+
   isAlive(): boolean {
     return this._alive && this.proc.isAlive;
   }
@@ -1247,10 +1257,31 @@ export interface RunningSessionUpdate {
   refreshSessionList: boolean;
 }
 
+export type AppUpdateDrainState = "waiting" | "stopping" | "stopped" | "failed";
+
+export interface AppUpdateDrainProcess {
+  sessionId: string;
+  name?: string;
+  pid?: number;
+  activity: "running" | "idle";
+  state: "stopping" | "stopped";
+}
+
+export interface AppUpdateDrainStatus {
+  state: AppUpdateDrainState;
+  total: number;
+  stopped: number;
+  processes: AppUpdateDrainProcess[];
+}
+type AppUpdateDrainInternalStatus = Pick<AppUpdateDrainStatus, "state" | "processes">;
+
+
 declare global {
   var __ompSessions: Map<string, AgentSessionWrapper> | undefined;
   var __ompStartLocks: Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> | undefined;
   var __ompRunningListeners: Set<(update: RunningSessionUpdate) => void> | undefined;
+  var __ompAppUpdateDrainPromise: Promise<number> | undefined;
+  var __ompAppUpdateDrainStatus: AppUpdateDrainInternalStatus | undefined;
 }
 
 function getRegistry(): Map<string, AgentSessionWrapper> {
@@ -1287,6 +1318,94 @@ export async function restartAllRpcSessions(): Promise<number> {
   const sessions = [...new Set(getRegistry().values())];
   await Promise.all(sessions.map((session) => session.destroyAndWait()));
   return sessions.length;
+}
+
+const APP_UPDATE_DRAIN_TIMEOUT_MS = 20_000;
+
+async function waitForAppUpdateDrain<T>(operation: Promise<T>, label: string): Promise<T> {
+  const { promise: timeout, reject } = Promise.withResolvers<T>();
+  const timer = setTimeout(() => reject(new Error(`${label} did not finish before the application update deadline`)), APP_UPDATE_DRAIN_TIMEOUT_MS);
+  timer.unref();
+  try {
+    return await Promise.race([operation, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Return an isolated drain snapshot suitable for an authenticated status response. */
+export function getAppUpdateDrainStatus(): AppUpdateDrainStatus | undefined {
+  const status = globalThis.__ompAppUpdateDrainStatus;
+  if (!status) return undefined;
+  const processes = status.processes.map((process) => ({ ...process }));
+  return {
+    state: status.state,
+    total: processes.length,
+    stopped: processes.filter((process) => process.state === "stopped").length,
+    processes,
+  };
+}
+
+/** Block new RPC children and drain both in-flight starts and registered
+ * sessions before the application update helper is armed. */
+export function beginAppUpdateDrain(): Promise<number> {
+  if (globalThis.__ompAppUpdateDrainPromise) return globalThis.__ompAppUpdateDrainPromise;
+  const status: AppUpdateDrainInternalStatus = {
+    state: "waiting",
+    processes: [],
+  };
+  globalThis.__ompAppUpdateDrainStatus = status;
+  const draining = (async () => {
+    try {
+      const starts = [...getLocks().values()];
+      if (starts.length > 0) {
+        await waitForAppUpdateDrain(Promise.allSettled(starts), "Starting OMP sessions");
+      }
+
+      const uniqueSessions = new Map<AgentSessionWrapper, string>();
+      for (const [registeredSessionId, session] of getRegistry()) {
+        if (!uniqueSessions.has(session)) {
+          uniqueSessions.set(session, session.sessionId || registeredSessionId);
+        }
+      }
+      const entries: Array<{ session: AgentSessionWrapper; diagnostic: AppUpdateDrainProcess }> = [];
+      for (const [session, sessionId] of uniqueSessions) {
+        entries.push({
+          session,
+          diagnostic: {
+            sessionId,
+            name: session.diagnosticName,
+            pid: session.diagnosticPid,
+            activity: session.isRunning() ? "running" : "idle",
+            state: "stopping",
+          },
+        });
+      }
+      status.state = "stopping";
+      status.processes = entries.map((entry) => entry.diagnostic);
+
+      const results = await waitForAppUpdateDrain(Promise.allSettled(entries.map(async ({ session, diagnostic }) => {
+        await session.destroyAndWait();
+        diagnostic.state = "stopped";
+      })), "Stopping OMP sessions");
+      for (const result of results) {
+        if (result.status === "rejected") throw result.reason;
+      }
+      status.state = "stopped";
+      return entries.length;
+    } catch (error) {
+      status.state = "failed";
+      globalThis.__ompAppUpdateDrainPromise = undefined;
+      throw error;
+    }
+  })();
+  globalThis.__ompAppUpdateDrainPromise = draining;
+  return draining;
+}
+
+export function cancelAppUpdateDrain(): void {
+  globalThis.__ompAppUpdateDrainPromise = undefined;
+  globalThis.__ompAppUpdateDrainStatus = undefined;
 }
 
 // ----------------------------------------------------------------------------
@@ -1328,6 +1447,12 @@ export function notifyRunningChange({ refreshSessionList = false }: { refreshSes
   }
 }
 
+function assertRpcSpawnAllowed(): void {
+  if (globalThis.__ompAppUpdateDrainPromise) {
+    throw new Error("Cannot start an OMP session while the application is preparing to update");
+  }
+}
+
 /**
  * Get or create the omp RPC process for the given session.
  * For new sessions (sessionFile === ""), omp generates its own id.
@@ -1346,6 +1471,7 @@ export async function startRpcSession(
    * fallback (recorded dir gone) and warn the user. Omit for new sessions. */
   recordedCwd?: string | null,
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
+  assertRpcSpawnAllowed();
   const registry = getRegistry();
   const locks = getLocks();
 
@@ -1361,11 +1487,15 @@ export async function startRpcSession(
       return { session: existing, realSessionId: sessionId };
     }
     await existing.destroyAndWait();
+    assertRpcSpawnAllowed();
   }
   // A wrapper whose omp child is still flushing/exiting must fully dispose
   // before a replacement spawns — two children touching the same .jsonl would
   // race on resume/delete/archive.
-  if (existing?.destroyPromise) await existing.destroyPromise;
+  if (existing?.destroyPromise) {
+    await existing.destroyPromise;
+    assertRpcSpawnAllowed();
+  }
 
   const inflight = locks.get(sessionId);
   if (inflight) return inflight;
@@ -1374,6 +1504,7 @@ export async function startRpcSession(
     // The wrapper needs the process and the process's onExit needs the wrapper;
     // the holder breaks that cycle (onExit only fires once the child dies).
     const holder: { wrapper?: AgentSessionWrapper } = {};
+    assertRpcSpawnAllowed();
     const proc = new RpcProcess({
       cwd,
       extraArgs: buildSessionSpawnArgs(sessionFile, toolNames, advisor === true),

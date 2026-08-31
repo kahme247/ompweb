@@ -24,6 +24,7 @@ export function isNewerVersion(availableVersion: string, currentVersion: string)
   const available = parseVersion(availableVersion);
   const current = parseVersion(currentVersion);
   if (!available || !current) return false;
+  if (available.prerelease) return false;
 
   for (let index = 0; index < available.parts.length; index += 1) {
     if (available.parts[index] !== current.parts[index]) {

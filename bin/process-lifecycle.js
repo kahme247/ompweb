@@ -13,23 +13,62 @@ function getSignalExitCode(signal) {
   return typeof signalNumber === "number" ? 128 + signalNumber : 1;
 }
 
-function killChildTree(child, force, platform = process.platform) {
+function killChildTree(child, force, platform = process.platform, gracefulSignal = "SIGTERM") {
   if (platform === "win32" && child.pid) {
     const reaper = spawn("taskkill", ["/pid", String(child.pid), "/t", ...(force ? ["/f"] : [])], {
       windowsHide: true,
       stdio: "ignore",
     });
-    reaper.once("error", () => {
+    const fallback = () => {
       try { child.kill(force ? "SIGKILL" : "SIGTERM"); } catch {}
+    };
+    reaper.once("error", fallback);
+    reaper.once("exit", (code) => {
+      if (code !== 0) fallback();
     });
     reaper.unref?.();
     return;
   }
 
-  try { child.kill(force ? "SIGKILL" : "SIGTERM"); } catch {}
+  const signal = force ? "SIGKILL" : gracefulSignal;
+  if (platform !== "win32" && child.pid) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {}
+  }
+
+  try { child.kill(signal); } catch {}
 }
 
-function wireChildProcessLifecycle(child, parentProcess = process, timeoutMs = shutdownTimeoutMs) {
+function childHasExited(child) {
+  return (child.exitCode !== null && child.exitCode !== undefined)
+    || (child.signalCode !== null && child.signalCode !== undefined);
+}
+
+function waitForChildExit(child, timeoutMs) {
+  if (childHasExited(child)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const finish = (exited) => {
+      clearTimeout(timer);
+      child.removeListener("exit", onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(childHasExited(child)), timeoutMs);
+    timer.unref?.();
+    child.once("exit", onExit);
+  });
+}
+
+async function terminateChildProcess(child, timeoutMs = shutdownTimeoutMs, platform = process.platform) {
+  if (childHasExited(child)) return true;
+  const exited = waitForChildExit(child, timeoutMs);
+  killChildTree(child, true, platform);
+  return exited;
+}
+
+function wireChildProcessLifecycle(child, parentProcess = process, timeoutMs = shutdownTimeoutMs, handleChildExit) {
   const signalHandlers = new Map();
   let shutdownTimer;
   const platform = parentProcess.platform ?? process.platform;
@@ -45,13 +84,7 @@ function wireChildProcessLifecycle(child, parentProcess = process, timeoutMs = s
 
       shutdownTimer = setTimeout(forceKill, timeoutMs);
       shutdownTimer.unref?.();
-      try {
-        child.kill(signal);
-      } catch {
-        // Windows has limited signal support. Ask taskkill to terminate the
-        // child tree if the native signal could not be delivered.
-        if (platform === "win32") killChildTree(child, false, platform);
-      }
+      killChildTree(child, false, platform, signal);
     };
     signalHandlers.set(signal, handler);
     parentProcess.on(signal, handler);
@@ -63,9 +96,10 @@ function wireChildProcessLifecycle(child, parentProcess = process, timeoutMs = s
     for (const [forwardedSignal, handler] of signalHandlers) {
       parentProcess.removeListener(forwardedSignal, handler);
     }
+    if (handleChildExit?.({ code, signal }) === true) return;
 
     parentProcess.exit(code ?? getSignalExitCode(signal));
   });
 }
 
-module.exports = { wireChildProcessLifecycle };
+module.exports = { terminateChildProcess, wireChildProcessLifecycle };

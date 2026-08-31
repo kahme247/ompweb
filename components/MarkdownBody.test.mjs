@@ -11,11 +11,12 @@ const jiti = createJiti(import.meta.url, {
 const { MarkdownBody } = await jiti.import("./MarkdownBody.tsx");
 const { normalizeDisplayMath, loadMathMarkdownPlugins } = await jiti.import("../lib/markdown.ts");
 
-function renderMarkdown(markdown) {
+function renderMarkdown(markdown, props = {}) {
   return renderToStaticMarkup(
     React.createElement(MarkdownBody, {
       cwd: "/home/me/project",
       onOpenFile() {},
+      ...props,
     }, markdown),
   );
 }
@@ -35,6 +36,26 @@ test("keeps local file markdown links in the app", () => {
 
   assert.match(html, /<a href="components\/MarkdownBody\.tsx">file<\/a>/);
   assert.doesNotMatch(html, /target=|rel=|\snode=/);
+});
+
+test("renders markdown images by default", () => {
+  const html = renderMarkdown("![remote](https://example.com/image.png)");
+
+  assert.match(html, /<button[^>]*class="image-clickable"/);
+  assert.match(html, /<img[^>]*src="https:\/\/example\.com\/image\.png"/);
+});
+
+test("suppresses markdown and raw HTML images without rendering request-capable elements", () => {
+  const html = renderMarkdown(
+    "![remote](https://example.com/remote.png)\n\n[![linked](https://example.com/linked.png)](https://example.com/release)\n\n<img src=\"https://example.com/raw.png\" alt=\"raw\">",
+    { suppressImages: true },
+  );
+
+  assert.doesNotMatch(html, /<(?:img|button)\b/);
+  assert.doesNotMatch(html, /https:\/\/example\.com/);
+  assert.match(html, /remote/);
+  assert.match(html, /linked/);
+  assert.match(html, /raw/);
 });
 
 test("renders math as plain text until the lazy KaTeX pipeline loads", () => {
