@@ -7,9 +7,13 @@
 //   ompweb-launchd [install [package-spec]|uninstall|status]
 //   npx -p @kahme247/ompweb@latest ompweb-launchd install
 
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const { spawnSync } = require("node:child_process");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const fs = require("node:fs");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const os = require("node:os");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const path = require("node:path");
 
 const LABEL = "com.kahme247.ompweb";
