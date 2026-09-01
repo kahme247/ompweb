@@ -1,6 +1,6 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
-import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { ChevronDown, ChevronUp, Paperclip, Square } from "lucide-react";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
@@ -593,6 +593,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
   }, [sessionKeyForPaging]);
   const [selectedSubagent, setSelectedSubagent] = useState<SubagentInfo | null>(null);
   const [composerMinimized, setComposerMinimized] = useState(false);
+  const minimizedExpandRef = useRef<HTMLButtonElement | null>(null);
   // True while the viewport is at/near the conversation bottom. Drives the
   // anchored render window in CommittedTranscript.
   const [nearBottom, setNearBottom] = useState(true);
@@ -802,6 +803,9 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
   // Reset minimized state on session switch (session-scoped)
   useEffect(() => { setComposerMinimized(false); }, [sessionKeyForPaging]);
+  // The extension dialog renders inside the collapsible composer wrapper;
+  // never let a pending approval prompt sit hidden behind the minimized pill.
+  useEffect(() => { if (extensionDialog) setComposerMinimized(false); }, [extensionDialog]);
   const messageCwd = session?.cwd ?? newSessionCwd ?? undefined;
 
   const availableThinkingLevels = displayModelValue
@@ -845,7 +849,11 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
     };
   }, [advisorRoleSelector, modelList]);
 
-  const handleMinimize = useCallback(() => setComposerMinimized(true), []);
+  const handleMinimize = useCallback(() => {
+    setComposerMinimized(true);
+    /* Focus the pill's expand button after React commits the visibility change */
+    requestAnimationFrame(() => minimizedExpandRef.current?.focus());
+  }, []);
   const handleExpand = useCallback(() => {
     setComposerMinimized(false);
     /* Focus the textarea after React commits the visibility change */
@@ -900,7 +908,10 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
       onAudioUnlock={unlockAudio}
       draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
       cwd={session?.cwd ?? newSessionCwd}
-      onMinimize={handleMinimize}
+      /* The pill bar and chevron only render in the non-empty layout; don't
+         accept Escape-to-minimize in the fresh-chat branch where there is
+         nothing to collapse. */
+      onMinimize={isEmptyNew ? undefined : handleMinimize}
     />
   );
 
@@ -1179,6 +1190,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
           draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
           isStreaming={sessionBusy}
           isCompacting={isCompacting}
+          expandRef={minimizedExpandRef}
           onExpand={handleExpand}
           onAbort={handleAbort}
           onAbortCompaction={handleAbortCompaction}
@@ -1197,7 +1209,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
               aria-label={t("chatWindow.minimizeComposer")}
               style={{
                 display: "flex", alignItems: "center", justifyContent: "center",
-                width: 32, height: 14,
+                width: 44, height: 24,
                 background: "none", border: "none",
                 color: "var(--text-dim)",
                 cursor: "pointer", padding: 0,
@@ -1516,10 +1528,11 @@ function ExtensionCustomPanel({
 }
 
 /** Slim pill bar replacing the full composer when minimized. */
-function MinimizedComposerBar({ draftKey, isStreaming, isCompacting, onExpand, onAbort, onAbortCompaction }: {
+function MinimizedComposerBar({ draftKey, isStreaming, isCompacting, expandRef, onExpand, onAbort, onAbortCompaction }: {
   draftKey?: string;
   isStreaming: boolean;
   isCompacting?: boolean;
+  expandRef?: Ref<HTMLButtonElement>;
   onExpand: () => void;
   onAbort: () => void;
   onAbortCompaction?: () => void;
@@ -1549,6 +1562,7 @@ function MinimizedComposerBar({ draftKey, isStreaming, isCompacting, onExpand, o
         >
           {/* Expand button - fills remaining space */}
           <button
+            ref={expandRef}
             type="button"
             onClick={onExpand}
             title={t("chatWindow.expandComposer")}
@@ -1593,6 +1607,7 @@ function MinimizedComposerBar({ draftKey, isStreaming, isCompacting, onExpand, o
                 else onAbort();
               }}
               title={t("chatInput.stopAgent")}
+              aria-label={t("chatInput.stopAgent")}
               style={{
                 display: "flex", alignItems: "center", gap: 5,
                 height: 26,
