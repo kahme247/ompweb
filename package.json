@@ -17,7 +17,7 @@
   "bin": {
     "ompweb": "bin/omp-web.js",
     "ompweb-tray": "bin/omp-web-tray.js",
-    "ompweb-launchd": "scripts/macos-launchd.mts"
+    "ompweb-launchd": "bin/omp-web-launchd.js"
   },
   "files": [
     "bin",
