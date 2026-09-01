@@ -616,7 +616,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [modelThinkingLevelMaps, setModelThinkingLevelMaps] = useState<Record<string, Record<string, string | null>>>({});
   const [newSessionModel, setNewSessionModel] = useState<SelectedModel | null>(null);
   const [newSessionDefaultModel, setNewSessionDefaultModel] = useState<SelectedModel | null>(null);
-  const [toolPreset, setToolPreset] = useState<ToolPreset>(() => getPreferredToolPreset());
+  // Start at the default for SSR; hydrate from localStorage in an effect
+  // to avoid a server/client mismatch when the user stored a different preset.
+  const [toolPreset, setToolPreset] = useState<ToolPreset>("full");
+  useEffect(() => { setToolPreset(getPreferredToolPreset()); }, []);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
   const [fastModeEnabled, setFastModeEnabled] = useState(false);
   const [fastModeActive, setFastModeActive] = useState<boolean | undefined>(undefined);
