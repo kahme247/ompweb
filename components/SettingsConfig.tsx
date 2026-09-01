@@ -3,7 +3,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useTransition, cloneElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { getSubmitDuringRunBehavior, setSubmitDuringRunBehavior, type SubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import dynamic from "next/dynamic";
-import { Copy, ExternalLink, RefreshCw, RotateCcw, Search, AlertCircle } from "lucide-react";
+import { Copy, ExternalLink, RefreshCw, RotateCcw, Search, AlertCircle, Monitor, Play, Square, Trash2 } from "lucide-react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
 import { SettingsTabs, type SettingsTab, SETTINGS_CATEGORIES, getNormalizedActive } from "./SettingsTabs";
@@ -26,6 +26,23 @@ type UpdateState = {
   updateAvailable: boolean;
   updateCommand?: string;
 };
+type WindowsServiceStatus = {
+  isWindows: boolean;
+  isInstalled: boolean;
+  autostart: boolean;
+  isRunning: boolean;
+  port: number;
+  hostname: string;
+  mode: "start" | "dev";
+  desktopShortcutExists: boolean;
+  startMenuShortcutExists: boolean;
+  startupShortcutExists: boolean;
+  logFile: string;
+  configFile: string;
+  serviceUrl: string;
+  version: string;
+};
+
 
 type NativeSettings = {
   defaultThinkingLevel?: "auto" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -151,6 +168,9 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { id: "load-project-mcp-servers", tab: "mcp", sectionKey: "settingsConfig.extensionsTools", labelKey: "settingsConfig.loadProjectMcp", descKey: "settingsConfig.loadProjectMcpDesc", fallbackSection: "Extensions & Tools", fallbackLabel: "Load Project MCP Servers", fallbackDesc: "Allow project-root MCP configuration to be discovered.", scope: "Native OMP" },
   { id: "render-mcp-markdown", tab: "mcp", sectionKey: "settingsConfig.extensionsTools", labelKey: "settingsConfig.renderMcpMarkdown", descKey: "settingsConfig.renderMcpMarkdownDesc", fallbackSection: "Extensions & Tools", fallbackLabel: "Render MCP Markdown", fallbackDesc: "Render non-JSON MCP results as Markdown in transcript.", scope: "Native OMP" },
   { id: "mcp-resource-updates", tab: "mcp", sectionKey: "settingsConfig.extensionsTools", labelKey: "settingsConfig.mcpResourceUpdates", descKey: "settingsConfig.mcpResourceUpdatesDesc", fallbackSection: "Extensions & Tools", fallbackLabel: "MCP Resource Updates", fallbackDesc: "Inject server resource updates into conversation.", scope: "Native OMP" },
+  // Windows Background Service & System Tray
+  { id: "windows-service-autostart", tab: "system", sectionKey: "settingsConfig.windowsServiceTitle", labelKey: "settingsConfig.windowsServiceAutostart", descKey: "settingsConfig.windowsServiceAutostartDesc", fallbackSection: "Windows Background Service & System Tray", fallbackLabel: "Start with Windows", fallbackDesc: "Launch background service quietly in system tray when logging into Windows.", scope: "UI" },
+  { id: "windows-service-shortcuts", tab: "system", sectionKey: "settingsConfig.windowsServiceTitle", labelKey: "settingsConfig.windowsServiceInstallBtn", descKey: "settingsConfig.windowsServiceDesc", fallbackSection: "Windows Background Service & System Tray", fallbackLabel: "Install Service & Shortcuts", fallbackDesc: "Manage background service execution, system tray monitor, Windows logon autostart, and Desktop shortcuts.", scope: "UI" },
 ];
 
 function SearchResultsList({ results, query, onSelect }: { results: SearchResult[]; query: string; onSelect: (result: SearchResult) => void }) {
@@ -365,6 +385,49 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   const [hasCheckedUpdates, setHasCheckedUpdates] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [windowsService, setWindowsService] = useState<WindowsServiceStatus | null>(null);
+  const [loadingWindowsService, setLoadingWindowsService] = useState(false);
+  const [windowsServiceActionPending, setWindowsServiceActionPending] = useState(false);
+
+  const fetchWindowsServiceStatus = useCallback(async () => {
+    try {
+      setLoadingWindowsService(true);
+      const res = await fetch("/api/windows-service");
+      if (res.ok) {
+        const data = (await res.json()) as WindowsServiceStatus;
+        setWindowsService(data);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoadingWindowsService(false);
+    }
+  }, []);
+
+  const performWindowsServiceAction = useCallback(async (action: "install" | "uninstall" | "toggle-autostart" | "start" | "stop" | "restart", payload: object = {}) => {
+    try {
+      setWindowsServiceActionPending(true);
+      setMessage(null);
+      const res = await fetch("/api/windows-service", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, ...payload }),
+      });
+      const data = (await res.json()) as { success?: boolean; error?: string; status?: WindowsServiceStatus; message?: string };
+      if (!res.ok || data.error) {
+        setMessage(data.error || t("settingsConfig.windowsServiceActionFailed"));
+      } else {
+        if (data.status) setWindowsService(data.status);
+        setMessage(data.message || t("settingsConfig.windowsServiceActionSuccess"));
+      }
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : t("settingsConfig.windowsServiceActionFailed"));
+    } finally {
+      setWindowsServiceActionPending(false);
+    }
+  }, [t]);
+
+
   const [nativeSettings, setNativeSettings] = useState<NativeSettings | null>(null);
   const [nativeSettingsError, setNativeSettingsError] = useState<string | null>(null);
   const [nativeSavesInFlight, setNativeSavesInFlight] = useState(0);
@@ -476,6 +539,11 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   }, [t]);
 
   const currentTab = getNormalizedActive(activeTab);
+  useEffect(() => {
+    if (currentTab === "system") {
+      void fetchWindowsServiceStatus();
+    }
+  }, [currentTab, fetchWindowsServiceStatus]);
 
   useEffect(() => {
     if (currentTab !== "system" || hasCheckedUpdates) return;
@@ -1043,6 +1111,122 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   </div>
                   {message && <p role="status" style={{ margin: "4px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>{message}</p>}
                 </section>
+
+                {/* Windows Background Service & System Tray card (Windows only) */}
+                {windowsService?.isWindows && (
+                  <section style={{ padding: 14, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", display: "flex", flexDirection: "column", gap: 12 }}>
+                    <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
+                          <Monitor size={15} aria-hidden="true" />
+                          {t("settingsConfig.windowsServiceTitle")}
+                        </div>
+                        <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)", lineHeight: 1.4 }}>
+                          {t("settingsConfig.windowsServiceDesc")}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void fetchWindowsServiceStatus()}
+                        disabled={loadingWindowsService}
+                        aria-label={t("settingsConfig.refresh")}
+                        style={{ padding: "6px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", cursor: loadingWindowsService ? "wait" : "pointer", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 5 }}
+                      >
+                        <RefreshCw size={13} aria-hidden="true" /> {t("settingsConfig.refresh")}
+                      </button>
+                    </div>
+
+                    {/* Status badges grid */}
+                    <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2, minmax(0, 1fr))", gap: 10 }}>
+                      <div style={{ padding: 10, border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", display: "flex", flexDirection: "column", gap: 4 }}>
+                        <div style={{ fontSize: 11, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+                          {t("settingsConfig.windowsServiceStatus")}
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 500, color: windowsService.isRunning ? "var(--accent)" : "var(--text-muted)" }}>
+                          <span style={{ width: 8, height: 8, borderRadius: "50%", background: windowsService.isRunning ? "var(--accent)" : "var(--border)" }} />
+                          {windowsService.isRunning ? t("settingsConfig.windowsServiceRunning", { port: windowsService.port }) : t("settingsConfig.windowsServiceStopped")}
+                        </div>
+                      </div>
+
+                      <div style={{ padding: 10, border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", display: "flex", flexDirection: "column", gap: 4 }}>
+                        <div style={{ fontSize: 11, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+                          {t("settingsConfig.windowsServiceDesktopShortcut", { status: "" }).replace(/:\s*$/, "")}
+                        </div>
+                        <div style={{ fontSize: 12, color: windowsService.desktopShortcutExists ? "var(--text)" : "var(--text-muted)" }}>
+                          {windowsService.desktopShortcutExists ? t("settingsConfig.windowsServicePresent") : t("settingsConfig.windowsServiceMissing")}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Autostart Toggle */}
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "8px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)" }}>
+                      <div>
+                        <div style={{ fontSize: 12, fontWeight: 500 }}>{t("settingsConfig.windowsServiceAutostart")}</div>
+                        <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("settingsConfig.windowsServiceAutostartDesc")}</div>
+                      </div>
+                      <ToggleSwitch
+                        id="windows-service-autostart-toggle"
+                        checked={windowsService.autostart}
+                        disabled={windowsServiceActionPending}
+                        onChange={(checked) => void performWindowsServiceAction("toggle-autostart", { autostart: checked })}
+                      />
+                    </div>
+
+                    {/* Action buttons toolbar */}
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                      <button
+                        type="button"
+                        onClick={() => void performWindowsServiceAction("install", { startImmediately: false })}
+                        disabled={windowsServiceActionPending}
+                        style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text)", cursor: windowsServiceActionPending ? "wait" : "pointer", fontSize: 12 }}
+                      >
+                        <Monitor size={13} aria-hidden="true" />
+                        {windowsService.isInstalled ? t("settingsConfig.windowsServiceReinstallBtn") : t("settingsConfig.windowsServiceInstallBtn")}
+                      </button>
+
+                      {windowsService.isRunning ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => void performWindowsServiceAction("restart")}
+                            disabled={windowsServiceActionPending}
+                            style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text)", cursor: windowsServiceActionPending ? "wait" : "pointer", fontSize: 12 }}
+                          >
+                            <RotateCcw size={13} aria-hidden="true" /> {t("settingsConfig.windowsServiceRestartBtn")}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void performWindowsServiceAction("stop")}
+                            disabled={windowsServiceActionPending}
+                            style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text)", cursor: windowsServiceActionPending ? "wait" : "pointer", fontSize: 12 }}
+                          >
+                            <Square size={13} aria-hidden="true" /> {t("settingsConfig.windowsServiceStopBtn")}
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => void performWindowsServiceAction("start")}
+                          disabled={windowsServiceActionPending}
+                          style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text)", cursor: windowsServiceActionPending ? "wait" : "pointer", fontSize: 12 }}
+                        >
+                          <Play size={13} aria-hidden="true" /> {t("settingsConfig.windowsServiceStartBtn")}
+                        </button>
+                      )}
+
+                      {windowsService.isInstalled && (
+                        <button
+                          type="button"
+                          onClick={() => void performWindowsServiceAction("uninstall", { cleanConfig: false })}
+                          disabled={windowsServiceActionPending}
+                          style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text-muted)", cursor: windowsServiceActionPending ? "wait" : "pointer", fontSize: 12 }}
+                        >
+                          <Trash2 size={13} aria-hidden="true" /> {t("settingsConfig.windowsServiceUninstallBtn")}
+                        </button>
+                      )}
+                    </div>
+                  </section>
+                )}
               </div>
             )}
               </div>

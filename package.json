@@ -15,7 +15,8 @@
     "node": ">=22.19.0"
   },
   "bin": {
-    "ompweb": "bin/omp-web.js"
+    "ompweb": "bin/omp-web.js",
+    "ompweb-tray": "bin/omp-web-tray.js"
   },
   "files": [
     "bin",
@@ -28,6 +29,7 @@
     "!.next/trace-build",
     "!.next/**/*.map",
     "public",
+    "scripts",
     "next.config.ts",
     "package.json"
   ],
@@ -40,6 +42,10 @@
     "test": "node --experimental-strip-types --test lib/*.test.mjs lib/omp/*.test.mjs components/*.test.mjs components/ui/*.test.mjs hooks/*.test.mjs bin/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
+    "tray:install": "node bin/omp-web-tray.js --install",
+    "tray:uninstall": "node bin/omp-web-tray.js --uninstall",
+    "tray:start": "node bin/omp-web-tray.js --start",
+    "tray:status": "node bin/omp-web-tray.js --status",
     "prepack": "npm run build",
     "release:check": "npm run typecheck && npm run lint && npm test && npm run build"
   },
