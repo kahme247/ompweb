@@ -1,0 +1,93 @@
+name: Verify PR
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  verify:
+    name: Verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript typecheck
+        run: npm run typecheck
+
+      - name: ESLint check
+        run: npm run lint
+
+      - name: Run unit & integration test suite
+        run: npm test
+
+      - name: Verify production build
+        run: npm run build
+
+      - name: Verify Windows System Tray & Shortcuts (Windows only)
+        if: runner.os == 'Windows'
+        run: |
+          node bin/omp-web-tray.js --status
+          node bin/omp-web-tray.js --install
+          node bin/omp-web-tray.js --status
+          node bin/omp-web-tray.js --uninstall
+
+  pr-rules:
+    name: PR Rules & Quality Gates
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Verify no forbidden secret or temporary files committed
+        run: |
+          FORBIDDEN_FILES=$(git diff --name-only origin/main...HEAD | grep -E '(\.env(\..+)?|\.pem|\.key|\.pfx|\.p12|\.DS_Store|thumbs\.db)$' || true)
+          if [ -n "$FORBIDDEN_FILES" ]; then
+            echo "::error::Forbidden secret or OS temporary files detected in commit:"
+            echo "$FORBIDDEN_FILES"
+            exit 1
+          fi
+
+      - name: Validate PR Title convention
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if ! echo "$PR_TITLE" | grep -qE '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-zA-Z0-9_-]+\))?: .+'; then
+            echo "::warning::PR title does not match Conventional Commits format (e.g. feat(scope): description): $PR_TITLE"
+          fi

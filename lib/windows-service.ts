@@ -1,3 +1,4 @@
+import packageJson from "../package.json";
 import { existsSync, promises as fs } from "fs";
 import { homedir } from "os";
 import * as path from "path";
@@ -151,14 +152,7 @@ export async function isTrayProcessRunning(): Promise<boolean> {
 }
 
 export function getAppVersion(): string {
-  try {
-    const pkgPath = path.join(getRepoRoot(), "package.json");
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const pkg = require(pkgPath);
-    return pkg.version || "0.0.0";
-  } catch {
-    return "0.0.0";
-  }
+  return packageJson.version || "0.0.0";
 }
 
 export async function getWebServiceStatus(): Promise<WebServiceStatus> {
