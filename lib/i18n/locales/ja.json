@@ -327,6 +327,8 @@
   "chatWindow.contextGauge": "{used}/{total} 文脈",
   "chatWindow.collapsePanel": "折りたたむ",
   "chatWindow.expandPanel": "展開",
+  "chatWindow.minimizeComposer": "入力を最小化",
+  "chatWindow.expandComposer": "入力を展開",
   "chatWindow.todoBlocker": "ブロック中: {blocker}",
   "chatWindow.todoList": "タスク",
   "chatWindow.todoPhaseStatus": "{name} {done}/{total}",

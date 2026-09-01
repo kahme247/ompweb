@@ -327,6 +327,8 @@
   "chatWindow.contextGauge": "{used}/{total} ctx",
   "chatWindow.collapsePanel": "Collapse",
   "chatWindow.expandPanel": "Expand",
+  "chatWindow.minimizeComposer": "Minimize input",
+  "chatWindow.expandComposer": "Expand input",
   "chatWindow.todoBlocker": "Blocked: {blocker}",
   "chatWindow.todoList": "Tasks",
   "chatWindow.todoPhaseStatus": "{name} {done}/{total}",

@@ -1,7 +1,7 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, ChevronUp, Paperclip, Square } from "lucide-react";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
 import { countToolCallBlocks, getDisplayableAssistantBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
@@ -27,6 +27,7 @@ import {
   restoreScrollTop,
   VISIBLE_PAGE_SIZE,
 } from "@/lib/chat-lazy-load";
+import { getDraft } from "@/lib/draft-store";
 
 interface Props {
   session: SessionInfo | null;
@@ -591,6 +592,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
     }
   }, [sessionKeyForPaging]);
   const [selectedSubagent, setSelectedSubagent] = useState<SubagentInfo | null>(null);
+  const [composerMinimized, setComposerMinimized] = useState(false);
   // True while the viewport is at/near the conversation bottom. Drives the
   // anchored render window in CommittedTranscript.
   const [nearBottom, setNearBottom] = useState(true);
@@ -798,6 +800,8 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
   }, [agentPhase, committedToolCallIds, streamState.streamingMessage]);
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
+  // Reset minimized state on session switch (session-scoped)
+  useEffect(() => { setComposerMinimized(false); }, [sessionKeyForPaging]);
   const messageCwd = session?.cwd ?? newSessionCwd ?? undefined;
 
   const availableThinkingLevels = displayModelValue
@@ -841,6 +845,12 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
     };
   }, [advisorRoleSelector, modelList]);
 
+  const handleMinimize = useCallback(() => setComposerMinimized(true), []);
+  const handleExpand = useCallback(() => {
+    setComposerMinimized(false);
+    /* Focus the textarea after React commits the visibility change */
+    requestAnimationFrame(() => chatInputRef?.current?.focus());
+  }, [chatInputRef]);
 
   const chatInputElement = (
     <ChatInput
@@ -890,6 +900,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
       onAudioUnlock={unlockAudio}
       draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
       cwd={session?.cwd ?? newSessionCwd}
+      onMinimize={handleMinimize}
     />
   );
 
@@ -1162,7 +1173,44 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
         )}
       </div>
 
-      <div className="relative" style={{ flexShrink: 0 }}>
+      {/* Minimized pill bar - shown when composer is collapsed */}
+      {composerMinimized && (
+        <MinimizedComposerBar
+          draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
+          isStreaming={sessionBusy}
+          isCompacting={isCompacting}
+          onExpand={handleExpand}
+          onAbort={handleAbort}
+          onAbortCompaction={handleAbortCompaction}
+        />
+      )}
+
+      {/* Full composer - always mounted; hidden when minimized to preserve ref + state */}
+      <div className="relative" style={{ flexShrink: 0, display: composerMinimized ? "none" : undefined }}>
+        {/* Minimize chevron above the composer area */}
+        <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
+          <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto", display: "flex", justifyContent: "center" }}>
+            <button
+              type="button"
+              onClick={handleMinimize}
+              title={t("chatWindow.minimizeComposer")}
+              aria-label={t("chatWindow.minimizeComposer")}
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "center",
+                width: 32, height: 14,
+                background: "none", border: "none",
+                color: "var(--text-dim)",
+                cursor: "pointer", padding: 0,
+                borderRadius: 4,
+                transition: "color var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm)",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
+            >
+              <ChevronDown size={14} strokeWidth={1.8} />
+            </button>
+          </div>
+        </div>
         <div
           style={{
             padding: `0 ${CHAT_COLUMN_PADDING}px`,
@@ -1462,6 +1510,109 @@ function ExtensionCustomPanel({
             </Fragment>
           ))}
         </pre>
+      </div>
+    </div>
+  );
+}
+
+/** Slim pill bar replacing the full composer when minimized. */
+function MinimizedComposerBar({ draftKey, isStreaming, isCompacting, onExpand, onAbort, onAbortCompaction }: {
+  draftKey?: string;
+  isStreaming: boolean;
+  isCompacting?: boolean;
+  onExpand: () => void;
+  onAbort: () => void;
+  onAbortCompaction?: () => void;
+}) {
+  const { t } = useI18n();
+
+  /* Read draft text for preview */
+  const draft = draftKey ? getDraft(draftKey) : null;
+  const draftText = draft?.value?.trim() || null;
+  const hasAttachments = (draft?.images?.length ?? 0) > 0 || (draft?.files?.length ?? 0) > 0;
+
+  return (
+    <div style={{ flexShrink: 0, padding: "4px 16px calc(6px + env(safe-area-inset-bottom))" }}>
+      <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 0,
+            height: 36,
+            background: "var(--bg)",
+            border: "1px solid color-mix(in srgb, var(--border) 70%, transparent)",
+            borderRadius: "var(--radius-card)",
+            boxShadow: "var(--shadow-card)",
+            overflow: "hidden",
+          }}
+        >
+          {/* Expand button - fills remaining space */}
+          <button
+            type="button"
+            onClick={onExpand}
+            title={t("chatWindow.expandComposer")}
+            aria-label={t("chatWindow.expandComposer")}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              flex: 1,
+              minWidth: 0,
+              height: "100%",
+              padding: "0 14px",
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              textAlign: "left",
+            }}
+          >
+            <ChevronUp size={14} strokeWidth={1.8} style={{ flexShrink: 0, color: "var(--text-dim)" }} />
+            {hasAttachments && (
+              <Paperclip size={13} strokeWidth={1.8} style={{ flexShrink: 0, color: "var(--text-muted)" }} />
+            )}
+            <span style={{
+              flex: 1,
+              minWidth: 0,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              fontSize: 14,
+              color: draftText ? "var(--text)" : "var(--text-dim)",
+            }}>
+              {draftText ?? t("chatInput.placeholder")}
+            </span>
+          </button>
+
+          {/* Stop button - sibling, only when agent is running */}
+          {isStreaming && (
+            <button
+              type="button"
+              onClick={() => {
+                if (isCompacting && onAbortCompaction) onAbortCompaction();
+                else onAbort();
+              }}
+              title={t("chatInput.stopAgent")}
+              style={{
+                display: "flex", alignItems: "center", gap: 5,
+                height: 26,
+                padding: "0 12px",
+                marginRight: 5,
+                background: "var(--accent-strong)",
+                border: "none",
+                borderRadius: 7,
+                color: "var(--on-accent)",
+                cursor: "pointer",
+                fontSize: 12,
+                fontWeight: 600,
+                flexShrink: 0,
+              }}
+            >
+              <Square size={9} strokeWidth={0} fill="currentColor" aria-hidden="true" />
+              {t("chatInput.stop")}
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

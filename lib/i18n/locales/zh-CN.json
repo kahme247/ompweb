@@ -327,6 +327,8 @@
   "chatWindow.contextGauge": "{used}/{total} 上下文",
   "chatWindow.collapsePanel": "收起",
   "chatWindow.expandPanel": "展开",
+  "chatWindow.minimizeComposer": "最小化输入",
+  "chatWindow.expandComposer": "展开输入",
   "chatWindow.todoBlocker": "已阻塞：{blocker}",
   "chatWindow.todoList": "任务",
   "chatWindow.todoPhaseStatus": "{name} {done}/{total}",
