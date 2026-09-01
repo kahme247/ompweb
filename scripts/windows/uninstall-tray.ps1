@@ -28,10 +28,10 @@ Log-Message "Uninstalling omp-web Windows System Tray & Background Service..."
 # -----------------------------------------------------------------------------
 try {
     # Find any running powershell instance executing omp-web-tray.ps1
-    $trayProcs = Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%omp-web-tray.ps1%'" -ErrorAction SilentlyContinue
+    $trayProcs = Get-CimInstance Win32_Process -Filter "Name LIKE '%powershell%' OR Name LIKE '%pwsh%'" -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*omp-web-tray.ps1*' }
     foreach ($p in $trayProcs) {
-        Log-Message "  Stopping background tray process (PID $($p.ProcessId))..."
-        Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+        Log-Message "  Stopping background tray process tree (PID $($p.ProcessId))..."
+        Start-Process -FilePath "taskkill.exe" -ArgumentList "/PID $($p.ProcessId) /T /F" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue | Out-Null
     }
 } catch { }
 

@@ -58,8 +58,18 @@ export function getWebServiceLogPath(): string {
 export function getWindowsShortcutPaths(): { desktop: string; startMenu: string; startup: string } {
   const home = homedir();
   const appData = process.env.APPDATA || path.join(home, "AppData", "Roaming");
+
+  let desktopDir = path.join(home, "Desktop");
+  if (process.env.OneDrive && existsSync(path.join(process.env.OneDrive, "Desktop", "omp-web.lnk"))) {
+    desktopDir = path.join(process.env.OneDrive, "Desktop");
+  } else if (process.env.OneDriveConsumer && existsSync(path.join(process.env.OneDriveConsumer, "Desktop", "omp-web.lnk"))) {
+    desktopDir = path.join(process.env.OneDriveConsumer, "Desktop");
+  } else if (existsSync(path.join(home, "OneDrive", "Desktop", "omp-web.lnk"))) {
+    desktopDir = path.join(home, "OneDrive", "Desktop");
+  }
+
   return {
-    desktop: path.join(home, "Desktop", "omp-web.lnk"),
+    desktop: path.join(desktopDir, "omp-web.lnk"),
     startMenu: path.join(appData, "Microsoft", "Windows", "Start Menu", "Programs", "omp-web.lnk"),
     startup: path.join(appData, "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "omp-web-tray.lnk"),
   };
@@ -142,7 +152,7 @@ export async function isTrayProcessRunning(): Promise<boolean> {
       "-ExecutionPolicy",
       "Bypass",
       "-Command",
-      "(Get-CimInstance Win32_Process -Filter \"CommandLine LIKE '%omp-web-tray.ps1%'\" -ErrorAction SilentlyContinue | Measure-Object).Count",
+      "$procs = Get-CimInstance Win32_Process -Filter \"Name LIKE '%powershell%' OR Name LIKE '%pwsh%'\" -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*omp-web-tray.ps1*' }; ($procs | Measure-Object).Count",
     ], { timeout: 4000 });
     const count = parseInt(stdout.trim(), 10);
     return !isNaN(count) && count > 0;
@@ -344,19 +354,18 @@ export async function stopTrayService(): Promise<{ success: boolean; message?: s
   }
   try {
     const psCommand = `
-      $trayProcs = Get-CimInstance Win32_Process -Filter "CommandLine LIKE '%omp-web-tray.ps1%'" -ErrorAction SilentlyContinue
+      $trayProcs = Get-CimInstance Win32_Process -Filter "Name LIKE '%powershell%' OR Name LIKE '%pwsh%'" -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*omp-web-tray.ps1*' }
       foreach ($p in $trayProcs) {
-          Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue
+          Start-Process -FilePath "taskkill.exe" -ArgumentList "/PID $($p.ProcessId) /T /F" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue | Out-Null
       }
     `;
-    await execFileAsync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", psCommand], { timeout: 5000 });
+    await execFileAsync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", psCommand], { timeout: 8000 });
     return { success: true };
   } catch (error: unknown) {
     const err = error as Error;
     return { success: false, message: err.message };
   }
 }
-
 export async function restartTrayService(): Promise<{ success: boolean; message?: string }> {
   await stopTrayService();
   const { promise, resolve } = Promise.withResolvers<void>();
