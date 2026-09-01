@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, ListChecks, Search, Shrink, Sparkles, Target, Zap } from "lucide-react";
+import { ChevronDown, ListChecks, Search, Shrink, Sparkles, Target, Wrench, Zap } from "lucide-react";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
@@ -31,6 +31,7 @@ import { FolderIcon, getFileIcon } from "./FileIcons";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/lib/i18n";
 import { selectableThinkingLevels } from "@/lib/thinking-levels";
+import type { ToolPreset } from "@/lib/tool-presets";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix
@@ -44,7 +45,13 @@ interface ModelOption {
   provider: string;
   modelId: string;
   name: string;
-}
+};
+
+const TOOL_PRESET_OPTIONS: Array<{ value: ToolPreset; descriptionKey: string }> = [
+  { value: "none", descriptionKey: "chatInput.toolPresetNone" },
+  { value: "default", descriptionKey: "chatInput.toolPresetDefault" },
+  { value: "full", descriptionKey: "chatInput.toolPresetFull" },
+];
 
 interface Props {
   onSend: (message: string, images?: AttachedImage[]) => void;
@@ -71,6 +78,9 @@ interface Props {
   onThinkingLevelChange?: (level: string) => void;
   availableThinkingLevels?: string[] | null;
   thinkingLevelMap?: Record<string, string | null> | null;
+  /** Browser-side tool preset, applied when spawning NEW sessions. */
+  toolPreset?: ToolPreset;
+  onToolPresetChange?: (preset: ToolPreset) => void;
   /** Display name for the current model when the catalog does not know it. */
   modelNameOverride?: string | null;
   retryInfo?: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
@@ -386,6 +396,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, fastModeEnabled, fastModeActive, fastModeSupported, onFastModeChange,
   onAbortCompaction, isCompacting, compactResult,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
+  toolPreset, onToolPresetChange,
   retryInfo, queuedMessages, inputHistory = [], onAbortRetry,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
@@ -413,6 +424,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
+  const [toolPresetDropdownOpen, setToolPresetDropdownOpen] = useState(false);
   const [modelSearchQuery, setModelSearchQuery] = useState("");
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
@@ -440,6 +452,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
   const modelSearchInputRef = useRef<HTMLInputElement>(null);
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
+  const toolPresetDropdownRef = useRef<HTMLDivElement>(null);
   const historyMenuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isComposingRef = useRef(false);
@@ -1503,6 +1516,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (thinkingDropdownRef.current && !thinkingDropdownRef.current.contains(e.target as Node)) {
         setThinkingDropdownOpen(false);
       }
+      if (toolPresetDropdownRef.current && !toolPresetDropdownRef.current.contains(e.target as Node)) {
+        setToolPresetDropdownOpen(false);
+      }
       if (historyMenuRef.current && !historyMenuRef.current.contains(e.target as Node) && !textareaRef.current?.contains(e.target as Node)) {
         setHistoryMenuOpen(false);
       }
@@ -2526,6 +2542,75 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     <div className="picker-panel-footer">
                       <span>{t("chatInput.appliesNextPrompt")}</span>
                       <span style={{ fontWeight: 600, color: "var(--text-muted)", textTransform: "capitalize" }}>{thinkingDisplayLabel}</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Tool preset selector — a browser-side preference applied when
+                spawning NEW sessions (omp's RPC cannot retool a live session,
+                which the change notice below communicates). */}
+            {onToolPresetChange && (
+              <div ref={toolPresetDropdownRef} style={{ position: "relative" }}>
+                <button
+                  onClick={() => setToolPresetDropdownOpen((v) => !v)}
+                  title={t("chatInput.changeToolPresetTitle", { preset: toolPreset ?? "full" })}
+                  aria-label={`${t("chatInput.changeToolPreset")}: ${toolPreset ?? "full"}`}
+                  aria-expanded={toolPresetDropdownOpen}
+                  aria-haspopup="menu"
+                  style={{
+                    display: "flex", alignItems: "center", gap: 5,
+                    height: 28, padding: "0 8px", background: toolPresetDropdownOpen ? "var(--bg-hover)" : "none",
+                    border: "none", borderRadius: 7, color: "var(--text-muted)", cursor: "pointer",
+                    fontSize: 12,
+                    transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = toolPresetDropdownOpen ? "var(--bg-hover)" : "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
+                >
+                  <Wrench size={11} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden="true" />
+                  <span style={{ whiteSpace: "nowrap", textTransform: "capitalize" }}>{toolPreset ?? "full"}</span>
+                  <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7, transform: toolPresetDropdownOpen ? "rotate(180deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }} aria-hidden="true" />
+                </button>
+                {toolPresetDropdownOpen && (
+                  <div
+                    className="picker-panel"
+                    role="menu"
+                    style={{
+                      position: "absolute", bottom: "calc(100% + 6px)", left: 0,
+                      zIndex: 100, width: 260, maxWidth: "calc(100vw - 32px)",
+                    }}
+                  >
+                    <div className="picker-panel-header">
+                      <Wrench size={12} strokeWidth={1.8} style={{ color: "var(--text-muted)", flexShrink: 0 }} aria-hidden="true" />
+                      <span className="picker-panel-title">{t("chatInput.toolPresetLabel")}</span>
+                      <span className="picker-panel-count">{TOOL_PRESET_OPTIONS.length}</span>
+                    </div>
+                    <div className="picker-thinking-cards">
+                      {TOOL_PRESET_OPTIONS.map((opt) => {
+                        const isActive = (toolPreset ?? "full") === opt.value;
+                        return (
+                          <button
+                            className="picker-thinking-card"
+                            data-active={isActive}
+                            role="menuitemradio"
+                            aria-checked={isActive}
+                            key={opt.value}
+                            title={t(opt.descriptionKey)}
+                            onClick={() => { setToolPresetDropdownOpen(false); if (!isActive) onToolPresetChange(opt.value); }}
+                          >
+                            <span className="picker-check">
+                              {isActive && <svg width="11" height="11" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>}
+                            </span>
+                            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textTransform: "capitalize" }}>{opt.value}</span>
+                            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11, color: "var(--text-dim)" }}>{t(opt.descriptionKey)}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <div className="picker-panel-footer">
+                      <span>{t("chatInput.toolPresetFooter")}</span>
                     </div>
                   </div>
                 )}

@@ -443,6 +443,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
   const {
     loading, error, messages, entryIds, showPreCompactionHistory, streamState,
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, fastModeEnabled, fastModeActive,
+    toolPreset,
     liveModelMeta,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactResult, tokensPerSecond, displayModel: displayModelValue, sessionStats,
@@ -458,6 +459,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
     removeQueuedMessage, promoteQueuedToSteer,
     handleBuiltinSlashCommand, togglePreCompactionHistory,
     handleThinkingLevelChange, handleFastModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
+    handleToolPresetChange,
   } = useAgentSession({
     session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsPanelOpen,
@@ -890,6 +892,8 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
       compactResult={compactResult}
       thinkingLevel={thinkingLevel}
       onThinkingLevelChange={session || isNew ? handleThinkingLevelChange : undefined}
+      toolPreset={toolPreset}
+      onToolPresetChange={handleToolPresetChange}
       fastModeEnabled={fastModeEnabled}
       fastModeActive={fastModeActive}
       fastModeSupported={Boolean(displayModelValue && modelList.some((entry) => entry.provider === displayModelValue.provider && entry.id === displayModelValue.modelId && entry.supportsFastMode))}
