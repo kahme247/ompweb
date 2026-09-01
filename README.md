@@ -55,6 +55,41 @@ ompweb --password "your-password"          # Enable password protection
 ompweb --no-open                           # Don't auto-open the browser
 ```
 
+### Run as a macOS Service (launchd)
+
+Install ompweb as a launchd user agent that starts at login and restarts on crash:
+
+```bash
+npx -p @kahme247/ompweb@latest ompweb-launchd install
+```
+
+Manage it with:
+
+```bash
+npx -p @kahme247/ompweb@latest ompweb-launchd status      # Show service state
+npx -p @kahme247/ompweb@latest ompweb-launchd uninstall   # Stop and remove
+```
+
+The service runs `npx --yes @kahme247/ompweb@latest`; pass a package spec to pin a
+version, e.g. `ompweb-launchd install @kahme247/ompweb@0.3.6`. All
+[environment variables](#environment-variables) are read at install time and baked
+into the plist, plus `OMP_WEB_PKG` (package spec, same as the positional argument).
+As a service, the browser is **not** auto-opened by default — install with
+`OMP_WEB_NO_OPEN=0` to restore that.
+
+```bash
+OMP_WEB_PASSWORD=secret npx -p @kahme247/ompweb@latest ompweb-launchd install
+```
+
+When binding to a non-loopback host, require authentication (`OMP_WEB_PASSWORD`
+or equivalent access control) and HTTPS through a trusted reverse proxy or VPN.
+Never expose the unauthenticated web UI or send its password/session cookie over
+plaintext HTTP.
+
+Logs go to `~/Library/Logs/ompweb/ompweb.log` and the plist lives at
+`~/Library/LaunchAgents/com.kahme247.ompweb.plist` (mode 600; a configured
+password is stored there in plain text).
+
 ## Features
 
 - **Interactive Chat**: Real-time streaming conversation with your local `omp` agent.
