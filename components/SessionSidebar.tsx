@@ -1,10 +1,11 @@
 "use client";
 
 import { memo, useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo, useDeferredValue } from "react";
-import type { ManagedProject, SessionInfo } from "@/lib/types";
+import type { ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { DirectoryPicker } from "./DirectoryPicker";
+import { ProjectLaunchConfigDialog } from "./ProjectLaunchConfigDialog";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { Tooltip } from "./ui/primitives";
 import { toast } from "./ui/toast";
@@ -99,6 +100,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const [expandedProjects, setExpandedProjects] = useState<Set<string> | null>(() => loadExpandedProjects());
   // Project currently being removed (hide) — serializes remove requests.
   const [removeProjectPath, setRemoveProjectPath] = useState<string | null>(null);
+  const [launchConfigProject, setLaunchConfigProject] = useState<ManagedProject | null>(null);
   // Worktree/branch/Git state is scoped per repository. It is cached in a
   // map keyed by the normalized repository root so switching workspaces never
   // leaks one project's branch/worktree data into another's UI (each project
@@ -757,7 +759,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     if (expandedProjects === null) expandProject(project);
   }, [selectedProject, expandedProjects, expandProject]);
 
-  const commitAddProject = useCallback(async (candidate?: string) => {
+  const commitAddProject = useCallback(async (candidate?: string, launchConfig?: ProjectLaunchConfig) => {
     const path = (candidate ?? "").trim();
     if (!path || addProjectBusy) return;
 
@@ -767,7 +769,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       const res = await fetch("/api/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: path }),
+        body: JSON.stringify({ cwd: path, launchConfig }),
       });
       const data = await res.json().catch(() => ({})) as { project?: ManagedProject; error?: string; code?: string };
       if (!res.ok || data.error || !data.project) {
@@ -786,12 +788,15 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     }
   }, [addProjectBusy, loadProjects, expandProject]);
 
-  const handleUpdateProjectPresentation = useCallback(async (projectPath: string, updates: { alias?: string | null; sortOrder?: number | null }) => {
+  const handleUpdateProjectPresentation = useCallback(async (projectPath: string, updates: { alias?: string | null; sortOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }) => {
     try {
       const response = await fetch("/api/projects", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cwd: projectPath, ...updates }) });
       if (!response.ok) throw new Error(t("projects.updateFailed"));
       await loadProjects();
-    } catch (error) { toast.error(error instanceof Error ? error.message : String(error)); }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+      throw error;
+    }
   }, [loadProjects, t]);
 
   /** Persist one whole-list order as a single atomic batched PATCH. */
@@ -1122,7 +1127,18 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
             setAddProjectOpen(false);
             setAddProjectError(null);
           }}
-          onSelect={(path) => void commitAddProject(path)}
+          onSelect={(path, launchConfig) => void commitAddProject(path, launchConfig)}
+        />
+      )}
+      {launchConfigProject && (
+        <ProjectLaunchConfigDialog
+          projectPath={launchConfigProject.path}
+          initialConfig={launchConfigProject.launchConfig}
+          onClose={() => setLaunchConfigProject(null)}
+          onSave={async (launchConfig) => {
+            await handleUpdateProjectPresentation(launchConfigProject.path, { launchConfig });
+            toast.info("工作区启动参数已保存；下次启动或重新加载 omp 会生效。");
+          }}
         />
       )}
       {/* Header: branding + quiet utilities + New Session */}
@@ -1366,6 +1382,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                 onActivate={activateProject}
                 onToggleExpand={toggleProjectExpanded}
                 onRemoveProject={handleRemoveProject}
+                onEditLaunchConfig={setLaunchConfigProject}
                 onUpdatePresentation={handleUpdateProjectPresentation}
                 onDragPathChange={setDraggedProjectPath}
                 onDropProject={(path) => void handleProjectDrop(path)}
@@ -1589,6 +1606,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     </div>
   );
 });
+
 
 
 

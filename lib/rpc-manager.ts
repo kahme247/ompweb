@@ -1,4 +1,4 @@
-import { existsSync } from "fs";
+import { existsSync, realpathSync } from "fs";
 import { homedir } from "os";
 import { validateAgentImages } from "./image-attachments";
 import { invalidateModelsCache } from "./models-cache";
@@ -6,6 +6,8 @@ import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame } fr
 import { readNativeSettings } from "./omp/settings-config";
 import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
 import { PRESET_FULL } from "./tool-presets";
+import { comparableProjectPath } from "./comparable-path";
+import { isReservedLaunchArg, loadProjectRegistry } from "./project-registry";
 import type {
   BashResultInfo,
   OmpModel,
@@ -14,7 +16,7 @@ import type {
   SessionStatsInfo,
   WebSessionState,
 } from "./pi-types";
-import type { ExtensionWidgetItem } from "./types";
+import type { ExtensionWidgetItem, ProjectLaunchConfig } from "./types";
 
 // ============================================================================
 // Types
@@ -133,7 +135,7 @@ export function mapPresetToolNames(toolNames: string[]): string[] {
 const FULL_PRESET_KEY = [...PRESET_FULL].map((n) => n.toLowerCase()).sort().join(",");
 
 /** Extra CLI args for spawning `omp --mode rpc-ui` for a session. */
-export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[], advisor = false): string[] {
+export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[], advisor = false, launchConfig?: ProjectLaunchConfig): string[] {
   const args: string[] = [];
   if (sessionFile) {
     // An absolute path (or anything containing "/") resolves deterministically:
@@ -153,6 +155,12 @@ export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[],
     }
   }
   if (advisor) args.push("--advisor");
+  else if (launchConfig?.advisor) args.push("--advisor");
+  // Defense in depth: the registry is hand-editable, so re-strip reserved
+  // args and dash-leading profiles at the spawn boundary even though the
+  // API validates them on write.
+  if (launchConfig?.profile && !launchConfig.profile.startsWith("-")) args.push("--profile", launchConfig.profile);
+  if (launchConfig?.extraArgs) args.push(...launchConfig.extraArgs.filter((arg) => !isReservedLaunchArg(arg)));
   return args;
 }
 
@@ -905,7 +913,7 @@ export class AgentSessionWrapper {
       this.compacting = false;
       const proc = new RpcProcess({
         cwd: this.cwd,
-        extraArgs: buildSessionSpawnArgs(resumable ? sessionFile : ""),
+        extraArgs: buildSessionSpawnArgs(resumable ? sessionFile : "", undefined, false, launchConfigForCwd(this.cwd)),
         onExit: ({ stderrTail }) => {
           if (this.proc === proc) this.handleProcessExit(stderrTail);
         },
@@ -1365,6 +1373,17 @@ export function notifyRunningChange({ refreshSessionList = false }: { refreshSes
   }
 }
 
+/** 获取工作区注册的启动配置；未注册项目不附加配置。 */
+function launchConfigForCwd(cwd: string): ProjectLaunchConfig | undefined {
+  let canonical = cwd;
+  try { canonical = realpathSync(cwd); } catch {}
+  const key = comparableProjectPath(canonical);
+  return loadProjectRegistry().projects.find((project) => {
+    const projectKey = comparableProjectPath(project.path);
+    return projectKey === key || key.startsWith(comparableProjectPath(`${project.path}-worktrees`));
+  })?.launchConfig;
+}
+
 /**
  * Get or create the omp RPC process for the given session.
  * For new sessions (sessionFile === ""), omp generates its own id.
@@ -1382,9 +1401,11 @@ export async function startRpcSession(
   /** The cwd recorded in the session file header, used to detect a spawn
    * fallback (recorded dir gone) and warn the user. Omit for new sessions. */
   recordedCwd?: string | null,
+  launchConfig?: ProjectLaunchConfig,
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
+  launchConfig = launchConfig ?? launchConfigForCwd(cwd);
 
   const existing = registry.get(sessionId);
   if (existing?.isAlive()) {
@@ -1413,10 +1434,10 @@ export async function startRpcSession(
     const holder: { wrapper?: AgentSessionWrapper } = {};
     const proc = new RpcProcess({
       cwd,
-      extraArgs: buildSessionSpawnArgs(sessionFile, toolNames, advisor === true),
+      extraArgs: buildSessionSpawnArgs(sessionFile, toolNames, advisor === true, launchConfig),
       onExit: ({ stderrTail }) => holder.wrapper?.handleProcessExit(stderrTail),
     });
-    const created = new AgentSessionWrapper(proc, cwd, recordedCwd, advisor === true);
+    const created = new AgentSessionWrapper(proc, cwd, recordedCwd, advisor === true || launchConfig?.advisor === true);
     holder.wrapper = created;
     created.start();
     try {
