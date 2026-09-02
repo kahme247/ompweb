@@ -445,19 +445,29 @@ export interface ArchivedSessionInfo {
   status?: "complete" | "interrupted" | "aborted" | "error" | "pending" | "unknown";
 }
 
+/** 工作区级 omp 启动配置；配置只影响该工作区启动的 omp 子进程。 */
+export interface ProjectLaunchConfig {
+  /** 使用的 OMP profile。 */
+  profile?: string;
+  /** 是否以 advisor 模式启动。 */
+  advisor?: boolean;
+  /** 按参数数组保存的额外 OMP CLI 参数。 */
+  extraArgs?: string[];
+}
+
 /** A project in the sidebar: an explicitly added directory (registered in the
  *  on-disk registry) or one discovered from existing sessions. Paths are the
  *  canonical projectRoot — worktrees resolve to their main repository. */
 export interface ManagedProject {
   path: string;
-  /** ISO timestamp of the last explicit add; present only for registered
-   *  projects and used to order the project list (most recently added
-   *  first). The order is stable and never driven by session activity. */
+  /** ISO timestamp of the last explicit add. */
   addedAt?: string;
   /** User-defined display name; never changes the directory path. */
   alias?: string;
   /** Explicit sidebar position for registered projects. */
   sortOrder?: number;
+  /** 工作区级 omp 启动配置。 */
+  launchConfig?: ProjectLaunchConfig;
 }
 
 export interface SessionContext {

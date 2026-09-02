@@ -2,7 +2,7 @@
 
 import { memo, useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo, useDeferredValue, type CSSProperties, type Dispatch, type ReactNode, type RefObject, type SetStateAction } from "react";
 import { createPortal } from "react-dom";
-import type { ManagedProject, SessionInfo } from "@/lib/types";
+import type { ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { DirectoryPicker } from "./DirectoryPicker";
@@ -1239,7 +1239,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     if (expandedProjects === null) expandProject(project);
   }, [selectedProject, expandedProjects, expandProject]);
 
-  const commitAddProject = useCallback(async (candidate?: string) => {
+  const commitAddProject = useCallback(async (candidate?: string, launchConfig?: ProjectLaunchConfig) => {
     const path = (candidate ?? "").trim();
     if (!path || addProjectBusy) return;
 
@@ -1249,7 +1249,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       const res = await fetch("/api/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: path }),
+        body: JSON.stringify({ cwd: path, launchConfig }),
       });
       const data = await res.json().catch(() => ({})) as { project?: ManagedProject; error?: string; code?: string };
       if (!res.ok || data.error || !data.project) {
@@ -1604,7 +1604,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
             setAddProjectOpen(false);
             setAddProjectError(null);
           }}
-          onSelect={(path) => void commitAddProject(path)}
+          onSelect={(path, launchConfig) => void commitAddProject(path, launchConfig)}
         />
       )}
       {/* Header: branding + quiet utilities + New Session */}
@@ -2089,7 +2089,7 @@ interface ProjectRowProps {
   onActivate: (path: string) => void;
   onToggleExpand: (path: string) => void;
   onRemoveProject: (path: string) => void;
-  onUpdatePresentation: (path: string, updates: { alias?: string | null; sortOrder?: number | null }) => void;
+  onUpdatePresentation: (path: string, updates: { alias?: string | null; sortOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }) => void;
   onDragPathChange: (path: string | null) => void;
   onDropProject: (path: string) => void;
   onMoveProject: (path: string, delta: -1 | 1) => void;

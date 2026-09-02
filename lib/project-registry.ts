@@ -3,7 +3,7 @@ import { homedir } from "os";
 import { isAbsolute, resolve } from "path";
 import { comparableProjectPath } from "./comparable-path";
 import { getAgentDir } from "./omp/paths";
-import type { ManagedProject } from "./types";
+import type { ManagedProject, ProjectLaunchConfig } from "./types";
 
 // ============================================================================
 // Project registry: which directories the user explicitly manages, and which
@@ -29,6 +29,8 @@ export interface ProjectRegistryEntry {
   alias?: string;
   /** Explicit sidebar position; lower values appear first. */
   sortOrder?: number;
+  /** 工作区级 omp 启动配置。 */
+  launchConfig?: ProjectLaunchConfig;
 }
 
 export interface ProjectRegistryFile {
@@ -57,6 +59,20 @@ function canonicalProjectPath(value: string): string {
   }
 }
 
+/** 解析磁盘注册表中的启动配置；非法字段安全忽略。 */
+function parseLaunchConfig(item: Record<string, unknown>): ProjectLaunchConfig | undefined {
+  const raw = item.launchConfig;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const value = raw as Record<string, unknown>;
+  const profile = typeof value.profile === "string" && value.profile.trim() ? value.profile.trim() : undefined;
+  const advisor = value.advisor === true ? true : undefined;
+  const extraArgs = Array.isArray(value.extraArgs)
+    ? value.extraArgs.filter((arg): arg is string => typeof arg === "string" && arg.length > 0 && arg.length <= 256).slice(0, 32)
+    : undefined;
+  if (!profile && advisor === undefined && (!extraArgs || extraArgs.length === 0)) return undefined;
+  return { profile, advisor, extraArgs };
+}
+
 /** Parse registry JSON; missing, corrupt, or foreign-shaped input yields an
  *  empty registry rather than failing the whole sidebar. */
 export function parseProjectRegistry(raw: string): ProjectRegistryFile {
@@ -76,6 +92,7 @@ export function parseProjectRegistry(raw: string): ProjectRegistryFile {
         hidden: "hidden" in item && item.hidden === true,
         alias: "alias" in item && typeof item.alias === "string" && item.alias.trim() ? item.alias.trim() : undefined,
         sortOrder: "sortOrder" in item && typeof item.sortOrder === "number" && Number.isFinite(item.sortOrder) ? item.sortOrder : undefined,
+        launchConfig: parseLaunchConfig(item as Record<string, unknown>),
       });
     }
     return { version: 1, projects: entries };
@@ -119,11 +136,12 @@ export function upsertProject(
   registry: ProjectRegistryFile,
   path: string,
   now = new Date().toISOString(),
+  launchConfig?: ProjectLaunchConfig,
 ): ProjectRegistryFile {
   const canonical = canonicalProjectPath(path);
   const key = comparableProjectPath(canonical);
   const projects = registry.projects.filter((p) => comparableProjectPath(p.path) !== key);
-  projects.push({ path: canonical, addedAt: now, hidden: false });
+  projects.push({ path: canonical, addedAt: now, hidden: false, launchConfig });
   return { version: 1, projects };
 }
 
@@ -134,7 +152,7 @@ export function upsertProject(
  *  managed must register them in the same cycle (see /api/projects PATCH). */
 export function updateProjectsPresentation(
   registry: ProjectRegistryFile,
-  updates: ReadonlyArray<{ path: string; alias?: string | null; sortOrder?: number | null }>,
+  updates: ReadonlyArray<{ path: string; alias?: string | null; sortOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }>,
 ): ProjectRegistryFile {
   const keyed = new Map(updates.map((update) =>
     [comparableProjectPath(canonicalProjectPath(update.path)), update] as const,
@@ -153,6 +171,10 @@ export function updateProjectsPresentation(
       if (update.sortOrder !== undefined) {
         if (update.sortOrder === null) delete next.sortOrder;
         else next.sortOrder = update.sortOrder;
+      }
+      if (update.launchConfig !== undefined) {
+        if (update.launchConfig === null) delete next.launchConfig;
+        else next.launchConfig = update.launchConfig;
       }
       return next;
     }),
@@ -194,7 +216,7 @@ export function mergeProjects(registry: ProjectRegistryFile, discovered: Iterabl
     const key = comparableProjectPath(p.path);
     if (registeredSeen.has(key)) continue; // tolerate hand-edited duplicates
     registeredSeen.add(key);
-    registered.push({ path: p.path, addedAt: p.addedAt, alias: p.alias, sortOrder: p.sortOrder });
+    registered.push({ path: p.path, addedAt: p.addedAt, alias: p.alias, sortOrder: p.sortOrder, launchConfig: p.launchConfig });
   }
   const extra: ManagedProject[] = [];
   const extraSeen = new Set<string>();

@@ -54,7 +54,7 @@ function isWindowsDriveRoot(directory: string): boolean {
 
 interface Props {
   onCancel: () => void;
-  onSelect: (path: string) => void;
+  onSelect: (path: string, launchConfig?: { profile?: string; advisor?: boolean; extraArgs?: string[] }) => void;
   busy?: boolean;
   error?: string | null;
 }
@@ -68,6 +68,9 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
   const [directories, setDirectories] = useState<DirectoryEntry[]>([]);
   const [drives, setDrives] = useState<DirectoryEntry[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [profile, setProfile] = useState("");
+  const [advisor, setAdvisor] = useState(false);
+  const [extraArgs, setExtraArgs] = useState("");
   const [loading, setLoading] = useState(true);
   const dialogRef = useModalDialog<HTMLDivElement>({
     onClose: () => { if (!busy) onCancel(); },
@@ -105,6 +108,10 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
   const hasUncommittedPath = pathInput.trim() !== currentPath;
   const canSelect = Boolean(currentPath) && !hasUncommittedPath && !busy;
   const canNavigateUp = Boolean(parentDirectory) || isWindowsDriveRoot(currentPath);
+  const submitSelection = () => {
+    const args = extraArgs.split("\n").map((arg) => arg.trim()).filter(Boolean);
+    onSelect(currentPath, { profile: profile.trim() || undefined, advisor: advisor || undefined, extraArgs: args.length ? args : undefined });
+  };
 
   if (!portalTarget) return null;
 
@@ -213,17 +220,15 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
           {(loadError || error) && <div style={{ padding: "8px", color: "var(--status-error)", fontSize: 11 }}>{loadError ?? error}</div>}
         </div>
 
+        <div style={{ flexShrink: 0, padding: "10px 18px", borderTop: "1px solid var(--border)" }}>
+          <input value={profile} onChange={(event) => setProfile(event.target.value)} placeholder="OMP profile（可选）" aria-label="OMP profile" style={{ width: "100%", height: 30, boxSizing: "border-box", marginBottom: 7, padding: "0 8px", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11 }} />
+          <label style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 7, color: "var(--text-muted)", fontSize: 11 }}><input type="checkbox" checked={advisor} onChange={(event) => setAdvisor(event.target.checked)} />以 advisor 模式启动</label>
+          <textarea value={extraArgs} onChange={(event) => setExtraArgs(event.target.value)} placeholder="额外参数，每行一个（可选）" aria-label="OMP extra arguments" rows={2} style={{ width: "100%", boxSizing: "border-box", resize: "vertical", padding: "6px 8px", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11 }} />
+        </div>
         <div className="directory-picker-footer" style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 10, flexShrink: 0, padding: "10px 18px", borderTop: "1px solid var(--border)" }}>
           <button className="directory-picker-action" type="button" onClick={onCancel} disabled={busy} style={{ padding: "6px 14px", border: "1px solid var(--border)", borderRadius: 6, background: "none", color: "var(--text-muted)", cursor: busy ? "default" : "pointer", fontSize: 13 }}>{t("directoryPicker.cancel")}</button>
-          <button
-            className="directory-picker-action"
-            type="button"
-            onClick={() => onSelect(currentPath)}
-            disabled={!canSelect}
-            title={hasUncommittedPath ? t("directoryPicker.openPathBeforeSelecting") : t("directoryPicker.selectCurrentDirectory")}
-            style={{ padding: "6px 16px", border: 0, borderRadius: 6, background: "var(--accent)", color: "var(--on-accent)", fontSize: 13, fontWeight: 600, opacity: canSelect ? 1 : 0.6, cursor: canSelect ? "pointer" : "default" }}
-          >
-            {busy ? t("directoryPicker.checking") : t("directoryPicker.selectThisFolder")}
+          <button className="directory-picker-action" type="button" onClick={submitSelection} disabled={!canSelect} title={hasUncommittedPath ? t("directoryPicker.openPathBeforeSelecting") : t("directoryPicker.selectCurrentDirectory")} style={{ padding: "6px 16px", border: 0, borderRadius: 6, background: "var(--accent)", color: "var(--on-accent)", fontSize: 13, fontWeight: 600, opacity: canSelect ? 1 : 0.6, cursor: canSelect ? "pointer" : "default" }}>
+            {busy ? t("directoryPicker.checking") : "添加工作区"}
           </button>
         </div>
       </div>
