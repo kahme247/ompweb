@@ -149,8 +149,12 @@ export function upsertProject(
 ): ProjectRegistryFile {
   const canonical = canonicalProjectPath(path);
   const key = comparableProjectPath(canonical);
+  const existing = registry.projects.find((p) => comparableProjectPath(p.path) === key);
   const projects = registry.projects.filter((p) => comparableProjectPath(p.path) !== key);
-  projects.push({ path: canonical, addedAt: now, hidden: false, launchConfig });
+  // An omitted launchConfig preserves the stored one: re-adding a workspace
+  // (e.g. un-hiding) without config must not wipe it. Explicit clear goes
+  // through PATCH with null.
+  projects.push({ path: canonical, addedAt: now, hidden: false, launchConfig: launchConfig ?? existing?.launchConfig });
   return { version: 1, projects };
 }
 

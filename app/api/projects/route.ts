@@ -234,7 +234,12 @@ export async function PATCH(req: Request) {
       .filter((entry) => updatedKeys.has(comparableProjectPath(entry.path)))
       .map((entry) => ({ path: entry.path, addedAt: entry.addedAt, hidden: entry.hidden, alias: entry.alias, sortOrder: entry.sortOrder, launchConfig: entry.launchConfig }));
     return NextResponse.json({ projects });
-  } catch (error) { return apiErrorResponse(error); }
+  } catch (error) {
+    if (error instanceof ProjectPathError) {
+      return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
+    }
+    return apiErrorResponse(error);
+  }
 }
 
 // DELETE /api/projects  body: { cwd }  →  { success: true }

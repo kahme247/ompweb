@@ -913,7 +913,7 @@ export class AgentSessionWrapper {
       this.compacting = false;
       const proc = new RpcProcess({
         cwd: this.cwd,
-        extraArgs: buildSessionSpawnArgs(resumable ? sessionFile : "", undefined, false, launchConfigForCwd(this.cwd)),
+        extraArgs: buildSessionSpawnArgs(resumable ? sessionFile : "", undefined, this.advisorSpawned, launchConfigForCwd(this.cwd)),
         onExit: ({ stderrTail }) => {
           if (this.proc === proc) this.handleProcessExit(stderrTail);
         },
@@ -1379,8 +1379,9 @@ function launchConfigForCwd(cwd: string): ProjectLaunchConfig | undefined {
   try { canonical = realpathSync(cwd); } catch {}
   const key = comparableProjectPath(canonical);
   return loadProjectRegistry().projects.find((project) => {
+    if (project.hidden) return false;
     const projectKey = comparableProjectPath(project.path);
-    return projectKey === key || key.startsWith(comparableProjectPath(`${project.path}-worktrees`));
+    return projectKey === key || key.startsWith(`${projectKey}-worktrees/`);
   })?.launchConfig;
 }
 
