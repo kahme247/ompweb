@@ -33,7 +33,12 @@ const nextConfig = (phase: string): NextConfig => {
         };
         if (candidate.constructor?.name === "TraceEntryPointsPlugin") {
           candidate.traceIgnores ??= [];
-          candidate.traceIgnores.push("**/../**", "**/Users/**", "**/Application Data/**");
+          candidate.traceIgnores.push(
+            "**/../**",
+            "**/Users/**",
+            "**/Application Data/**",
+            "**/omp-web-bundled-agents/**",
+          );
         }
       }
       return config;
