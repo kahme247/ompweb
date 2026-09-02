@@ -18,9 +18,11 @@ Options:
   -H, --hostname <host>    Bind hostname (default 127.0.0.1, env OMP_WEB_HOSTNAME)
       --password <pass>    Password for the web sign-in screen (env OMP_WEB_PASSWORD)
       --no-open            Do not open the browser automatically
+      --install-tray       Install Windows System Tray service & Desktop shortcuts
+      --uninstall-tray     Uninstall Windows System Tray service & shortcuts
+      --tray               Start background System Tray manager
   -h, --help               Show this help
       --version            Show version
-
 Password:
   ompweb --password "a-long-random-password"
   # env-variable forms (POSIX, PowerShell, CMD handled uniformly)
@@ -41,7 +43,11 @@ function parseLaunchOptions(args = process.argv.slice(2), env = process.env) {
       password:  { type: "string" },
       help:      { type: "boolean", short: "h" },
       version:   { type: "boolean" },
-      "no-open": { type: "boolean" },
+      "no-open":         { type: "boolean" },
+      "install-tray":    { type: "boolean" },
+      "install-service": { type: "boolean" },
+      "uninstall-tray":  { type: "boolean" },
+      tray:              { type: "boolean" },
     },
     strict: false,
   });
@@ -59,6 +65,9 @@ function parseLaunchOptions(args = process.argv.slice(2), env = process.env) {
       hostname: cliArgs.hostname ?? env.OMP_WEB_HOSTNAME ?? "127.0.0.1",
       password,
       openBrowser: !cliArgs["no-open"] && !isEnabled(env.OMP_WEB_NO_OPEN),
+      installTray: Boolean(cliArgs["install-tray"] || cliArgs["install-service"]),
+      uninstallTray: Boolean(cliArgs["uninstall-tray"]),
+      tray: Boolean(cliArgs.tray),
       version: true,
     };
   }
@@ -72,6 +81,9 @@ function parseLaunchOptions(args = process.argv.slice(2), env = process.env) {
       hostname: cliArgs.hostname ?? env.OMP_WEB_HOSTNAME ?? "127.0.0.1",
       password,
       openBrowser: !cliArgs["no-open"] && !isEnabled(env.OMP_WEB_NO_OPEN),
+      installTray: Boolean(cliArgs["install-tray"] || cliArgs["install-service"]),
+      uninstallTray: Boolean(cliArgs["uninstall-tray"]),
+      tray: Boolean(cliArgs.tray),
       help: true,
     };
   }
@@ -80,6 +92,9 @@ function parseLaunchOptions(args = process.argv.slice(2), env = process.env) {
     hostname: cliArgs.hostname ?? env.OMP_WEB_HOSTNAME ?? "127.0.0.1",
     password,
     openBrowser: !cliArgs["no-open"] && !isEnabled(env.OMP_WEB_NO_OPEN),
+    installTray: Boolean(cliArgs["install-tray"] || cliArgs["install-service"]),
+    uninstallTray: Boolean(cliArgs["uninstall-tray"]),
+    tray: Boolean(cliArgs.tray),
   };
 }
 

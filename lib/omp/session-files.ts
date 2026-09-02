@@ -398,7 +398,7 @@ export const MAX_SESSION_LOAD_BYTES = 1024 * 1024 * 1024;
  * past Node's ~512 MiB string cap still open. Lines exclude the newline; the
  * decoder carries multi-byte characters across chunk boundaries.
  */
-function forEachFileLineSync(filePath: string, onLine: (line: string) => void): void {
+export function forEachFileLineSync(filePath: string, onLine: (line: string) => void): void {
   const fd = openSync(filePath, "r");
   try {
     const buffer = Buffer.allocUnsafe(SESSION_READ_CHUNK_BYTES);
@@ -1027,7 +1027,7 @@ export function invalidateSessionFileListCache(): void {
   globalThis.__ompSessionFileListCache?.clear();
 }
 
-async function listSessionFiles(sessionsRoot: string): Promise<string[]> {
+export async function listSessionFiles(sessionsRoot: string): Promise<string[]> {
   let rootStat: { mtimeMs: number };
   try {
     rootStat = statSync(sessionsRoot);

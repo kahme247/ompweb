@@ -82,7 +82,11 @@ export function groupSessionsByProject(
   for (const session of sessions) {
     const key = workspaceKeyOf(session);
     if (!key) continue;
-    const bucket = bucketByKey.get(comparableProjectPath(session.projectKey ?? key)) ?? grouped.get(key);
+    // workspaceKeyOf already prefers projectKey, so this IS the session's
+    // key; bucketByKey covers every registered project under its case-folded
+    // path, and an exact-case fallback here could only hit when the folded
+    // lookup already did — otherwise it silently dropped the session.
+    const bucket = bucketByKey.get(comparableProjectPath(key));
     if (bucket) bucket.push(session);
   }
   return grouped;

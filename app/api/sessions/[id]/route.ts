@@ -9,6 +9,7 @@ import {
   loadSessionFile,
   MAX_SESSION_LOAD_BYTES,
   parseTitleSlotLine,
+  readSessionHeaderSync,
   setSessionTitle,
   writeSessionFileAtomicSync,
 } from "@/lib/omp/session-files";
@@ -21,9 +22,23 @@ import {
   buildSessionContext,
   readSessionHeader,
 } from "@/lib/session-reader";
-import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
+import { resolveSessionPathOr404 } from "@/lib/api-utils";
+import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { sessionPathKey } from "@/lib/paths";
 import { getRpcSession } from "@/lib/rpc-manager";
+
+/** Stable, client-safe error body for catch-all handlers: details go to the
+ *  server log only, never to the browser. */
+function sessionsErrorResponse(error: unknown): NextResponse {
+  if (error instanceof RequestBodyTooLargeError) {
+    return NextResponse.json({ error: "Request body is too large", code: "request_too_large" }, { status: 413 });
+  }
+  if (error instanceof SyntaxError) {
+    return NextResponse.json({ error: "Invalid JSON request body", code: "invalid_json" }, { status: 400 });
+  }
+  console.error("[api/sessions]", error);
+  return NextResponse.json({ error: "Session request failed", code: "session_request_failed" }, { status: 500 });
+}
 
 // BranchNavigator still traverses recursively, so keep the response tree shallow.
 const MAX_PROJECTED_TREE_DEPTH = 200;
@@ -228,7 +243,7 @@ export async function GET(
       ...(agent ? { agent } : {}),
     });
   } catch (error) {
-    return apiErrorResponse(error);
+    return sessionsErrorResponse(error);
   }
 }
 
@@ -239,7 +254,7 @@ export async function PATCH(
 ) {
   const { id } = await params;
   try {
-    const { name } = await req.json() as { name?: string };
+    const { name } = await parseJsonWithinLimit<{ name?: string }>(req, 64 * 1024);
     if (typeof name !== "string" || !name.trim()) {
       return NextResponse.json({ error: "name is required", code: "session_name_required" }, { status: 400 });
     }
@@ -266,7 +281,7 @@ export async function PATCH(
     invalidateSessionListCache();
     return NextResponse.json({ ok: true });
   } catch (error) {
-    return apiErrorResponse(error);
+    return sessionsErrorResponse(error);
   }
 }
 
@@ -347,33 +362,31 @@ export async function DELETE(
         } catch {
           continue; // vanished between readdir and stat — not a child we can fix
         }
-        // Parse phase: an unreadable or non-matching sibling is simply not a
-        // child of the deleted session, so it must not be reported as skipped.
-        let lines: string[];
-        let headerIndex: number;
-        let header: { type?: string; id?: string; parentSession?: string };
-        let linkedByPath: boolean;
-        try {
-          lines = readFileSync(childPath, "utf8").split("\n");
-          // v3 files carry a fixed-width title slot on line 1; the session
-          // header is then line 2. The slot line is left byte-identical.
-          headerIndex = parseTitleSlotLine(lines[0] ?? "") ? 1 : 0;
-          header = JSON.parse(lines[headerIndex]) as typeof header;
-          if (header.type !== "session" || !header.parentSession) continue;
-          linkedByPath = sessionPathKey(header.parentSession) === targetPathKey;
-          if (!linkedByPath && header.parentSession !== deletedSessionId) continue;
-        } catch {
-          continue;
-        }
+        const childHeader = readSessionHeaderSync(childPath);
+        if (!childHeader || !childHeader.parentSession) continue;
+        const linkedByPath = sessionPathKey(childHeader.parentSession) === targetPathKey;
+        if (!linkedByPath && childHeader.parentSession !== deletedSessionId) continue;
 
         // A live omp process owns its session file and flushes its whole
         // in-memory state on write — our rewrite would be clobbered by (or
         // interleaved with) its next flush.
-        const childId = typeof header.id === "string" ? header.id : undefined;
+        const childId = childHeader.id;
         if (childId && getRpcSession(childId)?.isAlive?.()) {
           skippedChildren.push({ id: childId, reason: "session_child_live" });
           continue;
         }
+
+        let lines: string[];
+        let headerIndex: number;
+        let header: { type?: string; id?: string; parentSession?: string };
+        try {
+          lines = readFileSync(childPath, "utf8").split("\n");
+          headerIndex = parseTitleSlotLine(lines[0] ?? "") ? 1 : 0;
+          header = JSON.parse(lines[headerIndex]) as typeof header;
+        } catch {
+          continue;
+        }
+
 
         // Write the replacement in the same form the child used.
         header.parentSession = linkedByPath
@@ -401,6 +414,6 @@ export async function DELETE(
       ...(skippedChildren.length > 0 ? { skippedChildren } : {}),
     });
   } catch (error) {
-    return apiErrorResponse(error);
+    return sessionsErrorResponse(error);
   }
 }

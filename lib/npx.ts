@@ -56,15 +56,3 @@ export async function runNpx(args: string[], opts: RunNpxOptions = {}): Promise<
   });
 }
 
-/** Run npm through Node's bundled CLI, including on Windows where npm.cmd cannot be execFile'd safely. */
-export async function runNpm(args: string[], opts: RunNpxOptions = {}): Promise<RunNpxResult> {
-  const npmCli = findCli("npm");
-  const { command, commandArgs } = npmCli
-    ? { command: execPath, commandArgs: [npmCli, ...args] }
-    : { command: "npm", commandArgs: args };
-  return execFileAsync(command, commandArgs, {
-    timeout: opts.timeout,
-    cwd: opts.cwd,
-    env: opts.env,
-  });
-}

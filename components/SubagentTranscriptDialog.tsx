@@ -284,6 +284,10 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
       setCompletionTruncated(found.truncated);
     } catch (e) {
       if (seq !== requestSeqRef.current) return;
+      // A failed refetch would otherwise leave the version consumed and the
+      // completion stale until close/reopen — re-arm so the next version bump
+      // (or this one, via latestVersionRef) retries.
+      refetchedVersionRef.current = 0;
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       if (seq === requestSeqRef.current) setLoading(false);
@@ -307,6 +311,12 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
     // The bumped seq invalidates an in-flight request whose finally will skip
     // clearing this — reset it here or the next open shows Loading forever.
     setTranscriptLoading(false);
+    // transcriptVersion is a PER-SUBAGENT counter: a coincidental value from
+    // the previous subagent would make the done-guards below skip the next
+    // subagent's debounced refetch, so zero the bookkeeping on every open/switch.
+    refetchedVersionRef.current = 0;
+    refetchedTranscriptVersionRef.current = 0;
+    latestVersionRef.current = 0;
     void load();
   }, [open, sessionId, load]);
 
@@ -481,10 +491,11 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
                       overflowY: "auto",
                     }}
                   >
-                    {transcriptError ? (
-                      <div style={{ fontSize: 12, color: "var(--status-error)" }}>{transcriptError}</div>
-                    ) : transcriptMessages.length === 0 && !transcriptLoading ? (
-                      <div style={{ fontSize: 12, color: "var(--text-dim)", fontStyle: "italic" }}>{t("subagentTranscript.noMessages")}</div>
+                    {transcriptError && transcriptMessages.length > 0 && (
+                      <div style={{ padding: "6px 8px", border: "1px solid color-mix(in srgb, var(--status-error) 40%, var(--border))", borderRadius: "var(--radius-control)", fontSize: 12, color: "var(--status-error)" }}>{transcriptError}</div>
+                    )}
+                    {transcriptMessages.length === 0 && !transcriptLoading ? (
+                      <div style={{ fontSize: 12, color: transcriptError ? "var(--status-error)" : "var(--text-dim)", fontStyle: transcriptError ? "normal" : "italic" }}>{transcriptError ?? t("subagentTranscript.noMessages")}</div>
                     ) : (
                       transcriptMessages.map((message, i) => <SubagentTranscriptRow key={i} message={message} />)
                     )}

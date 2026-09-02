@@ -7,22 +7,11 @@ import { promisify } from "util";
 import { NextResponse } from "next/server";
 import { resolveOmpBin } from "@/lib/omp/omp-cli";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
+import { getContentDisposition } from "@/lib/content-disposition";
 
 const execFileAsync = promisify(execFile);
 
 export const runtime = "nodejs";
-
-function encodeHeaderValue(value: string): string {
-  return encodeURIComponent(value).replace(/[!'()*]/g, (ch) =>
-    `%${ch.charCodeAt(0).toString(16).toUpperCase()}`
-  );
-}
-
-function getContentDisposition(fileName: string, inline: boolean): string {
-  const fallback = fileName.replace(/[^\x20-\x7E]|["\\;\r\n]/g, "_") || "session.html";
-  const disposition = inline ? "inline" : "attachment";
-  return `${disposition}; filename="${fallback}"; filename*=UTF-8''${encodeHeaderValue(fileName)}`;
-}
 
 /**
  * Render a session to self-contained HTML by shelling out to the user's omp
@@ -68,7 +57,7 @@ export async function GET(
       return new Response(html, {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
-          "Content-Disposition": getContentDisposition(fileName, inline),
+          "Content-Disposition": getContentDisposition(fileName, inline, "session.html"),
           "Cache-Control": "no-cache",
         },
       });

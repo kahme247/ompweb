@@ -100,8 +100,13 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
       setScrollRatio(0);
       setViewportRatio(1);
     } else {
-      setScrollRatio(scrollEl.scrollTop / scrollable);
-      setViewportRatio(clientH / totalH);
+      const nextScroll = scrollEl.scrollTop / scrollable;
+      const nextViewport = clientH / totalH;
+      // The scroll content's ResizeObserver fires per token batch while
+      // streaming; skip the setState (and the full minimap re-render) when
+      // the ratios barely moved.
+      setScrollRatio((prev) => (Math.abs(prev - nextScroll) < 0.001 ? prev : nextScroll));
+      setViewportRatio((prev) => (Math.abs(prev - nextViewport) < 0.001 ? prev : nextViewport));
     }
   }, [scrollContainer]);
 
@@ -244,7 +249,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
   }, [flushMouseMove]);
 
   const handleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    if (!visible) return;
+    if (!visible || draggingRef.current) return;
 
     draggingRef.current = true;
     const rect = e.currentTarget.getBoundingClientRect();
@@ -355,8 +360,10 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
 
   if (!visible) return null;
 
-  const viewportBoxTop = scrollRatio * (1 - viewportRatio) * 100;
-  const viewportBoxHeight = viewportRatio * 100;
+  // Viewport box in px, driven by transform so scroll frames never trigger
+  // layout (top/height % would).
+  const viewportBoxTopPx = scrollRatio * (1 - viewportRatio) * minimapHeightPx;
+  const viewportScale = (viewportRatio * minimapHeightPx) / 600;
 
   return (
     <div
@@ -380,13 +387,15 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
       <div
         style={{
           position: "absolute",
+          top: 0,
           left: 0,
           right: 0,
-          top: `${viewportBoxTop}%`,
-          height: `${viewportBoxHeight}%`,
+          transform: `translateY(${viewportBoxTopPx}px) scaleY(${viewportScale})`,
+          transformOrigin: "top",
+          height: 600,
           background: "color-mix(in srgb, var(--text-dim) 10%, transparent)",
-          borderTop: "1px solid color-mix(in srgb, var(--text-dim) 20%, transparent)",
-          borderBottom: "1px solid color-mix(in srgb, var(--text-dim) 20%, transparent)",
+          borderTop: `${1 / viewportScale}px solid color-mix(in srgb, var(--text-dim) 20%, transparent)`,
+          borderBottom: `${1 / viewportScale}px solid color-mix(in srgb, var(--text-dim) 20%, transparent)`,
           pointerEvents: "none",
           zIndex: 1,
         }}
@@ -558,7 +567,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
             }}
             style={{
               position: "absolute",
-              top: tooltipPositions[i],
+              transform: `translateY(${tooltipPositions[i]}px)`,
               right: "100%",
               marginRight: 3,
               background: isNearest ? "var(--bg-hover)" : "var(--bg-panel)",
@@ -568,7 +577,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
               width: 200,
               zIndex: 100,
               cursor: "pointer",
-              transition: "top var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm)",
+              transition: "transform var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm)",
             }}
           >
             <div

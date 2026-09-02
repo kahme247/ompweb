@@ -366,6 +366,8 @@ export function AppShell() {
     }
   }, [advanceAppUpdateVisibleStage]);
   const [ompUpdateAvailable, setOmpUpdateAvailable] = useState(false);
+  // Bumped on visibilitychange so the mount-time update checks re-run.
+  const [updateCheckKey, setUpdateCheckKey] = useState(0);
   // On mobile the sidebar is an overlay drawer; hide it by default so the chat
   // is visible on load. Runs once the breakpoint resolves after hydration.
   useEffect(() => {
@@ -425,6 +427,16 @@ export function AppShell() {
       })
       .catch(() => {});
     return () => controller.abort();
+  }, [updateCheckKey]);
+  useEffect(() => {
+    const recheck = () => {
+      if (document.visibilityState !== "visible") return;
+      // A transient failure on mount reads as "no update" forever otherwise;
+      // re-running the checks below on re-focus gives them another chance.
+      setUpdateCheckKey((key) => key + 1);
+    };
+    document.addEventListener("visibilitychange", recheck);
+    return () => document.removeEventListener("visibilitychange", recheck);
   }, []);
   const refreshAppUpdate = useCallback(async (force = false, autoOpen = false): Promise<AppUpdateInfo | null> => {
     const data = await fetchAppUpdateJson<AppUpdateInfo>(
@@ -743,6 +755,8 @@ export function AppShell() {
   const [autoNameStatus, setAutoNameStatus] = useState<AutoNameStatus>({ kind: "idle" });
   const autoNameTimerRef = useRef<TimerHandle | undefined>(undefined);
   const activeSessionIdRef = useRef<string | null>(selectedSession?.id ?? null);
+  const archiveRetryTimerRef = useRef<TimerHandle | undefined>(undefined);
+  useEffect(() => () => clearTimeout(archiveRetryTimerRef.current), []);
   useLayoutEffect(() => {
     activeSessionIdRef.current = selectedSession?.id ?? null;
   }, [selectedSession?.id]);
@@ -968,8 +982,11 @@ export function AppShell() {
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !initialSessionId);
-  // Suppresses sessionKey bump in handleCwdChange during the initial URL restore
-  const suppressCwdBumpRef = useRef(false);
+  // During the initial URL restore the sidebar adopts the restored cwd and
+  // notifies us; that first onCwdChange must not bump sessionKey. We store the
+  // expected cwd string and only skip when it matches, so a failure to fire
+  // can't leave the suppression armed for the user's next genuine switch.
+  const suppressCwdRef = useRef<string | null>(null);
 
   useEffect(() => {
     const requestedCwd = initialNavigation.requestedCwd;
@@ -993,8 +1010,7 @@ export function AppShell() {
 
         // The sidebar will notify us when it adopts this cwd. Avoid remounting
         // the just-created empty chat during that initial synchronization.
-        suppressCwdBumpRef.current = true;
-        setNewSessionCwd(data.cwd);
+        suppressCwdRef.current = data.cwd;
         setInitialCwdStatus("ready");
       })
       .catch((error: unknown) => {
@@ -1010,8 +1026,9 @@ export function AppShell() {
     setActiveCwd(cwd);
     // Skip if cwd is null (initial mount) or during the initial URL restore.
     if (!cwd) return;
-    if (suppressCwdBumpRef.current) {
-      suppressCwdBumpRef.current = false;
+    // Skip only when the notification matches the cwd we're suppressing for.
+    if (suppressCwdRef.current !== null && suppressCwdRef.current === cwd) {
+      suppressCwdRef.current = null;
       return;
     }
     // Worktrees of one repo share a project root. Moving the effective cwd
@@ -1042,6 +1059,10 @@ export function AppShell() {
   }, [router, selectedSession]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
+    // Re-picking the already-open session (sidebar double-click, palette
+    // re-select, notification click) must not bump sessionKey: that remounts
+    // ChatWindow, reconnects SSE, and drops the mid-run streaming view.
+    if (!isRestore && session.id === selectedSession?.id) return;
     setNewSessionCwd(null);
     setSelectedSession(session);
     setSessionKey((k) => k + 1);
@@ -1052,15 +1073,18 @@ export function AppShell() {
     if (isMobile && !isRestore) setSidebarOpen(false);
     if (isRestore) {
       // Suppress the redundant sessionKey bump that would come from the
-      // onCwdChange effect firing after setSelectedCwd in the sidebar
-      suppressCwdBumpRef.current = true;
+      // onCwdChange effect firing after setSelectedCwd in the sidebar. We
+      // arm the expected cwd (compared in handleCwdChange) rather than a
+      // sticky flag so a missed notification can't suppress the next
+      // genuine project switch.
+      suppressCwdRef.current = session.cwd;
     }
     // Skip router.replace when restoring from URL — the param is already correct
     // and calling replace in production Next.js triggers a Suspense remount loop
     if (!isRestore) {
       router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
     }
-  }, [router, isMobile]);
+  }, [router, isMobile, selectedSession?.id]);
 
   const handleNewSession = useCallback((_sessionId: string, cwd: string) => {
     setSelectedSession(null);
@@ -1124,6 +1148,10 @@ export function AppShell() {
     if (Notification.permission === "granted") notify();
     else if (Notification.permission === "default") {
       void Notification.requestPermission().then((permission) => { if (permission === "granted") notify(); });
+    } else {
+      // "denied": the OS blocks notifications, so surface the completion as an
+      // in-app toast instead of leaving background completions silent.
+      toast.info(targetSession?.name ?? translate("appShell.sessionComplete"), translate("appShell.taskFinished"));
     }
   }, [handleSelectSession, selectedSession]);
 
@@ -1144,8 +1172,8 @@ export function AppShell() {
       }
 
       const title = body.title.trim();
-      setRefreshKey((key) => key + 1);
       if (activeSessionIdRef.current !== sessionId) return;
+      setRefreshKey((key) => key + 1);
       setSelectedSession((current) => current?.id === sessionId ? { ...current, name: title } : current);
       setSessionStats((current) => current?.sessionId === sessionId ? { ...current, sessionName: title } : current);
       setAutoNameStatus({ kind: "success" });
@@ -1179,14 +1207,13 @@ export function AppShell() {
     setSelectedSession((prev) => ({
       ...(prev ?? { path: "", cwd: "", created: "", modified: "", messageCount: 0, firstMessage: "" }),
       id: newSessionId,
+      // path === "" is the sidebar's optimistic-row marker; keep it so the
+      // fork shows up immediately instead of waiting for a refresh.
+      path: "",
     }));
     hydrateSelectedSession(newSessionId);
     router.replace(`?session=${encodeURIComponent(newSessionId)}`, { scroll: false });
   }, [router, hydrateSelectedSession]);
-
-  const handleInitialRestoreDone = useCallback(() => {
-    setInitialSessionRestored(true);
-  }, []);
 
   const handleSessionDeleted = useCallback((sessionId: string) => {
     setRefreshKey((k) => k + 1);
@@ -1202,18 +1229,29 @@ export function AppShell() {
       router.replace("/", { scroll: false });
     }
   }, [selectedSession, router]);
+  const handleInitialRestoreDone = useCallback(() => {
+    setInitialSessionRestored(true);
+  }, []);
+
   const handleArchiveRestored = useCallback(async (sessionId: string) => {
     setArchiveBrowserOpen(false);
     publishSessionsChanged([sessionId]);
     setRefreshKey((k) => k + 1);
 
+    // The poll must not yank the UI back to the restored session if the user
+    // picks another one while we wait, and an untracked setTimeout chain would
+    // keep retrying after unmount — so freeze the selection at start, bail out
+    // of every attempt + the fallback when it changed, and track the timer.
+    const sessionAtRestoreStart = activeSessionIdRef.current;
     const selectRestoredSession = async (attemptsLeft = 5): Promise<void> => {
+      if (activeSessionIdRef.current !== sessionAtRestoreStart) return;
       try {
         const res = await fetch("/api/sessions");
         if (res.ok) {
           const data = (await res.json()) as { sessions?: SessionInfo[] };
           const found = data.sessions?.find((s) => s.id === sessionId);
           if (found) {
+            if (activeSessionIdRef.current !== sessionAtRestoreStart) return;
             handleSelectSession(found, false);
             return;
           }
@@ -1223,14 +1261,28 @@ export function AppShell() {
       }
 
       if (attemptsLeft > 0) {
-        setTimeout(() => void selectRestoredSession(attemptsLeft - 1), 300);
-      } else {
+        archiveRetryTimerRef.current = setTimeout(() => void selectRestoredSession(attemptsLeft - 1), 300);
+      } else if (activeSessionIdRef.current === sessionAtRestoreStart) {
         router.replace(`?session=${encodeURIComponent(sessionId)}`, { scroll: false });
       }
     };
 
     void selectRestoredSession();
   }, [handleSelectSession, router]);
+
+  const handleCloseFileTab = useCallback((tabId: string) => {
+    // Compute everything from the current list outside the updaters: no side
+    // effect inside a state updater, and no stale-closure read (the callback
+    // is recreated whenever fileTabs changes, but a batched double-close
+    // would still have read the pre-close list from the closure).
+    const next = fileTabs.filter((t) => t.id !== tabId);
+    setFileTabs(next);
+    if (next.length === 0) setRightPanelOpen(false);
+    setActiveFileTabId((cur) => {
+      if (cur !== tabId) return cur;
+      return next.length > 0 ? next[next.length - 1].id : null;
+    });
+  }, [fileTabs]);
 
   const handleOpenFile = useCallback((filePath: string, fileName: string, sourceSessionId?: string | null) => {
     const tabId = `file:${filePath}`;
@@ -1249,20 +1301,6 @@ export function AppShell() {
   const handleOpenLinkedFile = useCallback((filePath: string) => {
     handleOpenFile(filePath, getFileName(filePath), selectedSession?.id ?? null);
   }, [handleOpenFile, selectedSession?.id]);
-
-  const handleCloseFileTab = useCallback((tabId: string) => {
-    // Compute everything from the current list outside the updaters: no side
-    // effect inside a state updater, and no stale-closure read (the callback
-    // is recreated whenever fileTabs changes, but a batched double-close
-    // would still have read the pre-close list from the closure).
-    const next = fileTabs.filter((t) => t.id !== tabId);
-    setFileTabs(next);
-    if (next.length === 0) setRightPanelOpen(false);
-    setActiveFileTabId((cur) => {
-      if (cur !== tabId) return cur;
-      return next.length > 0 ? next[next.length - 1].id : null;
-    });
-  }, [fileTabs]);
 
   const handleViewFullHistory = useCallback(() => {
     if (!selectedSession) return;
@@ -1297,7 +1335,22 @@ export function AppShell() {
     <>
       <CommandPalette
         onSelectSession={handleSelectSession}
-        onNewSession={() => handleNewSession(`palette-${Date.now()}`, activeCwd ?? "")}
+        onNewSession={() => {
+          // An empty cwd is truthy, so showChat would render the shell while
+          // useAgentSession refuses to start — every send a silent no-op.
+          // Fall back to the server's default cwd (~/omp-cwd-<date>) instead.
+          if (activeCwd) {
+            handleNewSession(`palette-${Date.now()}`, activeCwd);
+            return;
+          }
+          void fetch("/api/default-cwd", { method: "POST" })
+            .then(async (response) => {
+              const data = (await response.json().catch(() => ({}))) as { cwd?: string };
+              if (!response.ok || !data.cwd) throw new Error(`HTTP ${response.status}`);
+              handleNewSession(`palette-${Date.now()}`, data.cwd);
+            })
+            .catch(() => toast.error(translate("errors.generic")));
+        }}
         currentModel={null}
       />
       <SessionSidebar
@@ -1325,7 +1378,6 @@ export function AppShell() {
       />
     </>
   );
-
   const currentProviderUsageReport = providerUsage?.reports[0] ?? null;
   const currentProviderUsageText = currentProviderUsageReport
     ? formatProviderUsageReport(currentProviderUsageReport, t("appShell.providerUsageNoData"))
@@ -1401,7 +1453,7 @@ export function AppShell() {
         }
       }
     `}</style>
-    <div style={{ display: "flex", height: "100dvh", overflow: "hidden", background: "var(--bg)" }}>
+    <div style={{ display: "flex", height: "100%", flex: 1, overflow: "hidden", background: "var(--bg)" }}>
       {/* Mobile overlay backdrop */}
       <div
         className={`sidebar-overlay-backdrop${mobileSidebarReady ? "" : " sidebar-mobile-pending"}`}

@@ -175,12 +175,21 @@ function stringRecord(value: unknown, name: string): void {
   if (!isRecord(value) || Object.values(value).some((item) => typeof item !== "string")) throw new Error(`${name} must map strings to strings`);
 }
 
+const projectRootCache = new Map<string, { root: string; expiresAt: number }>();
+const PROJECT_ROOT_TTL_MS = 30_000;
+
 function projectRoot(cwd: string): string {
+  const cached = projectRootCache.get(cwd);
+  if (cached && cached.expiresAt > Date.now()) return cached.root;
+  let root: string;
   try {
-    return resolve(execFileSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }).trim());
+    root = resolve(execFileSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }).trim());
   } catch {
-    return resolve(cwd);
+    root = resolve(cwd);
   }
+  if (projectRootCache.size > 500) projectRootCache.clear();
+  projectRootCache.set(cwd, { root, expiresAt: Date.now() + PROJECT_ROOT_TTL_MS });
+  return root;
 }
 
 function assertCwdWithinRoot(cwd: string, root: string): void {

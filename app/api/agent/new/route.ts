@@ -61,23 +61,31 @@ export async function POST(req: Request) {
     allowFileRoot(cwd);
     invalidateSessionListCache();
 
-    // Apply pre-selected model before sending the prompt
-    if (provider && modelId) {
-      await session.send({ type: "set_model", provider, modelId });
+    try {
+      // Apply pre-selected model before sending the prompt
+      if (provider && modelId) {
+        await session.send({ type: "set_model", provider, modelId });
+      }
+
+      // Apply pre-selected thinking level before sending the prompt
+      if (thinkingLevel) {
+        await session.send({ type: "set_thinking_level", level: thinkingLevel });
+      }
+
+      if (promptCommand.type === "ensure_session") {
+        return NextResponse.json({ success: true, sessionId: realSessionId, data: null });
+      }
+
+      const result = await session.send(promptCommand);
+
+      return NextResponse.json({ success: true, sessionId: realSessionId, data: result });
+    } catch (error) {
+      // The child was spawned but the prompt never ran: without this cleanup a
+      // failed set_model/set_thinking_level/prompt leaves an orphaned omp
+      // process and a registry entry nobody will ever use.
+      await session.destroyAndWait();
+      throw error;
     }
-
-    // Apply pre-selected thinking level before sending the prompt
-    if (thinkingLevel) {
-      await session.send({ type: "set_thinking_level", level: thinkingLevel });
-    }
-
-    if (promptCommand.type === "ensure_session") {
-      return NextResponse.json({ success: true, sessionId: realSessionId, data: null });
-    }
-
-    const result = await session.send(promptCommand);
-
-    return NextResponse.json({ success: true, sessionId: realSessionId, data: result });
   } catch (error) {
     return newSessionErrorResponse(error);
   }

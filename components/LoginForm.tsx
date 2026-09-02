@@ -22,7 +22,9 @@ export function LoginForm() {
         setError("Incorrect password. Please try again.");
         return;
       }
-      window.location.assign("/");
+      // Full reload so the new auth cookie is picked up by middleware
+      // and server components — SPA navigation alone may keep stale state.
+      window.location.replace("/");
     } catch {
       setError("Could not sign in. Please check your connection and try again.");
     } finally {

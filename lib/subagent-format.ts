@@ -27,7 +27,7 @@ export function shortModel(model: string | undefined): string | null {
   if (!model) return null;
   const separator = model.lastIndexOf("/");
   const id = separator >= 0 ? model.slice(separator + 1) : model;
-  return id.replace(/:.*$/, "") || null;
+  return id.replace(/:(off|minimal|low|medium|high|xhigh)$/, "") || null;
 }
 
 /** Count of nested (grandchild) subagents an agent currently has in flight. */

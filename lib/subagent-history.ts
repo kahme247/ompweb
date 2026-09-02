@@ -8,7 +8,7 @@
 // page reload without the live RPC registry (get_subagent_messages is
 // registry-gated and rejects unknown session files).
 
-import { closeSync, existsSync, openSync, readFileSync, readSync, realpathSync, statSync } from "fs";
+import { closeSync, existsSync, openSync, readSync, realpathSync, statSync } from "fs";
 import { basename, dirname, join } from "path";
 import { getSessionEntries, entryToUiMessage } from "./session-reader";
 import { parseJsonlLenient } from "./omp/session-files";
@@ -82,6 +82,18 @@ function resultStatus(value: Record<string, unknown>): SubagentHistoryEntry["sta
 }
 
 /**
+ * True when an entry already carries a settled state that a stale/duplicate
+ * progress snapshot must not regress (unknown/running → "started"). Mirrors
+ * the precedence rule mergeSubagentRoster enforces on the live roster.
+ */
+function progressUpsertBlocked(existing: SubagentHistoryEntry): boolean {
+  return existing.result !== undefined
+    || existing.status === "completed"
+    || existing.status === "failed"
+    || existing.status === "aborted";
+}
+
+/**
  * Recover the subagent roster from a parent session file. Walks task
  * toolResults, merging `progress` (live-snapshot fields) with `results`
  * (settled per-subagent telemetry), then resolves sibling transcript files.
@@ -117,7 +129,7 @@ export function extractSubagentHistory(sessionFilePath: string): SubagentHistory
   const batchSeqById = new Map<string, number>();
   let batchSeq = -1;
   let unannouncedCalls = 0;
-  const upsert = (entry: SubagentHistoryEntry) => {
+  const upsert = (entry: SubagentHistoryEntry, options?: { ignoreTerminal?: boolean }) => {
     if (!SUBAGENT_ID_RE.test(entry.id)) return;
     const existing = byId.get(entry.id);
     if (!existing) {
@@ -125,8 +137,11 @@ export function extractSubagentHistory(sessionFilePath: string): SubagentHistory
       byId.set(entry.id, entry);
       return;
     }
-    // Preserve batchSeq/parentToolCallId that may not be present on the incoming entry (results-only,
-    // async placeholder) — spreading undefined would erase the existing ordinal.
+    // A stale/duplicate progress snapshot must not regress a settled agent:
+    // once a result is recorded (or status went terminal via results), skip
+    // the whole overwrite. `ignoreTerminal` opts the results loop out — its
+    // own field-by-field guards already make it authoritative.
+    if (!options?.ignoreTerminal && progressUpsertBlocked(existing)) return;
     const preservedBatchSeq = batchSeqById.get(entry.id) ?? batchSeq;
     batchSeqById.set(entry.id, preservedBatchSeq);
     byId.set(entry.id, {
@@ -138,6 +153,8 @@ export function extractSubagentHistory(sessionFilePath: string): SubagentHistory
     });
   };
 
+  // Detached async spawns — jobIds collected in the same pass below.
+  const detachedIds = new Set<string>();
   for (const entry of entries) {
     if (entry.type !== "message" || !isRecord(entry.message) || entry.message.role !== "toolResult") continue;
     const message = entry.message;
@@ -151,6 +168,8 @@ export function extractSubagentHistory(sessionFilePath: string): SubagentHistory
     const progressArr = Array.isArray(details.progress) ? details.progress : [];
     const resultsArr = Array.isArray(details.results) ? details.results : [];
     const asyncInfo = isRecord(details.async) ? details.async : undefined;
+    const asyncJobId = asyncInfo ? asString(asyncInfo.jobId) : undefined;
+    if (asyncJobId) detachedIds.add(asyncJobId);
 
     for (const raw of progressArr) {
       const progress = parseSubagentProgress(raw);
@@ -239,7 +258,7 @@ export function extractSubagentHistory(sessionFilePath: string): SubagentHistory
         retryFailure,
         transcriptAvailable: false,
         result: Object.keys(result).length > 0 ? result : undefined,
-      });
+      }, { ignoreTerminal: true });
     }
 
     // Detached async spawns can persist with an empty results[] while still
@@ -254,23 +273,12 @@ export function extractSubagentHistory(sessionFilePath: string): SubagentHistory
           index: byId.size,
           ...(toolCallId !== undefined ? { parentToolCallId: toolCallId } : {}),
           transcriptAvailable: false,
-        });
+        }, { ignoreTerminal: true });
       }
     }
   }
-
-  // Resolve sibling transcript files and async/detached markers.
+  // Resolve sibling transcript files and detached markers.
   const dir = siblingDirForSession(sessionFilePath);
-  const detachedIds = new Set<string>();
-  for (const entry of entries) {
-    if (entry.type !== "message" || entry.message?.role !== "toolResult") continue;
-    const message = entry.message as { toolName?: unknown; details?: unknown };
-    if (message.toolName !== "task") continue;
-    const details = isRecord(message.details) ? message.details : {};
-    const asyncInfo = isRecord(details.async) ? details.async : undefined;
-    const jobId = asyncInfo ? asString(asyncInfo.jobId) : undefined;
-    if (jobId) detachedIds.add(jobId);
-  }
   const roster = [...byId.values()];
   for (const entry of roster) {
     // The client cannot derive this: neither a live snapshot nor a partial
@@ -344,10 +352,20 @@ export function readSubagentTranscriptPage(sessionFilePath: string, fromByte = 0
   const endByte = Math.min(size, startByte + SUBAGENT_TRANSCRIPT_PAGE_BYTES);
   let body: string;
   try {
+    // Positional read of just this page's window — materializing the whole
+    // file to slice one window made a pagination walk O(n²) in I/O.
     // Slice the BYTE buffer, not the decoded string: `startByte` is a UTF-8
     // offset, while string indices are UTF-16 code units — slicing the string
     // misaligns every later page once non-ASCII text precedes the offset.
-    body = readFileSync(sessionFilePath).subarray(startByte, endByte).toString("utf8");
+    const fd = openSync(sessionFilePath, "r");
+    try {
+      const windowBytes = endByte - startByte;
+      const buffer = Buffer.alloc(windowBytes);
+      const bytesRead = readSync(fd, buffer, 0, windowBytes, startByte);
+      body = buffer.subarray(0, bytesRead).toString("utf8");
+    } finally {
+      closeSync(fd);
+    }
   } catch {
     return { ...empty, fromByte: startByte, nextByte: startByte, reset };
   }

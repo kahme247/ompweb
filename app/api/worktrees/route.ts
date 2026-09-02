@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
 import { apiErrorResponse } from "@/lib/api-utils";
 import { existsSync } from "fs";
+import { join } from "path";
 import { addWorktree, findCurrentWorktreePath, listWorktrees, removeWorktree, resolveProject } from "@/lib/worktree";
 import { allowFileRoot, getAllowedFileRoots, isExistingFilePathAllowed, isFilePathAllowed } from "@/lib/file-access";
 import { projectIdentityKey } from "@/lib/paths";
+import { invalidateSessionListCache } from "@/lib/session-reader";
 
 /** Same gate as /api/files: only session cwds / project roots / explicitly
  *  allowed dirs may be inspected or mutated through this endpoint. */
@@ -43,7 +45,9 @@ export async function GET(req: Request) {
     try {
       // For a removed-worktree cwd (session of a deleted worktree), fall back
       // to the inferred project root so the switcher still shows the project.
-      worktrees = await listWorktrees(existsSync(cwd) ? cwd : project.projectRoot);
+      const hasGit = existsSync(join(cwd, ".git"));
+      const queryRoot = hasGit ? cwd : project.projectRoot;
+      worktrees = await listWorktrees(queryRoot);
       currentWorktreePath = findCurrentWorktreePath(worktrees, cwd);
     } catch {
       isGit = false;
@@ -82,6 +86,7 @@ export async function POST(req: Request) {
     }
 
     const result = await addWorktree(body.cwd, body.branch);
+    invalidateSessionListCache();
     return NextResponse.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -103,6 +108,7 @@ export async function DELETE(req: Request) {
     if (denied) return denied;
 
     await removeWorktree(body.cwd, body.path, body.force === true);
+    invalidateSessionListCache();
     return NextResponse.json({ success: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

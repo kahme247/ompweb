@@ -53,18 +53,79 @@ ompweb --port 8080                         # Custom port
 ompweb --hostname 0.0.0.0                  # Listen on network
 ompweb --password "your-password"          # Enable password protection
 ompweb --no-open                           # Don't auto-open the browser
+ompweb --install-tray                      # Install Windows System Tray service & Desktop shortcuts
+ompweb --uninstall-tray                    # Uninstall Windows System Tray service & shortcuts
+ompweb --tray                              # Start background System Tray manager
+ompweb --help                              # Show help
+ompweb --version                           # Show version
 ```
+
+### Run as a Windows Service (System Tray)
+
+Install ompweb as a Windows background service with a system tray icon and autostart at login:
+
+```bash
+ompweb --install-tray
+```
+
+Manage it from **Settings → System & Updates → Windows Background Service**, or via CLI:
+
+```bash
+ompweb --tray          # Start the tray manager
+ompweb --uninstall-tray
+```
+
+Shortcuts are created on the Desktop and Start Menu. The service restarts automatically and shows the current port and status in the tray.
+
+### Run as a macOS Service (launchd)
+
+Install ompweb as a launchd user agent that starts at login and restarts on crash:
+
+```bash
+npx --yes @kahme247/ompweb@latest ompweb-launchd install
+```
+
+Manage it with:
+
+```bash
+npx --yes @kahme247/ompweb@latest ompweb-launchd status      # Show service state
+npx --yes @kahme247/ompweb@latest ompweb-launchd uninstall   # Stop and remove
+```
+
+The service runs `npx --yes @kahme247/ompweb@latest`; pass a package spec to pin a
+version, e.g. `ompweb-launchd install @kahme247/ompweb@0.3.6`. All
+[environment variables](#environment-variables) are read at install time and baked
+into the plist, plus `OMP_WEB_PKG` (package spec, same as the positional argument).
+As a service, the browser is **not** auto-opened by default — install with
+`OMP_WEB_NO_OPEN=0` to restore that.
+
+```bash
+OMP_WEB_PASSWORD=secret npx --yes @kahme247/ompweb@latest ompweb-launchd install
+```
+
+When binding to a non-loopback host, require authentication (`OMP_WEB_PASSWORD`
+or equivalent access control) and HTTPS through a trusted reverse proxy or VPN.
+Never expose the unauthenticated web UI or send its password/session cookie over
+plaintext HTTP.
+
+Logs go to `~/Library/Logs/ompweb/ompweb.log` and the plist lives at
+`~/Library/LaunchAgents/com.kahme247.ompweb.plist` (mode 600; a configured
+password is stored there in plain text).
 
 ## Features
 
-- **Interactive Chat**: Real-time streaming conversation with your local `omp` agent.
-- **Session Management**: Browse past conversations by project, branch into new directions, or fork sessions.
-- **Live Plans & Subagents**: Collapsible panels track live todo tasks and running subagents with full transcript dialogs.
-- **File Explorer & Previews**: Browse files side-by-side with chat; preview code, markdown, images, audio, and PDFs.
-- **Git Worktree Support**: Switch and manage Git worktrees directly from the sidebar.
-- **Web-based Settings**: Configure models, API keys, MCP servers, skills, plugins, and native OMP settings without touching config files manually.
-- **Slash Commands & Shortcuts**: Quick prompts (`/plan`, `/review`, `/fix`, `/test`, etc.) and a `⌘K` / `Ctrl+K` command palette.
-- **UI Themes & Localization**: Warm paper light and dark themes, with full English, Chinese (简体中文), and Japanese (日本語) translations.
+- **Interactive Chat**: Real-time streaming conversation with your local `omp` agent — tool calls, thinking levels, token counts, cost, context gauge, queue controls, and interrupt & retry.
+- **Session Management**: Browse past conversations by project, fork sessions, branch within a session, archive/restore, import session files, and deep-link via URL.
+- **Live Plans & Subagents**: Collapsible panels pinned above the composer track live todo phases and running subagents (status, tool, retries, tokens/cost, nested tasks) with transcript dialogs and history recovery.
+- **Tool Preset Picker**: Choose the toolset for new sessions in the composer — `none` / `default` (`read,bash,edit,write`) / `full` (all tools including subagents). Persists to localStorage.
+- **File Explorer & Previews**: Browse workspaces side-by-side with chat; preview code, markdown, Mermaid, images, audio, PDFs, and diffs with allow-listed access.
+- **Git Worktree Support**: Create, switch, and manage Git worktrees directly from the sidebar; sessions and file roots stay grouped by project.
+- **Usage & Analytics**: Dashboard in **Settings → Usage** for tokens, costs, cache savings, and breakdowns by provider / model / day / project with SQLite persistence.
+- **Windows System Tray & Service**: Background service, tray icon, logon autostart, and Desktop/Start Menu shortcuts (Windows).
+- **macOS launchd Service**: LaunchAgent that starts at login, restarts on crash, and logs under `~/Library/Logs/ompweb`.
+- **Web-based Settings** (8 tabs): Interface & Behavior, Safety & Approvals, AI Model Defaults, API Keys & Providers, Usage, Agent & Intelligence (advisor, memory, compaction), Agents, Extensions & Tools (MCP, skills, plugins), System & Updates.
+- **Slash Commands & Shortcuts**: Quick prompts (`/plan`, `/review`, `/fix`, `/test`, etc.), `⌘K` / `Ctrl+K` palette, and model/reasoning cycling.
+- **UI Themes & Localization**: Warm paper light/dark themes, chat font size & interface scale, with full English, Chinese (简体中文), and Japanese (日本語) translations.
 
 ## Environment Variables
 

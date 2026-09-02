@@ -12,7 +12,18 @@ declare global {
 }
 
 export function normalizeSlashes(filePath: string): string {
-  return filePath.replace(/\\/g, "/");
+  return stripLongPathPrefix(filePath.replace(/\\/g, "/"));
+}
+
+/** Windows device paths (\\?\C:\... , \\?\UNC\server\share\...) come back from
+ *  realpathSync and defeat plain startsWith prefix checks against ordinary
+ *  drive/UNC roots, producing false 403s on long paths and junctions. */
+function stripLongPathPrefix(filePath: string): string {
+  if (filePath.startsWith("//?/UNC/")) return "//" + filePath.slice(8);
+  if (filePath.startsWith("//?/")) return filePath.slice(4);
+  if (filePath.startsWith("\\\\?\\UNC\\")) return "\\\\" + filePath.slice(8);
+  if (filePath.startsWith("\\\\?\\")) return filePath.slice(4);
+  return filePath;
 }
 
 function getAdditionalAllowedRoots(): Set<string> {
@@ -63,9 +74,9 @@ export const isFilePathAllowed = isPathWithinRoots;
 
 export function isExistingPathWithinRoots(target: string, roots: Set<string>): boolean {
   let realTarget: string;
-  try { realTarget = realpathSync(target); } catch { return false; }
+  try { realTarget = stripLongPathPrefix(realpathSync(target)); } catch { return false; }
   const realRoots = new Set<string>();
-  for (const root of roots) { try { realRoots.add(realpathSync(root)); } catch { /* stale */ } }
+  for (const root of roots) { try { realRoots.add(stripLongPathPrefix(realpathSync(root))); } catch { /* stale */ } }
   return isPathWithinRoots(realTarget, realRoots);
 }
 

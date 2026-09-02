@@ -180,6 +180,11 @@ function formatAddressBanner({
     lines.push(`  ${dim("🔒 Password protection enabled (OMP_WEB_PASSWORD)")}`);
   }
 
+  if (process.platform === "win32" && !process.env.OMP_WEB_SERVICE) {
+    lines.push("");
+    lines.push(`  ${dim("💡 Windows Tray: Run 'ompweb --install-tray' to enable background startup & Desktop shortcut.")}`);
+  }
+
   lines.push("");
   return lines.join("\n");
 }

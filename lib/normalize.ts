@@ -24,9 +24,16 @@ export function normalizeToolCalls(msg: AgentMessage): AgentMessage {
   if (msg.role !== "assistant") return msg;
   const content = (msg as AssistantMessage).content;
   if (!Array.isArray(content)) return msg;
+  let changed = false;
   const normalized = content.map((block) => {
     const result = normalizeToolCallBlock(block);
-    return result ?? block;
+    if (!result) return block;
+    const b = block as unknown as Record<string, unknown>;
+    if (b.toolCallId !== result.toolCallId || b.toolName !== result.toolName || b.input !== result.input) {
+      changed = true;
+      return result;
+    }
+    return block;
   });
-  return { ...msg, content: normalized } as AgentMessage;
+  return changed ? ({ ...msg, content: normalized } as AgentMessage) : msg;
 }

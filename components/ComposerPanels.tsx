@@ -13,6 +13,31 @@ import { countNestedSubagents, formatCost, formatDuration, formatTokens, shortMo
 import { TodoList } from "./TodoList";
 import { SubagentStatusIcon } from "./SubagentStatusIcon";
 
+// Panels unmount when their inputs are empty and remount when they fill
+// again; without persistence a remount would reset the user's collapse
+// choice mid-session. Keys follow the repo's "omp-web:*" convention.
+const TODO_COLLAPSED_STORAGE_KEY = "omp-web:composer-todo-collapsed";
+const SUBAGENTS_COLLAPSED_STORAGE_KEY = "omp-web:composer-subagents-collapsed";
+
+function loadCollapsed(key: string, defaultExpanded: boolean): boolean {
+  if (typeof window === "undefined") return !defaultExpanded;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw === null) return !defaultExpanded;
+    return raw === "true";
+  } catch {
+    return !defaultExpanded;
+  }
+}
+
+function saveCollapsed(key: string, collapsed: boolean): void {
+  try {
+    window.localStorage.setItem(key, String(collapsed));
+  } catch {
+    // Storage is optional UI state; the in-memory value still applies.
+  }
+}
+
 const SUBAGENT_STATE_KEYS: Record<SubagentInfo["status"], string> = {
   started: "chatWindow.subagentState.started",
   completed: "chatWindow.subagentState.completed",
@@ -128,7 +153,7 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
   defaultExpanded?: boolean;
 }) {
   const { t } = useI18n();
-  const [collapsed, setCollapsed] = useState(!defaultExpanded);
+  const [collapsed, setCollapsed] = useState(() => loadCollapsed(SUBAGENTS_COLLAPSED_STORAGE_KEY, defaultExpanded));
   const runningCount = subagents.filter((subagent) => subagent.source !== "history" && subagent.status === "started").length;
 
   if (subagents.length === 0) return null;
@@ -141,8 +166,7 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
     >
       <button
         type="button"
-        aria-expanded={!collapsed}
-        onClick={() => setCollapsed((value) => !value)}
+        onClick={() => setCollapsed((value) => { saveCollapsed(SUBAGENTS_COLLAPSED_STORAGE_KEY, !value); return !value; })}
         title={collapsed ? t("chatWindow.expandPanel") : t("chatWindow.collapsePanel")}
         className={`ui-focus-ring flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-left text-xs text-text-muted ${collapsed ? "" : "border-b border-border"}`}
         style={{ background: "none" }}
@@ -244,10 +268,17 @@ export function ComposerPanels({ todoPhases, subagents, onSelectSubagent, defaul
   /** Initial expansion of both panels (default: collapsed). */
   defaultExpanded?: boolean;
 }) {
+  const [todoCollapsed, setTodoCollapsed] = useState(() => loadCollapsed(TODO_COLLAPSED_STORAGE_KEY, defaultExpanded));
   if (todoPhases.length === 0 && subagents.length === 0) return null;
   return (
     <div style={{ display: "grid", gap: 6, marginBottom: 8 }}>
-      <TodoList phases={todoPhases} collapsible defaultExpanded={defaultExpanded} />
+      <TodoList
+        phases={todoPhases}
+        collapsible
+        defaultExpanded={defaultExpanded}
+        collapsed={todoCollapsed}
+        onCollapsedChange={(collapsed) => { saveCollapsed(TODO_COLLAPSED_STORAGE_KEY, collapsed); setTodoCollapsed(collapsed); }}
+      />
       <SubagentsPanel subagents={subagents} onSelectSubagent={onSelectSubagent} defaultExpanded={defaultExpanded} />
     </div>
   );

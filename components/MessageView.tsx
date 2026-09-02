@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useState, useRef, useEffect, useMemo, useCallback, type ComponentProps } from "react";
-import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, ChevronDown, Brain, EyeOff, CircleAlert, LoaderCircle } from "lucide-react";
+import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, ChevronDown, Brain, EyeOff, CircleAlert, CircleSlash, LoaderCircle } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
 import { ClickableImage } from "./ImageLightbox";
 import { translate, useI18n, type Locale } from "@/lib/i18n";
@@ -108,7 +108,7 @@ interface Props {
   entryId?: string;
   onFork?: (entryId: string) => void;
   forking?: boolean;
-  onNavigate?: (entryId: string) => void;
+  onNavigate?: (entryId: string) => boolean | Promise<boolean>;
   prevAssistantEntryId?: string;
   onEditContent?: (content: string) => void;
   showTimestamp?: boolean;
@@ -191,8 +191,21 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.prevTimestamp === next.prevTimestamp
     && prev.sessionId === next.sessionId
     && prev.toolCallsDefaultCollapsed === next.toolCallsDefaultCollapsed
-    && prev.liveTokensPerSecond === next.liveTokensPerSecond;
+    && (!prev.isStreaming || prev.liveTokensPerSecond === next.liveTokensPerSecond);
 });
+
+// lib/types.ts ImageContent uses the Anthropic-style {source:{type,data,media_type,url}}
+// shape; pi-ai on-disk format uses flat {data, mimeType} — handle both.
+function imageBlockSrc(img: ImageContent): string {
+  const flat = img as unknown as { data?: string; mimeType?: string };
+  return img.source
+    ? img.source.type === "base64"
+      ? `data:${img.source.media_type};base64,${img.source.data}`
+      : img.source.url ?? ""
+    : flat.data
+      ? `data:${flat.mimeType};base64,${flat.data}`
+      : "";
+}
 
 function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent }: {  message: UserMessage;
   cwd?: string;
@@ -200,7 +213,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
   entryId?: string;
   onFork?: (entryId: string) => void;
   forking?: boolean;
-  onNavigate?: (entryId: string) => void;
+  onNavigate?: (entryId: string) => boolean | Promise<boolean>;
   prevAssistantEntryId?: string;
   onEditContent?: (content: string) => void;
 }) {
@@ -243,8 +256,8 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
             borderRadius: "var(--radius-card)",
             boxShadow: "var(--shadow-card)",
             padding: "8px 12px",
-            fontSize: 14,
-            lineHeight: 1.6,
+            fontSize: "var(--chat-user-font-size)",
+            lineHeight: "var(--chat-line-height)",
             color: "var(--text)",
             wordBreak: "break-word",
             maxHeight: USER_BUBBLE_MAX_HEIGHT,
@@ -256,14 +269,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
               {imageBlocks.map((img, i) => {
                 // lib/types.ts ImageContent uses {source:{type,data,media_type,url}}
                 // pi-ai on-disk format uses flat {data, mimeType} — handle both
-                const flat = img as unknown as { data?: string; mimeType?: string };
-                const src = img.source
-                  ? img.source.type === "base64"
-                    ? `data:${img.source.media_type};base64,${img.source.data}`
-                    : img.source.url ?? ""
-                  : flat.data
-                    ? `data:${flat.mimeType};base64,${flat.data}`
-                    : "";
+                const src = imageBlockSrc(img);
                 return (
                   <ClickableImage
                     key={i}
@@ -280,7 +286,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
 
         {/* Bottom row: action buttons + timestamp — inside the bubble's column,
             spanning its width, so the timestamp aligns with its right edge. */}
-        {(time || canFork || canNavigate || true) && (
+        {(time || canFork || canNavigate) && (
           <div style={{
             display: "flex", alignItems: "center", justifyContent: "flex-end",
             gap: 6, marginTop: 3, width: "100%",
@@ -332,7 +338,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
               {canNavigate && (
                 <Tooltip content={t("messageView.editFromHereTitle")}>
                   <button
-                    onClick={() => { onNavigate!(prevAssistantEntryId!); onEditContent?.(content); }}
+                    onClick={async () => { if (!(await onNavigate!(prevAssistantEntryId!))) return; onEditContent?.(content); }}
                     aria-label={t("messageView.editFromHereTitle")}
                     style={{
                       display: "flex", alignItems: "center", gap: 4,
@@ -442,15 +448,19 @@ function AssistantMessageView({
   // toolResult timestamp = when tool execution finished
   const toolCallDurations = useMemo<Map<string, number>>(() => {
     const map = new Map<string, number>();
-    if (!toolResults || !message.timestamp) return map;
-    for (const [callId, result] of toolResults) {
-      if (result.timestamp && message.timestamp) {
-        const secs = Math.round((result.timestamp - message.timestamp) / 1000);
-        if (secs > 0) map.set(callId, secs);
+    if (!toolResults || !message.timestamp || !Array.isArray(message.content)) return map;
+    for (const block of message.content) {
+      if (block.type === "toolCall") {
+        const tc = block as ToolCallContent;
+        const result = toolResults.get(tc.toolCallId);
+        if (result?.timestamp && message.timestamp) {
+          const secs = Math.round((result.timestamp - message.timestamp) / 1000);
+          if (secs > 0) map.set(tc.toolCallId, secs);
+        }
       }
     }
     return map;
-  }, [toolResults, message.timestamp]);
+  }, [toolResults, message.content, message.timestamp]);
   useEffect(() => {
     if (!isStreaming) {
       // Finalise any un-finished thinking block durations on stream end
@@ -681,6 +691,17 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
 ));
 
 
+// message_update frames re-parse toolCall blocks each frame, so input objects
+// are never reference-equal; shallow-compare the small input objects instead.
+function inputsShallowEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== "object" || a === null || typeof b !== "object" || b === null) return false;
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  return keysA.every((k) => (a as Record<string, unknown>)[k] === (b as Record<string, unknown>)[k]);
+}
+
 const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isStreaming, defaultCollapsed = true }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; isStreaming?: boolean; defaultCollapsed?: boolean }) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(Boolean(isStreaming) && !defaultCollapsed);
@@ -692,6 +713,9 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
             .map((b) => b.text)
             .join("\n"))
     : null;
+  const resultImages = result && Array.isArray(result.content)
+    ? result.content.filter((b): b is ImageContent => b.type === "image")
+    : [];
   const resultIsEmpty = resultText === null ? false : (resultText.trim() === "(no output)" || resultText.trim() === "");
   const isError = result?.isError ?? false;
   const resultDiff = expanded && result && !isError ? getResultDiff(result) : null;
@@ -703,7 +727,17 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
       <Collapsible open={expanded} onOpenChange={setExpanded}>
         <CollapsibleTrigger className="activity-row-trigger">
           <span className={`activity-row-indicator${isError ? " activity-row-indicator-error" : ""}`} aria-hidden>
-            {isError ? <CircleAlert size={12} strokeWidth={1.8} /> : result ? <Check size={12} strokeWidth={2} /> : <LoaderCircle size={12} strokeWidth={1.8} className="activity-row-spinner" />}
+            {isError ? (
+              <CircleAlert size={12} strokeWidth={1.8} />
+            ) : result ? (
+              <Check size={12} strokeWidth={2} />
+            ) : isStreaming ? (
+              <LoaderCircle size={12} strokeWidth={1.8} className="activity-row-spinner" />
+            ) : (
+              // Run aborted mid-tool: no result will ever arrive — show a
+              // terminal "interrupted" indicator instead of a live spinner.
+              <CircleSlash size={12} strokeWidth={1.8} style={{ opacity: 0.5 }} />
+            )}
           </span>
           <span className={`activity-row-tool${isError ? " activity-row-tool-error" : ""}`}>{block.toolName}</span>
           <span className="activity-row-preview">{getToolPreview(block)}</span>
@@ -733,7 +767,23 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
               resultDiff ? (
                 <PairedDiffResult diff={resultDiff} />
               ) : (
-                <PairedResult text={formatToolOutput(resultText ?? "", block.toolName)} isEmpty={resultIsEmpty} isError={isError} />
+                <>
+                  {resultImages.length > 0 && (
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      {resultImages.map((img, i) => (
+                        <ClickableImage
+                          key={i}
+                          src={imageBlockSrc(img)}
+                          alt=""
+                          style={{ maxWidth: 240, maxHeight: 240, borderRadius: 6, objectFit: "contain", display: "block", border: "1px solid color-mix(in srgb, var(--accent) 18%, transparent)" }}
+                        />
+                      ))}
+                    </div>
+                  )}
+                  {!(resultIsEmpty && resultImages.length > 0) && (
+                    <PairedResult text={formatToolOutput(resultText ?? "", block.toolName)} isEmpty={resultIsEmpty} isError={isError} />
+                  )}
+                </>
               )
             ) : null}
           </div>
@@ -744,7 +794,7 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
 }, (prev, next) => (
   prev.block.toolCallId === next.block.toolCallId
   && prev.block.toolName === next.block.toolName
-  && prev.block.input === next.block.input
+  && inputsShallowEqual(prev.block.input, next.block.input)
   && prev.result === next.result
   && prev.duration === next.duration
   && prev.defaultCollapsed === next.defaultCollapsed

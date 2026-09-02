@@ -1,9 +1,10 @@
 import { execFile } from "child_process";
-import { existsSync, mkdirSync, realpathSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { promisify } from "util";
 import { allowFileRoot } from "./file-access";
-import { samePath, toNativePath } from "./paths";
+import { normalizeForComparison, samePath, toNativePath } from "./paths";
+import { loadProjectRegistry } from "./project-registry";
 
 const execFileAsync = promisify(execFile);
 
@@ -42,7 +43,9 @@ const PROJECT_CACHE_TTL_MS = 60_000;
 
 function realPathOrSelf(filePath: string): string {
   try {
-    return realpathSync(filePath);
+    // Use the OS-native resolver so Windows 8.3 aliases and filesystem casing
+    // canonicalize to the same identity Git reports.
+    return realpathSync.native(filePath);
   } catch {
     return filePath;
   }
@@ -69,17 +72,85 @@ async function git(cwd: string, args: string[]): Promise<string> {
 }
 
 /**
- * addWorktree() places worktrees in `<repoRoot>-worktrees/<dir>`. When such a
- * directory no longer exists (worktree removed), group its sessions back
- * under the main repo instead of letting them dangle as a phantom project.
- * The dir name is the sanitized branch name — close enough for display.
+ * Proactively sanitize Git worktree metadata on Windows: Git records the
+ * absolute path to the worktree's `.git` file in `.git/worktrees/<id>/gitdir`.
+ * If recorded with Windows backslashes (`\`), Git's internal C path parsing
+ * (`strip_suffix(path, "/.git")`) fails to match the forward-slash `/.git`
+ * delimiter, which corrupts Git's worktree root resolution and causes
+ * `git worktree remove` to check `<path>/.git/.git` and fail validation.
+ */
+export function repairWorktreeGitdirs(repoRoot: string): void {
+  try {
+    const worktreesDir = join(repoRoot, ".git", "worktrees");
+    if (!existsSync(worktreesDir)) return;
+    const entries = readdirSync(worktreesDir);
+    for (const entry of entries) {
+      const gitdirPath = join(worktreesDir, entry, "gitdir");
+      if (!existsSync(gitdirPath)) continue;
+      try {
+        const content = readFileSync(gitdirPath, "utf8");
+        const trimmed = content.trim();
+        const normalized = trimmed.replace(/\\/g, "/");
+        if (normalized !== trimmed) {
+          writeFileSync(gitdirPath, normalized + "\n", "utf8");
+        }
+      } catch {
+        // Ignore single-file read/write errors
+      }
+    }
+  } catch {
+    // Ignore worktrees directory read errors
+  }
+}
+
+/**
+ * When a worktree directory no longer exists or is no longer a valid git directory
+ * (worktree removed, or leftover folders like .next/ remained on Windows),
+ * resolve its sessions back under the main repo root instead of letting them dangle.
  */
 function inferRemovedWorktree(cwd: string): ProjectInfo | null {
+  // 1. Try `<repoRoot>-worktrees/<dir>`
   const parent = dirname(cwd);
-  if (!parent.endsWith("-worktrees")) return null;
-  const repoRoot = parent.slice(0, -"-worktrees".length);
-  if (!repoRoot || !existsSync(join(repoRoot, ".git"))) return null;
-  return { projectRoot: realPathOrSelf(repoRoot), branch: basename(cwd), isWorktree: true, isTopLevel: true };
+  if (parent.endsWith("-worktrees")) {
+    const repoRoot = parent.slice(0, -"-worktrees".length);
+    if (repoRoot && existsSync(join(repoRoot, ".git"))) {
+      return { projectRoot: realPathOrSelf(repoRoot), branch: basename(cwd), isWorktree: true, isTopLevel: true };
+    }
+  }
+
+  // 2. Try registered projects from ~/.omp/agent/projects.json
+  try {
+    const registry = loadProjectRegistry();
+    const candidateNormalized = normalizeForComparison(cwd);
+    for (const project of registry.projects) {
+      const projRoot = project.path;
+      if (!existsSync(join(projRoot, ".git"))) continue;
+      if (candidateNormalized.startsWith(normalizeForComparison(`${projRoot}-worktrees`))) {
+        return { projectRoot: realPathOrSelf(projRoot), branch: basename(cwd), isWorktree: true, isTopLevel: true };
+      }
+      const worktreesDir = join(projRoot, ".git", "worktrees");
+      if (existsSync(worktreesDir)) {
+        const entries = readdirSync(worktreesDir);
+        for (const entry of entries) {
+          const gitdirFile = join(worktreesDir, entry, "gitdir");
+          if (!existsSync(gitdirFile)) continue;
+          try {
+            const line = readFileSync(gitdirFile, "utf8").trim();
+            const wtDir = dirname(line);
+            if (samePath(wtDir, cwd) || samePath(line, cwd)) {
+              return { projectRoot: realPathOrSelf(projRoot), branch: basename(cwd), isWorktree: true, isTopLevel: true };
+            }
+          } catch {
+            // Ignore file read error
+          }
+        }
+      }
+    }
+  } catch {
+    // Ignore registry lookup error
+  }
+
+  return null;
 }
 
 export async function resolveProject(cwd: string): Promise<ProjectInfo> {
@@ -89,10 +160,18 @@ export async function resolveProject(cwd: string): Promise<ProjectInfo> {
 
   let info: ProjectInfo;
   try {
-    if (!existsSync(cwd)) {
-      info = inferRemovedWorktree(cwd) ?? { projectRoot: cwd, branch: null, isWorktree: false, isTopLevel: false };
-      cache.set(cwd, { info, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS });
-      return info;
+    const hasGit = existsSync(join(cwd, ".git"));
+    if (!existsSync(cwd) || !hasGit) {
+      const inferred = inferRemovedWorktree(cwd);
+      if (inferred) {
+        cache.set(cwd, { info: inferred, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS });
+        return inferred;
+      }
+      if (!existsSync(cwd)) {
+        info = { projectRoot: cwd, branch: null, isWorktree: false, isTopLevel: false };
+        cache.set(cwd, { info, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS });
+        return info;
+      }
     }
     const out = await git(cwd, [
       "rev-parse", "--path-format=absolute",
@@ -100,7 +179,7 @@ export async function resolveProject(cwd: string): Promise<ProjectInfo> {
       "--abbrev-ref", "HEAD",
     ]);
     const [commonDirRaw, gitDirRaw, toplevelRaw, ref] = out.split("\n").map((l) => l.trim());
-    const [commonDir, gitDir, toplevel] = [commonDirRaw, gitDirRaw, toplevelRaw].map(toNativePath);
+    const [commonDir, gitDir, toplevel] = [commonDirRaw, gitDirRaw, toplevelRaw].map((p) => realPathOrSelf(toNativePath(p)));
     // git prints resolved (symlink-free) paths; normalize cwd the same way
     const realCwd = realPathOrSelf(cwd);
     // For a linked worktree, --git-dir differs from --git-common-dir.
@@ -121,7 +200,8 @@ export async function resolveProject(cwd: string): Promise<ProjectInfo> {
       isTopLevel,
     };
   } catch {
-    info = { projectRoot: cwd, branch: null, isWorktree: false, isTopLevel: false };
+    const inferred = inferRemovedWorktree(cwd);
+    info = inferred ?? { projectRoot: realPathOrSelf(cwd), branch: null, isWorktree: false, isTopLevel: false };
   }
 
   cache.set(cwd, { info, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS });
@@ -143,6 +223,8 @@ async function getRepoRoot(cwd: string): Promise<string> {
 }
 
 export async function listWorktrees(cwd: string): Promise<WorktreeInfo[]> {
+  const repoRoot = await getRepoRoot(cwd);
+  repairWorktreeGitdirs(repoRoot);
   const out = await git(cwd, ["worktree", "list", "--porcelain"]);
   const worktrees: WorktreeInfo[] = [];
   let current: (Partial<WorktreeInfo> & { prunable?: boolean }) | null = null;
@@ -159,7 +241,7 @@ export async function listWorktrees(cwd: string): Promise<WorktreeInfo[]> {
         worktrees.push({
           path: worktreePath,
           branch: current.branch ?? null,
-          isMain: worktrees.length === 0,
+          isMain: samePath(worktreePath, repoRoot),
         });
       }
     }
@@ -179,6 +261,7 @@ export async function listWorktrees(cwd: string): Promise<WorktreeInfo[]> {
     }
   }
   flush();
+  worktrees.sort((a, b) => (a.isMain ? -1 : b.isMain ? 1 : a.path.localeCompare(b.path)));
   return worktrees;
 }
 
@@ -197,6 +280,14 @@ function sanitizeBranchForDir(branch: string): string {
 export async function addWorktree(cwd: string, branch: string): Promise<{ path: string; branch: string }> {
   const trimmed = branch.trim();
   if (!trimmed) throw new Error("Branch name is required");
+  // git-ref sanity: a bare positional like `--force` would be read as flags by
+  // `git worktree add -b`; whitespace, `..`, and leading/trailing dots are
+  // rejected by git's own ref rules (and `@{` is reflog syntax).
+  if (trimmed.startsWith("-")) throw new Error(`Invalid branch name: ${branch}`);
+  if (/[\s\x00-\x1f\x7f~^:?*[\]\\]/.test(trimmed)) throw new Error(`Invalid branch name: ${branch}`);
+  if (trimmed.includes("..") || trimmed.startsWith(".") || trimmed.endsWith(".") || trimmed.endsWith(".lock")) {
+    throw new Error(`Invalid branch name: ${branch}`);
+  }
 
   const dirName = sanitizeBranchForDir(trimmed);
   if (!dirName) throw new Error(`Invalid branch name: ${branch}`);
@@ -218,22 +309,26 @@ export async function addWorktree(cwd: string, branch: string): Promise<{ path: 
     branchExists = false;
   }
 
+  const posixWorktreePath = worktreePath.replace(/\\/g, "/");
   try {
     if (branchExists) {
-      await git(repoRoot, ["worktree", "add", "--", worktreePath, trimmed]);
+      await git(repoRoot, ["worktree", "add", "--", posixWorktreePath, trimmed]);
     } else {
-      await git(repoRoot, ["worktree", "add", "-b", trimmed, "--", worktreePath]);
+      await git(repoRoot, ["worktree", "add", "-b", trimmed, "--", posixWorktreePath]);
     }
   } catch (error) {
     throw new Error(extractGitError(error));
   }
 
+  repairWorktreeGitdirs(repoRoot);
   allowFileRoot(worktreePath);
   invalidateProjectCache();
   return { path: worktreePath, branch: trimmed };
 }
 
 export async function removeWorktree(cwd: string, worktreePath: string, force = false): Promise<void> {
+  const repoRoot = await getRepoRoot(cwd);
+  repairWorktreeGitdirs(repoRoot);
   const worktrees = await listWorktrees(cwd);
   // Compare on the same canonical form listWorktrees produces (resolve +
   // case-fold on win32): the client body value may use a drive-letter case
@@ -243,11 +338,27 @@ export async function removeWorktree(cwd: string, worktreePath: string, force = 
   if (!target) throw new Error(`Not a worktree of this repository: ${worktreePath}`);
   if (target.isMain) throw new Error("Cannot remove the main worktree");
 
+  const posixPath = target.path.replace(/\\/g, "/");
   try {
-    await git(cwd, ["worktree", "remove", ...(force ? ["--force"] : []), target.path]);
+    await git(cwd, ["worktree", "remove", ...(force ? ["--force"] : []), posixPath]);
   } catch (error) {
     throw new Error(extractGitError(error));
   }
+
+  if (existsSync(target.path)) {
+    try {
+      rmSync(target.path, { recursive: true, force: true });
+    } catch {
+      // Ignore if files are locked
+    }
+  }
+
+  try {
+    await git(repoRoot, ["worktree", "prune"]);
+  } catch {
+    // Ignore prune errors
+  }
+
   invalidateProjectCache();
 }
 

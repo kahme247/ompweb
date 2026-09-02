@@ -240,8 +240,11 @@ export function parseSubagentSnapshot(value: unknown): SubagentInfo | undefined 
   if (sessionFile !== undefined) info.sessionFile = sessionFile;
   const parentToolCallId = asString(value.parentToolCallId);
   if (parentToolCallId !== undefined) info.parentToolCallId = parentToolCallId;
-  const lastUpdate = asNumber(value.lastUpdate);
-  if (lastUpdate !== undefined) info.lastUpdate = lastUpdate;
+  // Snapshots without a wire-carried lastUpdate would be treated as
+  // infinitely new by mergeSubagentRoster's skipNewerThan guard, letting
+  // back-to-back stale snapshots regress terminal status — stamp read time.
+  const lastUpdate = asNumber(value.lastUpdate) ?? Date.now();
+  info.lastUpdate = lastUpdate;
   const progress = parseSubagentProgress(value.progress);
   if (progress !== undefined) info.progress = progress;
   return info;

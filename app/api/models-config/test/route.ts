@@ -63,6 +63,7 @@ export async function POST(req: Request) {
       {
         env: { PI_CODING_AGENT_DIR: tempDir, OMP_PROFILE: "", PI_PROFILE: "", XDG_DATA_HOME: "" },
         timeoutMs: TEST_TIMEOUT_MS,
+        signal: req.signal,
       },
     );
     const latencyMs = Date.now() - startedAt;

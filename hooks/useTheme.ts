@@ -66,17 +66,33 @@ export function useTheme() {
   // The OS preference is browser-only. Deferring it until after hydration keeps
   // the initial client tree identical to the server's system/light snapshot.
   const [hydrated, setHydrated] = useState(false);
+  const [osDark, setOsDark] = useState(false);
   useEffect(() => { setHydrated(true); }, []);
-  const prefersDark = hydrated && window.matchMedia("(prefers-color-scheme: dark)").matches;
+  // Track the OS color scheme in state so an OS light/dark flip changes the
+  // snapshot and re-renders isDark consumers, even when the stored preference
+  // itself ("system") is unchanged. Registered unconditionally at subscription
+  // time: consumers on an explicit light/dark preference still keep osDark
+  // fresh for when they switch back to system.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => setOsDark(media.matches);
+    onChange();
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, []);
+  const prefersDark = hydrated && osDark;
   const theme = resolveTheme(preference, prefersDark);
 
+  // Keep the DOM class in sync on an OS flip while the user is on "system"
+  // (setTheme/applyTheme own the class for explicit choices).
   useEffect(() => {
     if (preference !== "system" || typeof window === "undefined") return;
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const onChange = () => {
       document.documentElement.classList.toggle("dark", media.matches);
-      listeners.forEach((cb) => cb());
     };
+    onChange();
     media.addEventListener("change", onChange);
     return () => media.removeEventListener("change", onChange);
   }, [preference]);

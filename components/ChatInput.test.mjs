@@ -180,3 +180,40 @@ test("renders multiple queued prompts with count and expand action", () => {
   assert.match(html, />(Show all queued prompts|Show all|chatInput\.expandQueued)</);
   assert.match(html, /First task/);
 });
+
+test("model picker dropdown source uses scale-immune anchored positioning", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8");
+
+  // Ensures the model picker dropdown is anchored with CSS positioning (bottom: calc(100% + 6px), left: 0)
+  // and doesn't rely on raw viewport getBoundingClientRect measurements that break when html zoom is applied.
+  assert.doesNotMatch(source, /setModelDropdownRect/);
+  assert.match(source, /bottom:\s*isMobile\s*\?\s*8\s*:\s*["']calc\(100%\s*\+\s*6px\)["']/);
+});
+
+test("renders the tool preset picker trigger when a handler is provided", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ChatInput, {
+      onSend() {},
+      onAbort() {},
+      isStreaming: false,
+      toolPreset: "full",
+      onToolPresetChange() {},
+    }),
+  );
+
+  assert.match(html, /aria-label="Change tool preset: full"/);
+  assert.match(html, /aria-haspopup="menu"/);
+});
+
+test("tool preset picker is absent without a change handler", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ChatInput, {
+      onSend() {},
+      onAbort() {},
+      isStreaming: false,
+    }),
+  );
+
+  assert.doesNotMatch(html, /Change tool preset/);
+});

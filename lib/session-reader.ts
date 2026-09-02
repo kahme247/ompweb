@@ -168,9 +168,10 @@ export async function resolveSessionPath(sessionId: string): Promise<string | nu
     if (existsSync(cached)) return cached;
     // A deleted session must never resolve: callers spawn omp with --resume
     // against the path, and omp silently creates a NEW session when the file
-    // is gone. Drop the stale entry (and the list snapshot that produced it).
+    // is gone. Drop the dead entry directly; the list cache stays valid, so
+    // repeated 404 polls for the same id do not force a full rescan each time.
+    // (listAllSessions would drop it anyway on the next real list mutation.)
     invalidateSessionPathCache(sessionId);
-    invalidateSessionListCache();
   }
 
   // Cache miss: scan all sessions to populate cache, then retry
@@ -263,6 +264,9 @@ declare global {
 }
 
 const MAX_SESSION_ENTRIES_CACHE_ENTRIES = 32;
+/** Byte cap on CACHED FILE SIZES (parsed JS expands several-fold). Without it,
+ *  32 cached near-1GiB transcripts could pin tens of GB of heap. */
+const MAX_SESSION_ENTRIES_CACHE_BYTES = 256 * 1024 * 1024;
 
 function getSessionEntriesCache(): Map<string, SessionEntriesCacheEntry> {
   if (!globalThis.__ompSessionEntriesCache) globalThis.__ompSessionEntriesCache = new Map();
@@ -289,9 +293,16 @@ function loadSessionEntriesCached(filePath: string): SessionEntry[] {
   }
   const entries = loadSessionFile(filePath).entries;
   cache.set(filePath, { size, mtimeMs, entries });
-  while (cache.size > MAX_SESSION_ENTRIES_CACHE_ENTRIES) {
+  // Two bounds: entry count and total cached file bytes (parsed JS expands
+  // several-fold). Inserted files larger than the whole budget are still
+  // cached — they are evicted by the next insert, and skipping the cache
+  // would re-parse the giants on every request.
+  let totalBytes = 0;
+  for (const entry of cache.values()) totalBytes += entry.size;
+  while (cache.size > 1 && (cache.size > MAX_SESSION_ENTRIES_CACHE_ENTRIES || totalBytes > MAX_SESSION_ENTRIES_CACHE_BYTES)) {
     const oldestKey = cache.keys().next().value;
     if (oldestKey === undefined) break;
+    totalBytes -= cache.get(oldestKey)?.size ?? 0;
     cache.delete(oldestKey);
   }
   return entries;
@@ -469,6 +480,23 @@ export function buildSessionContext(
 function parseEntryTimestamp(timestamp: string): number | undefined {
   const parsed = Date.parse(timestamp);
   return Number.isNaN(parsed) ? undefined : parsed;
+}
+
+/** Message-level timestamps arrive as epoch numbers on the wire but ISO
+ *  strings in hand-edited/imported files — normalize both to number|undefined
+ *  so downstream arithmetic never sees a string (NaN / Invalid Date). */
+function normalizeMessageTimestamp(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value === "string") return parseEntryTimestamp(value);
+  return undefined;
+}
+
+/** Pass-through branches (user/assistant/toolResult) return the raw message
+ *  object — repair only its timestamp, copying when it needs it. */
+function withNormalizedTimestamp(message: AgentMessage): AgentMessage {
+  const raw = message.timestamp;
+  const timestamp = normalizeMessageTimestamp(raw);
+  return timestamp === raw ? message : { ...message, timestamp };
 }
 
 function base64ImageInfo(block: unknown): { bytes: number; mime?: string } | null {
@@ -670,7 +698,7 @@ export function entryToUiMessage(
           customType: "developer",
           content: raw.content,
           display: true,
-          timestamp: raw.timestamp,
+          timestamp: normalizeMessageTimestamp(raw.timestamp),
         };
       }
       if (raw.role === "pythonExecution") {
@@ -683,7 +711,7 @@ export function entryToUiMessage(
           customType: "python-execution",
           content: `Ran Python:\n\`\`\`python\n${raw.code}\n\`\`\`${output}${status}`,
           display: true,
-          timestamp: raw.timestamp,
+          timestamp: normalizeMessageTimestamp(raw.timestamp),
         };
       }
       if (raw.role === "fileMention") {
@@ -699,19 +727,19 @@ export function entryToUiMessage(
           customType: "file-mention",
           content: `Attached file${files.length === 1 ? "" : "s"}:\n${files.map((f) => `- ${f.path}`).join("\n")}`,
           display: true,
-          timestamp: raw.timestamp,
+          timestamp: normalizeMessageTimestamp(raw.timestamp),
         };
       }
       const normalized = options.deferToolResultImages
         ? omitToolResultBase64Images(normalizeToolCalls(raw))
         : normalizeToolCalls(raw);
       const message = stripToolResultDetails(normalized);
-      if (!options.deferThinking || message.role !== "assistant") return message;
+      if (!options.deferThinking || message.role !== "assistant") return withNormalizedTimestamp(message);
       // Guard like the loader does for bad lines: normalizeToolCalls passes
       // non-array content through unchanged, so a string-content assistant
       // entry must not 500 the whole context route.
-      if (!Array.isArray(message.content)) return message;
-      return {
+      if (!Array.isArray(message.content)) return withNormalizedTimestamp(message);
+      const deferred = {
         ...message,
         content: message.content.map((block) => (
           block.type === "thinking" && typeof block.thinking === "string" && block.thinking.trim() !== ""
@@ -719,6 +747,7 @@ export function entryToUiMessage(
             : block
         )),
       };
+      return withNormalizedTimestamp(deferred);
     }
     case "branch_summary":
       if (!entry.summary) return null;

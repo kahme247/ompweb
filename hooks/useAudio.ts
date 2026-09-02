@@ -27,6 +27,21 @@ function playTone(ctx: AudioContext) {
   });
 }
 
+// One AudioContext per browser tab, shared by every hook instance. ChatWindow
+// is keyed per session, so a per-hook context would be re-created on every
+// session switch and Chrome caps live contexts (~6) — after which
+// new AudioContext() throws and the completion sound dies permanently.
+let sharedCtx: AudioContext | null = null;
+function getSharedCtx(): AudioContext | null {
+  if (sharedCtx && sharedCtx.state !== "closed") return sharedCtx;
+  try {
+    sharedCtx = new AudioContext();
+  } catch {
+    return null;
+  }
+  return sharedCtx;
+}
+
 export function useAudio() {
   const [enabled, setEnabled] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
@@ -50,38 +65,28 @@ export function useAudio() {
     return () => window.removeEventListener("omp-sound-pref-change", onPrefChange);
   }, []);
 
-  // Reuse a single AudioContext so it can be resumed if the browser
-  // autoplay policy suspends it (contexts created outside user gestures
-  // start in "suspended" state and produce no sound).
-  const ctxRef = useRef<AudioContext | null>(null);
-  const getCtx = useCallback((): AudioContext | null => {
-    if (ctxRef.current && ctxRef.current.state !== "closed") return ctxRef.current;
-    try {
-      ctxRef.current = new AudioContext();
-    } catch {
-      return null;
-    }
-    return ctxRef.current;
-  }, []);
-
   const unlockAudio = useCallback((force = false) => {
     if (!force && !enabledRef.current) return;
-    const ctx = getCtx();
+    const ctx = getSharedCtx();
     if (!ctx || ctx.state !== "suspended") return;
     ctx.resume().catch(() => {});
-  }, [getCtx]);
+  }, []);
 
   const toggle = useCallback(() => {
     const next = !enabledRef.current;
     if (next) unlockAudio(true);
-    enabledRef.current = next;
-    localStorage.setItem("omp-sound-enabled", String(next));
+    try {
+      localStorage.setItem("omp-sound-enabled", String(next));
+    } catch {
+      // Storage may be unavailable (private mode, quota); the in-memory
+      // preference still applies for this session.
+    }
     setEnabled(next);
   }, [unlockAudio]);
 
   const playDone = useCallback(() => {
     if (!enabledRef.current) return;
-    const ctx = getCtx();
+    const ctx = getSharedCtx();
     if (!ctx) return;
     const play = () => {
       try {
@@ -95,7 +100,7 @@ export function useAudio() {
       return;
     }
     play();
-  }, [getCtx]);
+  }, []);
 
   return { soundEnabled: enabled, onSoundToggle: toggle, playDoneSound: playDone, unlockAudio, soundEnabledRef: enabledRef };
 }

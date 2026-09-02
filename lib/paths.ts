@@ -1,4 +1,5 @@
 import path, { normalize } from "path";
+import { realpathSync } from "fs";
 
 const WINDOWS_ABSOLUTE_RE = /^[a-zA-Z]:[\\/]/;
 
@@ -36,5 +37,15 @@ export function normalizeForComparison(value: string, platform: NodeJS.Platform 
 export function samePath(a: string, b: string): boolean {
   if (a === b) return true;
   if (!a || !b) return false;
-  return normalizeForComparison(a) === normalizeForComparison(b);
+  if (normalizeForComparison(a) === normalizeForComparison(b)) return true;
+  if (process.platform === "win32") {
+    try {
+      const realA = realpathSync.native ? realpathSync.native(a) : realpathSync(a);
+      const realB = realpathSync.native ? realpathSync.native(b) : realpathSync(b);
+      return normalizeForComparison(realA) === normalizeForComparison(realB);
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }

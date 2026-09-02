@@ -129,7 +129,7 @@ function loadExpandedProjects(): Set<string> | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as unknown;
     if (Array.isArray(parsed)) {
-      return new Set(parsed.filter((path): path is string => typeof path === "string" && path.length > 0));
+      return new Set(parsed.filter((path): path is string => typeof path === "string" && path.length > 0).map((path) => comparableProjectPath(path)));
     }
     return null;
   } catch {
@@ -551,7 +551,7 @@ function OmpWebTitle() {
     </button>
   );
 }
-export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, explorerRefreshing, onExplorerRefreshDone, onAtMention, onAtMentions, onOpenSettings, onOpenArchive, updateAvailable }: Props) {
+export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, explorerRefreshing, onExplorerRefreshDone, onAtMention, onAtMentions, onOpenSettings, onOpenArchive, updateAvailable }: Props) {
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -590,6 +590,8 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
+  const [runningSessionCwds, setRunningSessionCwds] = useState<Record<string, string>>({});
+  const knownRunningCwdsRef = useRef<Map<string, string>>(new Map());
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
   // Relative session times must age while the sidebar stays open; one shared
@@ -609,6 +611,9 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
 
   const sessionsEtagRef = useRef<string | null>(null);
   const sessionsAbortRef = useRef<AbortController | null>(null);
+  // Set once the first /api/sessions fetch settles (success OR failure) so the
+  // initial-restore effect can stop waiting on a load that never yields rows.
+  const initialLoadedRef = useRef(false);
   const loadSessions = useCallback(async (showLoading = false) => {
     sessionsAbortRef.current?.abort();
     const controller = new AbortController();
@@ -622,12 +627,24 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const etag = res.headers.get("ETag");
       if (etag) sessionsEtagRef.current = etag;
-      const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[] };
+      const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[]; runningSessions?: Array<{ id: string; cwd: string }> };
       setAllSessions(data.sessions);
+      if (data.runningSessions) {
+        for (const rs of data.runningSessions) {
+          if (rs.id && rs.cwd) knownRunningCwdsRef.current.set(rs.id, rs.cwd);
+        }
+      }
       // Treat the fetched running set as an initial fallback only. Once SSE is
       // live it owns this state, so a slow fetch can't revive a stale snapshot.
       if (!sseAuthoritativeRef.current) {
         setRunningSessionIds(new Set(data.runningSessionIds ?? []));
+        if (data.runningSessions) {
+          const nextCwds: Record<string, string> = {};
+          for (const rs of data.runningSessions) {
+            if (rs.id && rs.cwd) nextCwds[rs.id] = rs.cwd;
+          }
+          setRunningSessionCwds(nextCwds);
+        }
       }
       // Drop unread markers for sessions that no longer exist (e.g. deleted).
       const existingIds = new Set(data.sessions.map((s) => s.id));
@@ -646,6 +663,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       if ((e as Error)?.name === "AbortError") return;
       setError(t("sessionSidebar.loadFailed", { detail: e instanceof Error ? e.message : String(e) }));
     } finally {
+      initialLoadedRef.current = true;
       if (showLoading) setLoading(false);
     }
   }, [t]);
@@ -657,15 +675,20 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
     loadSessions(isFirst);
   }, [loadSessions, refreshKey]);
 
+  const projectsLoadSeqRef = useRef(0);
   const loadProjects = useCallback(async () => {
+    const seq = ++projectsLoadSeqRef.current;
     try {
       const res = await fetch("/api/projects");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json() as { projects?: ManagedProject[] };
+      // A newer request superseded this one — drop the stale response.
+      if (seq !== projectsLoadSeqRef.current) return;
       setProjects(data.projects ?? []);
       setProjectsError(null);
       projectsLoadedRef.current = true;
     } catch (e) {
+      if (seq !== projectsLoadSeqRef.current) return;
       setProjectsError(t("projects.loadFailed", { detail: e instanceof Error ? e.message : String(e) }));
     }
   }, [t]);
@@ -700,6 +723,12 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       void loadSessions(false);
     }, 300);
   }, [loadSessions]);
+  useEffect(() => () => {
+    if (sessionRefreshTimerRef.current) {
+      clearTimeout(sessionRefreshTimerRef.current);
+      sessionRefreshTimerRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
     // Live running status and session-list invalidations arrive via SSE; the
@@ -711,12 +740,23 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
         const data = JSON.parse(e.data) as {
           type?: string;
           runningSessionIds?: string[];
+          runningSessions?: Array<{ id: string; cwd: string }>;
           refreshSessionList?: boolean;
           sessionIds?: string[];
         };
         if (data.type === "running") {
           sseAuthoritativeRef.current = true;
           setRunningSessionIds(new Set(data.runningSessionIds ?? []));
+          if (data.runningSessions) {
+            const nextCwds: Record<string, string> = {};
+            for (const rs of data.runningSessions) {
+              if (rs.id && rs.cwd) {
+                knownRunningCwdsRef.current.set(rs.id, rs.cwd);
+                nextCwds[rs.id] = rs.cwd;
+              }
+            }
+            setRunningSessionCwds(nextCwds);
+          }
           if (data.refreshSessionList) scheduleRefresh();
         } else if (data.type === "sessions-changed") {
           if (data.refreshSessionList) scheduleRefresh();
@@ -727,6 +767,11 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       }
     };
 
+    source.onerror = () => {
+      // EventSource auto-reconnects; until a fresh frame arrives, let the
+      // polled /api/sessions fallback own running state again.
+      sseAuthoritativeRef.current = false;
+    };
     // On error EventSource auto-reconnects; keep the last known state meanwhile.
     return () => {
       if (pendingRefreshRef.current) clearTimeout(pendingRefreshRef.current);
@@ -790,18 +835,14 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
    *  it — never to a different repository's state. */
   const projectRootFor = useCallback((cwd: string | null): string | null => {
     if (!cwd) return null;
-    // Any path in a cached repo's worktree list belongs to that repo — covers
-    // worktrees without sessions, so switching to them keeps the row mounted.
     for (const state of Object.values(worktreeStateByProject)) {
       if (state.worktrees.some((w) => normalizeProjectKey(w.path) === normalizeProjectKey(cwd))) {
         return state.projectRoot;
       }
     }
-    // A registered project path is its own canonical root. The lookup goes
-    // through the case-folded comparable form (Windows/NTFS is
-    // case-insensitive, so a session's cwd/projectRoot can spell the same
-    // folder with different casing), and the registered path itself is
-    // returned so the caller gets a canonical value.
+    // Fall back to the project registry, then to session cwd→root matches, so
+    // a session whose projectKey was normalized server-side still resolves to
+    // the registry's case-preserved path — the caller gets a canonical value.
     const registered = projects.find((p) => comparableProjectPath(p.path) === comparableProjectPath(cwd));
     if (registered) return registered.path;
     const foldedCwd = comparableProjectPath(cwd);
@@ -810,32 +851,39 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   }, [worktreeStateByProject, allSessions, projects]);
 
   // ---- Expansion (used by the sync/notify effects below, so declared first) --
+  // Keys are stored in comparableProjectPath form so case-variant spellings of
+  // the same Windows path map to one entry (the server lowercases projectKey
+  // on win32, while project.path preserves registry casing).
   const expandProject = useCallback((path: string) => {
+    const key = comparableProjectPath(path);
     setExpandedProjects((prev) => {
-      if (prev?.has(path)) return prev;
+      if (prev?.has(key)) return prev;
       const next = new Set(prev ?? []);
-      next.add(path);
+      next.add(key);
       return next;
     });
   }, []);
 
   const collapseProject = useCallback((path: string) => {
+    const key = comparableProjectPath(path);
     setExpandedProjects((prev) => {
-      if (!prev?.has(path)) return prev;
+      if (!prev?.has(key)) return prev;
       const next = new Set(prev);
-      next.delete(path);
+      next.delete(key);
       return next;
     });
   }, []);
 
   const toggleProjectExpanded = useCallback((path: string) => {
+    const key = comparableProjectPath(path);
     setExpandedProjects((prev) => {
       const next = new Set(prev ?? []);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
       return next;
     });
   }, []);
+
 
   /** Activate a project (effective cwd = its root) and expand it, without
    *  opening a session. */
@@ -935,6 +983,12 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   })();
   // Stable placeholder timestamps: Date.now() inside the memo would churn every refresh and bust downstream memos.
   const placeholderTsRef = useRef<Map<string, string>>(new Map());
+  useEffect(() => {
+    if (optimisticSession?.id && optimisticSession.cwd) {
+      knownRunningCwdsRef.current.set(optimisticSession.id, optimisticSession.cwd);
+      setRunningSessionCwds((prev) => (prev[optimisticSession.id] === optimisticSession.cwd ? prev : { ...prev, [optimisticSession.id]: optimisticSession.cwd }));
+    }
+  }, [optimisticSession]);
   const visibleSessions = useMemo(() => {
     let base = allSessions;
     if (optimisticSession && !base.some((session) => session.id === optimisticSession.id)) {
@@ -954,12 +1008,21 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
         ts = new Date().toISOString();
         placeholderTsRef.current.set(id, ts);
       }
-      const phRoot = optimisticProjectRoot ?? selectedCwd ?? "";
+      const isOptimistic = optimisticSession?.id === id;
+      const sessionCwd = (isOptimistic ? optimisticSession.cwd : null)
+        ?? runningSessionCwds[id]
+        ?? knownRunningCwdsRef.current.get(id)
+        ?? selectedCwd
+        ?? "";
+      const resolvedRoot = isOptimistic
+        ? (optimisticProjectRoot ?? optimisticSession.projectRoot ?? optimisticSession.cwd)
+        : (projectRootFor(sessionCwd) ?? sessionCwd);
+      const phRoot = resolvedRoot ?? "";
       const phKey = phRoot ? comparableProjectPath(phRoot) : undefined;
       placeholders.push({
         id,
         path: "",
-        cwd: selectedCwd ?? "",
+        cwd: sessionCwd,
         name: undefined,
         created: ts,
         modified: ts,
@@ -969,14 +1032,21 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
         ...(phKey ? { projectKey: phKey } : {}),
       });
     }
-    // Prune timestamps for ids that are now materialized or no longer running
+    // Prune timestamps and known cwds for ids that are now materialized or no longer running
     if (placeholderTsRef.current.size > placeholders.length) {
       for (const key of [...placeholderTsRef.current.keys()]) {
         if (!runningSessionIds.has(key) || known.has(key)) placeholderTsRef.current.delete(key);
       }
     }
+    if (knownRunningCwdsRef.current.size > runningSessionIds.size + (optimisticSession ? 1 : 0)) {
+      const activeIds = new Set(runningSessionIds);
+      if (optimisticSession) activeIds.add(optimisticSession.id);
+      for (const key of [...knownRunningCwdsRef.current.keys()]) {
+        if (!activeIds.has(key) && known.has(key)) knownRunningCwdsRef.current.delete(key);
+      }
+    }
     return placeholders.length ? [...base, ...placeholders] : base;
-  }, [allSessions, optimisticSession, optimisticProjectRoot, runningSessionIds, selectedCwd]);
+  }, [allSessions, optimisticSession, optimisticProjectRoot, runningSessionIds, runningSessionCwds, projectRootFor, selectedCwd]);
   const visibleProjects = useMemo(() => {
     let base = projects;
     const hasOpt = optimisticProjectRoot ? base.some((p) => comparableProjectPath(p.path) === comparableProjectPath(optimisticProjectRoot)) : false;
@@ -989,14 +1059,23 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
     const knownFolded = new Set(base.map((p) => comparableProjectPath(p.path)));
     for (const id of runningSessionIds) {
       if (allSessions.some((s) => s.id === id)) continue;
-      const phPath = optimisticProjectRoot ?? selectedCwd ?? "";
+      const isOptimistic = optimisticSession?.id === id;
+      const sessionCwd = (isOptimistic ? optimisticSession.cwd : null)
+        ?? runningSessionCwds[id]
+        ?? knownRunningCwdsRef.current.get(id)
+        ?? selectedCwd
+        ?? "";
+      const resolvedRoot = isOptimistic
+        ? (optimisticProjectRoot ?? optimisticSession.projectRoot ?? optimisticSession.cwd)
+        : (projectRootFor(sessionCwd) ?? sessionCwd);
+      const phPath = resolvedRoot ?? "";
       if (phPath && !knownFolded.has(comparableProjectPath(phPath))) {
         base = [...base, { path: phPath }];
         knownFolded.add(comparableProjectPath(phPath));
       }
     }
     return base;
-  }, [optimisticProjectRoot, projects, runningSessionIds, allSessions, selectedCwd]);
+  }, [optimisticProjectRoot, projects, runningSessionIds, runningSessionCwds, allSessions, optimisticSession, projectRootFor, selectedCwd]);
 
   // ---- Derived project list ---------------------------------------------------
   const selectedProject = useMemo(() => projectRootFor(selectedCwd), [projectRootFor, selectedCwd]);
@@ -1062,8 +1141,8 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   // the first project fetch — an empty list mid-load must never wipe storage.
   useEffect(() => {
     if (expandedProjects === null || !projectsLoadedRef.current) return;
-    const known = new Set(sortedProjects.map((p) => p.path));
-    const stale = [...expandedProjects].filter((path) => !known.has(path));
+    const known = new Set(sortedProjects.map((p) => comparableProjectPath(p.path)));
+    const stale = [...expandedProjects].filter((path) => !known.has(comparableProjectPath(path)));
     if (stale.length === 0) return;
     setExpandedProjects((prev) => {
       if (!prev) return prev;
@@ -1095,13 +1174,17 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
 
     // If restoring a session, set cwd to match that session
     if (initialSessionId && !restoredRef.current) {
-      if (allSessions.length === 0) return; // wait for sessions to load
+      // An empty list only blocks while the first load is still in flight —
+      // a settled-but-empty or failed load means the target will never appear
+      // (shared ?session= link, deleted session), so fall through to the
+      // retry/exhaustion path below instead of returning forever.
+      if (allSessions.length === 0 && !initialLoadedRef.current) return; // wait for sessions to load
       const target = allSessions.find((s) => s.id === initialSessionId);
       if (target) {
         restoreRetryRef.current = 0;
         restoredRef.current = true;
         setSelectedCwd(target.cwd);
-        expandProject(workspaceKeyOf(target));
+        expandProject(comparableProjectPath(workspaceKeyOf(target)));
         onSelectSession(target, true);
         return;
       }
@@ -1250,6 +1333,8 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       }
       collapseProject(projectPath);
       await loadProjects();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e));
     } finally {
       setRemoveProjectPath(null);
     }
@@ -1292,12 +1377,14 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       });
       setSelectedCwd(newWorktreePath);
       setWtRefreshKey((k) => k + 1);
+      loadSessions(false);
+      void loadProjects();
     } catch (e) {
       setWtError(e instanceof Error ? e.message : String(e));
     } finally {
       setWtBusy(false);
     }
-  }, [wtNewBranch, wtBusy, selectedProject, worktreeStateByProject]);
+  }, [wtNewBranch, wtBusy, selectedProject, worktreeStateByProject, loadProjects, loadSessions]);
 
   const handleRemoveWorktree = useCallback(async (path: string, force: boolean) => {
     // Remove only from the active repo's own cached Git state.
@@ -1323,17 +1410,37 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
         return;
       }
       setWtConfirmRemove(null);
-      if (selectedCwd !== null && comparableProjectPath(selectedCwd) === comparableProjectPath(path)) setSelectedCwd(root);
+      // Optimistically remove the deleted worktree from the active project's state
+      setWorktreeStateByProject((prev) => {
+        const key = normalizeProjectKey(root);
+        const existing = prev[key];
+        if (!existing) return prev;
+        const nextWorktrees = existing.worktrees.filter((w) => comparableProjectPath(w.path) !== comparableProjectPath(path));
+        return {
+          ...prev,
+          [key]: {
+            ...existing,
+            forCwd: selectedCwd !== null && comparableProjectPath(selectedCwd) === comparableProjectPath(path) ? root : existing.forCwd,
+            worktrees: nextWorktrees,
+          },
+        };
+      });
+      if (selectedCwd !== null && comparableProjectPath(selectedCwd) === comparableProjectPath(path)) {
+        setSelectedCwd(root);
+      }
       setWtRefreshKey((k) => k + 1);
+      loadSessions(false);
+      void loadProjects();
     } catch (e) {
       setWtError(e instanceof Error ? e.message : String(e));
     } finally {
       setWtBusy(false);
     }
-  }, [selectedProject, worktreeStateByProject, wtBusy, selectedCwd]);
+  }, [selectedProject, worktreeStateByProject, wtBusy, selectedCwd, loadProjects, loadSessions]);
 
   // Reset the worktree dropdown's transient state (used by the portaled
-  // dropdown's outside-press/Escape close and by the branch toggle).
+  // dropdown's outside-press/Escape close, the branch toggle, and worktree
+  // selection).
   const closeWorktreeDropdown = useCallback(() => {
     setWtDropdownOpen(false);
     setWtNewOpen(false);
@@ -1350,7 +1457,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   const handleSelectSessionFromList = useCallback((s: SessionInfo) => {
     provisionalSelectionRef.current = false;
     if (s.cwd) setSelectedCwd(s.cwd);
-    expandProject(workspaceKeyOf(s));
+    expandProject(comparableProjectPath(workspaceKeyOf(s)));
     onSelectSession(s);
   }, [onSelectSession, expandProject]);
 
@@ -1392,8 +1499,10 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
     }
   }, [importing, loadSessions, loadProjects, t]);
 
-  // Sessions of every worktree in the selected project are shown together
-  const expandedProjectPaths = expandedProjects ?? EMPTY_PROJECT_SET;
+  // Sessions of every worktree in the selected project are shown together.
+  // Keys are comparableProjectPath forms (see expandProject) — comparable to
+  // the folded registry paths rows are checked against.
+  const expandedProjectKeys = expandedProjects ?? EMPTY_PROJECT_SET;
 
   // The active repo's own cached Git state, selected by repository root — never
   // a single sidebar-wide variable, so it is always the state belonging to the
@@ -1425,8 +1534,11 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
     && comparableProjectPath(selectedProject) === comparableProjectPath(activeGitState.projectRoot),
   );
   const toggleWorktrees = useCallback(() => {
-    setWtDropdownOpen((v) => !v);
-  }, []);
+    // Fold through closeWorktreeDropdown so closing never leaves the previous
+    // worktree's confirm/new-branch transient state behind.
+    if (wtDropdownOpen) closeWorktreeDropdown();
+    else setWtDropdownOpen(true);
+  }, [wtDropdownOpen, closeWorktreeDropdown]);
 
   // Stable callbacks for the session list so memoized children don't re-render
   // on every parent state change.
@@ -1461,8 +1573,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       setWtConfirmRemove={setWtConfirmRemove}
       onSelectWorktree={(path) => {
         setSelectedCwd(path);
-        setWtDropdownOpen(false);
-        setWtError(null);
+        closeWorktreeDropdown();
       }}
       onCreateWorktree={handleCreateWorktree}
       onRemoveWorktree={(path, force) => void handleRemoveWorktree(path, force)}
@@ -1715,9 +1826,9 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
                 key={project.path}
                 project={project}
                 isActive={isActive}
-                isExpanded={expandedProjectPaths.has(project.path)}
                 activity={projectActivity.get(comparableProjectPath(project.path))}
                 tree={tree}
+                isExpanded={expandedProjectKeys.has(comparableProjectPath(project.path))}
                 hiddenCount={filtersActive ? 0 : Math.max(0, tree.length - MAX_PROJECT_SESSIONS)}
                 selectedSessionId={selectedSessionId}
                 runningSessionIds={runningSessionIds}
@@ -1948,7 +2059,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       </div>
     </div>
   );
-}
+});
 
 const MAX_PROJECT_SESSIONS = 5;
 
@@ -2262,7 +2373,7 @@ function ProjectRow({
             <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { setActionMenuOpen(false); void onMoveProject(project.path, 1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
               {t("projects.moveDown")}
             </button>
-            <button type="button" role="menuitem" className="sidebar-menu-item" disabled={removeBusy} onClick={() => { setActionMenuOpen(false); onRemoveProject(project.path); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--status-error)", cursor: removeBusy ? "default" : "pointer", textAlign: "left", fontSize: 11 }}>
+            <button type="button" role="menuitem" className="sidebar-menu-item" disabled={removeBusy} onClick={() => { setActionMenuOpen(false); void onRemoveProject(project.path); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--status-error)", cursor: removeBusy ? "default" : "pointer", textAlign: "left", fontSize: 11 }}>
               {t("projects.remove", { name: label })}
             </button>
           </SidebarPortalMenu>
@@ -2414,7 +2525,9 @@ function ProjectWorktreeSwitcher({
     >
           <div style={{ maxHeight: "min(40vh, 300px)", overflowY: "auto" }}>
             {worktreeState.worktrees.map((wt) => {
-              const isCurrent = wt.path === selectedCwd || (wt.isMain && !worktreeState.worktrees.some((w) => w.path === selectedCwd));
+              const foldedCwd = selectedCwd === null ? null : comparableProjectPath(selectedCwd);
+              const isCurrent = (foldedCwd !== null && comparableProjectPath(wt.path) === foldedCwd)
+                || (wt.isMain && !worktreeState.worktrees.some((w) => comparableProjectPath(w.path) === foldedCwd));
               if (wtConfirmRemove === wt.path) {
                 return (
                   <div key={wt.path} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 10px", borderBottom: "1px solid var(--border)", background: "color-mix(in srgb, var(--accent) 6%, transparent)" }}>
@@ -2975,7 +3088,7 @@ const SessionItem = memo(function SessionItem({
                 <SidebarPortalMenu anchor={menuButtonRef} open={actionMenuOpen} onClose={() => setActionMenuOpen(false)} placement="above" minWidth={128}>
  <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); setConfirmArchive(true); }} disabled={hasChildren} title={hasChildren ? t("sessionSidebar.archiveLeafOnly") : t("sessionSidebar.archive")} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: hasChildren ? "var(--text-dim)" : "var(--text-muted)", cursor: hasChildren ? "not-allowed" : "pointer", textAlign: "left", fontSize: 11, opacity: hasChildren ? 0.55 : 1 }}>{t("sessionSidebar.archive")}</button>
                   <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { startRename(event); setActionMenuOpen(false); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.rename")}</button>
-                  <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); setConfirmDelete(true); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--status-error)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.delete")}</button>
+                  <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleDelete(); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--status-error)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.delete")}</button>
                 </SidebarPortalMenu>
               </div>
             </div>

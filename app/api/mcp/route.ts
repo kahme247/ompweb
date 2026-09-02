@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { deleteMcpServer, parseMcpListOutput, readDiscoveredMcpServers, readMcpConfig, readUserMcpConfig, type McpLiveServer, validateMcpServer, writeMcpServer } from "@/lib/omp/mcp-config";
 import { readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
-import { getRpcSession, resolveSpawnCwdResult, startRpcSession } from "@/lib/rpc-manager";
+import { WebRpcError, getRpcSession, resolveSpawnCwdResult, startRpcSession } from "@/lib/rpc-manager";
+import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { redactMcpServer } from "@/lib/omp/mcp-config";
 
@@ -12,6 +13,16 @@ const MAX_MCP_REQUEST_BYTES = 1024 * 1024;
 function mcpErrorResponse(error: unknown) {
   const status = error instanceof RequestBodyTooLargeError ? 413 : 400;
   return NextResponse.json({ error: error instanceof RequestBodyTooLargeError ? "MCP request is too large" : error instanceof Error ? error.message : String(error) }, { status });
+}
+
+/** Stable client-safe message for the GET liveError field: raw child-process
+ *  errors (spawn failures, stderr tails) must not reach the browser. */
+function sanitizeMcpLiveError(error: unknown): string {
+  if (error instanceof WebRpcError || error instanceof RpcCommandError) {
+    return error.message;
+  }
+  console.error("[api/mcp] live server list failed:", error);
+  return "Could not load live MCP server states";
 }
 
 function mergeMcpServers(primary: McpLiveServer[], secondary: McpLiveServer[]): McpLiveServer[] {
@@ -85,7 +96,7 @@ export async function GET(request: Request) {
         }
         liveServers = mergeMcpServers(parseMcpListOutput(await session.getMcpList()), inventory);
       } catch (error) {
-        liveError = error instanceof Error ? error.message : String(error);
+        liveError = sanitizeMcpLiveError(error);
       }
     }
     return NextResponse.json({ root: file?.root ?? null, path: file?.path ?? null, exists: file?.exists ?? false, servers: Object.entries(file?.config.mcpServers ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([name, config]) => ({ name, config: redactMcpServer(config) })), user: safeUser, inventory, liveServers, liveError });

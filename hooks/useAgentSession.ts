@@ -616,7 +616,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [modelThinkingLevelMaps, setModelThinkingLevelMaps] = useState<Record<string, Record<string, string | null>>>({});
   const [newSessionModel, setNewSessionModel] = useState<SelectedModel | null>(null);
   const [newSessionDefaultModel, setNewSessionDefaultModel] = useState<SelectedModel | null>(null);
-  const [toolPreset, setToolPreset] = useState<ToolPreset>(() => getPreferredToolPreset());
+  // Start at the default for SSR; hydrate from localStorage in an effect
+  // to avoid a server/client mismatch when the user stored a different preset.
+  const [toolPreset, setToolPreset] = useState<ToolPreset>("full");
+  useEffect(() => { setToolPreset(getPreferredToolPreset()); }, []);
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevelOption>("auto");
   const [fastModeEnabled, setFastModeEnabled] = useState(false);
   const [fastModeActive, setFastModeActive] = useState<boolean | undefined>(undefined);
@@ -716,8 +719,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // revision bumps to one per animation frame so an open dialog only re-pages
   // once per frame instead of per event.
   const subagentVersionFlushRef = useRef<Set<string> | null>(null);
+  const subagentActivityFlushRef = useRef<Map<string, SubagentActivityEvent[]> | null>(null);
   const subagentVersionFlushFrameRef = useRef<number | null>(null);
-  // Delayed live-roster hydration after mount/reconnect; cancelled on unmount
+  const wasRunningForGaugeRef = useRef(false);
   // so a stale get_subagents cannot target a session that was switched away.
   const rosterRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const promptRunIdRef = useRef(0);
@@ -748,11 +752,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // stays at the bottom (below the file entry) — it only fills the gap while
   // a brand-new session has no file data yet, and a failed new-session
   // set_model must not mask omp's actual resolved model.
-  const displayModel = isNew
-    ? (newSessionModel ?? newSessionDefaultModel)
-    : (currentModelOverride ?? (liveModelMeta
-        ? { provider: liveModelMeta.provider, modelId: liveModelMeta.modelId }
-        : data?.context.model ?? pendingModel));
+  const displayModel = useMemo(
+    () =>
+      isNew
+        ? (newSessionModel ?? newSessionDefaultModel)
+        : (currentModelOverride ?? (liveModelMeta
+            ? { provider: liveModelMeta.provider, modelId: liveModelMeta.modelId }
+            : data?.context.model ?? pendingModel)),
+    [isNew, newSessionModel, newSessionDefaultModel, currentModelOverride, liveModelMeta, data?.context.model, pendingModel],
+  );
 
   const sessionStats = useMemo(() => {
     if (sessionStatsOverride) return sessionStatsOverride;
@@ -935,6 +943,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       subagentVersionFlushFrameRef.current = null;
     }
     subagentVersionFlushRef.current = null;
+    subagentActivityFlushRef.current = null;
     setSubagentEvents({});
     setSubagentTranscriptVersions({});
   }, []);
@@ -1095,7 +1104,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (isInitialHydration) initialHydrationPendingRef.current = false;
       }
     } catch (e) {
-      setError(String(e));
+      // loadSession runs fire-and-forget as a background reconciler (file
+      // watcher, agent_end, bash, compaction) with showLoading=false. A
+      // transient failure there must not replace the chat with an error
+      // screen — only surface it when the user is actively waiting.
+      if (showLoading) setError(String(e));
+      else console.warn("Background loadSession failed:", e);
       if (showLoading && includeState) initialHydrationPendingRef.current = false;
       return null;
     } finally {
@@ -1105,7 +1119,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [refreshSubagentHistory, applyAuthoritativeModel, beginAuthoritativeModelSync]);
 
-  const loadContext = useCallback(async (sid: string, leafId: string | null, includePreCompaction = false) => {
+  const loadContext = useCallback(async (sid: string, leafId: string | null, includePreCompaction = false): Promise<boolean> => {
     const seq = ++contextRequestSeqRef.current;
     try {
       const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
@@ -1117,14 +1131,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const d = await res.json() as { context: { messages: AgentMessage[]; entryIds: string[]; todoPhases: TodoPhase[] } };
       // Fence like loadSession: drop the response if the session changed or a
       // newer navigate started while this request was in flight.
-      if (sessionIdRef.current !== sid || contextRequestSeqRef.current !== seq) return;
+      if (sessionIdRef.current !== sid || contextRequestSeqRef.current !== seq) return false;
       setMessages(d.context.messages);
       setEntryIds(d.context.entryIds ?? []);
       setShowPreCompactionHistory(includePreCompaction);
       setTodoPhases(d.context.todoPhases ?? []);
     } catch (e) {
       console.error("Failed to load context:", e);
+      return false;
     }
+    return true;
   }, []);
 
   const togglePreCompactionHistory = useCallback(() => {
@@ -1816,6 +1832,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // right around agent_end, possibly after the last in-run poll.
   useEffect(() => {
     if (!agentRunning) {
+      if (!wasRunningForGaugeRef.current) return;
+      wasRunningForGaugeRef.current = false;
       const sid = sessionIdRef.current;
       if (!sid) return;
       let cancelled = false;
@@ -1829,6 +1847,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         .catch(() => {});
       return () => { cancelled = true; };
     }
+    wasRunningForGaugeRef.current = true;
     const id = setInterval(() => {
       const sid = sessionIdRef.current;
       if (!sid) return;
@@ -2172,7 +2191,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setCompactResult(null);
         } else if (!event.aborted && !event.skipped) {
           setCompactResult(readCompactResult(event.result, "auto"));
-          if (sessionIdRef.current) loadSession(sessionIdRef.current);
+          if (sessionIdRef.current) void loadSession(sessionIdRef.current);
         }
         break;
       case "subagent_lifecycle": {
@@ -2283,33 +2302,42 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (subagentId) {
           const pending = subagentVersionFlushRef.current ?? (subagentVersionFlushRef.current = new Set());
           pending.add(subagentId);
+          const activity = parseSubagentActivityEvent(payload);
+          if (activity) {
+            const actMap = subagentActivityFlushRef.current ?? (subagentActivityFlushRef.current = new Map());
+            const list = actMap.get(subagentId) ?? [];
+            list.push(activity);
+            actMap.set(subagentId, list);
+          }
           if (subagentVersionFlushFrameRef.current === null) {
             subagentVersionFlushFrameRef.current = requestAnimationFrame(() => {
               subagentVersionFlushFrameRef.current = null;
               const queued = subagentVersionFlushRef.current;
               subagentVersionFlushRef.current = null;
-              if (!queued || queued.size === 0) return;
-              setSubagentTranscriptVersions((prev) => {
-                let next = prev;
-                for (const id of queued) next = { ...next, [id]: (next[id] ?? 0) + 1 };
-                return pruneSubagentIdMap(next);
-              });
-            });
-          }
-          const activity = parseSubagentActivityEvent(payload);
-          if (activity) {
-            setSubagentEvents((prev) => {
-              const existing = prev[subagentId] ?? [];
-              const nextEvents = existing.length >= SUBAGENT_ACTIVITY_BUFFER_MAX
-                ? [...existing.slice(existing.length - SUBAGENT_ACTIVITY_BUFFER_MAX + 1), activity]
-                : [...existing, activity];
-              // Re-key first so pruning evicts the LEAST recently UPDATED ids
-              // (a plain spread keeps an existing key at its original position
-              // and can evict an actively-updated early id).
-              const next = { ...prev };
-              delete next[subagentId];
-              next[subagentId] = nextEvents;
-              return pruneSubagentIdMap(next);
+              const queuedActs = subagentActivityFlushRef.current;
+              subagentActivityFlushRef.current = null;
+              if (queued && queued.size > 0) {
+                setSubagentTranscriptVersions((prev) => {
+                  let next = prev;
+                  for (const id of queued) next = { ...next, [id]: (next[id] ?? 0) + 1 };
+                  return pruneSubagentIdMap(next);
+                });
+              }
+              if (queuedActs && queuedActs.size > 0) {
+                setSubagentEvents((prev) => {
+                  const next = { ...prev };
+                  for (const [id, acts] of queuedActs.entries()) {
+                    const existing = next[id] ?? [];
+                    const merged = [...existing, ...acts];
+                    const trimmed = merged.length > SUBAGENT_ACTIVITY_BUFFER_MAX
+                      ? merged.slice(merged.length - SUBAGENT_ACTIVITY_BUFFER_MAX)
+                      : merged;
+                    delete next[id];
+                    next[id] = trimmed;
+                  }
+                  return pruneSubagentIdMap(next);
+                });
+              }
             });
           }
         }
@@ -2548,7 +2576,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, []);
 
   const handleFork = useCallback(async (entryId: string) => {
-    if (bashRunningRef.current) return;
+    if (bashRunningRef.current || agentRunningRef.current) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
     setForkingEntryId(entryId);
@@ -2569,18 +2597,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [onSessionForked]);
 
   // omp's RPC protocol has no navigate-within-tree command, so branch
-  // selection is display-only: the viewed branch is loaded from the session
-  // file, while a live agent keeps prompting from its own current leaf.
-  const handleNavigate = useCallback(async (entryId: string) => {
+  const handleNavigate = useCallback(async (entryId: string): Promise<boolean> => {
     // While a run is active its streaming frames append to the displayed
     // message list — swapping in another branch's context mid-run would mix
     // the running turn into the wrong branch (same gating as MessageView's
     // sessionBusy-navigable check).
-    if (bashRunningRef.current || agentRunningRef.current) return;
+    if (bashRunningRef.current || agentRunningRef.current) return false;
     const sid = sessionIdRef.current;
-    if (!sid) return;
+    if (!sid) return false;
     setActiveLeafId(entryId);
-    await loadContext(sid, entryId);
+    const ok = await loadContext(sid, entryId);
+    if (!ok) return false;
+    return true;
   }, [loadContext]);
 
   const handleLeafChange = useCallback(async (leafId: string | null) => {
@@ -3153,6 +3181,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         subagentVersionFlushFrameRef.current = null;
       }
       subagentVersionFlushRef.current = null;
+      subagentActivityFlushRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshSubagentRoster, registerHostTools, registerHostUriSchemes]);

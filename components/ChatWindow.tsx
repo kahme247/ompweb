@@ -1,7 +1,7 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
-import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronDown } from "lucide-react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
+import { ChevronDown, ChevronUp, Paperclip, Square } from "lucide-react";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
 import { countToolCallBlocks, getDisplayableAssistantBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
@@ -27,6 +27,7 @@ import {
   restoreScrollTop,
   VISIBLE_PAGE_SIZE,
 } from "@/lib/chat-lazy-load";
+import { getDraftSummary } from "@/lib/draft-store";
 
 interface Props {
   session: SessionInfo | null;
@@ -215,7 +216,7 @@ interface CommittedTranscriptProps {
   isNew: boolean;
   forkingEntryId: string | null;
   handleFork: (entryId: string) => void;
-  handleNavigate: (entryId: string) => void;
+  handleNavigate: (entryId: string) => boolean | Promise<boolean>;
   handleEditContent: (content: string) => void;
   modelNames: Record<string, string>;
   messageCwd: string | undefined;
@@ -442,6 +443,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
   const {
     loading, error, messages, entryIds, showPreCompactionHistory, streamState,
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, fastModeEnabled, fastModeActive,
+    toolPreset,
     liveModelMeta,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactResult, tokensPerSecond, displayModel: displayModelValue, sessionStats,
@@ -457,6 +459,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
     removeQueuedMessage, promoteQueuedToSteer,
     handleBuiltinSlashCommand, togglePreCompactionHistory,
     handleThinkingLevelChange, handleFastModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
+    handleToolPresetChange,
   } = useAgentSession({
     session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsPanelOpen,
@@ -475,13 +478,15 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
   useEffect(() => { onModelCapacityChange?.(modelCapacityRef.current); }, [modelCapacityKey, onModelCapacityChange]);
   const providerUsageContext = useMemo<ProviderUsageContext | null>(
     () => displayModelValue ? { provider: displayModelValue.provider, modelId: displayModelValue.modelId } : null,
+    // Deps are the primitive identity of the model — a new wrapper object
+    // per streaming frame must not re-create the context.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [displayModelValue?.provider, displayModelValue?.modelId],
   );
   useEffect(() => {
     onProviderUsageContextChange?.(providerUsageContext);
     return () => onProviderUsageContextChange?.(null);
   }, [onProviderUsageContextChange, providerUsageContext]);
-  const hasCompaction = messages.some((message) => message.role === "custom" && (message as CustomMessage).customType === "compaction");
   const [generationSpeed, setGenerationSpeed] = useState<GenerationSpeedInfo | null>(null);
   const speedSamplesRef = useRef<number[]>([]);
   // Source of truth is omp's own get_state.tokensPerSecond (polled by the
@@ -591,10 +596,13 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
     }
   }, [sessionKeyForPaging]);
   const [selectedSubagent, setSelectedSubagent] = useState<SubagentInfo | null>(null);
+  const [composerMinimized, setComposerMinimized] = useState(false);
+  const minimizedExpandRef = useRef<HTMLButtonElement | null>(null);
   // True while the viewport is at/near the conversation bottom. Drives the
   // anchored render window in CommittedTranscript.
   const [nearBottom, setNearBottom] = useState(true);
   useEffect(() => {
+    if (loading) return;
     const el = scrollContainerRef.current;
     if (!el) return;
     let raf: number | null = null;
@@ -612,7 +620,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
       el.removeEventListener("scroll", onScroll);
       if (raf !== null) cancelAnimationFrame(raf);
     };
-  }, [scrollContainerRef]);
+  }, [loading, scrollContainerRef]);
   const sentinelRef = useRef<HTMLButtonElement>(null);
   const prevScrollDistanceRef = useRef<number | null>(null);
   // "auto" (observer fired while scrolling) anchors the viewport to the old
@@ -758,16 +766,17 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
   const conversationMeta = useMemo(() => {
     const toolResultsMap = new Map<string, ToolResultMessage>();
     let lastAnchorIdx = -1;
+    let hasCompaction = false;
     const visibleRefIndexByMessage = new Map<number, number>();
     let refIdx = 0;
 
     messages.forEach((message, index) => {
       if (message.role === "toolResult") toolResultsMap.set((message as ToolResultMessage).toolCallId, message as ToolResultMessage);
+      if (message.role === "custom" && message.customType === "compaction") hasCompaction = true;
       if (isGroupAnchor(message)) lastAnchorIdx = index;
       if (message.role === "user" || message.role === "assistant") visibleRefIndexByMessage.set(index, refIdx++);
     });
-
-    return { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage };
+    return { toolResultsMap, lastAnchorIdx, hasCompaction, visibleRefIndexByMessage };
   }, [messages]);
   // The ref array is sized by the count of user/assistant messages — exactly
   // what conversationMeta's visibleRefIndexByMessage already tallies, so no
@@ -798,15 +807,25 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
   }, [agentPhase, committedToolCallIds, streamState.streamingMessage]);
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
+  // Reset minimized state on session switch (session-scoped)
+  useEffect(() => { setComposerMinimized(false); }, [sessionKeyForPaging]);
+  // The extension dialog renders inside the collapsible composer wrapper;
+  // never let a pending approval prompt sit hidden behind the minimized pill.
+  useEffect(() => { if (extensionDialog) setComposerMinimized(false); }, [extensionDialog]);
   const messageCwd = session?.cwd ?? newSessionCwd ?? undefined;
 
-  const availableThinkingLevels = displayModelValue
-    ? resolveAvailableThinkingLevels(
-        modelThinkingLevels[`${displayModelValue.provider}:${displayModelValue.modelId}`],
-        displayModelValue,
-        liveModelMeta,
-      )
-    : null;
+  const displayModelKey = displayModelValue ? `${displayModelValue.provider}:${displayModelValue.modelId}` : "";
+  const availableThinkingLevels = useMemo(
+    () =>
+      displayModelValue
+        ? resolveAvailableThinkingLevels(
+            modelThinkingLevels[displayModelKey],
+            displayModelValue,
+            liveModelMeta,
+          )
+        : null,
+    [displayModelKey, displayModelValue, modelThinkingLevels, liveModelMeta],
+  );
 
   const currentThinkingLevelMap = displayModelValue
     ? (modelThinkingLevelMaps[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
@@ -841,6 +860,16 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
     };
   }, [advisorRoleSelector, modelList]);
 
+  const handleMinimize = useCallback(() => {
+    setComposerMinimized(true);
+    /* Focus the pill's expand button after React commits the visibility change */
+    requestAnimationFrame(() => minimizedExpandRef.current?.focus());
+  }, []);
+  const handleExpand = useCallback(() => {
+    setComposerMinimized(false);
+    /* Focus the textarea after React commits the visibility change */
+    requestAnimationFrame(() => chatInputRef?.current?.focus());
+  }, [chatInputRef]);
 
   const chatInputElement = (
     <ChatInput
@@ -863,6 +892,8 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
       compactResult={compactResult}
       thinkingLevel={thinkingLevel}
       onThinkingLevelChange={session || isNew ? handleThinkingLevelChange : undefined}
+      toolPreset={toolPreset}
+      onToolPresetChange={handleToolPresetChange}
       fastModeEnabled={fastModeEnabled}
       fastModeActive={fastModeActive}
       fastModeSupported={Boolean(displayModelValue && modelList.some((entry) => entry.provider === displayModelValue.provider && entry.id === displayModelValue.modelId && entry.supportsFastMode))}
@@ -890,6 +921,10 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
       onAudioUnlock={unlockAudio}
       draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
       cwd={session?.cwd ?? newSessionCwd}
+      /* The pill bar and chevron only render in the non-empty layout; don't
+         accept Escape-to-minimize in the fresh-chat branch where there is
+         nothing to collapse. */
+      onMinimize={isEmptyNew ? undefined : handleMinimize}
     />
   );
 
@@ -1026,7 +1061,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
               <ExtensionStatusBar statuses={extensionStatuses} />
               <ExtensionWidgets widgets={aboveEditorWidgets} />
 
-            {hasCompaction && (
+            {conversationMeta.hasCompaction && (
               <div
                 style={{
                   display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
@@ -1073,8 +1108,8 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
             />
             {streamState.isStreaming && streamState.streamingMessage && (
               <MessageView
+                key={streamState.streamingMessage.timestamp ?? "stream"}
                 message={streamState.streamingMessage as AgentMessage}
-                isStreaming
                 modelNames={modelNames}
                 cwd={messageCwd}
                 onOpenFile={onOpenFile}
@@ -1162,7 +1197,45 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
         )}
       </div>
 
-      <div className="relative" style={{ flexShrink: 0 }}>
+      {/* Minimized pill bar - shown when composer is collapsed */}
+      {composerMinimized && (
+        <MinimizedComposerBar
+          draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
+          isStreaming={sessionBusy}
+          isCompacting={isCompacting}
+          expandRef={minimizedExpandRef}
+          onExpand={handleExpand}
+          onAbort={handleAbort}
+          onAbortCompaction={handleAbortCompaction}
+        />
+      )}
+
+      {/* Full composer - always mounted; hidden when minimized to preserve ref + state */}
+      <div className="relative" style={{ flexShrink: 0, display: composerMinimized ? "none" : undefined }}>
+        {/* Minimize chevron above the composer area */}
+        <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
+          <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto", display: "flex", justifyContent: "center" }}>
+            <button
+              type="button"
+              onClick={handleMinimize}
+              title={t("chatWindow.minimizeComposer")}
+              aria-label={t("chatWindow.minimizeComposer")}
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "center",
+                width: 44, height: 24,
+                background: "none", border: "none",
+                color: "var(--text-dim)",
+                cursor: "pointer", padding: 0,
+                borderRadius: 4,
+                transition: "color var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm)",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
+            >
+              <ChevronDown size={14} strokeWidth={1.8} />
+            </button>
+          </div>
+        </div>
         <div
           style={{
             padding: `0 ${CHAT_COLUMN_PADDING}px`,
@@ -1466,3 +1539,108 @@ function ExtensionCustomPanel({
     </div>
   );
 }
+
+/** Slim pill bar replacing the full composer when minimized. */
+const MinimizedComposerBar = memo(function MinimizedComposerBar({ draftKey, isStreaming, isCompacting, expandRef, onExpand, onAbort, onAbortCompaction }: {
+  draftKey?: string;
+  isStreaming: boolean;
+  isCompacting?: boolean;
+  expandRef?: Ref<HTMLButtonElement>;
+  onExpand: () => void;
+  onAbort: () => void;
+  onAbortCompaction?: () => void;
+}) {
+  const { t } = useI18n();
+
+  /* Read draft summary for preview without cloning attachment payloads */
+  const summary = draftKey ? getDraftSummary(draftKey) : null;
+  const draftText = summary?.text?.trim() || null;
+  const hasAttachments = summary?.hasAttachments ?? false;
+  return (
+    <div style={{ flexShrink: 0, padding: "4px 16px calc(6px + env(safe-area-inset-bottom))" }}>
+      <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 0,
+            height: 36,
+            background: "var(--bg)",
+            border: "1px solid color-mix(in srgb, var(--border) 70%, transparent)",
+            borderRadius: "var(--radius-card)",
+            boxShadow: "var(--shadow-card)",
+            overflow: "hidden",
+          }}
+        >
+          {/* Expand button - fills remaining space */}
+          <button
+            ref={expandRef}
+            type="button"
+            onClick={onExpand}
+            title={t("chatWindow.expandComposer")}
+            aria-label={t("chatWindow.expandComposer")}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              flex: 1,
+              minWidth: 0,
+              height: "100%",
+              padding: "0 14px",
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              textAlign: "left",
+            }}
+          >
+            <ChevronUp size={14} strokeWidth={1.8} style={{ flexShrink: 0, color: "var(--text-dim)" }} />
+            {hasAttachments && (
+              <Paperclip size={13} strokeWidth={1.8} style={{ flexShrink: 0, color: "var(--text-muted)" }} />
+            )}
+            <span style={{
+              flex: 1,
+              minWidth: 0,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              fontSize: 14,
+              color: draftText ? "var(--text)" : "var(--text-dim)",
+            }}>
+              {draftText ?? t("chatInput.placeholder")}
+            </span>
+          </button>
+
+          {/* Stop button - sibling, only when agent is running */}
+          {isStreaming && (
+            <button
+              type="button"
+              onClick={() => {
+                if (isCompacting && onAbortCompaction) onAbortCompaction();
+                else onAbort();
+              }}
+              title={t("chatInput.stopAgent")}
+              aria-label={t("chatInput.stopAgent")}
+              style={{
+                display: "flex", alignItems: "center", gap: 5,
+                height: 26,
+                padding: "0 12px",
+                marginRight: 5,
+                background: "var(--accent-strong)",
+                border: "none",
+                borderRadius: 7,
+                color: "var(--on-accent)",
+                cursor: "pointer",
+                fontSize: 12,
+                fontWeight: 600,
+                flexShrink: 0,
+              }}
+            >
+              <Square size={9} strokeWidth={0} fill="currentColor" aria-hidden="true" />
+              {t("chatInput.stop")}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+});

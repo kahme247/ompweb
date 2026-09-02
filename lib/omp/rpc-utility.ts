@@ -155,21 +155,38 @@ export function runUtilityCommand<T = unknown>(
 
 /** Run one RPC command on a dedicated throwaway process. Used where the shared
  * process must not be reused — e.g. the models-config connectivity test, which
- * points PI_CODING_AGENT_DIR at a temp dir via `env`. */
+ * points PI_CODING_AGENT_DIR at a temp dir via `env`.
+ *
+ * `signal` (optional) aborts the whole lifecycle: a not-yet-ready child is
+ * disposed immediately and a pending command is rejected. Callers with a
+ * Request should pass `request.signal` so a disconnected client does not keep
+ * a 60s registry spawn running. */
 export async function runIsolatedUtilityCommand<T = unknown>(
   command: { type: string; [key: string]: unknown },
-  options: { env?: Record<string, string>; cwd?: string; timeoutMs?: number } = {},
+  options: { env?: Record<string, string>; cwd?: string; timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<T> {
   const proc = new RpcProcess({
     cwd: options.cwd ?? homedir(),
     extraArgs: UTILITY_EXTRA_ARGS,
     env: options.env,
   });
+  const signal = options.signal;
+  const onAbort = () => { void proc.dispose(); };
+  if (signal) {
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  }
   try {
     const ready = await proc.waitReady(READY_TIMEOUT_MS);
     await proc.negotiateProtocol(ready);
     return await proc.sendCommand<T>(command, options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS);
+  } catch (error) {
+    if (signal?.aborted) {
+      throw new Error("Request aborted");
+    }
+    throw error;
   } finally {
+    if (signal) signal.removeEventListener("abort", onAbort);
     // Await the child's exit (not fire-and-forget): callers like the
     // models-config test remove their throwaway temp dir right after this
     // resolves, and on Windows a still-exiting child holding handles on that
