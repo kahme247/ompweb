@@ -6,6 +6,7 @@ import type { ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/typ
 import { useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { DirectoryPicker } from "./DirectoryPicker";
+import { ProjectLaunchConfigDialog } from "./ProjectLaunchConfigDialog";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { Tooltip } from "./ui/primitives";
 import { toast } from "./ui/toast";
@@ -581,6 +582,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const [expandedProjects, setExpandedProjects] = useState<Set<string> | null>(() => loadExpandedProjects());
   // Project currently being removed (hide) — serializes remove requests.
   const [removeProjectPath, setRemoveProjectPath] = useState<string | null>(null);
+  const [launchConfigProject, setLaunchConfigProject] = useState<ManagedProject | null>(null);
   // Worktree/branch/Git state is scoped per repository. It is cached in a
   // map keyed by the normalized repository root so switching workspaces never
   // leaks one project's branch/worktree data into another's UI (each project
@@ -1268,12 +1270,15 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     }
   }, [addProjectBusy, loadProjects, expandProject]);
 
-  const handleUpdateProjectPresentation = useCallback(async (projectPath: string, updates: { alias?: string | null; sortOrder?: number | null }) => {
+  const handleUpdateProjectPresentation = useCallback(async (projectPath: string, updates: { alias?: string | null; sortOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }) => {
     try {
       const response = await fetch("/api/projects", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cwd: projectPath, ...updates }) });
       if (!response.ok) throw new Error(t("projects.updateFailed"));
       await loadProjects();
-    } catch (error) { toast.error(error instanceof Error ? error.message : String(error)); }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+      throw error;
+    }
   }, [loadProjects, t]);
 
   /** Persist one whole-list order as a single atomic batched PATCH. */
@@ -1607,6 +1612,17 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
           onSelect={(path, launchConfig) => void commitAddProject(path, launchConfig)}
         />
       )}
+      {launchConfigProject && (
+        <ProjectLaunchConfigDialog
+          projectPath={launchConfigProject.path}
+          initialConfig={launchConfigProject.launchConfig}
+          onClose={() => setLaunchConfigProject(null)}
+          onSave={async (launchConfig) => {
+            await handleUpdateProjectPresentation(launchConfigProject.path, { launchConfig });
+            toast.info("工作区启动参数已保存；下次启动或重新加载 omp 会生效。");
+          }}
+        />
+      )}
       {/* Header: branding + quiet utilities + New Session */}
       <div
         style={{
@@ -1848,6 +1864,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                 onActivate={activateProject}
                 onToggleExpand={toggleProjectExpanded}
                 onRemoveProject={handleRemoveProject}
+                onEditLaunchConfig={setLaunchConfigProject}
                 onUpdatePresentation={handleUpdateProjectPresentation}
                 onDragPathChange={setDraggedProjectPath}
                 onDropProject={(path) => void handleProjectDrop(path)}
@@ -2089,6 +2106,7 @@ interface ProjectRowProps {
   onActivate: (path: string) => void;
   onToggleExpand: (path: string) => void;
   onRemoveProject: (path: string) => void;
+  onEditLaunchConfig: (project: ManagedProject) => void;
   onUpdatePresentation: (path: string, updates: { alias?: string | null; sortOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }) => void;
   onDragPathChange: (path: string | null) => void;
   onDropProject: (path: string) => void;
@@ -2125,6 +2143,7 @@ function ProjectRow({
   onActivate,
   onToggleExpand,
   onRemoveProject,
+  onEditLaunchConfig,
   onUpdatePresentation,
   onDragPathChange,
   onDropProject,
@@ -2251,6 +2270,18 @@ function ProjectRow({
             />
           </div>
         ) : (
+          <Tooltip
+            content={(
+              <span style={{ display: "grid", gap: 3, maxWidth: 360, whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontFamily: "var(--font-mono)", fontSize: 11 }}>
+                <strong style={{ fontFamily: "inherit", fontSize: 11 }}>目录</strong>
+                <span>{project.path}</span>
+                {project.launchConfig?.profile && <span>profile: {project.launchConfig.profile}</span>}
+                {project.launchConfig?.advisor && <span>--advisor</span>}
+                {project.launchConfig?.extraArgs?.map((arg, index) => <span key={`${arg}-${index}`}>{arg}</span>)}
+              </span>
+            )}
+            side="right"
+          >
           <button
             className="sidebar-project-identity"
             onClick={() => onActivate(project.path)}
@@ -2292,6 +2323,7 @@ function ProjectRow({
               {label}
             </span>
           </button>
+          </Tooltip>
         )}
         {worktreeBranch && worktreeToggleRef && (
           <button
@@ -2377,6 +2409,9 @@ function ProjectRow({
           >
             <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { startAliasEdit(); setActionMenuOpen(false); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
               {project.alias ? t("projects.editAlias") : t("projects.nameAlias")}
+            </button>
+            <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { onEditLaunchConfig(project); setActionMenuOpen(false); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
+              {project.launchConfig ? "编辑 OMP 启动参数" : "配置 OMP 启动参数"}
             </button>
             <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { setActionMenuOpen(false); void onMoveProject(project.path, -1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
               {t("projects.moveUp")}
