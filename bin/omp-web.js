@@ -9,6 +9,17 @@ if (!isNodeVersionSupported(process.versions.node)) {
   process.exit(1);
 }
 
+// Forward `ompweb ompweb-launchd [args]` → bin/omp-web-launchd.js so that
+// `npx @kahme247/ompweb@latest ompweb-launchd install` works without `-p`.
+if (process.argv[2] === "ompweb-launchd" || process.argv[2] === "launchd") {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { spawnSync } = require("node:child_process");
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { join } = require("node:path");
+  const { status } = spawnSync(process.execPath, [join(__dirname, "omp-web-launchd.js"), ...process.argv.slice(3)], { stdio: "inherit" });
+  process.exit(status ?? 1);
+}
+
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { spawn } = require("node:child_process");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
