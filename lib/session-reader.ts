@@ -1,5 +1,5 @@
 import { existsSync, statSync } from "fs";
-import { normalize as normalizePath } from "path";
+import { normalize as normalizePath, sep } from "path";
 import { getAgentDir, normalizeProfileName } from "./omp/paths";
 import { loadProjectRegistry } from "./project-registry";
 import {
@@ -46,6 +46,22 @@ function matchParentSessionId(
   const scopedId = sessionKeyForProfile(profile, parentSession);
   return knownIds.has(scopedId) ? scopedId : undefined;
 }
+/**
+ * 查询会话 cwd 所属工作区的 Profile。会话可从工作区子目录启动，
+ * 因此按最长工作区路径匹配 cwd 与解析出的项目根目录。
+ */
+function profileForSessionWorkspace(
+  workspaceProfiles: ReadonlyArray<{ pathKey: string; profile: string }>,
+  cwd: string,
+  projectRoot: string,
+): string | undefined {
+  const candidates = [projectIdentityKey(projectRoot), projectIdentityKey(cwd)];
+  const match = workspaceProfiles.find(({ pathKey }) => candidates.some((candidate) => (
+    candidate === pathKey || candidate.startsWith(pathKey.endsWith(sep) ? pathKey : `${pathKey}${sep}`)
+  )));
+  return match?.profile;
+}
+
 
 async function loadAllSessions(): Promise<SessionInfo[]> {
   const registry = loadProjectRegistry();
@@ -55,6 +71,10 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
     const profile = project.launchConfig?.profile;
     if (profile) profiles.add(normalizeProfileName(profile) ?? "");
   }
+  const workspaceProfiles = registry.projects.flatMap((project) => {
+    const profile = normalizeProfileName(project.launchConfig?.profile);
+    return profile ? [{ pathKey: projectIdentityKey(project.path), profile }] : [];
+  }).sort((a, b) => b.pathKey.length - a.pathKey.length);
   const profileSessions = await Promise.all(
     [...profiles].map(async (profileValue) => ({
       profile: normalizeProfileName(profileValue),
@@ -92,11 +112,9 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
   return ompSessions.flatMap(({ profile, session: s }) => {
     const project = s.cwd ? projectByCwd.get(s.cwd) : undefined;
     const projectRoot = project?.projectRoot ?? s.cwd;
-    const configuredProfile = registry.projects.find(
-      (entry) => projectIdentityKey(entry.path) === projectIdentityKey(projectRoot),
-    )?.launchConfig?.profile;
-    // 已配置 profile 的工作区只能显示该 profile 的记录，避免默认目录混入。
-    if (configuredProfile !== undefined && normalizeProfileName(configuredProfile) !== profile) return [];
+    const configuredProfile = profileForSessionWorkspace(workspaceProfiles, s.cwd, projectRoot);
+    // 已配置 Profile 的工作区及其子目录只显示所属 Profile，避免默认目录混入。
+    if (configuredProfile !== undefined && configuredProfile !== profile) return [];
 
     const id = sessionKeyForProfile(profile, s.id);
     cacheSessionPath(id, s.path);
