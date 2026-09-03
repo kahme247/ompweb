@@ -30,15 +30,14 @@ function parseLaunchConfig(value: unknown): ProjectLaunchConfig | undefined {
   const profile = raw.profile === undefined ? undefined : typeof raw.profile === "string" && raw.profile.trim() ? raw.profile.trim() : undefined;
   if (raw.profile !== undefined && !profile) throw new ProjectPathError("invalid_profile", "Profile must be a non-empty string");
   if (profile?.startsWith("-")) throw new ProjectPathError("invalid_profile", "Profile must not start with '-'");
-  const advisor = raw.advisor === undefined ? undefined : raw.advisor;
-  if (advisor !== undefined && typeof advisor !== "boolean") throw new ProjectPathError("invalid_advisor", "Advisor must be a boolean");
+  if (raw.advisor !== undefined) throw new ProjectPathError("invalid_launch_config", "Advisor is not a supported workspace launch setting");
   if (raw.extraArgs !== undefined && (!Array.isArray(raw.extraArgs) || raw.extraArgs.length > MAX_EXTRA_ARGS)) throw new ProjectPathError("invalid_extra_args", "Extra args must contain at most 32 arguments");
   const extraArgs = raw.extraArgs === undefined ? undefined : (raw.extraArgs as unknown[]).map((arg) => {
     if (typeof arg !== "string" || !arg || arg.length > MAX_EXTRA_ARG_LENGTH || isReservedLaunchArg(arg)) throw new ProjectPathError("invalid_extra_args", "Extra args contain an invalid or reserved argument");
     return arg;
   });
-  if (!profile && advisor === undefined && (!extraArgs || extraArgs.length === 0)) return undefined;
-  return { profile, advisor, extraArgs };
+  if (!profile && (!extraArgs || extraArgs.length === 0)) return undefined;
+  return { profile, extraArgs };
 }
 
 // GET /api/projects  →  { projects: ManagedProject[] }

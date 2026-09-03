@@ -8,6 +8,19 @@ import { WebRpcError, startRpcSession } from "@/lib/rpc-manager";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "@/lib/image-attachments";
+import { loadProjectRegistry } from "@/lib/project-registry";
+import { comparableProjectPath } from "@/lib/comparable-path";
+import { resolveProject } from "@/lib/worktree";
+import { normalizeProfileName } from "@/lib/omp/paths";
+/** 根据新会话 cwd 解析其工作区 profile；未配置时使用默认 profile。 */
+async function profileForNewSession(cwd: string): Promise<string | undefined> {
+  const project = await resolveProject(cwd);
+  const projectRoot = project.projectRoot;
+  const config = loadProjectRegistry().projects.find(
+    (entry) => comparableProjectPath(entry.path) === comparableProjectPath(projectRoot),
+  )?.launchConfig;
+  return normalizeProfileName(config?.profile);
+}
 
 function newSessionErrorResponse(error: unknown) {
   if (error instanceof RequestBodyTooLargeError) {
@@ -43,17 +56,23 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: `Directory does not exist: ${cwd}`, code: "directory_not_found" }, { status: 400 });
     }
 
-    // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids
-    const { provider, modelId, toolNames, thinkingLevel, advisor, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: string; advisor?: boolean; [key: string]: unknown };
+    const { provider, modelId, toolNames, thinkingLevel, advisor, ...promptCommand } = command as {
+      provider?: string;
+      modelId?: string;
+      toolNames?: string[];
+      thinkingLevel?: string;
+      advisor?: boolean;
+      [key: string]: unknown;
+    };
     if (typeof promptCommand.type !== "string" || !promptCommand.type.trim()) {
       return NextResponse.json({ error: "command type is required", code: "command_type_required" }, { status: 400 });
     }
 
-    // Must be unique per request: startRpcSession coalesces concurrent callers
-    // that share a key onto one session. Date.now() (ms resolution) collides for
-    // requests in the same millisecond, merging two new sessions into one.
+    // 使用一次性键避免并发新建请求互相合并；启动时显式传入工作区 profile。
     const tempKey = `__new__${randomUUID()}`;
-    const { session, realSessionId } = await startRpcSession(tempKey, "", cwd, toolNames, advisor === true);
+    const profile = await profileForNewSession(cwd);
+    const launchConfig = profile ? { profile } : undefined;
+    const { session, realSessionId } = await startRpcSession(tempKey, "", cwd, toolNames, advisor === true, undefined, launchConfig);
 
     // Keep the files-route allowed-roots cache (see app/api/files/[...path]/route.ts)
     // in sync so the new cwd is immediately readable via /api/files. Without this,
@@ -72,13 +91,15 @@ export async function POST(req: Request) {
         await session.send({ type: "set_thinking_level", level: thinkingLevel });
       }
 
+      // startRpcSession 已返回带 profile 命名空间的 Web 会话标识，不能再次封装。
+      const sessionId = realSessionId
       if (promptCommand.type === "ensure_session") {
-        return NextResponse.json({ success: true, sessionId: realSessionId, data: null });
+        return NextResponse.json({ success: true, sessionId, data: null });
       }
 
       const result = await session.send(promptCommand);
 
-      return NextResponse.json({ success: true, sessionId: realSessionId, data: result });
+      return NextResponse.json({ success: true, sessionId, data: result });
     } catch (error) {
       // The child was spawned but the prompt never ran: without this cleanup a
       // failed set_model/set_thinking_level/prompt leaves an orphaned omp

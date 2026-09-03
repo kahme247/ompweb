@@ -54,7 +54,7 @@ function isWindowsDriveRoot(directory: string): boolean {
 
 interface Props {
   onCancel: () => void;
-  onSelect: (path: string, launchConfig?: { profile?: string; advisor?: boolean; extraArgs?: string[] }) => void;
+  onSelect: (path: string, launchConfig?: { profile?: string; extraArgs?: string[] }) => void;
   busy?: boolean;
   error?: string | null;
 }
@@ -69,7 +69,6 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
   const [drives, setDrives] = useState<DirectoryEntry[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [profile, setProfile] = useState("");
-  const [advisor, setAdvisor] = useState(false);
   const [extraArgs, setExtraArgs] = useState("");
   const [loading, setLoading] = useState(true);
   const dialogRef = useModalDialog<HTMLDivElement>({
@@ -110,7 +109,7 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
   const canNavigateUp = Boolean(parentDirectory) || isWindowsDriveRoot(currentPath);
   const submitSelection = () => {
     const args = extraArgs.split("\n").map((arg) => arg.trim()).filter(Boolean);
-    onSelect(currentPath, { profile: profile.trim() || undefined, advisor: advisor || undefined, extraArgs: args.length ? args : undefined });
+    onSelect(currentPath, { profile: profile.trim() || undefined, extraArgs: args.length ? args : undefined });
   };
 
   if (!portalTarget) return null;
@@ -222,7 +221,6 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
 
         <div style={{ flexShrink: 0, padding: "10px 18px", borderTop: "1px solid var(--border)" }}>
           <input value={profile} onChange={(event) => setProfile(event.target.value)} placeholder="OMP profile（可选）" aria-label="OMP profile" style={{ width: "100%", height: 30, boxSizing: "border-box", marginBottom: 7, padding: "0 8px", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11 }} />
-          <label style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 7, color: "var(--text-muted)", fontSize: 11 }}><input type="checkbox" checked={advisor} onChange={(event) => setAdvisor(event.target.checked)} />以 advisor 模式启动</label>
           <textarea value={extraArgs} onChange={(event) => setExtraArgs(event.target.value)} placeholder="额外参数，每行一个（可选）" aria-label="OMP extra arguments" rows={2} style={{ width: "100%", boxSizing: "border-box", resize: "vertical", padding: "6px 8px", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11 }} />
         </div>
         <div className="directory-picker-footer" style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 10, flexShrink: 0, padding: "10px 18px", borderTop: "1px solid var(--border)" }}>

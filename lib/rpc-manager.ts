@@ -8,6 +8,7 @@ import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
 import { PRESET_FULL } from "./tool-presets";
 import { comparableProjectPath } from "./comparable-path";
 import { isReservedLaunchArg, loadProjectRegistry } from "./project-registry";
+import { isProfiledSessionKey, profileForSessionKey, sessionKeyForProfile } from "./session-identity";
 import type {
   BashResultInfo,
   OmpModel,
@@ -135,32 +136,23 @@ export function mapPresetToolNames(toolNames: string[]): string[] {
 const FULL_PRESET_KEY = [...PRESET_FULL].map((n) => n.toLowerCase()).sort().join(",");
 
 /** Extra CLI args for spawning `omp --mode rpc-ui` for a session. */
+/** 生成 OMP 启动参数；profile 必须先于 --resume 传入以选择正确的会话存储。 */
 export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[], advisor = false, launchConfig?: ProjectLaunchConfig): string[] {
   const args: string[] = [];
+  if (advisor) args.push("--advisor");
+  if (launchConfig?.profile && !launchConfig.profile.startsWith("-")) args.push("--profile", launchConfig.profile);
+  if (launchConfig?.extraArgs) args.push(...launchConfig.extraArgs.filter((arg) => !isReservedLaunchArg(arg)));
   if (sessionFile) {
-    // An absolute path (or anything containing "/") resolves deterministically:
-    // omp's createSessionManager opens it directly via SessionManager.open
-    // without any interactive resume/fork prompts (main.ts resume handling).
     args.push("--resume", sessionFile);
   } else if (toolNames !== undefined) {
     const presetKey = toolNames.map((n) => n.toLowerCase()).sort().join(",");
     if (toolNames.length === 0) {
       args.push("--no-tools");
-    } else if (presetKey === FULL_PRESET_KEY) {
-      // "Full" means everything: leave omp's complete default toolset intact
-      // rather than restricting it to the (much smaller) pi preset list.
-    } else {
+    } else if (presetKey !== FULL_PRESET_KEY) {
       const mapped = mapPresetToolNames(toolNames);
       if (mapped.length > 0) args.push("--tools", mapped.join(","));
     }
   }
-  if (advisor) args.push("--advisor");
-  else if (launchConfig?.advisor) args.push("--advisor");
-  // Defense in depth: the registry is hand-editable, so re-strip reserved
-  // args and dash-leading profiles at the spawn boundary even though the
-  // API validates them on write.
-  if (launchConfig?.profile && !launchConfig.profile.startsWith("-")) args.push("--profile", launchConfig.profile);
-  if (launchConfig?.extraArgs) args.push(...launchConfig.extraArgs.filter((arg) => !isReservedLaunchArg(arg)));
   return args;
 }
 
@@ -268,6 +260,8 @@ export class AgentSessionWrapper {
    * only (no runtime RPC toggles it), so applying a changed advisor setting
    * means replacing an idle child on the next startRpcSession call. */
   readonly advisorSpawned: boolean;
+  /** 会话文件所属的 profile；所有 Web 侧缓存与路由键必须携带它。 */
+  readonly profile: string | undefined;
   /** The cwd recorded in the session file header; null for brand-new sessions
    * or when the header lacks one. Used to detect a spawn fallback so a notice
    * can warn the user the agent is running in a different directory. */
@@ -275,11 +269,12 @@ export class AgentSessionWrapper {
 
   // Plain field assignments (not TS parameter properties) keep this module
   // runnable under Node's strip-only TypeScript mode for probes/tests.
-  constructor(proc: RpcProcess, cwd: string, recordedCwd?: string | null, advisorSpawned = false) {
+  constructor(proc: RpcProcess, cwd: string, recordedCwd?: string | null, advisorSpawned = false, profile?: string) {
     this.proc = proc;
     this.cwd = cwd;
     this.recordedCwd = recordedCwd ?? null;
     this.advisorSpawned = advisorSpawned;
+    this.profile = profile;
   }
 
   get sessionId(): string {
@@ -341,7 +336,7 @@ export class AgentSessionWrapper {
     this.streaming = state.isStreaming;
     this.compacting = state.isCompacting;
     this.fastModeEnabled = state.fastModeEnabled ?? state.fastMode ?? this.fastModeEnabled;
-    if (this._sessionFile) cacheSessionPath(this._sessionId, this._sessionFile);
+    if (this._sessionFile) cacheSessionPath(sessionKeyForProfile(this.profile, this._sessionId), this._sessionFile);
   }
 
   handleProcessExit(stderrTail: string): void {
@@ -903,17 +898,15 @@ export class AgentSessionWrapper {
       this.extensionStatuses.clear();
       this.extensionWidgets.clear();
       this.clearPendingUiRequests();
-      this.promptRunning = false;
-      this.promptDispatchPendingCount = 0;
-      this.awaitingAgentStart = false;
-      this.awaitingAgentStartDeadline = 0;
       this.continuationGraceUntil = 0;
       this.bashRunning = false;
       this.streaming = false;
       this.compacting = false;
+      const launchConfig = launchConfigForSession(sessionKeyForProfile(this.profile, this._sessionId), this.cwd);
       const proc = new RpcProcess({
         cwd: this.cwd,
-        extraArgs: buildSessionSpawnArgs(resumable ? sessionFile : "", undefined, this.advisorSpawned, launchConfigForCwd(this.cwd)),
+        env: launchEnvForConfig(launchConfig),
+        extraArgs: buildSessionSpawnArgs(resumable ? sessionFile : "", undefined, this.advisorSpawned, launchConfig),
         onExit: ({ stderrTail }) => {
           if (this.proc === proc) this.handleProcessExit(stderrTail);
         },
@@ -1273,6 +1266,7 @@ export class AgentSessionWrapper {
 // Session registry
 // ============================================================================
 export interface RunningRpcSession {
+  /** 含 profile 的 Web 会话标识，避免不同 profile 的原生 id 碰撞。 */
   id: string;
   cwd: string;
 }
@@ -1311,10 +1305,10 @@ export function getRpcSession(sessionId: string): AgentSessionWrapper | undefine
 
 export function getRunningRpcSessions(): RunningRpcSession[] {
   const map = new Map<string, string>();
-  for (const [sessionId, session] of getRegistry()) {
+  for (const [sessionKey, session] of getRegistry()) {
     if (session.isRunning()) {
-      const realId = session.sessionId || sessionId;
-      map.set(realId, session.cwd);
+      const nativeSessionId = session.sessionId || sessionKey;
+      map.set(sessionKeyForProfile(session.profile, nativeSessionId), session.cwd);
     }
   }
   return [...map.entries()].map(([id, cwd]) => ({ id, cwd }));
@@ -1373,6 +1367,19 @@ export function notifyRunningChange({ refreshSessionList = false }: { refreshSes
   }
 }
 
+/** 为 OMP 子进程注入 profile 环境，确保路径解析早于 CLI 恢复流程生效。 */
+function launchEnvForConfig(launchConfig: ProjectLaunchConfig | undefined): Record<string, string> | undefined {
+  const profile = launchConfig?.profile;
+  return profile ? { OMP_PROFILE: profile, PI_PROFILE: profile } : undefined;
+}
+
+/** 将工作区配置绑定到会话自身的 profile，避免恢复时被当前设置改写。 */
+function launchConfigForSession(sessionKey: string, cwd: string): ProjectLaunchConfig | undefined {
+  const config = launchConfigForCwd(cwd);
+  if (!isProfiledSessionKey(sessionKey)) return config;
+  return { ...config, profile: profileForSessionKey(sessionKey) };
+}
+
 /** 获取工作区注册的启动配置；未注册项目不附加配置。 */
 function launchConfigForCwd(cwd: string): ProjectLaunchConfig | undefined {
   let canonical = cwd;
@@ -1386,10 +1393,9 @@ function launchConfigForCwd(cwd: string): ProjectLaunchConfig | undefined {
 }
 
 /**
- * Get or create the omp RPC process for the given session.
- * For new sessions (sessionFile === ""), omp generates its own id.
- * Pass toolNames to pre-configure the builtin toolset of a NEW session
- * (empty array = all tools disabled); ignored when resuming.
+ * 获取或创建 omp RPC 会话。
+ * 新会话必须在进程 ready 后切换到空会话，避免 omp 默认加载当前 profile
+ * 最近一次历史记录；恢复会话则始终通过 --resume 指定文件。
  */
 export async function startRpcSession(
   sessionId: string,
@@ -1406,7 +1412,7 @@ export async function startRpcSession(
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
-  launchConfig = launchConfig ?? launchConfigForCwd(cwd);
+  launchConfig = launchConfig ?? launchConfigForSession(sessionId, cwd);
 
   const existing = registry.get(sessionId);
   if (existing?.isAlive()) {
@@ -1435,31 +1441,37 @@ export async function startRpcSession(
     const holder: { wrapper?: AgentSessionWrapper } = {};
     const proc = new RpcProcess({
       cwd,
+      env: launchEnvForConfig(launchConfig),
       extraArgs: buildSessionSpawnArgs(sessionFile, toolNames, advisor === true, launchConfig),
       onExit: ({ stderrTail }) => holder.wrapper?.handleProcessExit(stderrTail),
     });
-    const created = new AgentSessionWrapper(proc, cwd, recordedCwd, advisor === true || launchConfig?.advisor === true);
+    const sessionProfile = profileForSessionKey(sessionId) ?? launchConfig?.profile;
+    const created = new AgentSessionWrapper(proc, cwd, recordedCwd, advisor === true, sessionProfile);
     holder.wrapper = created;
     created.start();
     try {
       await created.waitUntilReady();
+      if (!sessionFile) {
+        // omp RPC 启动可能自动附着 profile 最近会话；ready 后显式切换到
+        // 新会话，确保新建对话不会继承旧历史内容。
+        await created.send({ type: "new_session" });
+      }
     } catch (error) {
       // Await the child's full exit before the `finally` releases the startup
-      // lock: a fire-and-forget destroy() would let a retry spawn a second
-      // OMP child while the failed one is still flushing/exiting, and
-      // concurrent resume/delete/archive paths could race that old child.
+      // lock，避免失败重试与旧进程并发操作同一会话。
       await created.destroyAndWait();
       throw error;
     }
 
-    const realSessionId = created.sessionId;
+    const realSessionId = sessionKeyForProfile(created.profile, created.sessionId);
     created.onDestroy(() => {
-      if (registry.get(created.sessionId) === created) registry.delete(created.sessionId);
+      if (registry.get(sessionKeyForProfile(created.profile, created.sessionId)) === created) registry.delete(sessionKeyForProfile(created.profile, created.sessionId));
       if (registry.get(realSessionId) === created) registry.delete(realSessionId);
     });
     created.onIdentityChange((oldId, newId) => {
-      if (registry.get(oldId) === created) registry.delete(oldId);
-      registry.set(newId, created);
+      const oldSessionKey = sessionKeyForProfile(created.profile, oldId);
+      if (registry.get(oldSessionKey) === created) registry.delete(oldSessionKey);
+      registry.set(sessionKeyForProfile(created.profile, newId), created);
     });
     registry.set(realSessionId, created);
     return { session: created, realSessionId };

@@ -415,6 +415,8 @@ export interface SessionInfo {
   path: string;
   id: string;
   cwd: string;
+  /** 会话所属的 OMP profile；默认 profile 为 undefined。 */
+  profile?: string;
   name?: string;
   created: string;
   modified: string;
@@ -449,8 +451,6 @@ export interface ArchivedSessionInfo {
 export interface ProjectLaunchConfig {
   /** 使用的 OMP profile。 */
   profile?: string;
-  /** 是否以 advisor 模式启动。 */
-  advisor?: boolean;
   /** 按参数数组保存的额外 OMP CLI 参数。 */
   extraArgs?: string[];
 }

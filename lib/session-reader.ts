@@ -1,6 +1,7 @@
 import { existsSync, statSync } from "fs";
 import { normalize as normalizePath } from "path";
-import { getAgentDir } from "./omp/paths";
+import { getAgentDir, normalizeProfileName } from "./omp/paths";
+import { loadProjectRegistry } from "./project-registry";
 import {
   invalidateSessionFileListCache,
   listAllSessionInfos,
@@ -24,6 +25,7 @@ import type { TodoPhase } from "./pi-types";
 import { projectIdentityKey, sessionPathKey } from "./paths";
 import { resolveProject, type ProjectInfo } from "./worktree";
 
+import { sessionKeyForProfile } from "./session-identity";
 export { getAgentDir };
 
 /**
@@ -35,27 +37,49 @@ export { getAgentDir };
  */
 function matchParentSessionId(
   parentSession: string,
+  profile: string | undefined,
   pathToId: Map<string, string>,
   knownIds: Set<string>,
 ): string | undefined {
   const byPath = pathToId.get(sessionPathKey(parentSession));
   if (byPath) return byPath;
-  return knownIds.has(parentSession) ? parentSession : undefined;
+  const scopedId = sessionKeyForProfile(profile, parentSession);
+  return knownIds.has(scopedId) ? scopedId : undefined;
 }
 
 async function loadAllSessions(): Promise<SessionInfo[]> {
-  const ompSessions: OmpSessionInfo[] = await listAllSessionInfos();
+  const registry = loadProjectRegistry();
+  // 空字符串显式指向默认 profile；不能传 undefined，否则会继承 omp-web 进程 profile。
+  const profiles = new Set<string>([""]);
+  for (const project of registry.projects) {
+    const profile = project.launchConfig?.profile;
+    if (profile) profiles.add(normalizeProfileName(profile) ?? "");
+  }
+  const profileSessions = await Promise.all(
+    [...profiles].map(async (profileValue) => ({
+      profile: normalizeProfileName(profileValue),
+      sessions: await listAllSessionInfos(profileValue),
+    })),
+  );
+  const ompSessions: Array<{ profile: string | undefined; session: OmpSessionInfo }> = [];
+  const seenPaths = new Set<string>();
+  for (const { profile, sessions } of profileSessions) {
+    for (const session of sessions) {
+      if (seenPaths.has(session.path)) continue;
+      seenPaths.add(session.path);
+      ompSessions.push({ profile, session });
+    }
+  }
+  ompSessions.sort((a, b) => b.session.modified.getTime() - a.session.modified.getTime());
   const pathToId = new Map<string, string>();
   const knownIds = new Set<string>();
-  for (const s of ompSessions) {
-    pathToId.set(sessionPathKey(s.path), s.id);
-    knownIds.add(s.id);
+  for (const { profile, session } of ompSessions) {
+    const sessionKey = sessionKeyForProfile(profile, session.id);
+    pathToId.set(sessionPathKey(session.path), sessionKey);
+    knownIds.add(sessionKey);
   }
 
-  // Resolve each unique cwd to its project root (main repo shared by all
-  // worktrees). resolveProject caches per-cwd, so this is cheap after warmup.
-  // Bound concurrency so 100+ unique cwds don't spawn 100 parallel git processes.
-  const uniqueCwds = [...new Set(ompSessions.map((s) => s.cwd).filter(Boolean))];
+  const uniqueCwds = [...new Set(ompSessions.map(({ session }) => session.cwd).filter(Boolean))];
   const projectByCwd = new Map<string, ProjectInfo>();
   const CONCURRENCY = 6;
   for (let i = 0; i < uniqueCwds.length; i += CONCURRENCY) {
@@ -65,14 +89,22 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
     }));
   }
 
-  return ompSessions.map((s) => {
-    cacheSessionPath(s.id, s.path);
+  return ompSessions.flatMap(({ profile, session: s }) => {
     const project = s.cwd ? projectByCwd.get(s.cwd) : undefined;
-    return {
+    const projectRoot = project?.projectRoot ?? s.cwd;
+    const configuredProfile = registry.projects.find(
+      (entry) => projectIdentityKey(entry.path) === projectIdentityKey(projectRoot),
+    )?.launchConfig?.profile;
+    // 已配置 profile 的工作区只能显示该 profile 的记录，避免默认目录混入。
+    if (configuredProfile !== undefined && normalizeProfileName(configuredProfile) !== profile) return [];
+
+    const id = sessionKeyForProfile(profile, s.id);
+    cacheSessionPath(id, s.path);
+    return [{
       path: s.path,
-      id: s.id,
+      id,
+      profile,
       cwd: s.cwd,
-      // omp renamed the display field to `title`; the internal shape keeps `name`.
       name: s.title,
       created: s.created instanceof Date && !Number.isNaN(s.created.getTime())
         ? s.created.toISOString()
@@ -81,12 +113,12 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
       messageCount: s.messageCount,
       firstMessage: s.firstMessage || "(no messages)",
       parentSessionId: s.parentSessionPath
-        ? matchParentSessionId(s.parentSessionPath, pathToId, knownIds)
+        ? matchParentSessionId(s.parentSessionPath, profile, pathToId, knownIds)
         : undefined,
-      projectRoot: project?.projectRoot ?? s.cwd,
-      projectKey: projectIdentityKey(project?.projectRoot ?? s.cwd),
+      projectRoot,
+      projectKey: projectIdentityKey(projectRoot),
       ...(project?.isWorktree && project.branch ? { worktreeBranch: project.branch } : {}),
-    };
+    }];
   });
 }
 
@@ -198,12 +230,13 @@ export async function resolveSessionIdByPath(filePath: string): Promise<string |
  * Resolve a `header.parentSession` value (either a session file path or a bare
  * session id — see matchParentSessionId) to the parent's session id.
  */
-export async function resolveParentSessionId(parentSession: string): Promise<string | undefined> {
+export async function resolveParentSessionId(parentSession: string, profile?: string): Promise<string | undefined> {
   if (!parentSession) return undefined;
   const byPath = await resolveSessionIdByPath(parentSession);
   if (byPath) return byPath;
-  // Id form: only accept it when a session file with that id still exists.
-  return (await resolveSessionPath(parentSession)) ? parentSession : undefined;
+  const parentId = sessionKeyForProfile(profile, parentSession);
+  // 原生 parentSession 的裸 id 与当前会话共用 profile。
+  return (await resolveSessionPath(parentId)) ? parentId : undefined;
 }
 
 export function cacheSessionPath(sessionId: string, filePath: string): void {

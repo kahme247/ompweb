@@ -1108,6 +1108,11 @@ pre, code {
   outline-offset: -2px;
 }
 
+/* 分隔条只保留拖动命中区域；资源管理器原有顶边线承担视觉分区。 */
+.sidebar-panel-resizer:focus-visible {
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--accent) 32%, transparent);
+}
+
 /* Sidebar overflow menus: compact items with a subtle warm hover highlight. */
 .sidebar-menu-item {
   display: block;

@@ -58,20 +58,20 @@ export function getConfigDirName(): string {
 }
 
 /** Config root: ~/.omp, or ~/.omp/profiles/<name> for a named profile. */
-export function getConfigRoot(): string {
+export function getConfigRoot(profileOverride?: string): string {
   const base = path.join(homedir(), getConfigDirName());
-  const profile = getActiveProfile();
+  const profile = profileOverride === undefined ? getActiveProfile() : normalizeProfileName(profileOverride);
   return profile ? path.join(base, "profiles", profile) : base;
 }
 
 /** The agent state directory (~/.omp/agent). PI_CODING_AGENT_DIR overrides it,
  * but a named profile takes precedence over the override (matching omp, where
  * profile activation rewrites PI_CODING_AGENT_DIR itself). */
-export function getAgentDir(): string {
-  const profile = getActiveProfile();
+export function getAgentDir(profileOverride?: string): string {
+  const profile = profileOverride === undefined ? getActiveProfile() : normalizeProfileName(profileOverride);
   const override = process.env.PI_CODING_AGENT_DIR;
   if (override && !profile) return path.resolve(override);
-  return path.join(getConfigRoot(), "agent");
+  return path.join(getConfigRoot(profileOverride), "agent");
 }
 
 function isDefaultAgentDir(): boolean {
@@ -105,14 +105,14 @@ function xdgDataAgentRoot(): string | undefined {
   }
 }
 
-function agentDataSubdir(subdir: string): string {
-  const xdg = xdgDataAgentRoot();
-  return path.join(xdg ?? getAgentDir(), subdir);
+function agentDataSubdir(subdir: string, profileOverride?: string): string {
+  const xdg = profileOverride === undefined ? xdgDataAgentRoot() : undefined;
+  return path.join(xdg ?? getAgentDir(profileOverride), subdir);
 }
 
-/** ~/.omp/agent/sessions (or $XDG_DATA_HOME/omp/sessions). */
-export function getSessionsDir(): string {
-  return agentDataSubdir("sessions");
+/** ~/.omp/agent/sessions，支持读取指定 profile 的会话目录。 */
+export function getSessionsDir(profileOverride?: string): string {
+  return agentDataSubdir("sessions", profileOverride);
 }
 
 /** OMP's gc archive root for compressed session JSONL files. */

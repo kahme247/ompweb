@@ -994,8 +994,8 @@ function scanSessionInfoCached(filePath: string): OmpSessionInfo | undefined {
  * requests (sidebar poll, page loads) into a single stat. Per-file scanning is
  * still memoized by scanSessionInfoCached on (size, mtimeMs).
  */
-export async function listAllSessionInfos(): Promise<OmpSessionInfo[]> {
-  const sessionsRoot = getSessionsDir();
+export async function listAllSessionInfos(profile?: string): Promise<OmpSessionInfo[]> {
+  const sessionsRoot = getSessionsDir(profile);
   const files = await listSessionFiles(sessionsRoot);
 
   const sessions: OmpSessionInfo[] = [];

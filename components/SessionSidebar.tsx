@@ -12,6 +12,7 @@ import { toast } from "./ui/toast";
 import { clearLastOpenSession, setLastOpenSession, workspaceKeyOf } from "@/lib/workspace-memory";
 import { groupSessionsByProject, projectActivityCounts, sortManagedProjects } from "@/lib/project-ordering";
 import { comparableProjectPath } from "@/lib/comparable-path";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { Archive, Check, ChevronRight, FileUp, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, Upload } from "lucide-react";
 import { publishSessionsChanged } from "@/lib/session-change-bus";
 import {
@@ -80,8 +81,26 @@ interface Props {
 
 
 
+const WORKSPACE_PANEL_HEIGHT_STORAGE_KEY = "omp-web:workspace-panel-height";
+const WORKSPACE_PANEL_DEFAULT_HEIGHT = 300;
+const WORKSPACE_PANEL_MIN_HEIGHT = 80;
+const EXPLORER_PANEL_MIN_HEIGHT = 120;
+
+/** 读取用户上次调整的工作区列表高度；存储不可用时保持默认尺寸。 */
+function loadWorkspacePanelHeight(): number {
+  if (typeof window === "undefined") return WORKSPACE_PANEL_DEFAULT_HEIGHT;
+  try {
+    const height = Number(window.localStorage.getItem(WORKSPACE_PANEL_HEIGHT_STORAGE_KEY));
+    return Number.isFinite(height) && height >= WORKSPACE_PANEL_MIN_HEIGHT
+      ? Math.round(height)
+      : WORKSPACE_PANEL_DEFAULT_HEIGHT;
+  } catch {
+    return WORKSPACE_PANEL_DEFAULT_HEIGHT;
+  }
+}
 
 export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, explorerRefreshing, onExplorerRefreshDone, onAtMention, onAtMentions, onOpenSettings, onOpenArchive, updateAvailable }: Props) {
+  const isMobile = useIsMobile();
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -119,6 +138,13 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const [explorerKey, setExplorerKey] = useState(0);
   const [explorerUploadBusy, setExplorerUploadBusy] = useState(false);
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
+  const [workspacePanelHeight, setWorkspacePanelHeight] = useState(WORKSPACE_PANEL_DEFAULT_HEIGHT);
+  const [workspacePanelResizing, setWorkspacePanelResizing] = useState(false);
+  const workspacePanelRef = useRef<HTMLDivElement>(null);
+  const explorerPanelRef = useRef<HTMLDivElement>(null);
+  const workspaceResizeHandlersRef = useRef<{ onMove: (event: MouseEvent) => void; onUp: () => void } | null>(null);
+  const pendingWorkspacePanelHeightRef = useRef(WORKSPACE_PANEL_DEFAULT_HEIGHT);
+  const workspacePanelHeightMountedRef = useRef(false);
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
   const [runningSessionCwds, setRunningSessionCwds] = useState<Record<string, string>>({});
@@ -128,6 +154,23 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   // Relative session times must age while the sidebar stays open; one shared
   // minute clock avoids a timer per session row.
   const [relativeTimeNow, setRelativeTimeNow] = useState(() => Date.now());
+  useEffect(() => {
+    setWorkspacePanelHeight(loadWorkspacePanelHeight());
+  }, []);
+
+  // 拖动期间只更新 DOM，结束后才写入 React 状态和本地存储，避免高频重渲染。
+  useEffect(() => {
+    if (!workspacePanelHeightMountedRef.current) {
+      workspacePanelHeightMountedRef.current = true;
+      return;
+    }
+    if (workspacePanelResizing) return;
+    try {
+      window.localStorage.setItem(WORKSPACE_PANEL_HEIGHT_STORAGE_KEY, String(workspacePanelHeight));
+    } catch {
+      // 隐私模式或空间不足时，本次页面会话内的尺寸仍有效。
+    }
+  }, [workspacePanelHeight, workspacePanelResizing]);
   // Client-side workspace/session filtering (Workspaces header controls).
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -788,6 +831,74 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     }
   }, [addProjectBusy, loadProjects, expandProject]);
 
+  /** 按当前可用高度约束工作区列表，始终给资源管理器保留可操作空间。 */
+  const clampWorkspacePanelHeight = useCallback((height: number): number => {
+    const workspaceHeight = workspacePanelRef.current?.getBoundingClientRect().height ?? 0;
+    const explorerHeight = explorerPanelRef.current?.getBoundingClientRect().height ?? 0;
+    const totalHeight = workspaceHeight + explorerHeight;
+    const maxHeight = Math.max(WORKSPACE_PANEL_MIN_HEIGHT, totalHeight - EXPLORER_PANEL_MIN_HEIGHT);
+    return Math.min(maxHeight, Math.max(WORKSPACE_PANEL_MIN_HEIGHT, Math.round(height)));
+  }, []);
+
+  /** 键盘调整分区大小；Enter 或空格恢复默认比例，提供鼠标拖动的等效操作。 */
+  const handleWorkspaceResizeKey = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setWorkspacePanelHeight((height) => clampWorkspacePanelHeight(height - 20));
+    } else if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setWorkspacePanelHeight((height) => clampWorkspacePanelHeight(height + 20));
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      setWorkspacePanelHeight(WORKSPACE_PANEL_MIN_HEIGHT);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      setWorkspacePanelHeight((height) => clampWorkspacePanelHeight(Number.MAX_SAFE_INTEGER));
+    } else if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      setWorkspacePanelHeight(clampWorkspacePanelHeight(WORKSPACE_PANEL_DEFAULT_HEIGHT));
+    }
+  }, [clampWorkspacePanelHeight]);
+
+  /** 开始拖动分隔条，在窗口范围接收事件以支持快速越界拖动。 */
+  const handleWorkspaceResizeStart = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    if (isMobile) return;
+    event.preventDefault();
+    const startY = event.clientY;
+    const startHeight = workspacePanelRef.current?.getBoundingClientRect().height ?? workspacePanelHeight;
+    setWorkspacePanelResizing(true);
+    const onMove = (moveEvent: MouseEvent) => {
+      const height = clampWorkspacePanelHeight(startHeight + (moveEvent.clientY - startY));
+      workspacePanelRef.current?.style.setProperty("flex", `0 1 ${height}px`);
+      pendingWorkspacePanelHeightRef.current = height;
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      workspaceResizeHandlersRef.current = null;
+      setWorkspacePanelResizing(false);
+      setWorkspacePanelHeight(pendingWorkspacePanelHeightRef.current);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    pendingWorkspacePanelHeightRef.current = startHeight;
+    workspaceResizeHandlersRef.current = { onMove, onUp };
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [clampWorkspacePanelHeight, isMobile, workspacePanelHeight]);
+
+  // 组件在拖动中卸载时，恢复文档状态并移除窗口事件，避免全局监听泄漏。
+  useEffect(() => () => {
+    const handlers = workspaceResizeHandlersRef.current;
+    if (!handlers) return;
+    window.removeEventListener("mousemove", handlers.onMove);
+    window.removeEventListener("mouseup", handlers.onUp);
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+  }, []);
+
   const handleUpdateProjectPresentation = useCallback(async (projectPath: string, updates: { alias?: string | null; sortOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }) => {
     try {
       const response = await fetch("/api/projects", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cwd: projectPath, ...updates }) });
@@ -1323,12 +1434,13 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
 
       {/* Workspaces */}
         <div
+          ref={workspacePanelRef}
           style={{
-            flex: explorerOpen && (selectedCwdProp || selectedCwd) ? "1 1 0" : "1 1 auto",
-            transition: "flex var(--dur-med) var(--ease-out-warm)",
+            flex: explorerOpen && (selectedCwdProp || selectedCwd) ? `0 1 ${workspacePanelHeight}px` : "1 1 auto",
+            transition: workspacePanelResizing ? "none" : "flex var(--dur-med) var(--ease-out-warm)",
             overflowY: "auto",
             padding: "2px 10px 10px",
-            minHeight: 80,
+            minHeight: WORKSPACE_PANEL_MIN_HEIGHT,
           }}
         >
           {loading && (
@@ -1403,17 +1515,44 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
           })}
         </div>
 
+      {explorerOpen && (selectedCwdProp || selectedCwd) && !isMobile && (
+        <div
+          className="sidebar-panel-resizer"
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="调整工作区与资源管理器高度"
+          aria-valuemin={WORKSPACE_PANEL_MIN_HEIGHT}
+          aria-valuemax={Math.max(WORKSPACE_PANEL_MIN_HEIGHT, (workspacePanelRef.current?.getBoundingClientRect().height ?? 0) + (explorerPanelRef.current?.getBoundingClientRect().height ?? 0) - EXPLORER_PANEL_MIN_HEIGHT)}
+          aria-valuenow={workspacePanelHeight}
+          tabIndex={0}
+          title="拖动调整工作区与资源管理器高度；双击或按 Enter 重置"
+          onKeyDown={handleWorkspaceResizeKey}
+          onMouseDown={handleWorkspaceResizeStart}
+          onDoubleClick={() => setWorkspacePanelHeight(clampWorkspacePanelHeight(WORKSPACE_PANEL_DEFAULT_HEIGHT))}
+          style={{
+            height: 10,
+            flexShrink: 0,
+            cursor: "row-resize",
+            touchAction: "none",
+            position: "relative",
+            outline: "none",
+          }}
+        >
+        </div>
+      )}
+
       {/* File Explorer section */}
       {(selectedCwdProp || selectedCwd) && (
         <div
+          ref={explorerPanelRef}
           style={{
             borderTop: "1px solid var(--border)",
             display: "flex",
             flexDirection: "column",
             flex: explorerOpen ? "1 1 0" : "0 0 auto",
-            minHeight: 0,
+            minHeight: explorerOpen ? EXPLORER_PANEL_MIN_HEIGHT : 0,
             overflow: "hidden",
-            transition: "flex var(--dur-med) var(--ease-out-warm)",
+            transition: workspacePanelResizing ? "none" : "flex var(--dur-med) var(--ease-out-warm)",
           }}
         >
           <div style={{ display: "flex", alignItems: "center", flexShrink: 0 }}>

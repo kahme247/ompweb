@@ -207,7 +207,6 @@ function ProjectRow({
                 <strong style={{ fontFamily: "inherit", fontSize: 11 }}>目录</strong>
                 <span>{project.path}</span>
                 {project.launchConfig?.profile && <span>profile: {project.launchConfig.profile}</span>}
-                {project.launchConfig?.advisor && <span>--advisor</span>}
                 {project.launchConfig?.extraArgs?.map((arg, index) => <span key={`${arg}-${index}`}>{arg}</span>)}
               </span>
             )}

@@ -62,7 +62,7 @@ function canonicalProjectPath(value: string): string {
 /** Launch args the web UI manages itself; a workspace config must never carry
  *  them (bare or `--flag=value`), or a stored config could hijack the session
  *  boundary (`--cwd`/`--resume`) or the rpc-ui mode. */
-const RESERVED_LAUNCH_ARGS: Record<string, true> = { "--mode": true, "rpc-ui": true, "--cwd": true, "--resume": true };
+const RESERVED_LAUNCH_ARGS: Record<string, true> = { "--mode": true, "rpc-ui": true, "--cwd": true, "--resume": true, "--advisor": true };
 const RESERVED_LAUNCH_ARG_PREFIXES = ["--mode=", "--cwd=", "--resume="];
 export function isReservedLaunchArg(arg: string): boolean {
   return RESERVED_LAUNCH_ARGS[arg] === true || RESERVED_LAUNCH_ARG_PREFIXES.some((prefix) => arg.startsWith(prefix));
@@ -74,12 +74,11 @@ function parseLaunchConfig(item: Record<string, unknown>): ProjectLaunchConfig |
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const value = raw as Record<string, unknown>;
   const profile = typeof value.profile === "string" && value.profile.trim() && !value.profile.trim().startsWith("-") ? value.profile.trim() : undefined;
-  const advisor = value.advisor === true ? true : undefined;
   const extraArgs = Array.isArray(value.extraArgs)
     ? value.extraArgs.filter((arg): arg is string => typeof arg === "string" && arg.length > 0 && arg.length <= 256 && !isReservedLaunchArg(arg)).slice(0, 32)
     : undefined;
-  if (!profile && advisor === undefined && (!extraArgs || extraArgs.length === 0)) return undefined;
-  return { profile, advisor, extraArgs };
+  if (!profile && (!extraArgs || extraArgs.length === 0)) return undefined;
+  return { profile, extraArgs };
 }
 
 /** Parse registry JSON; missing, corrupt, or foreign-shaped input yields an

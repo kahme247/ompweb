@@ -26,6 +26,7 @@ import { resolveSessionPathOr404 } from "@/lib/api-utils";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { sessionPathKey } from "@/lib/paths";
 import { getRpcSession } from "@/lib/rpc-manager";
+import { profileForSessionKey, sessionKeyForProfile } from "@/lib/session-identity";
 
 /** Stable, client-safe error body for catch-all handlers: details go to the
  *  server log only, never to the browser. */
@@ -194,12 +195,14 @@ export async function GET(
 
     let modified = header.timestamp ?? new Date().toISOString();
     try { modified = statSync(filePath).mtime.toISOString(); } catch { /* use header timestamp */ }
+    const sessionProfile = profileForSessionKey(id);
     const parentSessionId = header.parentSession
-      ? await resolveParentSessionId(header.parentSession)
+      ? await resolveParentSessionId(header.parentSession, sessionProfile)
       : undefined;
     const info = {
       path: filePath,
-      id: header.id,
+      id,
+      profile: sessionProfile,
       cwd: header.cwd ?? "",
       name: header.title,
       created: header.timestamp,
@@ -306,16 +309,18 @@ export async function DELETE(
     // whichever form each child used. Resolve both forms up front.
     let grandparentPath: string | undefined;
     let grandparentId: string | undefined;
+    const sessionProfile = profileForSessionKey(id);
     if (parentSession) {
       const idForPath = await resolveSessionIdByPath(parentSession);
       if (idForPath) {
         grandparentPath = parentSession;
         grandparentId = idForPath;
       } else {
-        const pathForId = await resolveSessionPath(parentSession);
+        const grandparentKey = sessionKeyForProfile(sessionProfile, parentSession);
+        const pathForId = await resolveSessionPath(grandparentKey);
         if (pathForId) {
           grandparentPath = pathForId;
-          grandparentId = parentSession;
+          grandparentId = grandparentKey;
         }
       }
     }
@@ -366,15 +371,14 @@ export async function DELETE(
         if (!childHeader || !childHeader.parentSession) continue;
         const linkedByPath = sessionPathKey(childHeader.parentSession) === targetPathKey;
         if (!linkedByPath && childHeader.parentSession !== deletedSessionId) continue;
-
-        // A live omp process owns its session file and flushes its whole
-        // in-memory state on write — our rewrite would be clobbered by (or
-        // interleaved with) its next flush.
+        // 运行中的子会话由 RPC 进程持有，删除父会话时不能改写其文件。
         const childId = childHeader.id;
-        if (childId && getRpcSession(childId)?.isAlive?.()) {
-          skippedChildren.push({ id: childId, reason: "session_child_live" });
+        const childKey = childId ? sessionKeyForProfile(sessionProfile, childId) : undefined;
+        if (childKey && getRpcSession(childKey)?.isAlive?.()) {
+          skippedChildren.push({ id: childId!, reason: "session_child_live" });
           continue;
         }
+
 
         let lines: string[];
         let headerIndex: number;

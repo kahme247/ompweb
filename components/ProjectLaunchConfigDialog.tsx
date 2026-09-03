@@ -14,7 +14,6 @@ interface Props {
 /** 编辑工作区专属的 OMP 启动配置，并以参数数组保存额外参数。 */
 export function ProjectLaunchConfigDialog({ projectPath, initialConfig, onClose, onSave }: Props) {
   const [profile, setProfile] = useState(initialConfig?.profile ?? "");
-  const [advisor, setAdvisor] = useState(initialConfig?.advisor === true);
   const [extraArgs, setExtraArgs] = useState(initialConfig?.extraArgs?.join("\n") ?? "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -24,10 +23,9 @@ export function ProjectLaunchConfigDialog({ projectPath, initialConfig, onClose,
     const args = extraArgs.split("\n").map((arg) => arg.trim()).filter(Boolean);
     const config: ProjectLaunchConfig = {
       profile: profile.trim() || undefined,
-      advisor: advisor || undefined,
       extraArgs: args.length > 0 ? args : undefined,
     };
-    return config.profile || config.advisor || config.extraArgs ? config : null;
+    return config.profile || config.extraArgs ? config : null;
   };
 
   /** 保存配置并在失败时保留弹窗内容，方便用户修正参数。 */
@@ -55,10 +53,6 @@ export function ProjectLaunchConfigDialog({ projectPath, initialConfig, onClose,
           <label style={{ display: "grid", gap: 5, color: "var(--text-muted)", fontSize: 12 }}>
             <span>OMP Profile</span>
             <input value={profile} onChange={(event) => setProfile(event.target.value)} placeholder="例如 work" disabled={saving} style={{ height: 34, padding: "0 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 12, outline: "none" }} />
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--text-muted)", fontSize: 12 }}>
-            <input type="checkbox" checked={advisor} onChange={(event) => setAdvisor(event.target.checked)} disabled={saving} />
-            以 advisor 模式启动
           </label>
           <label style={{ display: "grid", gap: 5, color: "var(--text-muted)", fontSize: 12 }}>
             <span>额外命令参数（每行一个）</span>

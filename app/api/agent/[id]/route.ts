@@ -61,7 +61,6 @@ export async function POST(
 
     const header = readSessionHeader(filePath);
     const { cwd } = resolveSpawnCwdResult(header?.cwd);
-
     const { session } = await startRpcSession(id, filePath, cwd, undefined, advisor, header?.cwd);
     const result = await session.send(body);
 
