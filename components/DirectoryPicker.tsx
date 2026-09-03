@@ -155,7 +155,7 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
             id="directory-path"
             type="text"
             value={pathInput}
-            aria-label={t("directoryPicker.pathPlaceholder") || "Directory path"}
+            aria-label={t("directoryPicker.pathPlaceholder")}
             placeholder={t("directoryPicker.pathPlaceholder")}
             autoFocus
             autoComplete="off"
@@ -220,8 +220,8 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
         </div>
 
         <div style={{ flexShrink: 0, padding: "10px 18px", borderTop: "1px solid var(--border)" }}>
-          <input value={profile} onChange={(event) => setProfile(event.target.value)} placeholder="OMP profile（可选）" aria-label="OMP profile" style={{ width: "100%", height: 30, boxSizing: "border-box", marginBottom: 7, padding: "0 8px", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11 }} />
-          <textarea value={extraArgs} onChange={(event) => setExtraArgs(event.target.value)} placeholder="额外参数，每行一个（可选）" aria-label="OMP extra arguments" rows={2} style={{ width: "100%", boxSizing: "border-box", resize: "vertical", padding: "6px 8px", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11 }} />
+          <input value={profile} onChange={(event) => setProfile(event.target.value)} placeholder={t("projects.launchConfigProfileOptional")} aria-label={t("projects.launchConfigProfile")} style={{ width: "100%", height: 30, boxSizing: "border-box", marginBottom: 7, padding: "0 8px", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11 }} />
+          <textarea value={extraArgs} onChange={(event) => setExtraArgs(event.target.value)} placeholder={t("projects.launchConfigExtraArgsOptional")} aria-label={t("projects.launchConfigExtraArgs")} rows={2} style={{ width: "100%", boxSizing: "border-box", resize: "vertical", padding: "6px 8px", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11 }} />
         </div>
         <div className="directory-picker-footer" style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 10, flexShrink: 0, padding: "10px 18px", borderTop: "1px solid var(--border)" }}>
           <button className="directory-picker-action" type="button" onClick={onCancel} disabled={busy} style={{ padding: "6px 14px", border: "1px solid var(--border)", borderRadius: 6, background: "none", color: "var(--text-muted)", cursor: busy ? "default" : "pointer", fontSize: 13 }}>{t("directoryPicker.cancel")}</button>

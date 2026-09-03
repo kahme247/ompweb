@@ -204,7 +204,7 @@ function ProjectRow({
           <Tooltip
             content={(
               <span style={{ display: "grid", gap: 3, maxWidth: 360, whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontFamily: "var(--font-mono)", fontSize: 11 }}>
-                <strong style={{ fontFamily: "inherit", fontSize: 11 }}>目录</strong>
+                <strong style={{ fontFamily: "inherit", fontSize: 11 }}>{t("projects.directory")}</strong>
                 <span>{project.path}</span>
                 {project.launchConfig?.profile && <span>profile: {project.launchConfig.profile}</span>}
                 {project.launchConfig?.extraArgs?.map((arg, index) => <span key={`${arg}-${index}`}>{arg}</span>)}
@@ -341,7 +341,7 @@ function ProjectRow({
               {project.alias ? t("projects.editAlias") : t("projects.nameAlias")}
             </button>
             <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { onEditLaunchConfig(project); setActionMenuOpen(false); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
-              {project.launchConfig ? "编辑 OMP 启动参数" : "配置 OMP 启动参数"}
+              {project.launchConfig ? t("projects.editLaunchConfig") : t("projects.configureLaunchConfig")}
             </button>
             <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { setActionMenuOpen(false); void onMoveProject(project.path, -1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
               {t("projects.moveUp")}

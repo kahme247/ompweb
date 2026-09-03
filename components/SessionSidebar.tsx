@@ -1248,7 +1248,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
           onClose={() => setLaunchConfigProject(null)}
           onSave={async (launchConfig) => {
             await handleUpdateProjectPresentation(launchConfigProject.path, { launchConfig });
-            toast.info("工作区启动参数已保存；下次启动或重新加载 omp 会生效。");
+            toast.info(t("projects.launchConfigSaved"));
           }}
         />
       )}
@@ -1520,12 +1520,12 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
           className="sidebar-panel-resizer"
           role="separator"
           aria-orientation="horizontal"
-          aria-label="调整工作区与资源管理器高度"
+          aria-label={t("sessionSidebar.resizePanels")}
           aria-valuemin={WORKSPACE_PANEL_MIN_HEIGHT}
           aria-valuemax={Math.max(WORKSPACE_PANEL_MIN_HEIGHT, (workspacePanelRef.current?.getBoundingClientRect().height ?? 0) + (explorerPanelRef.current?.getBoundingClientRect().height ?? 0) - EXPLORER_PANEL_MIN_HEIGHT)}
           aria-valuenow={workspacePanelHeight}
           tabIndex={0}
-          title="拖动调整工作区与资源管理器高度；双击或按 Enter 重置"
+          title={t("sessionSidebar.resizePanelsTitle")}
           onKeyDown={handleWorkspaceResizeKey}
           onMouseDown={handleWorkspaceResizeStart}
           onDoubleClick={() => setWorkspacePanelHeight(clampWorkspacePanelHeight(WORKSPACE_PANEL_DEFAULT_HEIGHT))}
