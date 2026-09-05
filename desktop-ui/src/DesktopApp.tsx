@@ -513,7 +513,11 @@ export function DesktopApp() {
             <span className="sidebar-footer-spacer" />
             <button
               className="sidebar-icon-btn"
-              onClick={() => void invoke("omp_open_settings").catch(() => {})}
+              onClick={() =>
+                void invoke("omp_open_settings").catch((err) =>
+                  setError(`Settings window failed to open: ${err}`),
+                )
+              }
               title="Settings"
             >
               <Settings size={15} aria-hidden />
