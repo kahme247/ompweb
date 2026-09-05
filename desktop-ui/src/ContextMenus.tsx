@@ -217,7 +217,6 @@ export function WorktreeMenu({
     invoke<WorktreeInfo[]>("omp_list_worktrees", { cwd })
       .then(setWorktrees)
       .catch(() => setWorktrees([]));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cwd]);
 
   const create = async () => {

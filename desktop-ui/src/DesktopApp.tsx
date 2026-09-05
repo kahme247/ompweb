@@ -12,6 +12,8 @@ import { useTheme } from "@/hooks/useTheme";
 import { Sidebar, projectLabel, type SidebarSession } from "./Sidebar";
 import { SettingsView, applyFontSettings, type LoginProvider, type UsageSnapshot } from "./SettingsView";
 import { MenuChip, ProjectMenu, BranchMenu, WorktreeMenu } from "./ContextMenus";
+import { CommandPalette } from "@/components/CommandPalette";
+import type { SessionInfo } from "@/lib/types";
 import type { AgentMessage, AssistantMessage, ToolResultMessage } from "@/lib/types";
 
 type SessionState = "idle" | "starting" | "ready" | "running" | "exited";
@@ -34,6 +36,7 @@ type StateResponse = {
   model?: { id?: string; provider?: string };
   thinkingLevel?: string;
   contextUsage?: { tokens: number; contextWindow: number; percent: number };
+  queuedMessageCount?: number;
 };
 
 type CwdInfo = { project: string; branch: string; diffAdded: number; diffRemoved: number };
@@ -90,8 +93,12 @@ export function DesktopApp() {
     }
   });
   const [refreshTick, setRefreshTick] = useState(0);
+  const [queuedCount, setQueuedCount] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const messageRefs = useRef<(HTMLDivElement | null)[]>([]);
+  /** Transcript auto-follows the stream until the user scrolls up. */
+  const followRef = useRef(true);
   const [models, setModels] = useState<OmpModelInfo[]>([]);
   const [activeModel, setActiveModel] = useState<{ provider: string; id: string } | null>(null);
   const [thinkingLevel, setThinkingLevel] = useState("");
@@ -256,10 +263,42 @@ export function DesktopApp() {
           ? state.contextUsage
           : undefined,
       );
+      setQueuedCount(typeof state.queuedMessageCount === "number" ? state.queuedMessageCount : 0);
     } catch {
       // session gone mid-refresh; the exit handler owns the UI from here
     }
   }, [rpc]);
+
+  // Transcript auto-follow: pin to bottom on every message/stream batch until
+  // the user scrolls up; scrolling back near the bottom re-engages the follow.
+  useEffect(() => {
+    if (!followRef.current) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const raf = requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [messages, streaming]);
+
+  const onTranscriptScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    followRef.current = distance < 140;
+  }, []);
+
+  const autoGrowComposer = useCallback(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
+  }, []);
+
+  // Focus the composer whenever the session becomes interactive.
+  useEffect(() => {
+    if (session === "ready" && !settingsOpen) textareaRef.current?.focus();
+  }, [session, settingsOpen]);
 
   // While a run streams, keep the context gauge moving without waiting for
   // agent_end (the frame handlers only bump the tick at turn boundaries).
@@ -319,10 +358,16 @@ export function DesktopApp() {
 
   const send = useCallback(async () => {
     const message = input.trim();
-    if (!message || session === "starting" || session === "running") return;
+    if (!message || session === "starting") return;
     setInput("");
     setError("");
     try {
+      if (sessionRef.current === "running") {
+        // omp queues prompts that arrive mid-run; show it in the context row.
+        await invoke("omp_send", { command: { type: "prompt", message } });
+        setTimeout(() => void refreshSessionState(), 600);
+        return;
+      }
       if (sessionRef.current !== "ready") {
         const ok = await beginSession();
         if (!ok) return;
@@ -334,7 +379,7 @@ export function DesktopApp() {
       setError(String(err));
       setSession(sessionRef.current === "exited" ? "exited" : "ready");
     }
-  }, [input, session, beginSession]);
+  }, [input, session, beginSession, refreshSessionState]);
 
   // Resume a stored session: spawn omp with --resume, then load its transcript
   // from disk (frames from omp continue the same message list).
@@ -596,7 +641,7 @@ export function DesktopApp() {
           />
         ) : (
           <>
-            <main className="desktop-transcript" ref={scrollRef}>
+            <main className="desktop-transcript" ref={scrollRef} onScroll={onTranscriptScroll}>
               <div className="transcript-inner">
                 <div className="transcript-column">
                   {messages.length === 0 && !streaming && (
@@ -631,8 +676,12 @@ export function DesktopApp() {
         <footer className="desktop-composer">
           <div className="composer-box">
             <textarea
+              ref={textareaRef}
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(e) => {
+                setInput(e.target.value);
+                autoGrowComposer();
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
@@ -641,7 +690,7 @@ export function DesktopApp() {
               }}
               placeholder="Do anything…"
               disabled={session === "starting"}
-              rows={2}
+              rows={1}
               spellCheck={false}
             />
             <div className="composer-row">
@@ -790,6 +839,11 @@ export function DesktopApp() {
               </select>
             </label>
             <span className="context-spacer" />
+            {queuedCount > 0 && (
+              <span className="context-chip" title={`${queuedCount} message(s) queued while the agent runs`}>
+                +{queuedCount} queued
+              </span>
+            )}
             {sessionUsage && (
               <span
                 className="context-chip"
@@ -821,6 +875,31 @@ export function DesktopApp() {
           </>
         )}
       </div>
+      <CommandPalette
+        onSelectSession={(session: SessionInfo) => {
+          void resume({
+            file: session.path,
+            title: session.name ?? "",
+            cwd: session.cwd,
+            mtimeMs: Date.parse(session.modified) || 0,
+          });
+        }}
+        onNewSession={() => void beginSession()}
+        loadSessions={() =>
+          invoke<SidebarSession[]>("omp_list_sessions").then((list) =>
+            list.map<SessionInfo>((s) => ({
+              path: s.file,
+              id: s.file,
+              cwd: s.cwd ?? "",
+              name: s.title,
+              created: new Date(s.mtimeMs).toISOString(),
+              modified: new Date(s.mtimeMs).toISOString(),
+              messageCount: 0,
+              firstMessage: s.title,
+            })),
+          )
+        }
+      />
     </div>
   );
 }

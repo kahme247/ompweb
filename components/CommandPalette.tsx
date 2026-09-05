@@ -12,6 +12,8 @@ type Props = {
   onSelectSession: (session: SessionInfo) => void;
   onNewSession: () => void;
   currentModel?: string | null;
+  /** Alternate session source (e.g. desktop invoke); defaults to /api/sessions. */
+  loadSessions?: () => Promise<SessionInfo[]>;
 };
 
 function relativeTime(value: string, locale: string): string {
@@ -24,7 +26,7 @@ function relativeTime(value: string, locale: string): string {
   return new Intl.RelativeTimeFormat(locale, { numeric: "always" }).format(-Math.floor(hours / 24), "day");
 }
 
-export const CommandPalette = memo(function CommandPalette({ onSelectSession, onNewSession, currentModel }: Props) {
+export const CommandPalette = memo(function CommandPalette({ onSelectSession, onNewSession, currentModel, loadSessions: loadSessionsProp }: Props) {
   const { t, locale } = useI18n();
   const { isDark, toggleTheme } = useTheme();
   const [open, setOpen] = useState(false);
@@ -38,11 +40,15 @@ export const CommandPalette = memo(function CommandPalette({ onSelectSession, on
     // #1 clobber #2 or drop the spinner early.
     const seq = ++loadSeqRef.current;
     setLoading(true);
-    void fetch("/api/sessions")
-      .then((response) => response.ok ? response.json() as Promise<{ sessions?: SessionInfo[] }> : Promise.reject(new Error("request failed")))
-      .then((data) => {
+    const request: Promise<SessionInfo[]> = loadSessionsProp
+      ? loadSessionsProp()
+      : fetch("/api/sessions").then(
+          (response) => response.ok ? (response.json() as Promise<{ sessions?: SessionInfo[] }>).then((d) => d.sessions ?? []) : Promise.reject(new Error("request failed")),
+        );
+    void request
+      .then((sessions) => {
         if (seq !== loadSeqRef.current) return;
-        setSessions(data.sessions ?? []);
+        setSessions(sessions);
       })
       .catch(() => {
         if (seq !== loadSeqRef.current) return;
@@ -52,7 +58,7 @@ export const CommandPalette = memo(function CommandPalette({ onSelectSession, on
         if (seq !== loadSeqRef.current) return;
         setLoading(false);
       });
-  }, []);
+  }, [loadSessionsProp]);
 
 
   useEffect(() => {

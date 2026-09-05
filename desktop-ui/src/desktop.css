@@ -589,6 +589,8 @@ body,
   font: inherit;
   font-size: 14px;
   line-height: 1.5;
+  max-height: 220px;
+  min-height: 22px;
 }
 
 .composer-box textarea:focus {
