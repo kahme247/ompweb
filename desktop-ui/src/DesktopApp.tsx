@@ -13,6 +13,7 @@ import { Sidebar, projectLabel, type SidebarSession } from "./Sidebar";
 import { SettingsView, applyFontSettings, type LoginProvider, type UsageSnapshot } from "./SettingsView";
 import { MenuChip, ProjectMenu, BranchMenu, WorktreeMenu } from "./ContextMenus";
 import { CommandPalette } from "@/components/CommandPalette";
+import { toast, ToastProvider } from "@/components/ui/toast";
 import { MAX_TOTAL_ATTACHED_IMAGE_BYTES } from "@/lib/image-attachments";
 import type { SessionInfo } from "@/lib/types";
 import type { AgentMessage, AssistantMessage, ToolResultMessage } from "@/lib/types";
@@ -356,7 +357,7 @@ export function DesktopApp() {
                   return [...prev, { data: img.data, mimeType: img.mimeType, previewUrl }];
                 });
               } catch (err) {
-                setError(String(err));
+                toast.error(String(err));
               }
             }
           })();
@@ -523,6 +524,8 @@ export function DesktopApp() {
   }, []);
 
   const [compacting, setCompacting] = useState(false);
+  /** Transient failures go to toasts; session-fatal ones keep the red bar. */
+  const toastError = useCallback((err: unknown) => toast.error(typeof err === "string" ? err : String(err)), []);
   const compact = useCallback(async () => {
     if (sessionRef.current !== "ready" || compacting) return;
     setCompacting(true);
@@ -530,7 +533,7 @@ export function DesktopApp() {
     try {
       await rpc({ type: "compact" });
     } catch (err) {
-      setError(String(err));
+      toast.error(String(err));
     } finally {
       setCompacting(false);
       void refreshSessionState();
@@ -559,7 +562,7 @@ export function DesktopApp() {
       try {
         await rpc({ type: "set_model", provider, modelId });
       } catch (err) {
-        setError(String(err));
+        toast.error(String(err));
       }
       void refreshSessionState();
     },
@@ -572,7 +575,7 @@ export function DesktopApp() {
       try {
         await rpc({ type: "set_thinking_level", level });
       } catch (err) {
-        setError(String(err));
+        toast.error(String(err));
       }
       void refreshSessionState();
     },
@@ -649,6 +652,7 @@ export function DesktopApp() {
   );
 
   return (
+    <ToastProvider>
     <div className="desktop-app">
       <aside className={`desktop-sidebar${sidebarOpen ? "" : " collapsed"}`}>
           <div className="sidebar-actions">
@@ -789,6 +793,7 @@ export function DesktopApp() {
               <div className="composer-attachments">
                 {attached.map((img, i) => (
                   <span key={i} className="attachment-thumb">
+                    {/* eslint-disable-next-line @next/next/no-img-element -- desktop Vite app, next/image unavailable */}
                     <img src={img.previewUrl} alt="" />
                     <button
                       className="attachment-remove"
@@ -920,7 +925,7 @@ export function DesktopApp() {
                     setCwd(p);
                     saveCwd(p);
                   }}
-                  onError={setError}
+                  onError={toastError}
                 />
               )}
             </MenuChip>
@@ -940,7 +945,7 @@ export function DesktopApp() {
                     project={cwdInfo.project}
                     close={close}
                     onDone={() => setRefreshTick((t) => t + 1)}
-                    onError={setError}
+                    onError={toastError}
                   />
                 )}
               </MenuChip>
@@ -962,7 +967,7 @@ export function DesktopApp() {
                     setCwd(p);
                     saveCwd(p);
                   }}
-                  onError={setError}
+                  onError={toastError}
                 />
               )}
             </MenuChip>
@@ -1044,5 +1049,6 @@ export function DesktopApp() {
         }
       />
     </div>
+    </ToastProvider>
   );
 }
