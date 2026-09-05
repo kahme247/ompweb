@@ -1,50 +1,29 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-
-type ChatMessage = {
-  role: "user" | "assistant";
-  text: string;
-  thinking?: string;
-};
+import { MessageView } from "@/components/MessageView";
+import { normalizeToolCalls } from "@/lib/normalize";
+import type { AgentMessage, AssistantMessage, ToolResultMessage } from "@/lib/types";
 
 type SessionState = "idle" | "starting" | "ready" | "running" | "exited";
 
 type RpcFrame = {
   type: string;
-  message?: { role?: string; content?: unknown };
-  assistantMessageEvent?: {
-    type?: string;
-    delta?: string;
-  };
+  message?: { role?: string; [key: string]: unknown };
+  assistantMessageEvent?: { type?: string; delta?: string };
 };
-
-function contentText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((block) =>
-        block && typeof block === "object" && "text" in block
-          ? String((block as { text: unknown }).text)
-          : "",
-      )
-      .filter(Boolean)
-      .join("");
-  }
-  return "";
-}
 
 export function DesktopApp() {
   const [home, setHome] = useState("");
   const [cwd, setCwd] = useState("");
   const [session, setSession] = useState<SessionState>("idle");
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messages, setMessages] = useState<AgentMessage[]>([]);
+  const [toolResults, setToolResults] = useState<Map<string, ToolResultMessage>>(new Map());
+  const [streaming, setStreaming] = useState<AssistantMessage | null>(null);
   const [error, setError] = useState("");
   const [input, setInput] = useState("");
-  // The in-progress assistant message: the ref is the source of truth inside
-  // the (once-registered) frame listener, the state mirrors it for rendering.
-  const streaming = useRef<ChatMessage | null>(null);
-  const [streamingMsg, setStreamingMsg] = useState<ChatMessage | null>(null);
+  const sessionRef = useRef<SessionState>("idle");
+  sessionRef.current = session;
 
   useEffect(() => {
     invoke<string>("omp_home")
@@ -56,39 +35,44 @@ export function DesktopApp() {
   }, []);
 
   useEffect(() => {
+    const putToolResult = (msg: ToolResultMessage) => {
+      setToolResults((prev) => {
+        const next = new Map(prev);
+        next.set(msg.toolCallId, msg);
+        return next;
+      });
+    };
+
     const unlisteners: Promise<UnlistenFn>[] = [
       listen<RpcFrame>("omp-frame", (event) => {
         const frame = event.payload;
+        const wire = frame.message as AgentMessage | undefined;
         switch (frame.type) {
           case "message_start": {
-            const role = frame.message?.role;
-            if (role === "user") {
-              const text = contentText(frame.message?.content);
-              if (text) setMessages((m) => [...m, { role: "user", text }]);
-            } else if (role === "assistant") {
-              streaming.current = { role: "assistant", text: "", thinking: "" };
-              setStreamingMsg({ ...streaming.current });
+            if (wire?.role === "user") {
+              setMessages((m) => [...m, wire]);
+            } else if (wire?.role === "assistant") {
+              setStreaming(normalizeToolCalls(wire) as AssistantMessage);
+            } else if (wire?.role === "toolResult") {
+              putToolResult(wire as ToolResultMessage);
             }
             break;
           }
           case "message_update": {
-            const ev = frame.assistantMessageEvent;
-            const cur = streaming.current;
-            if (!ev || !cur) break;
-            if (ev.type === "thinking_delta" && ev.delta) {
-              cur.thinking += ev.delta;
-            } else if (ev.type === "text_delta" && ev.delta) {
-              cur.text += ev.delta;
+            // frame.message is omp's full partial AssistantMessage — the app's
+            // own type, no manual delta accumulation needed.
+            if (wire?.role === "assistant") {
+              setStreaming(normalizeToolCalls(wire) as AssistantMessage);
             }
-            setStreamingMsg({ ...cur });
             break;
           }
           case "message_end": {
-            if (streaming.current) {
-              const done = { ...streaming.current };
+            if (wire?.role === "assistant") {
+              const done = normalizeToolCalls(wire) as AssistantMessage;
               setMessages((m) => [...m, done]);
-              streaming.current = null;
-              setStreamingMsg(null);
+              setStreaming(null);
+            } else if (wire?.role === "toolResult") {
+              putToolResult(wire as ToolResultMessage);
             }
             break;
           }
@@ -96,29 +80,26 @@ export function DesktopApp() {
             setSession("running");
             break;
           case "agent_end":
-            if (session !== "exited") setSession("ready");
+            if (sessionRef.current !== "exited") setSession("ready");
             break;
         }
       }),
       listen<{ code: number | null }>("omp-exit", () => {
         setSession("exited");
-        streaming.current = null;
-        setStreamingMsg(null);
+        setStreaming(null);
       }),
     ];
     return () => {
       unlisteners.forEach((p) => p.then((fn) => fn()));
     };
-    // session only read for the exit guard; keep handler identity stable
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const start = useCallback(async () => {
     setSession("starting");
     setError("");
     setMessages([]);
-    streaming.current = null;
-    setStreamingMsg(null);
+    setToolResults(new Map());
+    setStreaming(null);
     try {
       await invoke("omp_start", { cwd });
       setSession("ready");
@@ -180,31 +161,16 @@ export function DesktopApp() {
       {error && <div className="desktop-error">{error}</div>}
 
       <main className="desktop-transcript">
-        {messages.length === 0 && <div className="desktop-empty">{emptyHint[session]}</div>}
-        {messages.map((m, i) =>
-          m.role === "user" ? (
-            <div key={i} className="desktop-msg desktop-msg-user">
-              {m.text}
-            </div>
-          ) : (
-            <div key={i} className="desktop-msg desktop-msg-assistant">
-              {m.thinking && <details className="desktop-thinking"><summary>Thinking</summary><pre>{m.thinking}</pre></details>}
-              <div className="desktop-msg-text">{m.text}</div>
-            </div>
-          ),
+        {messages.length === 0 && !streaming && (
+          <div className="desktop-empty">{emptyHint[session]}</div>
         )}
-        {streamingMsg && (
-          <div className="desktop-msg desktop-msg-assistant">
-            {streamingMsg.thinking && (
-              <details className="desktop-thinking" open={!streamingMsg.text}>
-                <summary>Thinking</summary>
-                <pre>{streamingMsg.thinking}</pre>
-              </details>
-            )}
-            <div className="desktop-msg-text">{streamingMsg.text}</div>
-          </div>
+        {messages.map((m, i) => (
+          <MessageView key={i} message={m} toolResults={toolResults} cwd={cwd} />
+        ))}
+        {streaming && (
+          <MessageView message={streaming} isStreaming toolResults={toolResults} cwd={cwd} />
         )}
-        {session === "running" && !streamingMsg?.text && <div className="desktop-cursor" aria-hidden />}
+        {session === "running" && !streaming && <div className="desktop-cursor" aria-hidden />}
       </main>
 
       <footer className="desktop-composer">
