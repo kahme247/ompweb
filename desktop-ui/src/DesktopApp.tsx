@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { AppWindow, ArrowLeft, ArrowRight, ArrowUp, Brain, FolderOpen, GitBranch, HardDrive, Minus, PanelLeft, Plus, Settings, Shield, Sparkles, Square, X } from "lucide-react";
+import { AppWindow, ArrowLeft, ArrowRight, ArrowUp, Brain, FolderOpen, GitBranch, HardDrive, Minus, Minimize2, PanelLeft, Plus, Settings, Shield, Sparkles, Square, X } from "lucide-react";
 import { MessageView } from "@/components/MessageView";
 import { ChatMinimap } from "@/components/ChatMinimap";
 import { normalizeToolCalls } from "@/lib/normalize";
@@ -460,6 +460,37 @@ export function DesktopApp() {
     }
   }, []);
 
+  const [compacting, setCompacting] = useState(false);
+  const compact = useCallback(async () => {
+    if (sessionRef.current !== "ready" || compacting) return;
+    setCompacting(true);
+    setError("");
+    try {
+      await rpc({ type: "compact" });
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setCompacting(false);
+      void refreshSessionState();
+    }
+  }, [compacting, rpc, refreshSessionState]);
+
+  // Global keys: Esc leaves settings; Ctrl+N starts a new task.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && settingsOpen) {
+        setSettingsOpen(false);
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        void beginSession();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [settingsOpen, beginSession]);
+
   const changeModel = useCallback(
     async (provider: string, modelId: string) => {
       setActiveModel({ provider, id: modelId });
@@ -714,6 +745,16 @@ export function DesktopApp() {
               <div className="composer-controls">
                 {session !== "idle" && session !== "exited" && (
                   <>
+                    <button
+                      className="composer-chip"
+                      onClick={() => void compact()}
+                      disabled={running || compacting || session !== "ready"}
+                      title="Compact context — summarize the transcript to free window space"
+                      aria-label="Compact context"
+                    >
+                      <Minimize2 size={12} aria-hidden />
+                      {compacting ? "Compacting…" : "Compact"}
+                    </button>
                     <label className="composer-chip" title="Model">
                       <Sparkles size={12} aria-hidden />
                       <select
@@ -767,7 +808,7 @@ export function DesktopApp() {
                 <button
                   className="composer-send"
                   onClick={() => void send()}
-                  disabled={!input.trim() || session === "starting" || !cwd.trim()}
+                  disabled={!input.trim() || session === "starting" || compacting || !cwd.trim()}
                   title="Send"
                 >
                   <ArrowUp size={15} aria-hidden />
