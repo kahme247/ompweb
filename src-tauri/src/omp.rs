@@ -9,11 +9,13 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::Emitter;
+
+use crate::rpc_frame::{encode_rpc_frames, RpcFrameDecoder};
 
 const STDERR_TAIL_LIMIT: usize = 8 * 1024;
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -23,6 +25,9 @@ pub struct OmpSession {
     pub cwd: String,
     stdin: Mutex<Option<std::process::ChildStdin>>,
     next_id: Mutex<u64>,
+    chunk_counter: AtomicU64,
+    /// Active RPC protocol version (1 until v2 is negotiated).
+    protocol_version: AtomicU8,
     pending: Arc<Mutex<HashMap<String, Sender<Value>>>>,
     stderr_tail: Arc<Mutex<String>>,
     pid: u32,
@@ -38,10 +43,19 @@ fn poisoned() -> String {
 
 impl OmpSession {
     fn write_line(&self, value: &Value) -> Result<(), String> {
+        let chunk_n = self.chunk_counter.fetch_add(1, Ordering::Relaxed);
+        let lines = encode_rpc_frames(
+            value,
+            self.protocol_version.load(Ordering::Relaxed),
+            &format!("rust-{chunk_n}"),
+        )?;
         let mut guard = self.stdin.lock().map_err(|_| poisoned())?;
         let stdin = guard.as_mut().ok_or("omp RPC process is not running")?;
-        let line = serde_json::to_string(value).map_err(|e| e.to_string())?;
-        writeln!(stdin, "{line}").map_err(|e| format!("omp stdin write failed: {e}"))?;
+        for line in &lines {
+            stdin
+                .write_all(line.as_bytes())
+                .map_err(|e| format!("omp stdin write failed: {e}"))?;
+        }
         stdin.flush().map_err(|e| format!("omp stdin flush failed: {e}"))
     }
 
@@ -81,6 +95,25 @@ impl OmpSession {
 
     fn stderr_tail_snapshot(&self) -> String {
         self.stderr_tail.lock().map(|t| t.clone()).unwrap_or_default()
+    }
+
+    /// Enables bounded protocol-v2 framing when the ready frame advertises it.
+    /// Negotiation itself rides v1 (small frame); on success the session
+    /// switches its encoder/decoder expectations to v2.
+    fn negotiate_protocol(&self, ready: &Value) -> Result<(), String> {
+        let has_v2 = ready["supportedProtocolVersions"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|v| v.as_i64() == Some(2)));
+        if !has_v2 {
+            return Ok(());
+        }
+        let data = self.send(json!({ "type": "negotiate_protocol", "protocolVersion": 2 }))?;
+        if data["protocolVersion"].as_i64() == Some(2) {
+            self.protocol_version.store(2, Ordering::Relaxed);
+            Ok(())
+        } else {
+            Err("OMP rejected RPC protocol v2 negotiation".to_string())
+        }
     }
 
     /// Graceful shutdown: close stdin (omp exits on EOF); on Windows, if the
@@ -146,11 +179,29 @@ fn spawn_session(app: tauri::AppHandle, cwd: &str) -> Result<Spawned, String> {
     let exited = Arc::new(AtomicBool::new(false));
     let (ready_tx, ready_rx) = channel::<Value>();
 
-    // stdout reader: correlate responses, forward everything else as events.
+    // Built before the threads so the reader can reach stop()/protocol state.
+    let session = Arc::new(OmpSession {
+        cwd: cwd.to_string(),
+        stdin: Mutex::new(Some(stdin)),
+        next_id: Mutex::new(0),
+        chunk_counter: AtomicU64::new(0),
+        protocol_version: AtomicU8::new(1),
+        pending: Arc::clone(&pending),
+        stderr_tail: Arc::clone(&stderr_tail),
+        pid,
+        exited: Arc::clone(&exited),
+    });
+
+    // stdout reader: reassemble v2 chunks, correlate responses, forward
+    // everything else as events. Protocol errors are fatal (the TS layer
+    // disposes the process too).
     {
+        let session = Arc::clone(&session);
         let pending = Arc::clone(&pending);
+        let tail = Arc::clone(&stderr_tail);
         let app = app.clone();
         std::thread::spawn(move || {
+            let mut decoder = RpcFrameDecoder::new();
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
                 let Ok(line) = line else { break };
@@ -158,9 +209,27 @@ fn spawn_session(app: tauri::AppHandle, cwd: &str) -> Result<Spawned, String> {
                 if trimmed.is_empty() {
                     continue;
                 }
-                let Ok(frame) = serde_json::from_str::<Value>(trimmed) else {
+                let Ok(parsed) = serde_json::from_str::<Value>(trimmed) else {
                     // omp guards stdout in RPC mode; never let a stray line kill the reader.
                     continue;
+                };
+                if parsed["type"] == *"rpc_chunk" && session.protocol_version.load(Ordering::Relaxed) < 2 {
+                    if let Ok(mut t) = tail.lock() {
+                        t.push_str("\nRPC protocol error: RPC chunk received before protocol negotiation");
+                    }
+                    session.stop();
+                    break;
+                }
+                let frame = match decoder.push(parsed) {
+                    Ok(Some(frame)) => frame,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        if let Ok(mut t) = tail.lock() {
+                            t.push_str(&format!("\nRPC protocol error: {e}"));
+                        }
+                        session.stop();
+                        break;
+                    }
                 };
                 match frame["type"].as_str() {
                     Some("ready") => {
@@ -226,15 +295,7 @@ fn spawn_session(app: tauri::AppHandle, cwd: &str) -> Result<Spawned, String> {
     }
 
     Ok(Spawned {
-        session: Arc::new(OmpSession {
-            cwd: cwd.to_string(),
-            stdin: Mutex::new(Some(stdin)),
-            next_id: Mutex::new(0),
-            pending,
-            stderr_tail,
-            pid,
-            exited,
-        }),
+        session,
         ready_rx,
     })
 }
@@ -258,6 +319,7 @@ async fn omp_start(
             .ready_rx
             .recv_timeout(READY_TIMEOUT)
             .map_err(|_| "omp RPC ready timeout after 60s".to_string())?;
+        spawned.session.negotiate_protocol(&frame)?;
         Ok::<_, String>((spawned.session, frame))
     })
     .await
