@@ -388,6 +388,32 @@ fn omp_read_session(file: String) -> Result<Vec<Value>, String> {
     crate::sessions::read_session(&file)
 }
 
+/// Composer context row: project label (cwd basename) and current git branch.
+#[tauri::command]
+fn omp_cwd_info(cwd: String) -> Value {
+    let project = std::path::Path::new(&cwd)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| cwd.clone());
+    let mut branch = String::new();
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["-C", &cwd, "branch", "--show-current"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW: git is a console app spawned from a GUI process.
+        cmd.creation_flags(0x0800_0000);
+    }
+    if let Ok(output) = cmd.output() {
+        if output.status.success() {
+            branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        }
+    }
+    json!({ "project": project, "branch": branch })
+}
+
 /// The command macros are module-scoped, so the handler is assembled here
 /// where they resolve; lib.rs wires this straight into invoke_handler.
 pub fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool {
@@ -397,6 +423,7 @@ pub fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool {
         omp_stop,
         omp_home,
         omp_list_sessions,
-        omp_read_session
+        omp_read_session,
+        omp_cwd_info
     ]
 }

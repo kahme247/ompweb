@@ -1,19 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { ArrowUp, Minus, PanelLeft, Plus, Square, X } from "lucide-react";
 import { MessageView } from "@/components/MessageView";
 import { normalizeToolCalls } from "@/lib/normalize";
 import { selectableThinkingLevels, thinkingLevelsForMeta } from "@/lib/thinking-levels";
+import { useTheme } from "@/hooks/useTheme";
+import { Sidebar, projectLabel, type SidebarSession } from "./Sidebar";
 import type { AgentMessage, AssistantMessage, ToolResultMessage } from "@/lib/types";
 
 type SessionState = "idle" | "starting" | "ready" | "running" | "exited";
-
-type SessionInfo = {
-  file: string;
-  title: string;
-  cwd?: string;
-  mtimeMs: number;
-};
 
 type RpcFrame = {
   type: string;
@@ -34,7 +31,25 @@ type StateResponse = {
   thinkingLevel?: string;
 };
 
+type CwdInfo = { project: string; branch: string };
+
+const appWindow = getCurrentWindow();
+
+function firstUserText(messages: AgentMessage[]): string {
+  for (const m of messages) {
+    if (m.role !== "user") continue;
+    if (typeof m.content === "string") return m.content;
+    if (Array.isArray(m.content)) {
+      for (const block of m.content) {
+        if (block.type === "text" && typeof block.text === "string") return block.text;
+      }
+    }
+  }
+  return "";
+}
+
 export function DesktopApp() {
+  const { toggleTheme } = useTheme();
   const [home, setHome] = useState("");
   const [cwd, setCwd] = useState("");
   const [session, setSession] = useState<SessionState>("idle");
@@ -43,7 +58,10 @@ export function DesktopApp() {
   const [streaming, setStreaming] = useState<AssistantMessage | null>(null);
   const [error, setError] = useState("");
   const [input, setInput] = useState("");
-  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [sessions, setSessions] = useState<SidebarSession[]>([]);
+  const [activeFile, setActiveFile] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [cwdInfo, setCwdInfo] = useState<CwdInfo>({ project: "", branch: "" });
   const [models, setModels] = useState<OmpModelInfo[]>([]);
   const [activeModel, setActiveModel] = useState<{ provider: string; id: string } | null>(null);
   const [thinkingLevel, setThinkingLevel] = useState("");
@@ -55,31 +73,6 @@ export function DesktopApp() {
     [],
   );
 
-  // get_state is authoritative: omp may fall back to a default model that
-  // differs from what we set, so the pickers re-sync from it after changes.
-  const refreshSessionState = useCallback(async () => {
-    try {
-      const state = await rpc<StateResponse>({ type: "get_state" });
-      const model = state.model;
-      if (model?.provider && model.id) setActiveModel({ provider: model.provider, id: model.id });
-      if (typeof state.thinkingLevel === "string") setThinkingLevel(state.thinkingLevel);
-    } catch {
-      // session gone mid-refresh; the exit handler owns the UI from here
-    }
-  }, [rpc]);
-
-  const loadModels = useCallback(async () => {
-    try {
-      const res = await rpc<{ models?: OmpModelInfo[] }>({ type: "get_available_models" });
-      const list = Array.isArray(res.models)
-        ? res.models.filter((m) => m && typeof m.id === "string" && typeof m.provider === "string")
-        : [];
-      setModels(list);
-    } catch {
-      setModels([]);
-    }
-  }, [rpc]);
-
   useEffect(() => {
     invoke<string>("omp_home")
       .then((h) => {
@@ -87,10 +80,26 @@ export function DesktopApp() {
         setCwd((c) => c || h);
       })
       .catch(() => {});
-    invoke<SessionInfo[]>("omp_list_sessions")
+    invoke<SidebarSession[]>("omp_list_sessions")
       .then(setSessions)
       .catch(() => {});
   }, []);
+
+  // Context row under the composer: project name + git branch (debounced —
+  // the cwd field is editable and fires this on every keystroke).
+  useEffect(() => {
+    const dir = cwd.trim();
+    if (!dir) {
+      setCwdInfo({ project: "", branch: "" });
+      return;
+    }
+    const t = setTimeout(() => {
+      invoke<CwdInfo>("omp_cwd_info", { cwd: dir })
+        .then(setCwdInfo)
+        .catch(() => setCwdInfo({ project: projectLabel(dir), branch: "" }));
+    }, 350);
+    return () => clearTimeout(t);
+  }, [cwd]);
 
   useEffect(() => {
     const putToolResult = (msg: ToolResultMessage) => {
@@ -152,45 +161,87 @@ export function DesktopApp() {
     };
   }, []);
 
-  const start = useCallback(async () => {
-    setSession("starting");
-    setError("");
+  // get_state is authoritative: omp may fall back to a default model that
+  // differs from what we set, so the pickers re-sync from it after changes.
+  const refreshSessionState = useCallback(async () => {
+    try {
+      const state = await rpc<StateResponse>({ type: "get_state" });
+      const model = state.model;
+      if (model?.provider && model.id) setActiveModel({ provider: model.provider, id: model.id });
+      if (typeof state.thinkingLevel === "string") setThinkingLevel(state.thinkingLevel);
+    } catch {
+      // session gone mid-refresh; the exit handler owns the UI from here
+    }
+  }, [rpc]);
+
+  const loadModels = useCallback(async () => {
+    try {
+      const res = await rpc<{ models?: OmpModelInfo[] }>({ type: "get_available_models" });
+      const list = Array.isArray(res.models)
+        ? res.models.filter((m) => m && typeof m.id === "string" && typeof m.provider === "string")
+        : [];
+      setModels(list);
+    } catch {
+      setModels([]);
+    }
+  }, [rpc]);
+
+  const resetTranscript = useCallback(() => {
     setMessages([]);
     setToolResults(new Map());
     setStreaming(null);
+  }, []);
+
+  const beginSession = useCallback(async () => {
+    setSession("starting");
+    setError("");
+    resetTranscript();
+    setActiveFile(null);
     try {
-      await invoke("omp_start", { cwd });
+      await invoke("omp_start", { cwd: cwd.trim() });
       setSession("ready");
       void loadModels();
       void refreshSessionState();
+      return true;
     } catch (err) {
       setError(String(err));
       setSession("idle");
+      return false;
     }
-  }, [cwd, loadModels, refreshSessionState]);
+  }, [cwd, loadModels, refreshSessionState, resetTranscript]);
 
   const stop = useCallback(async () => {
+    if (sessionRef.current === "running") {
+      // interrupt the run; the session stays open
+      rpc({ type: "abort" }).catch(() => {});
+      return;
+    }
     await invoke("omp_stop").catch(() => {});
     setSession("idle");
-  }, []);
+  }, [rpc]);
 
   const send = useCallback(async () => {
     const message = input.trim();
-    if (!message || session !== "ready") return;
+    if (!message || session === "starting" || session === "running") return;
     setInput("");
-    setSession("running");
+    setError("");
     try {
+      if (sessionRef.current !== "ready") {
+        const ok = await beginSession();
+        if (!ok) return;
+      }
+      setSession("running");
       await invoke("omp_send", { command: { type: "prompt", message } });
       setSession("ready");
     } catch (err) {
       setError(String(err));
-      setSession("ready");
+      setSession(sessionRef.current === "exited" ? "exited" : "ready");
     }
-  }, [input, session]);
+  }, [input, session, beginSession]);
 
   // Resume a stored session: spawn omp with --resume, then load its transcript
   // from disk (frames from omp continue the same message list).
-  const resume = useCallback(async (info: SessionInfo) => {
+  const resume = useCallback(async (info: SidebarSession) => {
     const dir = info.cwd?.trim();
     if (!dir) {
       setError("Session has no cwd recorded.");
@@ -198,10 +249,9 @@ export function DesktopApp() {
     }
     setSession("starting");
     setError("");
-    setMessages([]);
-    setToolResults(new Map());
-    setStreaming(null);
+    resetTranscript();
     setCwd(dir);
+    setActiveFile(info.file);
     try {
       await invoke("omp_start", { cwd: dir, resume: info.file });
       const msgs = await invoke<AgentMessage[]>("omp_read_session", { file: info.file });
@@ -209,11 +259,13 @@ export function DesktopApp() {
       setSession("ready");
       void loadModels();
       void refreshSessionState();
+      invoke<SidebarSession[]>("omp_list_sessions").then(setSessions).catch(() => {});
     } catch (err) {
       setError(String(err));
       setSession("idle");
+      setActiveFile(null);
     }
-  }, [loadModels, refreshSessionState]);
+  }, [loadModels, refreshSessionState, resetTranscript]);
 
   const changeModel = useCallback(
     async (provider: string, modelId: string) => {
@@ -273,135 +325,175 @@ export function DesktopApp() {
     ? models.some((m) => m.provider === activeModel.provider && m.id === activeModel.id)
     : false;
 
-  const busy = session === "starting" || session === "running";
-  const started = session !== "idle" && session !== "exited";
-  const emptyHint: Record<SessionState, string> = {
-    idle: "Open a session to start chatting with omp.",
-    starting: "Starting omp…",
-    ready: "Session ready — type a prompt below.",
-    running: "Working…",
-    exited: "omp exited. Open a new session.",
-  };
+  const activeSession = activeFile ? sessions.find((s) => s.file === activeFile) : undefined;
+  const title =
+    activeSession?.title ||
+    (messages.length > 0 ? firstUserText(messages).slice(0, 80) : "") ||
+    "New Task";
+  const running = session === "running";
 
   return (
     <div className="desktop-app">
-      <header className="desktop-toolbar">
-        <input
-          className="desktop-cwd"
-          value={cwd}
-          onChange={(e) => setCwd(e.target.value)}
-          placeholder={home || "working directory"}
-          disabled={started}
-          spellCheck={false}
-        />
-        <button
-          className={started ? "desktop-btn" : "desktop-btn desktop-btn-primary"}
-          onClick={started ? stop : start}
-          disabled={started ? false : !cwd.trim() || busy}
-        >
-          {started ? "Stop" : busy ? "Starting…" : "Open session"}
-        </button>
-        {started && (
-          <select
-            className="desktop-select"
-            value={modelValue}
-            onChange={(e) => {
-              const [provider, id] = e.target.value.split("|");
-              if (provider && id) void changeModel(provider, id);
-            }}
-            disabled={busy}
-            aria-label="Model"
-            title="Model"
-          >
-            {activeModel && !activeInCatalog && (
-              <option value={modelValue}>{activeModel.id}</option>
-            )}
-            {modelGroups.map(([provider, list]) => (
-              <optgroup key={provider} label={provider}>
-                {list.map((m) => (
-                  <option key={m.id} value={`${provider}|${m.id}`}>
-                    {m.name || m.id}
-                  </option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
-        )}
-        {started && (
-          <select
-            className="desktop-select"
-            value={thinkingLevel || "auto"}
-            onChange={(e) => void changeThinking(e.target.value)}
-            disabled={busy}
-            aria-label="Thinking level"
-            title="Thinking level"
-          >
-            {thinkingOptions.map((lvl) => (
-              <option key={lvl} value={lvl}>
-                {lvl}
-              </option>
-            ))}
-          </select>
-        )}
-        <details className="desktop-sessions" open={!started && messages.length === 0 && sessions.length > 0}>
-          <summary className="desktop-btn">Resume…</summary>
-          <div className="desktop-sessions-list">
-            {sessions.length === 0 && <div className="desktop-sessions-empty">No sessions found.</div>}
-            {sessions.slice(0, 12).map((s) => (
-              <button
-                key={s.file}
-                className="desktop-session-item"
-                onClick={() => void resume(s)}
-                disabled={started || busy}
-                title={s.file}
-              >
-                <span className="desktop-session-title">{s.title || s.file.split(/[\\/]/).pop()}</span>
-                <span className="desktop-session-meta">
-                  {s.cwd} · {new Date(s.mtimeMs).toLocaleString()}
-                </span>
-              </button>
-            ))}
+      {sidebarOpen && (
+        <aside className="desktop-sidebar">
+          <div className="sidebar-actions">
+            <button className="sidebar-new-task" onClick={() => void beginSession()} disabled={!cwd.trim()}>
+              <Plus size={15} aria-hidden />
+              New Task
+            </button>
+            <label className="sidebar-cwd">
+              <input
+                value={cwd}
+                onChange={(e) => setCwd(e.target.value)}
+                placeholder={home || "working directory"}
+                spellCheck={false}
+              />
+            </label>
           </div>
-        </details>
-      </header>
+          <Sidebar sessions={sessions} activeFile={activeFile} onOpen={(s) => void resume(s)} />
+          <div className="sidebar-footer">
+            <button className="sidebar-icon-btn" onClick={() => toggleTheme()} title="Toggle theme">
+              <span aria-hidden>◑</span>
+            </button>
+          </div>
+        </aside>
+      )}
 
-      {error && <div className="desktop-error">{error}</div>}
+      <div className="desktop-main">
+        <header className="desktop-titlebar" data-tauri-drag-region>
+          <button
+            className="titlebar-btn"
+            onClick={() => setSidebarOpen((v) => !v)}
+            title="Toggle sidebar"
+          >
+            <PanelLeft size={15} aria-hidden />
+          </button>
+          <div className="titlebar-title" data-tauri-drag-region>{title}</div>
+          <div className="titlebar-drag" data-tauri-drag-region />
+          <div className="titlebar-controls">
+            <button className="titlebar-btn" onClick={() => void appWindow.minimize()} title="Minimize">
+              <Minus size={14} aria-hidden />
+            </button>
+            <button className="titlebar-btn" onClick={() => void appWindow.toggleMaximize()} title="Maximize">
+              <Square size={11} aria-hidden />
+            </button>
+            <button
+              className="titlebar-btn titlebar-close"
+              onClick={() => void appWindow.close()}
+              title="Close to tray"
+            >
+              <X size={14} aria-hidden />
+            </button>
+          </div>
+        </header>
 
-      <main className="desktop-transcript">
-        {messages.length === 0 && !streaming && (
-          <div className="desktop-empty">{emptyHint[session]}</div>
-        )}
-        {messages.map((m, i) => (
-          <MessageView key={i} message={m} toolResults={toolResults} cwd={cwd} />
-        ))}
-        {streaming && (
-          <MessageView message={streaming} isStreaming toolResults={toolResults} cwd={cwd} />
-        )}
-        {session === "running" && !streaming && <div className="desktop-cursor" aria-hidden />}
-      </main>
+        {error && <div className="desktop-error">{error}</div>}
 
-      <footer className="desktop-composer">
-        <textarea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              void send();
-            }
-          }}
-          placeholder={started ? "Type a prompt… (Enter to send)" : "Open a session first"}
-          disabled={!started || busy}
-          rows={2}
-        />
-        <button
-          className="desktop-btn desktop-btn-primary"
-          onClick={() => void send()}
-          disabled={!started || busy || !input.trim()}
-        >
-          Send
-        </button>
-      </footer>
+        <main className="desktop-transcript">
+          <div className="transcript-column">
+            {messages.length === 0 && !streaming && (
+              <div className="desktop-empty">
+                {session === "starting"
+                  ? "Starting omp…"
+                  : session === "exited"
+                    ? "omp exited. Start a new task."
+                    : "Do anything…"}
+              </div>
+            )}
+            {messages.map((m, i) => (
+              <MessageView key={i} message={m} toolResults={toolResults} cwd={cwd} />
+            ))}
+            {streaming && (
+              <MessageView message={streaming} isStreaming toolResults={toolResults} cwd={cwd} />
+            )}
+          </div>
+        </main>
+
+        <footer className="desktop-composer">
+          <div className="composer-box">
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void send();
+                }
+              }}
+              placeholder="Do anything…"
+              disabled={session === "starting"}
+              rows={2}
+              spellCheck={false}
+            />
+            <div className="composer-row">
+              <div className="composer-controls">
+                {session !== "idle" && session !== "exited" && (
+                  <>
+                    <select
+                      className="composer-select"
+                      value={modelValue}
+                      onChange={(e) => {
+                        const [provider, id] = e.target.value.split("|");
+                        if (provider && id) void changeModel(provider, id);
+                      }}
+                      disabled={running}
+                      aria-label="Model"
+                      title="Model"
+                    >
+                      {activeModel && !activeInCatalog && (
+                        <option value={modelValue}>{activeModel.id}</option>
+                      )}
+                      {modelGroups.map(([provider, list]) => (
+                        <optgroup key={provider} label={provider}>
+                          {list.map((m) => (
+                            <option key={m.id} value={`${provider}|${m.id}`}>
+                              {m.name || m.id}
+                            </option>
+                          ))}
+                        </optgroup>
+                      ))}
+                    </select>
+                    <select
+                      className="composer-select"
+                      value={thinkingLevel || "auto"}
+                      onChange={(e) => void changeThinking(e.target.value)}
+                      disabled={running}
+                      aria-label="Thinking level"
+                      title="Thinking level"
+                    >
+                      {thinkingOptions.map((lvl) => (
+                        <option key={lvl} value={lvl}>
+                          {lvl}
+                        </option>
+                      ))}
+                    </select>
+                  </>
+                )}
+              </div>
+              {running ? (
+                <button className="composer-send stop" onClick={() => void stop()} title="Stop">
+                  <Square size={12} aria-hidden />
+                </button>
+              ) : (
+                <button
+                  className="composer-send"
+                  onClick={() => void send()}
+                  disabled={!input.trim() || session === "starting" || !cwd.trim()}
+                  title="Send"
+                >
+                  <ArrowUp size={15} aria-hidden />
+                </button>
+              )}
+            </div>
+          </div>
+          <div className="composer-context">
+            {cwdInfo.project && <span className="context-chip">{cwdInfo.project}</span>}
+            {cwdInfo.branch && <span className="context-chip branch">{cwdInfo.branch}</span>}
+            <span className="context-spacer" />
+            {running && <span className="context-spinner" aria-label="running" />}
+          </div>
+        </footer>
+      </div>
     </div>
   );
 }
