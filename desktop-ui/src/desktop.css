@@ -254,3 +254,26 @@ body,
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* Model / thinking-level pickers */
+.desktop-select {
+  max-width: 220px;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control, 8px);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.desktop-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.desktop-select:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
