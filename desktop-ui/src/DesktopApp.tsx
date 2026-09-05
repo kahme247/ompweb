@@ -10,6 +10,7 @@ import { selectableThinkingLevels, thinkingLevelsForMeta } from "@/lib/thinking-
 import { formatTokens, formatCost } from "@/lib/subagent-format";
 import { useTheme } from "@/hooks/useTheme";
 import { Sidebar, projectLabel, type SidebarSession } from "./Sidebar";
+import { SettingsView, type LoginProvider } from "./SettingsView";
 import type { AgentMessage, AssistantMessage, ToolResultMessage } from "@/lib/types";
 
 type SessionState = "idle" | "starting" | "ready" | "running" | "exited";
@@ -75,6 +76,7 @@ export function DesktopApp() {
   const [sessions, setSessions] = useState<SidebarSession[]>([]);
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [histPast, setHistPast] = useState<SidebarSession[]>([]);
   const [histFuture, setHistFuture] = useState<SidebarSession[]>([]);
   const [cwdInfo, setCwdInfo] = useState<CwdInfo>(NO_DIFF);
@@ -513,11 +515,7 @@ export function DesktopApp() {
             <span className="sidebar-footer-spacer" />
             <button
               className="sidebar-icon-btn"
-              onClick={() =>
-                void invoke("omp_open_settings").catch((err) =>
-                  setError(`Settings window failed to open: ${err}`),
-                )
-              }
+              onClick={() => setSettingsOpen(true)}
               title="Settings"
             >
               <Settings size={15} aria-hidden />
@@ -536,9 +534,9 @@ export function DesktopApp() {
             <PanelLeft size={15} aria-hidden />
           </button>
           <div className="titlebar-title" data-tauri-drag-region>
-            {title}
+            {settingsOpen ? "Settings" : title}
           </div>
-          {(cwdInfo.diffAdded > 0 || cwdInfo.diffRemoved > 0) && (
+          {!settingsOpen && (cwdInfo.diffAdded > 0 || cwdInfo.diffRemoved > 0) && (
             <span className="titlebar-diff" title="Working-tree changes vs HEAD">
               <span className="diff-add">+{cwdInfo.diffAdded.toLocaleString()}</span>{" "}
               <span className="diff-del">-{cwdInfo.diffRemoved.toLocaleString()}</span>
@@ -562,9 +560,20 @@ export function DesktopApp() {
           </div>
         </header>
 
-        {error && <div className="desktop-error">{error}</div>}
+        {error && !settingsOpen && <div className="desktop-error">{error}</div>}
 
-        <main className="desktop-transcript" ref={scrollRef}>
+        {settingsOpen ? (
+          <SettingsView
+            onBack={() => setSettingsOpen(false)}
+            providersLoader={() =>
+              rpc<{ providers?: LoginProvider[] }>({ type: "get_login_providers" }).then(
+                (res) => (Array.isArray(res.providers) ? res.providers : []),
+              )
+            }
+          />
+        ) : (
+          <>
+            <main className="desktop-transcript" ref={scrollRef}>
               <div className="transcript-inner">
                 <div className="transcript-column">
                   {messages.length === 0 && !streaming && (
@@ -763,6 +772,8 @@ export function DesktopApp() {
             {running && <span className="context-spinner" aria-label="running" />}
           </div>
         </footer>
+          </>
+        )}
       </div>
     </div>
   );

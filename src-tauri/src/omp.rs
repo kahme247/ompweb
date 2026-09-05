@@ -500,29 +500,6 @@ fn omp_shell_set_setting(app: tauri::AppHandle, key: String, value: bool) -> Res
     crate::shell::set_setting(&app, &key, value)
 }
 
-/// Open (or focus) the standalone settings window.
-#[tauri::command]
-fn omp_open_settings(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(existing) = app.get_webview_window("settings") {
-        let _ = existing.show();
-        let _ = existing.unminimize();
-        let _ = existing.set_focus();
-        return Ok(());
-    }
-    tauri::WebviewWindowBuilder::new(
-        &app,
-        "settings",
-        tauri::WebviewUrl::App("index.html?boot=settings".into()),
-    )
-    .title("Settings")
-    .inner_size(1000.0, 680.0)
-    .min_inner_size(640.0, 460.0)
-    .decorations(false)
-    .build()
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 /// Open a chat window for a project (one per cwd — focusing an existing
 /// window for the same project instead of duplicating). Returns the label.
 #[tauri::command]
@@ -581,23 +558,6 @@ fn omp_window_boot(state: tauri::State<'_, OmpState>, window: tauri::Window) -> 
     Ok(json!({ "label": window.label(), "cwd": cwd }))
 }
 
-/// Login providers, served by any live omp session (the settings window has
-/// none of its own — sessions are per chat window).
-#[tauri::command]
-async fn omp_providers(state: tauri::State<'_, OmpState>) -> Result<Value, String> {
-    let session = {
-        let sessions = state.sessions.lock().map_err(|_| poisoned())?;
-        sessions
-            .get("main")
-            .cloned()
-            .or_else(|| sessions.values().next().cloned())
-            .ok_or("no omp session is running")?
-    };
-    tauri::async_runtime::spawn_blocking(move || session.send(json!({ "type": "get_login_providers" })))
-        .await
-        .map_err(|e| format!("omp send task failed: {e}"))?
-}
-
 /// The command macros are module-scoped, so the handler is assembled here
 /// where they resolve; lib.rs wires this straight into invoke_handler.
 pub fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool {
@@ -611,9 +571,7 @@ pub fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool {
         omp_cwd_info,
         omp_shell_settings,
         omp_shell_set_setting,
-        omp_open_settings,
         omp_open_project_window,
-        omp_window_boot,
-        omp_providers
+        omp_window_boot
     ]
 }
