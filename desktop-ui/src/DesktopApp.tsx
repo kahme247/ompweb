@@ -12,6 +12,7 @@ import { useTheme } from "@/hooks/useTheme";
 import { Sidebar, projectLabel, type SidebarSession } from "./Sidebar";
 import { SettingsView, applyFontSettings, type LoginProvider, type UsageSnapshot } from "./SettingsView";
 import { MenuChip, ProjectMenu, BranchMenu, WorktreeMenu } from "./ContextMenus";
+import { SubagentDialog } from "./SubagentDialog";
 import { CommandPalette } from "@/components/CommandPalette";
 import { TodoList } from "@/components/TodoList";
 import { toast, ToastProvider } from "@/components/ui/toast";
@@ -19,9 +20,11 @@ import { MAX_TOTAL_ATTACHED_IMAGE_BYTES } from "@/lib/image-attachments";
 import {
   compareSubagents,
   mergeSubagentRoster,
+  parseSubagentActivityEvent,
   parseSubagentLifecycle,
   parseSubagentProgress,
   parseSubagentSnapshot,
+  type SubagentActivityEvent,
   type SubagentInfo,
 } from "@/lib/subagent-types";
 import type { TodoPhase } from "@/lib/pi-types";
@@ -141,6 +144,11 @@ export function DesktopApp() {
   const [contextUsage, setContextUsage] = useState<StateResponse["contextUsage"]>(undefined);
   const [todoPhases, setTodoPhases] = useState<TodoPhase[]>([]);
   const [subagents, setSubagents] = useState<SubagentInfo[]>([]);
+  const [selectedSubagentId, setSelectedSubagentId] = useState<string | null>(null);
+  /** Bounded live-activity buffers, throttled into state (omp-web pattern). */
+  const subagentActivityRef = useRef<Map<string, SubagentActivityEvent[]>>(new Map());
+  const [subagentActivity, setSubagentActivity] = useState<Map<string, SubagentActivityEvent[]>>(new Map());
+  const activityDirtyRef = useRef(false);
   const sessionRef = useRef<SessionState>("idle");
   sessionRef.current = session;
 
@@ -276,6 +284,19 @@ export function DesktopApp() {
             if (sessionRef.current !== "exited") setSession("ready");
             setRefreshTick((t) => t + 1);
             break;
+          case "subagent_event": {
+            const payload = frame as { id?: unknown; event?: unknown };
+            const subId = typeof payload.id === "string" ? payload.id : null;
+            const activity = parseSubagentActivityEvent(payload);
+            if (subId && activity) {
+              const list = subagentActivityRef.current.get(subId) ?? [];
+              list.push(activity);
+              if (list.length > 40) list.splice(0, list.length - 40);
+              subagentActivityRef.current.set(subId, list);
+              activityDirtyRef.current = true;
+            }
+            break;
+          }
           case "subagent_lifecycle": {
             const info = parseSubagentLifecycle(frame);
             if (info) setSubagents((prev) => mergeSubagentRoster(prev, [info]));
@@ -473,6 +494,9 @@ export function DesktopApp() {
     setStreaming(null);
     setTodoPhases([]);
     setSubagents([]);
+    setSelectedSubagentId(null);
+    subagentActivityRef.current = new Map();
+    setSubagentActivity(new Map());
     messageRefs.current = [];
   }, []);
 
@@ -641,6 +665,17 @@ export function DesktopApp() {
     }
   }, [compacting, rpc, refreshSessionState]);
 
+  // Throttled flush of the live-activity buffers into render state.
+  useEffect(() => {
+    if (subagents.length === 0) return;
+    const id = setInterval(() => {
+      if (!activityDirtyRef.current) return;
+      activityDirtyRef.current = false;
+      setSubagentActivity(new Map(subagentActivityRef.current));
+    }, 400);
+    return () => clearInterval(id);
+  }, [subagents.length]);
+
   // Global keys: Esc leaves settings; Ctrl+N starts a new task.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -721,6 +756,7 @@ export function DesktopApp() {
     (messages.length > 0 ? firstUserText(messages).slice(0, 80) : "") ||
     "New Task";
   const running = session === "running";
+  const dialogInfo = selectedSubagentId ? subagents.find((s) => s.id === selectedSubagentId) : undefined;
 
   // Cumulative tokens processed / cost across the session's assistant turns.
   const sessionUsage = useMemo(() => {
@@ -894,7 +930,12 @@ export function DesktopApp() {
             {subagents.length > 0 && (
               <div className="subagent-chips">
                 {[...subagents].sort(compareSubagents).map((s) => (
-                  <span key={s.id} className={`subagent-chip ${s.status}`} title={s.task ?? s.description ?? s.id}>
+                  <span
+                    key={s.id}
+                    className={`subagent-chip ${s.status} clickable`}
+                    title={s.task ?? s.description ?? s.id}
+                    onClick={() => setSelectedSubagentId(s.id)}
+                  >
                     <span className="subagent-dot" aria-hidden />
                     <span className="subagent-chip-name">{s.agent}</span>
                     {s.progress?.retryFailure && <span className="subagent-chip-note">⟳ retrying</span>}
@@ -1194,6 +1235,13 @@ export function DesktopApp() {
           )
         }
       />
+      {dialogInfo && (
+        <SubagentDialog
+          info={dialogInfo}
+          activity={subagentActivity.get(dialogInfo.id) ?? []}
+          onClose={() => setSelectedSubagentId(null)}
+        />
+      )}
     </div>
     </ToastProvider>
   );
