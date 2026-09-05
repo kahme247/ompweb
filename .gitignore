@@ -92,3 +92,4 @@ bin/tray-publish/
 
 # npm packaging archives
 *.tgz
+desktop-ui/dist

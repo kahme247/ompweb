@@ -1,0 +1,176 @@
+/* Desktop shell chrome — consumes the shared design tokens from
+   app/globals.css (warm-paper / warm-ember). */
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+.desktop-app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 14px;
+}
+
+.desktop-toolbar {
+  display: flex;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.desktop-cwd {
+  flex: 1;
+  font-family: var(--font-mono, monospace);
+  font-size: 12.5px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control, 8px);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.desktop-cwd:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.desktop-btn {
+  padding: 7px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control, 8px);
+  background: var(--bg-subtle, var(--bg-panel));
+  color: var(--text);
+  cursor: pointer;
+  transition: background var(--dur-fast, 150ms) var(--ease-out-warm, ease);
+}
+
+.desktop-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.desktop-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.desktop-btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.desktop-btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.desktop-error {
+  padding: 8px 14px;
+  background: color-mix(in srgb, #c0392b 12%, var(--bg));
+  color: #c0392b;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.desktop-transcript {
+  flex: 1;
+  overflow-y: auto;
+  padding: 18px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.desktop-empty {
+  margin: auto;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.desktop-msg {
+  max-width: 78%;
+  border-radius: var(--radius-card, 12px);
+  padding: 10px 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.55;
+}
+
+.desktop-msg-user {
+  align-self: flex-end;
+  background: var(--user-bg);
+}
+
+.desktop-msg-assistant {
+  align-self: flex-start;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+}
+
+.desktop-msg-text {
+  white-space: pre-wrap;
+}
+
+.desktop-thinking {
+  margin-bottom: 8px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.desktop-thinking summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.desktop-thinking pre {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  font-family: var(--font-mono, monospace);
+}
+
+.desktop-cursor {
+  align-self: flex-start;
+  width: 10px;
+  height: 16px;
+  background: var(--accent);
+  animation: desktop-blink 1s steps(2) infinite;
+}
+
+@keyframes desktop-blink {
+  to {
+    visibility: hidden;
+  }
+}
+
+.desktop-composer {
+  display: flex;
+  gap: 8px;
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.desktop-composer textarea {
+  flex: 1;
+  resize: none;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control, 8px);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.desktop-composer textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}

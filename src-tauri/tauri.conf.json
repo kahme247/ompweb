@@ -4,7 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.kahme247.ompweb",
   "build": {
-    "frontendDist": "../desktop"
+    "beforeDevCommand": "npm run desktop-ui:dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run desktop-ui:build",
+    "frontendDist": "../desktop-ui/dist"
   },
   "app": {
     "withGlobalTauri": true,
