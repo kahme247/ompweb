@@ -208,3 +208,57 @@ pub fn read_session(file: &str) -> Result<Vec<Value>, String> {
     }
     Ok(messages)
 }
+
+/// Stream a session file and sum assistant-message usage (tokens, cost).
+/// Lighter than read_session — no tree/compaction handling; usage blocks only.
+pub fn session_usage_totals(file: &Path) -> Option<(u64, f64)> {
+    use std::io::BufRead;
+    let reader = std::io::BufReader::new(std::fs::File::open(file).ok()?);
+    let mut tokens: u64 = 0;
+    let mut cost: f64 = 0.0;
+    let mut any = false;
+    for line in reader.lines().flatten() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if v["type"] != *"message" {
+            continue;
+        }
+        let msg = &v["message"];
+        if msg["role"] != *"assistant" {
+            continue;
+        }
+        if let Some(usage) = msg.get("usage") {
+            any = true;
+            tokens += usage["totalTokens"].as_u64().unwrap_or(0);
+            cost += usage["cost"]["total"].as_f64().unwrap_or(0.0);
+        }
+    }
+    if any {
+        Some((tokens, cost))
+    } else {
+        None
+    }
+}
+
+/// Per-session token/cost totals for the 30 most recent sessions that carry
+/// usage blocks — backs the Usage settings page.
+pub fn usage_history() -> Result<Vec<serde_json::Value>, String> {
+    let files = list_sessions()?;
+    let mut out = Vec::new();
+    for session in files.iter().take(30) {
+        let Some(file) = session["file"].as_str() else {
+            continue;
+        };
+        if let Some((tokens, cost)) = session_usage_totals(std::path::Path::new(file)) {
+            out.push(serde_json::json!({
+                "title": session["title"],
+                "cwd": session["cwd"],
+                "mtimeMs": session["mtimeMs"],
+                "tokens": tokens,
+                "cost": cost,
+            }));
+        }
+    }
+    Ok(out)
+}

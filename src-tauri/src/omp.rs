@@ -460,6 +460,12 @@ fn omp_read_session(file: String) -> Result<Vec<Value>, String> {
     crate::sessions::read_session(&file)
 }
 
+/// Per-session token/cost totals for the 30 most recent sessions.
+#[tauri::command]
+fn omp_usage_history() -> Result<Vec<Value>, String> {
+    crate::sessions::usage_history()
+}
+
 /// Composer context row: project label (cwd basename) and current git branch.
 #[tauri::command]
 fn omp_cwd_info(cwd: String) -> Value {
@@ -590,6 +596,7 @@ pub fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool {
         omp_home,
         omp_list_sessions,
         omp_read_session,
+        omp_usage_history,
         omp_cwd_info,
         omp_shell_settings,
         omp_shell_set_setting,

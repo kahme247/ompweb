@@ -1610,3 +1610,47 @@ html.dark .desktop-app {
   font-size: 12px;
   color: var(--text-muted);
 }
+
+.usage-history {
+  max-width: 660px;
+  margin-top: 8px;
+}
+
+.usage-history-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12.5px;
+}
+
+.usage-history-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.usage-history-project {
+  flex: none;
+  color: var(--text-muted);
+}
+
+.usage-history-age {
+  flex: none;
+  width: 64px;
+  color: var(--text-dim);
+  text-align: right;
+}
+
+.usage-history-tokens,
+.usage-history-cost {
+  flex: none;
+  width: 76px;
+  text-align: right;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-muted);
+}
