@@ -150,10 +150,18 @@ struct Spawned {
     ready_rx: std::sync::mpsc::Receiver<Value>,
 }
 
-fn spawn_session(app: tauri::AppHandle, cwd: &str) -> Result<Spawned, String> {
+fn spawn_session(app: tauri::AppHandle, cwd: &str, resume: Option<&str>) -> Result<Spawned, String> {
     let mut cmd = Command::new(resolve_omp_bin());
-    cmd.args(["--mode", "rpc-ui", "--cwd", cwd])
-        .current_dir(cwd)
+    cmd.args(["--mode", "rpc-ui", "--cwd", cwd]);
+    // An absolute session-file path resolves deterministically in omp's
+    // createSessionManager — no interactive resume/fork prompts (see
+    // rpc-manager.ts buildSessionSpawnArgs).
+    if let Some(file) = resume {
+        if !file.trim().is_empty() {
+            cmd.arg("--resume").arg(file);
+        }
+    }
+    cmd.current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -306,6 +314,7 @@ async fn omp_start(
     app: tauri::AppHandle,
     state: tauri::State<'_, OmpState>,
     cwd: String,
+    resume: Option<String>,
 ) -> Result<Value, String> {
     // Only one session per window for now — dispose any previous one.
     if let Some(old) = state.0.lock().map_err(|_| poisoned())?.take() {
@@ -314,7 +323,7 @@ async fn omp_start(
 
     let app = app.clone();
     let (session, ready) = tauri::async_runtime::spawn_blocking(move || {
-        let spawned = spawn_session(app, &cwd)?;
+        let spawned = spawn_session(app, &cwd, resume.as_deref())?;
         let frame = spawned
             .ready_rx
             .recv_timeout(READY_TIMEOUT)
@@ -360,8 +369,25 @@ fn omp_home() -> Result<String, String> {
         .map_err(|_| "cannot determine home directory".to_string())
 }
 
+#[tauri::command]
+fn omp_list_sessions() -> Result<Vec<Value>, String> {
+    crate::sessions::list_sessions()
+}
+
+#[tauri::command]
+fn omp_read_session(file: String) -> Result<Vec<Value>, String> {
+    crate::sessions::read_session(&file)
+}
+
 /// The command macros are module-scoped, so the handler is assembled here
 /// where they resolve; lib.rs wires this straight into invoke_handler.
 pub fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool {
-    tauri::generate_handler![omp_start, omp_send, omp_stop, omp_home]
+    tauri::generate_handler![
+        omp_start,
+        omp_send,
+        omp_stop,
+        omp_home,
+        omp_list_sessions,
+        omp_read_session
+    ]
 }

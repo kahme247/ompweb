@@ -1,5 +1,6 @@
 mod omp;
 mod rpc_frame;
+mod sessions;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

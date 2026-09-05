@@ -7,6 +7,13 @@ import type { AgentMessage, AssistantMessage, ToolResultMessage } from "@/lib/ty
 
 type SessionState = "idle" | "starting" | "ready" | "running" | "exited";
 
+type SessionInfo = {
+  file: string;
+  title: string;
+  cwd?: string;
+  mtimeMs: number;
+};
+
 type RpcFrame = {
   type: string;
   message?: { role?: string; [key: string]: unknown };
@@ -22,6 +29,7 @@ export function DesktopApp() {
   const [streaming, setStreaming] = useState<AssistantMessage | null>(null);
   const [error, setError] = useState("");
   const [input, setInput] = useState("");
+  const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const sessionRef = useRef<SessionState>("idle");
   sessionRef.current = session;
 
@@ -31,6 +39,9 @@ export function DesktopApp() {
         setHome(h);
         setCwd((c) => c || h);
       })
+      .catch(() => {});
+    invoke<SessionInfo[]>("omp_list_sessions")
+      .then(setSessions)
       .catch(() => {});
   }, []);
 
@@ -128,6 +139,31 @@ export function DesktopApp() {
     }
   }, [input, session]);
 
+  // Resume a stored session: spawn omp with --resume, then load its transcript
+  // from disk (frames from omp continue the same message list).
+  const resume = useCallback(async (info: SessionInfo) => {
+    const dir = info.cwd?.trim();
+    if (!dir) {
+      setError("Session has no cwd recorded.");
+      return;
+    }
+    setSession("starting");
+    setError("");
+    setMessages([]);
+    setToolResults(new Map());
+    setStreaming(null);
+    setCwd(dir);
+    try {
+      await invoke("omp_start", { cwd: dir, resume: info.file });
+      const msgs = await invoke<AgentMessage[]>("omp_read_session", { file: info.file });
+      setMessages(msgs.map((m) => normalizeToolCalls(m)));
+      setSession("ready");
+    } catch (err) {
+      setError(String(err));
+      setSession("idle");
+    }
+  }, []);
+
   const busy = session === "starting" || session === "running";
   const started = session !== "idle" && session !== "exited";
   const emptyHint: Record<SessionState, string> = {
@@ -156,6 +192,26 @@ export function DesktopApp() {
         >
           {started ? "Stop" : busy ? "Starting…" : "Open session"}
         </button>
+        <details className="desktop-sessions" open={!started && messages.length === 0 && sessions.length > 0}>
+          <summary className="desktop-btn">Resume…</summary>
+          <div className="desktop-sessions-list">
+            {sessions.length === 0 && <div className="desktop-sessions-empty">No sessions found.</div>}
+            {sessions.slice(0, 12).map((s) => (
+              <button
+                key={s.file}
+                className="desktop-session-item"
+                onClick={() => void resume(s)}
+                disabled={started || busy}
+                title={s.file}
+              >
+                <span className="desktop-session-title">{s.title || s.file.split(/[\\/]/).pop()}</span>
+                <span className="desktop-session-meta">
+                  {s.cwd} · {new Date(s.mtimeMs).toLocaleString()}
+                </span>
+              </button>
+            ))}
+          </div>
+        </details>
       </header>
 
       {error && <div className="desktop-error">{error}</div>}
