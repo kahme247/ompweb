@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { AppWindow, ArrowLeft, ArrowRight, ArrowUp, Brain, FolderOpen, GitBranch, HardDrive, Minus, Minimize2, PanelLeft, Plus, Settings, Shield, Sparkles, Square, X } from "lucide-react";
+import { AppWindow, ArrowLeft, ArrowRight, ArrowUp, Brain, FolderOpen, GitBranch, HardDrive, Minus, Minimize2, PanelLeft, Plus, Settings, Shield, Sparkles, Square, Wrench, X, Zap } from "lucide-react";
 import { MessageView } from "@/components/MessageView";
 import { ChatMinimap } from "@/components/ChatMinimap";
 import { normalizeToolCalls } from "@/lib/normalize";
@@ -52,6 +52,16 @@ type StateResponse = {
   contextUsage?: { tokens: number; contextWindow: number; percent: number };
   queuedMessageCount?: number;
   todoPhases?: TodoPhase[];
+  fastModeEnabled?: boolean;
+  fastModeActive?: boolean;
+};
+
+type ToolPreset = "none" | "default" | "full";
+
+const TOOL_PRESET_LABELS: Record<ToolPreset, string> = {
+  none: "No tools",
+  default: "Core tools",
+  full: "Full tools",
 };
 
 type CwdInfo = { project: string; branch: string; diffAdded: number; diffRemoved: number };
@@ -107,6 +117,15 @@ export function DesktopApp() {
       return "default";
     }
   });
+  const [toolPreset, setToolPreset] = useState<ToolPreset>(() => {
+    try {
+      const v = localStorage.getItem("omp-desktop-tool-preset");
+      return v === "none" || v === "default" ? v : "full";
+    } catch {
+      return "full";
+    }
+  });
+  const [fastMode, setFastMode] = useState<{ enabled: boolean; active?: boolean }>({ enabled: false });
   const [refreshTick, setRefreshTick] = useState(0);
   const [queuedCount, setQueuedCount] = useState(0);
   const [dragOver, setDragOver] = useState(false);
@@ -318,6 +337,7 @@ export function DesktopApp() {
           : undefined,
       );
       setQueuedCount(typeof state.queuedMessageCount === "number" ? state.queuedMessageCount : 0);
+      setFastMode({ enabled: state.fastModeEnabled === true, active: state.fastModeActive });
       setTodoPhases(Array.isArray(state.todoPhases) ? state.todoPhases : []);
       // Roster rehydration: get_subagents snapshot fills gaps after reconnects
       // and restores terminal chips the frame stream no longer carries.
@@ -463,7 +483,7 @@ export function DesktopApp() {
     setActiveFile(null);
     saveCwd(cwd.trim());
     try {
-      await invoke("omp_start", { cwd: cwd.trim(), approvalMode });
+      await invoke("omp_start", { cwd: cwd.trim(), approvalMode, tools: toolPreset });
       setSession("ready");
       void loadModels();
       void refreshSessionState();
@@ -473,7 +493,7 @@ export function DesktopApp() {
       setSession("idle");
       return false;
     }
-  }, [cwd, approvalMode, loadModels, refreshSessionState, resetTranscript, saveCwd]);
+  }, [cwd, approvalMode, toolPreset, loadModels, refreshSessionState, resetTranscript, saveCwd]);
 
   const stop = useCallback(async () => {
     if (sessionRef.current === "running") {
@@ -541,7 +561,7 @@ export function DesktopApp() {
     saveCwd(dir);
     setActiveFile(info.file);
     try {
-      await invoke("omp_start", { cwd: dir, resume: info.file, approvalMode });
+      await invoke("omp_start", { cwd: dir, resume: info.file, approvalMode, tools: toolPreset });
       const msgs = await invoke<AgentMessage[]>("omp_read_session", { file: info.file });
       setMessages(msgs.map((m) => normalizeToolCalls(m)));
       setSession("ready");
@@ -553,7 +573,7 @@ export function DesktopApp() {
       setSession("idle");
       setActiveFile(null);
     }
-  }, [approvalMode, currentSession, loadModels, refreshSessionState, resetTranscript, saveCwd]);
+  }, [approvalMode, toolPreset, currentSession, loadModels, refreshSessionState, resetTranscript, saveCwd]);
 
   const goBack = useCallback(() => {
     const prev = histPast[histPast.length - 1];
@@ -580,9 +600,33 @@ export function DesktopApp() {
     }
   }, []);
 
-  const [compacting, setCompacting] = useState(false);
   /** Transient failures go to toasts; session-fatal ones keep the red bar. */
   const toastError = useCallback((err: unknown) => toast.error(typeof err === "string" ? err : String(err)), []);
+
+  const changeToolPreset = useCallback((preset: ToolPreset) => {
+    setToolPreset(preset);
+    try {
+      localStorage.setItem("omp-desktop-tool-preset", preset);
+    } catch {
+      // persistence is best-effort
+    }
+  }, []);
+
+  const fastModeSupported =
+    activeModel != null && ["anthropic", "openai", "google"].includes(activeModel.provider);
+  const toggleFastMode = useCallback(async () => {
+    try {
+      const res = await rpc<{ enabled?: boolean; active?: boolean }>({
+        type: "set_fast_mode",
+        enabled: !fastMode.enabled,
+      });
+      setFastMode({ enabled: res.enabled ?? !fastMode.enabled, active: res.active });
+    } catch (err) {
+      toastError(err);
+    }
+  }, [fastMode.enabled, rpc, toastError]);
+
+  const [compacting, setCompacting] = useState(false);
   const compact = useCallback(async () => {
     if (sessionRef.current !== "ready" || compacting) return;
     setCompacting(true);
@@ -909,6 +953,34 @@ export function DesktopApp() {
               <div className="composer-controls">
                 {session !== "idle" && session !== "exited" && (
                   <>
+                    <label className="composer-chip" title="Tool preset — applies to the next session">
+                      <Wrench size={12} aria-hidden />
+                      <select
+                        className="composer-select"
+                        value={toolPreset}
+                        onChange={(e) => changeToolPreset(e.target.value as ToolPreset)}
+                        disabled={running}
+                        aria-label="Tool preset"
+                      >
+                        {(Object.keys(TOOL_PRESET_LABELS) as ToolPreset[]).map((preset) => (
+                          <option key={preset} value={preset}>
+                            {TOOL_PRESET_LABELS[preset]}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    {(fastMode.enabled || fastModeSupported) && (
+                      <button
+                        className={`composer-chip${fastMode.active ? " fast-active" : ""}`}
+                        onClick={() => void toggleFastMode()}
+                        disabled={running}
+                        title="Fast mode — priority service tier"
+                        aria-label="Toggle fast mode"
+                      >
+                        <Zap size={12} aria-hidden />
+                        {fastMode.active ? "Fast" : "Fast mode"}
+                      </button>
+                    )}
                     <button
                       className="composer-chip"
                       onClick={() => void compact()}

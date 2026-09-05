@@ -164,6 +164,7 @@ fn spawn_session(
     cwd: &str,
     resume: Option<&str>,
     approval_mode: Option<&str>,
+    tools: Option<&str>,
 ) -> Result<Spawned, String> {
     let mut cmd = Command::new(resolve_omp_bin());
     cmd.args(["--mode", "rpc-ui", "--cwd", cwd]);
@@ -181,6 +182,18 @@ fn spawn_session(
         if matches!(mode, "always-ask" | "write" | "yolo") {
             cmd.arg(format!("--approval-mode={mode}"));
         }
+    }
+    // Tool preset (browser-side preference for NEW sessions), mirroring
+    // rpc-manager.ts buildSessionSpawnArgs: "none" → --no-tools, "full" →
+    // leave omp's complete default toolset, "default" → the pi preset list.
+    match tools {
+        Some("none") => {
+            cmd.arg("--no-tools");
+        }
+        Some("default") => {
+            cmd.args(["--tools", "read,bash,edit,write"]);
+        }
+        _ => {}
     }
     cmd.current_dir(cwd)
         .stdin(Stdio::piped())
@@ -354,6 +367,7 @@ async fn omp_start(
     cwd: String,
     resume: Option<String>,
     approval_mode: Option<String>,
+    tools: Option<String>,
 ) -> Result<Value, String> {
     let label = window.label().to_string();
     // Only one session per window — dispose any previous one.
@@ -369,7 +383,14 @@ async fn omp_start(
     let app = app.clone();
     let label_for_task = label.clone();
     let (session, ready) = tauri::async_runtime::spawn_blocking(move || {
-        let spawned = spawn_session(app, label_for_task.clone(), &cwd, resume.as_deref(), approval_mode.as_deref())?;
+        let spawned = spawn_session(
+            app,
+            label_for_task.clone(),
+            &cwd,
+            resume.as_deref(),
+            approval_mode.as_deref(),
+            tools.as_deref(),
+        )?;
         let frame = spawned
             .ready_rx
             .recv_timeout(READY_TIMEOUT)
