@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { ArrowUp, Minus, PanelLeft, Plus, Settings, Square, X } from "lucide-react";
+import { AppWindow, ArrowLeft, ArrowRight, ArrowUp, Brain, FolderOpen, GitBranch, HardDrive, Minus, PanelLeft, Plus, Settings, Shield, Sparkles, Square, X } from "lucide-react";
 import { MessageView } from "@/components/MessageView";
 import { ChatMinimap } from "@/components/ChatMinimap";
 import { normalizeToolCalls } from "@/lib/normalize";
@@ -10,7 +10,6 @@ import { selectableThinkingLevels, thinkingLevelsForMeta } from "@/lib/thinking-
 import { formatTokens, formatCost } from "@/lib/subagent-format";
 import { useTheme } from "@/hooks/useTheme";
 import { Sidebar, projectLabel, type SidebarSession } from "./Sidebar";
-import { SettingsView } from "./SettingsView";
 import type { AgentMessage, AssistantMessage, ToolResultMessage } from "@/lib/types";
 
 type SessionState = "idle" | "starting" | "ready" | "running" | "exited";
@@ -76,7 +75,8 @@ export function DesktopApp() {
   const [sessions, setSessions] = useState<SidebarSession[]>([]);
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [histPast, setHistPast] = useState<SidebarSession[]>([]);
+  const [histFuture, setHistFuture] = useState<SidebarSession[]>([]);
   const [cwdInfo, setCwdInfo] = useState<CwdInfo>(NO_DIFF);
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>(() => {
     try {
@@ -87,6 +87,7 @@ export function DesktopApp() {
     }
   });
   const [refreshTick, setRefreshTick] = useState(0);
+  const [editingCwd, setEditingCwd] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const messageRefs = useRef<(HTMLDivElement | null)[]>([]);
   const [models, setModels] = useState<OmpModelInfo[]>([]);
@@ -102,18 +103,31 @@ export function DesktopApp() {
   );
 
   useEffect(() => {
-    invoke<string>("omp_home")
-      .then((h) => {
-        setHome(h);
-        let stored: string | null = null;
-        try {
-          stored = localStorage.getItem("omp-desktop-cwd");
-        } catch {
-          // storage unavailable falls back to home
-        }
-        setCwd((c) => c || stored || h);
-      })
-      .catch(() => {});
+    // Project windows get their cwd from the Rust window registry; the main
+    // window falls back to the last-used directory, then home.
+    if (getCurrentWindow().label.startsWith("chat-")) {
+      invoke<{ cwd?: string | null }>("omp_window_boot")
+        .then((b) => {
+          if (b.cwd) {
+            setCwd(b.cwd);
+            setHome(b.cwd);
+          }
+        })
+        .catch(() => {});
+    } else {
+      invoke<string>("omp_home")
+        .then((h) => {
+          setHome(h);
+          let stored: string | null = null;
+          try {
+            stored = localStorage.getItem("omp-desktop-cwd");
+          } catch {
+            // storage unavailable falls back to home
+          }
+          setCwd((c) => c || stored || h);
+        })
+        .catch(() => {});
+    }
     invoke<SidebarSession[]>("omp_list_sessions")
       .then(setSessions)
       .catch(() => {});
@@ -315,11 +329,17 @@ export function DesktopApp() {
 
   // Resume a stored session: spawn omp with --resume, then load its transcript
   // from disk (frames from omp continue the same message list).
-  const resume = useCallback(async (info: SidebarSession) => {
+  const currentSession = activeFile ? sessions.find((s) => s.file === activeFile) : undefined;
+
+  const resume = useCallback(async (info: SidebarSession, push = true) => {
     const dir = info.cwd?.trim();
     if (!dir) {
       setError("Session has no cwd recorded.");
       return;
+    }
+    if (push && currentSession && currentSession.file !== info.file) {
+      setHistPast((p) => [...p, currentSession]);
+      setHistFuture([]);
     }
     setSession("starting");
     setError("");
@@ -340,7 +360,23 @@ export function DesktopApp() {
       setSession("idle");
       setActiveFile(null);
     }
-  }, [approvalMode, loadModels, refreshSessionState, resetTranscript, saveCwd]);
+  }, [approvalMode, currentSession, loadModels, refreshSessionState, resetTranscript, saveCwd]);
+
+  const goBack = useCallback(() => {
+    const prev = histPast[histPast.length - 1];
+    if (!prev) return;
+    setHistPast((p) => p.slice(0, -1));
+    if (currentSession) setHistFuture((f) => [...f, currentSession]);
+    void resume(prev, false);
+  }, [histPast, currentSession, resume]);
+
+  const goForward = useCallback(() => {
+    const next = histFuture[histFuture.length - 1];
+    if (!next) return;
+    setHistFuture((f) => f.slice(0, -1));
+    if (currentSession) setHistPast((p) => [...p, currentSession]);
+    void resume(next, false);
+  }, [histFuture, currentSession, resume]);
 
   const changeApproval = useCallback((mode: ApprovalMode) => {
     setApprovalMode(mode);
@@ -437,24 +473,47 @@ export function DesktopApp() {
       {sidebarOpen && (
         <aside className="desktop-sidebar">
           <div className="sidebar-actions">
+            <div className="sidebar-nav-row">
+              <button
+                className="sidebar-icon-btn"
+                onClick={goBack}
+                disabled={histPast.length === 0}
+                title="Back"
+              >
+                <ArrowLeft size={14} aria-hidden />
+              </button>
+              <button
+                className="sidebar-icon-btn"
+                onClick={goForward}
+                disabled={histFuture.length === 0}
+                title="Forward"
+              >
+                <ArrowRight size={14} aria-hidden />
+              </button>
+            </div>
             <button className="sidebar-new-task" onClick={() => void beginSession()} disabled={!cwd.trim()}>
               <Plus size={15} aria-hidden />
               New Task
             </button>
-            <label className="sidebar-cwd">
-              <input
-                value={cwd}
-                onChange={(e) => setCwd(e.target.value)}
-                placeholder={home || "working directory"}
-                spellCheck={false}
-              />
-            </label>
           </div>
-          <Sidebar sessions={sessions} activeFile={activeFile} onOpen={(s) => void resume(s)} />
+          <Sidebar
+            sessions={sessions}
+            activeFile={activeFile}
+            onOpen={(s) => void resume(s)}
+          />
           <div className="sidebar-footer">
             <button
               className="sidebar-icon-btn"
-              onClick={() => setSettingsOpen(true)}
+              onClick={() => void invoke("omp_open_project_window", { cwd: cwd.trim() }).catch(() => {})}
+              disabled={!cwd.trim()}
+              title="Open this project in its own window"
+            >
+              <AppWindow size={15} aria-hidden />
+            </button>
+            <span className="sidebar-footer-spacer" />
+            <button
+              className="sidebar-icon-btn"
+              onClick={() => void invoke("omp_open_settings").catch(() => {})}
               title="Settings"
             >
               <Settings size={15} aria-hidden />
@@ -473,9 +532,9 @@ export function DesktopApp() {
             <PanelLeft size={15} aria-hidden />
           </button>
           <div className="titlebar-title" data-tauri-drag-region>
-            {settingsOpen ? "Settings" : title}
+            {title}
           </div>
-          {!settingsOpen && (cwdInfo.diffAdded > 0 || cwdInfo.diffRemoved > 0) && (
+          {(cwdInfo.diffAdded > 0 || cwdInfo.diffRemoved > 0) && (
             <span className="titlebar-diff" title="Working-tree changes vs HEAD">
               <span className="diff-add">+{cwdInfo.diffAdded.toLocaleString()}</span>{" "}
               <span className="diff-del">-{cwdInfo.diffRemoved.toLocaleString()}</span>
@@ -499,17 +558,9 @@ export function DesktopApp() {
           </div>
         </header>
 
-        {error && !settingsOpen && <div className="desktop-error">{error}</div>}
+        {error && <div className="desktop-error">{error}</div>}
 
-        {settingsOpen ? (
-          <SettingsView
-            onBack={() => setSettingsOpen(false)}
-            rpc={rpc}
-            sessionReady={session === "ready" || session === "running"}
-          />
-        ) : (
-          <>
-            <main className="desktop-transcript" ref={scrollRef}>
+        <main className="desktop-transcript" ref={scrollRef}>
               <div className="transcript-inner">
                 <div className="transcript-column">
                   {messages.length === 0 && !streaming && (
@@ -560,44 +611,48 @@ export function DesktopApp() {
               <div className="composer-controls">
                 {session !== "idle" && session !== "exited" && (
                   <>
-                    <select
-                      className="composer-select"
-                      value={modelValue}
-                      onChange={(e) => {
-                        const [provider, id] = e.target.value.split("|");
-                        if (provider && id) void changeModel(provider, id);
-                      }}
-                      disabled={running}
-                      aria-label="Model"
-                      title="Model"
-                    >
-                      {activeModel && !activeInCatalog && (
-                        <option value={modelValue}>{activeModel.id}</option>
-                      )}
-                      {modelGroups.map(([provider, list]) => (
-                        <optgroup key={provider} label={provider}>
-                          {list.map((m) => (
-                            <option key={m.id} value={`${provider}|${m.id}`}>
-                              {m.name || m.id}
-                            </option>
-                          ))}
-                        </optgroup>
-                      ))}
-                    </select>
-                    <select
-                      className="composer-select"
-                      value={thinkingLevel || "auto"}
-                      onChange={(e) => void changeThinking(e.target.value)}
-                      disabled={running}
-                      aria-label="Thinking level"
-                      title="Thinking level"
-                    >
-                      {thinkingOptions.map((lvl) => (
-                        <option key={lvl} value={lvl}>
-                          {lvl}
-                        </option>
-                      ))}
-                    </select>
+                    <label className="composer-chip" title="Model">
+                      <Sparkles size={12} aria-hidden />
+                      <select
+                        className="composer-select"
+                        value={modelValue}
+                        onChange={(e) => {
+                          const [provider, id] = e.target.value.split("|");
+                          if (provider && id) void changeModel(provider, id);
+                        }}
+                        disabled={running}
+                        aria-label="Model"
+                      >
+                        {activeModel && !activeInCatalog && (
+                          <option value={modelValue}>{activeModel.id}</option>
+                        )}
+                        {modelGroups.map(([provider, list]) => (
+                          <optgroup key={provider} label={provider}>
+                            {list.map((m) => (
+                              <option key={m.id} value={`${provider}|${m.id}`}>
+                                {m.name || m.id}
+                              </option>
+                            ))}
+                          </optgroup>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="composer-chip" title="Thinking level">
+                      <Brain size={12} aria-hidden />
+                      <select
+                        className="composer-select"
+                        value={thinkingLevel || "auto"}
+                        onChange={(e) => void changeThinking(e.target.value)}
+                        disabled={running}
+                        aria-label="Thinking level"
+                      >
+                        {thinkingOptions.map((lvl) => (
+                          <option key={lvl} value={lvl}>
+                            {lvl}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
                   </>
                 )}
               </div>
@@ -618,21 +673,63 @@ export function DesktopApp() {
             </div>
           </div>
           <div className="composer-context">
-            {cwdInfo.project && <span className="context-chip">{cwdInfo.project}</span>}
-            {cwdInfo.branch && <span className="context-chip branch">{cwdInfo.branch}</span>}
-            <select
-              className="composer-select context-approval"
-              value={approvalMode}
-              onChange={(e) => changeApproval(e.target.value as ApprovalMode)}
-              title="Tool approval mode — applies when the next session starts"
-              aria-label="Approval mode"
-            >
-              {(Object.keys(APPROVAL_LABELS) as ApprovalMode[]).map((mode) => (
-                <option key={mode} value={mode}>
-                  {APPROVAL_LABELS[mode]}
-                </option>
-              ))}
-            </select>
+            {editingCwd ? (
+              <input
+                className="context-cwd-input"
+                autoFocus
+                value={cwd}
+                onChange={(e) => setCwd(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    saveCwd(e.currentTarget.value.trim());
+                    setEditingCwd(false);
+                  } else if (e.key === "Escape") {
+                    setEditingCwd(false);
+                  }
+                }}
+                onBlur={() => {
+                  saveCwd(cwd.trim());
+                  setEditingCwd(false);
+                }}
+                placeholder={home || "working directory"}
+                spellCheck={false}
+              />
+            ) : (
+              <button
+                className="context-chip editable"
+                onClick={() => setEditingCwd(true)}
+                title="Change working directory"
+              >
+                <FolderOpen size={12} aria-hidden />
+                {cwdInfo.project || projectLabel(cwd) || "Set directory"}
+              </button>
+            )}
+            {cwdInfo.branch && (
+              <span className="context-chip branch">
+                <GitBranch size={12} aria-hidden />
+                {cwdInfo.branch}
+              </span>
+            )}
+            <span className="context-chip" title="Sessions run locally on this machine">
+              <HardDrive size={12} aria-hidden />
+              Local
+            </span>
+            <label className="composer-chip context-approval" title="Tool approval mode — applies when the next session starts">
+              <Shield size={12} aria-hidden />
+              <select
+                className="composer-select"
+                value={approvalMode}
+                onChange={(e) => changeApproval(e.target.value as ApprovalMode)}
+                aria-label="Approval mode"
+              >
+                {(Object.keys(APPROVAL_LABELS) as ApprovalMode[]).map((mode) => (
+                  <option key={mode} value={mode}>
+                    {APPROVAL_LABELS[mode]}
+                  </option>
+                ))}
+              </select>
+            </label>
             <span className="context-spacer" />
             {sessionUsage && (
               <span
@@ -662,8 +759,6 @@ export function DesktopApp() {
             {running && <span className="context-spinner" aria-label="running" />}
           </div>
         </footer>
-          </>
-        )}
       </div>
     </div>
   );

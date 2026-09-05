@@ -5,7 +5,7 @@ import { useTheme, type ThemePreference } from "@/hooks/useTheme";
 
 type ShellSettings = { notifyOnAgentEnd: boolean; closeToTray: boolean };
 
-type LoginProvider = { id: string; name: string; available: boolean; authenticated: boolean };
+export type LoginProvider = { id: string; name: string; available: boolean; authenticated: boolean };
 
 const STORAGE_KEY = "omp-desktop-settings";
 
@@ -41,15 +41,16 @@ function Toggle({
 
 type SettingsViewProps = {
   onBack: () => void;
-  rpc: <T>(command: Record<string, unknown>) => Promise<T>;
-  sessionReady: boolean;
+  /** Resolves the provider list; rejects when no omp session is running. */
+  providersLoader: () => Promise<LoginProvider[]>;
 };
 
-export function SettingsView({ onBack, rpc, sessionReady }: SettingsViewProps) {
+export function SettingsView({ onBack, providersLoader }: SettingsViewProps) {
   const { preference, setTheme } = useTheme();
   const [section, setSection] = useState<SectionId>("general");
   const [shell, setShell] = useState<ShellSettings>({ notifyOnAgentEnd: true, closeToTray: true });
   const [providers, setProviders] = useState<LoginProvider[] | null>(null);
+  const [providersError, setProvidersError] = useState("");
 
   useEffect(() => {
     invoke<ShellSettings>("omp_shell_settings")
@@ -58,11 +59,13 @@ export function SettingsView({ onBack, rpc, sessionReady }: SettingsViewProps) {
   }, []);
 
   useEffect(() => {
-    if (section !== "providers" || !sessionReady) return;
-    rpc<{ providers?: LoginProvider[] }>({ type: "get_login_providers" })
-      .then((res) => setProviders(Array.isArray(res.providers) ? res.providers : []))
-      .catch(() => setProviders(null));
-  }, [section, sessionReady, rpc]);
+    if (section !== "providers") return;
+    setProviders(null);
+    setProvidersError("");
+    providersLoader()
+      .then(setProviders)
+      .catch((err) => setProvidersError(String(err)));
+  }, [section, providersLoader]);
 
   const updateShell = (key: keyof ShellSettings, value: boolean) => {
     setShell((prev) => ({ ...prev, [key]: value }));
@@ -158,7 +161,7 @@ export function SettingsView({ onBack, rpc, sessionReady }: SettingsViewProps) {
         {section === "providers" && (
           <>
             <h2>Providers</h2>
-            {!sessionReady ? (
+            {providersError ? (
               <div className="settings-empty">
                 Start a session to see which model providers are authenticated.
               </div>

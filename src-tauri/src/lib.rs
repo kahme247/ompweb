@@ -19,7 +19,7 @@ pub fn run() {
       shell::setup(app)?;
       Ok(())
     })
-    .manage(omp::OmpState(std::sync::Mutex::new(None)))
+    .manage(omp::OmpState::default())
     .invoke_handler(omp::handlers())
     .run(tauri::generate_context!())
     .expect("error while running tauri application");

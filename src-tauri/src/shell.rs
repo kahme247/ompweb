@@ -145,10 +145,13 @@ fn toggle_main_window(app: &AppHandle) {
 
 fn stop_omp_session(app: &AppHandle) {
     if let Some(state) = app.try_state::<crate::omp::OmpState>() {
-        if let Ok(mut guard) = state.0.lock() {
-            if let Some(session) = guard.take() {
+        if let Ok(mut sessions) = state.sessions.lock() {
+            for (_, session) in sessions.drain() {
                 session.stop();
             }
+        }
+        if let Ok(mut cwds) = state.window_cwds.lock() {
+            cwds.clear();
         }
     }
 }
