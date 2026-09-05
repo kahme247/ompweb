@@ -294,10 +294,18 @@ body,
 
 /* ---------- Transcript ---------- */
 
+.transcript-inner {
+  display: flex;
+  align-items: stretch;
+  min-height: 0;
+  height: 100%;
+}
+
 .desktop-transcript {
   flex: 1;
   overflow-y: auto;
   min-height: 0;
+  min-width: 0;
 }
 
 .transcript-column {
@@ -307,6 +315,20 @@ body,
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.titlebar-diff {
+  flex: none;
+  font-size: 12px;
+  font-family: var(--font-mono, monospace);
+}
+
+.titlebar-diff .diff-add {
+  color: #4ec96f;
+}
+
+.titlebar-diff .diff-del {
+  color: #e06c60;
 }
 
 .desktop-empty {
@@ -455,6 +477,11 @@ body,
 
 .context-chip.branch {
   font-family: var(--font-mono, monospace);
+}
+
+.context-approval {
+  flex: none;
+  padding-left: 8px;
 }
 
 .context-spacer {

@@ -150,7 +150,12 @@ struct Spawned {
     ready_rx: std::sync::mpsc::Receiver<Value>,
 }
 
-fn spawn_session(app: tauri::AppHandle, cwd: &str, resume: Option<&str>) -> Result<Spawned, String> {
+fn spawn_session(
+    app: tauri::AppHandle,
+    cwd: &str,
+    resume: Option<&str>,
+    approval_mode: Option<&str>,
+) -> Result<Spawned, String> {
     let mut cmd = Command::new(resolve_omp_bin());
     cmd.args(["--mode", "rpc-ui", "--cwd", cwd]);
     // An absolute session-file path resolves deterministically in omp's
@@ -159,6 +164,13 @@ fn spawn_session(app: tauri::AppHandle, cwd: &str, resume: Option<&str>) -> Resu
     if let Some(file) = resume {
         if !file.trim().is_empty() {
             cmd.arg("--resume").arg(file);
+        }
+    }
+    // Only omp's own approval modes are passed through; anything else starts
+    // with the config default.
+    if let Some(mode) = approval_mode {
+        if matches!(mode, "always-ask" | "write" | "yolo") {
+            cmd.arg(format!("--approval-mode={mode}"));
         }
     }
     cmd.current_dir(cwd)
@@ -324,6 +336,7 @@ async fn omp_start(
     state: tauri::State<'_, OmpState>,
     cwd: String,
     resume: Option<String>,
+    approval_mode: Option<String>,
 ) -> Result<Value, String> {
     // Only one session per window for now — dispose any previous one.
     if let Some(old) = state.0.lock().map_err(|_| poisoned())?.take() {
@@ -332,7 +345,7 @@ async fn omp_start(
 
     let app = app.clone();
     let (session, ready) = tauri::async_runtime::spawn_blocking(move || {
-        let spawned = spawn_session(app, &cwd, resume.as_deref())?;
+        let spawned = spawn_session(app, &cwd, resume.as_deref(), approval_mode.as_deref())?;
         let frame = spawned
             .ready_rx
             .recv_timeout(READY_TIMEOUT)
@@ -396,22 +409,46 @@ fn omp_cwd_info(cwd: String) -> Value {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| cwd.clone());
     let mut branch = String::new();
-    let mut cmd = std::process::Command::new("git");
-    cmd.args(["-C", &cwd, "branch", "--show-current"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW: git is a console app spawned from a GUI process.
-        cmd.creation_flags(0x0800_0000);
-    }
-    if let Ok(output) = cmd.output() {
-        if output.status.success() {
-            branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let mut diff_added: u64 = 0;
+    let mut diff_removed: u64 = 0;
+    let git = |args: &[&str], parse: &mut dyn FnMut(&str)| {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C").arg(&cwd).args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // CREATE_NO_WINDOW: git is a console app spawned from a GUI process.
+            cmd.creation_flags(0x0800_0000);
         }
-    }
-    json!({ "project": project, "branch": branch })
+        if let Ok(output) = cmd.output() {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout).to_string();
+                for line in text.lines() {
+                    parse(line);
+                }
+            }
+        }
+    };
+    git(&["branch", "--show-current"], &mut |line| {
+        if branch.is_empty() {
+            branch = line.trim().to_string();
+        }
+    });
+    // Working-tree churn vs HEAD (staged + unstaged); binary lines ("-	-") ignored.
+    git(&["diff", "HEAD", "--numstat"], &mut |line| {
+        let mut cols = line.split('\t');
+        if let (Some(add), Some(rem)) = (cols.next(), cols.next()) {
+            if let Ok(a) = add.parse::<u64>() {
+                diff_added += a;
+            }
+            if let Ok(r) = rem.parse::<u64>() {
+                diff_removed += r;
+            }
+        }
+    });
+    json!({ "project": project, "branch": branch, "diffAdded": diff_added, "diffRemoved": diff_removed })
 }
 
 /// Settings surface for the UI; keys are stable identifiers.

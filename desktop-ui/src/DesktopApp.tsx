@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { ArrowUp, Minus, PanelLeft, Plus, Settings, Square, X } from "lucide-react";
 import { MessageView } from "@/components/MessageView";
+import { ChatMinimap } from "@/components/ChatMinimap";
 import { normalizeToolCalls } from "@/lib/normalize";
 import { selectableThinkingLevels, thinkingLevelsForMeta } from "@/lib/thinking-levels";
 import { useTheme } from "@/hooks/useTheme";
@@ -32,7 +33,18 @@ type StateResponse = {
   thinkingLevel?: string;
 };
 
-type CwdInfo = { project: string; branch: string };
+type CwdInfo = { project: string; branch: string; diffAdded: number; diffRemoved: number };
+
+type ApprovalMode = "default" | "always-ask" | "write" | "yolo";
+
+const APPROVAL_LABELS: Record<ApprovalMode, string> = {
+  default: "Default",
+  "always-ask": "Ask",
+  write: "Write access",
+  yolo: "Full access",
+};
+
+const NO_DIFF: CwdInfo = { project: "", branch: "", diffAdded: 0, diffRemoved: 0 };
 
 const appWindow = getCurrentWindow();
 
@@ -63,7 +75,18 @@ export function DesktopApp() {
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [cwdInfo, setCwdInfo] = useState<CwdInfo>({ project: "", branch: "" });
+  const [cwdInfo, setCwdInfo] = useState<CwdInfo>(NO_DIFF);
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>(() => {
+    try {
+      const v = localStorage.getItem("omp-desktop-approval-mode");
+      return v === "always-ask" || v === "write" || v === "yolo" ? v : "default";
+    } catch {
+      return "default";
+    }
+  });
+  const [refreshTick, setRefreshTick] = useState(0);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const messageRefs = useRef<(HTMLDivElement | null)[]>([]);
   const [models, setModels] = useState<OmpModelInfo[]>([]);
   const [activeModel, setActiveModel] = useState<{ provider: string; id: string } | null>(null);
   const [thinkingLevel, setThinkingLevel] = useState("");
@@ -108,16 +131,16 @@ export function DesktopApp() {
   useEffect(() => {
     const dir = cwd.trim();
     if (!dir) {
-      setCwdInfo({ project: "", branch: "" });
+      setCwdInfo(NO_DIFF);
       return;
     }
     const t = setTimeout(() => {
       invoke<CwdInfo>("omp_cwd_info", { cwd: dir })
         .then(setCwdInfo)
-        .catch(() => setCwdInfo({ project: projectLabel(dir), branch: "" }));
+        .catch(() => setCwdInfo({ ...NO_DIFF, project: projectLabel(dir) }));
     }, 350);
     return () => clearTimeout(t);
-  }, [cwd]);
+  }, [cwd, refreshTick]);
 
   useEffect(() => {
     const putToolResult = (msg: ToolResultMessage) => {
@@ -166,6 +189,7 @@ export function DesktopApp() {
             break;
           case "agent_end":
             if (sessionRef.current !== "exited") setSession("ready");
+            setRefreshTick((t) => t + 1);
             break;
         }
       }),
@@ -208,6 +232,7 @@ export function DesktopApp() {
     setMessages([]);
     setToolResults(new Map());
     setStreaming(null);
+    messageRefs.current = [];
   }, []);
 
   const beginSession = useCallback(async () => {
@@ -216,7 +241,7 @@ export function DesktopApp() {
     resetTranscript();
     setActiveFile(null);
     try {
-      await invoke("omp_start", { cwd: cwd.trim() });
+      await invoke("omp_start", { cwd: cwd.trim(), approvalMode });
       setSession("ready");
       void loadModels();
       void refreshSessionState();
@@ -226,7 +251,7 @@ export function DesktopApp() {
       setSession("idle");
       return false;
     }
-  }, [cwd, loadModels, refreshSessionState, resetTranscript]);
+  }, [cwd, approvalMode, loadModels, refreshSessionState, resetTranscript]);
 
   const stop = useCallback(async () => {
     if (sessionRef.current === "running") {
@@ -271,7 +296,7 @@ export function DesktopApp() {
     setCwd(dir);
     setActiveFile(info.file);
     try {
-      await invoke("omp_start", { cwd: dir, resume: info.file });
+      await invoke("omp_start", { cwd: dir, resume: info.file, approvalMode });
       const msgs = await invoke<AgentMessage[]>("omp_read_session", { file: info.file });
       setMessages(msgs.map((m) => normalizeToolCalls(m)));
       setSession("ready");
@@ -283,7 +308,16 @@ export function DesktopApp() {
       setSession("idle");
       setActiveFile(null);
     }
-  }, [loadModels, refreshSessionState, resetTranscript]);
+  }, [approvalMode, loadModels, refreshSessionState, resetTranscript]);
+
+  const changeApproval = useCallback((mode: ApprovalMode) => {
+    setApprovalMode(mode);
+    try {
+      localStorage.setItem("omp-desktop-approval-mode", mode);
+    } catch {
+      // persistence is best-effort
+    }
+  }, []);
 
   const changeModel = useCallback(
     async (provider: string, modelId: string) => {
@@ -393,6 +427,12 @@ export function DesktopApp() {
           <div className="titlebar-title" data-tauri-drag-region>
             {settingsOpen ? "Settings" : title}
           </div>
+          {!settingsOpen && (cwdInfo.diffAdded > 0 || cwdInfo.diffRemoved > 0) && (
+            <span className="titlebar-diff" title="Working-tree changes vs HEAD">
+              <span className="diff-add">+{cwdInfo.diffAdded.toLocaleString()}</span>{" "}
+              <span className="diff-del">-{cwdInfo.diffRemoved.toLocaleString()}</span>
+            </span>
+          )}
           <div className="titlebar-drag" data-tauri-drag-region />
           <div className="titlebar-controls">
             <button className="titlebar-btn" onClick={() => void appWindow.minimize()} title="Minimize">
@@ -421,25 +461,36 @@ export function DesktopApp() {
           />
         ) : (
           <>
-            <main className="desktop-transcript">
-          <div className="transcript-column">
-            {messages.length === 0 && !streaming && (
-              <div className="desktop-empty">
-                {session === "starting"
-                  ? "Starting omp…"
-                  : session === "exited"
-                    ? "omp exited. Start a new task."
-                    : "Do anything…"}
+            <main className="desktop-transcript" ref={scrollRef}>
+              <div className="transcript-inner">
+                <div className="transcript-column">
+                  {messages.length === 0 && !streaming && (
+                    <div className="desktop-empty">
+                      {session === "starting"
+                        ? "Starting omp…"
+                        : session === "exited"
+                          ? "omp exited. Start a new task."
+                          : "Do anything…"}
+                    </div>
+                  )}
+                  {messages.map((m, i) => (
+                    <div
+                      key={i}
+                      className="transcript-message"
+                      ref={(el) => {
+                        messageRefs.current[i] = el;
+                      }}
+                    >
+                      <MessageView message={m} toolResults={toolResults} cwd={cwd} />
+                    </div>
+                  ))}
+                  {streaming && (
+                    <MessageView message={streaming} isStreaming toolResults={toolResults} cwd={cwd} />
+                  )}
+                </div>
               </div>
-            )}
-            {messages.map((m, i) => (
-              <MessageView key={i} message={m} toolResults={toolResults} cwd={cwd} />
-            ))}
-            {streaming && (
-              <MessageView message={streaming} isStreaming toolResults={toolResults} cwd={cwd} />
-            )}
-          </div>
-        </main>
+            </main>
+            <ChatMinimap messages={messages} scrollContainer={scrollRef} messageRefs={messageRefs} />
 
         <footer className="desktop-composer">
           <div className="composer-box">
@@ -521,6 +572,19 @@ export function DesktopApp() {
           <div className="composer-context">
             {cwdInfo.project && <span className="context-chip">{cwdInfo.project}</span>}
             {cwdInfo.branch && <span className="context-chip branch">{cwdInfo.branch}</span>}
+            <select
+              className="composer-select context-approval"
+              value={approvalMode}
+              onChange={(e) => changeApproval(e.target.value as ApprovalMode)}
+              title="Tool approval mode — applies when the next session starts"
+              aria-label="Approval mode"
+            >
+              {(Object.keys(APPROVAL_LABELS) as ApprovalMode[]).map((mode) => (
+                <option key={mode} value={mode}>
+                  {APPROVAL_LABELS[mode]}
+                </option>
+              ))}
+            </select>
             <span className="context-spacer" />
             {running && <span className="context-spinner" aria-label="running" />}
           </div>
