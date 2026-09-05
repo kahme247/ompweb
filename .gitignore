@@ -93,3 +93,4 @@ bin/tray-publish/
 # npm packaging archives
 *.tgz
 desktop-ui/dist
+tauri-dev.log

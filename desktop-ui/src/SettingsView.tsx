@@ -1,21 +1,46 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ArrowLeft, KeyRound, Palette, SlidersHorizontal } from "lucide-react";
+import { ArrowLeft, KeyRound, Palette, Puzzle, SlidersHorizontal } from "lucide-react";
 import { useTheme, type ThemePreference } from "@/hooks/useTheme";
+import { SkillsSettings } from "./SkillsSettings";
 
 type ShellSettings = { notifyOnAgentEnd: boolean; closeToTray: boolean };
 
 export type LoginProvider = { id: string; name: string; available: boolean; authenticated: boolean };
 
 const STORAGE_KEY = "omp-desktop-settings";
+const FONT_KEY = "omp-desktop-fonts";
 
 const SECTIONS = [
   { id: "general", label: "General", icon: SlidersHorizontal },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "providers", label: "Providers", icon: KeyRound },
+  { id: "skills", label: "Skills", icon: Puzzle },
 ] as const;
 
 type SectionId = (typeof SECTIONS)[number]["id"];
+
+type FontSettings = { ui: number; code: number };
+
+export function applyFontSettings(fonts: FontSettings): void {
+  document.documentElement.style.setProperty("--desktop-font-size", `${fonts.ui}px`);
+  document.documentElement.style.setProperty("--desktop-code-font-size", `${fonts.code}px`);
+}
+
+function loadFontSettings(): FontSettings {
+  try {
+    const raw = localStorage.getItem(FONT_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<FontSettings>;
+      const ui = typeof parsed.ui === "number" ? parsed.ui : 14;
+      const code = typeof parsed.code === "number" ? parsed.code : 13;
+      return { ui, code };
+    }
+  } catch {
+    // fall through to defaults
+  }
+  return { ui: 14, code: 13 };
+}
 
 function Toggle({
   checked,
@@ -43,14 +68,28 @@ type SettingsViewProps = {
   onBack: () => void;
   /** Resolves the provider list; rejects when no omp session is running. */
   providersLoader: () => Promise<LoginProvider[]>;
+  /** Working directory for the project skills scan. */
+  cwd: string;
 };
 
-export function SettingsView({ onBack, providersLoader }: SettingsViewProps) {
+export function SettingsView({ onBack, providersLoader, cwd }: SettingsViewProps) {
   const { preference, setTheme } = useTheme();
   const [section, setSection] = useState<SectionId>("general");
   const [shell, setShell] = useState<ShellSettings>({ notifyOnAgentEnd: true, closeToTray: true });
   const [providers, setProviders] = useState<LoginProvider[] | null>(null);
   const [providersError, setProvidersError] = useState("");
+  const [fonts, setFonts] = useState<FontSettings>(loadFontSettings);
+  const [skillsError, setSkillsError] = useState("");
+
+  const changeFonts = useCallback((next: FontSettings) => {
+    setFonts(next);
+    applyFontSettings(next);
+    try {
+      localStorage.setItem(FONT_KEY, JSON.stringify(next));
+    } catch {
+      // persistence is best-effort
+    }
+  }, []);
 
   useEffect(() => {
     invoke<ShellSettings>("omp_shell_settings")
@@ -141,7 +180,7 @@ export function SettingsView({ onBack, providersLoader }: SettingsViewProps) {
             <div className="settings-card">
               <div className="settings-card-text">
                 <div className="settings-card-title">Theme</div>
-                <div className="settings-card-desc">Light, dark, or follow the system</div>
+                <div className="settings-card-desc">Choose between system, light, or dark themes</div>
               </div>
               <div className="settings-segmented">
                 {(["system", "light", "dark"] as ThemePreference[]).map((p) => (
@@ -155,6 +194,44 @@ export function SettingsView({ onBack, providersLoader }: SettingsViewProps) {
                 ))}
               </div>
             </div>
+            <div className="settings-card">
+              <div className="settings-card-text">
+                <div className="settings-card-title">UI font size</div>
+                <div className="settings-card-desc">Text size across the interface and messages</div>
+              </div>
+              <select
+                className="settings-select"
+                value={fonts.ui}
+                onChange={(e) => changeFonts({ ...fonts, ui: Number(e.target.value) })}
+              >
+                {[12, 13, 14, 16, 18].map((n) => (
+                  <option key={n} value={n}>{n} px</option>
+                ))}
+              </select>
+            </div>
+            <div className="settings-card">
+              <div className="settings-card-text">
+                <div className="settings-card-title">Code font size</div>
+                <div className="settings-card-desc">Text size in diffs, code blocks, and tool output</div>
+              </div>
+              <select
+                className="settings-select"
+                value={fonts.code}
+                onChange={(e) => changeFonts({ ...fonts, code: Number(e.target.value) })}
+              >
+                {[11, 12, 13, 14, 15].map((n) => (
+                  <option key={n} value={n}>{n} px</option>
+                ))}
+              </select>
+            </div>
+          </>
+        )}
+
+        {section === "skills" && (
+          <>
+            <h2>Skills</h2>
+            {skillsError && <div className="settings-empty">{skillsError}</div>}
+            <SkillsSettings cwd={cwd} onError={setSkillsError} />
           </>
         )}
 

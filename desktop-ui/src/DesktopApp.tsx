@@ -11,6 +11,8 @@ import { formatTokens, formatCost } from "@/lib/subagent-format";
 import { useTheme } from "@/hooks/useTheme";
 import { Sidebar, projectLabel, type SidebarSession } from "./Sidebar";
 import { SettingsView, type LoginProvider } from "./SettingsView";
+import { MenuChip, ProjectMenu, BranchMenu, WorktreeMenu } from "./ContextMenus";
+import { applyFontSettings } from "./SettingsView";
 import type { AgentMessage, AssistantMessage, ToolResultMessage } from "@/lib/types";
 
 type SessionState = "idle" | "starting" | "ready" | "running" | "exited";
@@ -89,7 +91,6 @@ export function DesktopApp() {
     }
   });
   const [refreshTick, setRefreshTick] = useState(0);
-  const [editingCwd, setEditingCwd] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const messageRefs = useRef<(HTMLDivElement | null)[]>([]);
   const [models, setModels] = useState<OmpModelInfo[]>([]);
@@ -147,15 +148,22 @@ export function DesktopApp() {
   useEffect(() => {
     try {
       const raw = localStorage.getItem("omp-desktop-settings");
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as Record<string, unknown>;
-      for (const [key, value] of Object.entries(parsed)) {
-        if (typeof value === "boolean") {
-          invoke("omp_shell_set_setting", { key, value }).catch(() => {});
+      if (raw) {
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        for (const [key, value] of Object.entries(parsed)) {
+          if (typeof value === "boolean") {
+            invoke("omp_shell_set_setting", { key, value }).catch(() => {});
+          }
         }
       }
     } catch {
       // malformed storage falls back to Rust defaults
+    }
+    try {
+      const rawFonts = localStorage.getItem("omp-desktop-fonts");
+      if (rawFonts) applyFontSettings(JSON.parse(rawFonts));
+    } catch {
+      // font defaults apply
     }
   }, []);
 
@@ -565,6 +573,7 @@ export function DesktopApp() {
         {settingsOpen ? (
           <SettingsView
             onBack={() => setSettingsOpen(false)}
+            cwd={cwd.trim()}
             providersLoader={() =>
               rpc<{ providers?: LoginProvider[] }>({ type: "get_login_providers" }).then(
                 (res) => (Array.isArray(res.providers) ? res.providers : []),
@@ -578,11 +587,12 @@ export function DesktopApp() {
                 <div className="transcript-column">
                   {messages.length === 0 && !streaming && (
                     <div className="desktop-empty">
-                      {session === "starting"
-                        ? "Starting omp…"
-                        : session === "exited"
-                          ? "omp exited. Start a new task."
-                          : "Do anything…"}
+                      <div className="empty-heading">
+                        What should we build in{" "}
+                        <span className="empty-project">{cwdInfo.project || "this folder"}</span>?
+                      </div>
+                      {session === "starting" && <div className="empty-sub">Starting omp…</div>}
+                      {session === "exited" && <div className="empty-sub">omp exited. Start a new task.</div>}
                     </div>
                   )}
                   {messages.map((m, i) => (
@@ -686,48 +696,70 @@ export function DesktopApp() {
             </div>
           </div>
           <div className="composer-context">
-            {editingCwd ? (
-              <input
-                className="context-cwd-input"
-                autoFocus
-                value={cwd}
-                onChange={(e) => setCwd(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    saveCwd(e.currentTarget.value.trim());
-                    setEditingCwd(false);
-                  } else if (e.key === "Escape") {
-                    setEditingCwd(false);
-                  }
-                }}
-                onBlur={() => {
-                  saveCwd(cwd.trim());
-                  setEditingCwd(false);
-                }}
-                placeholder={home || "working directory"}
-                spellCheck={false}
-              />
-            ) : (
-              <button
-                className="context-chip editable"
-                onClick={() => setEditingCwd(true)}
-                title="Change working directory"
-              >
-                <FolderOpen size={12} aria-hidden />
-                {cwdInfo.project || projectLabel(cwd) || "Set directory"}
-              </button>
-            )}
+            <MenuChip
+              width={300}
+              chip={
+                <>
+                  <FolderOpen size={12} aria-hidden />
+                  {cwdInfo.project || projectLabel(cwd) || "Set directory"}
+                </>
+              }
+            >
+              {(close) => (
+                <ProjectMenu
+                  cwd={cwd}
+                  home={home}
+                  close={close}
+                  onPick={(p) => {
+                    setCwd(p);
+                    saveCwd(p);
+                  }}
+                  onError={setError}
+                />
+              )}
+            </MenuChip>
             {cwdInfo.branch && (
-              <span className="context-chip branch">
-                <GitBranch size={12} aria-hidden />
-                {cwdInfo.branch}
-              </span>
+              <MenuChip
+                width={340}
+                chip={
+                  <>
+                    <GitBranch size={12} aria-hidden />
+                    {cwdInfo.branch}
+                  </>
+                }
+              >
+                {(close) => (
+                  <BranchMenu
+                    cwd={cwd.trim()}
+                    project={cwdInfo.project}
+                    close={close}
+                    onDone={() => setRefreshTick((t) => t + 1)}
+                    onError={setError}
+                  />
+                )}
+              </MenuChip>
             )}
-            <span className="context-chip" title="Sessions run locally on this machine">
-              <HardDrive size={12} aria-hidden />
-              Local
-            </span>
+            <MenuChip
+              width={300}
+              chip={
+                <>
+                  <HardDrive size={12} aria-hidden />
+                  Local
+                </>
+              }
+            >
+              {(close) => (
+                <WorktreeMenu
+                  cwd={cwd.trim()}
+                  close={close}
+                  onPick={(p) => {
+                    setCwd(p);
+                    saveCwd(p);
+                  }}
+                  onError={setError}
+                />
+              )}
+            </MenuChip>
             <label className="composer-chip context-approval" title="Tool approval mode — applies when the next session starts">
               <Shield size={12} aria-hidden />
               <select

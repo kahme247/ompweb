@@ -561,6 +561,7 @@ fn omp_window_boot(state: tauri::State<'_, OmpState>, window: tauri::Window) -> 
 /// The command macros are module-scoped, so the handler is assembled here
 /// where they resolve; lib.rs wires this straight into invoke_handler.
 pub fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool {
+    use crate::workspace;
     tauri::generate_handler![
         omp_start,
         omp_send,
@@ -572,6 +573,18 @@ pub fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool {
         omp_shell_settings,
         omp_shell_set_setting,
         omp_open_project_window,
-        omp_window_boot
+        omp_window_boot,
+        workspace::omp_list_projects,
+        workspace::omp_pick_folder,
+        workspace::omp_git_branches,
+        workspace::omp_git_checkout,
+        workspace::omp_list_worktrees,
+        workspace::omp_new_worktree,
+        workspace::omp_reveal_path,
+        workspace::omp_copy_text,
+        workspace::omp_list_skills,
+        workspace::omp_read_skill,
+        workspace::omp_set_skill_disabled,
+        workspace::omp_delete_skill
     ]
 }
