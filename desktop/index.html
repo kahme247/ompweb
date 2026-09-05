@@ -1,0 +1,108 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>omp RPC round-trip test</title>
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        font: 13px/1.5 Consolas, monospace;
+        margin: 0; padding: 16px;
+        background: #14100c; color: #e8e2d8;
+        display: flex; flex-direction: column; height: 100vh; box-sizing: border-box;
+      }
+      h1 { font-size: 15px; margin: 0 0 12px; color: #d4a76a; }
+      .row { display: flex; gap: 8px; margin-bottom: 8px; }
+      input, textarea, button {
+        font: inherit; background: #221c14; color: #e8e2d8;
+        border: 1px solid #4a3f30; border-radius: 6px; padding: 6px 10px;
+      }
+      input { flex: 1; }
+      button { cursor: pointer; background: #3a2f1e; border-color: #6b5a3e; }
+      button:hover { background: #4a3c26; }
+      button:disabled { opacity: 0.4; cursor: default; }
+      textarea { flex: 1; resize: vertical; min-height: 44px; }
+      #log {
+        flex: 1; overflow-y: auto; background: #0d0a07;
+        border: 1px solid #4a3f30; border-radius: 8px; padding: 10px;
+        white-space: pre-wrap; word-break: break-word;
+      }
+      .ev { color: #9db4c9; }
+      .resp { color: #9fce91; }
+      .err { color: #e08a7a; }
+      .sys { color: #8a7f6d; font-style: italic; }
+    </style>
+  </head>
+  <body>
+    <h1>omp RPC round-trip test (Tauri ⇄ omp --mode rpc-ui)</h1>
+    <div class="row">
+      <input id="cwd" placeholder="working directory" />
+      <button id="start">Start session</button>
+      <button id="stop" disabled>Stop</button>
+    </div>
+    <div class="row">
+      <textarea id="prompt" placeholder="Type a prompt and press Ctrl+Enter">Say hello in exactly five words.</textarea>
+      <button id="send" disabled>Send<br />prompt</button>
+    </div>
+    <div id="log"></div>
+    <script>
+      const tauri = window.__TAURI__;
+      const invoke = tauri.core.invoke;
+      const listen = tauri.event.listen;
+      const $ = (id) => document.getElementById(id);
+      const log = (kind, text) => {
+        const el = $("log");
+        const line = document.createElement("div");
+        line.className = kind;
+        line.textContent = text;
+        el.appendChild(line);
+        while (el.childElementCount > 500) el.removeChild(el.firstChild);
+        el.scrollTop = el.scrollHeight;
+      };
+
+      listen("omp-frame", (e) => log("ev", "◀ " + JSON.stringify(e.payload)));
+      listen("omp-exit", (e) => {
+        log("err", "✕ omp exited (code " + e.payload.code + ")");
+        if (e.payload.stderrTail) log("err", e.payload.stderrTail);
+        $("send").disabled = true;
+        $("stop").disabled = true;
+        $("start").disabled = false;
+      });
+
+      invoke("omp_home").then((home) => ($("cwd").value = home)).catch(() => {});
+
+      $("start").onclick = async () => {
+        $("start").disabled = true;
+        log("sys", "▶ starting omp in " + $("cwd").value + " …");
+        try {
+          const ready = await invoke("omp_start", { cwd: $("cwd").value });
+          log("resp", "◀ ready: " + JSON.stringify(ready));
+          $("send").disabled = false;
+          $("stop").disabled = false;
+        } catch (err) {
+          log("err", "✕ start failed: " + err);
+          $("start").disabled = false;
+        }
+      };
+
+      $("send").onclick = async () => {
+        const message = $("prompt").value.trim();
+        if (!message) return;
+        $("send").disabled = true;
+        log("sys", "▶ prompt: " + message);
+        try {
+          const data = await invoke("omp_send", { command: { type: "prompt", message } });
+          log("resp", "◀ prompt response: " + JSON.stringify(data));
+        } catch (err) {
+          log("err", "✕ prompt failed: " + err);
+        }
+        $("send").disabled = false;
+      };
+
+      $("stop").onclick = () => invoke("omp_stop").then(() => log("sys", "▶ stop requested"));
+      document.addEventListener("keydown", (e) => {
+        if (e.ctrlKey && e.key === "Enter") $("send").click();
+      });
+    </script>
+  </body>
+</html>
