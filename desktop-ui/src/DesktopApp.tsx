@@ -13,8 +13,18 @@ import { Sidebar, projectLabel, type SidebarSession } from "./Sidebar";
 import { SettingsView, applyFontSettings, type LoginProvider, type UsageSnapshot } from "./SettingsView";
 import { MenuChip, ProjectMenu, BranchMenu, WorktreeMenu } from "./ContextMenus";
 import { CommandPalette } from "@/components/CommandPalette";
+import { TodoList } from "@/components/TodoList";
 import { toast, ToastProvider } from "@/components/ui/toast";
 import { MAX_TOTAL_ATTACHED_IMAGE_BYTES } from "@/lib/image-attachments";
+import {
+  compareSubagents,
+  mergeSubagentRoster,
+  parseSubagentLifecycle,
+  parseSubagentProgress,
+  parseSubagentSnapshot,
+  type SubagentInfo,
+} from "@/lib/subagent-types";
+import type { TodoPhase } from "@/lib/pi-types";
 import type { SessionInfo } from "@/lib/types";
 import type { AgentMessage, AssistantMessage, ToolResultMessage } from "@/lib/types";
 
@@ -22,6 +32,8 @@ type SessionState = "idle" | "starting" | "ready" | "running" | "exited";
 
 type RpcFrame = {
   type: string;
+  id?: string;
+  progress?: unknown;
   message?: { role?: string; [key: string]: unknown };
   assistantMessageEvent?: { type?: string; delta?: string };
 };
@@ -39,6 +51,7 @@ type StateResponse = {
   thinkingLevel?: string;
   contextUsage?: { tokens: number; contextWindow: number; percent: number };
   queuedMessageCount?: number;
+  todoPhases?: TodoPhase[];
 };
 
 type CwdInfo = { project: string; branch: string; diffAdded: number; diffRemoved: number };
@@ -107,6 +120,8 @@ export function DesktopApp() {
   const [activeModel, setActiveModel] = useState<{ provider: string; id: string } | null>(null);
   const [thinkingLevel, setThinkingLevel] = useState("");
   const [contextUsage, setContextUsage] = useState<StateResponse["contextUsage"]>(undefined);
+  const [todoPhases, setTodoPhases] = useState<TodoPhase[]>([]);
+  const [subagents, setSubagents] = useState<SubagentInfo[]>([]);
   const sessionRef = useRef<SessionState>("idle");
   sessionRef.current = session;
 
@@ -242,6 +257,27 @@ export function DesktopApp() {
             if (sessionRef.current !== "exited") setSession("ready");
             setRefreshTick((t) => t + 1);
             break;
+          case "subagent_lifecycle": {
+            const info = parseSubagentLifecycle(frame);
+            if (info) setSubagents((prev) => mergeSubagentRoster(prev, [info]));
+            break;
+          }
+          case "subagent_progress": {
+            // frame.progress carries the full AgentProgress for a live subagent.
+            const id = typeof frame.id === "string" ? frame.id : undefined;
+            const progress = parseSubagentProgress(frame.progress);
+            if (!id || !progress) break;
+            setSubagents((prev) => {
+              const existing = prev.find((s) => s.id === id);
+              if (!existing) {
+                return mergeSubagentRoster(prev, [
+                  { id, agent: "subagent", status: "started", index: -1, lastUpdate: Date.now(), source: "live", progress },
+                ]);
+              }
+              return mergeSubagentRoster(prev, [{ ...existing, lastUpdate: Date.now(), progress }]);
+            });
+            break;
+          }
         }
       }),
       listen<{ code: number | null }>("omp-exit", () => {
@@ -256,6 +292,20 @@ export function DesktopApp() {
 
   // get_state is authoritative: omp may fall back to a default model that
   // differs from what we set, so the pickers re-sync from it after changes.
+  const refreshSubagents = useCallback(async () => {
+    try {
+      const res = await rpc<{ subagents?: unknown[] }>({ type: "get_subagents" });
+      const incoming = Array.isArray(res.subagents)
+        ? res.subagents
+            .map(parseSubagentSnapshot)
+            .filter((s): s is SubagentInfo => s !== undefined)
+        : [];
+      setSubagents((prev) => mergeSubagentRoster(prev, incoming));
+    } catch {
+      // no session or no live subagents — keep the current roster
+    }
+  }, [rpc]);
+
   const refreshSessionState = useCallback(async () => {
     try {
       const state = await rpc<StateResponse>({ type: "get_state" });
@@ -268,9 +318,14 @@ export function DesktopApp() {
           : undefined,
       );
       setQueuedCount(typeof state.queuedMessageCount === "number" ? state.queuedMessageCount : 0);
+      setTodoPhases(Array.isArray(state.todoPhases) ? state.todoPhases : []);
+      // Roster rehydration: get_subagents snapshot fills gaps after reconnects
+      // and restores terminal chips the frame stream no longer carries.
+      void refreshSubagents();
     } catch {
       // session gone mid-refresh; the exit handler owns the UI from here
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rpc]);
 
   // Transcript auto-follow: pin to bottom on every message/stream batch until
@@ -396,6 +451,8 @@ export function DesktopApp() {
     setMessages([]);
     setToolResults(new Map());
     setStreaming(null);
+    setTodoPhases([]);
+    setSubagents([]);
     messageRefs.current = [];
   }, []);
 
@@ -788,6 +845,23 @@ export function DesktopApp() {
             <ChatMinimap messages={messages} scrollContainer={scrollRef} messageRefs={messageRefs} />
 
         <footer className="desktop-composer">
+          <div className="composer-panels">
+            {todoPhases.length > 0 && <TodoList phases={todoPhases} collapsible />}
+            {subagents.length > 0 && (
+              <div className="subagent-chips">
+                {[...subagents].sort(compareSubagents).map((s) => (
+                  <span key={s.id} className={`subagent-chip ${s.status}`} title={s.task ?? s.description ?? s.id}>
+                    <span className="subagent-dot" aria-hidden />
+                    <span className="subagent-chip-name">{s.agent}</span>
+                    {s.progress?.retryFailure && <span className="subagent-chip-note">⟳ retrying</span>}
+                    {s.status === "started" && s.progress?.currentTool && (
+                      <span className="subagent-chip-note">{s.progress.currentTool}</span>
+                    )}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
           <div className={`composer-box${dragOver ? " drag-over" : ""}`}>
             {attached.length > 0 && (
               <div className="composer-attachments">

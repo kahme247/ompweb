@@ -279,6 +279,187 @@ pub fn omp_read_image(path: String) -> Result<Value, String> {
     Ok(json!({ "data": data, "mimeType": mime }))
 }
 
+// ---------- Native omp settings (~/.omp/agent/config.yml) ----------
+// Mirror of lib/omp/settings-config.ts's allow-list. NOTE: writes rewrite the
+// YAML document, so hand-written comments in config.yml do not survive a
+// save (serde_yaml cannot preserve them).
+
+const SETTING_ENUMS: &[(&str, &[&str])] = &[
+    ("defaultThinkingLevel", &["auto", "minimal", "low", "medium", "high", "xhigh", "max"]),
+    ("textVerbosity", &["low", "medium", "high"]),
+    ("personality", &["default", "friendly", "pragmatic", "none"]),
+    ("tools.approvalMode", &["always-ask", "write", "yolo"]),
+    ("tools.approval.bash", &["allow", "prompt", "deny"]),
+    ("tools.approval.extension", &["allow", "prompt"]),
+    ("compaction.strategy", &["snapcompact", "handoff", "context-full", "shake", "off"]),
+    ("memory.backend", &["off", "local", "mnemopi", "hindsight"]),
+    ("advisor.syncBacklog", &["off", "1", "3", "5"]),
+];
+const SETTING_BOOLS: &[&str] = &[
+    "hideThinkingBlock",
+    "externalThinking",
+    "retry.enabled",
+    "retry.modelFallback",
+    "compaction.enabled",
+    "compaction.midTurnEnabled",
+    "compaction.autoContinue",
+    "compaction.remoteEnabled",
+    "autolearn.enabled",
+    "autolearn.autoContinue",
+    "mcp.enableProjectConfig",
+    "mcp.renderMarkdownResults",
+    "mcp.notifications",
+    "advisor.enabled",
+    "advisor.subagents",
+];
+const SETTING_NUMBERS: &[&str] = &[
+    "retry.maxRetries",
+    "compaction.keepRecentTokens",
+    "autolearn.minToolCalls",
+    "mcp.notificationDebounceMs",
+    "advisor.immuneTurns",
+];
+
+fn validate_setting(path: &str, value: &Value) -> Result<(), String> {
+    if let Some((_, allowed)) = SETTING_ENUMS.iter().find(|(p, _)| *p == path) {
+        match value {
+            Value::Null => Ok(()),
+            Value::String(s) if allowed.contains(&s.as_str()) => Ok(()),
+            _ => Err(format!("{path} must be one of: {}", allowed.join(", "))),
+        }
+    } else if SETTING_BOOLS.contains(&path) {
+        match value {
+            Value::Null | Value::Bool(_) => Ok(()),
+            _ => Err(format!("{path} must be a boolean")),
+        }
+    } else if SETTING_NUMBERS.contains(&path) {
+        match value {
+            Value::Null | Value::Number(_) => Ok(()),
+            _ => Err(format!("{path} must be a number")),
+        }
+    } else {
+        Err(format!("setting not editable here: {path}"))
+    }
+}
+
+fn config_yaml() -> serde_yaml::Value {
+    let path = agent_dir().join("config.yml");
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_yaml::from_str(&raw).ok())
+        .unwrap_or_else(|| serde_yaml::Value::Mapping(Default::default()))
+}
+
+fn yaml_get<'a>(root: &'a serde_yaml::Value, path: &str) -> Option<&'a serde_yaml::Value> {
+    let mut current = root;
+    for key in path.split('.') {
+        current = current.get(key)?;
+    }
+    Some(current)
+}
+
+fn yaml_set(root: &mut serde_yaml::Value, path: &str, value: serde_yaml::Value) {
+    let mut current = root;
+    let keys: Vec<&str> = path.split('.').collect();
+    for (i, key) in keys.iter().enumerate() {
+        let last = i == keys.len() - 1;
+        if last {
+            if let Some(map) = current.as_mapping_mut() {
+                if value.is_null() {
+                    map.remove(serde_yaml::Value::String((*key).to_string()));
+                } else {
+                    map.insert(serde_yaml::Value::String((*key).to_string()), value);
+                }
+            }
+            return;
+        }
+        let next = current.get_mut(key);
+        if next.is_none() {
+            if let Some(map) = current.as_mapping_mut() {
+                map.insert(
+                    serde_yaml::Value::String((*key).to_string()),
+                    serde_yaml::Value::Mapping(Default::default()),
+                );
+            }
+        }
+        current = current.get_mut(key).expect("just inserted");
+        if !current.is_mapping() {
+            *current = serde_yaml::Value::Mapping(Default::default());
+        }
+    }
+}
+
+fn yaml_to_json(value: &serde_yaml::Value) -> Value {
+    serde_json::to_value(value).unwrap_or(Value::Null)
+}
+
+/// The editable subset of ~/.omp/agent/config.yml (allow-listed paths only).
+#[tauri::command]
+pub fn omp_get_native_settings() -> Result<Value, String> {
+    let doc = config_yaml();
+    let mut out = serde_json::Map::new();
+    let mut put = |map: &mut serde_json::Map<String, Value>, path: &str, value: Value| {
+        let mut current = map;
+        let keys: Vec<&str> = path.split('.').collect();
+        for key in &keys[..keys.len() - 1] {
+            let entry = current
+                .entry((*key).to_string())
+                .or_insert_with(|| json!({}));
+            if !entry.is_object() {
+                *entry = json!({});
+            }
+            current = entry.as_object_mut().expect("just made object");
+        }
+        current.insert(keys[keys.len() - 1].to_string(), value);
+    };
+    for (path, _) in SETTING_ENUMS {
+        if let Some(v) = yaml_get(&doc, path) {
+            if !v.is_null() {
+                put(&mut out, path, yaml_to_json(v));
+            }
+        }
+    }
+    for path in SETTING_BOOLS {
+        if let Some(v) = yaml_get(&doc, path) {
+            if let Some(b) = v.as_bool() {
+                put(&mut out, path, json!(b));
+            }
+        }
+    }
+    for path in SETTING_NUMBERS {
+        if let Some(v) = yaml_get(&doc, path) {
+            if let Some(n) = v.as_i64() {
+                put(&mut out, path, json!(n));
+            }
+        }
+    }
+    Ok(Value::Object(out))
+}
+
+/// Set one allow-listed setting; Value::Null removes the key (omp default).
+#[tauri::command]
+pub fn omp_set_native_setting(path: String, value: Value) -> Result<(), String> {
+    validate_setting(&path, &value)?;
+    let mut doc = config_yaml();
+    if !doc.is_mapping() {
+        doc = serde_yaml::Value::Mapping(Default::default());
+    }
+    let yaml_value = if value.is_null() {
+        serde_yaml::Value::Null
+    } else {
+        serde_yaml::to_value(&value).map_err(|e| e.to_string())?
+    };
+    yaml_set(&mut doc, &path, yaml_value);
+    let serialized = serde_yaml::to_string(&doc).map_err(|e| e.to_string())?;
+    let target = agent_dir().join("config.yml");
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let tmp = target.with_extension("yml.tmp");
+    std::fs::write(&tmp, serialized).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &target).map_err(|e| e.to_string())
+}
+
 // ---------- Skills ----------
 
 fn frontmatter(content: &str) -> (String, String) {

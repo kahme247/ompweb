@@ -663,6 +663,91 @@ html.dark .desktop-app {
   padding: 0 24px 12px;
 }
 
+/* Composer-attached panels: live todo plan + subagent roster. */
+
+.composer-panels {
+  max-width: 860px;
+  margin: 0 auto 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.composer-panels > * {
+  min-width: 0;
+}
+
+.subagent-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.subagent-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-panel);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  max-width: 260px;
+}
+
+.subagent-chip-name {
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-chip-note {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+
+.subagent-chip.started .subagent-dot {
+  background: var(--status-renamed, #7ca8ff);
+  animation: subagent-pulse 1.4s ease-in-out infinite;
+}
+
+.subagent-chip.completed .subagent-dot {
+  background: var(--status-success, #69d5a5);
+}
+
+.subagent-chip.failed .subagent-dot,
+.subagent-chip.aborted .subagent-dot {
+  background: var(--status-error, #ff8a80);
+}
+
+@keyframes subagent-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .subagent-chip.started .subagent-dot {
+    animation: none;
+  }
+}
+
 .composer-box {
   max-width: 780px;
   margin: 0 auto;
@@ -1160,6 +1245,30 @@ html.dark .desktop-app {
 .settings-select:focus {
   outline: none;
   border-color: var(--accent);
+}
+
+.settings-group-label {
+  max-width: 660px;
+  padding: 18px 2px 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+
+.settings-path {
+  display: inline-block;
+  margin-left: 8px;
+  font-family: var(--font-mono, monospace);
+  font-size: 10.5px;
+  color: var(--text-dim);
+  opacity: 0.8;
+}
+
+.settings-number {
+  width: 110px;
+  text-align: right;
 }
 
 /* Skills master-detail */

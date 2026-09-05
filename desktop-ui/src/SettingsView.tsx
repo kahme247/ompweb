@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ArrowLeft, BarChart3, KeyRound, Palette, Puzzle, SlidersHorizontal } from "lucide-react";
+import { ArrowLeft, BarChart3, KeyRound, Palette, Puzzle, SlidersHorizontal, Wrench } from "lucide-react";
 import { useTheme, type ThemePreference } from "@/hooks/useTheme";
 import { SkillsSettings } from "./SkillsSettings";
+import { NativeSettingsPanel } from "./NativeSettings";
 import { formatTokens, formatCost } from "@/lib/subagent-format";
 
 type ShellSettings = { notifyOnAgentEnd: boolean; closeToTray: boolean };
@@ -26,6 +27,7 @@ const SECTIONS = [
   { id: "providers", label: "Providers", icon: KeyRound },
   { id: "skills", label: "Skills", icon: Puzzle },
   { id: "usage", label: "Usage", icon: BarChart3 },
+  { id: "advanced", label: "Advanced", icon: Wrench },
 ] as const;
 
 type SectionId = (typeof SECTIONS)[number]["id"];
@@ -288,7 +290,7 @@ export function SettingsView({ onBack, providersLoader, cwd, usage }: SettingsVi
                 <div className="settings-card">
                   <div className="settings-card-text">
                     <div className="settings-card-desc">
-                      Totals cover this window's session only (input + output including cache
+                      Totals cover this window&apos;s session only (input + output including cache
                       reads, summed across turns). Per-message breakdowns render under each reply
                       in the transcript.
                     </div>
@@ -299,6 +301,13 @@ export function SettingsView({ onBack, providersLoader, cwd, usage }: SettingsVi
           </>
         )}
 
+
+        {section === "advanced" && (
+          <>
+            <h2>Advanced</h2>
+            <NativeSettingsPanel />
+          </>
+        )}
 
         {section === "providers" && (
           <>
