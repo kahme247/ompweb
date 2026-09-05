@@ -10,6 +10,7 @@ import { isEmptyThinkingBlock } from "@/lib/message-display";
 import { Tooltip, Collapsible, CollapsibleTrigger } from "./ui/primitives";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { formatCompactNumber } from "@/lib/format";
+import { formatTokens, formatCost } from "@/lib/subagent-format";
 import { TaskResultPanel } from "./MessageView-task-panel";
 import { getResultDiff, PairedDiffResult, PairedResult } from "./MessageView-diff-view";
 import { getToolPreview, formatToolCommand, formatToolOutput, getToolResultMeta } from "./MessageView-tool-format";
@@ -527,6 +528,20 @@ function AssistantMessageView({
         {message.provider && (
           <span>{modelNames?.[`${message.provider}:${message.model}`] ?? modelNames?.[message.model] ?? message.model}</span>
         )}
+        {!isStreaming && message.usage?.totalTokens != null && (() => {
+          const tokens = formatTokens(message.usage!.totalTokens);
+          const cost = formatCost(message.usage!.cost?.total);
+          if (!tokens) return null;
+          const u = message.usage!;
+          return (
+            <span
+              title={`in ${u.input.toLocaleString()} · out ${u.output.toLocaleString()} · cache read ${u.cacheRead.toLocaleString()} / write ${u.cacheWrite.toLocaleString()}`}
+              style={{ fontWeight: 400 }}
+            >
+              {tokens} tok{cost ? ` · ${cost}` : ""}
+            </span>
+          );
+        })()}
         {isStreaming && (() => {
           let chars = 0;
           for (const b of blocks) {

@@ -7,6 +7,7 @@ import { MessageView } from "@/components/MessageView";
 import { ChatMinimap } from "@/components/ChatMinimap";
 import { normalizeToolCalls } from "@/lib/normalize";
 import { selectableThinkingLevels, thinkingLevelsForMeta } from "@/lib/thinking-levels";
+import { formatTokens, formatCost } from "@/lib/subagent-format";
 import { useTheme } from "@/hooks/useTheme";
 import { Sidebar, projectLabel, type SidebarSession } from "./Sidebar";
 import { SettingsView } from "./SettingsView";
@@ -104,12 +105,26 @@ export function DesktopApp() {
     invoke<string>("omp_home")
       .then((h) => {
         setHome(h);
-        setCwd((c) => c || h);
+        let stored: string | null = null;
+        try {
+          stored = localStorage.getItem("omp-desktop-cwd");
+        } catch {
+          // storage unavailable falls back to home
+        }
+        setCwd((c) => c || stored || h);
       })
       .catch(() => {});
     invoke<SidebarSession[]>("omp_list_sessions")
       .then(setSessions)
       .catch(() => {});
+  }, []);
+
+  const saveCwd = useCallback((dir: string) => {
+    try {
+      localStorage.setItem("omp-desktop-cwd", dir);
+    } catch {
+      // persistence is best-effort
+    }
   }, []);
 
   // Re-apply persisted shell settings (Rust defaults reset on restart).
@@ -255,6 +270,7 @@ export function DesktopApp() {
     setError("");
     resetTranscript();
     setActiveFile(null);
+    saveCwd(cwd.trim());
     try {
       await invoke("omp_start", { cwd: cwd.trim(), approvalMode });
       setSession("ready");
@@ -266,7 +282,7 @@ export function DesktopApp() {
       setSession("idle");
       return false;
     }
-  }, [cwd, approvalMode, loadModels, refreshSessionState, resetTranscript]);
+  }, [cwd, approvalMode, loadModels, refreshSessionState, resetTranscript, saveCwd]);
 
   const stop = useCallback(async () => {
     if (sessionRef.current === "running") {
@@ -309,6 +325,7 @@ export function DesktopApp() {
     setError("");
     resetTranscript();
     setCwd(dir);
+    saveCwd(dir);
     setActiveFile(info.file);
     try {
       await invoke("omp_start", { cwd: dir, resume: info.file, approvalMode });
@@ -323,7 +340,7 @@ export function DesktopApp() {
       setSession("idle");
       setActiveFile(null);
     }
-  }, [approvalMode, loadModels, refreshSessionState, resetTranscript]);
+  }, [approvalMode, loadModels, refreshSessionState, resetTranscript, saveCwd]);
 
   const changeApproval = useCallback((mode: ApprovalMode) => {
     setApprovalMode(mode);
@@ -398,6 +415,22 @@ export function DesktopApp() {
     (messages.length > 0 ? firstUserText(messages).slice(0, 80) : "") ||
     "New Task";
   const running = session === "running";
+
+  // Cumulative tokens processed / cost across the session's assistant turns.
+  const sessionUsage = useMemo(() => {
+    let tokens = 0;
+    let cost = 0;
+    let any = false;
+    for (const m of messages) {
+      if (m.role !== "assistant") continue;
+      const u = (m as AssistantMessage).usage;
+      if (!u) continue;
+      any = true;
+      tokens += u.totalTokens ?? u.input + u.output + u.cacheRead + u.cacheWrite;
+      cost += u.cost?.total ?? 0;
+    }
+    return any ? { tokens, cost } : null;
+  }, [messages]);
 
   return (
     <div className="desktop-app">
@@ -601,6 +634,15 @@ export function DesktopApp() {
               ))}
             </select>
             <span className="context-spacer" />
+            {sessionUsage && (
+              <span
+                className="context-chip"
+                title="Tokens processed (input+output incl. cache reads) and cost, summed across this session's turns"
+              >
+                {formatTokens(sessionUsage.tokens)} tok
+                {sessionUsage.cost > 0 ? ` · ${formatCost(sessionUsage.cost)}` : ""}
+              </span>
+            )}
             {contextUsage && typeof contextUsage.percent === "number" && (
               <span
                 className="context-chip context-gauge"
