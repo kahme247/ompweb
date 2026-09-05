@@ -2,12 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { ArrowUp, Minus, PanelLeft, Plus, Square, X } from "lucide-react";
+import { ArrowUp, Minus, PanelLeft, Plus, Settings, Square, X } from "lucide-react";
 import { MessageView } from "@/components/MessageView";
 import { normalizeToolCalls } from "@/lib/normalize";
 import { selectableThinkingLevels, thinkingLevelsForMeta } from "@/lib/thinking-levels";
 import { useTheme } from "@/hooks/useTheme";
 import { Sidebar, projectLabel, type SidebarSession } from "./Sidebar";
+import { SettingsView } from "./SettingsView";
 import type { AgentMessage, AssistantMessage, ToolResultMessage } from "@/lib/types";
 
 type SessionState = "idle" | "starting" | "ready" | "running" | "exited";
@@ -49,7 +50,7 @@ function firstUserText(messages: AgentMessage[]): string {
 }
 
 export function DesktopApp() {
-  const { toggleTheme } = useTheme();
+  useTheme();
   const [home, setHome] = useState("");
   const [cwd, setCwd] = useState("");
   const [session, setSession] = useState<SessionState>("idle");
@@ -61,6 +62,7 @@ export function DesktopApp() {
   const [sessions, setSessions] = useState<SidebarSession[]>([]);
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [cwdInfo, setCwdInfo] = useState<CwdInfo>({ project: "", branch: "" });
   const [models, setModels] = useState<OmpModelInfo[]>([]);
   const [activeModel, setActiveModel] = useState<{ provider: string; id: string } | null>(null);
@@ -83,6 +85,22 @@ export function DesktopApp() {
     invoke<SidebarSession[]>("omp_list_sessions")
       .then(setSessions)
       .catch(() => {});
+  }, []);
+
+  // Re-apply persisted shell settings (Rust defaults reset on restart).
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("omp-desktop-settings");
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      for (const [key, value] of Object.entries(parsed)) {
+        if (typeof value === "boolean") {
+          invoke("omp_shell_set_setting", { key, value }).catch(() => {});
+        }
+      }
+    } catch {
+      // malformed storage falls back to Rust defaults
+    }
   }, []);
 
   // Context row under the composer: project name + git branch (debounced —
@@ -352,8 +370,12 @@ export function DesktopApp() {
           </div>
           <Sidebar sessions={sessions} activeFile={activeFile} onOpen={(s) => void resume(s)} />
           <div className="sidebar-footer">
-            <button className="sidebar-icon-btn" onClick={() => toggleTheme()} title="Toggle theme">
-              <span aria-hidden>◑</span>
+            <button
+              className="sidebar-icon-btn"
+              onClick={() => setSettingsOpen(true)}
+              title="Settings"
+            >
+              <Settings size={15} aria-hidden />
             </button>
           </div>
         </aside>
@@ -368,7 +390,9 @@ export function DesktopApp() {
           >
             <PanelLeft size={15} aria-hidden />
           </button>
-          <div className="titlebar-title" data-tauri-drag-region>{title}</div>
+          <div className="titlebar-title" data-tauri-drag-region>
+            {settingsOpen ? "Settings" : title}
+          </div>
           <div className="titlebar-drag" data-tauri-drag-region />
           <div className="titlebar-controls">
             <button className="titlebar-btn" onClick={() => void appWindow.minimize()} title="Minimize">
@@ -387,9 +411,17 @@ export function DesktopApp() {
           </div>
         </header>
 
-        {error && <div className="desktop-error">{error}</div>}
+        {error && !settingsOpen && <div className="desktop-error">{error}</div>}
 
-        <main className="desktop-transcript">
+        {settingsOpen ? (
+          <SettingsView
+            onBack={() => setSettingsOpen(false)}
+            rpc={rpc}
+            sessionReady={session === "ready" || session === "running"}
+          />
+        ) : (
+          <>
+            <main className="desktop-transcript">
           <div className="transcript-column">
             {messages.length === 0 && !streaming && (
               <div className="desktop-empty">
@@ -493,6 +525,8 @@ export function DesktopApp() {
             {running && <span className="context-spinner" aria-label="running" />}
           </div>
         </footer>
+          </>
+        )}
       </div>
     </div>
   );

@@ -15,6 +15,8 @@ const HOTKEY: &str = "Alt+Shift+O";
 pub struct ShellState {
     busy: AtomicBool,
     has_session: AtomicBool,
+    notify_enabled: AtomicBool,
+    close_to_tray: AtomicBool,
     tray: Mutex<Option<TrayIcon<Wry>>>,
     status_item: Mutex<Option<MenuItem<Wry>>>,
 }
@@ -24,10 +26,38 @@ impl Default for ShellState {
         Self {
             busy: AtomicBool::new(false),
             has_session: AtomicBool::new(false),
+            notify_enabled: AtomicBool::new(true),
+            close_to_tray: AtomicBool::new(true),
             tray: Mutex::new(None),
             status_item: Mutex::new(None),
         }
     }
+}
+
+/// Settings surface for the UI; keys are stable identifiers.
+pub fn settings(app: &AppHandle) -> serde_json::Value {
+    serde_json::json!({
+        "notifyOnAgentEnd": app
+            .try_state::<ShellState>()
+            .map(|s| s.notify_enabled.load(Ordering::Relaxed))
+            .unwrap_or(true),
+        "closeToTray": app
+            .try_state::<ShellState>()
+            .map(|s| s.close_to_tray.load(Ordering::Relaxed))
+            .unwrap_or(true),
+    })
+}
+
+pub fn set_setting(app: &AppHandle, key: &str, value: bool) -> Result<(), String> {
+    let Some(state) = app.try_state::<ShellState>() else {
+        return Err("shell state unavailable".to_string());
+    };
+    match key {
+        "notifyOnAgentEnd" => state.notify_enabled.store(value, Ordering::Relaxed),
+        "closeToTray" => state.close_to_tray.store(value, Ordering::Relaxed),
+        other => return Err(format!("unknown setting: {other}")),
+    }
+    Ok(())
 }
 
 fn status_label(has_session: bool, busy: bool, cwd: &str) -> String {
@@ -64,6 +94,9 @@ pub fn report_agent_state(app: &AppHandle, busy: bool, cwd: &str) {
     apply_status(&state, &label, tooltip);
 
     if was_busy && !busy {
+        if !state.notify_enabled.load(Ordering::Relaxed) {
+            return;
+        }
         let focused = app
             .get_webview_window("main")
             .and_then(|w| w.is_focused().ok())
@@ -158,13 +191,24 @@ pub fn setup(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Close-to-tray: closing the window keeps running sessions alive; the
-    // tray menu's Quit is the real exit.
+    // tray menu's Quit is the real exit. Toggleable from Settings.
     if let Some(window) = app.get_webview_window("main") {
         let win = window.clone();
         window.on_window_event(move |event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = win.hide();
+                let close_to_tray = win
+                    .app_handle()
+                    .try_state::<ShellState>()
+                    .map(|s| s.close_to_tray.load(Ordering::Relaxed))
+                    .unwrap_or(true);
+                if close_to_tray {
+                    api.prevent_close();
+                    let _ = win.hide();
+                } else {
+                    let app = win.app_handle().clone();
+                    stop_omp_session(&app);
+                    app.exit(0);
+                }
             }
         });
     }

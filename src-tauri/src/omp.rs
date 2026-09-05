@@ -414,6 +414,17 @@ fn omp_cwd_info(cwd: String) -> Value {
     json!({ "project": project, "branch": branch })
 }
 
+/// Settings surface for the UI; keys are stable identifiers.
+#[tauri::command]
+fn omp_shell_settings(app: tauri::AppHandle) -> Result<Value, String> {
+    Ok(crate::shell::settings(&app))
+}
+
+#[tauri::command]
+fn omp_shell_set_setting(app: tauri::AppHandle, key: String, value: bool) -> Result<(), String> {
+    crate::shell::set_setting(&app, &key, value)
+}
+
 /// The command macros are module-scoped, so the handler is assembled here
 /// where they resolve; lib.rs wires this straight into invoke_handler.
 pub fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool {
@@ -424,6 +435,8 @@ pub fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool {
         omp_home,
         omp_list_sessions,
         omp_read_session,
-        omp_cwd_info
+        omp_cwd_info,
+        omp_shell_settings,
+        omp_shell_set_setting
     ]
 }
