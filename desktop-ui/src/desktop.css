@@ -18,6 +18,89 @@ body,
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: var(--desktop-font-size, 14px);
   overflow: hidden;
+  /* Native controls (select popups, inputs, scrollbars) follow the theme. */
+  color-scheme: light;
+}
+
+html.dark .desktop-app {
+  color-scheme: dark;
+}
+
+/* Native dropdown lists inside the app render on theme surfaces. */
+.desktop-app select,
+.desktop-app option,
+.desktop-app optgroup {
+  background-color: var(--bg-panel);
+  color: var(--text);
+}
+
+.desktop-app optgroup,
+.desktop-app option:checked {
+  background-color: var(--bg-selected);
+}
+
+.desktop-app ::selection {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.desktop-app :focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: 1px;
+}
+
+.desktop-app button,
+.desktop-app select,
+.desktop-app .context-chip,
+.desktop-app .composer-chip,
+.desktop-app .sidebar-session,
+.desktop-app .sidebar-icon-btn,
+.desktop-app .titlebar-btn,
+.desktop-app .settings-nav-item,
+.desktop-app .skills-row,
+.desktop-app .context-menu-row {
+  transition: background var(--dur-fast, 150ms) var(--ease-out-warm, ease),
+    color var(--dur-fast, 150ms) var(--ease-out-warm, ease),
+    border-color var(--dur-fast, 150ms) var(--ease-out-warm, ease),
+    opacity var(--dur-fast, 150ms) var(--ease-out-warm, ease);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .context-menu,
+  .desktop-sessions-list {
+    animation: menu-in var(--dur-fast, 150ms) var(--ease-out-warm, ease) both;
+    transform-origin: bottom left;
+  }
+
+  @keyframes menu-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  .settings-card,
+  .usage-stat {
+    animation: card-in var(--dur-med, 220ms) var(--ease-out-warm, ease) both;
+  }
+
+  @keyframes card-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  .desktop-error {
+    animation: card-in var(--dur-fast, 150ms) var(--ease-out-warm, ease) both;
+  }
 }
 
 .desktop-app pre,
@@ -35,6 +118,21 @@ body,
   border-right: 1px solid var(--border);
   background: var(--bg-panel);
   min-height: 0;
+  overflow: hidden;
+  transition: width var(--dur-med, 220ms) var(--ease-out-warm, ease),
+    border-color var(--dur-med, 220ms) var(--ease-out-warm, ease);
+}
+
+.desktop-sidebar.collapsed {
+  width: 0;
+  border-right-color: transparent;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-sidebar {
+    transition: none;
+  }
 }
 
 .sidebar-actions {
@@ -577,6 +675,12 @@ body,
 
 .composer-box:focus-within {
   border-color: var(--accent);
+}
+
+.composer-box.drag-over {
+  border-color: var(--accent);
+  border-style: dashed;
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg-panel));
 }
 
 .composer-box textarea {

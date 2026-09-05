@@ -94,6 +94,7 @@ export function DesktopApp() {
   });
   const [refreshTick, setRefreshTick] = useState(0);
   const [queuedCount, setQueuedCount] = useState(0);
+  const [dragOver, setDragOver] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const messageRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -299,6 +300,24 @@ export function DesktopApp() {
   useEffect(() => {
     if (session === "ready" && !settingsOpen) textareaRef.current?.focus();
   }, [session, settingsOpen]);
+
+  // Dropping files onto the window appends their paths to the composer
+  // (Tauri's drag-drop event is the only way to get real paths in WebView2).
+  useEffect(() => {
+    const unlisteners: Promise<UnlistenFn>[] = [
+      listen<{ paths: string[] }>("tauri://drag-enter", () => setDragOver(true)),
+      listen("tauri://drag-leave", () => setDragOver(false)),
+      listen<{ paths: string[] }>("tauri://drag-drop", (event) => {
+        setDragOver(false);
+        const paths = (event.payload.paths ?? []).filter(Boolean);
+        if (paths.length === 0) return;
+        setInput((prev) => (prev ? `${prev} ` : "") + paths.map((p) => `"${p}"`).join(" "));
+      }),
+    ];
+    return () => {
+      unlisteners.forEach((p) => p.then((fn) => fn()));
+    };
+  }, []);
 
   // While a run streams, keep the context gauge moving without waiting for
   // agent_end (the frame handlers only bump the tick at turn boundaries).
@@ -538,8 +557,7 @@ export function DesktopApp() {
 
   return (
     <div className="desktop-app">
-      {sidebarOpen && (
-        <aside className="desktop-sidebar">
+      <aside className={`desktop-sidebar${sidebarOpen ? "" : " collapsed"}`}>
           <div className="sidebar-actions">
             <div className="sidebar-nav-row">
               <button
@@ -587,8 +605,7 @@ export function DesktopApp() {
               <Settings size={15} aria-hidden />
             </button>
           </div>
-        </aside>
-      )}
+      </aside>
 
       <div className="desktop-main">
         <header className="desktop-titlebar" data-tauri-drag-region>
@@ -674,7 +691,7 @@ export function DesktopApp() {
             <ChatMinimap messages={messages} scrollContainer={scrollRef} messageRefs={messageRefs} />
 
         <footer className="desktop-composer">
-          <div className="composer-box">
+          <div className={`composer-box${dragOver ? " drag-over" : ""}`}>
             <textarea
               ref={textareaRef}
               value={input}
