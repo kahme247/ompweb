@@ -153,6 +153,51 @@ fn resolve_omp_bin() -> String {
     std::env::var("OMP_WEB_OMP_BIN").unwrap_or_else(|_| "omp".to_string())
 }
 
+/// `omp --version` (e.g. "omp/18.1.10") for the Daemon settings page.
+#[tauri::command]
+fn omp_daemon_info(app: tauri::AppHandle, state: tauri::State<'_, OmpState>) -> Result<Value, String> {
+    let sessions: Vec<Value> = state
+        .sessions
+        .lock()
+        .map_err(|_| poisoned())?
+        .iter()
+        .map(|(label, session)| {
+            json!({
+                "label": label,
+                "cwd": session.cwd,
+                "pid": session.pid,
+            })
+        })
+        .collect();
+    let mut version = String::new();
+    let mut cmd = Command::new(resolve_omp_bin());
+    cmd.arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    if let Ok(output) = cmd.output() {
+        version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    }
+    let _ = app;
+    Ok(json!({ "version": version, "sessions": sessions }))
+}
+
+/// Stop every live omp session (all windows); each window gets omp-exit.
+#[tauri::command]
+fn omp_stop_all_sessions(app: tauri::AppHandle, state: tauri::State<'_, OmpState>) -> Result<(), String> {
+    if let Ok(mut sessions) = state.sessions.lock() {
+        for (_, session) in sessions.drain() {
+            session.stop();
+        }
+    }
+    let _ = app;
+    Ok(())
+}
+
 struct Spawned {
     session: Arc<OmpSession>,
     ready_rx: std::sync::mpsc::Receiver<Value>,
@@ -574,6 +619,8 @@ pub fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool {
         omp_shell_set_setting,
         omp_open_project_window,
         omp_window_boot,
+        omp_daemon_info,
+        omp_stop_all_sessions,
         workspace::omp_list_projects,
         workspace::omp_pick_folder,
         workspace::omp_git_branches,

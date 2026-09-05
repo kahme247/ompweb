@@ -1196,3 +1196,32 @@ body,
   border-top: 1px solid var(--border);
   padding-top: 8px;
 }
+
+/* Usage page */
+
+.usage-grid {
+  display: flex;
+  gap: 12px;
+  max-width: 660px;
+  margin-bottom: 12px;
+}
+
+.usage-stat {
+  flex: 1;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card, 12px);
+  background: var(--bg-panel);
+}
+
+.usage-stat-value {
+  font-family: var(--font-serif, Georgia, serif);
+  font-size: 24px;
+  font-weight: 600;
+}
+
+.usage-stat-label {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}

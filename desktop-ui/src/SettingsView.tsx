@@ -1,12 +1,21 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ArrowLeft, KeyRound, Palette, Puzzle, SlidersHorizontal } from "lucide-react";
+import { ArrowLeft, BarChart3, KeyRound, Palette, Puzzle, Server, SlidersHorizontal } from "lucide-react";
 import { useTheme, type ThemePreference } from "@/hooks/useTheme";
 import { SkillsSettings } from "./SkillsSettings";
+import { formatTokens, formatCost } from "@/lib/subagent-format";
 
 type ShellSettings = { notifyOnAgentEnd: boolean; closeToTray: boolean };
 
 export type LoginProvider = { id: string; name: string; available: boolean; authenticated: boolean };
+
+export type UsageSnapshot = {
+  tokens: number;
+  cost: number;
+  contextPercent: number | null;
+  model: string | null;
+  thinkingLevel: string | null;
+};
 
 const STORAGE_KEY = "omp-desktop-settings";
 const FONT_KEY = "omp-desktop-fonts";
@@ -16,6 +25,8 @@ const SECTIONS = [
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "providers", label: "Providers", icon: KeyRound },
   { id: "skills", label: "Skills", icon: Puzzle },
+  { id: "usage", label: "Usage", icon: BarChart3 },
+  { id: "daemon", label: "Daemon", icon: Server },
 ] as const;
 
 type SectionId = (typeof SECTIONS)[number]["id"];
@@ -70,9 +81,11 @@ type SettingsViewProps = {
   providersLoader: () => Promise<LoginProvider[]>;
   /** Working directory for the project skills scan. */
   cwd: string;
+  /** Live usage of this window's session (null when none). */
+  usage: UsageSnapshot | null;
 };
 
-export function SettingsView({ onBack, providersLoader, cwd }: SettingsViewProps) {
+export function SettingsView({ onBack, providersLoader, cwd, usage }: SettingsViewProps) {
   const { preference, setTheme } = useTheme();
   const [section, setSection] = useState<SectionId>("general");
   const [shell, setShell] = useState<ShellSettings>({ notifyOnAgentEnd: true, closeToTray: true });
@@ -235,6 +248,60 @@ export function SettingsView({ onBack, providersLoader, cwd }: SettingsViewProps
           </>
         )}
 
+        {section === "usage" && (
+          <>
+            <h2>Usage</h2>
+            {!usage ? (
+              <div className="settings-empty">
+                Start a session in this window to see its token and cost usage.
+              </div>
+            ) : (
+              <>
+                <div className="usage-grid">
+                  <div className="usage-stat">
+                    <div className="usage-stat-value">{formatTokens(usage.tokens) ?? "0"}</div>
+                    <div className="usage-stat-label">tokens this session</div>
+                  </div>
+                  <div className="usage-stat">
+                    <div className="usage-stat-value">{formatCost(usage.cost) ?? "$0"}</div>
+                    <div className="usage-stat-label">estimated cost</div>
+                  </div>
+                  <div className="usage-stat">
+                    <div className="usage-stat-value">
+                      {usage.contextPercent != null
+                        ? usage.contextPercent >= 10
+                          ? `${Math.round(usage.contextPercent)}%`
+                          : `${usage.contextPercent.toFixed(1)}%`
+                        : "—"}
+                    </div>
+                    <div className="usage-stat-label">context window used</div>
+                  </div>
+                </div>
+                <div className="settings-card">
+                  <div className="settings-card-text">
+                    <div className="settings-card-title">Current model</div>
+                    <div className="settings-card-desc">
+                      {usage.model ?? "—"}
+                      {usage.thinkingLevel ? ` · thinking ${usage.thinkingLevel}` : ""}
+                    </div>
+                  </div>
+                </div>
+                <div className="settings-card">
+                  <div className="settings-card-text">
+                    <div className="settings-card-desc">
+                      Totals cover this window's session only (input + output including cache
+                      reads, summed across turns). Per-message breakdowns render under each reply
+                      in the transcript.
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
+          </>
+        )}
+
+        {section === "daemon" && <DaemonSettings onError={setSkillsError} />}
+
         {section === "providers" && (
           <>
             <h2>Providers</h2>
@@ -263,5 +330,74 @@ export function SettingsView({ onBack, providersLoader, cwd }: SettingsViewProps
         )}
       </div>
     </div>
+  );
+}
+
+type DaemonSession = { label: string; cwd: string; pid: number };
+
+function DaemonSettings({ onError }: { onError: (m: string) => void }) {
+  const [info, setInfo] = useState<{ version: string; sessions: DaemonSession[] } | null>(null);
+  const [restarting, setRestarting] = useState(false);
+
+  const reload = useCallback(() => {
+    invoke<{ version: string; sessions: DaemonSession[] }>("omp_daemon_info")
+      .then(setInfo)
+      .catch(() => setInfo(null));
+  }, []);
+
+  useEffect(() => {
+    reload();
+    const id = setInterval(reload, 5000);
+    return () => clearInterval(id);
+  }, [reload]);
+
+  const restart = async () => {
+    setRestarting(true);
+    try {
+      await invoke("omp_stop_all_sessions");
+      reload();
+    } catch (err) {
+      onError(String(err));
+    } finally {
+      setRestarting(false);
+    }
+  };
+
+  return (
+    <>
+      <h2>Daemon</h2>
+      <div className="settings-card">
+        <div className="settings-card-text">
+          <div className="settings-card-title">omp CLI</div>
+          <div className="settings-card-desc">
+            {info?.version
+              ? `${info.version} — each chat window spawns its own omp child process`
+              : "omp binary not found on PATH"}
+          </div>
+        </div>
+      </div>
+      <div className="settings-card">
+        <div className="settings-card-text">
+          <div className="settings-card-title">Running sessions</div>
+          <div className="settings-card-desc">
+            {info && info.sessions.length > 0
+              ? info.sessions.map((s) => `${s.label} — ${s.cwd} (pid ${s.pid})`).join(" · ")
+              : "No omp sessions are running"}
+          </div>
+        </div>
+      </div>
+      <div className="settings-card">
+        <div className="settings-card-text">
+          <div className="settings-card-title">Restart sessions</div>
+          <div className="settings-card-desc">
+            Stop every running omp child (all windows). Each window returns to the idle state and
+            starts a fresh child on its next prompt.
+          </div>
+        </div>
+        <button className="settings-select" onClick={() => void restart()} disabled={restarting}>
+          {restarting ? "Restarting…" : "Restart all"}
+        </button>
+      </div>
+    </>
   );
 }

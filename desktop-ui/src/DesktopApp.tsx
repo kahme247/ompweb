@@ -10,9 +10,8 @@ import { selectableThinkingLevels, thinkingLevelsForMeta } from "@/lib/thinking-
 import { formatTokens, formatCost } from "@/lib/subagent-format";
 import { useTheme } from "@/hooks/useTheme";
 import { Sidebar, projectLabel, type SidebarSession } from "./Sidebar";
-import { SettingsView, type LoginProvider } from "./SettingsView";
+import { SettingsView, applyFontSettings, type LoginProvider, type UsageSnapshot } from "./SettingsView";
 import { MenuChip, ProjectMenu, BranchMenu, WorktreeMenu } from "./ContextMenus";
-import { applyFontSettings } from "./SettingsView";
 import type { AgentMessage, AssistantMessage, ToolResultMessage } from "@/lib/types";
 
 type SessionState = "idle" | "starting" | "ready" | "running" | "exited";
@@ -478,6 +477,20 @@ export function DesktopApp() {
     return any ? { tokens, cost } : null;
   }, [messages]);
 
+  const usageSnapshot: UsageSnapshot | null = useMemo(
+    () =>
+      sessionUsage
+        ? {
+            tokens: sessionUsage.tokens,
+            cost: sessionUsage.cost,
+            contextPercent: contextUsage?.percent ?? null,
+            model: activeModel ? `${activeModel.provider}/${activeModel.id}` : null,
+            thinkingLevel: thinkingLevel || null,
+          }
+        : null,
+    [sessionUsage, contextUsage, activeModel, thinkingLevel],
+  );
+
   return (
     <div className="desktop-app">
       {sidebarOpen && (
@@ -574,6 +587,7 @@ export function DesktopApp() {
           <SettingsView
             onBack={() => setSettingsOpen(false)}
             cwd={cwd.trim()}
+            usage={usageSnapshot}
             providersLoader={() =>
               rpc<{ providers?: LoginProvider[] }>({ type: "get_login_providers" }).then(
                 (res) => (Array.isArray(res.providers) ? res.providers : []),
