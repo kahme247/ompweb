@@ -13,6 +13,7 @@ import { Sidebar, projectLabel, type SidebarSession } from "./Sidebar";
 import { SettingsView, applyFontSettings, type LoginProvider, type UsageSnapshot } from "./SettingsView";
 import { MenuChip, ProjectMenu, BranchMenu, WorktreeMenu } from "./ContextMenus";
 import { CommandPalette } from "@/components/CommandPalette";
+import { MAX_TOTAL_ATTACHED_IMAGE_BYTES } from "@/lib/image-attachments";
 import type { SessionInfo } from "@/lib/types";
 import type { AgentMessage, AssistantMessage, ToolResultMessage } from "@/lib/types";
 
@@ -95,6 +96,7 @@ export function DesktopApp() {
   const [refreshTick, setRefreshTick] = useState(0);
   const [queuedCount, setQueuedCount] = useState(0);
   const [dragOver, setDragOver] = useState(false);
+  const [attached, setAttached] = useState<{ data: string; mimeType: string; previewUrl: string }[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const messageRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -296,14 +298,43 @@ export function DesktopApp() {
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
   }, []);
 
+  const addImageFiles = useCallback(async (files: File[]) => {
+    for (const file of files) {
+      if (!file.type.startsWith("image/")) continue;
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(file);
+      }).catch(() => null);
+      if (!dataUrl) continue;
+      const data = dataUrl.slice(dataUrl.indexOf(",") + 1);
+      setAttached((prev) => {
+        if (prev.length >= 10) {
+          setError("At most 10 images can be attached.");
+          return prev;
+        }
+        const total =
+          prev.reduce((sum, img) => sum + img.data.length, 0) + data.length;
+        if (total > MAX_TOTAL_ATTACHED_IMAGE_BYTES) {
+          setError("Attached images exceed the 5 MB total limit.");
+          return prev;
+        }
+        return [...prev, { data, mimeType: file.type, previewUrl: dataUrl }];
+      });
+    }
+  }, []);
+
   // Focus the composer whenever the session becomes interactive.
   useEffect(() => {
     if (session === "ready" && !settingsOpen) textareaRef.current?.focus();
   }, [session, settingsOpen]);
 
-  // Dropping files onto the window appends their paths to the composer
-  // (Tauri's drag-drop event is the only way to get real paths in WebView2).
+  // Dropping files onto the window: images attach as prompt images, other
+  // files append their real paths (Tauri's drag-drop event is the only way
+  // to get real paths in WebView2).
   useEffect(() => {
+    const IMAGE_EXTS = [".png", ".jpg", ".jpeg", ".gif", ".webp"];
     const unlisteners: Promise<UnlistenFn>[] = [
       listen<{ paths: string[] }>("tauri://drag-enter", () => setDragOver(true)),
       listen("tauri://drag-leave", () => setDragOver(false)),
@@ -311,7 +342,28 @@ export function DesktopApp() {
         setDragOver(false);
         const paths = (event.payload.paths ?? []).filter(Boolean);
         if (paths.length === 0) return;
-        setInput((prev) => (prev ? `${prev} ` : "") + paths.map((p) => `"${p}"`).join(" "));
+        const images = paths.filter((p) => IMAGE_EXTS.some((ext) => p.toLowerCase().endsWith(ext)));
+        const others = paths.filter((p) => !images.includes(p));
+        if (images.length > 0) {
+          void (async () => {
+            for (const path of images) {
+              try {
+                const img = await invoke<{ data: string; mimeType: string }>("omp_read_image", { path });
+                const previewUrl = `data:${img.mimeType};base64,${img.data}`;
+                setAttached((prev) => {
+                  const total = prev.reduce((sum, a) => sum + a.data.length, 0) + img.data.length;
+                  if (prev.length >= 10 || total > MAX_TOTAL_ATTACHED_IMAGE_BYTES) return prev;
+                  return [...prev, { data: img.data, mimeType: img.mimeType, previewUrl }];
+                });
+              } catch (err) {
+                setError(String(err));
+              }
+            }
+          })();
+        }
+        if (others.length > 0) {
+          setInput((prev) => (prev ? `${prev} ` : "") + others.map((p) => `"${p}"`).join(" "));
+        }
       }),
     ];
     return () => {
@@ -377,28 +429,38 @@ export function DesktopApp() {
 
   const send = useCallback(async () => {
     const message = input.trim();
-    if (!message || session === "starting") return;
+    if ((!message && attached.length === 0) || session === "starting") return;
     setInput("");
+    setAttached([]);
     setError("");
+    const imagePayload = attached.map(({ data, mimeType }) => ({ type: "image" as const, data, mimeType }));
     try {
       if (sessionRef.current === "running") {
         // omp queues prompts that arrive mid-run; show it in the context row.
-        await invoke("omp_send", { command: { type: "prompt", message } });
+        await invoke("omp_send", {
+          command: { type: "prompt", message, ...(imagePayload.length ? { images: imagePayload } : {}) },
+        });
         setTimeout(() => void refreshSessionState(), 600);
         return;
       }
       if (sessionRef.current !== "ready") {
         const ok = await beginSession();
-        if (!ok) return;
+        if (!ok) {
+          setAttached(attached);
+          return;
+        }
       }
       setSession("running");
-      await invoke("omp_send", { command: { type: "prompt", message } });
+      await invoke("omp_send", {
+        command: { type: "prompt", message, ...(imagePayload.length ? { images: imagePayload } : {}) },
+      });
       setSession("ready");
     } catch (err) {
       setError(String(err));
+      setAttached((prev) => [...attached, ...prev]);
       setSession(sessionRef.current === "exited" ? "exited" : "ready");
     }
-  }, [input, session, beginSession, refreshSessionState]);
+  }, [input, attached, session, beginSession, refreshSessionState]);
 
   // Resume a stored session: spawn omp with --resume, then load its transcript
   // from disk (frames from omp continue the same message list).
@@ -723,6 +785,22 @@ export function DesktopApp() {
 
         <footer className="desktop-composer">
           <div className={`composer-box${dragOver ? " drag-over" : ""}`}>
+            {attached.length > 0 && (
+              <div className="composer-attachments">
+                {attached.map((img, i) => (
+                  <span key={i} className="attachment-thumb">
+                    <img src={img.previewUrl} alt="" />
+                    <button
+                      className="attachment-remove"
+                      onClick={() => setAttached((prev) => prev.filter((_, j) => j !== i))}
+                      title="Remove attachment"
+                    >
+                      <X size={10} aria-hidden />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
             <textarea
               ref={textareaRef}
               value={input}
@@ -730,13 +808,20 @@ export function DesktopApp() {
                 setInput(e.target.value);
                 autoGrowComposer();
               }}
+              onPaste={(e) => {
+                const files = Array.from(e.clipboardData.files).filter((f) => f.type.startsWith("image/"));
+                if (files.length > 0) {
+                  e.preventDefault();
+                  void addImageFiles(files);
+                }
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
                   void send();
                 }
               }}
-              placeholder="Do anything…"
+              placeholder={attached.length > 0 ? "Describe the attached image…" : "Do anything…"}
               disabled={session === "starting"}
               rows={1}
               spellCheck={false}
@@ -808,7 +893,7 @@ export function DesktopApp() {
                 <button
                   className="composer-send"
                   onClick={() => void send()}
-                  disabled={!input.trim() || session === "starting" || compacting || !cwd.trim()}
+                  disabled={(!input.trim() && attached.length === 0) || session === "starting" || compacting || !cwd.trim()}
                   title="Send"
                 >
                   <ArrowUp size={15} aria-hidden />

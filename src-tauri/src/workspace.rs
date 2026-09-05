@@ -252,6 +252,33 @@ pub fn omp_copy_text(text: String) -> Result<(), String> {
     }
 }
 
+/// Read a dropped image file as base64 for the prompt `images` payload.
+#[tauri::command]
+pub fn omp_read_image(path: String) -> Result<Value, String> {
+    const MIME_BY_EXT: &[(&str, &str)] = &[
+        ("png", "image/png"),
+        ("jpg", "image/jpeg"),
+        ("jpeg", "image/jpeg"),
+        ("gif", "image/gif"),
+        ("webp", "image/webp"),
+    ];
+    let p = PathBuf::from(&path);
+    let ext = p
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let Some((_, mime)) = MIME_BY_EXT.iter().find(|(e, _)| *e == ext) else {
+        return Err(format!("unsupported image type: .{ext}"));
+    };
+    let bytes = std::fs::read(&p).map_err(|e| e.to_string())?;
+    if bytes.len() > 8 * 1024 * 1024 {
+        return Err("image exceeds 8 MB".into());
+    }
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(json!({ "data": data, "mimeType": mime }))
+}
+
 // ---------- Skills ----------
 
 fn frontmatter(content: &str) -> (String, String) {

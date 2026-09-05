@@ -582,6 +582,7 @@ pub fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool {
         workspace::omp_new_worktree,
         workspace::omp_reveal_path,
         workspace::omp_copy_text,
+        workspace::omp_read_image,
         workspace::omp_list_skills,
         workspace::omp_read_skill,
         workspace::omp_set_skill_disabled,

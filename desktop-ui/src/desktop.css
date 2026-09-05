@@ -683,6 +683,49 @@ html.dark .desktop-app {
   background: color-mix(in srgb, var(--accent) 6%, var(--bg-panel));
 }
 
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 2px 2px 8px;
+}
+
+.attachment-thumb {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.attachment-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.attachment-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--text) 75%, transparent);
+  color: var(--bg);
+  cursor: pointer;
+  padding: 0;
+}
+
+.attachment-remove:hover {
+  background: var(--text);
+}
+
 .composer-box textarea {
   width: 100%;
   box-sizing: border-box;
