@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ArrowLeft, BarChart3, KeyRound, Palette, Puzzle, Server, SlidersHorizontal } from "lucide-react";
+import { ArrowLeft, BarChart3, KeyRound, Palette, Puzzle, SlidersHorizontal } from "lucide-react";
 import { useTheme, type ThemePreference } from "@/hooks/useTheme";
 import { SkillsSettings } from "./SkillsSettings";
 import { formatTokens, formatCost } from "@/lib/subagent-format";
@@ -26,7 +26,6 @@ const SECTIONS = [
   { id: "providers", label: "Providers", icon: KeyRound },
   { id: "skills", label: "Skills", icon: Puzzle },
   { id: "usage", label: "Usage", icon: BarChart3 },
-  { id: "daemon", label: "Daemon", icon: Server },
 ] as const;
 
 type SectionId = (typeof SECTIONS)[number]["id"];
@@ -300,7 +299,6 @@ export function SettingsView({ onBack, providersLoader, cwd, usage }: SettingsVi
           </>
         )}
 
-        {section === "daemon" && <DaemonSettings onError={setSkillsError} />}
 
         {section === "providers" && (
           <>
@@ -330,74 +328,5 @@ export function SettingsView({ onBack, providersLoader, cwd, usage }: SettingsVi
         )}
       </div>
     </div>
-  );
-}
-
-type DaemonSession = { label: string; cwd: string; pid: number };
-
-function DaemonSettings({ onError }: { onError: (m: string) => void }) {
-  const [info, setInfo] = useState<{ version: string; sessions: DaemonSession[] } | null>(null);
-  const [restarting, setRestarting] = useState(false);
-
-  const reload = useCallback(() => {
-    invoke<{ version: string; sessions: DaemonSession[] }>("omp_daemon_info")
-      .then(setInfo)
-      .catch(() => setInfo(null));
-  }, []);
-
-  useEffect(() => {
-    reload();
-    const id = setInterval(reload, 5000);
-    return () => clearInterval(id);
-  }, [reload]);
-
-  const restart = async () => {
-    setRestarting(true);
-    try {
-      await invoke("omp_stop_all_sessions");
-      reload();
-    } catch (err) {
-      onError(String(err));
-    } finally {
-      setRestarting(false);
-    }
-  };
-
-  return (
-    <>
-      <h2>Daemon</h2>
-      <div className="settings-card">
-        <div className="settings-card-text">
-          <div className="settings-card-title">omp CLI</div>
-          <div className="settings-card-desc">
-            {info?.version
-              ? `${info.version} — each chat window spawns its own omp child process`
-              : "omp binary not found on PATH"}
-          </div>
-        </div>
-      </div>
-      <div className="settings-card">
-        <div className="settings-card-text">
-          <div className="settings-card-title">Running sessions</div>
-          <div className="settings-card-desc">
-            {info && info.sessions.length > 0
-              ? info.sessions.map((s) => `${s.label} — ${s.cwd} (pid ${s.pid})`).join(" · ")
-              : "No omp sessions are running"}
-          </div>
-        </div>
-      </div>
-      <div className="settings-card">
-        <div className="settings-card-text">
-          <div className="settings-card-title">Restart sessions</div>
-          <div className="settings-card-desc">
-            Stop every running omp child (all windows). Each window returns to the idle state and
-            starts a fresh child on its next prompt.
-          </div>
-        </div>
-        <button className="settings-select" onClick={() => void restart()} disabled={restarting}>
-          {restarting ? "Restarting…" : "Restart all"}
-        </button>
-      </div>
-    </>
   );
 }
