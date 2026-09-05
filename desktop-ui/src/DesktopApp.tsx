@@ -31,6 +31,7 @@ type OmpModelInfo = {
 type StateResponse = {
   model?: { id?: string; provider?: string };
   thinkingLevel?: string;
+  contextUsage?: { tokens: number; contextWindow: number; percent: number };
 };
 
 type CwdInfo = { project: string; branch: string; diffAdded: number; diffRemoved: number };
@@ -90,6 +91,7 @@ export function DesktopApp() {
   const [models, setModels] = useState<OmpModelInfo[]>([]);
   const [activeModel, setActiveModel] = useState<{ provider: string; id: string } | null>(null);
   const [thinkingLevel, setThinkingLevel] = useState("");
+  const [contextUsage, setContextUsage] = useState<StateResponse["contextUsage"]>(undefined);
   const sessionRef = useRef<SessionState>("idle");
   sessionRef.current = session;
 
@@ -211,10 +213,23 @@ export function DesktopApp() {
       const model = state.model;
       if (model?.provider && model.id) setActiveModel({ provider: model.provider, id: model.id });
       if (typeof state.thinkingLevel === "string") setThinkingLevel(state.thinkingLevel);
+      setContextUsage(
+        state.contextUsage && typeof state.contextUsage.percent === "number"
+          ? state.contextUsage
+          : undefined,
+      );
     } catch {
       // session gone mid-refresh; the exit handler owns the UI from here
     }
   }, [rpc]);
+
+  // While a run streams, keep the context gauge moving without waiting for
+  // agent_end (the frame handlers only bump the tick at turn boundaries).
+  useEffect(() => {
+    if (session !== "running") return;
+    const id = setInterval(() => void refreshSessionState(), 5000);
+    return () => clearInterval(id);
+  }, [session, refreshSessionState]);
 
   const loadModels = useCallback(async () => {
     try {
@@ -586,6 +601,22 @@ export function DesktopApp() {
               ))}
             </select>
             <span className="context-spacer" />
+            {contextUsage && typeof contextUsage.percent === "number" && (
+              <span
+                className="context-chip context-gauge"
+                title={`${Math.round(contextUsage.tokens).toLocaleString()} of ${Math.round(contextUsage.contextWindow).toLocaleString()} context tokens`}
+              >
+                <span className="gauge-bar">
+                  <span
+                    className="gauge-fill"
+                    style={{ width: `${Math.min(100, Math.max(1.5, contextUsage.percent))}%` }}
+                  />
+                </span>
+                {contextUsage.percent >= 10
+                  ? `${Math.round(contextUsage.percent)}%`
+                  : `${contextUsage.percent.toFixed(1)}%`}
+              </span>
+            )}
             {running && <span className="context-spinner" aria-label="running" />}
           </div>
         </footer>
