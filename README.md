@@ -159,7 +159,48 @@ npm test            # Run test suite
 
 > **Note**: Do not run `npm run build` during local dev — it populates `.next/` and can break `npm run dev`.
 
+## Desktop App (Tauri 2)
+
+A native Windows desktop companion built on the same codebase: one frameless
+chat window per project, session sidebar, tray integration, and the full omp
+RPC protocol (including v2 chunked frames).
+
+### Install
+
+Download the latest NSIS installer from
+[/releases](https://github.com/kahme247/ompweb/releases) — or build it locally:
+
+```bash
+npm install
+npm run tauri build
+# → src-tauri/target/release/bundle/nsis/ompweb_<version>_x64-setup.exe
+```
+
+Requirements: Windows 10+ (WebView2 ships with the OS), the `omp` CLI on
+`PATH`, and at least one authenticated model provider (provider auth status
+is visible in Settings → Providers).
+
+### Develop
+
+```bash
+npm run tauri dev   # desktop app with hot reload (Vite on :5173)
+```
+
+The desktop UI lives in `desktop-ui/` and reuses the web app's `components/`,
+`lib/`, and design tokens; the Rust backend is `src-tauri/` (process + NDJSON
+RPC layer, tray/hotkey/notifications, skills + git workspace commands). Do not
+import `@oh-my-pi/*` packages — the same Bun-only porting contract as the web
+app applies.
+
+### Keyboard & shell
+
+- **Ctrl+K** — command palette (switch session, new task, theme)
+- **Alt+Shift+O** — global hotkey to show/hide the window
+- Tray icon shows live session state; closing the window minimizes to tray
+  (toggle in Settings → General), tray Quit exits for real.
+
 ## License & Credits
+
 
 - Forked from [agegr/pi-web](https://github.com/agegr/pi-web) (MIT) and adapted for [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi).
 - Released under the [MIT License](./LICENSE).
