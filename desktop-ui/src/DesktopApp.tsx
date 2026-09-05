@@ -41,7 +41,10 @@ export function DesktopApp() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [error, setError] = useState("");
   const [input, setInput] = useState("");
+  // The in-progress assistant message: the ref is the source of truth inside
+  // the (once-registered) frame listener, the state mirrors it for rendering.
   const streaming = useRef<ChatMessage | null>(null);
+  const [streamingMsg, setStreamingMsg] = useState<ChatMessage | null>(null);
 
   useEffect(() => {
     invoke<string>("omp_home")
@@ -64,6 +67,7 @@ export function DesktopApp() {
               if (text) setMessages((m) => [...m, { role: "user", text }]);
             } else if (role === "assistant") {
               streaming.current = { role: "assistant", text: "", thinking: "" };
+              setStreamingMsg({ ...streaming.current });
             }
             break;
           }
@@ -76,25 +80,15 @@ export function DesktopApp() {
             } else if (ev.type === "text_delta" && ev.delta) {
               cur.text += ev.delta;
             }
-            // Re-render the in-progress message.
-            setMessages((m) => {
-              const last = m[m.length - 1];
-              if (last?.role === "assistant" && last.text === "" && last.thinking === "") {
-                return [...m.slice(0, -1), { ...cur }];
-              }
-              return [...m, { ...cur }];
-            });
+            setStreamingMsg({ ...cur });
             break;
           }
           case "message_end": {
             if (streaming.current) {
               const done = { ...streaming.current };
-              setMessages((m) => {
-                const last = m[m.length - 1];
-                if (last?.role === "assistant") return [...m.slice(0, -1), done];
-                return [...m, done];
-              });
+              setMessages((m) => [...m, done]);
               streaming.current = null;
+              setStreamingMsg(null);
             }
             break;
           }
@@ -109,6 +103,7 @@ export function DesktopApp() {
       listen<{ code: number | null }>("omp-exit", () => {
         setSession("exited");
         streaming.current = null;
+        setStreamingMsg(null);
       }),
     ];
     return () => {
@@ -123,6 +118,7 @@ export function DesktopApp() {
     setError("");
     setMessages([]);
     streaming.current = null;
+    setStreamingMsg(null);
     try {
       await invoke("omp_start", { cwd });
       setSession("ready");
@@ -197,7 +193,18 @@ export function DesktopApp() {
             </div>
           ),
         )}
-        {session === "running" && <div className="desktop-cursor" aria-hidden />}
+        {streamingMsg && (
+          <div className="desktop-msg desktop-msg-assistant">
+            {streamingMsg.thinking && (
+              <details className="desktop-thinking" open={!streamingMsg.text}>
+                <summary>Thinking</summary>
+                <pre>{streamingMsg.thinking}</pre>
+              </details>
+            )}
+            <div className="desktop-msg-text">{streamingMsg.text}</div>
+          </div>
+        )}
+        {session === "running" && !streamingMsg?.text && <div className="desktop-cursor" aria-hidden />}
       </main>
 
       <footer className="desktop-composer">
