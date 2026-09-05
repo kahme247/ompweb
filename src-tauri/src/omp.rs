@@ -119,7 +119,7 @@ impl OmpSession {
     /// Graceful shutdown: close stdin (omp exits on EOF); on Windows, if the
     /// child is still alive shortly after, kill the whole process tree with
     /// taskkill so extension/LSP grandchildren don't linger.
-    fn stop(&self) {
+    pub fn stop(&self) {
         if let Ok(mut guard) = self.stdin.lock() {
             guard.take(); // dropping ChildStdin closes the pipe
         }
@@ -243,6 +243,14 @@ fn spawn_session(app: tauri::AppHandle, cwd: &str, resume: Option<&str>) -> Resu
                     Some("ready") => {
                         let _ = ready_tx.send(frame);
                     }
+                    Some("agent_start") => {
+                        crate::shell::report_agent_state(&app, true, &session.cwd);
+                        let _ = app.emit("omp-frame", frame);
+                    }
+                    Some("agent_end") => {
+                        crate::shell::report_agent_state(&app, false, &session.cwd);
+                        let _ = app.emit("omp-frame", frame);
+                    }
                     Some("response") => {
                         let id = frame["id"].as_str().map(|s| s.to_string());
                         let sender = id.and_then(|id| {
@@ -297,6 +305,7 @@ fn spawn_session(app: tauri::AppHandle, cwd: &str, resume: Option<&str>) -> Resu
             };
             exited.store(true, Ordering::Relaxed);
             pending.lock().ok().map(|mut p| p.clear());
+            crate::shell::report_session_gone(&app);
             let tail_text = tail.lock().map(|t| t.clone()).unwrap_or_default();
             let _ = app.emit("omp-exit", json!({ "code": code, "stderrTail": tail_text }));
         });
