@@ -1,6 +1,22 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Check, FolderOpen, GitBranch, GitBranchPlus, HardDrive, Plus, Search, X } from "lucide-react";
+import {
+  Archive,
+  Check,
+  ChevronRight,
+  FolderOpen,
+  GitBranch,
+  GitBranchPlus,
+  HardDrive,
+  ImagePlus,
+  Minimize2,
+  Plus,
+  Search,
+  Settings,
+  Wrench,
+  X,
+  Zap,
+} from "lucide-react";
 
 function samePath(a: string, b: string): boolean {
   return a.replace(/[\\/]+$/, "").toLowerCase() === b.replace(/[\\/]+$/, "").toLowerCase();
@@ -281,6 +297,134 @@ export function WorktreeMenu({
           </button>
         </div>
       )}
+    </>
+  );
+}
+
+// ---------- "+" composer menu (with Tools submenu) ----------
+
+export type ToolPreset = "none" | "default" | "full";
+
+const TOOL_PRESET_LABELS: Record<ToolPreset, string> = {
+  none: "No tools",
+  default: "Core tools",
+  full: "Full tools",
+};
+
+type PlusMenuProps = {
+  close: () => void;
+  running: boolean;
+  ready: boolean;
+  started: boolean;
+  compacting: boolean;
+  fastModeEnabled: boolean;
+  fastModeSupported: boolean;
+  toolPreset: ToolPreset;
+  onAttach: () => void;
+  onToggleFast: () => void;
+  onToolPreset: (preset: ToolPreset) => void;
+  onCompact: () => void;
+  onManageModels: () => void;
+};
+
+export function PlusMenu({
+  close,
+  running,
+  ready,
+  started,
+  compacting,
+  fastModeEnabled,
+  fastModeSupported,
+  toolPreset,
+  onAttach,
+  onToggleFast,
+  onToolPreset,
+  onCompact,
+  onManageModels,
+}: PlusMenuProps) {
+  const [toolsOpen, setToolsOpen] = useState(false);
+
+  return (
+    <>
+      <button
+        className="context-menu-row"
+        onClick={() => {
+          onAttach();
+          close();
+        }}
+      >
+        <ImagePlus size={13} aria-hidden />
+        <span className="context-menu-row-label">Attach image…</span>
+      </button>
+      {(fastModeEnabled || (fastModeSupported && started)) && (
+        <button
+          className="context-menu-row"
+          onClick={() => {
+            onToggleFast();
+            close();
+          }}
+        >
+          <Zap size={13} aria-hidden />
+          <span className="context-menu-row-label">Fast mode</span>
+          {fastModeEnabled && <Check size={13} aria-hidden />}
+        </button>
+      )}
+      <div
+        className="submenu-wrap"
+        onMouseEnter={() => setToolsOpen(true)}
+        onMouseLeave={() => setToolsOpen(false)}
+      >
+        <button
+          className="context-menu-row"
+          onClick={() => setToolsOpen((v) => !v)}
+          aria-expanded={toolsOpen}
+        >
+          <Wrench size={13} aria-hidden />
+          <span className="context-menu-row-label">Tools — next session</span>
+          <ChevronRight size={12} aria-hidden />
+        </button>
+        {toolsOpen && (
+          <div className="context-submenu">
+            {(Object.keys(TOOL_PRESET_LABELS) as ToolPreset[]).map((preset) => (
+              <button
+                key={preset}
+                className="context-menu-row"
+                onClick={() => {
+                  onToolPreset(preset);
+                  close();
+                }}
+              >
+                <span className="context-menu-row-label">{TOOL_PRESET_LABELS[preset]}</span>
+                {toolPreset === preset && <Check size={13} aria-hidden />}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="context-menu-sep" />
+      <button
+        className="context-menu-row"
+        onClick={() => {
+          onCompact();
+          close();
+        }}
+        disabled={running || compacting || !ready}
+      >
+        <Minimize2 size={13} aria-hidden />
+        <span className="context-menu-row-label">
+          {compacting ? "Compacting…" : "Compact context"}
+        </span>
+      </button>
+      <button
+        className="context-menu-row"
+        onClick={() => {
+          onManageModels();
+          close();
+        }}
+      >
+        <Settings size={13} aria-hidden />
+        <span className="context-menu-row-label">Manage models</span>
+      </button>
     </>
   );
 }

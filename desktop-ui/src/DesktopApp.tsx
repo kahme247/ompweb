@@ -10,7 +10,7 @@ import { formatTokens, formatCost } from "@/lib/subagent-format";
 import { useTheme } from "@/hooks/useTheme";
 import { Sidebar, projectLabel, type SidebarSession } from "./Sidebar";
 import { SettingsView, applyFontSettings, type LoginProvider, type UsageSnapshot } from "./SettingsView";
-import { MenuChip, ProjectMenu, BranchMenu, WorktreeMenu } from "./ContextMenus";
+import { MenuChip, PlusMenu, ProjectMenu, BranchMenu, WorktreeMenu } from "./ContextMenus";
 import { SubagentDialog } from "./SubagentDialog";
 import { ThemedSelect } from "./ThemedSelect";
 import { CommandPalette } from "@/components/CommandPalette";
@@ -1040,70 +1040,21 @@ export function DesktopApp() {
                     chip={<Plus size={15} aria-hidden />}
                   >
                     {(close) => (
-                      <>
-                        <button
-                          className="context-menu-row"
-                          onClick={() => {
-                            void attachFromPicker();
-                            close();
-                          }}
-                        >
-                          <ImagePlus size={13} aria-hidden />
-                          <span className="context-menu-row-label">Attach image…</span>
-                        </button>
-                        {(fastMode.enabled || (fastModeSupported && started)) && (
-                          <button
-                            className="context-menu-row"
-                            onClick={() => {
-                              void toggleFastMode();
-                              close();
-                            }}
-                          >
-                            <Zap size={13} aria-hidden />
-                            <span className="context-menu-row-label">Fast mode</span>
-                            {fastMode.enabled && <Check size={13} aria-hidden />}
-                          </button>
-                        )}
-                        <div className="context-menu-group">Tools — next session</div>
-                        {(Object.keys(TOOL_PRESET_LABELS) as ToolPreset[]).map((preset) => (
-                          <button
-                            key={preset}
-                            className="context-menu-row"
-                            onClick={() => {
-                              changeToolPreset(preset);
-                              close();
-                            }}
-                          >
-                            <Wrench size={13} aria-hidden />
-                            <span className="context-menu-row-label">{TOOL_PRESET_LABELS[preset]}</span>
-                            {toolPreset === preset && <Check size={13} aria-hidden />}
-                          </button>
-                        ))}
-                        <div className="context-menu-sep" />
-                        <button
-                          className="context-menu-row"
-                          onClick={() => {
-                            void compact();
-                            close();
-                          }}
-                          disabled={running || compacting || session !== "ready"}
-                        >
-                          <Minimize2 size={13} aria-hidden />
-                          <span className="context-menu-row-label">
-                            {compacting ? "Compacting…" : "Compact context"}
-                          </span>
-                        </button>
-                        <button
-                          className="context-menu-row"
-                          onClick={() => {
-                            void invoke("omp_manage_models").catch(toastError);
-                            close();
-                          }}
-                        >
-                          <Settings size={13} aria-hidden />
-                          <span className="context-menu-row-label">Manage models</span>
-                        </button>
-                      </>
+                      <PlusMenu
+                        close={close}
+                        running={running}
+                        ready={session === "ready"}
+                        started={started}
+                        compacting={compacting}
+                        fastModeEnabled={fastMode.enabled}
+                        fastModeSupported={fastModeSupported}
+                        toolPreset={toolPreset}
+                        onAttach={() => void attachFromPicker()}
+                        onToggleFast={() => void toggleFastMode()}
+                        onToolPreset={changeToolPreset}
+                        onCompact={() => void compact()}
+                        onManageModels={() => invoke("omp_manage_models").catch(toastError)}
+                      />
                     )}
                   </MenuChip>
                   <label className="composer-chip" title="Tool approval mode — applies when the next session starts">
@@ -1270,25 +1221,46 @@ export function DesktopApp() {
               </span>
             )}
             {running && <span className="context-spinner" aria-label="running" />}
+            {contextUsage && typeof contextUsage.percent === "number" && (
+              <MenuChip
+                width={300}
+                chip={
+                  <span className="context-gauge" title="Context window usage">
+                    <span className="gauge-bar">
+                      <span
+                        className="gauge-fill"
+                        style={{ width: `${Math.min(100, Math.max(1.5, contextUsage.percent))}%` }}
+                      />
+                    </span>
+                    {contextUsage.percent >= 10
+                      ? `${Math.round(contextUsage.percent)}%`
+                      : `${contextUsage.percent.toFixed(1)}%`}
+                  </span>
+                }
+              >
+                {() => (
+                  <div className="gauge-pop">
+                    <div className="gauge-pop-head">
+                      <span>Context window</span>
+                      <span className="gauge-pop-nums">
+                        {formatTokens(contextUsage.tokens)} / {formatTokens(contextUsage.contextWindow)} (
+                        {contextUsage.percent >= 10
+                          ? `${Math.round(contextUsage.percent)}`
+                          : contextUsage.percent.toFixed(1)}
+                        %)
+                      </span>
+                    </div>
+                    <div className="gauge-bar big">
+                      <span
+                        className="gauge-fill"
+                        style={{ width: `${Math.min(100, Math.max(1.5, contextUsage.percent))}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </MenuChip>
+            )}
           </div>
-          {contextUsage && typeof contextUsage.percent === "number" && (
-            <div className="context-details">
-              <span className="context-details-label">Context window</span>
-              <span className="context-details-nums">
-                {formatTokens(contextUsage.tokens)} / {formatTokens(contextUsage.contextWindow)} (
-                {contextUsage.percent >= 10
-                  ? `${Math.round(contextUsage.percent)}`
-                  : contextUsage.percent.toFixed(1)}
-                %)
-              </span>
-              <span className="gauge-bar big">
-                <span
-                  className="gauge-fill"
-                  style={{ width: `${Math.min(100, Math.max(1.5, contextUsage.percent))}%` }}
-                />
-              </span>
-            </div>
-          )}
         </footer>
           </>
         )}
