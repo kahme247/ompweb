@@ -937,7 +937,12 @@ export function DesktopApp() {
                 </div>
               </div>
             </main>
-            <ChatMinimap messages={messages} scrollContainer={scrollRef} messageRefs={messageRefs} />
+            <ChatMinimap
+              messages={messages}
+              scrollContainer={scrollRef}
+              messageRefs={messageRefs}
+              disableTooltips
+            />
 
         <footer className="desktop-composer">
           <div className="composer-panels">

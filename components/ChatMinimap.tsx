@@ -8,6 +8,8 @@ interface Props {
   messages: AgentMessage[];
   scrollContainer: RefObject<HTMLDivElement | null>;
   messageRefs: RefObject<(HTMLDivElement | null)[]>;
+  /** Hide the hover tooltip panels (desktop layout anchors them wrong). */
+  disableTooltips?: boolean;
 }
 
 
@@ -63,7 +65,7 @@ interface NodeInfo {
   index: number;
 }
 
-export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer, messageRefs }: Props) {
+export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer, messageRefs, disableTooltips }: Props) {
   const [scrollRatio, setScrollRatio] = useState(0);
   const [viewportRatio, setViewportRatio] = useState(1);
   const [visible, setVisible] = useState(false);
@@ -459,7 +461,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
         }}
       />
       {/* Tooltip panel: scrollable list when overflowing, absolute-positioned when fits */}
-      {minimapHovered && nodes.length > 0 && tooltipListOverflows && (
+      {!disableTooltips && minimapHovered && nodes.length > 0 && tooltipListOverflows && (
         <div
           ref={overflowPanelRef}
           onMouseDown={(e) => e.stopPropagation()}
@@ -522,7 +524,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
           })}
         </div>
       )}
-      {minimapHovered && tooltipPositions.length > 0 && (() => {
+      {!disableTooltips && minimapHovered && tooltipPositions.length > 0 && (() => {
         // Opaque backdrop spanning first to last tooltip; width includes the
         // 6px gutter so the mouse can't fall through the gap between the
         // minimap strip and the tooltip panel.
@@ -547,7 +549,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
           />
         );
       })()}
-      {minimapHovered && !tooltipListOverflows && nodes.map((node, i) => {
+      {!disableTooltips && minimapHovered && !tooltipListOverflows && nodes.map((node, i) => {
         const preview = nodePreviews[i] ?? getMessagePreview(node.msg);
         const color = nodeColors[i] ?? getNodeColor(node.msg);
         const isNearest = nearestIndex === node.index;
