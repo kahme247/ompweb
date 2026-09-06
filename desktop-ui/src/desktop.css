@@ -952,7 +952,6 @@ html.dark .desktop-app {
   align-items: center;
   gap: 4px;
   min-width: 0;
-  overflow: hidden;
 }
 
 .composer-chip {
