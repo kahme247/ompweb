@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { AppWindow, ArrowLeft, ArrowRight, ArrowUp, Brain, CircleDashed, FolderOpen, GitBranch, Hand, HardDrive, Minus, Minimize2, PanelLeft, Plus, Settings, ShieldCheck, Sparkles, Square, SquarePen, Wrench, X, Zap } from "lucide-react";
+import { AppWindow, ArrowLeft, ArrowRight, ArrowUp, Brain, Check, CircleDashed, FolderOpen, GitBranch, Hand, HardDrive, ImagePlus, Minus, Minimize2, PanelLeft, Plus, Settings, ShieldCheck, Sparkles, Square, SquarePen, Wrench, X, Zap } from "lucide-react";
 import { MessageView } from "@/components/MessageView";
 import { normalizeToolCalls } from "@/lib/normalize";
 import { selectableThinkingLevels, thinkingLevelsForMeta } from "@/lib/thinking-levels";
@@ -500,14 +500,15 @@ export function DesktopApp() {
     setSubagentActivity(new Map());
   }, []);
 
-  const beginSession = useCallback(async () => {
+  const beginSession = useCallback(async (dirOverride?: string) => {
+    const dir = (dirOverride ?? cwd).trim();
     setSession("starting");
     setError("");
     resetTranscript();
     setActiveFile(null);
-    saveCwd(cwd.trim());
+    saveCwd(dir);
     try {
-      await invoke("omp_start", { cwd: cwd.trim(), approvalMode, tools: toolPreset });
+      await invoke("omp_start", { cwd: dir, approvalMode, tools: toolPreset });
       setSession("ready");
       void loadModels();
       void refreshSessionState();
@@ -518,6 +519,16 @@ export function DesktopApp() {
       return false;
     }
   }, [cwd, approvalMode, toolPreset, loadModels, refreshSessionState, resetTranscript, saveCwd]);
+
+  // Boot with a live session so the composer (model catalog etc.) works
+  // immediately — the reference behavior.
+  const autoStartedRef = useRef(false);
+  useEffect(() => {
+    if (autoStartedRef.current || settingsOpen) return;
+    if (!cwd.trim() || session !== "idle") return;
+    autoStartedRef.current = true;
+    void beginSession();
+  }, [cwd, session, beginSession, settingsOpen]);
 
   const stop = useCallback(async () => {
     if (sessionRef.current === "running") {
@@ -626,6 +637,9 @@ export function DesktopApp() {
 
   /** Transient failures go to toasts; session-fatal ones keep the red bar. */
   const toastError = useCallback((err: unknown) => toast.error(typeof err === "string" ? err : String(err)), []);
+  const refreshSessions = useCallback(() => {
+    invoke<SidebarSession[]>("omp_list_sessions").then(setSessions).catch(() => {});
+  }, []);
 
   const changeToolPreset = useCallback((preset: ToolPreset) => {
     setToolPreset(preset);
@@ -832,6 +846,27 @@ export function DesktopApp() {
             sessions={sessions}
             activeFile={activeFile}
             onOpen={(s) => void resume(s)}
+            onRename={(file, title) => {
+              invoke("omp_rename_session", { file, title })
+                .then(refreshSessions)
+                .catch(toastError);
+            }}
+            onArchive={(file) => {
+              invoke("omp_archive_session", { file, archived: true })
+                .then(refreshSessions)
+                .catch(toastError);
+              if (activeFile === file) setActiveFile(null);
+            }}
+            onDelete={(file) => {
+              invoke("omp_delete_session", { file })
+                .then(refreshSessions)
+                .catch(toastError);
+              if (activeFile === file) {
+                setActiveFile(null);
+                void invoke("omp_stop").catch(() => {});
+                setSession("idle");
+              }
+            }}
           />
           <div className="sidebar-footer">
             <button
@@ -865,7 +900,7 @@ export function DesktopApp() {
           <div className="titlebar-title" data-tauri-drag-region>
             {settingsOpen ? "Settings" : title}
           </div>
-          {!settingsOpen && (cwdInfo.diffAdded > 0 || cwdInfo.diffRemoved > 0) && (
+          {started && (cwdInfo.diffAdded > 0 || cwdInfo.diffRemoved > 0) && (
             <span className="titlebar-diff" title="Working-tree changes vs HEAD">
               <span className="diff-add">+{cwdInfo.diffAdded.toLocaleString()}</span>{" "}
               <span className="diff-del">-{cwdInfo.diffRemoved.toLocaleString()}</span>
@@ -1000,14 +1035,77 @@ export function DesktopApp() {
             <div className="composer-row">
               <div className="composer-controls">
                 <div className="controls-side">
-                  <button
-                    className="composer-chip"
-                    onClick={() => void attachFromPicker()}
-                    title="Attach image"
-                    aria-label="Attach image"
+                  <MenuChip
+                    width={280}
+                    chip={<Plus size={15} aria-hidden />}
                   >
-                    <Plus size={14} aria-hidden />
-                  </button>
+                    {(close) => (
+                      <>
+                        <button
+                          className="context-menu-row"
+                          onClick={() => {
+                            void attachFromPicker();
+                            close();
+                          }}
+                        >
+                          <ImagePlus size={13} aria-hidden />
+                          <span className="context-menu-row-label">Attach image…</span>
+                        </button>
+                        {(fastMode.enabled || (fastModeSupported && started)) && (
+                          <button
+                            className="context-menu-row"
+                            onClick={() => {
+                              void toggleFastMode();
+                              close();
+                            }}
+                          >
+                            <Zap size={13} aria-hidden />
+                            <span className="context-menu-row-label">Fast mode</span>
+                            {fastMode.enabled && <Check size={13} aria-hidden />}
+                          </button>
+                        )}
+                        <div className="context-menu-group">Tools — next session</div>
+                        {(Object.keys(TOOL_PRESET_LABELS) as ToolPreset[]).map((preset) => (
+                          <button
+                            key={preset}
+                            className="context-menu-row"
+                            onClick={() => {
+                              changeToolPreset(preset);
+                              close();
+                            }}
+                          >
+                            <Wrench size={13} aria-hidden />
+                            <span className="context-menu-row-label">{TOOL_PRESET_LABELS[preset]}</span>
+                            {toolPreset === preset && <Check size={13} aria-hidden />}
+                          </button>
+                        ))}
+                        <div className="context-menu-sep" />
+                        <button
+                          className="context-menu-row"
+                          onClick={() => {
+                            void compact();
+                            close();
+                          }}
+                          disabled={running || compacting || session !== "ready"}
+                        >
+                          <Minimize2 size={13} aria-hidden />
+                          <span className="context-menu-row-label">
+                            {compacting ? "Compacting…" : "Compact context"}
+                          </span>
+                        </button>
+                        <button
+                          className="context-menu-row"
+                          onClick={() => {
+                            void invoke("omp_manage_models").catch(toastError);
+                            close();
+                          }}
+                        >
+                          <Settings size={13} aria-hidden />
+                          <span className="context-menu-row-label">Manage models</span>
+                        </button>
+                      </>
+                    )}
+                  </MenuChip>
                   <label className="composer-chip" title="Tool approval mode — applies when the next session starts">
                     <ThemedSelect
                       value={approvalMode}
@@ -1024,21 +1122,6 @@ export function DesktopApp() {
                   {running && <span className="context-spinner" aria-hidden />}
                   {session !== "exited" && (
                   <>
-                    <label className="composer-chip" title="Tool preset — applies to the next session">
-                      <Wrench size={12} aria-hidden />
-                      <ThemedSelect
-                        value={toolPreset}
-                        options={(Object.keys(TOOL_PRESET_LABELS) as ToolPreset[]).map((preset) => ({
-                          value: preset,
-                          label: TOOL_PRESET_LABELS[preset],
-                        }))}
-                        onChange={(v) => changeToolPreset(v as ToolPreset)}
-                        disabled={running}
-                        direction="up"
-                        ariaLabel="Tool preset"
-                        maxWidth={110}
-                      />
-                    </label>
                     <label
                       className="composer-chip"
                       title={started ? "Model" : "Model — starts loading once a session opens"}
@@ -1068,14 +1151,6 @@ export function DesktopApp() {
                         placeholder="Model"
                         ariaLabel="Model"
                         maxWidth={180}
-                        footer={
-                          <button
-                            className="tsel-footer"
-                            onClick={() => void invoke("omp_manage_models").catch(toastError)}
-                          >
-                            <Settings size={13} aria-hidden /> Manage models
-                          </button>
-                        }
                       />
                     </label>
                     <label
@@ -1093,28 +1168,6 @@ export function DesktopApp() {
                         maxWidth={110}
                       />
                     </label>
-                    {(fastMode.enabled || (fastModeSupported && started)) && (
-                      <button
-                        className={`composer-chip${fastMode.active ? " fast-active" : ""}`}
-                        onClick={() => void toggleFastMode()}
-                        disabled={running}
-                        title="Fast mode — priority service tier"
-                        aria-label="Toggle fast mode"
-                      >
-                        <Zap size={12} aria-hidden />
-                        {fastMode.active ? "Fast" : "Fast mode"}
-                      </button>
-                    )}
-                    <button
-                      className="composer-chip"
-                      onClick={() => void compact()}
-                      disabled={running || compacting || session !== "ready"}
-                      title="Compact context — summarize the transcript to free window space"
-                      aria-label="Compact context"
-                    >
-                      <Minimize2 size={12} aria-hidden />
-                      {compacting ? "Compacting…" : "Compact"}
-                    </button>
                   </>
                   )}
                 </div>
@@ -1153,6 +1206,7 @@ export function DesktopApp() {
                   onPick={(p) => {
                     setCwd(p);
                     saveCwd(p);
+                    void beginSession(p);
                   }}
                   onError={toastError}
                 />
@@ -1215,47 +1269,26 @@ export function DesktopApp() {
                 {sessionUsage.cost > 0 ? ` · ${formatCost(sessionUsage.cost)}` : ""}
               </span>
             )}
-            {contextUsage && typeof contextUsage.percent === "number" && (
-              <MenuChip
-                width={300}
-                chip={
-                  <span className="context-gauge" title="Context window usage">
-                    <span className="gauge-bar">
-                      <span
-                        className="gauge-fill"
-                        style={{ width: `${Math.min(100, Math.max(1.5, contextUsage.percent))}%` }}
-                      />
-                    </span>
-                    {contextUsage.percent >= 10
-                      ? `${Math.round(contextUsage.percent)}%`
-                      : `${contextUsage.percent.toFixed(1)}%`}
-                  </span>
-                }
-              >
-                {() => (
-                  <div className="gauge-pop">
-                    <div className="gauge-pop-head">
-                      <span>Context window</span>
-                      <span className="gauge-pop-nums">
-                        {formatTokens(contextUsage.tokens)} / {formatTokens(contextUsage.contextWindow)} (
-                        {contextUsage.percent >= 10
-                          ? `${Math.round(contextUsage.percent)}`
-                          : contextUsage.percent.toFixed(1)}
-                        %)
-                      </span>
-                    </div>
-                    <div className="gauge-bar big">
-                      <span
-                        className="gauge-fill"
-                        style={{ width: `${Math.min(100, Math.max(1.5, contextUsage.percent))}%` }}
-                      />
-                    </div>
-                  </div>
-                )}
-              </MenuChip>
-            )}
             {running && <span className="context-spinner" aria-label="running" />}
           </div>
+          {contextUsage && typeof contextUsage.percent === "number" && (
+            <div className="context-details">
+              <span className="context-details-label">Context window</span>
+              <span className="context-details-nums">
+                {formatTokens(contextUsage.tokens)} / {formatTokens(contextUsage.contextWindow)} (
+                {contextUsage.percent >= 10
+                  ? `${Math.round(contextUsage.percent)}`
+                  : contextUsage.percent.toFixed(1)}
+                %)
+              </span>
+              <span className="gauge-bar big">
+                <span
+                  className="gauge-fill"
+                  style={{ width: `${Math.min(100, Math.max(1.5, contextUsage.percent))}%` }}
+                />
+              </span>
+            </div>
+          )}
         </footer>
           </>
         )}

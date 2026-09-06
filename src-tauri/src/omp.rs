@@ -466,6 +466,21 @@ fn omp_usage_history() -> Result<Vec<Value>, String> {
     crate::sessions::usage_history()
 }
 
+#[tauri::command]
+fn omp_rename_session(file: String, title: String) -> Result<(), String> {
+    crate::sessions::rename_session(&file, &title)
+}
+
+#[tauri::command]
+fn omp_delete_session(file: String) -> Result<(), String> {
+    crate::sessions::delete_session(&file)
+}
+
+#[tauri::command]
+fn omp_archive_session(file: String, archived: bool) -> Result<(), String> {
+    crate::sessions::set_session_archived(&file, archived)
+}
+
 /// Composer context row: project label (cwd basename) and current git branch.
 #[tauri::command]
 fn omp_cwd_info(cwd: String) -> Value {
@@ -597,6 +612,9 @@ pub fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool {
         omp_list_sessions,
         omp_read_session,
         omp_usage_history,
+        omp_rename_session,
+        omp_delete_session,
+        omp_archive_session,
         omp_cwd_info,
         omp_shell_settings,
         omp_shell_set_setting,

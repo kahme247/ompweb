@@ -47,6 +47,7 @@ fn read_session_header(path: &Path) -> Option<(String, Value)> {
 /// Recent sessions across all project dirs, newest first (mtime).
 pub fn list_sessions() -> Result<Vec<Value>, String> {
     let root = sessions_root()?;
+    let archived = archived_paths();
     let mut out: Vec<(std::time::SystemTime, Value)> = Vec::new();
     let dirs = fs::read_dir(&root).map_err(|e| format!("cannot read sessions dir: {e}"))?;
     for dir in dirs.flatten() {
@@ -54,6 +55,10 @@ pub fn list_sessions() -> Result<Vec<Value>, String> {
         for entry in files.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let file_str = path.to_string_lossy().to_string();
+            if archived.iter().any(|p| p.eq_ignore_ascii_case(&file_str)) {
                 continue;
             }
             let Ok(meta) = entry.metadata() else { continue };
@@ -261,4 +266,121 @@ pub fn usage_history() -> Result<Vec<serde_json::Value>, String> {
         }
     }
     Ok(out)
+}
+
+// ---------- Session management (rename / delete / archive) ----------
+
+/// Confine a caller-supplied path to the sessions root.
+fn confine_session_path(file: &str) -> Result<PathBuf, String> {
+    let root = fs::canonicalize(sessions_root()?).map_err(|e| e.to_string())?;
+    let target = fs::canonicalize(file).map_err(|e| e.to_string())?;
+    if !target.starts_with(&root) {
+        return Err("path is outside the sessions root".into());
+    }
+    Ok(target)
+}
+
+fn archive_file() -> PathBuf {
+    // Companion to the sessions dir; omp ignores unknown files here.
+    sessions_root()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .parent()
+        .map(|p| p.join("ompweb-desktop.json"))
+        .unwrap_or_else(|| PathBuf::from("ompweb-desktop.json"))
+}
+
+fn archived_paths() -> Vec<String> {
+    std::fs::read_to_string(archive_file())
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|v| v["archived"].as_array().cloned())
+        .map(|a| {
+            a.into_iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn write_archived_paths(list: &[String]) -> Result<(), String> {
+    let path = archive_file();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let serialized = serde_json::to_string_pretty(&json!({ "archived": list })).map_err(|e| e.to_string())?;
+    std::fs::write(path, serialized).map_err(|e| e.to_string())
+}
+
+/// Rewrite the fixed 256-byte title slot in place (file length unchanged).
+pub fn rename_session(file: &str, title: &str) -> Result<(), String> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let target = confine_session_path(file)?;
+    let mut title = title.trim().to_string();
+    if title.is_empty() {
+        return Err("title must not be empty".into());
+    }
+    let mut f = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&target)
+        .map_err(|e| e.to_string())?;
+    let mut slot = [0u8; 256];
+    f.read_exact(&mut slot).map_err(|e| format!("not a v3 session file: {e}"))?;
+    let mut header: Value = serde_json::from_slice(&slot)
+        .map_err(|_| "session has no rewriteable title slot (legacy format)".to_string())?;
+    if header["type"] != *"title" {
+        return Err("session has no rewriteable title slot (legacy format)".into());
+    }
+    header["title"] = json!(title);
+    header["updatedAt"] = json!(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    );
+    // Shrink the title until the serialized header fits the 256-byte slot.
+    let mut line;
+    loop {
+        line = serde_json::to_string(&header).map_err(|e| e.to_string())?;
+        if line.len() <= 256 {
+            break;
+        }
+        let Some(current) = header["title"].as_str() else {
+            return Err("title too long".into());
+        };
+        if current.chars().count() <= 8 {
+            return Err("title too long".into());
+        }
+        let cut: String = current.chars().take(current.chars().count() - 4).collect();
+        header["title"] = json!(cut);
+    }
+    line.push_str(&" ".repeat(256 - line.len()));
+    f.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    f.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn delete_session(file: &str) -> Result<(), String> {
+    let target = confine_session_path(file)?;
+    fs::remove_file(&target).map_err(|e| e.to_string())?;
+    let mut list = archived_paths();
+    list.retain(|p| !p.eq_ignore_ascii_case(file));
+    write_archived_paths(&list)
+}
+
+pub fn set_session_archived(file: &str, archived: bool) -> Result<(), String> {
+    confine_session_path(file)?;
+    let mut list = archived_paths();
+    if archived {
+        if !list.iter().any(|p| p.eq_ignore_ascii_case(file)) {
+            list.push(file.to_string());
+        }
+    } else {
+        list.retain(|p| !p.eq_ignore_ascii_case(file));
+    }
+    write_archived_paths(&list)
+}
+
+pub fn is_archived(file: &str) -> bool {
+    archived_paths().iter().any(|p| p.eq_ignore_ascii_case(file))
 }

@@ -3,9 +3,7 @@
   "identifier": "default",
   "description": "enables the default permissions",
   "windows": [
-    "main",
-    "settings",
-    "chat-*"
+    "*"
   ],
   "permissions": [
     "core:default",
