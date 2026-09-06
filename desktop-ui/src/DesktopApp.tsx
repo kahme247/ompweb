@@ -4,7 +4,6 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { AppWindow, ArrowLeft, ArrowRight, ArrowUp, Brain, CircleDashed, FolderOpen, GitBranch, Hand, HardDrive, Minus, Minimize2, PanelLeft, Plus, Settings, ShieldCheck, Sparkles, Square, SquarePen, Wrench, X, Zap } from "lucide-react";
 import { MessageView } from "@/components/MessageView";
-import { ChatMinimap } from "@/components/ChatMinimap";
 import { normalizeToolCalls } from "@/lib/normalize";
 import { selectableThinkingLevels, thinkingLevelsForMeta } from "@/lib/thinking-levels";
 import { formatTokens, formatCost } from "@/lib/subagent-format";
@@ -137,7 +136,6 @@ export function DesktopApp() {
   const [attached, setAttached] = useState<{ data: string; mimeType: string; previewUrl: string }[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const messageRefs = useRef<(HTMLDivElement | null)[]>([]);
   /** Transcript auto-follows the stream until the user scrolls up. */
   const followRef = useRef(true);
   const [models, setModels] = useState<OmpModelInfo[]>([]);
@@ -500,7 +498,6 @@ export function DesktopApp() {
     setSelectedSubagentId(null);
     subagentActivityRef.current = new Map();
     setSubagentActivity(new Map());
-    messageRefs.current = [];
   }, []);
 
   const beginSession = useCallback(async () => {
@@ -908,41 +905,25 @@ export function DesktopApp() {
         ) : (
           <>
             <main className="desktop-transcript" ref={scrollRef} onScroll={onTranscriptScroll}>
-              <div className="transcript-inner">
-                <div className="transcript-column">
-                  {messages.length === 0 && !streaming && (
-                    <div className="desktop-empty">
-                      <div className="empty-heading">
-                        What should we build in{" "}
-                        <span className="empty-project">{cwdInfo.project || "this folder"}</span>?
-                      </div>
-                      {session === "starting" && <div className="empty-sub">Starting omp…</div>}
-                      {session === "exited" && <div className="empty-sub">omp exited. Start a new task.</div>}
+              <div className="transcript-column">
+                {messages.length === 0 && !streaming && (
+                  <div className="desktop-empty">
+                    <div className="empty-heading">
+                      What should we build in{" "}
+                      <span className="empty-project">{cwdInfo.project || "this folder"}</span>?
                     </div>
-                  )}
-                  {messages.map((m, i) => (
-                    <div
-                      key={i}
-                      className="transcript-message"
-                      ref={(el) => {
-                        messageRefs.current[i] = el;
-                      }}
-                    >
-                      <MessageView message={m} toolResults={toolResults} cwd={cwd} />
-                    </div>
-                  ))}
-                  {streaming && (
-                    <MessageView message={streaming} isStreaming toolResults={toolResults} cwd={cwd} />
-                  )}
-                </div>
+                    {session === "starting" && <div className="empty-sub">Starting omp…</div>}
+                    {session === "exited" && <div className="empty-sub">omp exited. Start a new task.</div>}
+                  </div>
+                )}
+                {messages.map((m, i) => (
+                  <MessageView key={i} message={m} toolResults={toolResults} cwd={cwd} />
+                ))}
+                {streaming && (
+                  <MessageView message={streaming} isStreaming toolResults={toolResults} cwd={cwd} />
+                )}
               </div>
             </main>
-            <ChatMinimap
-              messages={messages}
-              scrollContainer={scrollRef}
-              messageRefs={messageRefs}
-              disableTooltips
-            />
 
         <footer className="desktop-composer">
           <div className="composer-panels">
