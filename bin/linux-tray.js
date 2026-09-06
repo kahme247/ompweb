@@ -20,7 +20,9 @@ const dbus = require("dbus-next");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { parseArgs } = require("util");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { spawn, spawnSync } = require("node:child_process");
+const { spawn, spawnSync, execFile } = require("node:child_process");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { promisify } = require("node:util");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const fs = require("node:fs");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -29,9 +31,14 @@ const net = require("node:net");
 const os = require("node:os");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const path = require("node:path");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { readServiceEnv, writeServiceEnv } = require("./service-env");// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { getAccessibleAddresses, isLoopbackHost } = require("./network-addresses");
 
 const { Interface } = dbus.interface;
 const { Variant } = dbus;
+
+const execFileAsync = promisify(execFile);
 
 const BUS_NAME = "org.kde.ompweb.tray";
 const ITEM_PATH = "/StatusNotifierItem";
@@ -196,24 +203,27 @@ function sanitizeHostname(val, fallback = "127.0.0.1") {
   return val.trim();
 }
 
-// Tray configuration: CLI overrides win, then ~/.omp/agent/web-service.json.
+// Tray configuration precedence: CLI overrides, then the service env file
+// (the source the tray edits), then the Windows-style JSON config, then
+// defaults.
 function readTrayConfig(overrides = {}, env = process.env, home = os.homedir()) {
   const agentDir = (env.PI_CODING_AGENT_DIR ?? path.join(home, ".omp", "agent")).replace(/^~(?=\/|$)/, home);
   const configFile = path.join(agentDir, "web-service.json");
-  let fileConfig = {};
+  const serviceEnv = readServiceEnv(path.join(agentDir, "web-service.env"));
+  let jsonConfig = {};
   try {
-    fileConfig = JSON.parse(fs.readFileSync(configFile, "utf8"));
+    jsonConfig = JSON.parse(fs.readFileSync(configFile, "utf8"));
   } catch {
-    fileConfig = {};
+    jsonConfig = {};
   }
-  const port = overrides.port ?? sanitizePort(fileConfig.port);
-  const hostname = overrides.hostname ?? sanitizeHostname(fileConfig.hostname);
+  const port = overrides.port ?? sanitizePort(serviceEnv.PORT ?? jsonConfig.port);
+  const hostname = overrides.hostname ?? sanitizeHostname(serviceEnv.OMP_WEB_HOSTNAME ?? jsonConfig.hostname);
   return { port, hostname, configFile, serviceUrl: `http://${hostname}:${port}` };
 }
 
 // Menu item table. `separator` items render as dividers; `checkmark` items
 // carry a toggle state; `disabled` items are inert status rows.
-function buildMenuItems({ running, version, autostart, hasService }) {
+function buildMenuItems({ running, version, autostart, hasService, exposed, hasDialogTool }) {
   return [
     { id: 1, label: `ompweb (v${version})`, enabled: false },
     { id: 2, label: running ? "  Status: Running" : "  Status: Stopped", enabled: false },
@@ -225,9 +235,21 @@ function buildMenuItems({ running, version, autostart, hasService }) {
     { id: 8, label: "Restart Server", action: "restart", enabled: hasService },
     { id: 9, separator: true },
     { id: 10, label: "View Logs", action: "logs" },
-    { id: 11, label: "Start with Plasma", action: "autostart", checkmark: true, state: autostart ? 1 : 0 },
-    { id: 12, separator: true },
-    { id: 13, label: "Quit Tray", action: "quit" },
+    { id: 11, separator: true },
+    {
+      id: 12,
+      label: "Expose to Network",
+      action: "expose",
+      checkmark: true,
+      state: exposed ? 1 : 0,
+      enabled: hasService && hasDialogTool,
+    },
+    { id: 13, label: "Change Port…", action: "port", enabled: hasService && hasDialogTool },
+    { id: 14, label: "Set Web Password…", action: "password", enabled: hasService && hasDialogTool },
+    { id: 15, separator: true },
+    { id: 16, label: "Start with Plasma", action: "autostart", checkmark: true, state: autostart ? 1 : 0 },
+    { id: 17, separator: true },
+    { id: 18, label: "Quit Tray", action: "quit" },
   ];
 }
 
@@ -342,6 +364,46 @@ function resolveTerminal(env = process.env) {
 
 function resolveClipboardBin() {
   return which("wl-copy") ?? which("xclip") ?? null;
+}
+
+// Graphical prompt tools for tray settings (KDE kdialog first, zenity second).
+function dialogCandidates() {
+  return ["kdialog", "zenity"];
+}
+
+function resolveDialogTool(env = process.env) {
+  const override = env.OMP_WEB_DIALOG;
+  if (override) {
+    return override.includes(path.sep) ? (isExecutable(override) ? override : null) : which(override);
+  }
+  for (const candidate of dialogCandidates()) {
+    const found = which(candidate);
+    if (found) return found;
+  }
+  return null;
+}
+
+// Show an input dialog; returns the entered string ("" allowed) or null on
+// cancel / missing tool. Async so the tray's DBus loop stays responsive while
+// the dialog is open.
+async function dialogPrompt({ tool, title, text, value = "", password = false }, run = execFileAsync) {
+  if (!tool) return null;
+  let args;
+  if (path.basename(tool) === "kdialog") {
+    args = password
+      ? ["--password", text, "--title", title]
+      : ["--inputbox", text, value, "--title", title];
+  } else {
+    args = password
+      ? ["--password", `--title=${title}`]
+      : ["--entry", `--title=${title}`, `--text=${text}`, ...(value ? [`--entry-text=${value}`] : [])];
+  }
+  try {
+    const { stdout } = await run(tool, args, { encoding: "utf8", maxBuffer: 1024 * 64 });
+    return String(stdout ?? "").replace(/\n+$/, "");
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -538,8 +600,8 @@ class DbusMenu extends Interface {
     return false;
   }
 
-  Event(id, event) {
-    this.state.handleEvent(Number(id), event);
+  async Event(id, event) {
+    await this.state.handleEvent(Number(id), String(event));
   }
 
   EventGroup(events) {
@@ -606,6 +668,8 @@ function createTrayState(config, { log = console.log } = {}) {
     running: false,
     autostart: fs.existsSync(AUTOSTART_FILE),
     hasService: serviceInstalled(),
+    exposed: !isLoopbackHost(config.hostname),
+    dialogTool: resolveDialogTool(),
     menuRevision: 1,
     bus: null,
     sni: null,
@@ -626,7 +690,43 @@ function createTrayState(config, { log = console.log } = {}) {
       version: state.version,
       autostart: state.autostart,
       hasService: state.hasService,
+      exposed: state.exposed,
+      hasDialogTool: state.dialogTool !== null,
     });
+
+  // Re-read the env file after config changes and refresh icon + menu.
+  state.reloadConfig = () => {
+    const config = readTrayConfig();
+    state.port = config.port;
+    state.hostname = config.hostname;
+    state.serviceUrl = config.serviceUrl;
+    state.exposed = !isLoopbackHost(config.hostname);
+    state.refreshIcon();
+    state.refreshMenu();
+  };
+
+  // Merge updates into the service env file and restart the unit to apply.
+  // A `null` value removes the key.
+  state.applyServiceEnv = (updates) => {
+    const merged = readServiceEnv();
+    for (const [key, value] of Object.entries(updates)) {
+      if (value === null) delete merged[key];
+      else merged[key] = value;
+    }
+    try {
+      writeServiceEnv(merged);
+    } catch (err) {
+      state.notify("ompweb", `Config write failed: ${err.message}`);
+      return false;
+    }
+    const result = systemctlUser(["restart", SERVICE_UNIT]);
+    if (!result.ok) {
+      state.notify("ompweb", `Service restart failed: ${result.stderr || result.stdout || "unknown error"}`);
+      return false;
+    }
+    state.reloadConfig();
+    return true;
+  };
 
   state.refreshMenu = () => {
     state.menuRevision += 1;
@@ -644,7 +744,7 @@ function createTrayState(config, { log = console.log } = {}) {
     state.sni.NewToolTip();
   };
 
-  state.handleEvent = (id, event) => {
+  state.handleEvent = async (id, event) => {
     if (event !== "clicked") return;
     const item = itemById(state.menuItems(), id);
     if (!item || item.enabled === false) return;
@@ -667,6 +767,73 @@ function createTrayState(config, { log = console.log } = {}) {
       case "autostart":
         state.setAutostart(!state.autostart);
         break;
+      case "expose": {
+        const exposing = !state.exposed;
+        const updates = { OMP_WEB_HOSTNAME: exposing ? "0.0.0.0" : "127.0.0.1" };
+        if (exposing && !readServiceEnv().OMP_WEB_PASSWORD) {
+          const password = await dialogPrompt({
+            tool: state.dialogTool,
+            title: "ompweb",
+            text: "A password is required to expose the web UI.\nWeb sign-in password:",
+            password: true,
+          });
+          if (!password) {
+            state.notify("ompweb", "Expose cancelled: a password is required to leave loopback");
+            break;
+          }
+          updates.OMP_WEB_PASSWORD = password;
+        }
+        if (state.applyServiceEnv(updates)) {
+          const urls = getAccessibleAddresses({ hostname: state.hostname, port: state.port }).entries
+            .filter((entry) => entry.label !== "Local")
+            .map((entry) => entry.url);
+          state.notify(
+            "ompweb",
+            exposing
+              ? `Exposed to the network: ${urls[0] ?? `http://0.0.0.0:${state.port}`}`
+              : `Restricted to loopback (${state.serviceUrl})`,
+          );
+        }
+        break;
+      }
+      case "port": {
+        const input = await dialogPrompt({
+          tool: state.dialogTool,
+          title: "ompweb",
+          text: `Server port (current: ${state.port}):`,
+          value: String(state.port),
+        });
+        if (input === null) break;
+        const port = parseInt(input.trim(), 10);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+          state.notify("ompweb", `Invalid port: ${input.trim()}`);
+          break;
+        }
+        if (state.applyServiceEnv({ PORT: String(port) })) {
+          state.notify("ompweb", `Port updated: ${state.serviceUrl}`);
+        }
+        break;
+      }
+      case "password": {
+        const password = await dialogPrompt({
+          tool: state.dialogTool,
+          title: "ompweb",
+          text: "Web sign-in password (empty disables auth):",
+          password: true,
+        });
+        if (password === null) break;
+        const updates = {};
+        if (password) {
+          updates.OMP_WEB_PASSWORD = password;
+        } else {
+          updates.OMP_WEB_PASSWORD = null;
+          if (!isLoopbackHost(state.hostname)) updates.OMP_WEB_HOSTNAME = "127.0.0.1";
+        }
+        if (state.applyServiceEnv(updates)) {
+          state.notify("ompweb", password ? "Password updated" : "Password disabled (loopback only)");
+        }
+        break;
+      }
       case "quit":
         state.quit();
         break;
@@ -1014,12 +1181,15 @@ module.exports = {
   buildLayout,
   buildMenuItems,
   buildTrayIconPixels,
+  dialogCandidates,
+  dialogPrompt,
   itemById,
   itemProperties,
   layoutNode,
   pollIntervalMs: POLL_INTERVAL_MS,
   probeServer,
   readTrayConfig,
+  resolveDialogTool,
   resolveTerminal,
   runCli,
   sanitizeHostname,

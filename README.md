@@ -131,11 +131,13 @@ npx --yes @kahme247/ompweb@latest ompweb-systemd uninstall # Stop and remove
 ```
 
 The service runs the locally installed `ompweb` binary resolved at install time
-(override with `OMP_WEB_SYSTEMD_BIN`). All
-[environment variables](#environment-variables) are read at install time and
-baked into the unit. As a service, the browser is **not** auto-opened by
-default. The unit lives at `~/.config/systemd/user/ompweb.service` (mode 600; a
-configured password is stored there in plain text) and logs go to the journal:
+(override with `OMP_WEB_SYSTEMD_BIN`). Runtime configuration lives in
+`~/.omp/agent/web-service.env` — the tray (or any editor) can change the port,
+hostname, and password there and just restart the service; no reinstall needed.
+Install-time [environment variables](#environment-variables) are baked into
+that file. As a service, the browser is **not** auto-opened by default. The
+unit lives at `~/.config/systemd/user/ompweb.service` and logs go to the
+journal:
 
 ```bash
 journalctl --user -u ompweb -f
@@ -145,13 +147,22 @@ journalctl --user -u ompweb -f
 
 On Linux, `ompweb-tray` registers a StatusNotifierItem tray icon with a context
 menu: open the web UI, copy its URL, start/stop/restart the systemd service,
-view logs, toggle autostart, and quit the tray.
+view logs, expose the web UI to the network, change the port, set the web
+password, toggle autostart, and quit the tray.
 
 ```bash
 npx --yes @kahme247/ompweb@latest ompweb-tray --install      # Icons + autostart + start tray
 npx --yes @kahme247/ompweb@latest ompweb-tray --status       # Tray and service status
 npx --yes @kahme247/ompweb@latest ompweb-tray --uninstall    # Remove autostart, stop tray
 ```
+
+**Expose to Network** rebinds the service from `127.0.0.1` to `0.0.0.0` so the
+web UI is reachable from your LAN or VPN (e.g. Tailscale). Leaving loopback
+requires a web password — the tray prompts for one via `kdialog`/`zenity` when
+needed. **Change Port…** and **Set Web Password…** edit
+`~/.omp/agent/web-service.env` and restart the service. When binding to a
+non-loopback host, use HTTPS through a trusted reverse proxy or VPN for remote
+access.
 
 "Start with Plasma" in the tray menu toggles a desktop autostart entry at
 `~/.config/autostart/ompweb-tray.desktop`. Requires a running StatusNotifierItem

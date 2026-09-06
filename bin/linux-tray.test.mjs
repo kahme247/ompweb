@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -15,15 +15,25 @@ const {
   buildLayout,
   buildMenuItems,
   buildTrayIconPixels,
+  dialogCandidates,
+  dialogPrompt,
   itemById,
   itemProperties,
   probeServer,
   readTrayConfig,
+  resolveDialogTool,
   sanitizeHostname,
   sanitizePort,
   terminalCandidates,
   terminalPrefix,
 } = require("./linux-tray.js");
+const {
+  escapeEnvValue,
+  parseServiceEnv,
+  readServiceEnv,
+  serializeServiceEnv,
+  writeServiceEnv,
+} = require("./service-env.js");
 
 test("sanitizePort accepts valid ports and falls back otherwise", () => {
   assert.equal(sanitizePort("30177"), 30177);
@@ -71,17 +81,29 @@ test("readTrayConfig falls back to defaults without a config file", () => {
 });
 
 test("buildMenuItems reflects running state and service availability", () => {
-  const running = buildMenuItems({ running: true, version: "0.4.2", autostart: true, hasService: true });
+  const running = buildMenuItems({ running: true, version: "0.4.2", autostart: true, hasService: true, exposed: false, hasDialogTool: true });
   assert.equal(itemById(running, 2).label, "  Status: Running");
   assert.equal(itemById(running, 7).label, "Stop Server");
-  assert.equal(itemById(running, 11).state, 1);
+  assert.equal(itemById(running, 12).label, "Expose to Network");
+  assert.equal(itemById(running, 12).state, 0);
+  assert.equal(itemById(running, 16).label, "Start with Plasma");
+  assert.equal(itemById(running, 16).state, 1);
 
-  const stoppedNoService = buildMenuItems({ running: false, version: "0.4.2", autostart: false, hasService: false });
+  const exposed = buildMenuItems({ running: true, version: "0.4.2", autostart: false, hasService: true, exposed: true, hasDialogTool: true });
+  assert.equal(itemById(exposed, 12).state, 1);
+
+  const stoppedNoService = buildMenuItems({ running: false, version: "0.4.2", autostart: false, hasService: false, exposed: false, hasDialogTool: true });
   assert.equal(itemById(stoppedNoService, 2).label, "  Status: Stopped");
   assert.equal(itemById(stoppedNoService, 7).label, "Start Server");
   assert.equal(itemById(stoppedNoService, 7).enabled, false);
   assert.equal(itemById(stoppedNoService, 8).enabled, false);
-  assert.equal(itemById(stoppedNoService, 11).state, 0);
+  assert.equal(itemById(stoppedNoService, 16).state, 0);
+
+  // Settings actions need both the service and a dialog tool.
+  const noDialog = buildMenuItems({ running: true, version: "0.4.2", autostart: false, hasService: true, exposed: false, hasDialogTool: false });
+  assert.equal(itemById(noDialog, 12).enabled, false);
+  assert.equal(itemById(noDialog, 13).enabled, false);
+  assert.equal(itemById(noDialog, 14).enabled, false);
 
   // Inert rows and separators.
   assert.equal(itemById(running, 1).enabled, false);
@@ -103,7 +125,7 @@ test("itemProperties renders standard, separator, and checkmark items", () => {
 });
 
 test("buildLayout nests all items under the root with the given revision", () => {
-  const items = buildMenuItems({ running: true, version: "0.4.2", autostart: true, hasService: true });
+  const items = buildMenuItems({ running: true, version: "0.4.2", autostart: true, hasService: true, exposed: false, hasDialogTool: true });
   const [revision, root] = buildLayout(items, 7, 0);
   assert.equal(revision, 7);
   assert.equal(root[0], 0);
@@ -187,4 +209,76 @@ test("buildIconPixmap returns sized structs with matching byte counts", () => {
   // Stopped icon uses the gray background #8d8578.
   const stopped = buildIconPixmap(false).find(([w]) => w === 64)[2];
   assert.ok(Math.abs(stopped[(8 * 64 + 32) * 4 + 1] - 141) <= 2);
+});
+
+test("service env file round-trips quoted and escaped values", () => {
+  const entries = {
+    PORT: "30177",
+    OMP_WEB_HOSTNAME: "0.0.0.0",
+    OMP_WEB_PASSWORD: 'pa"ss\\word',
+    OMP_WEB_OMP_BIN: "/home/u/.bun/bin/omp",
+  };
+  const parsed = parseServiceEnv(serializeServiceEnv(entries));
+  assert.deepEqual(parsed, entries);
+});
+
+test("parseServiceEnv tolerates comments, blanks, and unquoted values", () => {
+  const parsed = parseServiceEnv(`
+# comment
+; also a comment
+PORT=40001
+
+OMP_WEB_HOSTNAME="0.0.0.0"
+broken line without equals
+1BAD=skipped
+`);
+  assert.deepEqual(parsed, { PORT: "40001", OMP_WEB_HOSTNAME: "0.0.0.0" });
+});
+
+test("writeServiceEnv writes atomically with mode 600 and readServiceEnv round-trips", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "ompweb-env-"));
+  try {
+    const file = path.join(dir, "web-service.env");
+    writeServiceEnv({ PORT: "40100", OMP_WEB_PASSWORD: "s3cret" }, file);
+    assert.equal(statSync(file).mode & 0o777, 0o600);
+    assert.deepEqual(readServiceEnv(file), { PORT: "40100", OMP_WEB_PASSWORD: "s3cret" });
+    assert.ok(escapeEnvValue("a\nb").includes(" "));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readTrayConfig prefers the env file over the JSON config", () => {
+  const home = mkdtempSync(path.join(tmpdir(), "ompweb-tray-"));
+  try {
+    const agentDir = path.join(home, ".omp", "agent");
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(path.join(agentDir, "web-service.json"), JSON.stringify({ port: 40001, hostname: "0.0.0.0" }));
+    writeFileSync(path.join(agentDir, "web-service.env"), serializeServiceEnv({ PORT: "40200", OMP_WEB_HOSTNAME: "127.0.0.1" }));
+
+    const config = readTrayConfig({}, {}, home);
+    assert.equal(config.port, 40200);
+    assert.equal(config.hostname, "127.0.0.1");
+    assert.equal(config.serviceUrl, "http://127.0.0.1:40200");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("dialog candidates put kdialog first and resolve via override", () => {
+  assert.deepEqual(dialogCandidates(), ["kdialog", "zenity"]);
+  assert.equal(resolveDialogTool({ OMP_WEB_DIALOG: "definitely-not-on-path-xyz" }), null);
+});
+
+test("dialogPrompt returns null on cancel and text on success", async () => {
+  const fakeRun = async (tool, args) => {
+    if (args.includes("--password")) {
+      throw new Error("cancelled");
+    }
+    return { stdout: "30178\n" };
+  };
+  const tool = "/usr/bin/kdialog";
+  assert.equal(await dialogPrompt({ tool, title: "t", text: "port", value: "1" }, fakeRun), "30178");
+  assert.equal(await dialogPrompt({ tool, title: "t", text: "pw", password: true }, fakeRun), null);
+  assert.equal(await dialogPrompt({ tool: null, title: "t", text: "x" }, fakeRun), null);
 });

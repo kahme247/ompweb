@@ -22,13 +22,10 @@ test("escapeUnitValue escapes backslashes, quotes, and percent specifiers", () =
   assert.equal(escapeUnitValue("100%h"), "100%%h");
 });
 
-test("buildUnit renders ExecStart, environment, and install target", () => {
+test("buildUnit renders ExecStart, EnvironmentFile, and install target", () => {
   const unit = buildUnit({
     ompwebBin: "/usr/local/bin/ompweb",
-    port: 30177,
-    hostname: "127.0.0.1",
     env: {
-      OMP_WEB_PASSWORD: "s3cret",
       OMP_WEB_OMP_BIN: "/home/u/.bun/bin/omp",
     },
     home: "/home/u",
@@ -36,11 +33,10 @@ test("buildUnit renders ExecStart, environment, and install target", () => {
 
   assert.match(unit, /ExecStart=\/usr\/local\/bin\/ompweb\n/);
   assert.match(unit, /WorkingDirectory=%h/);
-  assert.match(unit, /PORT=30177/);
-  assert.match(unit, /OMP_WEB_HOSTNAME=127\.0\.0\.1/);
-  assert.match(unit, /OMP_WEB_NO_OPEN=1/);
-  assert.match(unit, /"OMP_WEB_PASSWORD=s3cret"/);
-  assert.match(unit, /"OMP_WEB_OMP_BIN=\/home\/u\/.bun\/bin\/omp"/);
+  // Runtime config lives in the env file so edits don't need a reinstall.
+  assert.match(unit, /EnvironmentFile=.*web-service\.env/);
+  assert.ok(!unit.includes("PORT="));
+  assert.ok(!unit.includes("OMP_WEB_PASSWORD"));
   assert.match(unit, /Restart=on-failure/);
   assert.match(unit, /WantedBy=default\.target/);
   // PATH prefers the omp and ompweb directories, then node and standard bins.
@@ -50,17 +46,14 @@ test("buildUnit renders ExecStart, environment, and install target", () => {
   assert.equal(envLines.length, 1);
 });
 
-test("buildUnit omits optional env entries and dedupes PATH dirs", () => {
+test("buildUnit dedupes PATH dirs without omp", () => {
   const unit = buildUnit({
     ompwebBin: "/usr/bin/ompweb",
-    port: 30177,
-    hostname: "127.0.0.1",
     env: {},
     home: "/home/u",
   });
-  assert.ok(!unit.includes("OMP_WEB_PASSWORD"));
   assert.ok(!unit.includes("OMP_WEB_OMP_BIN"));
-  assert.ok(!unit.includes("PI_CODING_AGENT_DIR"));
+  assert.match(unit, /"PATH=\/usr\/bin:.*\/home\/u\/\.local\/bin:/);
 });
 
 test("resolveOmpwebBin honors OMP_WEB_SYSTEMD_BIN override", () => {
