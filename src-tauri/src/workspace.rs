@@ -108,6 +108,35 @@ pub async fn omp_pick_folder(app: AppHandle) -> Result<Option<String>, String> {
     .map_err(|e| format!("folder picker failed: {e}"))?
 }
 
+/// Native image file picker for composer attachments.
+#[tauri::command]
+pub async fn omp_pick_image(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    tauri::async_runtime::spawn_blocking(move || {
+        let picked = app
+            .dialog()
+            .file()
+            .set_title("Attach image")
+            .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp"])
+            .blocking_pick_file();
+        Ok(picked.map(|p| p.to_string()))
+    })
+    .await
+    .map_err(|e| format!("file picker failed: {e}"))?
+}
+
+/// Reveal ~/.omp/agent/models.yml in File Manager ("Manage models").
+#[tauri::command]
+pub fn omp_manage_models(app: AppHandle) -> Result<(), String> {
+    let path = agent_dir().join("models.yml");
+    if !path.is_file() {
+        return Err("models.yml does not exist yet".into());
+    }
+    omp_reveal_path(path.to_string_lossy().to_string())?;
+    let _ = app;
+    Ok(())
+}
+
 /// Branches newest-first with the checked-out one flagged.
 #[tauri::command]
 pub fn omp_git_branches(cwd: String) -> Result<Value, String> {

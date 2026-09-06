@@ -604,6 +604,8 @@ pub fn handlers() -> impl Fn(tauri::ipc::Invoke) -> bool {
         omp_window_boot,
         workspace::omp_list_projects,
         workspace::omp_pick_folder,
+        workspace::omp_pick_image,
+        workspace::omp_manage_models,
         workspace::omp_git_branches,
         workspace::omp_git_checkout,
         workspace::omp_list_worktrees,

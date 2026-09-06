@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { AppWindow, ArrowLeft, ArrowRight, ArrowUp, Brain, FolderOpen, GitBranch, HardDrive, Minus, Minimize2, PanelLeft, Plus, Settings, Shield, Sparkles, Square, Wrench, X, Zap } from "lucide-react";
+import { AppWindow, ArrowLeft, ArrowRight, ArrowUp, Brain, CircleDashed, FolderOpen, GitBranch, Hand, HardDrive, Minus, Minimize2, PanelLeft, Plus, Settings, ShieldCheck, Sparkles, Square, SquarePen, Wrench, X, Zap } from "lucide-react";
 import { MessageView } from "@/components/MessageView";
 import { ChatMinimap } from "@/components/ChatMinimap";
 import { normalizeToolCalls } from "@/lib/normalize";
@@ -48,6 +48,7 @@ type OmpModelInfo = {
   provider: string;
   reasoning?: boolean;
   thinking?: { efforts?: string[] };
+  input?: string[];
 };
 
 type StateResponse = {
@@ -72,12 +73,12 @@ type CwdInfo = { project: string; branch: string; diffAdded: number; diffRemoved
 
 type ApprovalMode = "default" | "always-ask" | "write" | "yolo";
 
-const APPROVAL_LABELS: Record<ApprovalMode, string> = {
-  default: "Default",
-  "always-ask": "Ask",
-  write: "Write access",
-  yolo: "Full access",
-};
+const APPROVAL_OPTIONS = [
+  { value: "default", label: "Default", description: "Use the omp config default", icon: <CircleDashed size={14} /> },
+  { value: "always-ask", label: "Ask before changes", description: "Ask before file changes.", icon: <Hand size={14} /> },
+  { value: "write", label: "Edit automatically", description: "Edit files automatically.", icon: <SquarePen size={14} /> },
+  { value: "yolo", label: "Full access", description: "Run with fewer confirmations.", icon: <ShieldCheck size={14} /> },
+];
 
 const NO_DIFF: CwdInfo = { project: "", branch: "", diffAdded: 0, diffRemoved: 0 };
 
@@ -396,6 +397,25 @@ export function DesktopApp() {
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
   }, []);
 
+  /** Shared attach path for paste/drag/picker; enforces the omp-web limits. */
+  const attachImageData = useCallback((data: string, mimeType: string): boolean => {
+    let ok = false;
+    setAttached((prev) => {
+      const total = prev.reduce((sum, img) => sum + img.data.length, 0) + data.length;
+      if (prev.length >= 10) {
+        setError("At most 10 images can be attached.");
+        return prev;
+      }
+      if (total > MAX_TOTAL_ATTACHED_IMAGE_BYTES) {
+        setError("Attached images exceed the 5 MB total limit.");
+        return prev;
+      }
+      ok = true;
+      return [...prev, { data, mimeType, previewUrl: `data:${mimeType};base64,${data}` }];
+    });
+    return ok;
+  }, []);
+
   const addImageFiles = useCallback(async (files: File[]) => {
     for (const file of files) {
       if (!file.type.startsWith("image/")) continue;
@@ -406,22 +426,9 @@ export function DesktopApp() {
         reader.readAsDataURL(file);
       }).catch(() => null);
       if (!dataUrl) continue;
-      const data = dataUrl.slice(dataUrl.indexOf(",") + 1);
-      setAttached((prev) => {
-        if (prev.length >= 10) {
-          setError("At most 10 images can be attached.");
-          return prev;
-        }
-        const total =
-          prev.reduce((sum, img) => sum + img.data.length, 0) + data.length;
-        if (total > MAX_TOTAL_ATTACHED_IMAGE_BYTES) {
-          setError("Attached images exceed the 5 MB total limit.");
-          return prev;
-        }
-        return [...prev, { data, mimeType: file.type, previewUrl: dataUrl }];
-      });
+      attachImageData(dataUrl.slice(dataUrl.indexOf(",") + 1), file.type);
     }
-  }, []);
+  }, [attachImageData]);
 
   // Focus the composer whenever the session becomes interactive.
   useEffect(() => {
@@ -447,14 +454,9 @@ export function DesktopApp() {
             for (const path of images) {
               try {
                 const img = await invoke<{ data: string; mimeType: string }>("omp_read_image", { path });
-                const previewUrl = `data:${img.mimeType};base64,${img.data}`;
-                setAttached((prev) => {
-                  const total = prev.reduce((sum, a) => sum + a.data.length, 0) + img.data.length;
-                  if (prev.length >= 10 || total > MAX_TOTAL_ATTACHED_IMAGE_BYTES) return prev;
-                  return [...prev, { data: img.data, mimeType: img.mimeType, previewUrl }];
-                });
+                attachImageData(img.data, img.mimeType);
               } catch (err) {
-                toast.error(String(err));
+                toastError(err);
               }
             }
           })();
@@ -639,6 +641,17 @@ export function DesktopApp() {
 
   const fastModeSupported =
     activeModel != null && ["anthropic", "openai", "google"].includes(activeModel.provider);
+
+  const attachFromPicker = useCallback(async () => {
+    try {
+      const path = await invoke<string | null>("omp_pick_image");
+      if (!path) return;
+      const img = await invoke<{ data: string; mimeType: string }>("omp_read_image", { path });
+      attachImageData(img.data, img.mimeType);
+    } catch (err) {
+      toastError(err);
+    }
+  }, [attachImageData, toastError]);
   const toggleFastMode = useCallback(async () => {
     try {
       const res = await rpc<{ enabled?: boolean; active?: boolean }>({
@@ -987,14 +1000,43 @@ export function DesktopApp() {
                   void send();
                 }
               }}
-              placeholder={attached.length > 0 ? "Describe the attached image…" : "Do anything…"}
+              placeholder={
+                running
+                  ? "Keep typing to queue follow-up changes…"
+                  : attached.length > 0
+                    ? "Describe the attached image…"
+                    : "Do anything…"
+              }
               disabled={session === "starting"}
               rows={1}
               spellCheck={false}
             />
             <div className="composer-row">
               <div className="composer-controls">
-                {session !== "exited" && (
+                <div className="controls-side">
+                  <button
+                    className="composer-chip"
+                    onClick={() => void attachFromPicker()}
+                    title="Attach image"
+                    aria-label="Attach image"
+                  >
+                    <Plus size={14} aria-hidden />
+                  </button>
+                  <label className="composer-chip" title="Tool approval mode — applies when the next session starts">
+                    <ThemedSelect
+                      value={approvalMode}
+                      options={APPROVAL_OPTIONS}
+                      onChange={(v) => changeApproval(v as ApprovalMode)}
+                      direction="up"
+                      ariaLabel="Approval mode"
+                      maxWidth={140}
+                      hideLabel={running}
+                    />
+                  </label>
+                </div>
+                <div className="controls-side">
+                  {running && <span className="context-spinner" aria-hidden />}
+                  {session !== "exited" && (
                   <>
                     <label className="composer-chip" title="Tool preset — applies to the next session">
                       <Wrench size={12} aria-hidden />
@@ -1023,7 +1065,12 @@ export function DesktopApp() {
                             ? [{ value: modelValue, label: activeModel.id, group: "current" }]
                             : []),
                           ...modelGroups.flatMap(([provider, list]) =>
-                            list.map((m) => ({ value: `${provider}|${m.id}`, label: m.name || m.id, group: provider })),
+                            list.map((m) => ({
+                              value: `${provider}|${m.id}`,
+                              label: m.name || m.id,
+                              group: provider,
+                              badge: m.input?.includes("image") ? "Vision" : undefined,
+                            })),
                           ),
                         ]}
                         onChange={(v) => {
@@ -1034,7 +1081,15 @@ export function DesktopApp() {
                         direction="up"
                         placeholder="Model"
                         ariaLabel="Model"
-                        maxWidth={170}
+                        maxWidth={180}
+                        footer={
+                          <button
+                            className="tsel-footer"
+                            onClick={() => void invoke("omp_manage_models").catch(toastError)}
+                          >
+                            <Settings size={13} aria-hidden /> Manage models
+                          </button>
+                        }
                       />
                     </label>
                     <label
@@ -1075,7 +1130,8 @@ export function DesktopApp() {
                       {compacting ? "Compacting…" : "Compact"}
                     </button>
                   </>
-                )}
+                  )}
+                </div>
               </div>
               {running ? (
                 <button className="composer-send stop" onClick={() => void stop()} title="Stop">
@@ -1158,20 +1214,6 @@ export function DesktopApp() {
                 />
               )}
             </MenuChip>
-            <label className="composer-chip context-approval" title="Tool approval mode — applies when the next session starts">
-              <Shield size={12} aria-hidden />
-              <ThemedSelect
-                value={approvalMode}
-                options={(Object.keys(APPROVAL_LABELS) as ApprovalMode[]).map((mode) => ({
-                  value: mode,
-                  label: APPROVAL_LABELS[mode],
-                }))}
-                onChange={(v) => changeApproval(v as ApprovalMode)}
-                direction="up"
-                ariaLabel="Approval mode"
-                maxWidth={120}
-              />
-            </label>
             <span className="context-spacer" />
             {queuedCount > 0 && (
               <span className="context-chip" title={`${queuedCount} message(s) queued while the agent runs`}>
@@ -1188,20 +1230,43 @@ export function DesktopApp() {
               </span>
             )}
             {contextUsage && typeof contextUsage.percent === "number" && (
-              <span
-                className="context-chip context-gauge"
-                title={`${Math.round(contextUsage.tokens).toLocaleString()} of ${Math.round(contextUsage.contextWindow).toLocaleString()} context tokens`}
+              <MenuChip
+                width={300}
+                chip={
+                  <span className="context-gauge" title="Context window usage">
+                    <span className="gauge-bar">
+                      <span
+                        className="gauge-fill"
+                        style={{ width: `${Math.min(100, Math.max(1.5, contextUsage.percent))}%` }}
+                      />
+                    </span>
+                    {contextUsage.percent >= 10
+                      ? `${Math.round(contextUsage.percent)}%`
+                      : `${contextUsage.percent.toFixed(1)}%`}
+                  </span>
+                }
               >
-                <span className="gauge-bar">
-                  <span
-                    className="gauge-fill"
-                    style={{ width: `${Math.min(100, Math.max(1.5, contextUsage.percent))}%` }}
-                  />
-                </span>
-                {contextUsage.percent >= 10
-                  ? `${Math.round(contextUsage.percent)}%`
-                  : `${contextUsage.percent.toFixed(1)}%`}
-              </span>
+                {() => (
+                  <div className="gauge-pop">
+                    <div className="gauge-pop-head">
+                      <span>Context window</span>
+                      <span className="gauge-pop-nums">
+                        {formatTokens(contextUsage.tokens)} / {formatTokens(contextUsage.contextWindow)} (
+                        {contextUsage.percent >= 10
+                          ? `${Math.round(contextUsage.percent)}`
+                          : contextUsage.percent.toFixed(1)}
+                        %)
+                      </span>
+                    </div>
+                    <div className="gauge-bar big">
+                      <span
+                        className="gauge-fill"
+                        style={{ width: `${Math.min(100, Math.max(1.5, contextUsage.percent))}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </MenuChip>
             )}
             {running && <span className="context-spinner" aria-label="running" />}
           </div>

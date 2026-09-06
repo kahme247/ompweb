@@ -1,7 +1,17 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Check, ChevronDown } from "lucide-react";
 
-export type SelectOption = { value: string; label: string; group?: string };
+export type SelectOption = {
+  value: string;
+  label: string;
+  group?: string;
+  /** Second line rendered under the label (approval-mode style menus). */
+  description?: string;
+  /** Small pill after the label (capability badges, e.g. "Vision"). */
+  badge?: string;
+  /** Leading icon for rich menus. */
+  icon?: ReactNode;
+};
 
 type ThemedSelectProps = {
   value: string;
@@ -16,6 +26,10 @@ type ThemedSelectProps = {
   className?: string;
   /** Max rendered label width before ellipsis. */
   maxWidth?: number;
+  /** Bottom action row inside the open menu (e.g. "Manage models"). */
+  footer?: ReactNode;
+  /** Hide the trigger label (icon-only triggers). */
+  hideLabel?: boolean;
 };
 
 /** Themed dropdown replacing native <select> — one consistent, dark-aware
@@ -31,6 +45,8 @@ export function ThemedSelect({
   ariaLabel,
   className,
   maxWidth = 220,
+  footer,
+  hideLabel,
 }: ThemedSelectProps) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
@@ -119,7 +135,7 @@ export function ThemedSelect({
         aria-label={ariaLabel}
         style={{ maxWidth }}
       >
-        <span className="tsel-label" style={{ maxWidth: maxWidth - 22 }}>{label}</span>
+        {!hideLabel && <span className="tsel-label" style={{ maxWidth: maxWidth - 22 }}>{label}</span>}
         <ChevronDown size={12} aria-hidden className="tsel-chevron" />
       </button>
       {open && (
@@ -140,17 +156,30 @@ export function ThemedSelect({
                   role="option"
                   aria-selected={option.value === value}
                   data-index={i}
-                  className={`tsel-option${i === active ? " active" : ""}${option.value === value ? " selected" : ""}`}
+                  className={`tsel-option${i === active ? " active" : ""}${option.value === value ? " selected" : ""}${option.description ? " rich" : ""}`}
                   onMouseEnter={() => setActive(i)}
                   onClick={() => commit(option)}
                 >
-                  <span className="tsel-option-label" title={option.label}>{option.label}</span>
+                  {option.icon && <span className="tsel-option-icon">{option.icon}</span>}
+                  <span className="tsel-option-body">
+                    <span className="tsel-option-line">
+                      <span className="tsel-option-label" title={option.label}>{option.label}</span>
+                      {option.badge && <span className="tsel-badge">{option.badge}</span>}
+                    </span>
+                    {option.description && <span className="tsel-option-desc">{option.description}</span>}
+                  </span>
                   {option.value === value && <Check size={13} aria-hidden />}
                 </button>
               </div>
             );
           })}
           {options.length === 0 && <div className="tsel-empty">No options</div>}
+          {footer && (
+            <>
+              <div className="tsel-sep" />
+              {footer}
+            </>
+          )}
         </div>
       )}
     </div>

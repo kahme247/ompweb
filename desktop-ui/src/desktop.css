@@ -1114,6 +1114,80 @@ html.dark .desktop-app {
   text-align: center;
 }
 
+.tsel-sep {
+  height: 1px;
+  background: var(--border);
+  margin: 6px 4px;
+}
+
+.tsel-option.rich {
+  align-items: flex-start;
+  padding: 8px 10px;
+}
+
+.tsel-option-icon {
+  flex: none;
+  display: inline-flex;
+  margin-top: 1px;
+  color: var(--text-muted);
+}
+
+.tsel-option.selected .tsel-option-icon {
+  color: var(--accent);
+}
+
+.tsel-option-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.tsel-option-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tsel-option-desc {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tsel-badge {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+
+.tsel-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: var(--radius-control, 8px);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tsel-footer:hover {
+  background: var(--bg-hover);
+}
+
 .composer-select {
   max-width: 180px;
   padding: 4px 6px;
@@ -1262,6 +1336,43 @@ html.dark .desktop-app {
   border-radius: 2px;
   background: var(--accent);
   transition: width var(--dur-med, 220ms) var(--ease-out-warm, ease);
+}
+
+.gauge-pop {
+  padding: 4px 6px 6px;
+}
+
+.gauge-pop-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+
+.gauge-pop-nums {
+  font-family: var(--font-mono, monospace);
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.gauge-bar.big {
+  width: 100%;
+  height: 6px;
+}
+
+.controls-side {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.composer-controls .controls-side:last-child {
+  margin-left: auto;
 }
 
 .context-spacer {
