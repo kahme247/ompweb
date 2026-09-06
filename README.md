@@ -56,6 +56,7 @@ ompweb --no-open                           # Don't auto-open the browser
 ompweb --install-tray                      # Install Windows System Tray service & Desktop shortcuts
 ompweb --uninstall-tray                    # Uninstall Windows System Tray service & shortcuts
 ompweb --tray                              # Start background System Tray manager
+ompweb systemd install                     # Install Linux systemd user service
 ompweb --help                              # Show help
 ompweb --version                           # Show version
 ```
@@ -112,6 +113,50 @@ Logs go to `~/Library/Logs/ompweb/ompweb.log` and the plist lives at
 `~/Library/LaunchAgents/com.kahme247.ompweb.plist` (mode 600; a configured
 password is stored there in plain text).
 
+### Run as a Linux Service (systemd)
+
+Install ompweb as a systemd **user** service that starts at login and restarts
+on crash:
+
+```bash
+npx --yes @kahme247/ompweb@latest ompweb-systemd install
+```
+
+Manage it with:
+
+```bash
+npx --yes @kahme247/ompweb@latest ompweb-systemd status    # Show service state
+npx --yes @kahme247/ompweb@latest ompweb-systemd restart   # start / stop / restart
+npx --yes @kahme247/ompweb@latest ompweb-systemd uninstall # Stop and remove
+```
+
+The service runs the locally installed `ompweb` binary resolved at install time
+(override with `OMP_WEB_SYSTEMD_BIN`). All
+[environment variables](#environment-variables) are read at install time and
+baked into the unit. As a service, the browser is **not** auto-opened by
+default. The unit lives at `~/.config/systemd/user/ompweb.service` (mode 600; a
+configured password is stored there in plain text) and logs go to the journal:
+
+```bash
+journalctl --user -u ompweb -f
+```
+
+### Linux System Tray (KDE Plasma and compatible)
+
+On Linux, `ompweb-tray` registers a StatusNotifierItem tray icon with a context
+menu: open the web UI, copy its URL, start/stop/restart the systemd service,
+view logs, toggle autostart, and quit the tray.
+
+```bash
+npx --yes @kahme247/ompweb@latest ompweb-tray --install      # Icons + autostart + start tray
+npx --yes @kahme247/ompweb@latest ompweb-tray --status       # Tray and service status
+npx --yes @kahme247/ompweb@latest ompweb-tray --uninstall    # Remove autostart, stop tray
+```
+
+"Start with Plasma" in the tray menu toggles a desktop autostart entry at
+`~/.config/autostart/ompweb-tray.desktop`. Requires a running StatusNotifierItem
+host (KDE Plasma, and most Wayland/X11 desktops).
+
 ## Features
 
 - **Interactive Chat**: Real-time streaming conversation with your local `omp` agent — tool calls, thinking levels, token counts, cost, context gauge, queue controls, and interrupt & retry.
@@ -123,6 +168,7 @@ password is stored there in plain text).
 - **Usage & Analytics**: Dashboard in **Settings → Usage** for tokens, costs, cache savings, and breakdowns by provider / model / day / project with SQLite persistence.
 - **Windows System Tray & Service**: Background service, tray icon, logon autostart, and Desktop/Start Menu shortcuts (Windows).
 - **macOS launchd Service**: LaunchAgent that starts at login, restarts on crash, and logs under `~/Library/Logs/ompweb`.
+- **Linux systemd Service & Tray**: User service that starts at login and restarts on crash, plus a StatusNotifierItem tray icon with service controls (KDE Plasma and compatible desktops).
 - **Web-based Settings** (8 tabs): Interface & Behavior, Safety & Approvals, AI Model Defaults, API Keys & Providers, Usage, Agent & Intelligence (advisor, memory, compaction), Agents, Extensions & Tools (MCP, skills, plugins), System & Updates.
 - **Slash Commands & Shortcuts**: Quick prompts (`/plan`, `/review`, `/fix`, `/test`, etc.), `⌘K` / `Ctrl+K` palette, and model/reasoning cycling.
 - **UI Themes & Localization**: Warm paper light/dark themes, chat font size & interface scale, with full English, Chinese (简体中文), and Japanese (日本語) translations.

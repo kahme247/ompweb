@@ -20,6 +20,16 @@ if (process.argv[2] === "ompweb-launchd" || process.argv[2] === "launchd") {
   process.exit(status ?? 1);
 }
 
+// Forward `ompweb ompweb-systemd [args]` → bin/omp-web-systemd.js (Linux service).
+if (process.argv[2] === "ompweb-systemd" || process.argv[2] === "systemd") {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { spawnSync } = require("node:child_process");
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { join } = require("node:path");
+  const { status } = spawnSync(process.execPath, [join(__dirname, "omp-web-systemd.js"), ...process.argv.slice(3)], { stdio: "inherit" });
+  process.exit(status ?? 1);
+}
+
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { spawn } = require("node:child_process");
 // eslint-disable-next-line @typescript-eslint/no-require-imports

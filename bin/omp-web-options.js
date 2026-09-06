@@ -18,9 +18,9 @@ Options:
   -H, --hostname <host>    Bind hostname (default 127.0.0.1, env OMP_WEB_HOSTNAME)
       --password <pass>    Password for the web sign-in screen (env OMP_WEB_PASSWORD)
       --no-open            Do not open the browser automatically
-      --install-tray       Install Windows System Tray service & Desktop shortcuts
-      --uninstall-tray     Uninstall Windows System Tray service & shortcuts
-      --tray               Start background System Tray manager
+      --install-tray       Install system tray service & shortcuts (Windows tray / Linux SNI tray)
+      --uninstall-tray     Uninstall system tray service & shortcuts
+      --tray               Start background system tray manager
   -h, --help               Show this help
       --version            Show version
 Password:
