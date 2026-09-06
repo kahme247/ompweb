@@ -66,9 +66,14 @@ html.dark .desktop-app {
 
 @media (prefers-reduced-motion: no-preference) {
   .context-menu,
-  .desktop-sessions-list {
+  .desktop-sessions-list,
+  .tsel-menu {
     animation: menu-in var(--dur-fast, 150ms) var(--ease-out-warm, ease) both;
     transform-origin: bottom left;
+  }
+
+  .tsel-menu.tsel-down {
+    transform-origin: top left;
   }
 
   @keyframes menu-in {
@@ -80,26 +85,6 @@ html.dark .desktop-app {
       opacity: 1;
       transform: none;
     }
-  }
-
-  .settings-card,
-  .usage-stat {
-    animation: card-in var(--dur-med, 220ms) var(--ease-out-warm, ease) both;
-  }
-
-  @keyframes card-in {
-    from {
-      opacity: 0;
-      transform: translateY(4px);
-    }
-    to {
-      opacity: 1;
-      transform: none;
-    }
-  }
-
-  .desktop-error {
-    animation: card-in var(--dur-fast, 150ms) var(--ease-out-warm, ease) both;
   }
 }
 
