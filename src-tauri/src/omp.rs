@@ -554,17 +554,17 @@ fn omp_open_project_window(
         .file_name()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| cwd.clone());
-    tauri::WebviewWindowBuilder::new(
-        &app,
-        &label,
-        tauri::WebviewUrl::App("index.html?boot=chat".into()),
-    )
-    .title(title)
-    .inner_size(1280.0, 800.0)
-    .min_inner_size(720.0, 480.0)
-    .decorations(false)
-    .build()
-    .map_err(|e| e.to_string())?;
+    // WebviewUrl::App is a PATH — a query string here breaks asset resolution
+    // on Windows (white window). The new window pulls its cwd at boot from
+    // omp_window_boot via the window_cwds registry instead.
+    tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App("index.html".into()))
+        .title(title)
+        .inner_size(1280.0, 800.0)
+        .min_inner_size(720.0, 480.0)
+        .decorations(false)
+        .background_color(tauri::window::Color(27, 25, 22, 255))
+        .build()
+        .map_err(|e| e.to_string())?;
     state
         .window_cwds
         .lock()
