@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "@/components/ui/toast";
+import { ThemedSelect } from "./ThemedSelect";
 
 type NativeSettings = Record<string, unknown>;
 
@@ -119,16 +120,15 @@ export function NativeSettingsPanel() {
                 </div>
               </div>
               {def.kind === "enum" && (
-                <select
-                  className="settings-select"
+                <ThemedSelect
                   value={(getPath(settings, def.path) as string) ?? ""}
-                  onChange={(e) => change(def, e.target.value)}
-                >
-                  <option value="">Default</option>
-                  {def.options?.map((opt) => (
-                    <option key={opt} value={opt}>{opt}</option>
-                  ))}
-                </select>
+                  options={[
+                    { value: "", label: "Default" },
+                    ...(def.options ?? []).map((opt) => ({ value: opt, label: opt })),
+                  ]}
+                  onChange={(v) => change(def, v)}
+                  maxWidth={150}
+                />
               )}
               {def.kind === "bool" && (
                 <span

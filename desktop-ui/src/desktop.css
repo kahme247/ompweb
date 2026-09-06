@@ -995,6 +995,125 @@ html.dark .desktop-app {
   background: color-mix(in srgb, var(--status-warning, #f0c36a) 12%, transparent);
 }
 
+/* ---------- ThemedSelect (replaces native <select> everywhere) ---------- */
+
+.tsel-wrap {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+}
+
+.tsel-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: var(--radius-control, 8px);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: inherit;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.tsel-trigger:hover:not(:disabled),
+.tsel-trigger[aria-expanded="true"] {
+  background: var(--bg-hover);
+}
+
+.tsel-trigger:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.tsel-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tsel-chevron {
+  flex: none;
+  opacity: 0.7;
+}
+
+.tsel-menu {
+  position: absolute;
+  left: 0;
+  z-index: 50;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card, 12px);
+  box-shadow: var(--shadow-pop, 0 8px 24px rgba(0, 0, 0, 0.3));
+  padding: 6px;
+  overflow-y: auto;
+  max-height: 320px;
+}
+
+.tsel-menu.tsel-down {
+  top: calc(100% + 6px);
+}
+
+.tsel-menu.tsel-up {
+  bottom: calc(100% + 6px);
+}
+
+.tsel-group {
+  padding: 6px 10px 4px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.tsel-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: var(--radius-control, 8px);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tsel-option.active {
+  background: var(--bg-hover);
+}
+
+.tsel-option.selected {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.tsel-option-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tsel-option svg {
+  flex: none;
+}
+
+.tsel-empty {
+  padding: 10px;
+  color: var(--text-dim);
+  font-style: italic;
+  font-size: 12.5px;
+  text-align: center;
+}
+
 .composer-select {
   max-width: 180px;
   padding: 4px 6px;

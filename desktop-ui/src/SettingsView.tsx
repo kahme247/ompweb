@@ -4,6 +4,7 @@ import { ArrowLeft, BarChart3, KeyRound, Palette, Puzzle, SlidersHorizontal, Wre
 import { useTheme, type ThemePreference } from "@/hooks/useTheme";
 import { SkillsSettings } from "./SkillsSettings";
 import { NativeSettingsPanel } from "./NativeSettings";
+import { ThemedSelect } from "./ThemedSelect";
 import { formatTokens, formatCost } from "@/lib/subagent-format";
 import { LOCALES, setLocale, useI18n, type Locale } from "@/lib/i18n";
 
@@ -215,47 +216,36 @@ export function SettingsView({ onBack, providersLoader, cwd, usage }: SettingsVi
                 <div className="settings-card-title">Language</div>
                 <div className="settings-card-desc">Language used throughout the app</div>
               </div>
-              <select
-                className="settings-select"
+              <ThemedSelect
                 value={locale}
-                onChange={(e) => changeLocale(e.target.value as Locale)}
-              >
-                {LOCALES.map((l) => (
-                  <option key={l.value} value={l.value}>
-                    {l.label}
-                  </option>
-                ))}
-              </select>
+                options={LOCALES.map((l) => ({ value: l.value, label: l.label }))}
+                onChange={(v) => changeLocale(v as Locale)}
+                maxWidth={130}
+              />
             </div>
             <div className="settings-card">
               <div className="settings-card-text">
                 <div className="settings-card-title">UI font size</div>
                 <div className="settings-card-desc">Text size across the interface and messages</div>
               </div>
-              <select
-                className="settings-select"
-                value={fonts.ui}
-                onChange={(e) => changeFonts({ ...fonts, ui: Number(e.target.value) })}
-              >
-                {[12, 13, 14, 16, 18].map((n) => (
-                  <option key={n} value={n}>{n} px</option>
-                ))}
-              </select>
+              <ThemedSelect
+                value={String(fonts.ui)}
+                options={[12, 13, 14, 16, 18].map((n) => ({ value: String(n), label: n + " px" }))}
+                onChange={(v) => changeFonts({ ...fonts, ui: Number(v) })}
+                maxWidth={110}
+              />
             </div>
             <div className="settings-card">
               <div className="settings-card-text">
                 <div className="settings-card-title">Code font size</div>
                 <div className="settings-card-desc">Text size in diffs, code blocks, and tool output</div>
               </div>
-              <select
-                className="settings-select"
-                value={fonts.code}
-                onChange={(e) => changeFonts({ ...fonts, code: Number(e.target.value) })}
-              >
-                {[11, 12, 13, 14, 15].map((n) => (
-                  <option key={n} value={n}>{n} px</option>
-                ))}
-              </select>
+              <ThemedSelect
+                value={String(fonts.code)}
+                options={[11, 12, 13, 14, 15].map((n) => ({ value: String(n), label: n + " px" }))}
+                onChange={(v) => changeFonts({ ...fonts, code: Number(v) })}
+                maxWidth={110}
+              />
             </div>
           </>
         )}

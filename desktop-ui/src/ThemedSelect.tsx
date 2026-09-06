@@ -1,0 +1,158 @@
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Check, ChevronDown } from "lucide-react";
+
+export type SelectOption = { value: string; label: string; group?: string };
+
+type ThemedSelectProps = {
+  value: string;
+  options: SelectOption[];
+  onChange: (value: string) => void;
+  /** Opens the list upward (composer/context row) or downward (settings). */
+  direction?: "up" | "down";
+  disabled?: boolean;
+  placeholder?: string;
+  title?: string;
+  ariaLabel?: string;
+  className?: string;
+  /** Max rendered label width before ellipsis. */
+  maxWidth?: number;
+};
+
+/** Themed dropdown replacing native <select> — one consistent, dark-aware
+ *  menu everywhere (WebView2 native option popups ignore color-scheme). */
+export function ThemedSelect({
+  value,
+  options,
+  onChange,
+  direction = "down",
+  disabled,
+  placeholder,
+  title,
+  ariaLabel,
+  className,
+  maxWidth = 220,
+}: ThemedSelectProps) {
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(0);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  useLayoutEffect(() => {
+    if (!open || !listRef.current) return;
+    const el = listRef.current.querySelector<HTMLElement>(`[data-index="${active}"]`);
+    el?.scrollIntoView({ block: "nearest" });
+  }, [open, active]);
+
+  const selected = options.find((o) => o.value === value);
+  const label = selected?.label ?? placeholder ?? value;
+
+  const openList = () => {
+    if (disabled) return;
+    const idx = options.findIndex((o) => o.value === value);
+    setActive(idx >= 0 ? idx : 0);
+    setOpen(true);
+  };
+
+  const commit = (option: SelectOption) => {
+    setOpen(false);
+    if (option.value !== value) onChange(option.value);
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (disabled) return;
+    if (!open) {
+      if (e.key === "Enter" || e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        openList();
+      }
+      return;
+    }
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActive((i) => Math.min(options.length - 1, i + 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActive((i) => Math.max(0, i - 1));
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      setActive(0);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      setActive(options.length - 1);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const option = options[active];
+      if (option) commit(option);
+    } else if (e.key === "Escape") {
+      setOpen(false);
+    }
+  };
+
+  let lastGroup: string | undefined;
+
+  return (
+    <div className={`tsel-wrap${className ? ` ${className}` : ""}`} ref={wrapRef}>
+      <button
+        type="button"
+        className="tsel-trigger"
+        onClick={() => (open ? setOpen(false) : openList())}
+        onKeyDown={onKeyDown}
+        disabled={disabled}
+        title={title}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={ariaLabel}
+        style={{ maxWidth }}
+      >
+        <span className="tsel-label" style={{ maxWidth: maxWidth - 22 }}>{label}</span>
+        <ChevronDown size={12} aria-hidden className="tsel-chevron" />
+      </button>
+      {open && (
+        <div
+          className={`tsel-menu ${direction === "up" ? "tsel-up" : "tsel-down"}`}
+          role="listbox"
+          ref={listRef}
+          style={{ maxWidth: Math.max(maxWidth, 240) }}
+        >
+          {options.map((option, i) => {
+            const showGroup = option.group && option.group !== lastGroup;
+            lastGroup = option.group;
+            return (
+              <div key={option.value}>
+                {showGroup && <div className="tsel-group">{option.group}</div>}
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={option.value === value}
+                  data-index={i}
+                  className={`tsel-option${i === active ? " active" : ""}${option.value === value ? " selected" : ""}`}
+                  onMouseEnter={() => setActive(i)}
+                  onClick={() => commit(option)}
+                >
+                  <span className="tsel-option-label" title={option.label}>{option.label}</span>
+                  {option.value === value && <Check size={13} aria-hidden />}
+                </button>
+              </div>
+            );
+          })}
+          {options.length === 0 && <div className="tsel-empty">No options</div>}
+        </div>
+      )}
+    </div>
+  );
+}

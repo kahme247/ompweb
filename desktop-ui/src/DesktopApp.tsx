@@ -13,6 +13,7 @@ import { Sidebar, projectLabel, type SidebarSession } from "./Sidebar";
 import { SettingsView, applyFontSettings, type LoginProvider, type UsageSnapshot } from "./SettingsView";
 import { MenuChip, ProjectMenu, BranchMenu, WorktreeMenu } from "./ContextMenus";
 import { SubagentDialog } from "./SubagentDialog";
+import { ThemedSelect } from "./ThemedSelect";
 import { CommandPalette } from "@/components/CommandPalette";
 import { TodoList } from "@/components/TodoList";
 import { toast, ToastProvider } from "@/components/ui/toast";
@@ -756,6 +757,7 @@ export function DesktopApp() {
     (messages.length > 0 ? firstUserText(messages).slice(0, 80) : "") ||
     "New Task";
   const running = session === "running";
+  const started = session !== "idle" && session !== "exited";
   const dialogInfo = selectedSubagentId ? subagents.find((s) => s.id === selectedSubagentId) : undefined;
 
   // Cumulative tokens processed / cost across the session's assistant turns.
@@ -992,25 +994,65 @@ export function DesktopApp() {
             />
             <div className="composer-row">
               <div className="composer-controls">
-                {session !== "idle" && session !== "exited" && (
+                {session !== "exited" && (
                   <>
                     <label className="composer-chip" title="Tool preset — applies to the next session">
                       <Wrench size={12} aria-hidden />
-                      <select
-                        className="composer-select"
+                      <ThemedSelect
                         value={toolPreset}
-                        onChange={(e) => changeToolPreset(e.target.value as ToolPreset)}
+                        options={(Object.keys(TOOL_PRESET_LABELS) as ToolPreset[]).map((preset) => ({
+                          value: preset,
+                          label: TOOL_PRESET_LABELS[preset],
+                        }))}
+                        onChange={(v) => changeToolPreset(v as ToolPreset)}
                         disabled={running}
-                        aria-label="Tool preset"
-                      >
-                        {(Object.keys(TOOL_PRESET_LABELS) as ToolPreset[]).map((preset) => (
-                          <option key={preset} value={preset}>
-                            {TOOL_PRESET_LABELS[preset]}
-                          </option>
-                        ))}
-                      </select>
+                        direction="up"
+                        ariaLabel="Tool preset"
+                        maxWidth={110}
+                      />
                     </label>
-                    {(fastMode.enabled || fastModeSupported) && (
+                    <label
+                      className="composer-chip"
+                      title={started ? "Model" : "Model — starts loading once a session opens"}
+                    >
+                      <Sparkles size={12} aria-hidden />
+                      <ThemedSelect
+                        value={modelValue}
+                        options={[
+                          ...(activeModel && !activeInCatalog
+                            ? [{ value: modelValue, label: activeModel.id, group: "current" }]
+                            : []),
+                          ...modelGroups.flatMap(([provider, list]) =>
+                            list.map((m) => ({ value: `${provider}|${m.id}`, label: m.name || m.id, group: provider })),
+                          ),
+                        ]}
+                        onChange={(v) => {
+                          const [provider, id] = v.split("|");
+                          if (provider && id) void changeModel(provider, id);
+                        }}
+                        disabled={running || models.length === 0}
+                        direction="up"
+                        placeholder="Model"
+                        ariaLabel="Model"
+                        maxWidth={170}
+                      />
+                    </label>
+                    <label
+                      className="composer-chip"
+                      title={started ? "Thinking level" : "Thinking level — applies once a session opens"}
+                    >
+                      <Brain size={12} aria-hidden />
+                      <ThemedSelect
+                        value={thinkingLevel || "auto"}
+                        options={thinkingOptions.map((lvl) => ({ value: lvl, label: lvl }))}
+                        onChange={(v) => void changeThinking(v)}
+                        disabled={running || !started}
+                        direction="up"
+                        ariaLabel="Thinking level"
+                        maxWidth={110}
+                      />
+                    </label>
+                    {(fastMode.enabled || (fastModeSupported && started)) && (
                       <button
                         className={`composer-chip${fastMode.active ? " fast-active" : ""}`}
                         onClick={() => void toggleFastMode()}
@@ -1032,48 +1074,6 @@ export function DesktopApp() {
                       <Minimize2 size={12} aria-hidden />
                       {compacting ? "Compacting…" : "Compact"}
                     </button>
-                    <label className="composer-chip" title="Model">
-                      <Sparkles size={12} aria-hidden />
-                      <select
-                        className="composer-select"
-                        value={modelValue}
-                        onChange={(e) => {
-                          const [provider, id] = e.target.value.split("|");
-                          if (provider && id) void changeModel(provider, id);
-                        }}
-                        disabled={running}
-                        aria-label="Model"
-                      >
-                        {activeModel && !activeInCatalog && (
-                          <option value={modelValue}>{activeModel.id}</option>
-                        )}
-                        {modelGroups.map(([provider, list]) => (
-                          <optgroup key={provider} label={provider}>
-                            {list.map((m) => (
-                              <option key={m.id} value={`${provider}|${m.id}`}>
-                                {m.name || m.id}
-                              </option>
-                            ))}
-                          </optgroup>
-                        ))}
-                      </select>
-                    </label>
-                    <label className="composer-chip" title="Thinking level">
-                      <Brain size={12} aria-hidden />
-                      <select
-                        className="composer-select"
-                        value={thinkingLevel || "auto"}
-                        onChange={(e) => void changeThinking(e.target.value)}
-                        disabled={running}
-                        aria-label="Thinking level"
-                      >
-                        {thinkingOptions.map((lvl) => (
-                          <option key={lvl} value={lvl}>
-                            {lvl}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
                   </>
                 )}
               </div>
@@ -1160,18 +1160,17 @@ export function DesktopApp() {
             </MenuChip>
             <label className="composer-chip context-approval" title="Tool approval mode — applies when the next session starts">
               <Shield size={12} aria-hidden />
-              <select
-                className="composer-select"
+              <ThemedSelect
                 value={approvalMode}
-                onChange={(e) => changeApproval(e.target.value as ApprovalMode)}
-                aria-label="Approval mode"
-              >
-                {(Object.keys(APPROVAL_LABELS) as ApprovalMode[]).map((mode) => (
-                  <option key={mode} value={mode}>
-                    {APPROVAL_LABELS[mode]}
-                  </option>
-                ))}
-              </select>
+                options={(Object.keys(APPROVAL_LABELS) as ApprovalMode[]).map((mode) => ({
+                  value: mode,
+                  label: APPROVAL_LABELS[mode],
+                }))}
+                onChange={(v) => changeApproval(v as ApprovalMode)}
+                direction="up"
+                ariaLabel="Approval mode"
+                maxWidth={120}
+              />
             </label>
             <span className="context-spacer" />
             {queuedCount > 0 && (
