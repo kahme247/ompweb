@@ -1102,6 +1102,8 @@ export function DesktopApp() {
                         placeholder="Model"
                         ariaLabel="Model"
                         maxWidth={180}
+                        searchable
+                        searchPlaceholder="Search models…"
                       />
                     </label>
                     <label

@@ -1036,6 +1036,31 @@ html.dark .desktop-app {
   max-height: 320px;
 }
 
+.tsel-search {
+  padding: 2px 2px 6px;
+}
+
+.tsel-search input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control, 8px);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.tsel-search input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.tsel-search input::placeholder {
+  color: var(--text-dim);
+}
+
 .tsel-menu.tsel-down {
   top: calc(100% + 6px);
 }

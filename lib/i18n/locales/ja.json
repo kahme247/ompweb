@@ -193,6 +193,7 @@
   "appShell.statTotal": "合計",
   "appShell.statUser": "ユーザー",
   "appShell.switchToDarkMode": "ダークモードに切り替え",
+  "appShell.switchToOmpTheme": "ompミッドナイトテーマに切り替え",
   "appShell.switchToLightMode": "ライトモードに切り替え",
   "appShell.switchToSystemTheme": "システムテーマに切り替え",
   "appShell.systemTheme": "システムテーマを使用中（クリックでライトに切り替え）",

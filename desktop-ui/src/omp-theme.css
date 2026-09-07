@@ -1,0 +1,200 @@
+/* Desktop flourishes for the shared `html.omp` midnight theme (tokens live
+   in app/globals.css, AA-verified). This layer adds what tokens can't:
+   Geist display type, the checkerboard canvas, marquee/link/brand-gradient
+   utilities, sharper shapes, and contrast fixes for filled controls.
+   Source: https://omp.sh. */
+
+.desktop-app {
+  color-scheme: dark;
+
+  /* --- type (omp.sh: Geist + JetBrains Mono) --- */
+  --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --font-brand: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+
+  /* --- motion (matches omp.sh defaults) --- */
+  --dur-fast: 150ms;
+  --dur-med: 220ms;
+  --dur-slow: 320ms;
+  --ease-out-warm: cubic-bezier(0.4, 0, 0.2, 1);
+
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizelegibility;
+  background:
+    conic-gradient(rgba(255, 255, 255, 0.03) 90deg, transparent 90deg 180deg, rgba(255, 255, 255, 0.03) 180deg 270deg, transparent 270deg) 0 0 / 2px 2px,
+    var(--bg);
+}
+
+/* Display headings: tight Geist like omp.sh `.display`. */
+.desktop-app .display-serif,
+.desktop-app .empty-heading,
+.desktop-app .settings-content h2,
+.desktop-app .skills-detail-name {
+  font-family: var(--font-display);
+  font-feature-settings: "ss01";
+  letter-spacing: -0.03em;
+  text-wrap: balance;
+}
+
+/* Empty-state heading stays solid ink — the animated gradient read as a
+   styling bug frozen mid-sweep. The project name keeps weight, not color. */
+.desktop-app .empty-project {
+  color: inherit;
+  text-decoration: none;
+}
+
+.desktop-app pre,
+.desktop-app code {
+  font-family: var(--font-mono);
+  letter-spacing: -0.01em;
+}
+
+.desktop-app ::selection {
+  background: oklch(70% 0.24 340 / 0.32);
+  color: var(--text);
+}
+
+.desktop-app :focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 3px;
+}
+
+/* Thin scrollbars, hairline thumb — like omp.sh docs sidebar. */
+.desktop-app ::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.desktop-app ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 3px;
+}
+.desktop-app ::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Animated underline links (omp.sh `.link`). */
+.desktop-app .omp-link {
+  color: inherit;
+  text-decoration: none;
+  position: relative;
+}
+.desktop-app .omp-link::after {
+  content: "";
+  transform-origin: 0;
+  background: currentColor;
+  width: 100%;
+  height: 1px;
+  transition: transform 0.32s cubic-bezier(0.2, 0.8, 0.2, 1);
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  transform: scaleX(0);
+}
+.desktop-app .omp-link:hover::after,
+.desktop-app .omp-link:focus-visible::after {
+  transform: scaleX(1);
+}
+
+/* Brand gradient text (favicon glyph: magenta → violet → cyan). */
+.desktop-app .brand-gradient-text {
+  background: linear-gradient(135deg, #ed4abf 0%, #9b4dff 50%, #5ad8e6 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* --- shape + elevation: sharper, hairline — omp.sh has no soft pills --- */
+.desktop-app {
+  --radius-control: 6px;
+  --radius-card: 10px;
+  --radius-modal: 14px;
+  --shadow-card: 0 0 0 1px rgba(255, 255, 255, 0.05);
+  --shadow-pop: 0 8px 24px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.07);
+  --shadow-modal: 0 16px 48px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+/* Filled accent controls: black glyphs on neon magenta (white fails contrast). */
+.desktop-app .composer-send:not(:disabled):not(.stop),
+.desktop-app .context-menu-create:not(.cancel),
+.desktop-app .settings-toggle.on {
+  color: var(--on-accent);
+}
+.desktop-app .attachment-remove:hover {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+/* Error strip: warm dark-red is mud on black — use neon status. */
+.desktop-app .desktop-error {
+  background: color-mix(in srgb, var(--status-error) 12%, var(--bg));
+  color: var(--status-error);
+}
+
+/* Task + subagent surfaces: deep-ink panels, square chips, mono labels. */
+.desktop-app .subagent-chip,
+.desktop-app .composer-chip,
+.desktop-app .context-chip {
+  border-radius: 6px;
+}
+.desktop-app .tsel-menu,
+.desktop-app .context-menu,
+.desktop-app .sidebar-ctx-menu,
+.desktop-app .subagent-dialog {
+  background: #050507;
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+/* Edge-fade marquee helpers (60s drift, pause on hover). */
+.desktop-app .omp-marquee {
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 10% 90%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 10% 90%, transparent);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .desktop-app .omp-marquee-track {
+    animation: omp-marquee-drift 60s linear infinite;
+  }
+  .desktop-app .omp-marquee:hover .omp-marquee-track {
+    animation-play-state: paused;
+  }
+}
+@keyframes omp-marquee-drift {
+  to {
+    transform: translate(-50%);
+  }
+}
+
+/* Composer focus: cyan ring glow instead of plain accent border. */
+.desktop-app .composer-box:focus-within {
+  border-color: var(--accent-2);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-2) 45%, transparent);
+}
+
+/* Mono micro-labels: uppercase, wide tracking — omp.sh prose h4 idiom. */
+.desktop-app .sidebar-group-label,
+.desktop-app .context-details-label,
+.desktop-app .subagent-stat-label,
+.desktop-app .settings-group-label {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+}
+
+/* Centered compact composer like the reference: ~680px column, not the old
+   780px and not full-bleed. */
+.desktop-app .composer-box,
+.desktop-app .composer-panels,
+.desktop-app .composer-context {
+  max-width: 680px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* Gauge popover: center on its anchor chip instead of jutting right from the
+   chip's left edge. `translate` (not `transform`) so the menu-in keyframes
+   that animate `transform` keep working. */
+.desktop-app .context-menu:has(> .gauge-pop) {
+  left: 50%;
+  translate: -50% 0;
+}

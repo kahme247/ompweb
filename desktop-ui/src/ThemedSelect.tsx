@@ -26,6 +26,10 @@ type ThemedSelectProps = {
   className?: string;
   /** Max rendered label width before ellipsis. */
   maxWidth?: number;
+  /** Show a filter box on top of the open menu (long lists like models). */
+  searchable?: boolean;
+  /** Filter input placeholder. */
+  searchPlaceholder?: string;
   /** Bottom action row inside the open menu (e.g. "Manage models"). */
   footer?: ReactNode;
   /** Hide the trigger label (icon-only triggers). */
@@ -47,9 +51,13 @@ export function ThemedSelect({
   maxWidth = 220,
   footer,
   hideLabel,
+  searchable,
+  searchPlaceholder = "Search…",
 }: ThemedSelectProps) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
+  const [query, setQuery] = useState("");
+  const searchRef = useRef<HTMLInputElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -67,6 +75,9 @@ export function ThemedSelect({
       document.removeEventListener("keydown", onKey);
     };
   }, [open]);
+  useEffect(() => {
+    if (open && searchable) searchRef.current?.focus();
+  }, [open, searchable]);
 
   useLayoutEffect(() => {
     if (!open || !listRef.current) return;
@@ -76,9 +87,17 @@ export function ThemedSelect({
 
   const selected = options.find((o) => o.value === value);
   const label = selected?.label ?? placeholder ?? value;
+  const needle = searchable ? query.trim().toLowerCase() : "";
+  const visible =
+    needle.length === 0
+      ? options
+      : options.filter((o) =>
+          `${o.label} ${o.group ?? ""} ${o.description ?? ""} ${o.value}`.toLowerCase().includes(needle),
+        );
 
   const openList = () => {
     if (disabled) return;
+    setQuery("");
     const idx = options.findIndex((o) => o.value === value);
     setActive(idx >= 0 ? idx : 0);
     setOpen(true);
@@ -100,7 +119,7 @@ export function ThemedSelect({
     }
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setActive((i) => Math.min(options.length - 1, i + 1));
+      setActive((i) => Math.min(visible.length - 1, i + 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setActive((i) => Math.max(0, i - 1));
@@ -109,10 +128,10 @@ export function ThemedSelect({
       setActive(0);
     } else if (e.key === "End") {
       e.preventDefault();
-      setActive(options.length - 1);
+      setActive(visible.length - 1);
     } else if (e.key === "Enter") {
       e.preventDefault();
-      const option = options[active];
+      const option = visible[active];
       if (option) commit(option);
     } else if (e.key === "Escape") {
       setOpen(false);
@@ -145,7 +164,22 @@ export function ThemedSelect({
           ref={listRef}
           style={{ maxWidth: Math.max(maxWidth, 240) }}
         >
-          {options.map((option, i) => {
+          {searchable && (
+            <div className="tsel-search">
+              <input
+                ref={searchRef}
+                value={query}
+                onChange={(e) => {
+                  setQuery(e.target.value);
+                  setActive(0);
+                }}
+                onKeyDown={onKeyDown}
+                placeholder={searchPlaceholder}
+                aria-label={searchPlaceholder}
+              />
+            </div>
+          )}
+          {visible.map((option, i) => {
             const showGroup = option.group && option.group !== lastGroup;
             lastGroup = option.group;
             return (
@@ -173,7 +207,7 @@ export function ThemedSelect({
               </div>
             );
           })}
-          {options.length === 0 && <div className="tsel-empty">No options</div>}
+          {visible.length === 0 && <div className="tsel-empty">{needle ? "No matches" : "No options"}</div>}
           {footer && (
             <>
               <div className="tsel-sep" />

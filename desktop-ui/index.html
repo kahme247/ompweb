@@ -3,24 +3,31 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>omp desktop</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Geist:wght@300..700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
     <script>
-      // Pre-paint theme: apply the dark class before first paint so the
-      // window never flashes light in dark mode (and vice versa).
+      // Pre-paint theme: omp midnight is the default; stored light/dark
+      // preferences are honored. Mirrors app/layout.tsx + useTheme.
       (function () {
         try {
           var pref = localStorage.getItem("omp-theme");
-          var dark = pref === "dark" || (pref !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
-          if (dark) document.documentElement.classList.add("dark");
+          var omp = pref === "omp" || pref === null || pref === "system";
+          var dark = !omp && (pref === "dark" || (pref !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches));
+          if (omp) document.documentElement.classList.add("omp");
+          else if (dark) document.documentElement.classList.add("dark");
         } catch (e) {
-          document.documentElement.classList.add("dark");
+          document.documentElement.classList.add("omp");
         }
       })();
     </script>
     <style>
       /* Paint the bg before the CSS bundle arrives. */
-      html { background: #faf9f6; }
-      html.dark { background: #1b1916; }
+      html { background: #000; }
+      html.dark { background: #000; }
     </style>
   </head>
   <body>

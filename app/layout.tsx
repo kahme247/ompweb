@@ -1,6 +1,19 @@
 import type { Metadata, Viewport } from "next";
-import { Noto_Sans_Mono, Noto_Serif_SC, Source_Serif_4 } from "next/font/google";
+import { Geist, JetBrains_Mono, Noto_Sans_Mono, Noto_Serif_SC, Source_Serif_4 } from "next/font/google";
 import "./globals.css";
+
+const geist = Geist({
+  subsets: ["latin"],
+  variable: "--font-geist",
+  display: "swap",
+});
+
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ["latin"],
+  weight: ["400", "500", "600"],
+  variable: "--font-jb-mono",
+  display: "swap",
+});
 
 const notoSansMono = Noto_Sans_Mono({
   subsets: ["latin", "cyrillic"],
@@ -59,14 +72,14 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" translate="no" className={`${notoSansMono.variable} ${sourceSerif.variable} ${notoSerifSC.variable} notranslate`} suppressHydrationWarning>
+    <html lang="en" translate="no" className={`${geist.variable} ${jetbrainsMono.variable} ${notoSansMono.variable} ${sourceSerif.variable} ${notoSerifSC.variable} notranslate`} suppressHydrationWarning>
       <head>
         <meta name="google" content="notranslate" />
         {/* Pre-hydration: apply stored theme before first paint to avoid a flash
-            of the wrong theme. Matches html.dark selector in globals.css. */}
+            of the wrong theme. Matches html.dark / html.omp selectors in globals.css. */}
         <script
           dangerouslySetInnerHTML={{
-            __html: `(function(){try{var t=localStorage.getItem("omp-theme"),d=matchMedia("(prefers-color-scheme: dark)").matches;if(t==="dark"||(t!=="light"&&t!=="dark"&&d))document.documentElement.classList.add("dark")}catch(e){}})();`,
+            __html: `(function(){try{var t=localStorage.getItem("omp-theme"),d=matchMedia("(prefers-color-scheme: dark)").matches;if(t==="omp"||!t||t==="system"){document.documentElement.classList.add("omp")}else if(t==="dark"||(t!=="light"&&d))document.documentElement.classList.add("dark")}catch(e){}})();`,
           }}
         />
         <script

@@ -674,3 +674,175 @@ pub fn omp_delete_skill(dir: String) -> Result<(), String> {
     }
     std::fs::remove_dir_all(&d).map_err(|e| e.to_string())
 }
+
+// ---------- Git changes + file explorer ----------
+
+fn repo_root(cwd: &str) -> Result<PathBuf, String> {
+    match run_git(cwd, &["rev-parse", "--show-toplevel"]) {
+        Some((true, out)) => {
+            let root = out.trim().to_string();
+            if root.is_empty() {
+                Err("not a git repository".into())
+            } else {
+                Ok(PathBuf::from(root))
+            }
+        }
+        Some((false, _)) => Err("not a git repository".into()),
+        None => Err("git not available".into()),
+    }
+}
+
+/// Confine a repo-relative path: no absolutes, no `..` escapes.
+fn confine_path(root: &Path, path: &str) -> Result<PathBuf, String> {
+    let rel = Path::new(path);
+    if rel.is_absolute() || path.contains("..") {
+        return Err("path escapes the repository".into());
+    }
+    Ok(root.join(rel))
+}
+
+fn parse_ahead_behind(header: &str) -> (u32, u32) {
+    let (mut ahead, mut behind) = (0u32, 0u32);
+    if let Some(bracket) = header.split('[').nth(1).and_then(|s| s.split(']').next()) {
+        for part in bracket.split(',') {
+            let part = part.trim();
+            if let Some(n) = part.strip_prefix("ahead ").and_then(|n| n.parse().ok()) {
+                ahead = n;
+            }
+            if let Some(n) = part.strip_prefix("behind ").and_then(|n| n.parse().ok()) {
+                behind = n;
+            }
+        }
+    }
+    (ahead, behind)
+}
+
+/// `git status --porcelain=v1 -b` → { branch, ahead, behind, files: [{ path, index, worktree }] }.
+/// Rename entries resolve to the new path.
+#[tauri::command]
+pub fn omp_git_status(cwd: String) -> Result<Value, String> {
+    let Some((ok, out)) = run_git(&cwd, &["status", "--porcelain=v1", "-b"]) else {
+        return Err("git not available".into());
+    };
+    if !ok {
+        return Err("not a git repository".into());
+    }
+    let mut lines = out.lines();
+    let header = lines.next().unwrap_or("");
+    let head = header.strip_prefix("## ").unwrap_or(header);
+    let head = head.strip_prefix("No commits yet on ").unwrap_or(head);
+    let branch = head.split("...").next().unwrap_or(head).to_string();
+    let (ahead, behind) = parse_ahead_behind(head);
+    let mut files = Vec::new();
+    for line in lines {
+        if line.len() < 4 {
+            continue;
+        }
+        let index = line.chars().next().unwrap_or(' ');
+        let worktree = line.chars().nth(1).unwrap_or(' ');
+        let mut path = line[3..].trim().to_string();
+        // Rename/copy entries: `R  old -> new`.
+        if let Some(arrow) = path.find(" -> ") {
+            path = path[arrow + 4..].to_string();
+        }
+        // Porcelain quotes paths with special bytes: `"a b"`.
+        if path.len() >= 2 && path.starts_with('"') && path.ends_with('"') {
+            path = path[1..path.len() - 1].to_string();
+        }
+        if path.is_empty() || (index == ' ' && worktree == ' ') {
+            continue;
+        }
+        files.push(json!({ "path": path, "index": index.to_string(), "worktree": worktree.to_string() }));
+    }
+    Ok(json!({ "branch": branch, "ahead": ahead, "behind": behind, "files": files }))
+}
+/// Unified diff for one file. `staged = true` diffs the index, else the worktree.
+#[tauri::command]
+pub fn omp_git_file_diff(cwd: String, path: String, staged: bool) -> Result<Value, String> {
+    let root = repo_root(&cwd)?;
+    confine_path(&root, &path)?;
+    let args: Vec<&str> = if staged {
+        vec!["diff", "--no-color", "--cached", "--", &path]
+    } else {
+        vec!["diff", "--no-color", "--", &path]
+    };
+    match run_git(&cwd, &args) {
+        Some((_, out)) => Ok(json!({ "diff": out })),
+        None => Err("git not available".into()),
+    }
+}
+
+const LIST_SKIP_DIRS: &[&str] = &[".git", "node_modules", "target", ".next", "dist", "build", ".venv", "__pycache__", ".turbo", ".parcel-cache"];
+const LIST_MAX_ENTRIES: usize = 5000;
+
+/// Capped recursive listing, repo-relative `/`-separated paths.
+/// Skips dependency/build dirs. → { root, entries: [{ path, dir }], truncated }.
+#[tauri::command]
+pub fn omp_list_files(cwd: String) -> Result<Value, String> {
+    let root = repo_root(&cwd).unwrap_or_else(|_| PathBuf::from(&cwd));
+    let mut entries: Vec<Value> = Vec::new();
+    let mut stack = vec![PathBuf::new()];
+    let mut truncated = false;
+    while let Some(rel) = stack.pop() {
+        let abs = root.join(&rel);
+        let read = match std::fs::read_dir(&abs) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let mut children: Vec<(String, bool)> = Vec::new();
+        for child in read.flatten() {
+            let name = child.file_name().to_string_lossy().to_string();
+            let is_dir = child.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_dir && LIST_SKIP_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            children.push((name, is_dir));
+        }
+        children.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        for (name, is_dir) in children.into_iter().rev() {
+            if entries.len() >= LIST_MAX_ENTRIES {
+                truncated = true;
+                break;
+            }
+            let child_rel = if rel.as_os_str().is_empty() {
+                PathBuf::from(&name)
+            } else {
+                rel.join(&name)
+            };
+            entries.push(json!({
+                "path": child_rel.to_string_lossy().replace('\\', "/"),
+                "dir": is_dir,
+            }));
+            if is_dir {
+                stack.push(child_rel);
+            }
+        }
+        if truncated {
+            break;
+        }
+    }
+    Ok(json!({ "root": root.to_string_lossy(), "entries": entries, "truncated": truncated }))
+}
+
+const READ_MAX_BYTES: u64 = 256 * 1024;
+
+/// Read a repo-confined text file. → { content, truncated }. Refuses binaries.
+#[tauri::command]
+pub fn omp_read_file(cwd: String, path: String) -> Result<Value, String> {
+    let root = repo_root(&cwd).unwrap_or_else(|_| PathBuf::from(&cwd));
+    let abs = confine_path(&root, &path)?;
+    let meta = std::fs::metadata(&abs).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("not a file".into());
+    }
+    if meta.len() > 8 * 1024 * 1024 {
+        return Err("file too large".into());
+    }
+    let bytes = std::fs::read(&abs).map_err(|e| e.to_string())?;
+    let truncated = bytes.len() as u64 > READ_MAX_BYTES;
+    let slice = if truncated { &bytes[..READ_MAX_BYTES as usize] } else { &bytes[..] };
+    match String::from_utf8(slice.to_vec()) {
+        Ok(content) => Ok(json!({ "content": content, "truncated": truncated })),
+        Err(_) => Err("binary file".into()),
+    }
+}

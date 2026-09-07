@@ -266,7 +266,7 @@ function ToggleSwitch({
         height: 24,
         borderRadius: 12,
         border: "none",
-        background: checked ? "var(--accent)" : "var(--border)",
+        background: checked ? "var(--accent-strong)" : "var(--border)",
         cursor: disabled ? "not-allowed" : "pointer",
         transition: "background var(--dur-fast)",
         padding: 2,

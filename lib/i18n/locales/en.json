@@ -193,6 +193,7 @@
   "appShell.statTotal": "Total",
   "appShell.statUser": "User",
   "appShell.switchToDarkMode": "Switch to dark mode",
+  "appShell.switchToOmpTheme": "Switch to omp midnight theme",
   "appShell.switchToLightMode": "Switch to light mode",
   "appShell.switchToSystemTheme": "Switch to system theme",
   "appShell.systemTheme": "Using system theme (click to switch to light)",

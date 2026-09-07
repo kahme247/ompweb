@@ -212,14 +212,14 @@ export function ExtensionDialog({
               style={{
                 padding: "6px 10px",
                 borderRadius: 6,
-                border: "1px solid var(--accent)",
-                background: "var(--accent)",
+                border: "1px solid var(--accent-strong)",
+                background: "var(--accent-strong)",
                 color: "var(--on-accent)",
                 cursor: "pointer",
                 transition: "background-color var(--dur-fast) var(--ease-out-warm)",
               }}
-              onMouseEnter={(e) => { e.currentTarget.style.background = "var(--accent-hover)"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.background = "var(--accent)"; }}
+              onMouseEnter={(e) => { e.currentTarget.style.filter = "brightness(1.12)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.filter = "none"; }}
             >
               {t("chatWindow.confirm")}
             </button>
@@ -230,8 +230,8 @@ export function ExtensionDialog({
               style={{
                 padding: "6px 10px",
                 borderRadius: 6,
-                border: "1px solid var(--accent)",
-                background: selectedOption ? "var(--accent)" : "var(--bg-subtle)",
+                border: "1px solid var(--accent-strong)",
+                background: selectedOption ? "var(--accent-strong)" : "var(--bg-subtle)",
                 color: selectedOption ? "var(--on-accent)" : "var(--text-dim)",
                 cursor: selectedOption ? "pointer" : "not-allowed",
                 opacity: selectedOption ? 1 : 0.65,
@@ -245,14 +245,14 @@ export function ExtensionDialog({
               style={{
                 padding: "6px 10px",
                 borderRadius: 6,
-                border: "1px solid var(--accent)",
-                background: "var(--accent)",
+                border: "1px solid var(--accent-strong)",
+                background: "var(--accent-strong)",
                 color: "var(--on-accent)",
                 cursor: "pointer",
                 transition: "background-color var(--dur-fast) var(--ease-out-warm)",
               }}
-              onMouseEnter={(e) => { e.currentTarget.style.background = "var(--accent-hover)"; }}
-              onMouseLeave={(e) => { e.currentTarget.style.background = "var(--accent)"; }}
+              onMouseEnter={(e) => { e.currentTarget.style.filter = "brightness(1.12)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.filter = "none"; }}
             >
               {t("chatWindow.submit")}
             </button>

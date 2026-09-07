@@ -193,6 +193,7 @@
   "appShell.statTotal": "总计",
   "appShell.statUser": "用户",
   "appShell.switchToDarkMode": "切换到深色模式",
+  "appShell.switchToOmpTheme": "切换到 omp 午夜主题",
   "appShell.switchToLightMode": "切换到浅色模式",
   "appShell.switchToSystemTheme": "切换到系统主题",
   "appShell.systemTheme": "正在使用系统主题（点击切换到浅色）",

@@ -11,8 +11,8 @@ import { ChatWindow } from "./ChatWindow";
 import { TabBar, type Tab } from "./TabBar";
 import { BranchNavigator } from "./BranchNavigator";
 import { LanguageSwitcher } from "./LanguageSwitcher";
-import { Check, CircleCheck, Folder, Gauge, History, Menu, Moon, PanelLeft, Sun, Terminal, Wand2, Zap } from "lucide-react";
-import { useTheme } from "@/hooks/useTheme";
+import { Check, CircleCheck, Folder, Gauge, History, Menu, PanelLeft, Terminal, Wand2, Zap } from "lucide-react";
+import { ThemeSwitcher } from "./ThemeSwitcher";
 import { formatCompactNumber, formatPercent, getCacheHitRate } from "@/lib/format";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
@@ -94,7 +94,6 @@ export function AppShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
-  const { isDark, preference, toggleTheme } = useTheme();
   const { t, locale } = useI18n();
   const isMobile = useIsMobile();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
@@ -1410,18 +1409,7 @@ export function AppShell() {
             >
               {sidebarOpen ? <PanelLeft size={16} strokeWidth={1.8} aria-hidden="true" /> : <Menu size={16} strokeWidth={1.8} aria-hidden="true" />}
             </button>
-            <button
-              onClick={(e) => {
-                const rect = e.currentTarget.getBoundingClientRect();
-                toggleTheme({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
-              }}
-              title={preference === "system" ? t("appShell.systemTheme") : (isDark ? t("appShell.switchToSystemTheme") : t("appShell.switchToDarkMode"))}
-              aria-label={preference === "system" ? t("appShell.systemTheme") : (isDark ? t("appShell.switchToSystemTheme") : t("appShell.switchToDarkMode"))}
-              aria-pressed={isDark}
-              className="shell-toolbar-btn ui-focus-ring"
-            >
-              {isDark ? <Sun size={16} strokeWidth={1.8} aria-hidden="true" /> : <Moon size={16} strokeWidth={1.8} aria-hidden="true" />}
-            </button>
+            <ThemeSwitcher />
             <LanguageSwitcher />
             {showChat && (
               <>

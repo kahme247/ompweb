@@ -58,6 +58,112 @@
   --overlay-backdrop: color-mix(in srgb, var(--text) 24%, transparent);
 }
 
+/* omp.sh midnight theme (dark). Pure-black terminal look with a magenta/cyan
+   dual accent, ported from https://omp.sh. Text/background pairs verified
+   WCAG AA (≥4.5:1 for small text) — measured values noted per token.
+   --text-dim is deliberately lighter than omp.sh's faint gray (which fails
+   on panels) to hold AA. */
+html.omp {
+  color-scheme: dark;
+  --bg: #000000;
+  --bg-panel: #0A0A0C;
+  --bg-hover: #141417;
+  --bg-selected: #1C1C21;
+  --border: #232329;
+  /* 19.26:1 on --bg, 18.14:1 on --bg-panel */
+  --text: #F5F5F5;
+  /* 12.76:1 on --bg, 12.02:1 on --bg-panel */
+  --text-muted: #C9C9D1;
+  /* 6.46:1 on --bg, 6.08:1 on --bg-panel */
+  --text-dim: #8E8E96;
+  /* Magenta link accent. 6.65:1 on --bg, 6.26:1 on --bg-panel */
+  --accent: #EC5BAB;
+  /* Deep-magenta fill. White-on-fill: 6.35:1 (passes AA for small text) */
+  --accent-strong: #AD2674;
+  /* Link hover. 8.81:1 on --bg */
+  --accent-hover: #F483BB;
+  /* Cyan secondary accent (focus rings, highlights). 12.76:1 on --bg */
+  --accent-2: #7DD7E8;
+  --user-bg: #171217;
+  --tool-bg: #101014;
+  --bg-subtle: rgba(255,255,255,0.04);
+  --status-error: #FF9B92;
+  --status-success: #7DD8A8;
+  --status-warning: #F0C36A;
+  --status-modified: #E0B24D;
+  --status-renamed: #7CA8FF;
+  --on-accent: #FFFFFF;
+  --overlay-backdrop: color-mix(in srgb, var(--text) 24%, transparent);
+  --shadow-card: 0 1px 2px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.05);
+  --shadow-pop: 0 2px 8px rgba(0,0,0,0.65), 0 0 0 1px rgba(255,255,255,0.06);
+  --shadow-modal: 0 8px 32px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.07);
+}
+
+/* omp.sh dotted-grid canvas + magenta selection + cyan focus ring. */
+html.omp body {
+  background: conic-gradient(rgba(255,255,255,0.03) 90deg, transparent 90deg 180deg, rgba(255,255,255,0.03) 180deg 270deg, transparent 270deg) 0 0 / 2px 2px, #000000;
+}
+html.omp ::selection {
+  background: rgba(236,91,171,0.32);
+  color: var(--text);
+}
+html.omp :focus-visible {
+  outline-color: var(--accent-2);
+}
+
+/* omp.sh type voice: Geist for UI text, JetBrains Mono for code. Scoped to
+   the omp theme so the warm themes keep their system/serif identity. */
+html.omp,
+html.omp body {
+  font-family: var(--font-geist), ui-sans-serif, system-ui, sans-serif;
+}
+html.omp {
+  --font-mono: var(--font-jb-mono), "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+/* omp.sh link sweep: underline draws itself left-to-right on hover/focus. */
+html.omp .markdown-body a {
+  text-decoration: none;
+  position: relative;
+}
+html.omp .markdown-body a::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: -2px;
+  width: 100%;
+  height: 1px;
+  background: currentColor;
+  transform: scaleX(0);
+  transform-origin: 0;
+  transition: transform 0.32s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+html.omp .markdown-body a:hover::after,
+html.omp .markdown-body a:focus-visible::after {
+  transform: scaleX(1);
+}
+
+/* omp.sh sunray signature for the empty-state wordmark: a cyan→white sheen
+   that sweeps across every 9s. Static gradient text when reduced motion. */
+html.omp .omp-wordmark {
+  background: linear-gradient(105deg, var(--accent-2) 38%, var(--text) 50%, var(--accent-2) 62%);
+  background-position: 100% 0;
+  background-size: 320% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+@media (prefers-reduced-motion: no-preference) {
+  html.omp .omp-wordmark {
+    animation: omp-sunray-sweep 9s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  }
+}
+@keyframes omp-sunray-sweep {
+  0% { text-shadow: none; background-position: 100% 0; }
+  8% { text-shadow: 0 0 16px color-mix(in srgb, var(--accent-2) 65%, transparent); }
+  18%, to { text-shadow: none; background-position: 0 0; }
+}
+
 /* Warm-ember palette (dark). Same AA verification as light. */
 html.dark {
   --bg: #1B1916;
