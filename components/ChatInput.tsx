@@ -1,11 +1,12 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, ListChecks, Search, Shrink, Sparkles, Wrench, Zap } from "lucide-react";
+import { ChevronDown, ListChecks, Loader2, Mic, Search, Shrink, Sparkles, Wrench, Zap } from "lucide-react";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
 import { toast } from "@/components/ui/toast";
+import { useDictation } from "@/hooks/useDictation";
 import { clearDraft, getDraft, setDraft } from "@/lib/draft-store";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import type { AttachedImage, AttachedTextFile } from "./ChatInput-draft-attachments";
@@ -225,6 +226,47 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   attachedImagesRef.current = attachedImages;
   attachedTextFilesRef.current = attachedTextFiles;
 
+  const insertTextAtCursor = useCallback((text: string) => {
+    const ta = textareaRef.current;
+    if (!ta) {
+      setValue((v) => v + (v ? " " : "") + text);
+      return;
+    }
+    const start = ta.selectionStart ?? ta.value.length;
+    const end = ta.selectionEnd ?? ta.value.length;
+    const before = ta.value.slice(0, start);
+    const after = ta.value.slice(end);
+    const sep = before.length > 0 && !before.endsWith(" ") ? " " : "";
+    const newVal = before + sep + text + after;
+    setValue(newVal);
+    setAtQuery(null);
+    requestAnimationFrame(() => {
+      if (!ta) return;
+      const pos = start + sep.length + text.length;
+      ta.setSelectionRange(pos, pos);
+      ta.focus();
+      ta.style.height = "auto";
+      ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+    });
+  }, []);
+
+  const { isRecording, isTranscribing, toggle: toggleDictation, cancel: cancelDictation, stop: stopDictation } = useDictation({
+    onTranscript: insertTextAtCursor,
+    onError: (err) => {
+      const msg =
+        err === "Microphone not supported in this browser or context"
+          ? t("chatInput.dictationNotSupported")
+          : err === "Microphone access denied"
+          ? t("chatInput.dictationPermissionDenied")
+          : err === "No speech detected"
+          ? t("chatInput.dictationNoSpeech")
+          : err === "Transcription failed"
+          ? t("chatInput.dictationFailed")
+          : err;
+      toast.error(msg);
+    },
+  });
+
   useImperativeHandle(ref, () => ({
     focus() {
       textareaRef.current?.focus();
@@ -259,29 +301,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
       });
     },
-    insertText(text: string) {
-      const ta = textareaRef.current;
-      if (!ta) {
-        setValue((v) => v + (v ? " " : "") + text);
-        return;
-      }
-      const start = ta.selectionStart ?? ta.value.length;
-      const end = ta.selectionEnd ?? ta.value.length;
-      const before = ta.value.slice(0, start);
-      const after = ta.value.slice(end);
-      const sep = before.length > 0 && !before.endsWith(" ") ? " " : "";
-      const newVal = before + sep + text + after;
-      setValue(newVal);
-      setAtQuery(null);
-      requestAnimationFrame(() => {
-        if (!ta) return;
-        const pos = start + sep.length + text.length;
-        ta.setSelectionRange(pos, pos);
-        ta.focus();
-        ta.style.height = "auto";
-        ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-      });
-    },
+    insertText: insertTextAtCursor,
     addFiles(files: File[]) {
       processFiles(files);
     },
@@ -987,6 +1007,24 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         if (recentlyComposed) e.preventDefault();
         return;
       }
+      if (isRecording) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          cancelDictation();
+          return;
+        }
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          stopDictation();
+          return;
+        }
+      }
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "m") {
+        e.preventDefault();
+        toggleDictation();
+        return;
+      }
+
 
       if (historyMenuOpen && !isComposing) {
         if (e.key === "ArrowDown") {
@@ -1105,7 +1143,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }
       }
     },
-    [isStreaming, onSteer, onFollowUp, onAbort, onMinimize, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value]
+    [isStreaming, onSteer, onFollowUp, onAbort, onMinimize, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, isRecording, cancelDictation, stopDictation, toggleDictation]
   );
 
   const handleInput = useCallback(() => {
@@ -2468,6 +2506,32 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </button>
             )}
 
+            {/* Dictation */}
+            <button
+              type="button"
+              onClick={toggleDictation}
+              disabled={isTranscribing}
+              title={isRecording ? t("chatInput.stopDictation") : isTranscribing ? t("chatInput.transcribing") : t("chatInput.startDictation")}
+              aria-label={isRecording ? t("chatInput.stopDictation") : isTranscribing ? t("chatInput.transcribing") : t("chatInput.startDictation")}
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "center",
+                width: 28, height: 28, padding: 0,
+                background: isRecording ? "var(--danger-subtle, rgba(239, 68, 68, 0.15))" : "none",
+                border: isRecording ? "1px solid var(--danger, #ef4444)" : "none",
+                borderRadius: 7,
+                color: isRecording ? "var(--danger, #ef4444)" : isTranscribing ? "var(--accent)" : "var(--text-muted)",
+                cursor: isTranscribing ? "wait" : "pointer",
+                transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
+              }}
+              onMouseEnter={(e) => { if (!isRecording && !isTranscribing) e.currentTarget.style.background = "var(--bg-hover)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = isRecording ? "var(--danger-subtle, rgba(239, 68, 68, 0.15))" : "none"; }}
+            >
+              {isTranscribing ? (
+                <Loader2 size={14} strokeWidth={1.8} className="animate-spin" aria-hidden="true" />
+              ) : (
+                <Mic size={14} strokeWidth={1.8} aria-hidden="true" />
+              )}
+            </button>
             {/* Primary action: Send (idle) / Queue (typed while running) / Stop (running) */}
             {primaryActionQueuesMessage ? (
               <button

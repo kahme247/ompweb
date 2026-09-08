@@ -76,6 +76,9 @@ ompweb --no-open                           # ブラウザ自動起動を無効�
 | `OMP_WEB_NO_OPEN` | `1` でブラウザ自動起動を無効化 | `0` |
 | `OMP_WEB_OMP_BIN` | `omp` の絶対パス（PATH 未登録時） | _自動検出_ |
 | `PI_CODING_AGENT_DIR` | カスタム omp エージェントディレクトリ | `~/.omp/agent` |
+| `OMP_WEB_STT_ENDPOINT` | OpenAI 互換の音声認識エンドポイント URL | _なし（無効）_ |
+| `OMP_WEB_STT_KEY` | STT エンドポイント用の API キー | _なし_ |
+| `OMP_WEB_STT_MODEL` | STT エンドポイント用のモデル名 | _なし_ |
 
 ## 開発
 
