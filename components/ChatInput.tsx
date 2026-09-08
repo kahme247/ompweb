@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
+import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
 import { ChevronDown, ListChecks, Search, Shrink, Sparkles, Wrench, Zap } from "lucide-react";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
@@ -140,6 +140,82 @@ export interface ChatInputHandle {
 
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
 
+// The history / slash / @ menus are absolutely positioned relative to the
+// composer input. On the empty-session page the composer sits inside an
+// `overflow-y-auto` wrapper, so the part of a menu that extends past that
+// wrapper's edge gets clipped. Before paint we measure the nearest clipping
+// ancestor and pick the side (above/below the input) with more room, then cap
+// the menu height so it never overflows that boundary.
+const MENU_EDGE_PAD = 8;
+
+function getMenuBoundary(el: HTMLElement | null): { top: number; bottom: number } {
+  if (typeof window === "undefined" || !el) return { top: 0, bottom: 0 };
+  let node: HTMLElement | null = el.parentElement;
+  while (node && node !== document.body && node !== document.documentElement) {
+    if (getComputedStyle(node).overflowY !== "visible") {
+      const rect = node.getBoundingClientRect();
+      return { top: rect.top, bottom: rect.bottom };
+    }
+    node = node.parentElement;
+  }
+  return { top: 0, bottom: window.innerHeight };
+}
+
+type MenuPlacement = "up" | "down";
+
+/**
+ * Resolves the anchor rect (the relative parent of the menu) and the nearest
+ * clipping boundary, then returns which side to open on and the max height
+ * (CSS px) that fits. `vhFraction`/`capPx` reproduce the menu's existing
+ * `min(<vhFraction>vh, <capPx>px)` default so the unconstrained case is
+ * byte-for-byte unchanged.
+ */
+function useDropdownFlip(
+  open: boolean,
+  menuRef: React.RefObject<HTMLDivElement | null>,
+  vhFraction: number,
+  capPx: number,
+) {
+  const [placement, setPlacement] = useState<MenuPlacement>("up");
+  const [maxHeight, setMaxHeight] = useState<number | null>(null);
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setPlacement("up");
+      setMaxHeight(null);
+      return;
+    }
+    const menu = menuRef.current;
+    const anchor = menu?.parentElement;
+    if (!menu || !anchor) return;
+    const boundary = getMenuBoundary(menu);
+    const rect = anchor.getBoundingClientRect();
+    const vh = window.innerHeight;
+    const defaultPx = Math.min(vh * vhFraction, capPx);
+    // The menu bottom (up) / top (down) is anchored 8px off the input edge.
+    const upSpace = rect.top - 8 - boundary.top - MENU_EDGE_PAD;
+    const downSpace = boundary.bottom - (rect.bottom + 8) - MENU_EDGE_PAD;
+
+    if (upSpace >= defaultPx || upSpace >= downSpace) {
+      setPlacement("up");
+      setMaxHeight(Math.max(0, Math.min(defaultPx, upSpace)));
+    } else {
+      setPlacement("down");
+      setMaxHeight(Math.max(0, Math.min(defaultPx, downSpace)));
+    }
+  }, [open, menuRef, vhFraction, capPx]);
+
+  return { placement, maxHeight };
+}
+
+function menuDropStyle(placement: MenuPlacement, maxHeight: number | null): React.CSSProperties {
+  return {
+    ...(placement === "down" ? { top: "calc(100% + 8px)" } : { bottom: "calc(100% + 8px)" }),
+    maxHeight: maxHeight !== null ? `${maxHeight}px` : undefined,
+  };
+}
+
+
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, fastModeEnabled, fastModeActive, fastModeSupported, onFastModeChange,
   onAbortCompaction, isCompacting, compactResult,
@@ -203,6 +279,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
   const toolPresetDropdownRef = useRef<HTMLDivElement>(null);
   const historyMenuRef = useRef<HTMLDivElement>(null);
+  const slashMenuRef = useRef<HTMLDivElement>(null);
+  const atMenuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isComposingRef = useRef(false);
   const lastCompositionEndAtRef = useRef(0);
@@ -553,6 +631,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
     : null;
+  const historyFlip = useDropdownFlip(historyMenuOpen && inputHistory.length > 0, historyMenuRef, 0.44, 360);
+  const slashFlip = useDropdownFlip(slashMenuOpen && slashQuery !== null, slashMenuRef, 0.56, 460);
+  const atFlip = useDropdownFlip(atMenuOpen && atQuery !== null, atMenuRef, 0.48, 400);
   const [dormantSkillNames, setDormantSkillNames] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
@@ -1466,9 +1547,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 position: "absolute",
                 left: 0,
                 right: 0,
-                bottom: "calc(100% + 8px)",
                 zIndex: 120,
-                maxHeight: "min(44vh, 360px)",
+                ...menuDropStyle(historyFlip.placement, historyFlip.maxHeight),
               }}
             >
               <div
@@ -1543,14 +1623,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           )}
           {slashMenuOpen && slashQuery !== null && (
             <div
+              ref={slashMenuRef}
               className="dropdown-surface"
               style={{
                 position: "absolute",
                 left: 0,
                 right: 0,
-                bottom: "calc(100% + 8px)",
                 zIndex: 120,
-                maxHeight: "min(56vh, 460px)",
+                ...menuDropStyle(slashFlip.placement, slashFlip.maxHeight),
               }}
             >
               <div
@@ -1681,14 +1761,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               : "";
             return (
               <div
+                ref={atMenuRef}
                 className="dropdown-surface"
                 style={{
                   position: "absolute",
                   left: 0,
                   right: 0,
-                  bottom: "calc(100% + 8px)",
                   zIndex: 120,
-                  maxHeight: "min(48vh, 400px)",
+                  ...menuDropStyle(atFlip.placement, atFlip.maxHeight),
                 }}
               >
                 <div
