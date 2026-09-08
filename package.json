@@ -81,6 +81,7 @@
     "eslint-config-next": "16.3.4",
     "jiti": "^2.7.0",
     "postcss": "^8",
+    "react-test-renderer": "^19.2.8",
     "tailwindcss": "^4.3.3",
     "typescript": "^5",
     "typescript-language-server": "^6.0.0"

@@ -2,9 +2,10 @@
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { ChevronDown, ChevronUp, Paperclip, Square } from "lucide-react";
-import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
+import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
-import { countToolCallBlocks, getDisplayableAssistantBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
+import { splitFinalAssistantBlocks } from "@/lib/message-display";
+import { isGroupAnchor, planTranscriptRows, type TranscriptRow } from "@/lib/chat-transcript-plan";
 import { MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ExtensionDialog } from "./ExtensionDialog";
@@ -74,23 +75,6 @@ const CHAT_COLUMN_MAX_WIDTH_DESKTOP = `min(${CHAT_COLUMN_MAX_WIDTH}px, calc(100%
 // the banner and the load looked like a no-op.
 const LOAD_MORE_ROOT_MARGIN = "400px 0px 0px 0px";
 
-function hasFinalAssistantAnswer(message: AgentMessage): boolean {
-  if (message.role !== "assistant") return false;
-  return splitFinalAssistantBlocks(message as AssistantMessage).answerBlocks.some((block) => (
-    block.type === "image" || (block.type === "text" && block.text.trim().length > 0)
-  ));
-}
-
-function findFinalAssistantIndex(messages: AgentMessage[], userIdx: number, endIdx: number): number {
-  for (let candidateIdx = endIdx - 1; candidateIdx > userIdx; candidateIdx--) {
-    if (hasFinalAssistantAnswer(messages[candidateIdx])) return candidateIdx;
-  }
-  for (let candidateIdx = endIdx - 1; candidateIdx > userIdx; candidateIdx--) {
-    if (messages[candidateIdx]?.role === "assistant") return candidateIdx;
-  }
-  return -1;
-}
-
 function getUserInputText(message: AgentMessage): string | null {
   if (message.role !== "user") return null;
   if (typeof message.content === "string") {
@@ -103,36 +87,6 @@ function getUserInputText(message: AgentMessage): string | null {
     .join("\n")
     .trim();
   return text.length > 0 ? text : null;
-}
-
-function countToolCalls(messages: AgentMessage[], indices: number[]): number {
-  let count = 0;
-  for (const idx of indices) {
-    const msg = messages[idx];
-    if (msg?.role !== "assistant") continue;
-    count += countToolCallBlocks(getDisplayableAssistantBlocks(msg as AssistantMessage));
-  }
-  return count;
-}
-
-function hasDisplayableProcessMessage(message: AgentMessage): boolean {
-  if (message.role === "assistant") {
-    return getDisplayableAssistantBlocks(message as AssistantMessage).length > 0;
-  }
-  return message.role === "custom";
-}
-
-// A user message normally anchors a turn (user prompt → process → final
-// answer), and the process messages in between get folded into a collapsed
-// ProcessDetailsGroup. When compaction fires mid-turn, pi drops the original
-// user prompt and inserts a compaction summary (role "custom", customType
-// "compaction") in its place; the agent then keeps producing tool calls and a
-// final answer with no user message left to anchor them. Treat a compaction
-// summary as an anchor too, otherwise every post-compaction message renders
-// standalone and never collapses.
-function isGroupAnchor(message: AgentMessage): boolean {
-  if (message.role === "user") return true;
-  return message.role === "custom" && (message as CustomMessage).customType === "compaction";
 }
 
 function withAssistantBlocks(
@@ -168,7 +122,7 @@ function OmpRuntimeVersion() {
   );
 }
 
-function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messageCount: number; toolCallCount: number; children: ReactNode }) {
+function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messageCount: number; toolCallCount: number; children: () => ReactNode }) {
   const { t, tn } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const parts = [t("chatWindow.processDetails"), tn("chatWindow.messageCount", messageCount)];
@@ -199,7 +153,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messag
       </button>
       {expanded && (
         <div style={{ marginTop: 3 }}>
-          {children}
+          {children()}
         </div>
       )}
     </div>
@@ -302,67 +256,82 @@ const CommittedTranscript = memo(function CommittedTranscript({
     );
   };
 
+  // Rows are plain descriptors; element creation below only happens for the
+  // visible window (rendered.slice(startIndex) happens on the row list, so
+  // invisible history never allocates React elements).
+  const rows = useMemo<TranscriptRow[]>(() => planTranscriptRows(messages), [messages]);
+  const isLiveTail = (row: TranscriptRow): boolean => {
+    if (row.kind !== "group") return false;
+    return (sessionBusy || isStreaming) && row.endIndex === messages.length && row.userIndex === lastAnchorIdx;
+  };
+
+  // Anchor the render window while the user is reading history: the plain
+  // end-anchored window (total - visibleCount) slides forward as a running
+  // agent appends messages, silently pushing the viewed messages out of the
+  // window with no scroll correction. While not near the bottom, keep the
+  // window's top at the last end-anchored position and let the appended tail
+  // grow into the window; returning to the bottom re-engages the end anchor.
+  const anchorStartIndexRef = useRef<number | null>(null);
+  const { startIndex, hasMore } = useMemo(() => {
+    const total = rows.length;
+    const endAnchored = Math.max(0, total - visibleCount);
+    if (nearBottom || anchorStartIndexRef.current === null) {
+      anchorStartIndexRef.current = endAnchored;
+      return { startIndex: endAnchored, hasMore: endAnchored > 0 };
+    }
+    const anchored = Math.min(anchorStartIndexRef.current, endAnchored);
+    anchorStartIndexRef.current = anchored;
+    return { startIndex: anchored, hasMore: anchored > 0 };
+  }, [rows.length, visibleCount, nearBottom]);
+
+  // Only rows from startIndex onward create React elements. Rows above the
+  // window are pure descriptors — no MessageView allocation for invisible
+  // history, so long sessions pay element cost proportional to the visible
+  // window instead of the whole transcript.
   const rendered: ReactNode[] = [];
-  for (let idx = 0; idx < messages.length;) {
-    const msg = messages[idx];
-    if (!isGroupAnchor(msg)) {
-      rendered.push(renderMessage(idx));
-      idx += 1;
+  for (let rowIdx = startIndex; rowIdx < rows.length; rowIdx++) {
+    const row = rows[rowIdx];
+    if (row.kind === "message") {
+      rendered.push(renderMessage(row.index));
       continue;
     }
+    const { userIndex: userIdx, endIndex: endIdx, finalAssistantIndex: finalAssistantIdx, processIndices, processCount, toolCallCount: groupToolCallCount, hasFinalAnswer } = row;
 
-    const userIdx = idx;
-    let endIdx = userIdx + 1;
-    while (endIdx < messages.length && !isGroupAnchor(messages[endIdx])) endIdx += 1;
-
-    const finalAssistantIdx = findFinalAssistantIndex(messages, userIdx, endIdx);
-
-    if (finalAssistantIdx === -1) {
+    if (isLiveTail(row)) {
+      // Live tail: the run may still be producing the final answer — flatten
+      // the group so streaming updates render without a collapsed wrapper.
       for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
         rendered.push(renderMessage(renderIdx));
       }
-      idx = endIdx;
-      continue;
-    }
-
-    const isLiveTail = (sessionBusy || isStreaming) && endIdx === messages.length && userIdx === lastAnchorIdx;
-    if (isLiveTail) {
-      for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
-        rendered.push(renderMessage(renderIdx));
-      }
-      idx = endIdx;
       continue;
     }
 
     rendered.push(renderMessage(userIdx));
-
-    const processIndices: number[] = [];
-    for (let processIdx = userIdx + 1; processIdx < finalAssistantIdx; processIdx++) {
-      processIndices.push(processIdx);
-    }
-    const visibleProcessIndices = processIndices.filter((processIdx) => hasDisplayableProcessMessage(messages[processIdx]));
+    const processRefIdx = processIndices
+      .map((processIdx) => visibleRefIndexByMessage.get(processIdx))
+      .find((value): value is number => typeof value === "number")
+      ?? (hasFinalAnswer ? undefined : visibleRefIndexByMessage.get(finalAssistantIdx));
     const finalAssistant = messages[finalAssistantIdx] as AssistantMessage;
     const finalSplit = splitFinalAssistantBlocks(finalAssistant);
     const finalProcessMessage = finalSplit.processBlocks.length > 0
       ? withAssistantBlocks(finalAssistant, finalSplit.processBlocks, { omitUsage: true })
       : null;
-    const finalAnswerMessage = finalSplit.answerBlocks.length > 0
+    const finalAnswerMessage = hasFinalAnswer
       ? withAssistantBlocks(finalAssistant, finalSplit.answerBlocks)
       : null;
 
-    const processCount = visibleProcessIndices.length + (finalProcessMessage ? 1 : 0);
     if (processCount > 0) {
-      const processRefIdx = visibleProcessIndices
-        .map((processIdx) => visibleRefIndexByMessage.get(processIdx))
-        .find((value): value is number => typeof value === "number")
-        ?? (finalAnswerMessage ? undefined : visibleRefIndexByMessage.get(finalAssistantIdx));
       const processGroup = (
         <ProcessDetailsGroup
           messageCount={processCount}
-          toolCallCount={countToolCalls(messages, visibleProcessIndices) + countToolCallBlocks(finalSplit.processBlocks)}
+          toolCallCount={groupToolCallCount}
         >
-          {visibleProcessIndices.map((processIdx) => renderMessage(processIdx, { attachRef: false, keyPrefix: "process" }))}
-          {finalProcessMessage && renderMessage(finalAssistantIdx, { attachRef: false, keyPrefix: "process-final", messageOverride: finalProcessMessage, showTimestamp: false })}
+          {() => (
+            <>
+              {processIndices.map((processIdx) => renderMessage(processIdx, { attachRef: false, keyPrefix: "process" }))}
+              {finalProcessMessage && renderMessage(finalAssistantIdx, { attachRef: false, keyPrefix: "process-final", messageOverride: finalProcessMessage, showTimestamp: false })}
+            </>
+          )}
         </ProcessDetailsGroup>
       );
       rendered.push(
@@ -381,26 +350,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
     for (let renderIdx = finalAssistantIdx + 1; renderIdx < endIdx; renderIdx++) {
       rendered.push(renderMessage(renderIdx));
     }
-    idx = endIdx;
   }
-  // Anchor the render window while the user is reading history: the plain
-  // end-anchored window (total - visibleCount) slides forward as a running
-  // agent appends messages, silently pushing the viewed messages out of the
-  // window with no scroll correction. While not near the bottom, keep the
-  // window's top at the last end-anchored position and let the appended tail
-  // grow into the window; returning to the bottom re-engages the end anchor.
-  const anchorStartIndexRef = useRef<number | null>(null);
-  const { startIndex, hasMore } = useMemo(() => {
-    const total = rendered.length;
-    const endAnchored = Math.max(0, total - visibleCount);
-    if (nearBottom || anchorStartIndexRef.current === null) {
-      anchorStartIndexRef.current = endAnchored;
-      return { startIndex: endAnchored, hasMore: endAnchored > 0 };
-    }
-    const anchored = Math.min(anchorStartIndexRef.current, endAnchored);
-    anchorStartIndexRef.current = anchored;
-    return { startIndex: anchored, hasMore: anchored > 0 };
-  }, [rendered.length, visibleCount, nearBottom]);
   return (
     <>
       {hasMore && (
@@ -413,7 +363,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
           {t("chatWindow.scrollUpToLoad", { count: startIndex })}
         </button>
       )}
-      {rendered.slice(startIndex)}
+      {rendered}
     </>
   );
 });
