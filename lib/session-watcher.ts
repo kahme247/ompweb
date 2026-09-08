@@ -2,7 +2,9 @@ import { watch, type FSWatcher } from "fs";
 import { join } from "path";
 import {
   getAgentDir,
+  invalidateSessionEntriesCache,
   invalidateSessionListCache,
+  invalidateSessionListMeta,
   listAllSessions,
   resolveSessionIdByPath,
 } from "./session-reader";
@@ -34,29 +36,19 @@ function flush(): void {
   pendingUnknown = false;
   if (paths.length === 0 && !hadUnknown) return;
 
-  // A changed file means the cached list's mtimes and message counts are stale.
-  invalidateSessionListCache();
-
   if (hadUnknown) {
     // filename was null — fs.watch coalesced the event or overflowed. We
-    // don't know which file changed, so rescan the whole tree.
-    void listAllSessions()
-      .then((sessions) => {
-        const sessionIds = sessions.map((s) => s.id);
-        if (sessionIds.length === 0) return;
-        for (const listener of listeners) {
-          try {
-            listener(sessionIds);
-          } catch {
-            // a failing subscriber must not stop the others
-          }
-        }
-      })
-      .catch(() => {
-        // resolution failures are not worth tearing the watcher down for
-      });
+    // don't know which file changed, so fall back to the full invalidation.
+    invalidateSessionListCache();
+    void rescanAndNotify();
     return;
   }
+
+  // Known paths: refresh the list metadata (a changed file means the cached
+  // list's mtimes and message counts are stale) and invalidate ONLY the
+  // changed sessions' parse caches, leaving unrelated sessions cached.
+  invalidateSessionListMeta();
+  for (const path of paths) invalidateSessionEntriesCache(path);
 
   void Promise.all(paths.map((path) => resolveSessionIdByPath(path).catch(() => undefined)))
     .then((ids) => {
@@ -73,6 +65,23 @@ function flush(): void {
     .catch(() => {
       // resolution failures are not worth tearing the watcher down for
     });
+}
+
+async function rescanAndNotify(): Promise<void> {
+  try {
+    const sessions = await listAllSessions();
+    const sessionIds = sessions.map((s) => s.id);
+    if (sessionIds.length === 0) return;
+    for (const listener of listeners) {
+      try {
+        listener(sessionIds);
+      } catch {
+        // a failing subscriber must not stop the others
+      }
+    }
+  } catch {
+    // resolution failures are not worth tearing the watcher down for
+  }
 }
 
 function scheduleRetry(): void {

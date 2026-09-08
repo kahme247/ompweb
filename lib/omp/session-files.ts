@@ -35,6 +35,7 @@ import type {
   SessionTreeNode,
 } from "../types";
 import { getArchivedSessionsDir, getBlobsDir, getSessionsDir } from "./paths";
+import { sessionPathKey } from "../paths";
 
 /**
  * Pure-Node reader/writer for oh-my-pi's session JSONL files (format v3).
@@ -329,7 +330,7 @@ function resolveBlobsInValue(value: unknown, key: string | undefined): void {
 }
 
 /** Cheap precheck so blob-free entries skip the resolution walk entirely. */
-function containsBlobRef(value: unknown): boolean {
+export function containsBlobRef(value: unknown): boolean {
   if (typeof value === "string") return isBlobRef(value);
   if (Array.isArray(value)) {
     for (const item of value) if (containsBlobRef(item)) return true;
@@ -946,9 +947,34 @@ declare global {
 
 const MAX_SESSION_SCAN_CACHE_ENTRIES = 2048;
 
+/** Normalized cache key: sessionPathKey lowercases and normalizes separators
+ * on Windows so invalidation from a differently-cased path still hits. */
+function scanCacheKey(filePath: string): string {
+  return sessionPathKey(filePath);
+}
+
 function getSessionScanCache(): Map<string, SessionScanCacheEntry> {
   if (!globalThis.__ompSessionScanCache) globalThis.__ompSessionScanCache = new Map();
   return globalThis.__ompSessionScanCache;
+}
+
+/** Invalidate the memoized scan (prefix/suffix window info) for ONE session
+ * file. Callers that know exactly which session changed (live RPC events with
+ * a session file path, the file watcher with a concrete filename) use this
+ * when the file's size+mtime may NOT have changed (title-slot rewrites, title
+ * updates, reparent rewrites, delete-while-open) so the list scan picks up the
+ * new window without dropping every other session's scan memo. */
+export function invalidateSessionScanCache(filePath: string): void {
+  globalThis.__ompSessionScanCache?.delete(scanCacheKey(filePath));
+}
+
+/** Clear EVERY per-file scan memo. Used by the full list-cache flush for
+ * unknown-source changes (delete/archive/import fallbacks): a change whose
+ * path is unknown cannot target one memo, and without this an unknown
+ * same-size + same-mtime rewrite would keep serving the OLD scan summary
+ * (old title / old parent link) to the sidebar. */
+export function invalidateAllSessionScanCaches(): void {
+  globalThis.__ompSessionScanCache?.clear();
 }
 
 /** scanSessionInfo memoized on (path, size, mtimeMs). Callers must treat the
@@ -961,18 +987,19 @@ function scanSessionInfoCached(filePath: string): OmpSessionInfo | undefined {
     return undefined;
   }
   const cache = getSessionScanCache();
-  const cached = cache.get(filePath);
+  const key = scanCacheKey(filePath);
+  const cached = cache.get(key);
   if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
-    cache.delete(filePath);
-    cache.set(filePath, cached);
+    cache.delete(key);
+    cache.set(key, cached);
     return cached.info;
   }
-  if (cached) cache.delete(filePath);
+  if (cached) cache.delete(key);
   const info = scanSessionInfo(filePath, true);
   // Failed scans are not negatively cached: a transient read error must not
   // hide a session until its next mtime bump.
   if (info) {
-    cache.set(filePath, { size: stat.size, mtimeMs: stat.mtimeMs, info });
+    cache.set(key, { size: stat.size, mtimeMs: stat.mtimeMs, info });
     while (cache.size > MAX_SESSION_SCAN_CACHE_ENTRIES) {
       const oldestKey = cache.keys().next().value;
       if (oldestKey === undefined) break;

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { scanSessionInfo, setSessionTitle } from "@/lib/omp/session-files";
 import { deriveSessionTitleFromFirstMessage, sanitizeSessionTitle } from "@/lib/session-title";
 import { getRpcSession } from "@/lib/rpc-manager";
-import { invalidateSessionListCache } from "@/lib/session-reader";
+import { invalidateSessionCaches } from "@/lib/session-reader";
 import { resolveSessionPathOr404 } from "@/lib/api-utils";
 
 /**
@@ -31,7 +31,10 @@ export async function POST(
         const state = await rpc.send({ type: "get_state" }) as { sessionName?: string } | null;
         const liveTitle = sanitizeSessionTitle(state?.sessionName);
         if (liveTitle) {
-          invalidateSessionListCache();
+          // The live child owns the file; ask it for the path so the targeted
+          // invalidation does not flush every other session's parse caches.
+          const filePath = rpc?.sessionFile;
+          invalidateSessionCaches(filePath);
           return NextResponse.json({ title: liveTitle, usage: null });
         }
       } catch {
@@ -62,7 +65,7 @@ export async function POST(
     if (!running) {
       setSessionTitle(filePath, derived, "auto");
     }
-    invalidateSessionListCache();
+    invalidateSessionCaches(filePath);
     return NextResponse.json({ title: derived, usage: null });
   } catch (error) {
     return NextResponse.json(
