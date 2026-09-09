@@ -444,7 +444,9 @@ export class AgentSessionWrapper {
         // is also a terminal-failure signal. Otherwise this frame would be
         // ignored and the UI would stop with no explanation.
         if (event.success === false) {
-          const promptFailure = event.command === "prompt" || this.promptRunning || this.streaming;
+          const promptFailure =
+            event.command === "prompt" ||
+            (!event.command && (this.promptRunning || this.streaming));
           const detail = typeof event.error === "string"
             ? event.error
             : typeof event.message === "string"
@@ -1170,10 +1172,10 @@ export class AgentSessionWrapper {
               });
               patchEstimatedTokensAfter(result);
               return result;
-} finally {
-            this.compacting = false;
-          }
-        });
+            } finally {
+              this.compacting = false;
+            }
+          });
         } finally {
           this.invalidateSessionLists();
         }
