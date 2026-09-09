@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
+import { parseFormDataWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 
 export const dynamic = "force-dynamic";
+
+export const MAX_STT_AUDIO_BYTES = 25 * 1024 * 1024;
+const MAX_STT_REQUEST_BYTES = MAX_STT_AUDIO_BYTES + 1024 * 1024;
 
 function extractUpstreamErrorMessage(data: unknown, rawText: string, status: number): string {
   if (data && typeof data === "object" && "error" in data) {
@@ -33,7 +37,21 @@ export async function POST(request: Request) {
 
     apiKey = cleanEnvVar(process.env.OMP_WEB_STT_KEY);
     const model = cleanEnvVar(process.env.OMP_WEB_STT_MODEL);
-    const formData = await request.formData();
+    const formData = await parseFormDataWithinLimit(request, MAX_STT_REQUEST_BYTES);
+    const file = formData.get("file");
+    if (!file || typeof file === "string" || file.size === 0) {
+      return NextResponse.json(
+        { error: "Audio file is required", code: "missing_audio_file" },
+        { status: 400 }
+      );
+    }
+    if (file.size > MAX_STT_AUDIO_BYTES) {
+      return NextResponse.json(
+        { error: "Audio file too large (max 25MB)", code: "audio_too_large" },
+        { status: 413 }
+      );
+    }
+
     if (model && !formData.has("model")) {
       formData.append("model", model);
     }
@@ -65,6 +83,12 @@ export async function POST(request: Request) {
     }
     return NextResponse.json({ text: rawText }, { status: res.status });
   } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      return NextResponse.json(
+        { error: "Audio file too large (max 25MB)", code: "audio_too_large" },
+        { status: 413 }
+      );
+    }
     const rawMsg = error instanceof Error ? error.message : String(error);
     const safeMsg = apiKey ? rawMsg.replaceAll(apiKey, "[REDACTED]") : rawMsg;
     return NextResponse.json({ error: safeMsg }, { status: 500 });

@@ -1007,13 +1007,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         if (recentlyComposed) e.preventDefault();
         return;
       }
-      if (isRecording) {
+      if (isRecording || isTranscribing) {
         if (e.key === "Escape") {
           e.preventDefault();
           cancelDictation();
           return;
         }
-        if (e.key === "Enter" && !e.shiftKey) {
+        if (isRecording && e.key === "Enter" && !e.shiftKey) {
           e.preventDefault();
           stopDictation();
           return;
@@ -1143,7 +1143,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }
       }
     },
-    [isStreaming, onSteer, onFollowUp, onAbort, onMinimize, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, isRecording, cancelDictation, stopDictation, toggleDictation]
+    [isStreaming, onSteer, onFollowUp, onAbort, onMinimize, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, isRecording, isTranscribing, cancelDictation, stopDictation, toggleDictation]
   );
 
   const handleInput = useCallback(() => {

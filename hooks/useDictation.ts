@@ -24,10 +24,10 @@ export function useDictation({ onTranscript, onError }: UseDictationOptions) {
   const [isTranscribing, setIsTranscribing] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
   const cancelledRef = useRef(false);
   const isStartingRef = useRef(false);
   const maxTimeoutRef = useRef<number | null>(null);
-
   const clearMaxTimeout = useCallback(() => {
     if (maxTimeoutRef.current !== null) {
       window.clearTimeout(maxTimeoutRef.current);
@@ -50,12 +50,24 @@ export function useDictation({ onTranscript, onError }: UseDictationOptions) {
     setIsRecording(false);
   }, [clearMaxTimeout]);
 
-  useEffect(() => cleanup, [cleanup]);
-
+  useEffect(() => {
+    return () => {
+      cancelledRef.current = true;
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
+      }
+      cleanup();
+    };
+  }, [cleanup]);
   const start = useCallback(async () => {
     if (isStartingRef.current || isRecording || isTranscribing) return;
     isStartingRef.current = true;
     cleanup();
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
     cancelledRef.current = false;
     if (
       typeof navigator?.mediaDevices?.getUserMedia !== "function" ||
@@ -83,6 +95,12 @@ export function useDictation({ onTranscript, onError }: UseDictationOptions) {
         clearMaxTimeout();
         if (chunks.length === 0) return;
         setIsTranscribing(true);
+        const abortController = new AbortController();
+        abortControllerRef.current = abortController;
+        const timeoutId = window.setTimeout(() => {
+          abortController.abort(new DOMException("Transcription timed out", "TimeoutError"));
+        }, STT_TIMEOUT_MS);
+
         try {
           const mimeType = recorder.mimeType || "audio/webm";
           const blob = new Blob(chunks, { type: mimeType });
@@ -93,25 +111,37 @@ export function useDictation({ onTranscript, onError }: UseDictationOptions) {
           const res = await fetch("/api/stt", {
             method: "POST",
             body,
-            signal: AbortSignal.timeout(STT_TIMEOUT_MS),
+            signal: abortController.signal,
           });
+          if (cancelledRef.current) return;
           const data = await res.json();
+          if (cancelledRef.current) return;
           if (!res.ok) {
             onError?.(normalizeErrorMessage(data?.error, "Transcription failed"));
             return;
           }
           if (typeof data.text === "string" && data.text.trim()) {
-            onTranscript(data.text.trim());
+            if (!cancelledRef.current) {
+              onTranscript(data.text.trim());
+            }
           } else {
-            onError?.("No speech detected");
+            if (!cancelledRef.current) {
+              onError?.("No speech detected");
+            }
           }
         } catch (err) {
+          if (cancelledRef.current) return;
+          if (err instanceof DOMException && err.name === "AbortError") return;
           onError?.(
             err instanceof Error
               ? err.message
               : normalizeErrorMessage(err, "Transcription failed"),
           );
         } finally {
+          window.clearTimeout(timeoutId);
+          if (abortControllerRef.current === abortController) {
+            abortControllerRef.current = null;
+          }
           setIsTranscribing(false);
         }
       };
@@ -155,6 +185,11 @@ export function useDictation({ onTranscript, onError }: UseDictationOptions) {
 
   const cancel = useCallback(() => {
     cancelledRef.current = true;
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsTranscribing(false);
     cleanup();
   }, [cleanup]);
 
