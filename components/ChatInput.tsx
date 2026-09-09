@@ -1590,6 +1590,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 left: 0,
                 right: 0,
                 zIndex: 120,
+                display: "flex",
+                flexDirection: "column",
                 ...menuDropStyle(historyFlip.placement, historyFlip.maxHeight),
               }}
             >
@@ -1602,6 +1604,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   display: "flex",
                   alignItems: "center",
                   color: "var(--text-dim)",
+                  flexShrink: 0,
                 }}
               >
                 <svg
@@ -1620,7 +1623,17 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   <path d="M12 7v5l3 2" />
                 </svg>
               </div>
-              <div style={{ maxHeight: "calc(min(44vh, 360px) - 31px)", overflowY: "auto", padding: 4 }}>
+              <div
+                style={{
+                  flex: 1,
+                  minHeight: 0,
+                  maxHeight: historyFlip.maxHeight !== null
+                    ? `${Math.max(0, historyFlip.maxHeight - 31)}px`
+                    : "calc(min(44vh, 360px) - 31px)",
+                  overflowY: "auto",
+                  padding: 4,
+                }}
+              >
                 {inputHistory.map((item, index) => {
                   const active = index === historyActiveIndex;
                   return (
@@ -1672,6 +1685,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 left: 0,
                 right: 0,
                 zIndex: 120,
+                display: "flex",
+                flexDirection: "column",
                 ...menuDropStyle(slashFlip.placement, slashFlip.maxHeight),
               }}
             >
@@ -1685,12 +1700,23 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   gap: 8,
                   fontSize: 11,
                   color: "var(--text-dim)",
+                  flexShrink: 0,
                 }}
               >
                 <span>{slashCommandsLoading ? t("chatInput.loadingCommands") : t("chatInput.slashCommandsHeader", { countLabel: slashCommandCountLabel })}</span>
                 <span style={{ fontFamily: "var(--font-mono)" }}>{t("chatInput.tabEnterHint")}</span>
               </div>
-              <div style={{ maxHeight: "calc(min(56vh, 460px) - 34px)", overflowY: "auto", padding: 10 }}>
+              <div
+                style={{
+                  flex: 1,
+                  minHeight: 0,
+                  maxHeight: slashFlip.maxHeight !== null
+                    ? `${Math.max(0, slashFlip.maxHeight - 34)}px`
+                    : "calc(min(56vh, 460px) - 34px)",
+                  overflowY: "auto",
+                  padding: 10,
+                }}
+              >
                 {!slashCommandsLoading && filteredSlashCommands.length === 0 ? (
                   <div style={{ padding: "2px 2px 4px", fontSize: 12, color: "var(--text-dim)" }}>
                     {t("chatInput.noCommandsFound")}
@@ -1810,6 +1836,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   left: 0,
                   right: 0,
                   zIndex: 120,
+                  display: "flex",
+                  flexDirection: "column",
                   ...menuDropStyle(atFlip.placement, atFlip.maxHeight),
                 }}
               >
@@ -1823,6 +1851,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     gap: 8,
                     fontSize: 11,
                     color: "var(--text-dim)",
+                    flexShrink: 0,
                   }}
                 >
                   <span>
@@ -1832,7 +1861,17 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   </span>
                   <span style={{ fontFamily: "var(--font-mono)" }}>{t("chatInput.tabEnterHint")}</span>
                 </div>
-                <div style={{ maxHeight: "calc(min(48vh, 400px) - 34px)", overflowY: "auto", padding: 4 }}>
+                <div
+                  style={{
+                    flex: 1,
+                    minHeight: 0,
+                    maxHeight: atFlip.maxHeight !== null
+                      ? `${Math.max(0, atFlip.maxHeight - 34)}px`
+                      : "calc(min(48vh, 400px) - 34px)",
+                    overflowY: "auto",
+                    padding: 4,
+                  }}
+                >
                   {!indexLoading && atMatches.length === 0 ? (
                     <div style={{ padding: "6px 8px", fontSize: 12, color: "var(--text-dim)" }}>
                       {needsServerSearch && !serverResultInUse ? t("chatInput.searching") : t("chatInput.noMatchingFiles")}
