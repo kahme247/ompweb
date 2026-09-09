@@ -33,6 +33,10 @@ import {
 import { OmpWebTitle, SIDEBAR_BUTTON_TRANSITION, SidebarIconButton } from "./SessionSidebar-chrome";
 import { ProjectRow, ProjectWorktreeSwitcher } from "./SessionSidebar-rows";
 
+/** Deadline for one /api/sessions fetch. A wedged-but-listening server never
+ * answers; without this the initial spinner would pend forever. */
+const SESSIONS_FETCH_TIMEOUT_MS = 15_000;
+
 declare global {
   interface Window {
     piDesktop?: {
@@ -136,6 +140,12 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     sessionsAbortRef.current?.abort();
     const controller = new AbortController();
     sessionsAbortRef.current = controller;
+    // A wedged-but-listening server (the long-idle failure mode) accepts the
+    // TCP connection and never answers: without a deadline the fetch pends
+    // forever and the sidebar shows its initial spinner indefinitely. Abort
+    // with a TimeoutError so the catch surfaces an error and the
+    // visibility/online recovery below can retry later.
+    const timeout = setTimeout(() => controller.abort(new DOMException("Session list request timed out", "TimeoutError")), SESSIONS_FETCH_TIMEOUT_MS);
     try {
       if (showLoading) setLoading(true);
       const headers: Record<string, string> = {};
@@ -181,6 +191,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       if ((e as Error)?.name === "AbortError") return;
       setError(t("sessionSidebar.loadFailed", { detail: e instanceof Error ? e.message : String(e) }));
     } finally {
+      clearTimeout(timeout);
       initialLoadedRef.current = true;
       if (showLoading) setLoading(false);
     }
@@ -296,6 +307,22 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       source.close();
     };
   }, [loadSessions, scheduleRefresh]);
+  // Long-idle recovery: while the tab is hidden the SSE connection can die
+  // (laptop sleep, network change, tab freeze) and its EventSource reconnect
+  // carries no list invalidation. Refresh whenever the user actually comes
+  // back or the network returns, so the list is never left stale/empty.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void loadSessions(false);
+    };
+    const onOnline = () => void loadSessions(false);
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("online", onOnline);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("online", onOnline);
+    };
+  }, [loadSessions]);
 
   useEffect(() => {
     const previous = previousRunningSessionIdsRef.current;

@@ -23,3 +23,17 @@ test("fork carries the advisor choice to the new session id", async () => {
   assert.match(source, /setSessionAdvisorSpawn\(newSessionId, true\)/);
   assert.match(source, /omp-advisor-enabled:\$\{newSessionId\}/);
 });
+
+test("a CLOSED event stream retries with backoff even while the agent is idle", async () => {
+  const source = await readFile(new URL("./useAgentSession.ts", import.meta.url), "utf8");
+  // EventSource gives up on fatal errors; without a manual retry an idle
+  // session whose stream died (server hiccup, wrapper respawn) stays dead
+  // silently until a full page reload. The retry must not be gated on
+  // agentRunningRef — only on the session still being selected.
+  assert.match(source, /reconnectTimerRef\.current = setTimeout\(\(\) => \{\s*\n\s*reconnectTimerRef\.current = undefined;\s*\n\s*if \(sessionIdRef\.current === sid\) \{\s*\n\s*void connectEvents\(sid\);/);
+  // Backoff doubles per failure and caps, so a persistently failing endpoint
+  // (e.g. a 409 wrapper-less session) cannot tight-loop.
+  assert.match(source, /eventStreamRetryMsRef\.current = Math\.min\(delay \* 2, EVENT_STREAM_RETRY_MAX_MS\)/);
+  // A successful open resets the backoff to the floor.
+  assert.match(source, /es\.onopen = \(\) => \{\s*\n\s*eventStreamRetryMsRef\.current = EVENT_STREAM_RETRY_MIN_MS;/);
+});

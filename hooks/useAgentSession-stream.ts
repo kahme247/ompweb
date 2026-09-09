@@ -237,6 +237,13 @@ export const BASH_STATE_RECONCILE_MS = 1_000;
 export const EVENT_STREAM_CONNECT_TIMEOUT_MS = 60_000;
 // Tell the user something is happening if the stream is still connecting.
 export const EVENT_STREAM_SLOW_CONNECT_MS = 4_000;
+// Manual reconnect backoff for a CLOSED event stream (fatal per EventSource,
+// so the browser will not retry on its own). Doubles per consecutive failure,
+// caps at the max; reset on any successful open. Without this, an idle
+// session whose stream died (server hiccup, wrapper respawn) stays dead
+// silently until a full page reload.
+export const EVENT_STREAM_RETRY_MIN_MS = 1_000;
+export const EVENT_STREAM_RETRY_MAX_MS = 30_000;
 
 export const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " ", "Space", "Spacebar"]);
 export function isQuotaLikeError(text: string): boolean {

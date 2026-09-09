@@ -1,3 +1,7 @@
+import { appendFileSync, mkdirSync, renameSync, statSync } from "fs";
+import { join } from "path";
+import { getConfigRoot } from "@/lib/omp/paths";
+
 export async function register(): Promise<void> {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
 
@@ -41,4 +45,44 @@ export async function register(): Promise<void> {
       console.warn(`[omp-web] omp utility warm-up failed (routes will retry on demand): ${detail} — ${hint}`);
     }
   })();
+
+  // Crash/stall journal: a long-running server that dies or wedges while the
+  // user is away leaves no trace in a terminal that no longer exists (CLI runs
+  // are killed with their terminal; pages then show endless loading until the
+  // process is restarted). Append fatal errors and event-loop stalls to a file
+  // so the next incident explains itself. Node's default crash semantics are
+  // preserved — this only adds the record before exiting.
+  const logDir = join(getConfigRoot(), "omp-web");
+  const logPath = join(logDir, "diagnostics.log");
+  const appendDiag = (kind: string, detail: string) => {
+    try {
+      mkdirSync(logDir, { recursive: true });
+      try {
+        if (statSync(logPath).size > 1_000_000) renameSync(logPath, `${logPath}.old`);
+      } catch { /* first write or unreadable — append anyway */ }
+      appendFileSync(logPath, `${new Date().toISOString()} [${kind}] ${detail}\n`, { encoding: "utf8" });
+    } catch { /* diagnostics must never crash the server */ }
+  };
+  const describe = (value: unknown) => (value instanceof Error ? `${value.name}: ${value.message}\n${value.stack ?? ""}` : String(value));
+  process.on("uncaughtException", (error) => {
+    appendDiag("crash", `uncaughtException ${describe(error)}`);
+    // An uncaughtException listener suppresses Node's default exit; keep the
+    // crash-visible semantics by exiting explicitly.
+    process.exit(2);
+  });
+  process.on("unhandledRejection", (reason) => {
+    appendDiag("crash", `unhandledRejection ${describe(reason)}`);
+    // Same as above: preserve Node's crash-on-unhandled-rejection default.
+    process.exit(2);
+  });
+  let lastTick = Date.now();
+  const watchdog = setInterval(() => {
+    const now = Date.now();
+    const drift = now - lastTick;
+    lastTick = now;
+    if (drift > 45_000) {
+      appendDiag("stall", `event loop unresponsive for ~${Math.round(drift / 1000)}s — a synchronous operation is blocking every request`);
+    }
+  }, 15_000);
+  watchdog.unref?.();
 }

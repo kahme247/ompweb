@@ -62,6 +62,8 @@ import {
   AGENT_STATE_RECONCILE_MS,
   BASH_STATE_RECONCILE_MS,
   EVENT_STREAM_CONNECT_TIMEOUT_MS,
+  EVENT_STREAM_RETRY_MAX_MS,
+  EVENT_STREAM_RETRY_MIN_MS,
   EVENT_STREAM_SLOW_CONNECT_MS,
   PROGRAMMATIC_SCROLL_IGNORE_MS,
   PROMPT_SETTLE_INITIAL_DELAY_MS,
@@ -293,7 +295,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const activeSubagentCount = subagents.filter((subagent) => subagent.source !== "history" && subagent.status === "started").length;
 
   const eventSourceRef = useRef<EventSource | null>(null);
-  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectTimerRef = useRef<NodeJS.Timeout | undefined>(undefined);
+  const eventStreamRetryMsRef = useRef<number>(EVENT_STREAM_RETRY_MIN_MS);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
   // Guards stale branch/leaf context responses: two rapid navigate clicks must
   // not let the older response overwrite the newer branch's messages.
@@ -923,10 +926,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         resolve({ status, source: es });
       };
       const timeout = setTimeout(() => settle("timeout"), EVENT_STREAM_CONNECT_TIMEOUT_MS);
-
       // The stream is live as soon as the response headers land, whether or not
-      // the server also sends an explicit `connected` frame.
-      es.onopen = () => settle("connected");
+      // the server also sends an explicit `connected` frame. A successful open
+      // also resets the manual-reconnect backoff.
+      es.onopen = () => {
+        eventStreamRetryMsRef.current = EVENT_STREAM_RETRY_MIN_MS;
+        settle("connected");
+      };
 
       es.onmessage = (e) => {
         try {
@@ -942,25 +948,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       };
       es.onerror = () => {
         if (es.readyState === EventSource.CLOSED) {
-          // Fatal error (404/500/content-type mismatch): browser won't
-          // auto-reconnect. Settle the Promise and manually reconnect for
-          // already-running sessions. Keep the timer in a ref so unmount or a
-          // session switch cancels it — otherwise an orphaned stream respawns
-          // (and can 404-loop) after the hook is torn down.
+          // Fatal error (404/409/500/content-type mismatch): the browser will
+          // not auto-reconnect. Settle the Promise and schedule a manual
+          // reconnect with capped backoff — regardless of whether the agent is
+          // running. Long-idle sessions (wrapper respawned server-side, server
+          // restart, proxy timeout) previously stayed dead silently until a
+          // page reload; the backoff bounds the retry loop against endpoints
+          // that keep failing (e.g. a 409 "not managed" wrapper-less session).
           settle("closed");
-          if (eventSourceRef.current === es && agentRunningRef.current) {
+          if (eventSourceRef.current === es) {
             eventSourceRef.current = null;
-            if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+            const delay = eventStreamRetryMsRef.current;
+            eventStreamRetryMsRef.current = Math.min(delay * 2, EVENT_STREAM_RETRY_MAX_MS);
+            clearTimeout(reconnectTimerRef.current);
             reconnectTimerRef.current = setTimeout(() => {
-              reconnectTimerRef.current = null;
-              if (agentRunningRef.current && sessionIdRef.current === sid) {
+              reconnectTimerRef.current = undefined;
+              if (sessionIdRef.current === sid) {
                 void connectEvents(sid);
-                // The reconnect restores the event stream, but host tools, URI
-                // schemes, and the subagent roster were registered on the old
-                // connection — re-register them so the agent keeps working.
-                reconnectActionsRef.current?.(sid);
+                // While the agent runs, the reconnect must also re-register
+                // host tools, URI schemes, and the subagent roster that were
+                // registered on the old connection.
+                if (agentRunningRef.current) reconnectActionsRef.current?.(sid);
               }
-            }, 1000);
+            }, delay);
           }
         }
         // Recoverable errors (CONNECTING): let EventSource auto-reconnect.
@@ -2984,10 +2994,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       eventCoalescerRef.current?.reset();
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
-      if (reconnectTimerRef.current) {
-        clearTimeout(reconnectTimerRef.current);
-        reconnectTimerRef.current = null;
-      }
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = undefined;
       if (rosterRefreshTimerRef.current) {
         clearTimeout(rosterRefreshTimerRef.current);
         rosterRefreshTimerRef.current = null;
