@@ -1007,6 +1007,7 @@ export function AppShell() {
     // Re-picking the already-open session (sidebar double-click, palette
     // re-select, notification click) must not bump sessionKey: that remounts
     // ChatWindow, reconnects SSE, and drops the mid-run streaming view.
+    setSettingsTab(null);
     if (!isRestore && session.id === selectedSession?.id) return;
     setNewSessionCwd(null);
     setSelectedSession(session);
@@ -1032,6 +1033,7 @@ export function AppShell() {
   }, [router, isMobile, selectedSession?.id]);
 
   const handleNewSession = useCallback((_sessionId: string, cwd: string) => {
+    setSettingsTab(null);
     setSelectedSession(null);
     setNewSessionCwd(cwd);
     setSessionKey((k) => k + 1);
@@ -1345,7 +1347,29 @@ export function AppShell() {
   }, [windowTitle]);
 
   const sidebarContent = (
+    <SessionSidebar
+      selectedSessionId={selectedSession?.id ?? null}
+      optimisticSession={selectedSession?.path === "" ? selectedSession : null}
+      onSelectSession={handleSelectSession}
+      onNewSession={handleNewSession}
+      initialSessionId={initialSessionId}
+      skipInitialProjectSelection={initialNavigation.requestedCwd !== null}
+      onInitialRestoreDone={handleInitialRestoreDone}
+      refreshKey={refreshKey}
+      onSessionDeleted={handleSessionDeleted}
+      selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
+      onCwdChange={handleCwdChange}
+      usageVisible={providerUsageVisible}
+      settingsOpen={Boolean(settingsTab)}
+      onOpenSettings={() => setSettingsTab((prev) => prev ? null : "general")}
+      onOpenArchive={() => setArchiveBrowserOpen(true)}
+      updateAvailable={Boolean(appUpdate?.updateAvailable) || ompUpdateAvailable}
+    />
+  );
+
+  return (
     <>
+    <ToastProvider>
       <CommandPalette
         onSelectSession={handleSelectSession}
         onNewSession={() => {
@@ -1358,37 +1382,19 @@ export function AppShell() {
           }
           void fetch("/api/default-cwd", { method: "POST" })
             .then(async (response) => {
-              const data = (await response.json().catch(() => ({}))) as { cwd?: string };
-              if (!response.ok || !data.cwd) throw new Error(`HTTP ${response.status}`);
+              if (!response.ok) throw new Error(`HTTP ${response.status}`);
+              const data = (await response.json()) as { cwd?: string };
+              if (!data.cwd) throw new Error("Empty cwd returned");
+              return data;
+            })
+            .then((data) => {
+              if (!data.cwd) throw new Error("Empty cwd returned");
               handleNewSession(`palette-${Date.now()}`, data.cwd);
             })
             .catch(() => toast.error(translate("errors.generic")));
         }}
         currentModel={null}
       />
-      <SessionSidebar
-        selectedSessionId={selectedSession?.id ?? null}
-        optimisticSession={selectedSession?.path === "" ? selectedSession : null}
-        onSelectSession={handleSelectSession}
-        onNewSession={handleNewSession}
-        initialSessionId={initialSessionId}
-        skipInitialProjectSelection={initialNavigation.requestedCwd !== null}
-        onInitialRestoreDone={handleInitialRestoreDone}
-        refreshKey={refreshKey}
-        onSessionDeleted={handleSessionDeleted}
-        selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
-        onCwdChange={handleCwdChange}
-        usageVisible={providerUsageVisible}
-        onOpenSettings={() => setSettingsTab("general")}
-        onOpenArchive={() => setArchiveBrowserOpen(true)}
-        updateAvailable={Boolean(appUpdate?.updateAvailable) || ompUpdateAvailable}
-      />
-    </>
-  );
-
-  return (
-    <>
-    <ToastProvider>
     <style>{`
       @keyframes session-info-pop {
         0% {
@@ -1449,6 +1455,9 @@ export function AppShell() {
       }
     `}</style>
     <div style={{ display: "flex", height: "100%", flex: 1, overflow: "hidden", background: "var(--bg)" }}>
+      {/* Left sidebar: hidden on full-page Settings */}
+      {!settingsTab && (
+        <>
       {/* Mobile overlay backdrop */}
       <div
         className={`sidebar-overlay-backdrop${mobileSidebarReady ? "" : " sidebar-mobile-pending"}`}
@@ -1511,9 +1520,31 @@ export function AppShell() {
           onBlur={(e) => { e.currentTarget.style.background = "transparent"; }}
         />
       )}
+        </>
+      )}
 
       {/* Center: chat */}
       <main style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
+        {settingsTab ? (
+          <SettingsConfig
+            activeTab={settingsTab}
+            toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
+            onToolCallsDefaultCollapsedChange={handleToolCallsDefaultCollapsedChange}
+            providerUsageVisible={providerUsageVisible}
+            onProviderUsageVisibleChange={handleProviderUsageVisibleChange}
+            cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd}
+            sessionId={selectedSession?.id ?? null}
+            onModelsSaved={() => setModelsRefreshKey((k) => k + 1)}
+            onPluginsReloaded={() => setSessionKey((k) => k + 1)}
+            appUpdate={appUpdate}
+            onRefreshAppUpdate={refreshAppUpdate}
+            onOmpUpdateAvailabilityChange={setOmpUpdateAvailable}
+            onRequestAppUpdate={requestAppUpdateFromSettings}
+            onSelectTab={setSettingsTab}
+            onClose={() => setSettingsTab(null)}
+          />
+        ) : (
+          <>
         {/* Top bar: 3-zone segmented control bar */}
         <div ref={topBarRef} className="shell-topbar" style={{
           position: "relative",
@@ -1839,6 +1870,7 @@ export function AppShell() {
               onSessionStatsChange={handleSessionStatsChange}
               onSessionStatsPanelOpen={openSessionStatsPanel}
               onGenerationSpeedChange={handleGenerationSpeedChange}
+              onOpenProviders={() => setSettingsTab("providers")}
             />
           ) : initialCwdStatus === "validating" ? (
             <div
@@ -1896,8 +1928,11 @@ export function AppShell() {
             )
           )}
         </div>
+          </>
+        )}
       </main>
-      <RightPanel
+      {!settingsTab && (
+        <RightPanel
         fileTabs={fileTabs}
         activeFileTabId={activeFileTabId}
         rightView={rightView}
@@ -1940,10 +1975,11 @@ export function AppShell() {
         onRightPanelResizeStart={handleRightPanelResizeStart}
         onRightPanelResizeKey={handleRightPanelResizeKey}
       />
+      )}
 
     </div>
-    {/* File panel toggle — always visible at top-right */}
-    <button
+    {!settingsTab && (
+      <button
       onClick={() => setRightPanelOpen((v) => !v)}
       title={rightPanelOpen ? t("appShell.hideFilePanel") : t("appShell.showFilePanel")}
       aria-label={rightPanelOpen ? t("appShell.hideFilePanel") : t("appShell.showFilePanel")}
@@ -1962,7 +1998,7 @@ export function AppShell() {
         <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
       </svg>
     </button>
-    {settingsTab && <SettingsConfig activeTab={settingsTab} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} onToolCallsDefaultCollapsedChange={handleToolCallsDefaultCollapsedChange} providerUsageVisible={providerUsageVisible} onProviderUsageVisibleChange={handleProviderUsageVisibleChange} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd} sessionId={selectedSession?.id ?? null} onModelsSaved={() => setModelsRefreshKey((k) => k + 1)} onPluginsReloaded={() => setSessionKey((k) => k + 1)} appUpdate={appUpdate} onRefreshAppUpdate={refreshAppUpdate} onOmpUpdateAvailabilityChange={setOmpUpdateAvailable} onRequestAppUpdate={requestAppUpdateFromSettings} onSelectTab={setSettingsTab} onClose={() => setSettingsTab(null)} />}
+    )}
     <AppUpdateDialog open={appUpdateDialogOpen} update={appUpdate} phase={appUpdatePhase} visibleStage={appUpdateVisibleStage} error={appUpdateError} onProceed={() => void proceedWithAppUpdate()} onNotNow={dismissAppUpdate} />
     {archiveBrowserOpen && (
       <ArchiveBrowser

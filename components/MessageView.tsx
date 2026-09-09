@@ -506,6 +506,7 @@ function AssistantMessageView({
     .filter(({ block }) => !isEmptyThinkingBlock(block, { isStreaming }));
   const blocks = blockItems.map(({ block }) => block);
   const hasActivityBlocks = blocks.some((block) => block.type === "thinking" || block.type === "toolCall");
+  const errorMessage = message.errorMessage?.trim() || null;
   const blockItemsRef = useRef(blockItems);
   blockItemsRef.current = blockItems;
 
@@ -584,7 +585,7 @@ function AssistantMessageView({
     return () => clearInterval(id);
   }, [isStreaming]);
 
-  if (blocks.length === 0 && !isStreaming) return null;
+  if (blocks.length === 0 && !isStreaming && !errorMessage) return null;
 
   return (
     <div
@@ -643,6 +644,28 @@ function AssistantMessageView({
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+        {errorMessage && (
+          <div
+            role="alert"
+            style={{
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 6,
+              padding: "7px 9px",
+              border: "1px solid color-mix(in srgb, var(--status-error) 35%, var(--border))",
+              borderRadius: "var(--radius-control)",
+              background: "color-mix(in srgb, var(--status-error) 7%, var(--bg-panel))",
+              color: "var(--status-error)",
+              fontSize: 12,
+              lineHeight: 1.45,
+              whiteSpace: "pre-wrap",
+              overflowWrap: "anywhere",
+            }}
+          >
+            <CircleAlert size={14} strokeWidth={1.8} aria-hidden="true" style={{ flexShrink: 0, marginTop: 1 }} />
+            <span><strong>{t("messageView.responseError")}:</strong> {errorMessage}</span>
+          </div>
+        )}
         {groupAdjacentBlocks(blockItems).map((group, groupIdx) => {
           if (group.type === "single") {
             const { block, originalIndex } = group.item;

@@ -81,17 +81,7 @@ export function SettingsTabs({
         aria-label={t("settingsTabs.ariaLabel")}
         role="tablist"
         aria-orientation="vertical"
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: 4,
-          padding: "12px 8px",
-          width: 230,
-          flexShrink: 0,
-          borderRight: "1px solid var(--border)",
-          background: "var(--bg-panel)",
-          overflowY: "auto",
-        }}
+        className="settings-nav"
       >
         {SETTINGS_CATEGORIES.map(({ id, label, description, Icon, needsWorkspace }, index) => {
           const labelKey = `settingsTabs.${id}.label`;
@@ -114,28 +104,18 @@ export function SettingsTabs({
               disabled={disabled}
               onClick={() => onSelect(id)}
               onKeyDown={(event) => onKeyDown(event, index)}
+              className={`settings-nav-item${selected ? " active" : ""}`}
               style={{
-                display: "flex",
-                alignItems: "flex-start",
-                gap: 10,
-                padding: "9px 10px",
-                border: "none",
-                borderRadius: "var(--radius-control)",
-                background: selected ? "var(--bg-selected)" : "transparent",
-                color: selected ? "var(--text)" : disabled ? "var(--text-dim)" : "var(--text-muted)",
-                cursor: disabled ? "not-allowed" : "pointer",
                 opacity: disabled ? 0.5 : 1,
-                textAlign: "left",
-                transition: "background var(--dur-fast), color var(--dur-fast)",
-                width: "100%",
+                cursor: disabled ? "not-allowed" : "pointer",
               }}
             >
               <Icon size={16} aria-hidden="true" style={{ marginTop: 2, flexShrink: 0, color: selected ? "var(--accent)" : "currentColor" }} />
               <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
-                <div style={{ fontSize: 12.5, fontWeight: selected ? 600 : 500, lineHeight: 1.3, color: selected ? "var(--text)" : "inherit" }}>
+                <div style={{ fontSize: 13, fontWeight: selected ? 600 : 500, lineHeight: 1.3, color: selected ? "var(--text)" : "inherit" }}>
                   {displayLabel}
                 </div>
-                <div style={{ fontSize: 10.5, color: "var(--text-dim)", lineHeight: 1.3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.35, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                   {displayDescription}
                 </div>
               </div>

@@ -4,7 +4,12 @@ import { validateAgentImages } from "./image-attachments";
 import { invalidateModelsCache } from "./models-cache";
 import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame } from "./omp/rpc-process";
 import { readNativeSettings } from "./omp/settings-config";
-import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
+import {
+  cacheSessionPath,
+  invalidateSessionEntriesCache,
+  invalidateSessionListCache,
+  invalidateSessionListMeta,
+} from "./session-reader";
 import { PRESET_FULL } from "./tool-presets";
 import { comparableProjectPath } from "./comparable-path";
 import { isReservedLaunchArg, loadProjectRegistry } from "./project-registry";
@@ -387,7 +392,7 @@ export class AgentSessionWrapper {
         // The session file can appear just after the prompt acknowledgement.
         // Invalidate and signal the sidebar now rather than waiting for the
         // agent's first reply or terminal event.
-        invalidateSessionListCache();
+        this.invalidateSessionLists();
         refreshSessionList = true;
         // If the file is not on disk yet, the sidebar refresh above may walk
         // the sessions dir before it exists — and the mtime-keyed walk cache
@@ -406,7 +411,7 @@ export class AgentSessionWrapper {
           this.awaitingAgentStart = false;
           this.awaitingAgentStartDeadline = 0;
           this.continuationGraceUntil = 0;
-          invalidateSessionListCache();
+          this.invalidateSessionLists();
         } else {
           this.continuationGraceUntil = Date.now() + NON_TERMINAL_CONTINUATION_GRACE_MS;
         }
@@ -425,21 +430,37 @@ export class AgentSessionWrapper {
         // Same patch the manual `compact` path applies — the client reads
         // event.result.estimatedTokensAfter for the banner.
         patchEstimatedTokensAfter(event.result);
-        invalidateSessionListCache();
+        this.invalidateSessionLists();
         break;
       case "session_info_update":
         if (typeof event.title === "string") this._sessionName = event.title;
-        invalidateSessionListCache();
+        this.invalidateSessionLists();
         refreshSessionList = true;
         break;
       case "response": {
         // Unsolicited failed responses surface async prompt failures (omp
-        // reuses the original command id after the immediate ack).
-        if (event.success === false && event.command === "prompt") {
+        // reuses the original command id after the immediate ack). Some omp
+        // versions omit `command` on that second response, so the active run
+        // is also a terminal-failure signal. Otherwise this frame would be
+        // ignored and the UI would stop with no explanation.
+        if (event.success === false) {
+          const promptFailure =
+            event.command === "prompt" ||
+            (!event.command && (this.promptRunning || this.streaming));
+          const detail = typeof event.error === "string"
+            ? event.error
+            : typeof event.message === "string"
+              ? event.message
+              : "RPC command failed";
+          if (!promptFailure) {
+            this.emit({ type: "error", error: event.error, message: detail, command: event.command });
+            notifyRunningChange();
+            return;
+          }
           this.promptRunning = false;
           this.awaitingAgentStart = false;
           this.awaitingAgentStartDeadline = 0;
-          this.emit({ type: "prompt_error", errorMessage: (event.error as string) ?? "Prompt failed" });
+          this.emit({ type: "prompt_error", errorMessage: detail, error: event.error, command: event.command });
           notifyRunningChange();
           return;
         }
@@ -652,6 +673,21 @@ export class AgentSessionWrapper {
 
   private sessionFileSignalTimer: NodeJS.Timeout | null = null;
 
+  /** Invalidate session-list metadata plus ONLY this session's parse caches
+   * when the file path is known, else fall back to the full invalidation.
+   * Use this on the hot event paths (agent_end, auto_compaction_end,
+   * session_info_update, …) so a busy session does not flush every other
+   * open session's parsed-entry cache. List metadata (sidebar order/counts)
+   * still always refreshes. */
+  private invalidateSessionLists(): void {
+    if (this._sessionFile) {
+      invalidateSessionListMeta();
+      invalidateSessionEntriesCache(this._sessionFile);
+    } else {
+      invalidateSessionListCache();
+    }
+  }
+
   /** Poll briefly for the session file to appear after agent_start, then
    *  invalidate the session-list caches and re-signal the sidebar so the
    *  running session shows up even though the file landed after the first
@@ -670,7 +706,7 @@ export class AgentSessionWrapper {
         }
         return;
       }
-      invalidateSessionListCache();
+      this.invalidateSessionLists();
       notifyRunningChange({ refreshSessionList: true });
     };
     this.sessionFileSignalTimer = setTimeout(check, 250);
@@ -898,7 +934,7 @@ export class AgentSessionWrapper {
     if (oldId && oldId !== this._sessionId) {
       this.onIdentityChangeCallback?.(oldId, this._sessionId);
     }
-    invalidateSessionListCache();
+    this.invalidateSessionLists();
     return this._sessionId;
   }
 
@@ -1087,7 +1123,7 @@ export class AgentSessionWrapper {
         const { provider, modelId } = command as { provider: string; modelId: string };
         const model = await this.proc.sendCommand<OmpModel>({ type: "set_model", provider, modelId });
         invalidateModelsCache();
-        invalidateSessionListCache();
+        this.invalidateSessionLists();
         return { id: model.id, provider: model.provider };
       }
 
@@ -1141,7 +1177,7 @@ export class AgentSessionWrapper {
             }
           });
         } finally {
-          invalidateSessionListCache();
+          this.invalidateSessionLists();
         }
       }
 
@@ -1156,7 +1192,7 @@ export class AgentSessionWrapper {
         if (!name) throw new Error("Session name cannot be empty");
         await this.proc.sendCommand({ type: "set_session_name", name });
         this._sessionName = name;
-        invalidateSessionListCache();
+        this.invalidateSessionLists();
         return null;
       }
 
@@ -1206,7 +1242,7 @@ export class AgentSessionWrapper {
           return await this.proc.sendCommand<BashResultInfo>({ type: "bash", command: command.command as string });
         } finally {
           this.bashRunning = false;
-          invalidateSessionListCache();
+          this.invalidateSessionLists();
           notifyRunningChange();
         }
       }
@@ -1246,7 +1282,7 @@ export class AgentSessionWrapper {
       default: {
         if (PASSTHROUGH_COMMANDS.has(type)) {
           const result: unknown = await this.proc.sendCommand(command as { type: string });
-          if (type === "set_thinking_level") invalidateSessionListCache();
+          if (type === "set_thinking_level") this.invalidateSessionLists();
           return result ?? null;
         }
         throw new Error(`Unsupported command: ${type}`);

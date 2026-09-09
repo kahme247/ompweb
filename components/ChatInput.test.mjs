@@ -182,15 +182,55 @@ test("renders multiple queued prompts with count and expand action", () => {
   assert.match(html, /First task/);
 });
 
-test("model picker dropdown source uses scale-immune anchored positioning", async () => {
-  const { readFile } = await import("node:fs/promises");
-  const source = await readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8");
 
-  // Ensures the model picker dropdown is anchored with CSS positioning (bottom: calc(100% + 6px), left: 0)
-  // and doesn't rely on raw viewport getBoundingClientRect measurements that break when html zoom is applied.
-  assert.doesNotMatch(source, /setModelDropdownRect/);
-  assert.match(source, /bottom:\s*isMobile\s*\?\s*8\s*:\s*["']calc\(100%\s*\+\s*6px\)["']/);
+test("nested model picker groups by provider and pins the current provider first", async () => {
+  const { groupModelOptionsByProvider, orderProviderGroups } = await jiti.import("./ChatInput-model-picker.tsx");
+  const options = [
+    { provider: "anthropic", modelId: "claude", name: "Claude" },
+    { provider: "openai", modelId: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
+    { provider: "openai", modelId: "gpt-5.5", name: "GPT-5.5" },
+    { provider: "pi", modelId: "pi-1", name: "Pi" },
+  ];
+  const grouped = groupModelOptionsByProvider(options);
+  assert.deepEqual(grouped.map((g) => g.provider), ["anthropic", "openai", "pi"]);
+  assert.equal(grouped[1].options.length, 2);
+
+  const ordered = orderProviderGroups(grouped, "openai");
+  assert.deepEqual(ordered.map((g) => g.provider), ["openai", "anthropic", "pi"]);
 });
+
+test("model picker panel renders providers rail, models pane, and Add Providers", async () => {
+  const { ModelPickerPanel } = await jiti.import("./ChatInput-model-picker.tsx");
+  const html = renderToStaticMarkup(
+    React.createElement(ModelPickerPanel, {
+      modelOptions: [
+        { provider: "codex", modelId: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
+        { provider: "codex", modelId: "gpt-5.6-terra", name: "GPT-5.6 Terra" },
+        { provider: "pi", modelId: "pi-1", name: "Pi One" },
+      ],
+      filteredModelOptions: [
+        { provider: "codex", modelId: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
+        { provider: "codex", modelId: "gpt-5.6-terra", name: "GPT-5.6 Terra" },
+        { provider: "pi", modelId: "pi-1", name: "Pi One" },
+      ],
+      currentModel: { provider: "codex", modelId: "gpt-5.6-sol" },
+      modelSearchQuery: "",
+      onSearchQueryChange() {},
+      isMobile: false,
+      onSelectModel() {},
+      onOpenProviders() {},
+    }),
+  );
+
+  assert.match(html, /picker-nested-providers/);
+  assert.match(html, /picker-nested-models/);
+  assert.match(html, /GPT-5\.6 Sol/);
+  assert.match(html, /GPT-5\.6 Terra/);
+  assert.match(html, />codex</);
+  assert.match(html, />pi</);
+  assert.match(html, />(Add Providers|chatInput\.addProviders)</);
+});
+
 
 test("exposes tool presets through the plus menu when a handler is provided", () => {
   const html = renderToStaticMarkup(

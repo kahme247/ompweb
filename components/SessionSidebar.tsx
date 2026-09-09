@@ -62,6 +62,8 @@ interface Props {
   updateAvailable?: boolean;
   /** Opens the archived sessions browser. */
   onOpenArchive?: () => void;
+  /** True when settings full-page view is currently open. */
+  settingsOpen?: boolean;
 }
 
 
@@ -69,7 +71,7 @@ interface Props {
 
 
 
-export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, usageVisible = true, onOpenSettings, onOpenArchive, updateAvailable }: Props) {
+export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, usageVisible = true, onOpenSettings, onOpenArchive, updateAvailable, settingsOpen = false }: Props) {
 
 
   const { t } = useI18n();
@@ -1390,6 +1392,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       <div style={{ borderTop: "1px solid var(--border)", flexShrink: 0 }}>
         <button
           className="sidebar-settings-row"
+          data-active={settingsOpen}
           onClick={onOpenSettings}
           title={t("chatInput.settings")}
           aria-label={t("chatInput.settings")}
@@ -1401,15 +1404,15 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
             alignItems: "center",
             gap: 9,
             padding: "0 12px",
-            background: "none",
+            background: settingsOpen ? "var(--bg-selected)" : "none",
             border: "none",
-            color: "var(--text-muted)",
+            color: settingsOpen ? "var(--text)" : "var(--text-muted)",
             cursor: "pointer",
             textAlign: "left",
             transition: SIDEBAR_BUTTON_TRANSITION,
           }}
-          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = settingsOpen ? "var(--bg-selected)" : "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = settingsOpen ? "var(--bg-selected)" : "none"; e.currentTarget.style.color = settingsOpen ? "var(--text)" : "var(--text-muted)"; }}
         >
           <span style={{ position: "relative", display: "inline-flex", flexShrink: 0, color: "var(--accent)" }}>
             <Settings2 size={14} strokeWidth={2} aria-hidden="true" />

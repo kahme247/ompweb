@@ -2,11 +2,17 @@ import { existsSync, statSync } from "fs";
 import { normalize as normalizePath } from "path";
 import { getAgentDir } from "./omp/paths";
 import {
+  containsBlobRef,
+  invalidateAllSessionScanCaches,
   invalidateSessionFileListCache,
+  invalidateSessionScanCache,
   listAllSessionInfos,
   loadSessionFile,
+  MAX_SESSION_LOAD_BYTES,
   readSessionHeaderSync,
+  resolveBlobRefsInEntries,
   type OmpSessionInfo,
+  type ResolveBlobOptions,
 } from "./omp/session-files";
 import type {
   AgentMessage,
@@ -139,17 +145,58 @@ declare global {
 
 const SESSION_LIST_CACHE_TTL_MS = 30_000;
 
-export function invalidateSessionListCache(): void {
+/** Invalidate the session LIST metadata (30s TTL result + generation gate)
+ * and the directory-walk cache, but leave per-session parse caches intact.
+ * Use this when a session changed but you know which one: call
+ * invalidateSessionEntriesCache(path) for the specific file instead of paying
+ * for a full parse-cache flush. */
+export function invalidateSessionListMeta(): void {
   globalThis.__piSessionListGeneration = (globalThis.__piSessionListGeneration ?? 0) + 1;
   globalThis.__piSessionListCache = undefined;
   // The session-file walk cache keys on the sessions-root mtime, which does
   // not change when a file is added inside an existing project subdirectory
   // (Windows/NTFS). Clear it too so new sessions appear immediately.
   invalidateSessionFileListCache();
+}
+
+export function invalidateSessionListCache(): void {
+  invalidateSessionListMeta();
   // Drop cached entry parses so a mutation preserving size+mtime (rare) can
   // never serve stale entries; the (size, mtimeMs) key already invalidates
   // the common case, this closes the remaining window.
   globalThis.__ompSessionEntriesCache?.clear();
+  // Unknown-source changes (full-flush fallback) have no known path to target
+  // with invalidateSessionEntriesCache: clear every per-file SCAN memo too, or
+  // an unknown same-size + same-mtime rewrite would keep serving the OLD list
+  // summary (stale title/parent) from __ompSessionScanCache.
+  invalidateAllSessionScanCaches();
+}
+
+/** Invalidate session-list metadata plus ONLY the given file's parse caches
+ * when the path is known; without a path, fall back to the full flush (list
+ * + every session's parse caches). This is the shared entry point for code
+ * that edits a session and knows which file it touched — a busy session must
+ * not force unrelated open sessions to re-parse their transcripts. */
+export function invalidateSessionCaches(filePath?: string): void {
+  if (filePath) {
+    invalidateSessionListMeta();
+    invalidateSessionEntriesCache(filePath);
+  } else {
+    invalidateSessionListCache();
+  }
+}
+
+/** Invalidate ONLY the per-session caches for one session file (full-entry
+ * parse + list scan window). Callers that know exactly which session changed
+ * (live RPC events carrying the session file path, the file watcher with a
+ * concrete filename) use this instead of invalidateSessionListCache() so
+ * unrelated sessions keep their parsed-entry cache — a single busy session no
+ * longer forces every other open session to re-parse multi-MB transcripts.
+ * The key is normalized with sessionPathKey so Windows case/spacing variants
+ * still hit the same entry. */
+export function invalidateSessionEntriesCache(filePath: string): void {
+  globalThis.__ompSessionEntriesCache?.delete(sessionPathKey(filePath));
+  invalidateSessionScanCache(filePath);
 }
 
 function getPathCache(): Map<string, string> {
@@ -285,18 +332,32 @@ function loadSessionEntriesCached(filePath: string): SessionEntry[] {
     return loadSessionFile(filePath).entries;
   }
   const cache = getSessionEntriesCache();
-  const cached = cache.get(filePath);
+  const key = sessionPathKey(filePath);
+  const cached = cache.get(key);
   if (cached && cached.size === size && cached.mtimeMs === mtimeMs) {
-    cache.delete(filePath);
-    cache.set(filePath, cached);
+    cache.delete(key);
+    cache.set(key, cached);
     return cached.entries;
   }
   const entries = loadSessionFile(filePath).entries;
-  cache.set(filePath, { size, mtimeMs, entries });
+  // A single file larger than the WHOLE cache budget would pin the entire
+  // budget for itself (the old `cache.size > 1` guard never evicted it) and
+  // starve every other session's cached parse. Skip the cache for such
+  // giants: they re-parse per request, which is bounded work (the read is
+  // chunked; parse is O(entries)) and far cheaper than evicting all peers.
+  // The per-request parse cost is the accepted trade-off for staying within
+  // the memory budget — the alternative (caching) makes concurrent large
+  // sessions OOM the server.
+  if (size > MAX_SESSION_ENTRIES_CACHE_BYTES) {
+    // The file outgrew the budget: any cached entry for this path is stale
+    // (keyed on the OLD smaller size) and would keep burning eviction budget
+    // until LRU got to it — drop it now.
+    cache.delete(key);
+    return entries;
+  }
+  cache.set(key, { size, mtimeMs, entries });
   // Two bounds: entry count and total cached file bytes (parsed JS expands
-  // several-fold). Inserted files larger than the whole budget are still
-  // cached — they are evicted by the next insert, and skipping the cache
-  // would re-parse the giants on every request.
+  // several-fold). Total-bytes eviction keeps the cache within budget.
   let totalBytes = 0;
   for (const entry of cache.values()) totalBytes += entry.size;
   while (cache.size > 1 && (cache.size > MAX_SESSION_ENTRIES_CACHE_ENTRIES || totalBytes > MAX_SESSION_ENTRIES_CACHE_BYTES)) {
@@ -311,6 +372,158 @@ function loadSessionEntriesCached(filePath: string): SessionEntry[] {
 /** Session entries without blob resolution (fine for reference/thinking scans). */
 export function getSessionEntries(filePath: string): SessionEntry[] {
   return loadSessionEntriesCached(filePath);
+}
+
+/** Surface loadSessionFile's `too_large` marker (loadSessionEntriesCached
+ * drops it by returning only `.entries`) without paying for a fresh parse:
+ * the size check is a stat, and the cached read below serves everything
+ * else. Header reads are bounded and succeed on giant files, so this check is
+ * what tells a 413 (file too large) from a 404 (missing/malformed). */
+function loadEntriesOrThrowTooLarge(filePath: string): SessionEntry[] {
+  try {
+    if (statSync(filePath).size > MAX_SESSION_LOAD_BYTES) {
+      // The cached entry (keyed on the old, smaller size) can never match
+      // again — drop it instead of letting it linger until LRU eviction.
+      getSessionEntriesCache().delete(sessionPathKey(filePath));
+      throw new SessionFileTooLargeError(filePath);
+    }
+  } catch (error) {
+    if (error instanceof SessionFileTooLargeError) throw error;
+    // Missing/unreadable — mirror loadSessionFile's lenient empty result;
+    // loadSessionEntriesCached handles the same case identically.
+  }
+  return loadSessionEntriesCached(filePath);
+}
+
+/** Thrown by getSessionEntriesForDisplay when the session file exists but is
+ * larger than MAX_SESSION_LOAD_BYTES. The header read is bounded and succeeds
+ * on such files, so routes cannot rely on a null header to detect the
+ * overload — without this error the loader's too_large marker was dropped
+ * (`.entries` is the empty array) and routes returned 200 with an empty
+ * transcript, making history look deleted. Routes catch this and respond 413
+ * with the stable `session_file_too_large` code. */
+export class SessionFileTooLargeError extends Error {
+  readonly code = "session_file_too_large" as const;
+  constructor(filePath: string) {
+    super(`Session file is too large to open in omp-web: ${filePath}`);
+    this.name = "SessionFileTooLargeError";
+  }
+}
+
+/**
+ * Display-path entry read for the session/context routes: reuses the memoized
+ * (size, mtimeMs) parse cache WITHOUT blob resolution for entries that don't
+ * reference blobs, and deep-copies ONLY the entries that do before resolving
+ * their blob refs. The cache stays clean (shared objects are never mutated),
+ * and the expensive deep copy is paid only for blob-bearing entries — the
+ * common image-free session clones nothing (the array is shallow-copied).
+ * Throws SessionFileTooLargeError when the file exceeds the load ceiling.
+ */
+export function getSessionEntriesForDisplay(filePath: string, options: ResolveBlobOptions = {}): SessionEntry[] {
+  const entries = loadEntriesOrThrowTooLarge(filePath);
+  return toDisplayEntries(entries, options);
+}
+
+/** Blob-resolution transform shared by the sync and deduplicated display
+ * reads. */
+function toDisplayEntries(entries: SessionEntry[], options: ResolveBlobOptions): SessionEntry[] {
+  if (entries.length === 0) return entries;
+  // Blob-bearing entries are deep-copied so resolution never mutates the
+  // shared cache object; blob-free entries are shared as-is.
+  const out: SessionEntry[] = new Array(entries.length);
+  let copiedAny = false;
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    if (
+      options.skipToolResultImages &&
+      entry.type === "message" &&
+      ((entry.message as { role?: string } | null | undefined)?.role === "toolResult")
+    ) {
+      // Caller omits these images anyway — share the entry without blob work.
+      out[i] = entry;
+      continue;
+    }
+    if (!containsBlobRef(entry)) {
+      out[i] = entry;
+      continue;
+    }
+    // Blob-bearing entries are deep-copied so resolution never mutates the
+    // shared cache object.
+    out[i] = structuredClone(entry) as SessionEntry;
+    copiedAny = true;
+  }
+  if (copiedAny) {
+    resolveBlobRefsInEntries(out, options);
+  }
+  return out;
+}
+
+// In-flight parse dedup, keyed like the entries cache. Concurrent display
+// reads for the SAME file share one parse instead of stacking duplicate
+// work: for cache-skipped oversized files this removes the double parse on
+// same-tick requests, and it is the load-bearing correctness point once the
+// parse moves into the (async) worker queue — without the map, concurrent
+// callers would each enqueue their own parse. Stored on globalThis for
+// hot-reload safety; bounded by the number of distinct files being read
+// concurrently, and entries are removed as soon as their parse settles.
+declare global {
+  var __ompEntriesInFlight: Map<string, Promise<SessionEntry[]>> | undefined;
+}
+
+function getInFlightEntries(): Map<string, Promise<SessionEntry[]>> {
+  if (!globalThis.__ompEntriesInFlight) globalThis.__ompEntriesInFlight = new Map();
+  return globalThis.__ompEntriesInFlight;
+}
+
+/** Deduplicated display-path entry read. Semantically identical to
+ * getSessionEntriesForDisplay; concurrent calls for the same file share one
+ * parse and resolve to the SAME entry array (callers must treat it as
+ * immutable, like all cached entry reads). Rejections are never memoized: a
+ * transient failure must not poison later reads. */
+export async function getSessionEntriesForDisplayAsync(
+  filePath: string,
+  options: ResolveBlobOptions = {},
+): Promise<SessionEntry[]> {
+  const key = sessionPathKey(filePath);
+  const cache = getSessionEntriesCache();
+  // Same too-large gate as the sync display read: past the load ceiling the
+  // routes must get the structured 413 error, not an empty transcript — and
+  // the stale (small-size) cache entry for this path can never match again.
+  let stat: { size: number; mtimeMs: number } | null = null;
+  try {
+    stat = statSync(filePath);
+  } catch {
+    stat = null; // missing/unreadable: fall through to the lenient load
+  }
+  if (stat && stat.size > MAX_SESSION_LOAD_BYTES) {
+    getSessionEntriesCache().delete(key);
+    throw new SessionFileTooLargeError(filePath);
+  }
+  // Fast path: unchanged file is a single stat away (same key convention as
+  // loadSessionEntriesCached) — no parse, no dedup bookkeeping.
+  if (stat) {
+    const cached = cache.get(key);
+    if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+      cache.delete(key);
+      cache.set(key, cached);
+      return toDisplayEntries(cached.entries, options);
+    }
+  }
+
+  const inFlight = getInFlightEntries().get(key);
+  if (inFlight) return inFlight.then((entries) => toDisplayEntries(entries, options));
+
+  // Defer the synchronous parse by one microtask so same-tick callers land
+  // on the in-flight map instead of each starting their own parse.
+  const parse = Promise.resolve().then(() => loadSessionEntriesCached(filePath));
+  getInFlightEntries().set(key, parse);
+  try {
+    const entries = await parse;
+    return toDisplayEntries(entries, options);
+  } finally {
+    const map = getInFlightEntries();
+    if (map.get(key) === parse) map.delete(key);
+  }
 }
 
 function parseTodoPhases(value: unknown): TodoPhase[] | null {

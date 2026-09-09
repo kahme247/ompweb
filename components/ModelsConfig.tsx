@@ -20,7 +20,7 @@ import {
   ConfirmDialog,
   useFieldValidation,
 } from "@/components/ui/field";
-import { Plus, Trash2, RefreshCw, AlertCircle, Cpu, Settings, Sparkles, Check as CheckIcon, Layers, RotateCcw, SlidersHorizontal, BookOpen, Search } from "lucide-react";
+import { Plus, Trash2, RefreshCw, AlertCircle, Cpu, Settings, Sparkles, Check as CheckIcon, Layers, RotateCcw, SlidersHorizontal, BookOpen, Search, KeyRound, ArrowLeft } from "lucide-react";
 import { toast } from "@/components/ui/toast";
 import { SettingsTabs, type SettingsTab } from "./SettingsTabs";
 import { ModelCatalogPicker } from "./ModelCatalogPicker";
@@ -45,8 +45,6 @@ import {
   type Selection,
   type ThinkingConfig,
   type ThinkingLevel,
-  hoverAccent,
-  hoverRow,
 } from "./ModelsConfig-types";
 import {
   AddProviderPicker,
@@ -58,7 +56,6 @@ import {
   ProviderIcon,
   RetryFallbackDetail,
   SectionTitle,
-  TreeNavButton,
 } from "./ModelsConfig-panels";
 export { providerInitials } from "./ModelsConfig-types";
 
@@ -1068,12 +1065,15 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedOk, setSavedOk] = useState(false);
+  const [subTab, setSubTab] = useState<"connected" | "custom" | "system">("connected");
+  const [systemTab, setSystemTab] = useState<"registry" | "picker" | "roles" | "fallbacks">("registry");
   const [selection, setSelection] = useState<Selection | null>(null);
   const [oauthProviders, setOauthProviders] = useState<OAuthProvider[]>([]);
   const [apiKeyProviders, setApiKeyProviders] = useState<ApiKeyProvider[]>([]);
   const [runtimeModels, setRuntimeModels] = useState<RuntimeModelEntry[]>([]);
   const [connectedProviders, setConnectedProviders] = useState<ConnectedProvider[]>([]);
   const [runtimeModelsLoading, setRuntimeModelsLoading] = useState(true);
+  const [connectSearch, setConnectSearch] = useState("");
   const [visibleModelKeys, setVisibleModelKeys] = useState<Set<string> | null>(null);
   const [composerPickerSearch, setComposerPickerSearch] = useState("");
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -1132,11 +1132,11 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
         const normalized = d.providers ? d : { ...d, providers: {} };
         setConfig(normalized);
         const keys = Object.keys(normalized.providers ?? {});
-        if (keys.length > 0) setSelection({ type: "provider", name: keys[0] });
+        if (!embedded && keys.length > 0) setSelection({ type: "provider", name: keys[0] });
       })
       .catch(() => setConfig({ providers: {} }))
       .finally(() => setLoading(false));
-  }, []);
+  }, [embedded]);
 
   useEffect(() => {
     loadConfig();
@@ -1482,242 +1482,548 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
             </button>
           </div>
         ) : (
-        <div style={{ flex: 1, display: "flex", flexDirection: isMobile ? "column" : "row", overflow: "hidden" }}>
-          {/* Left: tree — zoned navigation */}
-          <div style={{
-            width: isMobile ? "100%" : 258,
-            maxHeight: isMobile ? "40vh" : undefined,
-            borderRight: isMobile ? "none" : "1px solid var(--border)",
-            borderBottom: isMobile ? "1px solid var(--border)" : "none",
-            display: "flex", flexDirection: "column", flexShrink: 0, background: "var(--bg-panel)",
-            overflow: "hidden",
-          }}>
-            <div style={{ flex: 1, overflowY: "auto", padding: "10px 8px", display: "flex", flexDirection: "column", gap: 14 }}>
-              {/* — OMP System — */}
-              <section style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 6px", fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--text-dim)" }}>
-                  <Layers size={10} aria-hidden="true" style={{ opacity: 0.7 }} /> {t("modelsConfig.ompSystemSection")}
-                </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 2, padding: 4, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg)" }}>
-                  <TreeNavButton icon={Layers} label={t("modelsConfig.navNativeRegistry")} selected={selection?.type === "registry"} onClick={() => setSelection({ type: "registry" })} />
-                  <TreeNavButton icon={RotateCcw} label={t("modelsConfig.navRetryFallback")} selected={selection?.type === "fallbacks"} onClick={() => setSelection({ type: "fallbacks" })} />
-                  <TreeNavButton icon={BookOpen} label={t("modelsConfig.navComposerPicker")} selected={selection?.type === "picker"} onClick={() => setSelection({ type: "picker" })} />
-                  <TreeNavButton icon={SlidersHorizontal} label={t("modelsConfig.navModelRoles")} selected={selection?.type === "roles"} onClick={() => setSelection({ type: "roles" })} />
-                </div>
-              </section>
-
-              {/* — Connected accounts — */}
-              <section style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 6px" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--text-dim)" }}>
-                    <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: activeOAuth.length + activeApiKey.length > 0 ? "var(--status-success)" : "var(--border)", flexShrink: 0 }} />
-                    {t("modelsConfig.connectedAccounts")}
-                  </div>
+          <div style={{ display: "flex", flexDirection: "column", minHeight: 0, width: "100%" }}>
+            {/* Top Sub-navigation Segmented Control + Add Provider Action */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, marginBottom: 20, flexWrap: "wrap" }}>
+              <div className="providers-segmented" style={{ marginBottom: 0 }}>
+                <button
+                  type="button"
+                  className={`providers-segmented-btn${subTab === "connected" ? " active" : ""}`}
+                  onClick={() => { setSubTab("connected"); setSelection(null); }}
+                >
+                  <KeyRound size={14} aria-hidden="true" />
+                  <span>{t("modelsConfig.connectedAccounts")}</span>
                   {(activeOAuth.length + activeApiKey.length) > 0 && (
-                    <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 10, background: "var(--bg)", border: "1px solid var(--border)", color: "var(--text-dim)", fontWeight: 600 }}>
-                      {activeOAuth.length + activeApiKey.length}
-                    </span>
+                    <span className="providers-count-badge">{activeOAuth.length + activeApiKey.length}</span>
                   )}
-                </div>
-                {(activeOAuth.length === 0 && activeApiKey.length === 0) ? (
-                  <div style={{ padding: "10px 10px", border: "1px dashed var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg)", color: "var(--text-dim)", fontSize: 11, lineHeight: 1.5, textAlign: "center" }}>
-                    {t("modelsConfig.noConnectedAccounts")}
-                    <br />
-                    <span style={{ color: "var(--text-muted)" }}>{t("modelsConfig.addOneBelow")}</span>
-                  </div>
-                ) : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 4, padding: 4, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg)" }}>
-                    {activeOAuth.map((p) => {
-                      const isSelected = selection?.type === "oauth" && selection.providerId === p.id;
-                      return (
-                        <button
-                          type="button"
-                          key={p.id}
-                          onClick={() => setSelection({ type: "oauth", providerId: p.id })}
-                          style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 8px", borderRadius: "var(--radius-control)", cursor: "pointer", width: "100%", border: isSelected ? "1px solid var(--accent)" : "1px solid transparent", textAlign: "left", fontFamily: "inherit", background: isSelected ? "var(--bg-selected)" : "none", fontWeight: isSelected ? 600 : 400 }}
-                          {...hoverRow(isSelected)}
-                        >
-                          <ProviderIcon id={p.id} size={16} />
-                          <span style={{ fontSize: 12, color: "var(--text)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
-                          <span title={t("modelsConfig.oauthProviderTitle", { id: p.id })} style={{ padding: "2px 6px", borderRadius: 4, background: isSelected ? "var(--accent-strong)" : "var(--bg-subtle)", color: isSelected ? "var(--on-accent)" : "var(--text-muted)", fontSize: 9, fontWeight: 600, flexShrink: 0 }}>OAuth</span>
-                        </button>
-                      );
-                    })}
-                    {activeApiKey.map((p) => {
-                      const isSelected = selection?.type === "apikey" && selection.providerId === p.id;
-                      return (
-                        <button
-                          type="button"
-                          key={p.id}
-                          onClick={() => setSelection({ type: "apikey", providerId: p.id })}
-                          style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 8px", borderRadius: "var(--radius-control)", cursor: "pointer", width: "100%", border: isSelected ? "1px solid var(--accent)" : "1px solid transparent", textAlign: "left", fontFamily: "inherit", background: isSelected ? "var(--bg-selected)" : "none", fontWeight: isSelected ? 600 : 400 }}
-                          {...hoverRow(isSelected)}
-                        >
-                          <ProviderIcon id={p.id} size={16} />
-                          <span style={{ fontSize: 12, color: "var(--text)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.displayName}</span>
-                          <span title={t("modelsConfig.apiKeyProviderTitle", { id: p.id })} style={{ padding: "2px 6px", borderRadius: 4, background: isSelected ? "var(--accent-strong)" : "var(--bg-subtle)", color: isSelected ? "var(--on-accent)" : "var(--text-muted)", fontSize: 9, fontWeight: 600, flexShrink: 0 }}>API key</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </section>
+                </button>
+                <button
+                  type="button"
+                  className={`providers-segmented-btn${subTab === "custom" ? " active" : ""}`}
+                  onClick={() => { setSubTab("custom"); setSelection(null); }}
+                >
+                  <Cpu size={14} aria-hidden="true" />
+                  <span>{t("modelsConfig.customProviders")}</span>
+                  {providers.length > 0 && (
+                    <span className="providers-count-badge">{providers.length}</span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  className={`providers-segmented-btn${subTab === "system" ? " active" : ""}`}
+                  onClick={() => { setSubTab("system"); setSelection({ type: systemTab }); }}
+                >
+                  <Layers size={14} aria-hidden="true" />
+                  <span>{t("modelsConfig.ompSystemSection")}</span>
+                </button>
+              </div>
 
-              {/* — Custom providers (models.yml) — */}
-              <section style={{ display: "flex", flexDirection: "column", gap: 6, flex: 1, minHeight: 0 }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 6px" }}>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
-                    {t("modelsConfig.customProviders")}
-                  </div>
-                  <code style={{ fontSize: 9, padding: "1px 5px", borderRadius: 4, background: "var(--bg)", border: "1px solid var(--border)", color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>models.yml</code>
-                </div>
-                {loading ? (
-                  <div style={{ padding: "10px 8px", fontSize: 12, color: "var(--text-muted)" }}>{t("modelsConfig.loading")}</div>
-                ) : providers.length === 0 ? (
-                  <div style={{ padding: "12px 10px", border: "1px dashed var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg)", color: "var(--text-dim)", fontSize: 11, lineHeight: 1.5, textAlign: "center" }}>
-                    {t("modelsConfig.noCustomProviders")}
-                    <br />
-                    <span style={{ color: "var(--text-muted)" }}>{t("modelsConfig.addOpenAiEndpoint")}</span>
-                  </div>
-                ) : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {providers.map(([pName, pData]) => {
-                      const isProviderSelected = selection?.type === "provider" && selection.name === pName;
-                      const models = pData.models ?? [];
-                      return (
-                        <div key={pName} style={{ borderRadius: "var(--radius-card)", background: "var(--bg)", border: isProviderSelected ? "1px solid var(--accent)" : "1px solid var(--border)", overflow: "hidden", boxShadow: isProviderSelected ? "0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent)" : "none" }}>
-                          {/* Provider row */}
-                          <button
-                            type="button"
-                            onClick={() => setSelection({ type: "provider", name: pName })}
-                            style={{ display: "flex", alignItems: "center", gap: 7, padding: "8px 10px", cursor: "pointer", width: "100%", border: "none", textAlign: "left", fontFamily: "inherit", background: isProviderSelected ? "var(--bg-selected)" : "var(--bg)", borderBottom: models.length ? "1px solid var(--border)" : "none" }}
-                            {...hoverRow(isProviderSelected)}
-                          >
-                            <ProviderIcon id={pName} size={15} />
-                            <span style={{ fontSize: 12, fontWeight: isProviderSelected ? 700 : 600, color: "var(--text)", fontFamily: "var(--font-mono)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                              {pName}
-                            </span>
-                            <span style={{ fontSize: 10, color: isProviderSelected ? "var(--accent)" : "var(--text-dim)", padding: "2px 6px", borderRadius: 10, background: isProviderSelected ? "color-mix(in srgb, var(--accent) 14%, transparent)" : "var(--bg-subtle)", border: `1px solid ${isProviderSelected ? "color-mix(in srgb, var(--accent) 22%, transparent)" : "var(--border)"}`, fontWeight: 600 }}>
-                              {models.length} model{models.length === 1 ? "" : "s"}
-                            </span>
-                          </button>
-
-                          {/* Model rows */}
-                          {models.map((m, i) => {
-                            const isModelSelected = selection?.type === "model" && selection.providerName === pName && selection.index === i;
-                            return (
-                              <button
-                                type="button"
-                                key={i}
-                                onClick={() => setSelection({ type: "model", providerName: pName, index: i })}
-                                style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px 6px 32px", cursor: "pointer", width: "100%", border: "none", textAlign: "left", fontFamily: "inherit", background: isModelSelected ? "var(--bg-selected)" : "transparent", borderLeft: isModelSelected ? "2px solid var(--accent)" : "2px solid transparent", borderTop: "1px solid var(--border)" }}
-                                {...hoverRow(isModelSelected)}
-                              >
-                                <span style={{ fontSize: 11, fontFamily: "var(--font-mono)", color: m.id ? (isModelSelected ? "var(--text)" : "var(--text-muted)") : "var(--text-dim)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: isModelSelected ? 600 : 400 }}>
-                                  {m.id || t("modelsConfig.newModel")}
-                                </span>
-                                {m.reasoning && (
-                                  <span style={{ fontSize: 9, padding: "1px 4px", background: isModelSelected ? "var(--accent-strong)" : "color-mix(in srgb, var(--accent) 14%, transparent)", color: isModelSelected ? "var(--on-accent)" : "var(--accent)", borderRadius: 3, flexShrink: 0, fontWeight: 700 }}>T</span>
-                                )}
-                              </button>
-                            );
-                          })}
-
-                          {/* Add model buttons */}
-                          <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 8px", background: "var(--bg-subtle)", borderTop: "1px solid var(--border)", flexWrap: "nowrap" }}>
-                            <button
-                              type="button"
-                              onClick={(e) => { e.stopPropagation(); addModel(pName); }}
-                              style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "4px 8px", borderRadius: "var(--radius-control)", cursor: "pointer", color: "var(--text-muted)", border: "1px solid var(--border)", background: "var(--bg)", fontFamily: "inherit", fontSize: 11, whiteSpace: "nowrap", flexShrink: 0, fontWeight: 500 }}
-                              {...hoverAccent}
-                            >
-                              <Plus size={11} aria-hidden="true" />
-                              <span>{t("modelsConfig.addModel")}</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={(e) => { e.stopPropagation(); setCatalogPicker(pName); }}
-                              style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "4px 8px", borderRadius: "var(--radius-control)", cursor: "pointer", color: "var(--text-muted)", border: "1px solid var(--border)", background: "var(--bg)", fontFamily: "inherit", fontSize: 11, whiteSpace: "nowrap", flexShrink: 0, fontWeight: 500 }}
-                              {...hoverAccent}
-                            >
-                              <BookOpen size={11} aria-hidden="true" />
-                              <span>{t("modelsConfig.addFromCatalog")}</span>
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </section>
+              {subTab === "connected" && !selection && (
+                <button
+                  type="button"
+                  onClick={() => setPickerOpen(true)}
+                  className="settings-back"
+                  style={{ background: "var(--accent-strong)", color: "var(--on-accent)", border: "1px solid var(--accent-strong)", fontWeight: 600, padding: "7px 16px", flexShrink: 0 }}
+                >
+                  <Plus size={14} aria-hidden="true" /> {t("modelsConfig.addProvider")}
+                </button>
+              )}
             </div>
 
-            {/* Add provider — primary action */}
-            <div style={{ borderTop: "1px solid var(--border)", padding: "10px 8px", background: "var(--bg)", flexShrink: 0 }}>
-              <button onClick={() => setPickerOpen(true)} style={{
-                display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-                width: "100%", padding: "8px 0", background: "var(--accent-strong)", border: "1px solid var(--accent-strong)", borderRadius: "var(--radius-control)",
-                color: "var(--on-accent)", cursor: "pointer", fontSize: 12, fontWeight: 600,
-              }}
-                onMouseEnter={(e) => { e.currentTarget.style.filter = "brightness(1.05)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.filter = "none"; }}
-              >
-                <Plus size={13} aria-hidden="true" /> {t("modelsConfig.addProvider")}
+            {/* Sub-tab content */}
+            {subTab === "connected" && (
+              selection && (selection.type === "oauth" || selection.type === "apikey") ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                  <button
+                    type="button"
+                    className="settings-back"
+                    onClick={() => setSelection(null)}
+                    style={{ alignSelf: "flex-start", marginBottom: 4 }}
+                  >
+                    <ArrowLeft size={14} aria-hidden="true" />
+                    <span>Back to connected accounts</span>
+                  </button>
+                  {detailContent}
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+                  {/* Active OAuth Accounts */}
+                  {activeOAuth.length > 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                      <div className="settings-group-label" style={{ padding: "8px 2px 2px" }}>Active OAuth Accounts ({activeOAuth.length})</div>
+                      <div className="provider-grid">
+                        {activeOAuth.map((p) => {
+                          const models = runtimeModelsByProvider[p.id] ?? [];
+                          return (
+                            <div key={p.id} className="provider-grid-card">
+                              <div>
+                                <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10 }}>
+                                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                                    <ProviderIcon id={p.id} size={28} />
+                                    <div>
+                                      <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{p.name}</div>
+                                      <div style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>{p.id}</div>
+                                    </div>
+                                  </div>
+                                  <span className="settings-badge ok" style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 8px", fontSize: 11 }}>
+                                    <CheckIcon size={11} aria-hidden="true" /> Connected
+                                  </span>
+                                </div>
+
+                                {models.length > 0 ? (
+                                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 12 }}>
+                                    {models.slice(0, 3).map((m) => (
+                                      <span key={m.id} style={{ fontSize: 10.5, padding: "2px 6px", borderRadius: 4, background: "var(--bg)", border: "1px solid var(--border)", color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
+                                        {m.name || m.id}
+                                      </span>
+                                    ))}
+                                    {models.length > 3 && (
+                                      <span style={{ fontSize: 10, color: "var(--text-dim)", padding: "2px 4px", alignSelf: "center" }}>
+                                        +{models.length - 3} more
+                                      </span>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginTop: 10 }}>
+                                    OAuth authenticated
+                                  </div>
+                                )}
+                              </div>
+
+                              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+                                <span style={{ fontSize: 11.5, color: "var(--text-dim)" }}>
+                                  {models.length > 0 ? `${models.length} active models` : "Ready to use"}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => setSelection({ type: "oauth", providerId: p.id })}
+                                  className="settings-back"
+                                  style={{ padding: "4px 10px", fontSize: 11.5, border: "1px solid var(--border)", background: "var(--bg)" }}
+                                >
+                                  Configure
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Active API Key Providers */}
+                  {activeApiKey.length > 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                      <div className="settings-group-label" style={{ padding: "8px 2px 2px" }}>Configured API Keys ({activeApiKey.length})</div>
+                      <div className="provider-grid">
+                        {activeApiKey.map((p) => {
+                          const models = runtimeModelsByProvider[p.id] ?? [];
+                          return (
+                            <div key={p.id} className="provider-grid-card">
+                              <div>
+                                <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10 }}>
+                                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                                    <ProviderIcon id={p.id} size={28} />
+                                    <div>
+                                      <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{p.displayName}</div>
+                                      <div style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>{p.id}</div>
+                                    </div>
+                                  </div>
+                                  <span className="settings-badge ok" style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 8px", fontSize: 11 }}>
+                                    <CheckIcon size={11} aria-hidden="true" /> Key configured
+                                  </span>
+                                </div>
+
+                                {models.length > 0 ? (
+                                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 12 }}>
+                                    {models.slice(0, 3).map((m) => (
+                                      <span key={m.id} style={{ fontSize: 10.5, padding: "2px 6px", borderRadius: 4, background: "var(--bg)", border: "1px solid var(--border)", color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>
+                                        {m.name || m.id}
+                                      </span>
+                                    ))}
+                                    {models.length > 3 && (
+                                      <span style={{ fontSize: 10, color: "var(--text-dim)", padding: "2px 4px", alignSelf: "center" }}>
+                                        +{models.length - 3} more
+                                      </span>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginTop: 10 }}>
+                                    System key configured
+                                  </div>
+                                )}
+                              </div>
+
+                              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+                                <span style={{ fontSize: 11.5, color: "var(--text-dim)" }}>
+                                  {p.modelCount > 0 ? `${p.modelCount} models` : "Key ready"}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => setSelection({ type: "apikey", providerId: p.id })}
+                                  className="settings-back"
+                                  style={{ padding: "4px 10px", fontSize: 11.5, border: "1px solid var(--border)", background: "var(--bg)" }}
+                                >
+                                  Manage
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {activeOAuth.length === 0 && activeApiKey.length === 0 && (
+                    <div className="settings-empty" style={{ textAlign: "center", padding: "32px 20px" }}>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", marginBottom: 6 }}>{t("modelsConfig.noConnectedAccounts")}</div>
+                      <div style={{ fontSize: 12.5, color: "var(--text-muted)", marginBottom: 16 }}>{t("modelsConfig.addOneBelow")}</div>
+                      <button
+                        type="button"
+                        onClick={() => setPickerOpen(true)}
+                        className="settings-back"
+                        style={{ background: "var(--accent-strong)", color: "var(--on-accent)", border: "1px solid var(--accent-strong)", fontWeight: 600, padding: "6px 14px", margin: "0 auto" }}
+                      >
+                        <Plus size={14} aria-hidden="true" /> {t("modelsConfig.addProvider")}
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Connect other providers */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 8 }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                      <div className="settings-group-label" style={{ padding: 0 }}>Add Provider Integration</div>
+                      <div style={{ position: "relative", width: "100%", maxWidth: 320 }}>
+                        <Search size={13} aria-hidden="true" style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)", pointerEvents: "none" }} />
+                        <input
+                          type="text"
+                          value={connectSearch}
+                          onChange={(e) => setConnectSearch(e.target.value)}
+                          placeholder="Search providers to connect..."
+                          style={{ width: "100%", height: 28, padding: "0 24px 0 28px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12, outline: "none" }}
+                        />
+                        {connectSearch && (
+                          <button
+                            type="button"
+                            onClick={() => setConnectSearch("")}
+                            style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 12 }}
+                          >
+                            ×
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Filtered list or curated list */}
+                    {(() => {
+                      const q = connectSearch.trim().toLowerCase();
+                      const unlinkedOAuth = oauthProviders.filter(p => !p.loggedIn);
+                      const unconfiguredApiKey = apiKeyProviders.filter(p => !p.configured);
+                      const matchingOAuth = unlinkedOAuth.filter(p => !q || p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q));
+                      const matchingApiKey = unconfiguredApiKey.filter(p => !q || p.displayName.toLowerCase().includes(q) || p.id.toLowerCase().includes(q));
+
+                      const displayedOAuth = q ? matchingOAuth : matchingOAuth.slice(0, 6);
+                      const displayedApiKey = q ? matchingApiKey : matchingApiKey.slice(0, 6);
+
+                      return (
+                        <div className="provider-grid">
+                          {displayedOAuth.map((p) => (
+                            <div key={p.id} className="provider-grid-card" style={{ minHeight: 90 }}>
+                              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                                  <ProviderIcon id={p.id} size={24} />
+                                  <div>
+                                    <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{p.name}</div>
+                                    <div style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>{p.id}</div>
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => setSelection({ type: "oauth", providerId: p.id })}
+                                  className="settings-back"
+                                  style={{ padding: "4px 12px", fontSize: 12, border: "1px solid var(--border)", background: "var(--bg)" }}
+                                >
+                                  Sign in
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                          {displayedApiKey.map((p) => (
+                            <div key={p.id} className="provider-grid-card" style={{ minHeight: 90 }}>
+                              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                                  <ProviderIcon id={p.id} size={24} />
+                                  <div>
+                                    <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{p.displayName}</div>
+                                    <div style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>API Key</div>
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => setSelection({ type: "apikey", providerId: p.id })}
+                                  className="settings-back"
+                                  style={{ padding: "4px 12px", fontSize: 12, border: "1px solid var(--border)", background: "var(--bg)" }}
+                                >
+                                  Set Key
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                          {!q && (unlinkedOAuth.length + unconfiguredApiKey.length > 12) && (
+                            <button
+                              type="button"
+                              onClick={() => setPickerOpen(true)}
+                              className="provider-grid-card"
+                              style={{ minHeight: 90, alignItems: "center", justifyContent: "center", gap: 6, cursor: "pointer", borderStyle: "dashed", background: "transparent" }}
+                            >
+                              <Plus size={14} style={{ color: "var(--accent)" }} />
+                              <span style={{ fontSize: 12.5, fontWeight: 500, color: "var(--text-muted)" }}>
+                                Browse all {unlinkedOAuth.length + unconfiguredApiKey.length} providers…
+                              </span>
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </div>
+              )
+            )}
+
+            {subTab === "custom" && (
+              selection && (selection.type === "provider" || selection.type === "model") ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                  <button
+                    type="button"
+                    className="settings-back"
+                    onClick={() => setSelection(null)}
+                    style={{ alignSelf: "flex-start", marginBottom: 4 }}
+                  >
+                    <ArrowLeft size={14} aria-hidden="true" />
+                    <span>Back to custom providers</span>
+                  </button>
+                  {detailContent}
+                </div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+                  <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
+                    <div>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text)" }}>{t("modelsConfig.customProviders")}</div>
+                      <div style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 3 }}>
+                        Custom endpoints, local Ollama / vLLM models, or reverse proxies defined in <code style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}>~/.omp/agent/models.yml</code>.
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={addCustomProvider}
+                      className="settings-back"
+                      style={{ background: "var(--accent-strong)", color: "var(--on-accent)", border: "1px solid var(--accent-strong)", fontWeight: 600, padding: "6px 14px", flexShrink: 0 }}
+                    >
+                      <Plus size={14} aria-hidden="true" /> Add Provider
+                    </button>
+                  </div>
+
+                  {providers.length === 0 ? (
+                    <div className="settings-empty" style={{ textAlign: "center", padding: "32px 20px" }}>
+                      <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", marginBottom: 6 }}>{t("modelsConfig.noCustomProviders")}</div>
+                      <div style={{ fontSize: 12.5, color: "var(--text-muted)", marginBottom: 16 }}>{t("modelsConfig.addOpenAiEndpoint")}</div>
+                      <div style={{ display: "flex", justifyContent: "center", gap: 8, flexWrap: "wrap" }}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setConfig((prev) => ({
+                              ...prev,
+                              providers: {
+                                ...(prev.providers ?? {}),
+                                ollama: { baseUrl: "http://localhost:11434/v1", api: "openai-completions", auth: "none" },
+                              },
+                            }));
+                            setSelection({ type: "provider", name: "ollama" });
+                          }}
+                          className="settings-back"
+                          style={{ border: "1px solid var(--border)", background: "var(--bg-panel)", padding: "6px 12px" }}
+                        >
+                          Add Ollama (localhost:11434)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={addCustomProvider}
+                          className="settings-back"
+                          style={{ background: "var(--accent-strong)", color: "var(--on-accent)", border: "1px solid var(--accent-strong)", fontWeight: 600, padding: "6px 12px" }}
+                        >
+                          <Plus size={14} aria-hidden="true" /> Add Custom Endpoint
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                      {providers.map(([pName, pData]) => {
+                        const models = pData.models ?? [];
+                        return (
+                          <div key={pName} className="settings-card" style={{ flexDirection: "column", alignItems: "stretch", gap: 12 }}>
+                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                                <ProviderIcon id={pName} size={22} />
+                                <div>
+                                  <div style={{ fontSize: 13.5, fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--text)" }}>{pName}</div>
+                                  <div style={{ fontSize: 11.5, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{pData.baseUrl || t("modelsConfig.defaultEndpoint")}</div>
+                                </div>
+                              </div>
+                              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                <button
+                                  type="button"
+                                  onClick={() => addModel(pName)}
+                                  className="settings-back"
+                                  style={{ padding: "4px 8px", fontSize: 11, border: "1px solid var(--border)", background: "var(--bg)" }}
+                                >
+                                  <Plus size={12} aria-hidden="true" /> Add Model
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setCatalogPicker(pName)}
+                                  className="settings-back"
+                                  style={{ padding: "4px 8px", fontSize: 11, border: "1px solid var(--border)", background: "var(--bg)" }}
+                                >
+                                  <BookOpen size={12} aria-hidden="true" /> Catalog
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setSelection({ type: "provider", name: pName })}
+                                  className="settings-back"
+                                  style={{ padding: "4px 8px", fontSize: 11, border: "1px solid var(--border)", background: "var(--bg)" }}
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => deleteProvider(pName)}
+                                  className="settings-back"
+                                  style={{ padding: "4px 8px", fontSize: 11, border: "1px solid var(--border)", background: "var(--bg)", color: "var(--status-error)" }}
+                                  title="Delete provider"
+                                >
+                                  <Trash2 size={12} aria-hidden="true" />
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Models chips */}
+                            {models.length > 0 ? (
+                              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, paddingTop: 6, borderTop: "1px solid var(--border)" }}>
+                                {models.map((m, i) => (
+                                  <button
+                                    key={i}
+                                    type="button"
+                                    onClick={() => setSelection({ type: "model", providerName: pName, index: i })}
+                                    style={{
+                                      display: "inline-flex", alignItems: "center", gap: 5, padding: "3px 8px",
+                                      borderRadius: 5, background: "var(--bg)", border: "1px solid var(--border)",
+                                      color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11, cursor: "pointer",
+                                    }}
+                                  >
+                                    <span>{m.id}</span>
+                                    {m.reasoning && <span style={{ fontSize: 9, padding: "0 3px", borderRadius: 2, background: "var(--accent-strong)", color: "var(--on-accent)", fontWeight: 700 }}>T</span>}
+                                  </button>
+                                ))}
+                              </div>
+                            ) : (
+                              <div style={{ fontSize: 11.5, color: "var(--text-dim)", paddingTop: 4, borderTop: "1px solid var(--border)" }}>
+                                No models defined yet. Click &quot;Add Model&quot; or &quot;Catalog&quot; above to configure models.
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )
+            )}
+
+            {subTab === "system" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                <div className="providers-segmented">
+                  <button
+                    type="button"
+                    className={`providers-segmented-btn${systemTab === "registry" ? " active" : ""}`}
+                    onClick={() => { setSystemTab("registry"); setSelection({ type: "registry" }); }}
+                  >
+                    <Layers size={13} aria-hidden="true" />
+                    <span>{t("modelsConfig.navNativeRegistry")}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`providers-segmented-btn${systemTab === "picker" ? " active" : ""}`}
+                    onClick={() => { setSystemTab("picker"); setSelection({ type: "picker" }); }}
+                  >
+                    <BookOpen size={13} aria-hidden="true" />
+                    <span>{t("modelsConfig.navComposerPicker")}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`providers-segmented-btn${systemTab === "roles" ? " active" : ""}`}
+                    onClick={() => { setSystemTab("roles"); setSelection({ type: "roles" }); }}
+                  >
+                    <SlidersHorizontal size={13} aria-hidden="true" />
+                    <span>{t("modelsConfig.navModelRoles")}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`providers-segmented-btn${systemTab === "fallbacks" ? " active" : ""}`}
+                    onClick={() => { setSystemTab("fallbacks"); setSelection({ type: "fallbacks" }); }}
+                  >
+                    <RotateCcw size={13} aria-hidden="true" />
+                    <span>{t("modelsConfig.navRetryFallback")}</span>
+                  </button>
+                </div>
+
+                <div style={{ width: "100%" }}>
+                  {detailContent}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Footer for saving models.yml */}
+        {(subTab === "custom" || !embedded) && (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "12px 18px", borderTop: "1px solid var(--border)", background: "var(--bg-panel)", borderRadius: "0 0 var(--radius-card) var(--radius-card)", flexShrink: 0, marginTop: 16 }}>
+            <div style={{ fontSize: 12, color: saveError ? "var(--status-error)" : "var(--text-muted)" }}>
+              {saveError ? saveError : <code>~/.omp/agent/models.yml</code>}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <button onClick={() => loadConfig()} disabled={loading} style={{ padding: "6px 14px", background: "none", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", cursor: "pointer", fontSize: 12.5 }}>
+                {t("modelsConfig.cancel")}
+              </button>
+              <button onClick={handleSave} disabled={saving || savedOk || parseError !== null} style={{
+                position: "relative",
+                padding: "6px 18px",
+                minWidth: 92,
+                background: savedOk ? "var(--status-success)" : (saving || parseError) ? "var(--bg-panel)" : "var(--accent-strong)",
+                border: "none", borderRadius: 6,
+                color: savedOk ? "var(--on-accent)" : (saving || parseError) ? "var(--text-muted)" : "var(--on-accent)",
+                cursor: (saving || savedOk || parseError) ? "default" : "pointer", fontSize: 12.5, fontWeight: 600,
+                display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6,
+                transition: "background-color var(--dur-med) var(--ease-out-warm), color var(--dur-med) var(--ease-out-warm)",
+                animation: savedOk ? "saved-pop var(--dur-theme) var(--ease-out-warm)" : undefined,
+              }}>
+                {savedOk && (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"
+                    style={{ strokeDasharray: 18, animation: "saved-check-draw 0.35s ease forwards", flexShrink: 0 }}>
+                    <polyline points="20 6 9 17 4 12" />
+                  </svg>
+                )}
+                <span>{savedOk ? t("modelsConfig.saved") : saving ? t("modelsConfig.saving") : t("modelsConfig.save")}</span>
               </button>
             </div>
           </div>
-          <div style={{ flex: 1, overflowY: "auto", padding: 20, background: "var(--bg)" }}>
-            {loading ? (
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                <div className="skeleton" style={{ height: 18, width: "40%" }} />
-                <div className="skeleton" style={{ height: 12, width: "70%" }} />
-                <div className="skeleton" style={{ height: 12, width: "55%" }} />
-                <div className="skeleton" style={{ height: 90, width: "100%" }} />
-              </div>
-            ) : detailContent ?? (
-              <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 13 }}>
-                {t("modelsConfig.selectProviderOrModel")}
-              </div>
-            )}
-          </div>
-        </div>
         )}
-
-        {/* Footer */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10, padding: "10px 18px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
-          {saveError && <span style={{ fontSize: 12, color: "var(--status-error)", flex: 1 }}>{saveError}</span>}
-          <button onClick={onClose} style={{ padding: "6px 14px", background: "none", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", cursor: "pointer", fontSize: 13 }}>
-            {t("modelsConfig.cancel")}
-          </button>
-          <button onClick={handleSave} disabled={saving || savedOk || parseError !== null} style={{
-            position: "relative",
-            padding: "6px 16px",
-            minWidth: 92,
-            background: savedOk ? "var(--status-success)" : (saving || parseError) ? "var(--bg-panel)" : "var(--accent-strong)",
-            border: "none", borderRadius: 6,
-            color: savedOk ? "var(--on-accent)" : (saving || parseError) ? "var(--text-muted)" : "var(--on-accent)",
-            cursor: (saving || savedOk || parseError) ? "default" : "pointer", fontSize: 13, fontWeight: 600,
-            display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6,
-            transition: "background-color var(--dur-med) var(--ease-out-warm), color var(--dur-med) var(--ease-out-warm)",
-            animation: savedOk ? "saved-pop var(--dur-theme) var(--ease-out-warm)" : undefined,
-          }}>
-            {savedOk && (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"
-                style={{ strokeDasharray: 18, animation: "saved-check-draw 0.35s ease forwards", flexShrink: 0 }}>
-                <polyline points="20 6 9 17 4 12" />
-              </svg>
-            )}
-            <span>{savedOk ? t("modelsConfig.saved") : saving ? t("modelsConfig.saving") : t("modelsConfig.save")}</span>
-          </button>
-        </div>
       </ModelsConfigSurface>
     {pickerOpen && (
       <AddProviderPicker
         oauthProviders={oauthProviders}
         apiKeyProviders={apiKeyProviders}
-        onSelectOAuth={(id) => setSelection({ type: "oauth", providerId: id })}
-        onSelectApiKey={(id) => setSelection({ type: "apikey", providerId: id })}
-        onAddCustom={addCustomProvider}
+        onSelectOAuth={(id) => { setSubTab("connected"); setSelection({ type: "oauth", providerId: id }); }}
+        onSelectApiKey={(id) => { setSubTab("connected"); setSelection({ type: "apikey", providerId: id }); }}
+        onAddCustom={() => { setSubTab("custom"); addCustomProvider(); }}
         onClose={() => setPickerOpen(false)}
       />
     )}

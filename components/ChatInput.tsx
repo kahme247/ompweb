@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, ListChecks, Loader2, Paperclip, Plus, Search, Shrink, Sparkles, Wrench, Zap } from "lucide-react";
+import { ChevronDown, ListChecks, Loader2, Paperclip, Plus, Shrink, Sparkles, Wrench, Zap } from "lucide-react";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
@@ -38,6 +38,7 @@ import {
   readVisibleModelKeys,
   type ModelOption,
 } from "./ChatInput-model-options";
+import { ModelPickerPanel } from "./ChatInput-model-picker";
 import { ComposerModeStatus, ModelErrorBanner, QueuedActionButton } from "./ChatInput-banners";
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
 import {
@@ -139,6 +140,8 @@ interface Props {
   onMinimize?: () => void;
   /** Active status label attached to the composer's top edge (e.g. "Waiting for model..."). */
   statusText?: string | null;
+  /** Open Settings → API Keys & Providers from the model picker footer. */
+  onOpenProviders?: () => void;
 }
 
 export interface ChatInputHandle {
@@ -254,6 +257,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   onAdvisorChange,
   onMinimize,
   statusText,
+  onOpenProviders,
 }: Props, ref) {
   const isMobile = useIsMobile();
   const { t, tn, locale } = useI18n();
@@ -1293,16 +1297,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     [locale, modelOptions, modelSearchQuery],
   );
 
-  // Group options by provider, preserving insertion order.
-  const modelsByProvider: { provider: string; options: ModelOption[] }[] = React.useMemo(() => {
-    const groups: { provider: string; options: ModelOption[] }[] = [];
-    for (const opt of filteredModelOptions) {
-      const group = groups.find((g) => g.provider === opt.provider);
-      if (group) group.options.push(opt);
-      else groups.push({ provider: opt.provider, options: [opt] });
-    }
-    return groups;
-  }, [filteredModelOptions]);
+  // Grouping for the nested picker lives in ChatInput-model-picker (providers rail + models pane).
 
   const displayModelName = model
     ? (modelOptions.find((o) => o.modelId === model.modelId && o.provider === model.provider)?.name
@@ -2412,11 +2407,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                       bottom: isMobile ? 8 : "calc(100% + 6px)",
                       ...(isMobile
                         ? { left: 8, right: 8, maxWidth: "calc(100vw - 16px)" }
-                        : { left: 0, width: "max-content", minWidth: 200, maxWidth: "min(320px, calc(100vw - 32px))" }),
+                        : { left: 0, width: "min(360px, calc(100vw - 32px))" }),
                       zIndex: 500,
                       display: "flex",
                       flexDirection: "column",
-                      maxHeight: isMobile ? "calc(100dvh - 32px)" : "min(380px, 60vh)",
+                      height: isMobile ? undefined : "min(360px, calc(100dvh - 32px))",
+                      maxHeight: isMobile ? "calc(100dvh - 32px)" : undefined,
                     }}
                   >
                       <div className="picker-panel-header">
@@ -2427,52 +2423,27 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         <span className="picker-panel-title">{t("chatInput.modelsLabel")}</span>
                         <span className="picker-panel-count">{modelOptions.length}</span>
                       </div>
-                      <label className="picker-search">
-                        <Search size={13} strokeWidth={1.8} color="var(--text-dim)" aria-hidden="true" />
-                        <input
-                          ref={modelSearchInputRef}
-                          type="search"
-                          autoComplete="off"
-                          spellCheck={false}
-                          value={modelSearchQuery}
-                          onChange={(e) => setModelSearchQuery(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Escape") {
-                              e.preventDefault();
-                              setModelDropdownOpen(false);
-                            }
-                          }}
-                          placeholder={t("chatInput.searchModels")}
-                          aria-label={t("chatInput.searchModels")}
-                        />
-                      </label>
-                      <div className="picker-list">
-                        {modelsByProvider.length === 0 ? (
-                          <div style={{ padding: "9px 8px", color: "var(--text-dim)", fontSize: 12, whiteSpace: "nowrap" }}>
-                            {modelSearchQuery.trim() ? t("chatInput.noMatchingModels") : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noAvailableModels")}
-                          </div>
-                        ) : modelsByProvider.map((group) => (
-                          <div key={group.provider}>
-                            <div className="picker-group-label">{group.provider}</div>
-                            {group.options.map((opt) => {
-                              const isActive = opt.modelId === model?.modelId && opt.provider === model?.provider;
-                              return (
-                                <button
-                                  className="picker-row"
-                                  data-active={isActive}
-                                  key={`${opt.provider}:${opt.modelId}`}
-                                  onClick={() => { setModelDropdownOpen(false); if (!isActive || isAutoModelSelection) onModelChange(opt.provider, opt.modelId); }}
-                                >
-                                  <span className="picker-check">
-                                    {isActive && <svg width="11" height="11" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>}
-                                  </span>
-                                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{opt.name}</span>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        ))}
-                      </div>
+                      <ModelPickerPanel
+                        modelOptions={modelOptions}
+                        filteredModelOptions={filteredModelOptions}
+                        currentModel={model}
+                        modelSearchQuery={modelSearchQuery}
+                        onSearchQueryChange={setModelSearchQuery}
+                        searchInputRef={modelSearchInputRef}
+                        showModelsLoading={showModelsLoading}
+                        isMobile={isMobile}
+                        onSelectModel={(provider, modelId) => {
+                          setModelDropdownOpen(false);
+                          if (provider !== model?.provider || modelId !== model?.modelId || isAutoModelSelection) {
+                            onModelChange(provider, modelId);
+                          }
+                        }}
+                        onClose={() => setModelDropdownOpen(false)}
+                        onOpenProviders={onOpenProviders ? () => {
+                          setModelDropdownOpen(false);
+                          onOpenProviders();
+                        } : undefined}
+                      />
                     </div>
                 )}
               </div>
