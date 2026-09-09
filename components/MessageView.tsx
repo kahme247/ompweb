@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useState, useRef, useEffect, useMemo, useCallback, type ComponentProps } from "react";
-import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, ChevronDown, Brain, EyeOff, CircleAlert, CircleSlash, LoaderCircle } from "lucide-react";
+import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, ChevronDown, Brain, EyeOff, CircleAlert, CircleSlash, LoaderCircle, FileText, Search, FileEdit, Terminal, CheckSquare, Bot, Code2, Globe, Wrench } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
 import { ClickableImage } from "./ImageLightbox";
 import { translate, useI18n, type Locale } from "@/lib/i18n";
@@ -12,7 +12,17 @@ import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { formatCompactNumber } from "@/lib/format";
 import { TaskResultPanel } from "./MessageView-task-panel";
 import { getResultDiff, PairedDiffResult, PairedResult } from "./MessageView-diff-view";
-import { getToolPreview, formatToolCommand, formatToolOutput, getToolResultMeta } from "./MessageView-tool-format";
+import {
+  getToolPreview,
+  formatToolCommand,
+  formatToolOutput,
+  getToolResultMeta,
+  getToolCategory,
+  getTodoSummary,
+  summarizeToolCallGroup,
+  getSemanticToolLabel,
+  type ToolCategory,
+} from "./MessageView-tool-format";
 export { TaskResultPanel } from "./MessageView-task-panel";
 import type {
   AgentMessage,
@@ -28,6 +38,74 @@ import type {
   ThinkingContent,
 } from "@/lib/types";
 
+function ToolCategoryIcon({
+  category,
+  size = 12,
+  className,
+  style,
+}: {
+  category: ToolCategory;
+  size?: number;
+  className?: string;
+  style?: React.CSSProperties;
+}) {
+  switch (category) {
+    case "read":
+      return <FileText size={size} strokeWidth={1.8} className={className} style={{ color: "var(--status-renamed, #7CA8FF)", ...style }} />;
+    case "search":
+      return <Search size={size} strokeWidth={1.8} className={className} style={{ color: "var(--accent, #EC5BAB)", ...style }} />;
+    case "edit":
+      return <FileEdit size={size} strokeWidth={1.8} className={className} style={{ color: "var(--status-modified, #E0B24D)", ...style }} />;
+    case "terminal":
+      return <Terminal size={size} strokeWidth={1.8} className={className} style={{ color: "var(--status-success, #7DD8A8)", ...style }} />;
+    case "todo":
+      return <CheckSquare size={size} strokeWidth={1.8} className={className} style={{ color: "var(--accent, #EC5BAB)", ...style }} />;
+    case "task":
+      return <Bot size={size} strokeWidth={1.8} className={className} style={{ color: "var(--accent-2, #7DD7E8)", ...style }} />;
+    case "code":
+      return <Code2 size={size} strokeWidth={1.8} className={className} style={{ color: "var(--accent, #EC5BAB)", ...style }} />;
+    case "web":
+      return <Globe size={size} strokeWidth={1.8} className={className} style={{ color: "var(--accent-2, #7DD7E8)", ...style }} />;
+    default:
+      return <Wrench size={size} strokeWidth={1.8} className={className} style={{ color: "var(--text-muted)", ...style }} />;
+  }
+}
+
+type GroupedBlockItem =
+  | { type: "single"; item: { block: AssistantContentBlock; originalIndex: number } }
+  | { type: "toolGroup"; items: Array<{ block: ToolCallContent; originalIndex: number }> };
+
+function groupAdjacentBlocks(items: Array<{ block: AssistantContentBlock; originalIndex: number }>): GroupedBlockItem[] {
+  const result: GroupedBlockItem[] = [];
+  let currentGroup: Array<{ block: ToolCallContent; originalIndex: number }> | null = null;
+
+  for (const item of items) {
+    if (item.block.type === "toolCall") {
+      if (!currentGroup) currentGroup = [];
+      currentGroup.push({ block: item.block as ToolCallContent, originalIndex: item.originalIndex });
+    } else {
+      if (currentGroup) {
+        if (currentGroup.length === 1) {
+          result.push({ type: "single", item: currentGroup[0] });
+        } else {
+          result.push({ type: "toolGroup", items: currentGroup });
+        }
+        currentGroup = null;
+      }
+      result.push({ type: "single", item });
+    }
+  }
+
+  if (currentGroup) {
+    if (currentGroup.length === 1) {
+      result.push({ type: "single", item: currentGroup[0] });
+    } else {
+      result.push({ type: "toolGroup", items: currentGroup });
+    }
+  }
+
+  return result;
+}
 
 const MAX_THINKING_CACHE_ENTRIES = 100;
 const thinkingContentCache = new Map<string, Promise<string>>();
@@ -588,9 +666,38 @@ function AssistantMessageView({
             <span><strong>{t("messageView.responseError")}:</strong> {errorMessage}</span>
           </div>
         )}
-        {blockItems.map(({ block, originalIndex }) => (
-          <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block} toolResults={toolResults} isStreaming={isStreaming} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} />
-        ))}
+        {groupAdjacentBlocks(blockItems).map((group, groupIdx) => {
+          if (group.type === "single") {
+            const { block, originalIndex } = group.item;
+            return (
+              <BlockView
+                key={`${entryId ?? "stream"}-${originalIndex}`}
+                block={block}
+                toolResults={toolResults}
+                isStreaming={isStreaming}
+                streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)}
+                toolCallDurations={toolCallDurations}
+                cwd={cwd}
+                onOpenFile={onOpenFile}
+                sessionId={sessionId}
+                entryId={entryId}
+                blockIndex={originalIndex}
+                toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
+              />
+            );
+          }
+          return (
+            <ToolCallGroupBlock
+              key={`${entryId ?? "stream"}-group-${groupIdx}`}
+              items={group.items}
+              toolResults={toolResults}
+              isStreaming={isStreaming}
+              toolCallDurations={toolCallDurations}
+              onOpenFile={onOpenFile}
+              toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
+            />
+          );
+        })}
       </div>
 
       {time && !isStreaming && (
@@ -613,7 +720,7 @@ function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCal
     const tc = block as ToolCallContent;
     const result = toolResults?.get(tc.toolCallId);
     const duration = toolCallDurations?.get(tc.toolCallId);
-    return <ToolCallBlock block={tc} result={result} duration={duration} isStreaming={isStreaming} defaultCollapsed={toolCallsDefaultCollapsed} />;
+    return <ToolCallBlock block={tc} result={result} duration={duration} isStreaming={isStreaming} defaultCollapsed={toolCallsDefaultCollapsed} onOpenFile={onOpenFile} />;
   }
   return null;
 }
@@ -674,7 +781,7 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
             <span className="activity-row-duration">{t("messageView.durationSeconds", { seconds: duration })}</span>
           )}
           <ChevronDown
-            size={11}
+            size={12}
             strokeWidth={1.8}
             aria-hidden
             style={{
@@ -685,20 +792,11 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
           />
         </CollapsibleTrigger>
         {expanded && (
-          <div className="tool-call-details">
+          <div className="thinking-details">
             <div
-              className={`tool-call-output${error ? " tool-call-output-error" : ""}`}
-              style={{
-                whiteSpace: "pre-wrap",
-                fontFamily: "var(--font-mono)",
-                fontSize: 10.5,
-                lineHeight: 1.45,
-                color: error ? "var(--status-error)" : "var(--text-muted)",
-              }}
+              className={`thinking-output${error ? " thinking-output-error" : ""}`}
             >
-              <pre className="tool-call-output-text">
-                {loading ? t("messageView.loadingThinking") : error ?? (block.deferred ? content : block.thinking)}
-              </pre>
+              {loading ? t("messageView.loadingThinking") : error ?? (block.deferred ? content : block.thinking)}
             </div>
           </div>
         )}
@@ -726,7 +824,24 @@ function inputsShallowEqual(a: unknown, b: unknown): boolean {
   return keysA.every((k) => (a as Record<string, unknown>)[k] === (b as Record<string, unknown>)[k]);
 }
 
-const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isStreaming, defaultCollapsed = true }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; isStreaming?: boolean; defaultCollapsed?: boolean }) {
+const ToolCallBlock = memo(function ToolCallBlock({
+  block,
+  result,
+  duration,
+  isStreaming,
+  defaultCollapsed = true,
+  inGroup = false,
+  onOpenFile,
+}: {
+  block: ToolCallContent;
+  result?: ToolResultMessage;
+  duration?: number;
+  isStreaming?: boolean;
+  defaultCollapsed?: boolean;
+  cwd?: string;
+  inGroup?: boolean;
+  onOpenFile?: (filePath: string) => void;
+}) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(Boolean(isStreaming) && !defaultCollapsed);
   const resultText = result
@@ -745,11 +860,19 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
   const resultDiff = expanded && result && !isError ? getResultDiff(result) : null;
   const resultMeta = getToolResultMeta(result);
   const command = formatToolCommand(block);
+  const category = getToolCategory(block.toolName);
+  const semantic = getSemanticToolLabel(block);
+  const todoSummary = category === "todo" ? getTodoSummary(block.input) : null;
+  const preview = getToolPreview(block);
+
+  const cleanFilePath = semantic.isFile && typeof block.input === "object" && block.input && "path" in block.input
+    ? String((block.input as Record<string, unknown>).path).split(":")[0]
+    : null;
 
   return (
-    <div className="activity-row" data-activity-operation="true">
+    <div className={inGroup ? "activity-group-item" : "activity-row"} data-activity-operation="true">
       <Collapsible open={expanded} onOpenChange={setExpanded}>
-        <CollapsibleTrigger className="activity-row-trigger">
+        <CollapsibleTrigger className={inGroup ? "activity-group-item-trigger" : "activity-row-trigger"}>
           <span className={`activity-row-indicator${isError ? " activity-row-indicator-error" : ""}`} aria-hidden>
             {isError ? (
               <CircleAlert size={12} strokeWidth={1.8} />
@@ -758,18 +881,42 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
             ) : isStreaming ? (
               <LoaderCircle size={12} strokeWidth={1.8} className="activity-row-spinner" />
             ) : (
-              // Run aborted mid-tool: no result will ever arrive — show a
-              // terminal "interrupted" indicator instead of a live spinner.
               <CircleSlash size={12} strokeWidth={1.8} style={{ opacity: 0.5 }} />
             )}
           </span>
+          <span className="activity-tool-icon" aria-hidden>
+            <ToolCategoryIcon category={category} size={12} />
+          </span>
           <span className={`activity-row-tool${isError ? " activity-row-tool-error" : ""}`}>{block.toolName}</span>
-          <span className="activity-row-preview">{getToolPreview(block)}</span>
+          <span className="activity-row-preview">
+            {cleanFilePath && onOpenFile ? (
+              <span
+                role="button"
+                tabIndex={0}
+                className="activity-file-link"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenFile(cleanFilePath);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.stopPropagation();
+                    onOpenFile(cleanFilePath);
+                  }
+                }}
+                title={preview}
+              >
+                {preview}
+              </span>
+            ) : (
+              preview
+            )}
+          </span>
           {duration !== undefined && (
             <span className="activity-row-duration">{t("messageView.durationSeconds", { seconds: duration })}</span>
           )}
           <ChevronDown
-            size={11}
+            size={12}
             strokeWidth={1.8}
             aria-hidden
             style={{
@@ -786,6 +933,14 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
               <span className="tool-call-command-prompt" aria-hidden>$</span>
               <code>{command}</code>
             </div>
+            {todoSummary && (
+              <div className="tool-call-todo-badge">
+                <span className={`todo-op-tag todo-op-${todoSummary.op}`}>
+                  {todoSummary.action}
+                </span>
+                <span className="todo-task-name">{todoSummary.task ?? todoSummary.label}</span>
+              </div>
+            )}
             <TaskResultPanel details={result?.details} />
             {result ? (
               resultDiff ? (
@@ -822,6 +977,112 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
   && prev.result === next.result
   && prev.duration === next.duration
   && prev.defaultCollapsed === next.defaultCollapsed
+  && prev.inGroup === next.inGroup
+  && prev.onOpenFile === next.onOpenFile
+));
+
+const ToolCallGroupBlock = memo(function ToolCallGroupBlock({
+  items,
+  toolResults,
+  isStreaming,
+  toolCallDurations,
+  onOpenFile,
+  toolCallsDefaultCollapsed,
+}: {
+  items: Array<{ block: ToolCallContent; originalIndex: number }>;
+  toolResults?: Map<string, ToolResultMessage>;
+  isStreaming?: boolean;
+  toolCallDurations?: Map<string, number>;
+  onOpenFile?: (filePath: string) => void;
+  toolCallsDefaultCollapsed: boolean;
+}) {
+  const { t } = useI18n();
+  const [expanded, setExpanded] = useState(!toolCallsDefaultCollapsed);
+  const blocks = items.map((i) => i.block);
+  const groupSummary = useMemo(() => summarizeToolCallGroup(blocks), [blocks]);
+
+  const hasError = blocks.some((b) => toolResults?.get(b.toolCallId)?.isError);
+  const isPending = isStreaming && blocks.some((b) => !toolResults?.has(b.toolCallId));
+
+  const totalDuration = useMemo(() => {
+    if (!toolCallDurations) return undefined;
+    let sum = 0;
+    let counted = 0;
+    for (const b of blocks) {
+      const d = toolCallDurations.get(b.toolCallId);
+      if (d !== undefined) {
+        sum += d;
+        counted++;
+      }
+    }
+    return counted > 0 ? sum : undefined;
+  }, [blocks, toolCallDurations]);
+
+  return (
+    <div className="activity-group" data-activity-operation="true">
+      <Collapsible open={expanded} onOpenChange={setExpanded}>
+        <CollapsibleTrigger className="activity-group-header">
+          <span className="activity-group-icon-cluster" aria-hidden>
+            {groupSummary.categories.slice(0, 3).map((cat) => (
+              <ToolCategoryIcon key={cat} category={cat} size={12} />
+            ))}
+          </span>
+          <span className="activity-group-summary">
+            {groupSummary.summaryText}
+          </span>
+          {totalDuration !== undefined && (
+            <span className="activity-row-duration">
+              {t("messageView.durationSeconds", { seconds: totalDuration })}
+            </span>
+          )}
+          <span className={`activity-row-indicator${hasError ? " activity-row-indicator-error" : ""}`} aria-hidden>
+            {hasError ? (
+              <CircleAlert size={12} strokeWidth={1.8} />
+            ) : isPending ? (
+              <LoaderCircle size={12} strokeWidth={1.8} className="activity-row-spinner" />
+            ) : (
+              <Check size={12} strokeWidth={2} />
+            )}
+          </span>
+          <ChevronDown
+            size={12}
+            strokeWidth={1.8}
+            aria-hidden
+            style={{
+              flexShrink: 0,
+              transform: expanded ? "none" : "rotate(-90deg)",
+              transition: "transform var(--dur-fast) var(--ease-out-warm)",
+            }}
+          />
+        </CollapsibleTrigger>
+        {expanded && (
+          <div className="activity-group-body">
+            {items.map(({ block }) => {
+              const result = toolResults?.get(block.toolCallId);
+              const duration = toolCallDurations?.get(block.toolCallId);
+              return (
+                <ToolCallBlock
+                  key={block.toolCallId}
+                  block={block}
+                  result={result}
+                  duration={duration}
+                  isStreaming={isStreaming}
+                  defaultCollapsed={true}
+                  inGroup={true}
+                  onOpenFile={onOpenFile}
+                />
+              );
+            })}
+          </div>
+        )}
+      </Collapsible>
+    </div>
+  );
+}, (prev, next) => (
+  prev.items.length === next.items.length
+  && prev.items.every((item, i) => item.block.toolCallId === next.items[i]?.block.toolCallId)
+  && prev.onOpenFile === next.onOpenFile
+  && (!prev.toolResults || !next.toolResults || prev.items.every((item) => prev.toolResults?.get(item.block.toolCallId) === next.toolResults?.get(item.block.toolCallId)))
 ));
 
 

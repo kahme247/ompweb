@@ -273,7 +273,7 @@ function diffLines(patch: string): DiffLine[] {
   }));
 }
 
-function DiffView({ patch }: { patch: string }) {
+export function DiffView({ patch }: { patch: string }) {
   const { t, tn } = useI18n();
   const diff = diffLines(patch);
 

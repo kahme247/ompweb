@@ -1,10 +1,10 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
-import { ChevronDown, ChevronUp, Paperclip, Square } from "lucide-react";
-import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
+import { ChevronDown, ChevronUp, Layers, Paperclip, Square } from "lucide-react";
+import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolCallContent, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
-import { splitFinalAssistantBlocks } from "@/lib/message-display";
+import { getDisplayableAssistantBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { isGroupAnchor, planTranscriptRows, type TranscriptRow } from "@/lib/chat-transcript-plan";
 import { MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
@@ -12,6 +12,7 @@ import { ExtensionDialog } from "./ExtensionDialog";
 import { SubagentTranscriptDialog } from "./SubagentTranscriptDialog";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ComposerPanels } from "./ComposerPanels";
+import OmpWebLogo from "./OmpWebLogo";
 import { CHAT_COLUMN_MAX_WIDTH, MINIMAP_WIDTH } from "@/lib/chat-layout";
 import { useAgentSession, type AgentPhase, type NoticeItem, type SubagentInfo } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
@@ -45,8 +46,6 @@ interface Props {
   onSessionStatsChange?: (stats: SessionStatsInfo | null) => void;
   onSessionStatsPanelOpen?: () => void;
   onProviderUsageContextChange?: (context: ProviderUsageContext | null) => void;
-  onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
-  onModelCapacityChange?: (capacity: { contextWindow?: number; maxTokens?: number } | null) => void;
   onOpenFile?: (filePath: string) => void;
   onGenerationSpeedChange?: (speed: GenerationSpeedInfo | null) => void;
 }
@@ -137,6 +136,12 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messag
         className="process-details-toggle"
         title={expanded ? t("chatWindow.collapseProcessDetails") : t("chatWindow.expandProcessDetails")}
       >
+        <Layers
+          size={12}
+          strokeWidth={1.8}
+          aria-hidden="true"
+          style={{ flexShrink: 0, color: "var(--accent)" }}
+        />
         <ChevronDown
           size={12}
           strokeWidth={1.8}
@@ -158,6 +163,127 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messag
       )}
     </div>
   );
+}
+
+function renderClusteredProcessMessages(
+  messages: AgentMessage[],
+  visibleProcessIndices: number[],
+  finalAssistantIdx: number | null,
+  finalProcessMessage: AssistantMessage | null,
+  renderMessage: (idx: number, options?: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean }) => ReactNode,
+): ReactNode[] {
+  const rendered: ReactNode[] = [];
+  let pendingToolCalls: Array<{ block: ToolCallContent; msgIdx: number }> = [];
+
+  const flushToolCalls = () => {
+    if (pendingToolCalls.length === 0) return;
+    if (pendingToolCalls.length === 1) {
+      const item = pendingToolCalls[0];
+      const origMsg = messages[item.msgIdx] as AssistantMessage;
+      if (origMsg.content?.length === 1) {
+        rendered.push(renderMessage(item.msgIdx, { attachRef: false, keyPrefix: "process" }));
+      } else {
+        rendered.push(
+          renderMessage(item.msgIdx, {
+            attachRef: false,
+            keyPrefix: `process-tool-${item.msgIdx}`,
+            messageOverride: withAssistantBlocks(origMsg, [item.block], { omitUsage: true }),
+            showTimestamp: false,
+          }),
+        );
+      }
+    } else {
+      const first = pendingToolCalls[0];
+      const baseMsg = messages[first.msgIdx] as AssistantMessage;
+      const combinedMsg = withAssistantBlocks(
+        baseMsg,
+        pendingToolCalls.map((c) => c.block),
+        { omitUsage: true },
+      );
+      rendered.push(
+        renderMessage(first.msgIdx, {
+          attachRef: false,
+          keyPrefix: `process-cluster-${first.msgIdx}-${pendingToolCalls.length}`,
+          messageOverride: combinedMsg,
+          showTimestamp: false,
+        }),
+      );
+    }
+    pendingToolCalls = [];
+  };
+
+  for (const idx of visibleProcessIndices) {
+    const msg = messages[idx];
+    if (msg?.role === "assistant") {
+      const blocks = getDisplayableAssistantBlocks(msg as AssistantMessage);
+      for (let bIdx = 0; bIdx < blocks.length; bIdx++) {
+        const block = blocks[bIdx];
+        if (block.type === "thinking") {
+          flushToolCalls();
+          const thinkingMsg = withAssistantBlocks(msg as AssistantMessage, [block], { omitUsage: true });
+          rendered.push(
+            renderMessage(idx, {
+              attachRef: false,
+              keyPrefix: `process-thinking-${idx}-${bIdx}`,
+              messageOverride: thinkingMsg,
+              showTimestamp: false,
+            }),
+          );
+        } else if (block.type === "toolCall") {
+          pendingToolCalls.push({ block: block as ToolCallContent, msgIdx: idx });
+        } else {
+          flushToolCalls();
+          const otherMsg = withAssistantBlocks(msg as AssistantMessage, [block], { omitUsage: true });
+          rendered.push(
+            renderMessage(idx, {
+              attachRef: false,
+              keyPrefix: `process-block-${idx}-${bIdx}`,
+              messageOverride: otherMsg,
+              showTimestamp: false,
+            }),
+          );
+        }
+      }
+    } else {
+      flushToolCalls();
+      rendered.push(renderMessage(idx, { attachRef: false, keyPrefix: "process" }));
+    }
+  }
+
+  if (finalAssistantIdx !== null && finalProcessMessage) {
+    const blocks = getDisplayableAssistantBlocks(finalProcessMessage);
+    for (let bIdx = 0; bIdx < blocks.length; bIdx++) {
+      const block = blocks[bIdx];
+      if (block.type === "thinking") {
+        flushToolCalls();
+        const thinkingMsg = withAssistantBlocks(finalProcessMessage, [block], { omitUsage: true });
+        rendered.push(
+          renderMessage(finalAssistantIdx, {
+            attachRef: false,
+            keyPrefix: `process-final-thinking-${finalAssistantIdx}-${bIdx}`,
+            messageOverride: thinkingMsg,
+            showTimestamp: false,
+          }),
+        );
+      } else if (block.type === "toolCall") {
+        pendingToolCalls.push({ block: block as ToolCallContent, msgIdx: finalAssistantIdx });
+      } else {
+        flushToolCalls();
+        const otherMsg = withAssistantBlocks(finalProcessMessage, [block], { omitUsage: true });
+        rendered.push(
+          renderMessage(finalAssistantIdx, {
+            attachRef: false,
+            keyPrefix: `process-final-block-${finalAssistantIdx}-${bIdx}`,
+            messageOverride: otherMsg,
+            showTimestamp: false,
+          }),
+        );
+      }
+    }
+  }
+
+  flushToolCalls();
+  return rendered;
 }
 
 interface CommittedTranscriptProps {
@@ -250,15 +376,16 @@ const CommittedTranscript = memo(function CommittedTranscript({
     );
     if (!isVisible || options.attachRef === false || currentRefIdx === undefined) return view;
     return (
-      <div key={`${keyPrefix}-${idx}`} ref={attachVisibleRef(idx, currentRefIdx)}>
+      <div key={`${keyPrefix}-${idx}`} data-message-index={idx} ref={attachVisibleRef(idx, currentRefIdx)}>
         {view}
       </div>
     );
   };
 
   // Rows are plain descriptors; element creation below only happens for the
-  // visible window (rendered.slice(startIndex) happens on the row list, so
-  // invisible history never allocates React elements).
+  // visible window. Invisible history never allocates React elements, so long
+  // sessions pay element cost proportional to the visible window instead of
+  // the whole transcript.
   const rows = useMemo<TranscriptRow[]>(() => planTranscriptRows(messages), [messages]);
   const isLiveTail = (row: TranscriptRow): boolean => {
     if (row.kind !== "group") return false;
@@ -284,10 +411,6 @@ const CommittedTranscript = memo(function CommittedTranscript({
     return { startIndex: anchored, hasMore: anchored > 0 };
   }, [rows.length, visibleCount, nearBottom]);
 
-  // Only rows from startIndex onward create React elements. Rows above the
-  // window are pure descriptors — no MessageView allocation for invisible
-  // history, so long sessions pay element cost proportional to the visible
-  // window instead of the whole transcript.
   const rendered: ReactNode[] = [];
   for (let rowIdx = startIndex; rowIdx < rows.length; rowIdx++) {
     const row = rows[rowIdx];
@@ -326,11 +449,12 @@ const CommittedTranscript = memo(function CommittedTranscript({
           messageCount={processCount}
           toolCallCount={groupToolCallCount}
         >
-          {() => (
-            <>
-              {processIndices.map((processIdx) => renderMessage(processIdx, { attachRef: false, keyPrefix: "process" }))}
-              {finalProcessMessage && renderMessage(finalAssistantIdx, { attachRef: false, keyPrefix: "process-final", messageOverride: finalProcessMessage, showTimestamp: false })}
-            </>
+          {() => renderClusteredProcessMessages(
+            messages,
+            processIndices,
+            finalProcessMessage ? finalAssistantIdx : null,
+            finalProcessMessage,
+            renderMessage,
           )}
         </ProcessDetailsGroup>
       );
@@ -368,7 +492,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
   );
 });
 
-export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed = true, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onContextUsageChange, onModelCapacityChange, onGenerationSpeedChange, onOpenFile }: Props) {
+export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed = true, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile }: Props) {
   const { t, tn } = useI18n();
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -422,10 +546,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
     if (!model || (!model.contextWindow && !model.maxTokens)) return null;
     return { contextWindow: model.contextWindow, maxTokens: model.maxTokens };
   }, [displayModelValue, modelList]);
-  const modelCapacityKey = modelCapacity ? `${modelCapacity.contextWindow ?? ""}|${modelCapacity.maxTokens ?? ""}` : "";
-  const modelCapacityRef = useRef(modelCapacity);
-  modelCapacityRef.current = modelCapacity;
-  useEffect(() => { onModelCapacityChange?.(modelCapacityRef.current); }, [modelCapacityKey, onModelCapacityChange]);
+
   const providerUsageContext = useMemo<ProviderUsageContext | null>(
     () => displayModelValue ? { provider: displayModelValue.provider, modelId: displayModelValue.modelId } : null,
     // Deps are the primitive identity of the model — a new wrapper object
@@ -683,16 +804,6 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
   }, [statsKey, onSessionStatsChange]);
   useEffect(() => () => { onSessionStatsChange?.(null); }, [onSessionStatsChange]);
 
-  // Push context usage up to AppShell as well.
-  const ctxKey = contextUsage
-    ? `${contextUsage.percent ?? "null"}|${contextUsage.contextWindow}|${contextUsage.tokens ?? "null"}`
-    : null;
-  const contextUsageRef = useRef(contextUsage);
-  contextUsageRef.current = contextUsage;
-  useEffect(() => {
-    onContextUsageChange?.(contextUsageRef.current);
-  }, [ctxKey, onContextUsageChange]);
-  useEffect(() => () => { onContextUsageChange?.(null); }, [onContextUsageChange]);
 
   const onDrop = useCallback((files: File[]) => {
     if (sessionBusy) return;
@@ -883,6 +994,10 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
       inputHistory={inputHistory}
       advisorActive={advisorActive}
       onCompact={handleCompact}
+      contextUsage={contextUsage}
+      sessionStats={sessionStats}
+      modelCapacity={modelCapacity}
+      generationSpeed={generationSpeed}
       onRemoveQueuedMessage={removeQueuedMessage}
       onPromoteQueuedToSteer={promoteQueuedToSteer}
       slashCommands={slashCommands}
@@ -990,9 +1105,9 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
                 fontFamily: "var(--font-mono)",
               }}
             >
-              <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0, flex: 1, lineHeight: 1.4, overflow: "hidden" }}>
-                <span style={{ fontSize: 18, fontWeight: 600, letterSpacing: "0.04em", color: "var(--accent)", flexShrink: 0, whiteSpace: "nowrap" }}>⌥</span>
-                <span style={{ fontSize: 18, color: "var(--text)", fontWeight: 600, letterSpacing: "0.02em", flexShrink: 0, whiteSpace: "nowrap" }}>omp web</span>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flex: 1, lineHeight: 1.4, overflow: "hidden" }}>
+                <OmpWebLogo size={26} />
+                <span className="omp-wordmark" style={{ fontSize: 18, color: "var(--text)", fontWeight: 600, letterSpacing: "0.02em", flexShrink: 0, whiteSpace: "nowrap", fontFamily: "var(--font-mono)" }}>omp web</span>
               </div>
               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, flexShrink: 0 }}>
                 <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
@@ -1027,7 +1142,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
         {/* Hide the Firefox scrollbar on desktop only: ChatMinimap provides the
             position indicator there, but on mobile there is no minimap and
             users need the scrollbar (Chrome's overlay scrollbar still shows). */}
-        <div ref={scrollContainerRef} className={`flex-1 overflow-y-auto pt-6` + (isMobile ? "" : " [scrollbar-width:none]")}>
+        <div ref={scrollContainerRef} className={`flex-1 overflow-y-auto pt-6` + (isMobile ? "" : " [scrollbar-width:none] [&::-webkit-scrollbar]:hidden")}>
           <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
             <div style={{ maxWidth: isMobile ? CHAT_COLUMN_MAX_WIDTH : CHAT_COLUMN_MAX_WIDTH_DESKTOP, margin: "0 auto" }}>
               <ExtensionStatusBar statuses={extensionStatuses} />
@@ -1127,7 +1242,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
           </div>
         </div>
         {isMobile ? null : (
-          <div style={{ position: "absolute", top: 0, bottom: 0, right: 0, zIndex: 30, display: "flex" }}>
+          <div style={{ position: "absolute", top: 0, bottom: 0, right: 0, zIndex: 30, display: "flex", alignItems: "center", pointerEvents: "none" }}>
             <ChatMinimap
               messages={messages}
               scrollContainer={scrollContainerRef}

@@ -30,6 +30,29 @@ export function loadSidebarWidth(): number {
   }
 }
 
+// Resizable right (file) panel: null means the fluid 42% default; a number is
+// a user-chosen pixel width persisted between sessions (same drag pattern as
+// the left sidebar, mirrored — the handle sits on the panel's left edge).
+export const RIGHT_PANEL_WIDTH_STORAGE_KEY = "omp-web:right-panel-width";
+export const RIGHT_PANEL_MIN_WIDTH = 300;
+export const RIGHT_PANEL_MAX_WIDTH = 900;
+
+export function clampRightPanelWidth(width: number): number {
+  return Math.min(RIGHT_PANEL_MAX_WIDTH, Math.max(RIGHT_PANEL_MIN_WIDTH, Math.round(width)));
+}
+
+export function loadRightPanelWidth(): number | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(RIGHT_PANEL_WIDTH_STORAGE_KEY);
+    if (!raw) return null;
+    const width = Number(raw);
+    return Number.isFinite(width) ? clampRightPanelWidth(width) : null;
+  } catch {
+    return null;
+  }
+}
+
 export function PanelLoadingFallback() {
   const { t } = useI18n();
   return (

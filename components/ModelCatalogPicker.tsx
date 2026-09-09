@@ -214,7 +214,7 @@ export function ModelCatalogPicker({ open, providerName, providerBaseUrl, existi
                       type="button"
                       aria-label={"Add " + entry.id + " (" + entry.providerName + ")"}
                       onClick={() => onAdd(toPickedModel(entry), entry.providerBaseUrl)}
-                      style={{ flexShrink: 0, padding: "5px 12px", background: "var(--accent)", border: "none", borderRadius: "var(--radius-control)", color: "var(--on-accent)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}
+                      style={{ flexShrink: 0, padding: "5px 12px", background: "var(--accent-strong)", border: "none", borderRadius: "var(--radius-control)", color: "var(--on-accent)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}
                     >
                       {t("modelsConfig.catalogAdd")}
                     </button>

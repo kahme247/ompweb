@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 
-export type ThemePreference = "light" | "dark" | "system";
-type Theme = "light" | "dark";
+export type ThemePreference = "light" | "dark" | "system" | "omp";
+export type Theme = "light" | "dark" | "omp";
 
 const STORAGE_KEY = "omp-theme";
 const listeners = new Set<() => void>();
@@ -14,26 +14,39 @@ function subscribe(cb: () => void): () => void {
 }
 
 function storedPreference(): ThemePreference {
-  if (typeof window === "undefined") return "system";
+  if (typeof window === "undefined") return "omp";
   try {
     const value = localStorage.getItem(STORAGE_KEY);
-    return value === "light" || value === "dark" || value === "system" ? value : "system";
+    if (value === "light" || value === "dark" || value === "omp") return value;
+    if (value === "system") {
+      // One-time migration: "system" predates the omp base theme (it was the
+      // old implicit default). Persist the upgrade so pre-paint agrees.
+      try {
+        localStorage.setItem(STORAGE_KEY, "omp");
+      } catch {
+        // Migration remains in-memory when storage is unavailable.
+      }
+      return "omp";
+    }
+    return "omp";
   } catch {
-    return "system";
+    return "omp";
   }
 }
 
 export function resolveTheme(preference: ThemePreference, prefersDark = false): Theme {
+  if (preference === "omp") return "omp";
   return preference === "system" ? (prefersDark ? "dark" : "light") : preference;
 }
 
 export function nextThemePreference(preference: ThemePreference): ThemePreference {
-  return preference === "light" ? "dark" : preference === "dark" ? "system" : "light";
+  return preference === "light" ? "dark" : preference === "dark" ? "omp" : preference === "omp" ? "system" : "light";
 }
 
 function applyTheme(preference: ThemePreference): void {
-  const dark = resolveTheme(preference, window.matchMedia?.("(prefers-color-scheme: dark)").matches);
-  document.documentElement.classList.toggle("dark", dark === "dark");
+  const theme = resolveTheme(preference, window.matchMedia?.("(prefers-color-scheme: dark)").matches);
+  document.documentElement.classList.toggle("dark", theme === "dark");
+  document.documentElement.classList.toggle("omp", theme === "omp");
   try {
     localStorage.setItem(STORAGE_KEY, preference);
   } catch {
@@ -43,7 +56,7 @@ function applyTheme(preference: ThemePreference): void {
 }
 
 function getServerSnapshot(): ThemePreference {
-  return "system";
+  return "omp";
 }
 
 type ToggleOrigin = { x: number; y: number };
@@ -64,7 +77,7 @@ function motionDurationMs(variable: string, fallback: number): number {
 export function useTheme() {
   const preference = useSyncExternalStore(subscribe, storedPreference, getServerSnapshot);
   // The OS preference is browser-only. Deferring it until after hydration keeps
-  // the initial client tree identical to the server's system/light snapshot.
+  // the initial client tree identical to the server's omp snapshot.
   const [hydrated, setHydrated] = useState(false);
   const [osDark, setOsDark] = useState(false);
   useEffect(() => { setHydrated(true); }, []);
@@ -83,14 +96,22 @@ export function useTheme() {
   }, []);
   const prefersDark = hydrated && osDark;
   const theme = resolveTheme(preference, prefersDark);
+  // Heal the DOM class on mount: stored preferences can predate the current
+  // default (migration above), and pre-paint only runs on full page loads —
+  // without this, hot-reloaded windows keep stale classes until restarted.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const current = resolveTheme(preference, window.matchMedia?.("(prefers-color-scheme: dark)").matches);
+    document.documentElement.classList.toggle("dark", current === "dark");
+    document.documentElement.classList.toggle("omp", current === "omp");
+  }, [preference]);
 
-  // Keep the DOM class in sync on an OS flip while the user is on "system"
-  // (setTheme/applyTheme own the class for explicit choices).
   useEffect(() => {
     if (preference !== "system" || typeof window === "undefined") return;
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const onChange = () => {
       document.documentElement.classList.toggle("dark", media.matches);
+      document.documentElement.classList.remove("omp");
     };
     onChange();
     media.addEventListener("change", onChange);
@@ -123,5 +144,5 @@ export function useTheme() {
 
   const toggleTheme = useCallback((origin?: ToggleOrigin) => setTheme(nextThemePreference(preference), origin), [preference, setTheme]);
 
-  return { theme, preference, isDark: theme === "dark", setTheme, toggleTheme };
+  return { theme, preference, isDark: theme !== "light", setTheme, toggleTheme };
 }
