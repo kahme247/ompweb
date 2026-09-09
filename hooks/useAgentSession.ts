@@ -205,6 +205,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [entryIds, setEntryIds] = useState<string[]>([]);
   const [showPreCompactionHistory, setShowPreCompactionHistory] = useState(false);
   const [streamState, dispatch] = useReducer(streamReducer, { isStreaming: false, streamingMessage: null });
+  // Latest streaming snapshot for event handlers that must not close over a
+  // stale streamState (quota error stamping onto the live assistant bubble).
+  const streamStateRef = useRef(streamState);
+  streamStateRef.current = streamState;
   const [agentRunning, setAgentRunning] = useState(false);
   const [bashRunning, setBashRunning] = useState(false);
   const [pendingBash, setPendingBash] = useState<{ command: string; excludeFromContext: boolean } | null>(null);
@@ -364,6 +368,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     });
   }
   const eventCoalescer = eventCoalescerRef.current;
+
+  /** Stamp a quota error onto the live assistant bubble so it renders as the
+   * inline chat error banner (MessageView) instead of toast-only. No-op when
+   * nothing is streaming. */
+  const surfaceQuotaOnStream = useCallback((errorMessage: string) => {
+    const current = streamStateRef.current.streamingMessage;
+    if (!current || current.role !== "assistant") return;
+    if (typeof current.errorMessage === "string" && current.errorMessage.trim()) return;
+    dispatch({
+      type: "update",
+      message: { ...current, errorMessage, stopReason: "error" },
+    });
+  }, []);
 
   const setToolPresetState = opts.setToolPreset ?? setToolPreset;
 
@@ -1317,13 +1334,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!agentRunningRef.current) return;
       if (runError) {
         addNotice({ type: "error", message: runError });
-        toast.error(isQuotaLikeError(runError) ? "Quota reached" : "Request failed", runError, { timeout: 12000 });
+        if (!isQuotaLikeError(runError)) {
+          toast.error("Request failed", runError, { timeout: 12000 });
+        } else {
+          surfaceQuotaOnStream(runError);
+        }
       } else if (quotaMessage && isQuotaLikeError(quotaMessage) && !hadContent) {
-        // Quota mid-run already toasted via the notice path; only re-surface
-        // here when the run then stopped with no visible content, so a
-        // content-producing run does not get a duplicate toast.
+        // Silent stop: no assistant bubble to stamp — the shelf notice is the
+        // in-chat message. Mid-run quota already toasted via the notice path.
         addNotice({ type: "error", message: quotaMessage });
-        toast.error("Quota reached", quotaMessage, { timeout: 12000 });
       } else if (!hadContent && !allowEmptyResponse) {
         // Fallback for silent stops with no visible content and no explicit
         // error — never leave the user with a disappeared spinner and no
@@ -1354,7 +1373,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       slashCommandRunRef.current = false;
       onAgentEnd?.();
     }
-  }, [addNotice, clearTerminalReconcileTimer, loadSession, onAgentEnd, refreshSubagentHistory, resetSubagentActivityState]);
+  }, [addNotice, clearTerminalReconcileTimer, loadSession, onAgentEnd, refreshSubagentHistory, resetSubagentActivityState, surfaceQuotaOnStream]);
   const waitForPromptSettlement = useCallback(async (sid: string, runId?: number) => {
     await delay(PROMPT_SETTLE_INITIAL_DELAY_MS);
     const startedAt = Date.now();
@@ -1636,7 +1655,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           ?? (!hadContent && quotaMessage && isQuotaLikeError(quotaMessage) ? quotaMessage : null);
         if (errorMessage) {
           addNotice({ type: "error", message: errorMessage });
-          toast.error(isQuotaLikeError(errorMessage) ? "Quota reached" : "Request failed", errorMessage, { timeout: 12000 });
+          if (isQuotaLikeError(errorMessage)) {
+            // Inline chat banner on the live bubble when still streaming;
+            // otherwise the shelf notice is the in-chat message. No toast —
+            // quota must read as a chat message, not a transient popup.
+            surfaceQuotaOnStream(errorMessage);
+          } else {
+            toast.error("Request failed", errorMessage, { timeout: 12000 });
+          }
         } else if (!hadContent && !wasSlashCommand) {
           const message = translate("agentSession.responseFailed");
           addNotice({ type: "error", message });
@@ -1713,7 +1739,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (agentRunningRef.current) void finishPromptWithoutStream(sessionIdRef.current, promptRunIdRef.current);
         else {
           addNotice({ type: "error", message: promptMsg });
-          if (isQuotaLikeError(promptMsg)) toast.error("Quota reached", promptMsg, { timeout: 12000 });
+          if (isQuotaLikeError(promptMsg)) surfaceQuotaOnStream(promptMsg);
         }
         break;
       }
@@ -1745,10 +1771,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           });
           if (isQuotaLikeError(message)) {
             lastQuotaErrorRef.current = message;
-            // Quota errors are actionable (wait 4h / upgrade) — keep them
-            // visible both as a shelf error and a dismissible toast.
+            // Quota errors are actionable (wait 4h / upgrade) — show them as
+            // an inline chat error on the live assistant bubble, plus a shelf
+            // entry. Toast is omitted: the in-chat banner is the message.
             if (noticeType !== "error") addNotice({ type: "error", message });
-            toast.error("Quota reached", message, { timeout: 12000 });
+            surfaceQuotaOnStream(message);
           }
         }
         break;
@@ -1760,7 +1787,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           addNotice({ type: "info", message: text });
           if (isQuotaLikeError(text)) {
             lastQuotaErrorRef.current = text;
-            toast.error("Quota reached", text, { timeout: 12000 });
+            surfaceQuotaOnStream(text);
           }
         }
         break;
@@ -2104,7 +2131,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, clearTerminalReconcileTimer, consumeQueuedMessage, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, mergeSubagents, onAgentEnd, reconcileAgentState, resetSubagentActivityState, applyAuthoritativeModel, beginAuthoritativeModelSync]);
+  }, [addNotice, clearTerminalReconcileTimer, consumeQueuedMessage, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, mergeSubagents, onAgentEnd, reconcileAgentState, resetSubagentActivityState, applyAuthoritativeModel, beginAuthoritativeModelSync, surfaceQuotaOnStream]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean> => {
