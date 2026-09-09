@@ -137,6 +137,9 @@ password is stored there in plain text).
 | `OMP_WEB_NO_OPEN` | Set to `1` to prevent auto-opening browser | `0` |
 | `OMP_WEB_OMP_BIN` | Path to `omp` binary if not on `PATH` | _auto-detected_ |
 | `PI_CODING_AGENT_DIR` | Custom omp agent directory | `~/.omp/agent` |
+| `OMP_WEB_STT_ENDPOINT` | OpenAI-compatible transcription endpoint URL | _None (disabled)_ |
+| `OMP_WEB_STT_KEY` | Optional API key for the STT endpoint | _None_ |
+| `OMP_WEB_STT_MODEL` | Optional model name for the STT endpoint | _None_ |
 
 ## Development
 
