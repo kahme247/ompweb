@@ -87,9 +87,10 @@ test("renders goal, planning, and advisor indicators at the composer", () => {
 
   assert.match(html, /Ship the active goal bar/);
   assert.match(html, /(Planning in progress|chatInput\.planningInProgress)/);
-  // The per-chat advisor toggle renders pressed with its disable title.
-  assert.match(html, /aria-pressed="true"/);
-  assert.match(html, /title="(Disable advisor for this chat|chatInput\.advisorDisableTitle|Advisor: [^"]*)"/);
+  // The advisor toggle moved into the plus menu: no pressed toggle inline,
+  // but the plus trigger renders for the same props.
+  assert.doesNotMatch(html, /aria-pressed="true"/);
+  assert.match(html, /aria-label="(More actions|chatInput\.plusMenu)"/);
 });
 
 test("renders the compact toolbar action", () => {
@@ -191,7 +192,7 @@ test("model picker dropdown source uses scale-immune anchored positioning", asyn
   assert.match(source, /bottom:\s*isMobile\s*\?\s*8\s*:\s*["']calc\(100%\s*\+\s*6px\)["']/);
 });
 
-test("renders the tool preset picker trigger when a handler is provided", () => {
+test("exposes tool presets through the plus menu when a handler is provided", () => {
   const html = renderToStaticMarkup(
     React.createElement(ChatInput, {
       onSend() {},
@@ -202,11 +203,13 @@ test("renders the tool preset picker trigger when a handler is provided", () => 
     }),
   );
 
-  assert.match(html, /aria-label="Change tool preset: full"/);
+  // No inline preset trigger remains; the plus trigger carries the menu.
+  assert.doesNotMatch(html, /aria-label="Change tool preset: full"/);
+  assert.match(html, /aria-label="(More actions|chatInput\.plusMenu)"/);
   assert.match(html, /aria-haspopup="menu"/);
 });
 
-test("tool preset picker is absent without a change handler", () => {
+test("plus trigger renders without change handlers", () => {
   const html = renderToStaticMarkup(
     React.createElement(ChatInput, {
       onSend() {},
@@ -216,6 +219,7 @@ test("tool preset picker is absent without a change handler", () => {
   );
 
   assert.doesNotMatch(html, /Change tool preset/);
+  assert.match(html, /aria-label="(More actions|chatInput\.plusMenu)"/);
 });
 
 test("renders live status bar attached to the composer top edge when statusText is provided", () => {

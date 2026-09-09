@@ -8,17 +8,18 @@ import { SessionSidebar } from "./SessionSidebar";
 import { ToastProvider } from "./ui/toast";
 import { toast } from "./ui/toast";
 import { ChatWindow } from "./ChatWindow";
-import { TabBar, type Tab } from "./TabBar";
+import { type Tab } from "./TabBar";
+import { type FileExplorerHandle } from "./FileExplorer";
+import type { RightPanelView } from "./RightPanel";
 import { BranchNavigator } from "./BranchNavigator";
 import { LanguageSwitcher } from "./LanguageSwitcher";
-import { Check, CircleCheck, Folder, Gauge, History, Menu, Moon, PanelLeft, Sun, Terminal, Wand2, Zap } from "lucide-react";
-import { useTheme } from "@/hooks/useTheme";
-import { formatCompactNumber, formatPercent, getCacheHitRate } from "@/lib/format";
+import { Check, Folder, History, Menu, PanelLeft, Terminal, Wand2, Zap } from "lucide-react";
+import { ThemeSwitcher } from "./ThemeSwitcher";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { copyText } from "@/lib/clipboard";
-import { getFileName } from "@/lib/file-paths";
+import { encodeFilePathForApi, getFileName, getRelativeFilePath } from "@/lib/file-paths";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import { comparableProjectPath } from "@/lib/comparable-path";
@@ -40,22 +41,19 @@ import {
 } from "./AppShell-app-update";
 import {
   PanelLoadingFallback,
+  RIGHT_PANEL_MIN_WIDTH,
+  RIGHT_PANEL_WIDTH_STORAGE_KEY,
   SIDEBAR_DEFAULT_WIDTH,
   SIDEBAR_WIDTH_STORAGE_KEY,
+  clampRightPanelWidth,
   clampSidebarWidth,
+  loadRightPanelWidth,
   loadSidebarWidth,
   projectLabel,
 } from "./AppShell-layout";
-import {
-  formatProviderUsageReport,
-  formatUsageReset,
-  usageTone,
-  useProviderUsage,
-} from "./AppShell-provider-usage";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo, GenerationSpeedInfo } from "@/lib/pi-types";
-import type { ProviderUsageContext } from "@/lib/provider-usage-types";
 import type { SettingsTab } from "./SettingsTabs";
 import { SettingsConfig } from "./SettingsConfig";
 import {
@@ -69,8 +67,8 @@ import {
 } from "./AppUpdateDialog";
 import { ArchiveBrowser } from "./ArchiveBrowser";
 import { publishSessionsChanged } from "@/lib/session-change-bus";
-// The settings shell is part of the app bundle so opening it does not fetch or compile a modal chunk. The file viewer remains on demand.
-const FileViewer = dynamic(() => import("./FileViewer").then((m) => m.FileViewer), {
+// The settings shell is part of the app bundle so opening it does not fetch or compile a modal chunk. The right panel (viewer included) remains on demand.
+const RightPanel = dynamic(() => import("./RightPanel").then((m) => m.RightPanel), {
   ssr: false,
   loading: () => <PanelLoadingFallback />,
 });
@@ -82,7 +80,6 @@ const CommandPalette = dynamic(() => import("./CommandPalette").then((m) => m.Co
   ssr: false,
 });
 
-type SessionCopyField = "file" | "id";
 type AutoNameStatus =
   | { kind: "idle" }
   | { kind: "naming" }
@@ -94,8 +91,7 @@ export function AppShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
-  const { isDark, preference, toggleTheme } = useTheme();
-  const { t, locale } = useI18n();
+  const { t } = useI18n();
   const isMobile = useIsMobile();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   // When user clicks +, we only store the cwd — no fake session id
@@ -610,9 +606,6 @@ export function AppShell() {
   const systemPromptLoaderRef = useRef<(() => Promise<void>) | null>(null);
   const systemPromptLoadIdRef = useRef(0);
   const systemBtnRef = useRef<HTMLButtonElement>(null);
-  const usageBtnRef = useRef<HTMLButtonElement>(null);
-  const sessionStatsBtnRef = useRef<HTMLButtonElement>(null);
-
   const handleSystemPromptChange = useCallback((prompt: string | null) => {
     setSystemPrompt(prompt);
     setSystemPromptLoading(false);
@@ -637,58 +630,19 @@ export function AppShell() {
   const handleSessionStatsChange = useCallback((stats: SessionStatsInfo | null) => {
     setSessionStats(stats);
   }, []);
-  const [copiedSessionField, setCopiedSessionField] = useState<SessionCopyField | null>(null);
-  const sessionCopyTimerRef = useRef<TimerHandle | undefined>(undefined);
-  const handleCopySessionField = useCallback((field: SessionCopyField, value: string) => {
-    void copyText(value).then(() => {
-      clearTimeout(sessionCopyTimerRef.current);
-      setCopiedSessionField(field);
-      sessionCopyTimerRef.current = setTimeout(() => setCopiedSessionField(null), 1400);
-    });
-  }, []);
-
-  const [providerUsageContext, setProviderUsageContext] = useState<ProviderUsageContext | null>(null);
-  const handleProviderUsageContextChange = useCallback((context: ProviderUsageContext | null) => {
-    setProviderUsageContext(context);
-  }, []);
-  const activeProvider = providerUsageContext?.provider ?? null;
-  const activeModelId = providerUsageContext?.modelId ?? null;
-  const providerUsageQuery = providerUsageVisible && activeProvider
-    ? new URLSearchParams({ provider: activeProvider, ...(activeModelId ? { model: activeModelId } : {}) }).toString()
-    : null;
-  const { snapshot: providerUsage, loading: providerUsageLoading, error: providerUsageError } =
-    useProviderUsage(providerUsageQuery, 5 * 60_000);
-
 
   useEffect(() => {
     return () => {
-      clearTimeout(sessionCopyTimerRef.current);
       clearTimeout(autoNameTimerRef.current);
     };
   }, []);
 
-  // Context usage — populated by ChatWindow, displayed in top bar
-  const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
-  const [modelCapacity, setModelCapacity] = useState<{ contextWindow?: number; maxTokens?: number } | null>(null);
-  const handleContextUsageChange = useCallback((usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => {
-    setContextUsage(usage);
-  }, []);
-  const handleModelCapacityChange = useCallback((capacity: { contextWindow?: number; maxTokens?: number } | null) => {
-    setModelCapacity(capacity);
-  }, []);
-
   // Single active panel — only one dropdown open at a time
-  const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | "usage" | "session" | null>(null);
-  const toggleTopPanel = useCallback((panel: "branches" | "system" | "usage" | "session") => {
+  const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | null>(null);
+  const toggleTopPanel = useCallback((panel: "branches" | "system") => {
     if (isMobile) setSidebarOpen(false);
     setActiveTopPanel((cur) => cur === panel ? null : panel);
   }, [isMobile]);
-  const { snapshot: allProviderUsage, loading: allProviderUsageLoading, error: allProviderUsageError } =
-    useProviderUsage(activeTopPanel === "usage" ? "" : null, 5 * 60_000);
-
-  useEffect(() => {
-    if (!providerUsageVisible && activeTopPanel === "usage") setActiveTopPanel(null);
-  }, [activeTopPanel, providerUsageVisible]);
 
   // Generation speed — current live t/s and the session average.
   const [generationSpeed, setGenerationSpeed] = useState<GenerationSpeedInfo | null>(null);
@@ -711,10 +665,11 @@ export function AppShell() {
     });
   }, [activeTopPanel, systemPrompt, systemPromptLoading, toggleTopPanel]);
 
+  // The topbar session panel is gone (its content lives in the composer ring
+  // popover), so /session opens that instead.
   const openSessionStatsPanel = useCallback(() => {
-    if (isMobile) setSidebarOpen(false);
-    setActiveTopPanel("session");
-  }, [isMobile]);
+    chatInputRef.current?.openContextPanel();
+  }, []);
 
   const handleSidebarToggle = useCallback(() => {
     if (isMobile) setActiveTopPanel(null);
@@ -798,6 +753,95 @@ export function AppShell() {
     document.body.style.userSelect = "";
   }, []);
 
+  const resetRightPanelWidth = useCallback(() => {
+    rightPanelRef.current?.style.removeProperty("--right-panel-width");
+    setRightPanelWidth(null);
+  }, []);
+
+  const changeRightPanelWidth = useCallback((delta: number) => {
+    setRightPanelWidth((prev) => {
+      // Keyboard steps from the fluid default start at the panel's live
+      // width so the first press doesn't jump to the clamp minimum.
+      const base = prev ?? rightPanelRef.current?.getBoundingClientRect().width ?? RIGHT_PANEL_MIN_WIDTH;
+      const next = clampRightPanelWidth(base + delta);
+      rightPanelRef.current?.style.setProperty("--right-panel-width", `${next}px`);
+      return next;
+    });
+  }, []);
+
+  const handleRightPanelResizeKey = useCallback((e: React.KeyboardEvent) => {
+    // The handle sits on the panel's left edge: left widens, right narrows.
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      changeRightPanelWidth(10);
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      changeRightPanelWidth(-10);
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      resetRightPanelWidth();
+    }
+  }, [changeRightPanelWidth, resetRightPanelWidth]);
+
+  const handleRightPanelResizeStart = useCallback((e: React.MouseEvent) => {
+    if (isMobile) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    // Live rect, not state: it always reflects the committed width (custom or
+    // fluid default), and keeps this callback above the state declarations
+    // without a TDZ cycle. The handle only exists while the panel is open.
+    const startWidth = rightPanelRef.current?.getBoundingClientRect().width
+      ?? RIGHT_PANEL_MIN_WIDTH;
+    // Same --ui-scale ground truth as the left sidebar handle: clientX is in
+    // viewport pixels while the panel width is zoomed layout pixels.
+    let uiScale = 1;
+    try {
+      const raw = getComputedStyle(document.documentElement).getPropertyValue("--ui-scale");
+      const value = parseFloat(raw);
+      if (Number.isFinite(value) && value > 0) uiScale = value;
+    } catch {
+      // SSR/unavailable: fall back to unscaled math.
+    }
+    setRightPanelResizing(true);
+    const onMove = (ev: MouseEvent) => {
+      // Dragging the left edge left grows the panel: inverse of the sidebar.
+      const next = clampRightPanelWidth(startWidth - (ev.clientX - startX) / uiScale);
+      // Write the CSS variable straight to the DOM: the flex row follows the
+      // pointer without re-rendering the whole AppShell on every mousemove.
+      rightPanelRef.current?.style.setProperty("--right-panel-width", `${next}px`);
+      pendingRightPanelWidthRef.current = next;
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      rightResizeHandlersRef.current = null;
+      setRightPanelResizing(false);
+      // Commit the final width so state and the persisted value agree with
+      // what the user actually dragged to.
+      setRightPanelWidth(pendingRightPanelWidthRef.current);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    pendingRightPanelWidthRef.current = startWidth;
+    rightResizeHandlersRef.current = { onMove, onUp };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [isMobile]);
+
+  // If the app unmounts mid-drag, remove the window listeners and restore the
+  // body cursor; otherwise the handlers leak and body stays cursor:col-resize.
+  useEffect(() => () => {
+    const handlers = rightResizeHandlersRef.current;
+    if (!handlers) return;
+    window.removeEventListener("mousemove", handlers.onMove);
+    window.removeEventListener("mouseup", handlers.onUp);
+    rightResizeHandlersRef.current = null;
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+  }, []);
+
 
   // Dismiss the topbar dropdowns on outside click or Escape. The Escape
   // handler stops propagation so the global Esc (abort agent) does not fire
@@ -807,9 +851,6 @@ export function AppShell() {
     if (!activeTopPanel || activeTopPanel === "branches") return;
     const onPointerDown = (event: MouseEvent) => {
       if (event.target instanceof Element && event.target.closest("[data-top-panel]")) return;
-      if (systemBtnRef.current?.contains(event.target as Node)) return;
-      if (usageBtnRef.current?.contains(event.target as Node)) return;
-      if (sessionStatsBtnRef.current?.contains(event.target as Node)) return;
       setActiveTopPanel(null);
     };
     const onKeyDown = (event: KeyboardEvent) => {
@@ -825,10 +866,47 @@ export function AppShell() {
     };
   }, [activeTopPanel]);
 
-  // Right panel — file tabs only
+  // Right panel tabs: Explorer | Git changes | open files (Tauri parity).
   const [fileTabs, setFileTabs] = useState<Tab[]>([]);
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
+  const [rightView, setRightView] = useState<"explorer" | "git" | "file">("explorer");
+  // User-chosen pixel width (null = fluid 42% default), persisted.
+  const [rightPanelWidth, setRightPanelWidth] = useState<number | null>(null);
+  const [rightPanelResizing, setRightPanelResizing] = useState(false);
+  const rightPanelRef = useRef<HTMLDivElement>(null);
+  const pendingRightPanelWidthRef = useRef<number | null>(null);
+  const rightResizeHandlersRef = useRef<{ onMove: (ev: MouseEvent) => void; onUp: () => void } | null>(null);
+  useEffect(() => {
+    setRightPanelWidth(loadRightPanelWidth());
+  }, []);
+  // One-shot request asking the explorer tab to expand + scroll to a file.
+  const [revealPath, setRevealPath] = useState<string | null>(null);
+  const [fileSearchOpen, setFileSearchOpen] = useState(false);
+  const [explorerUploadBusy, setExplorerUploadBusy] = useState(false);
+  const [explorerGitCount, setExplorerGitCount] = useState(0);
+  const [explorerIsRepo, setExplorerIsRepo] = useState(false);
+  const fileExplorerRef = useRef<FileExplorerHandle>(null);
+  const handleExplorerGitStatus = useCallback((changedCount: number, isRepo: boolean) => {
+    setExplorerGitCount(changedCount);
+    setExplorerIsRepo(isRepo);
+  }, []);
+  // Same guard as the left sidebar: skip the mount run and mid-drag writes. A
+  // reset (null) removes the key so the fluid default returns.
+  const rightPanelWidthMountedRef = useRef(false);
+  useEffect(() => {
+    if (!rightPanelWidthMountedRef.current) {
+      rightPanelWidthMountedRef.current = true;
+      return;
+    }
+    if (rightPanelResizing) return;
+    try {
+      if (rightPanelWidth === null) window.localStorage.removeItem(RIGHT_PANEL_WIDTH_STORAGE_KEY);
+      else window.localStorage.setItem(RIGHT_PANEL_WIDTH_STORAGE_KEY, String(rightPanelWidth));
+    } catch {
+      // ignore storage quota / privacy-mode errors
+    }
+  }, [rightPanelWidth, rightPanelResizing]);
 
   // Same @mention format as the chat input's @ autocomplete, so the agent's
   // read tool resolves it the same way (it strips the @ prefix).
@@ -1144,7 +1222,9 @@ export function AppShell() {
     // would still have read the pre-close list from the closure).
     const next = fileTabs.filter((t) => t.id !== tabId);
     setFileTabs(next);
-    if (next.length === 0) setRightPanelOpen(false);
+    // The panel now hosts the Explorer tab, so it stays open: closing the
+    // last file falls back to the explorer instead of hiding the panel.
+    if (next.length === 0) setRightView("explorer");
     setActiveFileTabId((cur) => {
       if (cur !== tabId) return cur;
       return next.length > 0 ? next[next.length - 1].id : null;
@@ -1160,14 +1240,80 @@ export function AppShell() {
       return prev.map((t) => t.id === tabId ? { ...t, sourceSessionId } : t);
     });
     setActiveFileTabId(tabId);
+    setRightView("file");
     setRightPanelOpen(true);
     // On mobile the file panel is full-screen; close the drawer so it shows.
     if (isMobile) setSidebarOpen(false);
   }, [isMobile]);
 
+  const activeFileTab = fileTabs.find((tab) => tab.id === activeFileTabId) ?? null;
+  // Explorer tab browses the active workspace: live cwd first, then the
+  // selected / new-session cwd (mirrors what the sidebar used to pass down).
+  const explorerCwd = activeCwd ?? selectedSession?.cwd ?? newSessionCwd ?? null;
   const handleOpenLinkedFile = useCallback((filePath: string) => {
     handleOpenFile(filePath, getFileName(filePath), selectedSession?.id ?? null);
   }, [handleOpenFile, selectedSession?.id]);
+
+  // File-panel integrations: every action works on the active tab so the right
+  // panel behaves like an editor toolbar, not just a tab strip.
+  const handleMentionActiveFile = useCallback(() => {
+    if (!activeFileTab) return;
+    handleAtMention(getRelativeFilePath(activeFileTab.filePath, activeCwd ?? undefined), false);
+  }, [activeFileTab, activeCwd, handleAtMention]);
+
+  const handleCopyActiveFilePath = useCallback(() => {
+    if (!activeFileTab) return;
+    const relative = getRelativeFilePath(activeFileTab.filePath, activeCwd ?? undefined);
+    copyText(relative).then(
+      () => toast.success(t("appShell.copied")),
+      () => toast.error(t("appShell.commandCopyFailed")),
+    );
+  }, [activeFileTab, activeCwd, t]);
+
+  const handleDownloadActiveFile = useCallback(() => {
+    if (!activeFileTab) return;
+    const link = document.createElement("a");
+    link.href = `/api/files/${encodeFilePathForApi(activeFileTab.filePath)}?type=download`;
+    link.download = activeFileTab.label;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }, [activeFileTab]);
+  const handleRevealActiveFile = useCallback(() => {
+    if (!activeFileTab) return;
+    setRevealPath(activeFileTab.filePath);
+    setRightView("explorer");
+    setRightPanelOpen(true);
+  }, [activeFileTab]);
+
+  const handleSelectFileTab = useCallback((tabId: string) => {
+    setActiveFileTabId(tabId);
+    setRightView("file");
+  }, []);
+  // Stable selectors for the memoized RightPanel: inline arrows here would be
+  // new identities every render and defeat the memo boundary.
+  const handleSelectRightView = useCallback((view: RightPanelView) => {
+    setRightView(view);
+  }, []);
+
+  const handleRevealDone = useCallback(() => {
+    setRevealPath(null);
+  }, []);
+
+  const handleToggleFileSearch = useCallback(() => {
+    setFileSearchOpen((open) => !open);
+  }, []);
+
+  const handleCloseOtherFileTabs = useCallback(() => {
+    if (!activeFileTab) return;
+    setFileTabs([activeFileTab]);
+  }, [activeFileTab]);
+
+  const handleCloseAllFileTabs = useCallback(() => {
+    setFileTabs([]);
+    setActiveFileTabId(null);
+    setRightView("explorer");
+  }, []);
 
   const handleViewFullHistory = useCallback(() => {
     if (!selectedSession) return;
@@ -1232,31 +1378,13 @@ export function AppShell() {
         onSessionDeleted={handleSessionDeleted}
         selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
         onCwdChange={handleCwdChange}
-        onOpenFile={handleOpenFile}
-        explorerRefreshKey={explorerRefreshKey}
-        onExplorerRefresh={handleExplorerRefresh}
-        explorerRefreshing={explorerRefreshing}
-        onExplorerRefreshDone={handleExplorerRefreshDone}
-        onAtMention={handleAtMention}
-        onAtMentions={handleAtMentions}
+        usageVisible={providerUsageVisible}
         onOpenSettings={() => setSettingsTab("general")}
         onOpenArchive={() => setArchiveBrowserOpen(true)}
         updateAvailable={Boolean(appUpdate?.updateAvailable) || ompUpdateAvailable}
       />
     </>
   );
-  const currentProviderUsageReport = providerUsage?.reports[0] ?? null;
-  const currentProviderUsageText = currentProviderUsageReport && !currentProviderUsageReport.noLimits
-    ? formatProviderUsageReport(currentProviderUsageReport, "")
-    : null;
-  const currentProviderUsagePercents = currentProviderUsageReport ? [
-    currentProviderUsageReport.fiveHour?.percent,
-    currentProviderUsageReport.sevenDay?.percent,
-    currentProviderUsageReport.monthly?.percent,
-  ].filter((percent): percent is number => percent !== undefined) : [];
-  const currentProviderUsageColor = currentProviderUsagePercents.length > 0
-    ? usageTone(Math.max(...currentProviderUsagePercents))
-    : "var(--text-muted)";
 
   return (
     <>
@@ -1410,18 +1538,7 @@ export function AppShell() {
             >
               {sidebarOpen ? <PanelLeft size={16} strokeWidth={1.8} aria-hidden="true" /> : <Menu size={16} strokeWidth={1.8} aria-hidden="true" />}
             </button>
-            <button
-              onClick={(e) => {
-                const rect = e.currentTarget.getBoundingClientRect();
-                toggleTheme({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
-              }}
-              title={preference === "system" ? t("appShell.systemTheme") : (isDark ? t("appShell.switchToSystemTheme") : t("appShell.switchToDarkMode"))}
-              aria-label={preference === "system" ? t("appShell.systemTheme") : (isDark ? t("appShell.switchToSystemTheme") : t("appShell.switchToDarkMode"))}
-              aria-pressed={isDark}
-              className="shell-toolbar-btn ui-focus-ring"
-            >
-              {isDark ? <Sun size={16} strokeWidth={1.8} aria-hidden="true" /> : <Moon size={16} strokeWidth={1.8} aria-hidden="true" />}
-            </button>
+            <ThemeSwitcher />
             <LanguageSwitcher />
             {showChat && (
               <>
@@ -1609,134 +1726,6 @@ export function AppShell() {
               flexShrink: 0,
             }}
           >
-            {/* Provider limits pill */}
-            {showChat && providerUsageVisible && (providerUsage || providerUsageLoading || providerUsageError) && (
-              <button
-                ref={usageBtnRef}
-                type="button"
-                data-provider-usage-trigger
-                onClick={() => toggleTopPanel("usage")}
-                title={currentProviderUsageText
-                  ? t("appShell.tooltipProviderUsage", { value: currentProviderUsageText })
-                  : currentProviderUsageReport?.noLimits
-                    ? `${t("appShell.providerUsageNoData")}${activeProvider ? ` (${activeProvider})` : ""}`
-                    : providerUsageLoading
-                      ? t("appShell.providerUsageLoading")
-                      : providerUsageError
-                        ? t("appShell.providerUsageUnavailable")
-                        : t("appShell.providerUsageButton")}
-                aria-label={t("appShell.providerUsageButton")}
-                aria-pressed={activeTopPanel === "usage"}
-                className="shell-metric-pill ui-focus-ring"
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  gap: 4,
-                  height: 26,
-                  padding: currentProviderUsageText ? "0 8px" : "0 6px",
-                  borderRadius: "var(--radius-control)",
-                  border: "1px solid var(--border)",
-                  background: activeTopPanel === "usage" ? "var(--bg-selected)" : "var(--bg-subtle)",
-                  color: currentProviderUsageText ? currentProviderUsageColor : "var(--text-dim)",
-                  fontSize: 11,
-                  fontFamily: "var(--font-mono)",
-                  fontVariantNumeric: "tabular-nums",
-                  cursor: "pointer",
-                  whiteSpace: "nowrap",
-                  flexShrink: 0,
-                  transition: "background var(--dur-fast), border-color var(--dur-fast), color var(--dur-fast)",
-                }}
-              >
-                <Gauge size={13} strokeWidth={1.8} aria-hidden="true" />
-                {currentProviderUsageText && <span>{currentProviderUsageText}</span>}
-              </button>
-            )}
-
-            {/* Session Stats and context/cost pill */}
-            {showChat && (sessionStats || contextUsage || modelCapacity) && (() => {
-              const tok = sessionStats?.tokens;
-              const c = sessionStats?.cost ?? 0;
-              const costStr = c > 0 ? (c >= 0.01 ? `$${c.toFixed(2)}` : `<$0.01`) : null;
-              const cacheHitRate = tok ? getCacheHitRate(tok.input, tok.cacheRead) : null;
-              const cacheRateStr = cacheHitRate !== null ? formatPercent(cacheHitRate) : null;
-
-              let ctxColor = "var(--text-muted)";
-              let ctxStr: string | null = null;
-              if (contextUsage?.contextWindow) {
-                const pct = contextUsage.percent;
-                if (pct !== null && pct > 90) ctxColor = "var(--status-error)";
-                else if (pct !== null && pct > 70) ctxColor = "var(--status-warning)";
-                ctxStr = pct !== null ? `${formatPercent(pct)} / ${formatCompactNumber(contextUsage.contextWindow)}` : `? / ${formatCompactNumber(contextUsage.contextWindow)}`;
-              }
-
-              const tooltipParts: string[] = [];
-              if (tok) {
-                tooltipParts.push(t("appShell.tooltipInput", { value: tok.input.toLocaleString(locale) }));
-                tooltipParts.push(t("appShell.tooltipOutput", { value: tok.output.toLocaleString(locale) }));
-                tooltipParts.push(t("appShell.tooltipCacheRead", { value: tok.cacheRead.toLocaleString(locale) }));
-                tooltipParts.push(t("appShell.tooltipCacheWrite", { value: tok.cacheWrite.toLocaleString(locale) }));
-                if (cacheRateStr) tooltipParts.push(t("appShell.tooltipCacheRate", { percent: cacheRateStr }));
-                if (c > 0) tooltipParts.push(t("appShell.tooltipCost", { value: c.toFixed(4) }));
-              }
-              if (modelCapacity?.maxTokens) tooltipParts.push(t("appShell.tooltipMaxOutput", { tokens: modelCapacity.maxTokens.toLocaleString(locale) }));
-              if (contextUsage?.contextWindow) {
-                const pct = contextUsage.percent;
-                tooltipParts.push(t("appShell.tooltipContext", {
-                  percent: pct !== null ? pct.toFixed(1) + "%" : t("appShell.unknown"),
-                  tokens: contextUsage.contextWindow.toLocaleString(locale),
-                }));
-              }
-              const tooltip = tooltipParts.join("  |  ");
-
-              return (
-                <button
-                  ref={sessionStatsBtnRef}
-                  type="button"
-                  onClick={() => toggleTopPanel("session")}
-                  title={tooltip || t("appShell.sessionInfo")}
-                  aria-label={t("appShell.sessionInfo")}
-                  aria-pressed={activeTopPanel === "session"}
-                  className="shell-metric-pill ui-focus-ring"
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 8,
-                    height: 26,
-                    padding: "0 8px",
-                    borderRadius: "var(--radius-control)",
-                    border: "1px solid var(--border)",
-                    background: activeTopPanel === "session" ? "var(--bg-selected)" : "var(--bg-subtle)",
-                    color: "var(--text)",
-                    fontSize: 11,
-                    fontFamily: "var(--font-mono)",
-                    fontVariantNumeric: "tabular-nums",
-                    cursor: "pointer",
-                    whiteSpace: "nowrap",
-                    flexShrink: 0,
-                    transition: "background var(--dur-fast), border-color var(--dur-fast), color var(--dur-fast)",
-                  }}
-                >
-                  {ctxStr && (
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 3, color: ctxColor }}>
-                      <span style={{ fontSize: 10, opacity: 0.7 }}>⌂</span>
-                      {ctxStr}
-                    </span>
-                  )}
-                  {!isMobile && cacheRateStr && (
-                    <span className="shell-pill-extra" style={{ display: "inline-flex", alignItems: "center", gap: 3, color: "var(--text-muted)" }}>
-                      <CircleCheck size={11} strokeWidth={1.8} aria-hidden="true" />
-                      {cacheRateStr}
-                    </span>
-                  )}
-                  {costStr && (
-                    <span style={{ fontWeight: 600, color: "var(--text)" }}>
-                      {costStr}
-                    </span>
-                  )}
-                </button>
-              );
-            })()}
 
             {/* Generation speed pill */}
             {showChat && (() => {
@@ -1781,163 +1770,20 @@ export function AppShell() {
               );
             })()}
           </div>
-          {(activeTopPanel === "system" || activeTopPanel === "usage" || activeTopPanel === "session") && (
+          {activeTopPanel === "system" && (
             <div data-top-panel className="dropdown-surface" style={{
               position: "absolute",
               top: "calc(100% + 4px)",
-              left: activeTopPanel === "system" ? (isMobile ? 4 : 8) : "auto",
-              right: activeTopPanel === "system" ? "auto" : (isMobile ? 4 : 8),
+              left: isMobile ? 4 : 8,
+              right: "auto",
               width: "auto",
-              minWidth: activeTopPanel === "usage" ? (isMobile ? undefined : 480) : activeTopPanel === "session" ? (isMobile ? undefined : 580) : (isMobile ? undefined : 420),
+              minWidth: isMobile ? undefined : 420,
               maxWidth: "min(680px, calc(100vw - 24px))",
               maxHeight: "min(70vh, calc(100dvh - 56px))",
               overflowY: "auto",
               overflowX: "hidden",
               zIndex: 500,
             }}>
-              {activeTopPanel === "usage" && (
-                <div className="session-info-popover" style={{
-                  background: "var(--bg-panel)",
-                  borderBottom: "1px solid var(--border)",
-                  boxShadow: "var(--shadow-pop)",
-                  padding: "14px 16px",
-                  minWidth: isMobile ? undefined : 500,
-                  maxWidth: "min(640px, calc(100vw - 24px))",
-                }}>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, marginBottom: 12 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                      <Gauge size={14} strokeWidth={2} style={{ color: "var(--accent)" }} aria-hidden="true" />
-                      <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>{t("appShell.sectionProviderUsage")}</div>
-                    </div>
-                    {allProviderUsageLoading && allProviderUsage && (
-                      <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("appShell.providerUsageLoading")}</span>
-                    )}
-                  </div>
-                  {allProviderUsage?.reports.length ? (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 10, fontSize: 12, fontFamily: "var(--font-mono)" }}>
-                      {allProviderUsage.reports.map((report, index) => {
-                        const account = report.accountLabel ?? t("appShell.account", { number: report.accountIndex ?? index + 1 });
-                        const key = `${report.provider}:${account}:${report.modelId ?? "all"}:${index}`;
-                        return (
-                          <div
-                            key={key}
-                            style={{
-                              padding: "10px 12px",
-                              borderRadius: "var(--radius-card)",
-                              background: "var(--bg-subtle)",
-                              border: "1px solid var(--border)",
-                              display: "flex",
-                              flexDirection: "column",
-                              gap: 8,
-                            }}
-                          >
-                            {/* Card Header: Provider badge, account, plan, model */}
-                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
-                              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                                <span style={{
-                                  fontWeight: 700,
-                                  fontSize: 11,
-                                  color: "var(--text)",
-                                  background: "var(--bg-panel)",
-                                  border: "1px solid var(--border)",
-                                  padding: "2px 6px",
-                                  borderRadius: 4,
-                                }}>
-                                  {report.provider}
-                                </span>
-                                <span style={{ fontSize: 11, color: "var(--text)", fontWeight: 500 }}>
-                                  {account}
-                                </span>
-                                {report.tier && (
-                                  <span style={{ fontSize: 10, color: "var(--text-dim)", background: "var(--bg-panel)", border: "1px solid var(--border)", padding: "1px 5px", borderRadius: 3 }}>
-                                    {report.tier}
-                                  </span>
-                                )}
-                              </div>
-                              <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--text-dim)" }}>
-                                {report.plan && <span style={{ color: "var(--text-muted)" }}>{report.plan}</span>}
-                                {report.modelId && <span>· {report.modelId}</span>}
-                              </div>
-                            </div>
-
-                            {/* Quota Limits or Unlimited status */}
-                            {report.noLimits ? (
-                              <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--text-dim)", padding: "2px 0" }}>
-                                <span style={{ display: "inline-block", width: 6, height: 6, borderRadius: "50%", background: "var(--accent)" }} />
-                                <span>{t("appShell.providerUsageNoData")}</span>
-                              </div>
-                            ) : (
-                              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 8 }}>
-                                {report.fiveHour && (() => {
-                                  const pct = Math.round(report.fiveHour.percent);
-                                  const reset = report.fiveHour.resetMinutes !== undefined ? formatUsageReset(report.fiveHour.resetMinutes, "minutes") : null;
-                                  const tone = usageTone(pct);
-                                  return (
-                                    <div style={{ background: "var(--bg-panel)", padding: "6px 8px", borderRadius: 6, border: "1px solid var(--border)" }}>
-                                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4, fontSize: 10 }}>
-                                        <span style={{ color: "var(--text-dim)", fontWeight: 600 }}>5h Window</span>
-                                        <span style={{ color: tone, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{pct}%</span>
-                                      </div>
-                                      <div style={{ height: 4, borderRadius: 2, background: "var(--border)", overflow: "hidden" }}>
-                                        <div style={{ height: "100%", width: `${Math.min(100, pct)}%`, background: tone, borderRadius: 2, transition: "width 0.3s" }} />
-                                      </div>
-                                      {reset && <div style={{ fontSize: 9, color: "var(--text-dim)", marginTop: 4, textAlign: "right" }}>resets {reset}</div>}
-                                    </div>
-                                  );
-                                })()}
-
-                                {report.sevenDay && (() => {
-                                  const pct = Math.round(report.sevenDay.percent);
-                                  const reset = report.sevenDay.resetHours !== undefined ? formatUsageReset(report.sevenDay.resetHours, "hours") : null;
-                                  const tone = usageTone(pct);
-                                  return (
-                                    <div style={{ background: "var(--bg-panel)", padding: "6px 8px", borderRadius: 6, border: "1px solid var(--border)" }}>
-                                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4, fontSize: 10 }}>
-                                        <span style={{ color: "var(--text-dim)", fontWeight: 600 }}>7d Window</span>
-                                        <span style={{ color: tone, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{pct}%</span>
-                                      </div>
-                                      <div style={{ height: 4, borderRadius: 2, background: "var(--border)", overflow: "hidden" }}>
-                                        <div style={{ height: "100%", width: `${Math.min(100, pct)}%`, background: tone, borderRadius: 2, transition: "width 0.3s" }} />
-                                      </div>
-                                      {reset && <div style={{ fontSize: 9, color: "var(--text-dim)", marginTop: 4, textAlign: "right" }}>resets {reset}</div>}
-                                    </div>
-                                  );
-                                })()}
-
-                                {report.monthly && (() => {
-                                  const pct = Math.floor(report.monthly.percent);
-                                  const reset = report.monthly.resetHours !== undefined ? formatUsageReset(report.monthly.resetHours, "hours") : null;
-                                  const tone = usageTone(pct);
-                                  return (
-                                    <div style={{ background: "var(--bg-panel)", padding: "6px 8px", borderRadius: 6, border: "1px solid var(--border)" }}>
-                                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4, fontSize: 10 }}>
-                                        <span style={{ color: "var(--text-dim)", fontWeight: 600 }}>Monthly</span>
-                                        <span style={{ color: tone, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{pct}%</span>
-                                      </div>
-                                      <div style={{ height: 4, borderRadius: 2, background: "var(--border)", overflow: "hidden" }}>
-                                        <div style={{ height: "100%", width: `${Math.min(100, pct)}%`, background: tone, borderRadius: 2, transition: "width 0.3s" }} />
-                                      </div>
-                                      {reset && <div style={{ fontSize: 9, color: "var(--text-dim)", marginTop: 4, textAlign: "right" }}>resets {reset}</div>}
-                                    </div>
-                                  );
-                                })()}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ) : allProviderUsageLoading ? (
-                    <div style={{ fontSize: 12, color: "var(--text-muted)", fontStyle: "italic", padding: "8px 0" }}>{t("appShell.providerUsageLoading")}</div>
-                  ) : allProviderUsageError ? (
-                    <div style={{ fontSize: 12, color: "var(--status-error)", fontStyle: "italic", padding: "8px 0" }}>{t("appShell.providerUsageUnavailable")}</div>
-                  ) : allProviderUsage ? (
-                    <div style={{ fontSize: 12, color: "var(--text-muted)", fontStyle: "italic", padding: "8px 0" }}>{t("appShell.providerUsageNoData")}</div>
-                  ) : (
-                    <div style={{ fontSize: 12, color: "var(--text-muted)", fontStyle: "italic", padding: "8px 0" }}>{t("appShell.providerUsageLoading")}</div>
-                  )}
-                </div>
-              )}
               {activeTopPanel === "system" && (
                 <div className="session-info-popover" style={{
                   background: "var(--bg-panel)",
@@ -1969,162 +1815,6 @@ export function AppShell() {
                   )}
                 </div>
               )}
-              {activeTopPanel === "session" && (
-                <div className="session-info-popover" style={{
-                  background: "var(--bg-panel)",
-                  borderBottom: "1px solid var(--border)",
-                  boxShadow: "var(--shadow-pop)",
-                  padding: "12px 16px",
-                  minWidth: isMobile ? undefined : 580,
-                }}>
-                  {sessionStats ? (() => {
-                    const sessionRows = [
-                      ...(sessionStats.sessionName ? [{ label: t("appShell.statName"), value: sessionStats.sessionName, copyField: null }] : []),
-                      { label: t("appShell.statFile"), value: sessionStats.sessionFile ?? t("appShell.inMemory"), copyField: "file" as const },
-                      { label: t("appShell.statId"), value: sessionStats.sessionId, copyField: "id" as const },
-                    ];
-                    const messageRows = [
-                      [t("appShell.statUser"), sessionStats.userMessages.toLocaleString(locale)],
-                      [t("appShell.statAssistant"), sessionStats.assistantMessages.toLocaleString(locale)],
-                      [t("appShell.statToolCalls"), sessionStats.toolCalls.toLocaleString(locale)],
-                      [t("appShell.statToolResults"), sessionStats.toolResults.toLocaleString(locale)],
-                      [t("appShell.statTotal"), sessionStats.totalMessages.toLocaleString(locale)],
-                    ];
-                    const tokenRows = [
-                      [t("appShell.statInput"), sessionStats.tokens.input.toLocaleString(locale)],
-                      [t("appShell.statOutput"), sessionStats.tokens.output.toLocaleString(locale)],
-                      ...(sessionStats.tokens.cacheRead > 0 ? [[t("appShell.statCacheRead"), sessionStats.tokens.cacheRead.toLocaleString(locale)]] : []),
-                      ...(sessionStats.tokens.cacheWrite > 0 ? [[t("appShell.statCacheWrite"), sessionStats.tokens.cacheWrite.toLocaleString(locale)]] : []),
-                      [t("appShell.statTotal"), sessionStats.tokens.total.toLocaleString(locale)],
-                    ];
-                    const ctx = contextUsage ?? sessionStats.contextUsage;
-                    const cacheHitRate = getCacheHitRate(sessionStats.tokens.input, sessionStats.tokens.cacheRead);
-                    const extraTokenRows = [
-                      ...(cacheHitRate !== null ? [[t("appShell.statCacheRate"), formatPercent(cacheHitRate)]] : []),
-                      ...(ctx?.contextWindow ? [[t("appShell.statContext"), `${ctx.percent !== null ? formatPercent(ctx.percent) : "?"} / ${formatCompactNumber(ctx.contextWindow)}`]] : []),
-                      ...(sessionStats.cost > 0 ? [[t("appShell.statCost"), `$${sessionStats.cost.toFixed(4)}`]] : []),
-                    ];
-                    const section = (
-                      title: string,
-                      sectionRows: string[][],
-                      valueAlign: "left" | "right" = "left",
-                      compact = false,
-                    ) => (
-                        <div style={{ minWidth: 0 }}>
-                          <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>{title}</div>
-                          <div style={{
-                            display: "grid",
-                            gridTemplateColumns: compact ? "max-content max-content" : "auto minmax(0, 1fr)",
-                            columnGap: compact ? 14 : 12,
-                            rowGap: 4,
-                            justifyContent: compact ? "start" : undefined,
-                          }}>
-                            {sectionRows.map(([label, value]) => (
-                              <div key={`${title}:${label}`} style={{ display: "contents" }}>
-                                <div style={{ color: "var(--text-dim)", whiteSpace: "nowrap" }}>{label}</div>
-                                <div style={{
-                                  color: "var(--text-muted)",
-                                  minWidth: 0,
-                                  overflowWrap: compact ? "normal" : "anywhere",
-                                  textAlign: valueAlign,
-                                  whiteSpace: "nowrap",
-                                }}>{value}</div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      );
-                    const copyButton = (field: SessionCopyField, value: string) => {
-                      const copied = copiedSessionField === field;
-                      return (
-                        <button
-                          type="button"
-                          title={copied ? t("appShell.copied") : field === "file" ? t("appShell.copyFilePath") : t("appShell.copySessionId")}
-                          onClick={() => handleCopySessionField(field, value)}
-                          style={{
-                            alignSelf: "start",
-                            display: "inline-flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            width: 22,
-                            height: 22,
-                            marginTop: -2,
-                            color: copied ? "var(--accent)" : "var(--text-dim)",
-                            background: "transparent",
-                            border: "1px solid var(--border)",
-                            borderRadius: 4,
-                            cursor: "pointer",
-                            flex: "0 0 auto",
-                            transition: "color var(--dur-fast) var(--ease-out-warm), border-color var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm)",
-                          }}
-                          onMouseEnter={(e) => {
-                            e.currentTarget.style.color = "var(--accent)";
-                            e.currentTarget.style.borderColor = "var(--accent)";
-                            e.currentTarget.style.background = "var(--bg-hover)";
-                          }}
-                          onMouseLeave={(e) => {
-                            e.currentTarget.style.color = copied ? "var(--accent)" : "var(--text-dim)";
-                            e.currentTarget.style.borderColor = "var(--border)";
-                            e.currentTarget.style.background = "transparent";
-                          }}
-                        >
-                          {copied ? (
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                              <polyline points="20 6 9 17 4 12" />
-                            </svg>
-                          ) : (
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                            </svg>
-                          )}
-                        </button>
-                      );
-                    };
-                    const sessionInfoSection = (
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>{t("appShell.sectionSessionInfo")}</div>
-                        <div style={{ display: "grid", gridTemplateColumns: "auto minmax(0, 1fr) auto", columnGap: 12, rowGap: 8, alignItems: "start" }}>
-                          {sessionRows.map((row) => (
-                            <div key={`session-info:${row.label}`} style={{ display: "contents" }}>
-                              <div style={{ color: "var(--text-dim)", whiteSpace: "nowrap" }}>{row.label}</div>
-                              <div style={{
-                                color: "var(--text-muted)",
-                                minWidth: 0,
-                                overflowWrap: "anywhere",
-                                wordBreak: "break-word",
-                                whiteSpace: "normal",
-                              }}>{row.value}</div>
-                              <div>{row.copyField ? copyButton(row.copyField, row.value) : null}</div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    );
-
-                    return (
-                      <div style={{
-                        display: "grid",
-                        gridTemplateColumns: isMobile
-                          ? "1fr"
-                          : "minmax(220px, 1fr) auto auto",
-                        gap: isMobile ? 16 : 24,
-                        fontSize: 12,
-                        lineHeight: 1.5,
-                        fontFamily: "var(--font-mono)",
-                      }}>
-                        {sessionInfoSection}
-                        {section(t("appShell.sectionMessages"), messageRows, "right", true)}
-                        {section(t("appShell.sectionTokens"), [...tokenRows, ...extraTokenRows], "right", true)}
-                      </div>
-                    );
-                  })() : (
-                    <div style={{ fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
-                      {t("appShell.sessionInfoLoadHint")}
-                    </div>
-                  )}
-                </div>
-              )}
             </div>
           )}
 
@@ -2148,11 +1838,7 @@ export function AppShell() {
               onSystemPromptLoaderChange={handleSystemPromptLoaderChange}
               onSessionStatsChange={handleSessionStatsChange}
               onSessionStatsPanelOpen={openSessionStatsPanel}
-              onProviderUsageContextChange={handleProviderUsageContextChange}
-              onContextUsageChange={handleContextUsageChange}
-              onModelCapacityChange={handleModelCapacityChange}
               onGenerationSpeedChange={handleGenerationSpeedChange}
-              toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
             />
           ) : initialCwdStatus === "validating" ? (
             <div
@@ -2211,54 +1897,50 @@ export function AppShell() {
           )}
         </div>
       </main>
+      <RightPanel
+        fileTabs={fileTabs}
+        activeFileTabId={activeFileTabId}
+        rightView={rightView}
+        onSelectView={handleSelectRightView}
+        rightPanelOpen={rightPanelOpen}
+        rightPanelWidth={rightPanelWidth}
+        rightPanelResizing={rightPanelResizing}
+        rightPanelRef={rightPanelRef}
+        fileExplorerRef={fileExplorerRef}
+        revealPath={revealPath}
+        onRevealDone={handleRevealDone}
+        explorerCwd={explorerCwd}
+        activeCwd={activeCwd}
+        explorerRefreshKey={explorerRefreshKey}
+        fileSearchOpen={fileSearchOpen}
+        onToggleFileSearch={handleToggleFileSearch}
+        onFileSearchOpenChange={setFileSearchOpen}
+        explorerUploadBusy={explorerUploadBusy}
+        onUploadBusyChange={setExplorerUploadBusy}
+        explorerGitCount={explorerGitCount}
+        explorerIsRepo={explorerIsRepo}
+        explorerRefreshing={explorerRefreshing}
+        isMobile={isMobile}
+        onOpenFile={handleOpenFile}
+        onSelectFileTab={handleSelectFileTab}
+        onCloseFileTab={handleCloseFileTab}
+        onCloseOtherFileTabs={handleCloseOtherFileTabs}
+        onCloseAllFileTabs={handleCloseAllFileTabs}
+        onMentionActiveFile={handleMentionActiveFile}
+        onCopyActiveFilePath={handleCopyActiveFilePath}
+        onDownloadActiveFile={handleDownloadActiveFile}
+        onRevealActiveFile={handleRevealActiveFile}
+        onExplorerRefresh={handleExplorerRefresh}
+        onExplorerRefreshDone={handleExplorerRefreshDone}
+        onAtMention={handleAtMention}
+        onAtMentions={handleAtMentions}
+        onMentionLines={handleFileLineMention}
+        onExplorerGitStatus={handleExplorerGitStatus}
+        onResetRightPanelWidth={resetRightPanelWidth}
+        onRightPanelResizeStart={handleRightPanelResizeStart}
+        onRightPanelResizeKey={handleRightPanelResizeKey}
+      />
 
-      {/* Right panel: file viewer — always mounted, width animated via CSS */}
-      <div
-        className={`right-panel-container${rightPanelOpen ? " right-panel-open" : " right-panel-closed"}`}
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          borderLeft: "1px solid var(--border)",
-          background: "var(--bg)",
-        }}
-      >
-        {/* Right panel tab bar */}
-        <div style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", height: 36 }}>
-          <div style={{ flex: 1, overflow: "hidden" }}>
-            <TabBar
-              tabs={fileTabs}
-              activeTabId={activeFileTabId ?? ""}
-              onSelectTab={setActiveFileTabId}
-              onCloseTab={handleCloseFileTab}
-            />
-          </div>
-
-        </div>
-
-        {/* Keep open viewers mounted so switching tabs preserves scroll and preview state. */}
-        <div style={{ flex: 1, overflow: "hidden" }}>
-          {fileTabs.length > 0 ? fileTabs.map((tab) => (
-            <div key={tab.id} style={{ display: tab.id === activeFileTabId ? "block" : "none", height: "100%" }}>
-              <FileViewer
-                filePath={tab.filePath}
-                cwd={activeCwd ?? undefined}
-                sourceSessionId={tab.sourceSessionId}
-                gitRefreshKey={explorerRefreshKey}
-                onMentionLines={tab.id === activeFileTabId && rightPanelOpen ? handleFileLineMention : undefined}
-                onOpenFile={(filePath) => handleOpenFile(
-                  filePath,
-                  getFileName(filePath),
-                  tab.sourceSessionId,
-                )}
-              />
-            </div>
-          )) : (
-            <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>
-              {t("appShell.noFileOpen")}
-            </div>
-          )}
-        </div>
-      </div>
     </div>
     {/* File panel toggle — always visible at top-right */}
     <button

@@ -1,11 +1,13 @@
 "use client";
 
 import { memo, useCallback, useRef, useState, type Dispatch, type ReactNode, type RefObject, type SetStateAction } from "react";
-import type { ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
+import type { AgentMessage, ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { Check, ChevronDown, ChevronRight, Folder, GitBranch, MoreHorizontal, Plus, Trash2 } from "lucide-react";
 import { Tooltip } from "./ui/primitives";
+import { copyText } from "@/lib/clipboard";
+import { transcriptToMarkdown } from "@/lib/transcript";
 import { toast } from "./ui/toast";
 import {
   MAX_PROJECT_SESSIONS,
@@ -912,6 +914,23 @@ const SessionItem = memo(function SessionItem({
       toast.error(t("sessionSidebar.deleteFailed"));
     }
   }, [session.id, onDeleted, t]);
+  const [copyingTranscript, setCopyingTranscript] = useState(false);
+  const handleCopyTranscript = useCallback(async () => {
+    if (copyingTranscript) return;
+    setCopyingTranscript(true);
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}`);
+      if (!response.ok) throw new Error("Session transcript fetch failed");
+      const data = await response.json() as { context?: { messages?: AgentMessage[] }; info?: { cwd?: string } };
+      const markdown = transcriptToMarkdown(data.context?.messages ?? [], { title, cwd: data.info?.cwd ?? session.cwd });
+      await copyText(markdown);
+      toast.success(t("sessionSidebar.copyTranscriptCopied"));
+    } catch {
+      toast.error(t("sessionSidebar.copyTranscriptFailed"));
+    } finally {
+      setCopyingTranscript(false);
+    }
+  }, [copyingTranscript, session.id, session.cwd, title, t]);
 
  const closeConfirmation = useCallback(() => {
  setConfirmArchive(false);
@@ -1007,6 +1026,7 @@ const SessionItem = memo(function SessionItem({
                 <SidebarPortalMenu anchor={menuButtonRef} open={actionMenuOpen} onClose={() => setActionMenuOpen(false)} placement="below" minWidth={128}>
  <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleArchive(); }} disabled={hasChildren} title={hasChildren ? t("sessionSidebar.archiveLeafOnly") : t("sessionSidebar.archive")} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: hasChildren ? "var(--text-dim)" : "var(--text-muted)", cursor: hasChildren ? "not-allowed" : "pointer", textAlign: "left", fontSize: 11, opacity: hasChildren ? 0.55 : 1 }}>{t("sessionSidebar.archive")}</button>
                   <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { startRename(event); setActionMenuOpen(false); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.rename")}</button>
+                  <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleCopyTranscript(); }} disabled={copyingTranscript} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: copyingTranscript ? "default" : "pointer", textAlign: "left", fontSize: 11, opacity: copyingTranscript ? 0.55 : 1 }}>{t("sessionSidebar.copyTranscript")}</button>
                   <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleDelete(); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--status-error)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.delete")}</button>
                 </SidebarPortalMenu>
               </div>

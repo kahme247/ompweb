@@ -208,7 +208,7 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
             style={{
               alignSelf: "flex-start",
               padding: "5px 12px",
-              background: "var(--accent)",
+              background: "var(--accent-strong)",
               border: "none",
               borderRadius: "var(--radius-control)",
               color: "var(--on-accent)",
@@ -381,7 +381,7 @@ function ThinkingEditor({
           color: "var(--text-dim)",
         };
         const btnActive: React.CSSProperties = {
-          background: "var(--accent)",
+          background: "var(--accent-strong)",
           color: "var(--on-accent)",
           fontWeight: 600,
         };
@@ -988,7 +988,7 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
               <button
                 onClick={() => submitCode(loginState.token, inputValue)}
                 disabled={!inputValue.trim()}
-                style={{ padding: "6px 12px", background: inputValue.trim() ? "var(--accent)" : "var(--bg-panel)", border: "none", borderRadius: 5, color: inputValue.trim() ? "var(--on-accent)" : "var(--text-dim)", cursor: inputValue.trim() ? "pointer" : "not-allowed", fontSize: 12, fontWeight: 600, flexShrink: 0 }}
+                style={{ padding: "6px 12px", background: inputValue.trim() ? "var(--accent-strong)" : "var(--bg-panel)", border: "none", borderRadius: 5, color: inputValue.trim() ? "var(--on-accent)" : "var(--text-dim)", cursor: inputValue.trim() ? "pointer" : "not-allowed", fontSize: 12, fontWeight: 600, flexShrink: 0 }}
               >
                 {t("modelsConfig.submit")}
               </button>
@@ -1035,7 +1035,7 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
           <>
             <button
               onClick={handleLogin}
-              style={{ padding: "5px 14px", background: "var(--accent)", border: "none", borderRadius: 5, color: "var(--on-accent)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}
+              style={{ padding: "5px 14px", background: "var(--accent-strong)", border: "none", borderRadius: 5, color: "var(--on-accent)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}
             >
               {provider.loggedIn ? t("modelsConfig.relogin") : t("modelsConfig.login")}
             </button>
@@ -1539,7 +1539,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                         >
                           <ProviderIcon id={p.id} size={16} />
                           <span style={{ fontSize: 12, color: "var(--text)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
-                          <span title={t("modelsConfig.oauthProviderTitle", { id: p.id })} style={{ padding: "2px 6px", borderRadius: 4, background: isSelected ? "var(--accent)" : "var(--bg-subtle)", color: isSelected ? "var(--on-accent)" : "var(--text-muted)", fontSize: 9, fontWeight: 600, flexShrink: 0 }}>OAuth</span>
+                          <span title={t("modelsConfig.oauthProviderTitle", { id: p.id })} style={{ padding: "2px 6px", borderRadius: 4, background: isSelected ? "var(--accent-strong)" : "var(--bg-subtle)", color: isSelected ? "var(--on-accent)" : "var(--text-muted)", fontSize: 9, fontWeight: 600, flexShrink: 0 }}>OAuth</span>
                         </button>
                       );
                     })}
@@ -1555,7 +1555,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                         >
                           <ProviderIcon id={p.id} size={16} />
                           <span style={{ fontSize: 12, color: "var(--text)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.displayName}</span>
-                          <span title={t("modelsConfig.apiKeyProviderTitle", { id: p.id })} style={{ padding: "2px 6px", borderRadius: 4, background: isSelected ? "var(--accent)" : "var(--bg-subtle)", color: isSelected ? "var(--on-accent)" : "var(--text-muted)", fontSize: 9, fontWeight: 600, flexShrink: 0 }}>API key</span>
+                          <span title={t("modelsConfig.apiKeyProviderTitle", { id: p.id })} style={{ padding: "2px 6px", borderRadius: 4, background: isSelected ? "var(--accent-strong)" : "var(--bg-subtle)", color: isSelected ? "var(--on-accent)" : "var(--text-muted)", fontSize: 9, fontWeight: 600, flexShrink: 0 }}>API key</span>
                         </button>
                       );
                     })}
@@ -1617,7 +1617,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                                   {m.id || t("modelsConfig.newModel")}
                                 </span>
                                 {m.reasoning && (
-                                  <span style={{ fontSize: 9, padding: "1px 4px", background: isModelSelected ? "var(--accent)" : "color-mix(in srgb, var(--accent) 14%, transparent)", color: isModelSelected ? "var(--on-accent)" : "var(--accent)", borderRadius: 3, flexShrink: 0, fontWeight: 700 }}>T</span>
+                                  <span style={{ fontSize: 9, padding: "1px 4px", background: isModelSelected ? "var(--accent-strong)" : "color-mix(in srgb, var(--accent) 14%, transparent)", color: isModelSelected ? "var(--on-accent)" : "var(--accent)", borderRadius: 3, flexShrink: 0, fontWeight: 700 }}>T</span>
                                 )}
                               </button>
                             );
@@ -1656,7 +1656,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
             <div style={{ borderTop: "1px solid var(--border)", padding: "10px 8px", background: "var(--bg)", flexShrink: 0 }}>
               <button onClick={() => setPickerOpen(true)} style={{
                 display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-                width: "100%", padding: "8px 0", background: "var(--accent)", border: "1px solid var(--accent)", borderRadius: "var(--radius-control)",
+                width: "100%", padding: "8px 0", background: "var(--accent-strong)", border: "1px solid var(--accent-strong)", borderRadius: "var(--radius-control)",
                 color: "var(--on-accent)", cursor: "pointer", fontSize: 12, fontWeight: 600,
               }}
                 onMouseEnter={(e) => { e.currentTarget.style.filter = "brightness(1.05)"; }}
@@ -1693,7 +1693,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
             position: "relative",
             padding: "6px 16px",
             minWidth: 92,
-            background: savedOk ? "var(--status-success)" : (saving || parseError) ? "var(--bg-panel)" : "var(--accent)",
+            background: savedOk ? "var(--status-success)" : (saving || parseError) ? "var(--bg-panel)" : "var(--accent-strong)",
             border: "none", borderRadius: 6,
             color: savedOk ? "var(--on-accent)" : (saving || parseError) ? "var(--text-muted)" : "var(--on-accent)",
             cursor: (saving || savedOk || parseError) ? "default" : "pointer", fontSize: 13, fontWeight: 600,
