@@ -655,6 +655,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const historyFlip = useDropdownFlip(historyMenuOpen && inputHistory.length > 0, historyMenuRef, 0.44, 360);
   const slashFlip = useDropdownFlip(slashMenuOpen && slashQuery !== null, slashMenuRef, 0.56, 460);
   const atFlip = useDropdownFlip(atMenuOpen && atQuery !== null, atMenuRef, 0.48, 400);
+  const plusFlip = useDropdownFlip(plusMenuOpen, plusMenuRef, 0.44, 320);
   const [dormantSkillNames, setDormantSkillNames] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
@@ -2209,8 +2210,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   aria-label={t("chatInput.plusMenu")}
                   onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); setPlusMenuOpen(false); } }}
                   style={{
-                    position: "absolute", bottom: "calc(100% + 6px)", left: 0,
+                    position: "absolute", left: 0,
                     zIndex: 100, width: 230, maxWidth: "calc(100vw - 32px)",
+                    overflowY: "auto",
+                    ...menuDropStyle(plusFlip.placement, plusFlip.maxHeight),
                   }}
                 >
                   <div className="picker-panel-header">
