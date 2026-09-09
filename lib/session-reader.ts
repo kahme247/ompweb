@@ -125,6 +125,18 @@ export async function listAllSessions(): Promise<SessionInfo[]> {
       globalThis.__piSessionListPromiseGeneration = undefined;
     }
   });
+  // A load that never settles (a stuck sync syscall, a hung git spawn that
+  // slipped past its timeout) must not be handed to every future caller
+  // forever — the coalescing slot would pin the wedge until process restart.
+  // Drop the slot after a generous deadline; the cache stays unset, so the
+  // next request starts a fresh scan.
+  const watchdog = setTimeout(() => {
+    if (globalThis.__piSessionListPromise === trackedPromise) {
+      globalThis.__piSessionListPromise = undefined;
+      globalThis.__piSessionListPromiseGeneration = undefined;
+    }
+  }, SESSION_LIST_LOAD_DEADLINE_MS);
+  watchdog.unref?.();
 
   globalThis.__piSessionListPromise = trackedPromise;
   globalThis.__piSessionListPromiseGeneration = generation;
@@ -144,6 +156,8 @@ declare global {
 }
 
 const SESSION_LIST_CACHE_TTL_MS = 30_000;
+/** Beyond this, an unsettled in-flight list load stops being coalesced. */
+const SESSION_LIST_LOAD_DEADLINE_MS = 60_000;
 
 /** Invalidate the session LIST metadata (30s TTL result + generation gate)
  * and the directory-walk cache, but leave per-session parse caches intact.
