@@ -18,9 +18,11 @@ import {
   resolveSessionIdByPath,
   resolveSessionPath,
   invalidateSessionPathCache,
-  invalidateSessionListCache,
+  invalidateSessionCaches,
+  getSessionEntriesForDisplayAsync,
   buildSessionContext,
   readSessionHeader,
+  SessionFileTooLargeError,
 } from "@/lib/session-reader";
 import { resolveSessionPathOr404 } from "@/lib/api-utils";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
@@ -30,6 +32,12 @@ import { getRpcSession } from "@/lib/rpc-manager";
 /** Stable, client-safe error body for catch-all handlers: details go to the
  *  server log only, never to the browser. */
 function sessionsErrorResponse(error: unknown): NextResponse {
+  if (error instanceof SessionFileTooLargeError) {
+    return NextResponse.json(
+      { error: "Session file is too large to open in omp-web", code: "session_file_too_large" },
+      { status: 413 },
+    );
+  }
   if (error instanceof RequestBodyTooLargeError) {
     return NextResponse.json({ error: "Request body is too large", code: "request_too_large" }, { status: 413 });
   }
@@ -175,22 +183,27 @@ export async function GET(
     const deferToolResultImages = searchParams.has("deferMedia");
     const includeState = searchParams.has("includeState");
 
-    const { header, entries, error: loadError } = loadSessionFile(filePath, {
-      resolveBlobs: true,
-      skipToolResultImages: deferToolResultImages,
-    });
-    if (loadError === "too_large") {
-      return NextResponse.json(
-        { error: "Session file is too large to open in omp-web", code: "session_file_too_large" },
-        { status: 413 },
-      );
-    }
-    if (!header) {
+    // Single unified read path: the cached parse serves unchanged files from
+    // memory (a stat per request), and blob resolution happens on a per-entry
+    // deep copy so shared cached objects are never mutated. Previous code
+    // parsed the whole file synchronously on every open.
+    const header = readSessionHeader(filePath);
+    if (header === null) {
+      // Distinguish "missing/too large" from "malformed": the header read is
+      // bounded; a malformed file yields null exactly like a missing one.
+      const loaded = loadSessionFile(filePath, { resolveBlobs: false });
+      if (loaded.error === "too_large") {
+        return NextResponse.json(
+          { error: "Session file is too large to open in omp-web", code: "session_file_too_large" },
+          { status: 413 },
+        );
+      }
       return NextResponse.json({ error: "Session file is missing or malformed", code: "session_file_malformed" }, { status: 404 });
     }
-    const leafId = getLeafEntryId(entries);
-    const tree = projectTreeForResponse(buildSessionTree(entries));
-    const context = buildSessionContext(entries, leafId, { deferThinking, deferToolResultImages });
+    const displayEntries = await getSessionEntriesForDisplayAsync(filePath, { skipToolResultImages: deferToolResultImages });
+    const leafId = getLeafEntryId(displayEntries);
+    const tree = projectTreeForResponse(buildSessionTree(displayEntries));
+    const context = buildSessionContext(displayEntries, leafId, { deferThinking, deferToolResultImages });
 
     let modified = header.timestamp ?? new Date().toISOString();
     try { modified = statSync(filePath).mtime.toISOString(); } catch { /* use header timestamp */ }
@@ -277,8 +290,10 @@ export async function PATCH(
       if ("response" in resolved) return resolved.response;
       const filePath = resolved.filePath;
       setSessionTitle(filePath, name.trim(), "user");
+      invalidateSessionCaches(filePath);
+      return NextResponse.json({ ok: true });
     }
-    invalidateSessionListCache();
+    invalidateSessionCaches();
     return NextResponse.json({ ok: true });
   } catch (error) {
     return sessionsErrorResponse(error);
@@ -408,7 +423,7 @@ export async function DELETE(
     await getRpcSession(id)?.destroyAndWait?.();
     deleteSessionFileWithArtifacts(filePath);
     invalidateSessionPathCache(id);
-    invalidateSessionListCache();
+    invalidateSessionCaches(); // deletion drops the file: full flush is correct
     return NextResponse.json({
       ok: true,
       ...(skippedChildren.length > 0 ? { skippedChildren } : {}),

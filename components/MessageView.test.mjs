@@ -196,3 +196,54 @@ test("expanded edit results with a patch render the split diff view", () => {
   assert.match(html, /dropped const gone = 1;/);
   assert.doesNotMatch(html, /<pre/);
 });
+
+test("consecutive tool calls group into an activity group summary", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    isStreaming: true,
+    toolCallsDefaultCollapsed: true,
+    message: {
+      role: "assistant",
+      content: [
+        { type: "toolCall", toolCallId: "call-1", toolName: "read", input: { path: "a.ts" } },
+        { type: "toolCall", toolCallId: "call-2", toolName: "read", input: { path: "b.ts" } },
+        { type: "toolCall", toolCallId: "call-3", toolName: "grep", input: { pattern: "test" } },
+      ],
+    },
+  }));
+
+  assert.match(html, /activity-group/);
+  assert.match(html, /Read 2 files and searched 1 time/);
+});
+
+test("bash (local) rows count as terminal commands in group summaries", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    isStreaming: true,
+    toolCallsDefaultCollapsed: true,
+    message: {
+      role: "assistant",
+      content: [
+        { type: "toolCall", toolCallId: "call-1", toolName: "bash", input: { command: "go vet ./..." } },
+        { type: "toolCall", toolCallId: "call-2", toolName: "bash (local)", input: { command: "go test ./..." } },
+      ],
+    },
+  }));
+
+  assert.match(html, /Ran 2 commands/);
+});
+
+test("todo tool calls render clean status badge with action and task name", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    isStreaming: true,
+    toolCallsDefaultCollapsed: false,
+    message: {
+      role: "assistant",
+      content: [
+        { type: "toolCall", toolCallId: "call-1", toolName: "todo", input: { op: "done", task: "Build redesigned component" } },
+      ],
+    },
+  }));
+
+  assert.match(html, /tool-call-todo-badge/);
+  assert.match(html, /Completed/);
+  assert.match(html, /Build redesigned component/);
+});

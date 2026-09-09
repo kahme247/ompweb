@@ -1,12 +1,15 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, ListChecks, Loader2, Mic, Search, Shrink, Sparkles, Wrench, Zap } from "lucide-react";
+import { ChevronDown, ListChecks, Loader2, Mic, Paperclip, Plus, Shrink, Sparkles, Wrench, Zap } from "lucide-react";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
 import { toast } from "@/components/ui/toast";
 import { useDictation } from "@/hooks/useDictation";
+import type { GenerationSpeedInfo, SessionStatsInfo } from "@/lib/pi-types";
+import { formatCompactNumber, formatPercent } from "@/lib/format";
+import { ContextDetailPanel } from "./ComposerPanels";
 import { clearDraft, getDraft, setDraft } from "@/lib/draft-store";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import type { AttachedImage, AttachedTextFile } from "./ChatInput-draft-attachments";
@@ -36,6 +39,7 @@ import {
   readVisibleModelKeys,
   type ModelOption,
 } from "./ChatInput-model-options";
+import { ModelPickerPanel } from "./ChatInput-model-picker";
 import { ComposerModeStatus, ModelErrorBanner, QueuedActionButton } from "./ChatInput-banners";
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
 import {
@@ -108,6 +112,14 @@ interface Props {
   advisorModel?: { name: string; reasoning: string | null } | null;
   /** Compact the session context from the composer toolbar. */
   onCompact?: () => void;
+  /** Live context totals feeding the composer context ring. */
+  contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null;
+  /** Session stats shown in the context ring popover. */
+  sessionStats?: SessionStatsInfo | null;
+  /** Model capacity shown in the context ring popover. */
+  modelCapacity?: { contextWindow?: number; maxTokens?: number } | null;
+  /** Generation speed shown in the context ring popover. */
+  generationSpeed?: GenerationSpeedInfo | null;
   /** Remove one queued message from the queue panel (Edit/Delete/Steer). */
   onRemoveQueuedMessage?: (text: string) => void;
   /** Relabel the first queued follow-up as a steering message. */
@@ -129,6 +141,8 @@ interface Props {
   onMinimize?: () => void;
   /** Active status label attached to the composer's top edge (e.g. "Waiting for model..."). */
   statusText?: string | null;
+  /** Open Settings → API Keys & Providers from the model picker footer. */
+  onOpenProviders?: () => void;
 }
 
 export interface ChatInputHandle {
@@ -137,8 +151,8 @@ export interface ChatInputHandle {
   insertIfEmpty: (text: string) => void;
   prependText: (text: string) => void;
   addFiles: (files: File[]) => void;
+  openContextPanel: () => void;
 }
-
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
 
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
@@ -154,6 +168,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   advisorActive,
   advisorModel,
   onCompact,
+  contextUsage,
+  sessionStats,
+  modelCapacity,
+  generationSpeed,
   onRemoveQueuedMessage,
   onPromoteQueuedToSteer,
   draftKey,
@@ -164,6 +182,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   onAdvisorChange,
   onMinimize,
   statusText,
+  onOpenProviders,
 }: Props, ref) {
   const isMobile = useIsMobile();
   const { t, tn, locale } = useI18n();
@@ -174,7 +193,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
-  const [toolPresetDropdownOpen, setToolPresetDropdownOpen] = useState(false);
+  const [contextOpen, setContextOpen] = useState(false);
+  const [plusMenuOpen, setPlusMenuOpen] = useState(false);
+  const [plusExpanded, setPlusExpanded] = useState<"tools" | "advisor" | null>(null);
   const [modelSearchQuery, setModelSearchQuery] = useState("");
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
@@ -202,7 +223,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
   const modelSearchInputRef = useRef<HTMLInputElement>(null);
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
-  const toolPresetDropdownRef = useRef<HTMLDivElement>(null);
+  const contextWrapRef = useRef<HTMLDivElement>(null);
+  const plusMenuRef = useRef<HTMLDivElement>(null);
   const historyMenuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isComposingRef = useRef(false);
@@ -304,6 +326,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     insertText: insertTextAtCursor,
     addFiles(files: File[]) {
       processFiles(files);
+    },
+    openContextPanel() {
+      setContextOpen(true);
     },
   }));
 
@@ -1228,16 +1253,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     [locale, modelOptions, modelSearchQuery],
   );
 
-  // Group options by provider, preserving insertion order.
-  const modelsByProvider: { provider: string; options: ModelOption[] }[] = React.useMemo(() => {
-    const groups: { provider: string; options: ModelOption[] }[] = [];
-    for (const opt of filteredModelOptions) {
-      const group = groups.find((g) => g.provider === opt.provider);
-      if (group) group.options.push(opt);
-      else groups.push({ provider: opt.provider, options: [opt] });
-    }
-    return groups;
-  }, [filteredModelOptions]);
+  // Grouping for the nested picker lives in ChatInput-model-picker (providers rail + models pane).
 
   const displayModelName = model
     ? (modelOptions.find((o) => o.modelId === model.modelId && o.provider === model.provider)?.name
@@ -1267,6 +1283,23 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         saved: formatTokenCount(compactSavedTokens, locale),
       })
     : null;
+  // Composer context ring: live totals, falling back to the session snapshot.
+  const ringCtx = contextUsage ?? sessionStats?.contextUsage ?? null;
+  const ringPct = ringCtx?.percent ?? null;
+  const ringTone = ringPct !== null && ringPct > 90
+    ? "var(--status-error)"
+    : ringPct !== null && ringPct > 70
+      ? "var(--status-warning)"
+      : "var(--text-muted)";
+  const ringTitle = ringCtx?.contextWindow
+    ? [
+        ringPct !== null ? formatPercent(ringPct) : null,
+        ringCtx.tokens !== null && ringCtx.tokens !== undefined
+          ? `${formatCompactNumber(ringCtx.tokens)} / ${formatCompactNumber(ringCtx.contextWindow)}`
+          : formatCompactNumber(ringCtx.contextWindow),
+        t("chatInput.compactContext"),
+      ].filter(Boolean).join(" · ")
+    : t("chatInput.compactContext");
   const thinkingDisplayLabel = (() => {
     const lvl = thinkingLevel ?? "auto";
     if (lvl === "auto" || !thinkingLevelMap) return lvl;
@@ -1303,11 +1336,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (thinkingDropdownRef.current && !thinkingDropdownRef.current.contains(e.target as Node)) {
         setThinkingDropdownOpen(false);
       }
-      if (toolPresetDropdownRef.current && !toolPresetDropdownRef.current.contains(e.target as Node)) {
-        setToolPresetDropdownOpen(false);
+      if (plusMenuRef.current && !plusMenuRef.current.contains(e.target as Node)) {
+        setPlusMenuOpen(false);
       }
       if (historyMenuRef.current && !historyMenuRef.current.contains(e.target as Node) && !textareaRef.current?.contains(e.target as Node)) {
         setHistoryMenuOpen(false);
+      }
+      if (contextWrapRef.current && !contextWrapRef.current.contains(e.target as Node)) {
+        setContextOpen(false);
       }
     };
     document.addEventListener("mousedown", handler);
@@ -2086,9 +2122,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             }}
           />
 
-          {/* Toolbar: attachment · advisor · model · settings · reasoning · fast · compact · send/queue/stop */}
-
-          {/* Toolbar: attachment · model · settings · reasoning · fast · context ring · send/stop */}
+          {/* Toolbar: plus menu · model · reasoning · fast · compact · send/queue/stop */}
           <div style={{
             display: "flex",
             alignItems: "center",
@@ -2098,67 +2132,137 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             borderTop: "1px solid color-mix(in srgb, var(--border) 62%, transparent)",
             flexWrap: isMobile ? "wrap" : "nowrap",
           }}>
-            {/* Attachment */}
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              disabled={isStreaming}
-              title={t("chatInput.attachFile")}
-              aria-label={t("chatInput.attachFile")}
-              style={{
-                flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
-                width: 28, height: 28, padding: 0,
-                background: "none", border: "none",
-                borderRadius: 7,
-                color: (attachedImages.length || attachedTextFiles.length) ? "var(--accent)" : "var(--text-muted)",
-                cursor: isStreaming ? "not-allowed" : "pointer",
-                opacity: isStreaming ? 0.5 : 1,
-                transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
-              }}
-              onMouseEnter={(e) => {
-                if (isStreaming) return;
-                e.currentTarget.style.background = "var(--bg-hover)";
-                e.currentTarget.style.color = (attachedImages.length || attachedTextFiles.length) ? "var(--accent)" : "var(--text)";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = "none";
-                e.currentTarget.style.color = (attachedImages.length || attachedTextFiles.length) ? "var(--accent)" : "var(--text-muted)";
-              }}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                <polyline points="14 2 14 8 20 8" />
-              </svg>
-            </button>
-
-            {/* Advisor toggle — per-chat: gates the /advisor command and the
-                thunder indicator; active state follows this session only. */}
-            {onAdvisorChange && (
+            {/* Plus menu — attachment · tools submenu · advisor submenu */}
+            <div ref={plusMenuRef} style={{ position: "relative", flexShrink: 0 }}>
               <button
-                type="button"
-                onClick={() => onAdvisorChange(!advisorEnabled)}
-                aria-pressed={advisorEnabled}
-                title={advisorEnabled
-                  ? t("chatInput.advisorDisableTitle", { model: advisorModel?.name ?? t("messageView.advisorLabel"), reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault") })
-                  : t("chatInput.advisorEnableTitle")}
-                aria-label={advisorEnabled
-                  ? t("chatInput.advisorDisableTitle", { model: advisorModel?.name ?? t("messageView.advisorLabel"), reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault") })
-                  : t("chatInput.advisorEnableTitle")}
+                onClick={() => setPlusMenuOpen((v) => !v)}
+                title={t("chatInput.plusMenu")}
+                aria-label={t("chatInput.plusMenu")}
+                aria-expanded={plusMenuOpen}
+                aria-haspopup="menu"
                 style={{
-                  flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
+                  display: "flex", alignItems: "center", justifyContent: "center",
                   width: 28, height: 28, padding: 0,
-                  background: "none", border: "none",
+                  background: plusMenuOpen ? "var(--bg-hover)" : "none",
+                  border: "none",
                   borderRadius: 7,
-                  color: advisorEnabled ? "var(--accent)" : "var(--text-muted)",
+                  color: plusMenuOpen ? "var(--text)" : "var(--text-muted)",
                   cursor: "pointer",
                   transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
                 }}
-                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = plusMenuOpen ? "var(--bg-hover)" : "none"; e.currentTarget.style.color = plusMenuOpen ? "var(--text)" : "var(--text-muted)"; }}
               >
-                <Sparkles size={14} strokeWidth={2} aria-hidden="true" />
+                <Plus size={14} strokeWidth={2} aria-hidden="true" />
               </button>
-            )}
-
+              {plusMenuOpen && (
+                <div
+                  className="picker-panel"
+                  role="menu"
+                  aria-label={t("chatInput.plusMenu")}
+                  onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); setPlusMenuOpen(false); } }}
+                  style={{
+                    position: "absolute", bottom: "calc(100% + 6px)", left: 0,
+                    zIndex: 100, width: 230, maxWidth: "calc(100vw - 32px)",
+                  }}
+                >
+                  <div className="picker-panel-header">
+                    <Plus size={12} strokeWidth={2} style={{ color: "var(--text-muted)", flexShrink: 0 }} aria-hidden="true" />
+                    <span className="picker-panel-title">{t("chatInput.plusMenu")}</span>
+                  </div>
+                  <button
+                    role="menuitem"
+                    onClick={() => { setPlusMenuOpen(false); fileInputRef.current?.click(); }}
+                    disabled={isStreaming}
+                    title={t("chatInput.attachFile")}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 8, width: "100%",
+                      padding: "7px 10px", border: 0, borderRadius: 5,
+                      background: "transparent", color: isStreaming ? "var(--text-dim)" : "var(--text-muted)",
+                      cursor: isStreaming ? "not-allowed" : "pointer", fontSize: 12, textAlign: "left",
+                    }}
+                  >
+                    <Paperclip size={12} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden="true" />
+                    <span style={{ flex: 1 }}>{t("chatInput.attachFile")}</span>
+                  </button>
+                  {onToolPresetChange && (
+                    <>
+                      <button
+                        role="menuitem"
+                        aria-expanded={plusExpanded === "tools"}
+                        onClick={() => setPlusExpanded((v) => (v === "tools" ? null : "tools"))}
+                        title={t("chatInput.changeToolPresetTitle", { preset: toolPreset ?? "full" })}
+                        style={{
+                          display: "flex", alignItems: "center", gap: 8, width: "100%",
+                          padding: "7px 10px", border: 0, borderRadius: 5,
+                          background: plusExpanded === "tools" ? "var(--bg-selected)" : "transparent",
+                          color: "var(--text-muted)", cursor: "pointer", fontSize: 12, textAlign: "left",
+                        }}
+                      >
+                        <Wrench size={12} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden="true" />
+                        <span style={{ flex: 1 }}>{t("chatInput.toolPresetLabel")}</span>
+                        <span style={{ color: "var(--text-dim)", textTransform: "capitalize" }}>{toolPreset ?? "full"}</span>
+                        <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7, transform: plusExpanded === "tools" ? "rotate(180deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }} aria-hidden="true" />
+                      </button>
+                      {plusExpanded === "tools" && TOOL_PRESET_OPTIONS.map((opt) => {
+                        const isActive = (toolPreset ?? "full") === opt.value;
+                        return (
+                          <button
+                            className="picker-row"
+                            role="menuitemradio"
+                            aria-checked={isActive}
+                            data-active={isActive}
+                            key={opt.value}
+                            title={t(opt.descriptionKey)}
+                            onClick={() => { setPlusMenuOpen(false); if (!isActive) onToolPresetChange(opt.value); }}
+                            style={{ paddingLeft: 30 }}
+                          >
+                            <span className="picker-check">
+                              {isActive && <svg width="11" height="11" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>}
+                            </span>
+                            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textTransform: "capitalize" }}>{opt.value}</span>
+                          </button>
+                        );
+                      })}
+                    </>
+                  )}
+                  {onAdvisorChange && (
+                    <>
+                      <button
+                        role="menuitem"
+                        aria-expanded={plusExpanded === "advisor"}
+                        onClick={() => setPlusExpanded((v) => (v === "advisor" ? null : "advisor"))}
+                        title={advisorEnabled ? t("chatInput.advisorDisableTitle", { model: advisorModel?.name ?? t("messageView.advisorLabel"), reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault") }) : t("chatInput.advisorEnableTitle")}
+                        style={{
+                          display: "flex", alignItems: "center", gap: 8, width: "100%",
+                          padding: "7px 10px", border: 0, borderRadius: 5,
+                          background: plusExpanded === "advisor" ? "var(--bg-selected)" : "transparent",
+                          color: advisorEnabled ? "var(--accent)" : "var(--text-muted)", cursor: "pointer", fontSize: 12, textAlign: "left",
+                        }}
+                      >
+                        <Sparkles size={12} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden="true" />
+                        <span style={{ flex: 1 }}>{t("messageView.advisorLabel")}</span>
+                        <span style={{ color: "var(--text-dim)" }}>{advisorEnabled ? t("chatInput.plusOn") : t("chatInput.plusOff")}</span>
+                        <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7, transform: plusExpanded === "advisor" ? "rotate(180deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }} aria-hidden="true" />
+                      </button>
+                      {plusExpanded === "advisor" && (
+                        <button
+                          className="picker-row"
+                          role="menuitem"
+                          onClick={() => { setPlusMenuOpen(false); onAdvisorChange(!advisorEnabled); }}
+                          title={advisorEnabled ? t("chatInput.advisorDisableTitle", { model: advisorModel?.name ?? t("messageView.advisorLabel"), reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault") }) : t("chatInput.advisorEnableTitle")}
+                          style={{ paddingLeft: 30 }}
+                        >
+                          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {advisorEnabled ? t("chatInput.advisorDisableTitle", { model: advisorModel?.name ?? t("messageView.advisorLabel"), reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault") }) : t("chatInput.advisorEnableTitle")}
+                          </span>
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
             {/* Model selector — compact text button with dropdown */}
             {(modelOptions.length > 0 || currentName || modelError || showModelsLoading) && onModelChange && (
               <div ref={dropdownRef} style={{ position: "relative", minWidth: 0 }}>
@@ -2219,11 +2323,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                       bottom: isMobile ? 8 : "calc(100% + 6px)",
                       ...(isMobile
                         ? { left: 8, right: 8, maxWidth: "calc(100vw - 16px)" }
-                        : { left: 0, width: "max-content", minWidth: 200, maxWidth: "min(320px, calc(100vw - 32px))" }),
+                        : { left: 0, width: "min(360px, calc(100vw - 32px))" }),
                       zIndex: 500,
                       display: "flex",
                       flexDirection: "column",
-                      maxHeight: isMobile ? "calc(100dvh - 32px)" : "min(380px, 60vh)",
+                      height: isMobile ? undefined : "min(360px, calc(100dvh - 32px))",
+                      maxHeight: isMobile ? "calc(100dvh - 32px)" : undefined,
                     }}
                   >
                       <div className="picker-panel-header">
@@ -2234,52 +2339,27 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         <span className="picker-panel-title">{t("chatInput.modelsLabel")}</span>
                         <span className="picker-panel-count">{modelOptions.length}</span>
                       </div>
-                      <label className="picker-search">
-                        <Search size={13} strokeWidth={1.8} color="var(--text-dim)" aria-hidden="true" />
-                        <input
-                          ref={modelSearchInputRef}
-                          type="search"
-                          autoComplete="off"
-                          spellCheck={false}
-                          value={modelSearchQuery}
-                          onChange={(e) => setModelSearchQuery(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Escape") {
-                              e.preventDefault();
-                              setModelDropdownOpen(false);
-                            }
-                          }}
-                          placeholder={t("chatInput.searchModels")}
-                          aria-label={t("chatInput.searchModels")}
-                        />
-                      </label>
-                      <div className="picker-list">
-                        {modelsByProvider.length === 0 ? (
-                          <div style={{ padding: "9px 8px", color: "var(--text-dim)", fontSize: 12, whiteSpace: "nowrap" }}>
-                            {modelSearchQuery.trim() ? t("chatInput.noMatchingModels") : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noAvailableModels")}
-                          </div>
-                        ) : modelsByProvider.map((group) => (
-                          <div key={group.provider}>
-                            <div className="picker-group-label">{group.provider}</div>
-                            {group.options.map((opt) => {
-                              const isActive = opt.modelId === model?.modelId && opt.provider === model?.provider;
-                              return (
-                                <button
-                                  className="picker-row"
-                                  data-active={isActive}
-                                  key={`${opt.provider}:${opt.modelId}`}
-                                  onClick={() => { setModelDropdownOpen(false); if (!isActive || isAutoModelSelection) onModelChange(opt.provider, opt.modelId); }}
-                                >
-                                  <span className="picker-check">
-                                    {isActive && <svg width="11" height="11" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>}
-                                  </span>
-                                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{opt.name}</span>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        ))}
-                      </div>
+                      <ModelPickerPanel
+                        modelOptions={modelOptions}
+                        filteredModelOptions={filteredModelOptions}
+                        currentModel={model}
+                        modelSearchQuery={modelSearchQuery}
+                        onSearchQueryChange={setModelSearchQuery}
+                        searchInputRef={modelSearchInputRef}
+                        showModelsLoading={showModelsLoading}
+                        isMobile={isMobile}
+                        onSelectModel={(provider, modelId) => {
+                          setModelDropdownOpen(false);
+                          if (provider !== model?.provider || modelId !== model?.modelId || isAutoModelSelection) {
+                            onModelChange(provider, modelId);
+                          }
+                        }}
+                        onClose={() => setModelDropdownOpen(false)}
+                        onOpenProviders={onOpenProviders ? () => {
+                          setModelDropdownOpen(false);
+                          onOpenProviders();
+                        } : undefined}
+                      />
                     </div>
                 )}
               </div>
@@ -2360,75 +2440,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </div>
             )}
 
-            {/* Tool preset selector — a browser-side preference applied when
-                spawning NEW sessions (omp's RPC cannot retool a live session,
-                which the change notice below communicates). */}
-            {onToolPresetChange && (
-              <div ref={toolPresetDropdownRef} style={{ position: "relative" }}>
-                <button
-                  onClick={() => setToolPresetDropdownOpen((v) => !v)}
-                  title={t("chatInput.changeToolPresetTitle", { preset: toolPreset ?? "full" })}
-                  aria-label={`${t("chatInput.changeToolPreset")}: ${toolPreset ?? "full"}`}
-                  aria-expanded={toolPresetDropdownOpen}
-                  aria-haspopup="menu"
-                  style={{
-                    display: "flex", alignItems: "center", gap: 5,
-                    height: 28, padding: "0 8px", background: toolPresetDropdownOpen ? "var(--bg-hover)" : "none",
-                    border: "none", borderRadius: 7, color: "var(--text-muted)", cursor: "pointer",
-                    fontSize: 12,
-                    transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
-                  }}
-                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.background = toolPresetDropdownOpen ? "var(--bg-hover)" : "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
-                >
-                  <Wrench size={11} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden="true" />
-                  <span style={{ whiteSpace: "nowrap", textTransform: "capitalize" }}>{toolPreset ?? "full"}</span>
-                  <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7, transform: toolPresetDropdownOpen ? "rotate(180deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }} aria-hidden="true" />
-                </button>
-                {toolPresetDropdownOpen && (
-                  <div
-                    className="picker-panel"
-                    role="menu"
-                    style={{
-                      position: "absolute", bottom: "calc(100% + 6px)", left: 0,
-                      zIndex: 100, width: 260, maxWidth: "calc(100vw - 32px)",
-                    }}
-                  >
-                    <div className="picker-panel-header">
-                      <Wrench size={12} strokeWidth={1.8} style={{ color: "var(--text-muted)", flexShrink: 0 }} aria-hidden="true" />
-                      <span className="picker-panel-title">{t("chatInput.toolPresetLabel")}</span>
-                      <span className="picker-panel-count">{TOOL_PRESET_OPTIONS.length}</span>
-                    </div>
-                    <div className="picker-thinking-cards">
-                      {TOOL_PRESET_OPTIONS.map((opt) => {
-                        const isActive = (toolPreset ?? "full") === opt.value;
-                        return (
-                          <button
-                            className="picker-thinking-card"
-                            data-active={isActive}
-                            role="menuitemradio"
-                            aria-checked={isActive}
-                            key={opt.value}
-                            title={t(opt.descriptionKey)}
-                            onClick={() => { setToolPresetDropdownOpen(false); if (!isActive) onToolPresetChange(opt.value); }}
-                          >
-                            <span className="picker-check">
-                              {isActive && <svg width="11" height="11" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>}
-                            </span>
-                            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textTransform: "capitalize" }}>{opt.value}</span>
-                            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11, color: "var(--text-dim)" }}>{t(opt.descriptionKey)}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                    <div className="picker-panel-footer">
-                      <span>{t("chatInput.toolPresetFooter")}</span>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
             {/* Fast toggle — only for models that support fast mode. Stays
                 visible while the agent runs (disabled) so it does not look
                 like fast mode was reset; the toggle affects the family tier
@@ -2481,29 +2492,125 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </span>
             )}
 
-            {/* Compact context — replaces the context ring (usage lives in the top bar) */}
+            {/* Context ring: usage gauge opening the session context popover */}
             {onCompact && (
-              <button
-                type="button"
-                onClick={isCompacting ? onAbortCompaction : onCompact}
-                disabled={isStreaming && !isCompacting}
-                title={isCompacting ? t("chatInput.stopCompaction") : t("chatInput.compactContext")}
-                aria-label={isCompacting ? t("chatInput.stopCompaction") : t("chatInput.compactContext")}
-                style={{
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  width: 28, height: 28, padding: 0,
-                  background: "none", border: "none",
-                  borderRadius: 7,
-                  color: isCompacting ? "var(--accent)" : "var(--text-muted)",
-                  cursor: isStreaming && !isCompacting ? "not-allowed" : "pointer",
-                  opacity: isStreaming && !isCompacting ? 0.5 : 1,
-                  transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
-                }}
-                onMouseEnter={(e) => { if (!(isStreaming && !isCompacting)) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
-              >
-                <Shrink size={14} strokeWidth={1.8} aria-hidden="true" />
-              </button>
+              <div ref={contextWrapRef} style={{ position: "relative", flexShrink: 0 }}>
+                <button
+                  type="button"
+                  onClick={() => setContextOpen((open) => !open)}
+                  title={ringTitle}
+                  aria-label={t("composerContext.title")}
+                  aria-expanded={contextOpen}
+                  aria-haspopup="dialog"
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    width: 28, height: 28, padding: 0,
+                    background: contextOpen ? "var(--bg-hover)" : "none", border: "none",
+                    borderRadius: 7,
+                    color: isCompacting ? "var(--accent)" : "var(--text-muted)",
+                    cursor: "pointer",
+                    transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = contextOpen ? "var(--bg-hover)" : "none"; }}
+                >
+                  {isCompacting ? (
+                    <Loader2 size={14} strokeWidth={2} aria-hidden="true" style={{ animation: "spin 0.8s linear infinite" }} />
+                  ) : (
+                    <span style={{ position: "relative", width: 20, height: 20, display: "inline-flex" }} aria-hidden="true">
+                      <svg width="20" height="20" viewBox="0 0 20 20">
+                        <circle cx="10" cy="10" r="8" fill="none" stroke="var(--border)" strokeWidth="2.5" />
+                        {ringPct !== null && (
+                          <circle
+                            cx="10"
+                            cy="10"
+                            r="8"
+                            fill="none"
+                            stroke={ringTone}
+                            strokeWidth="2.5"
+                            strokeLinecap="round"
+                            strokeDasharray={2 * Math.PI * 8}
+                            strokeDashoffset={2 * Math.PI * 8 * (1 - Math.min(100, Math.max(0, ringPct)) / 100)}
+                            transform="rotate(-90 10 10)"
+                            style={{ transition: "stroke-dashoffset var(--dur-med) var(--ease-out-warm)" }}
+                          />
+                        )}
+                      </svg>
+                      {ringPct !== null && (
+                        <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 7, fontWeight: 700, fontFamily: "var(--font-mono)", color: ringTone }}>
+                          {Math.round(ringPct)}
+                        </span>
+                      )}
+                    </span>
+                  )}
+                </button>
+                {contextOpen && (
+                  <div
+                    role="dialog"
+                    aria-label={t("composerContext.title")}
+                    className="picker-panel"
+                    style={{
+                      position: isMobile ? "fixed" : "absolute",
+                      bottom: isMobile ? 8 : "calc(100% + 8px)",
+                      ...(isMobile
+                        ? { left: 8, right: 8 }
+                        : { right: 0, width: 360, maxWidth: "min(360px, calc(100vw - 32px))" }),
+                      background: "var(--bg-panel)",
+                      border: "1px solid var(--border)",
+                      borderRadius: "var(--radius-card)",
+                      boxShadow: "var(--shadow-pop)",
+                      zIndex: 60,
+                      padding: 12,
+                      maxHeight: isMobile ? "calc(100dvh - 32px)" : "min(50vh, 380px)",
+                      overflowY: "auto",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 10 }}>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>{t("composerContext.title")}</span>
+                      {ringPct !== null && (
+                        <span style={{ fontSize: 11, fontFamily: "var(--font-mono)", fontWeight: 700, color: ringTone, fontVariantNumeric: "tabular-nums" }}>
+                          {formatPercent(ringPct)}
+                        </span>
+                      )}
+                    </div>
+                    <ContextDetailPanel
+                      sessionStats={sessionStats}
+                      contextUsage={contextUsage}
+                      modelCapacity={modelCapacity}
+                      generationSpeed={generationSpeed}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (isCompacting) onAbortCompaction?.();
+                        else onCompact?.();
+                        setContextOpen(false);
+                      }}
+                      disabled={isStreaming && !isCompacting}
+                      title={isCompacting ? t("chatInput.stopCompaction") : t("chatInput.compactContext")}
+                      style={{
+                        display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                        width: "100%", boxSizing: "border-box", height: 30, marginTop: 10, padding: "0 12px",
+                        background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: "var(--radius-control)",
+                        color: isCompacting ? "var(--accent)" : "var(--text)",
+                        cursor: isStreaming && !isCompacting ? "not-allowed" : "pointer",
+                        opacity: isStreaming && !isCompacting ? 0.5 : 1,
+                        fontSize: 12, fontWeight: 600,
+                        transition: "background var(--dur-fast) var(--ease-out-warm)",
+                      }}
+                      onMouseEnter={(e) => { if (!(isStreaming && !isCompacting)) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-subtle)"; }}
+                    >
+                      {isCompacting ? (
+                        <Loader2 size={13} strokeWidth={2} aria-hidden="true" style={{ animation: "spin 0.8s linear infinite" }} />
+                      ) : (
+                        <Shrink size={13} strokeWidth={2} aria-hidden="true" />
+                      )}
+                      {isCompacting ? t("chatInput.stopCompaction") : t("chatInput.compactContext")}
+                    </button>
+                  </div>
+                )}
+              </div>
             )}
 
             {/* Dictation */}

@@ -1,6 +1,6 @@
 "use client";
 
-import { forwardRef, useState, useCallback, useEffect, useImperativeHandle, useMemo, useRef } from "react";
+import { forwardRef, memo, useState, useCallback, useEffect, useImperativeHandle, useMemo, useRef } from "react";
 import {
   AtSign,
   Check,
@@ -36,10 +36,6 @@ interface FileEntry {
   modified: string;
 }
 
-// Search rows are always files (the panel asks for kind=file), so they never
-// expand and every row shares these.
-const EMPTY_PATH_SET: Set<string> = new Set();
-const noop = () => {};
 
 interface FileNode {
   name: string;
@@ -60,10 +56,18 @@ interface Props {
   onRefreshDone?: () => void;
   fileSearchOpen?: boolean;
   onFileSearchOpenChange?: (open: boolean) => void;
+  /** Absolute path of the file open in the right panel — rendered selected. */
+  activeFilePath?: string | null;
+  /** Absolute path to expand, highlight, and scroll into view (one-shot). */
+  revealPath?: string | null;
+  onRevealDone?: () => void;
+  /** Reports the git changed-file count so the explorer header can badge it. */
+  onGitStatusChange?: (changedCount: number, isRepo: boolean) => void;
 }
 
 export interface FileExplorerHandle {
   openUploadPicker: () => void;
+  collapseAll: () => void;
 }
 
 type UploadPhase = "idle" | "checking" | "uploading";
@@ -126,7 +130,7 @@ async function fetchGitStatus(cwd: string): Promise<GitStatusResponse> {
   return res.json() as Promise<GitStatusResponse>;
 }
 
-const GIT_STATUS_LABEL_KEYS: Record<GitFileStatusKind, string> = {
+export const GIT_STATUS_LABEL_KEYS: Record<GitFileStatusKind, string> = {
   modified: "fileExplorer.gitModified",
   added: "fileExplorer.gitAdded",
   deleted: "fileExplorer.gitDeleted",
@@ -135,7 +139,7 @@ const GIT_STATUS_LABEL_KEYS: Record<GitFileStatusKind, string> = {
   conflict: "fileExplorer.gitConflict",
 };
 
-const GIT_STATUS_COLORS: Record<GitFileStatusKind, string> = {
+export const GIT_STATUS_COLORS: Record<GitFileStatusKind, string> = {
   modified: "var(--status-modified)",
   added: "var(--status-success)",
   deleted: "var(--status-error)",
@@ -204,359 +208,306 @@ function DismissButton({ onClick, title }: { onClick: () => void; title: string 
   );
 }
 
-function TreeNode({
-  node,
-  depth,
-  cwd,
-  onOpenFile,
-  onAtMention,
-  expandedPaths,
-  onToggleExpanded,
-  refreshToken,
-  secondaryLabel,
-  highlightedPaths,
-  gitStatusByPath,
-  changedDirectoryPaths,
-}: {
-  node: FileNode;
-  depth: number;
+// Fixed row geometry: every tree row is exactly this tall, so the visible
+// window is pure arithmetic (no measuring). The empty-directory placeholder
+// shares the height — a second geometry would break the scroll math.
+const ROW_HEIGHT = 24;
+const OVERSCAN_ROWS = 8;
+
+type FlatRow =
+  | { kind: "node"; node: FileNode; depth: number; secondaryLabel?: string }
+  | { kind: "empty"; key: string; depth: number };
+
+function flattenVisibleRows(
+  nodes: FileNode[],
+  expandedPaths: Set<string>,
+  childrenByPath: Map<string, FileNode[]>,
+  depth: number,
+  out: FlatRow[],
+): FlatRow[] {
+  for (const node of nodes) {
+    out.push({ kind: "node", node, depth });
+    if (node.isDir && expandedPaths.has(node.fullPath)) {
+      const children = childrenByPath.get(node.fullPath);
+      if (children) {
+        if (children.length === 0) {
+          out.push({ kind: "empty", key: node.fullPath, depth: depth + 1 });
+        } else {
+          flattenVisibleRows(children, expandedPaths, childrenByPath, depth + 1, out);
+        }
+      }
+    }
+  }
+  return out;
+}
+
+interface ExplorerRowProps {
+  row: FlatRow;
+  index: number;
+  rowCount: number;
   cwd: string;
-  onOpenFile: (filePath: string, fileName: string) => void;
-  onAtMention?: (relativePath: string, isDir: boolean) => void;
-  expandedPaths: Set<string>;
-  onToggleExpanded: (fullPath: string, open: boolean) => void;
-  /** Undefined for search-result nodes, whose children are pre-resolved. */
-  refreshToken?: string;
-  highlightedPaths: Set<string>;
+  open: boolean;
+  loading: boolean;
+  highlighted: boolean;
+  isActiveFile: boolean;
+  focused: boolean;
   gitStatusByPath: Map<string, GitFileStatus>;
   changedDirectoryPaths: Set<string>;
-  /** Dimmed directory shown next to the name in flat search results. */
-  secondaryLabel?: string;
-}) {
+  onAtMention?: (relativePath: string, isDir: boolean) => void;
+  onActivate: (node: FileNode, index: number) => void;
+  onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>, node: FileNode, index: number) => void;
+  onFocusRow: (index: number) => void;
+}
+
+// Memoized: the parent re-renders on every scroll tick, but a row only
+// re-renders when its own props change. Without this, scrolling a 30k-row
+// tree reconciles the whole window per frame instead of the shifted edges.
+const ExplorerRow = memo(function ExplorerRow({
+  row,
+  index,
+  rowCount,
+  cwd,
+  open,
+  loading,
+  highlighted,
+  isActiveFile,
+  focused,
+  gitStatusByPath,
+  changedDirectoryPaths,
+  onAtMention,
+  onActivate,
+  onKeyDown,
+  onFocusRow,
+}: ExplorerRowProps) {
   const { t } = useI18n();
-  const open = expandedPaths.has(node.fullPath);
-  const highlighted = highlightedPaths.has(node.fullPath);
+  const [hovered, setHovered] = useState(false);
+
+  if (row.kind === "empty") {
+    return (
+      <div
+        style={{ paddingLeft: 8 + row.depth * 14, fontSize: 11, color: "var(--text-dim)", height: ROW_HEIGHT, display: "flex", alignItems: "center" }}
+      >
+        {t("fileExplorer.emptyDir")}
+      </div>
+    );
+  }
+
+  const { node, secondaryLabel } = row;
   const normalizedPath = normalizeFilePathSlashes(node.fullPath);
   const gitStatus = gitStatusByPath.get(normalizedPath);
   const containsGitChanges = node.isDir && (
     gitStatus !== undefined || changedDirectoryPaths.has(normalizedPath)
   );
-  const [children, setChildren] = useState<FileNode[]>(node.children ?? []);
-  const [loaded, setLoaded] = useState(node.loaded ?? false);
-  const [loading, setLoading] = useState(false);
-  const [hovered, setHovered] = useState(false);
-  const [focused, setFocused] = useState(false);
-
-  const loadChildren = useCallback(async (force = false) => {
-    if (loaded && !force) return;
-    setLoading(true);
-    try {
-      const entries = await fetchEntries(node.fullPath);
-      setChildren(entries);
-      setLoaded(true);
-    } catch {
-      // ignore
-    } finally {
-      setLoading(false);
-    }
-  }, [loaded, node.fullPath]);
-
-  // Re-fetch children when the tree refreshes. Open directories re-fetch in
-  // place; collapsed directories are marked stale so the next expand re-fetches
-  // instead of showing a listing captured before the refresh.
-  useEffect(() => {
-    if (refreshToken === undefined) return;
-    if (open) {
-      if (loaded) loadChildren(true);
-    } else {
-      setLoaded(false);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshToken]);
-
-  const handleClick = useCallback(() => {
-    if (node.isDir) {
-      const next = !open;
-      onToggleExpanded(node.fullPath, next);
-      if (next && !loaded) loadChildren();
-    } else {
-      onOpenFile(node.fullPath, node.name);
-    }
-  }, [node.isDir, node.fullPath, node.name, loaded, open, loadChildren, onOpenFile, onToggleExpanded]);
-
-  // Keyboard activation (Enter/Space + Arrow navigation) for tree items
-  const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (event.target !== event.currentTarget) return;
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      handleClick();
-    } else if (event.key === "ArrowRight") {
-      if (node.isDir) {
-        event.preventDefault();
-        if (!open) {
-          onToggleExpanded(node.fullPath, true);
-          if (!loaded) loadChildren();
-        } else {
-          const next = event.currentTarget.parentElement?.querySelector<HTMLDivElement>('[role="group"] [role="treeitem"]');
-          next?.focus();
-        }
-      }
-    } else if (event.key === "ArrowLeft") {
-      if (node.isDir && open) {
-        event.preventDefault();
-        onToggleExpanded(node.fullPath, false);
-      } else {
-        const parentTreeItem = event.currentTarget.closest('[role="group"]')?.parentElement?.querySelector<HTMLDivElement>(':scope > [role="treeitem"]');
-        parentTreeItem?.focus();
-      }
-    } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      event.preventDefault();
-      const tree = event.currentTarget.closest('[role="tree"]');
-      if (!tree) return;
-      const allItems = Array.from(tree.querySelectorAll<HTMLDivElement>('[role="treeitem"]'))
-        .filter((item) => !item.closest('[inert]'));
-      const idx = allItems.indexOf(event.currentTarget);
-      if (idx !== -1) {
-        const nextIdx = event.key === "ArrowDown" ? Math.min(allItems.length - 1, idx + 1) : Math.max(0, idx - 1);
-        allItems[nextIdx]?.focus();
-      }
-    }
-  }, [node.isDir, node.fullPath, open, loaded, loadChildren, onToggleExpanded, handleClick]);
-
   const mentionLabel = t("fileExplorer.insertPathIntoChat");
   const downloadLabel = t("fileExplorer.downloadFile");
 
   return (
-    <div>
-      <div
-        onClick={handleClick}
-        onKeyDown={handleKeyDown}
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
-        onFocus={(e) => { if (e.target === e.currentTarget) setFocused(true); }}
-        onBlur={() => setFocused(false)}
-        role="treeitem"
-        tabIndex={0}
-        aria-selected={highlighted}
-        aria-expanded={node.isDir ? open : undefined}
-        // Search rows repeat names such as route.ts, so the directory has to be
-        // part of the accessible name, not just the dimmed text beside it.
-        aria-label={node.isDir
-          ? (node.name + " (folder" + (open ? ", expanded" : ", collapsed") + ")")
-          : (secondaryLabel ? (node.name + " (file, " + secondaryLabel + ")") : (node.name + " (file)"))}
-        style={{
-          position: "relative",
-          display: "flex",
-          alignItems: "center",
-          gap: 4,
-          paddingLeft: 8 + depth * 14,
-          paddingRight: 8,
-          height: 24,
-          cursor: "pointer",
-          background: hovered ? "var(--bg-hover)" : "transparent",
-          borderRadius: "var(--radius-control)",
-          userSelect: "none",
-          boxShadow: focused ? "inset 0 0 0 1px color-mix(in srgb, var(--accent) 70%, transparent)" : "none",
-          outline: "none",
-          transition: `background var(--dur-fast) var(--ease-out-warm)`,
-        }}
-      >
-        {node.isDir && (
-          <ChevronRight
-            size={10}
-            strokeWidth={2}
-            color="var(--text-dim)"
-            style={{
-              flexShrink: 0,
-              transform: open ? "rotate(90deg)" : "none",
-              transition: `transform var(--dur-med) var(--ease-out-warm)`,
-            }}
-            aria-hidden="true"
-          />
+    <div
+      onClick={() => onActivate(node, index)}
+      onKeyDown={(e) => onKeyDown(e, node, index)}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onFocus={(e) => { if (e.target === e.currentTarget) onFocusRow(index); }}
+      role="treeitem"
+      tabIndex={focused ? 0 : -1}
+      data-index={index}
+      data-file-path={node.fullPath}
+      aria-selected={highlighted || isActiveFile}
+      aria-current={isActiveFile ? "true" : undefined}
+      aria-expanded={node.isDir ? open : undefined}
+      aria-level={row.depth + 1}
+      aria-setsize={rowCount}
+      aria-posinset={index + 1}
+      // Search rows repeat names such as route.ts, so the directory has to be
+      // part of the accessible name, not just the dimmed text beside it.
+      aria-label={node.isDir
+        ? (node.name + " (folder" + (open ? ", expanded" : ", collapsed") + ")")
+        : (secondaryLabel ? (node.name + " (file, " + secondaryLabel + ")") : (node.name + " (file)"))}
+      style={{
+        position: "relative",
+        display: "flex",
+        alignItems: "center",
+        gap: 4,
+        paddingLeft: 8 + row.depth * 14,
+        paddingRight: 8,
+        height: ROW_HEIGHT,
+        cursor: "pointer",
+        background: isActiveFile ? "var(--bg-selected)" : hovered ? "var(--bg-hover)" : "transparent",
+        borderRadius: "var(--radius-control)",
+        userSelect: "none",
+        boxShadow: focused ? "inset 0 0 0 1px color-mix(in srgb, var(--accent) 70%, transparent)" : isActiveFile ? "inset 2px 0 0 var(--accent)" : "none",
+        outline: "none",
+        transition: `background var(--dur-fast) var(--ease-out-warm)`,
+      }}
+    >
+      {node.isDir && (
+        <ChevronRight
+          size={10}
+          strokeWidth={2}
+          color="var(--text-dim)"
+          style={{
+            flexShrink: 0,
+            transform: open ? "rotate(90deg)" : "none",
+            transition: `transform var(--dur-med) var(--ease-out-warm)`,
+          }}
+          aria-hidden="true"
+        />
+      )}
+      {!node.isDir && <span style={{ width: 10, flexShrink: 0 }} />}
+      <span style={{ flexShrink: 0, display: "flex", alignItems: "center", color: node.isDir ? "var(--text-muted)" : "var(--text-dim)" }}>
+        {node.isDir ? (
+          open ? <FolderOpen size={14} strokeWidth={1.8} aria-hidden="true" /> : <Folder size={14} strokeWidth={1.8} aria-hidden="true" />
+        ) : (
+          getFileIcon(node.name, 14)
         )}
-        {!node.isDir && <span style={{ width: 10, flexShrink: 0 }} />}
-        <span style={{ flexShrink: 0, display: "flex", alignItems: "center", color: node.isDir ? "var(--text-muted)" : "var(--text-dim)" }}>
-          {node.isDir ? (
-            open ? <FolderOpen size={14} strokeWidth={1.8} aria-hidden="true" /> : <Folder size={14} strokeWidth={1.8} aria-hidden="true" />
-          ) : (
-            getFileIcon(node.name, 14)
-          )}
-        </span>
+      </span>
+      <span
+        style={{
+          fontSize: 12,
+          color: "var(--text)",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          // The name is the answer the user is looking for, so the directory
+          // gives up width first.
+          flex: secondaryLabel ? "0 0 auto" : 1,
+          maxWidth: secondaryLabel ? "72%" : undefined,
+        }}
+        title={node.fullPath}
+      >
+        {node.name}
+      </span>
+      {secondaryLabel && (
+        // Search rows are flat, so the directory is the only context a row has.
         <span
           style={{
-            fontSize: 12,
-            color: "var(--text)",
+            flex: "1 1 auto",
+            minWidth: 0,
+            fontSize: 11,
+            color: "var(--text-dim)",
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
-            // The name is the answer the user is looking for, so the directory
-            // gives up width first.
-            flex: secondaryLabel ? "0 0 auto" : 1,
-            maxWidth: secondaryLabel ? "72%" : undefined,
+            direction: "rtl",
+            textAlign: "left",
           }}
           title={node.fullPath}
         >
-          {node.name}
+          {secondaryLabel}
         </span>
-        {secondaryLabel && (
-          // Search rows are flat, so the directory is the only context a row has.
-          <span
-            style={{
-              flex: "1 1 auto",
-              minWidth: 0,
-              fontSize: 11,
-              color: "var(--text-dim)",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-              direction: "rtl",
-              textAlign: "left",
+      )}
+      {highlighted && (
+        <span
+          title={t("fileExplorer.newlyUploaded")}
+          aria-label={t("fileExplorer.newlyUploaded")}
+          style={{ width: 6, height: 6, flexShrink: 0, borderRadius: "50%", background: "var(--accent)" }}
+        />
+      )}
+      {!hovered && !node.isDir && gitStatus && (
+        <span
+          title={t(GIT_STATUS_LABEL_KEYS[gitStatus.status])}
+          aria-label={t(GIT_STATUS_LABEL_KEYS[gitStatus.status])}
+          style={{
+            width: 14,
+            flexShrink: 0,
+            color: GIT_STATUS_COLORS[gitStatus.status],
+            fontFamily: "var(--font-mono)",
+            fontSize: 11,
+            fontWeight: 600,
+            textAlign: "center",
+          }}
+        >
+          {gitStatus.code}
+        </span>
+      )}
+      {!hovered && containsGitChanges && (
+        <span
+          title={t("fileExplorer.containsChangedFiles")}
+          aria-label={t("fileExplorer.containsChangedFiles")}
+          style={{
+            width: 6,
+            height: 6,
+            flexShrink: 0,
+            borderRadius: "50%",
+            background: "var(--status-modified)",
+          }}
+        />
+      )}
+      {loading && (
+        <Loader2 size={10} strokeWidth={2} color="var(--text-dim)" style={{ animation: "spin 0.8s linear infinite", flexShrink: 0 }} aria-hidden="true" />
+      )}
+      {onAtMention && hovered && (
+        <Tooltip content={mentionLabel}>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onAtMention(getRelativeFilePath(node.fullPath, cwd), node.isDir);
             }}
-            title={node.fullPath}
-          >
-            {secondaryLabel}
-          </span>
-        )}
-        {highlighted && (
-          <span
-            title={t("fileExplorer.newlyUploaded")}
-            aria-label={t("fileExplorer.newlyUploaded")}
-            style={{ width: 6, height: 6, flexShrink: 0, borderRadius: "50%", background: "var(--accent)" }}
-          />
-        )}
-        {!hovered && !node.isDir && gitStatus && (
-          <span
-            title={t(GIT_STATUS_LABEL_KEYS[gitStatus.status])}
-            aria-label={t(GIT_STATUS_LABEL_KEYS[gitStatus.status])}
+            aria-label={mentionLabel}
             style={{
-              width: 14,
-              flexShrink: 0,
-              color: GIT_STATUS_COLORS[gitStatus.status],
-              fontFamily: "var(--font-mono)",
+              position: "absolute",
+              right: !node.isDir ? 28 : 4,
+              top: "50%",
+              transform: "translateY(-50%)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 4,
+              padding: "0 8px",
+              height: 20,
+              background: "var(--bg-panel)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-control)",
+              color: "var(--accent)",
+              cursor: "pointer",
               fontSize: 11,
               fontWeight: 600,
-              textAlign: "center",
+              whiteSpace: "nowrap",
+              transition: `background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)`,
             }}
           >
-            {gitStatus.code}
-          </span>
-        )}
-        {!hovered && containsGitChanges && (
-          <span
-            title={t("fileExplorer.containsChangedFiles")}
-            aria-label={t("fileExplorer.containsChangedFiles")}
+            <AtSign size={11} strokeWidth={2.2} aria-hidden="true" />
+            {t("fileExplorer.mention")}
+          </button>
+        </Tooltip>
+      )}
+      {hovered && !node.isDir && (
+        <Tooltip content={downloadLabel}>
+          <a
+            href={`/api/files/${encodeFilePathForApi(node.fullPath)}?type=download`}
+            download
+            onClick={(e) => e.stopPropagation()}
+            aria-label={downloadLabel}
             style={{
-              width: 6,
-              height: 6,
-              flexShrink: 0,
-              borderRadius: "50%",
-              background: "var(--status-modified)",
+              position: "absolute",
+              right: 4,
+              top: "50%",
+              transform: "translateY(-50%)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 4,
+              padding: "0 5px",
+              height: 20,
+              background: "var(--bg-panel)",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-control)",
+              color: "var(--text-muted)",
+              cursor: "pointer",
+              fontSize: 11,
+              fontWeight: 600,
+              whiteSpace: "nowrap",
+              textDecoration: "none",
+              transition: `background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)`,
             }}
-          />
-        )}
-        {loading && (
-          <Loader2 size={10} strokeWidth={2} color="var(--text-dim)" style={{ animation: "spin 0.8s linear infinite", flexShrink: 0 }} aria-hidden="true" />
-        )}
-        {onAtMention && hovered && (
-          <Tooltip content={mentionLabel}>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onAtMention(getRelativeFilePath(node.fullPath, cwd), node.isDir);
-              }}
-              aria-label={mentionLabel}
-              style={{
-                position: "absolute",
-                right: !node.isDir ? 28 : 4,
-                top: "50%",
-                transform: "translateY(-50%)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 4,
-                padding: "0 8px",
-                height: 20,
-                background: "var(--bg-panel)",
-                border: "1px solid var(--border)",
-                borderRadius: "var(--radius-control)",
-                color: "var(--accent)",
-                cursor: "pointer",
-                fontSize: 11,
-                fontWeight: 600,
-                whiteSpace: "nowrap",
-                transition: `background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)`,
-              }}
-            >
-              <AtSign size={11} strokeWidth={2.2} aria-hidden="true" />
-              {t("fileExplorer.mention")}
-            </button>
-          </Tooltip>
-        )}
-        {hovered && !node.isDir && (
-          <Tooltip content={downloadLabel}>
-            <a
-              href={`/api/files/${encodeFilePathForApi(node.fullPath)}?type=download`}
-              download
-              onClick={(e) => e.stopPropagation()}
-              aria-label={downloadLabel}
-              style={{
-                position: "absolute",
-                right: 4,
-                top: "50%",
-                transform: "translateY(-50%)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 4,
-                padding: "0 5px",
-                height: 20,
-                background: "var(--bg-panel)",
-                border: "1px solid var(--border)",
-                borderRadius: "var(--radius-control)",
-                color: "var(--text-muted)",
-                cursor: "pointer",
-                fontSize: 11,
-                fontWeight: 600,
-                whiteSpace: "nowrap",
-                textDecoration: "none",
-                transition: `background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)`,
-              }}
-            >
-              <Download size={11} strokeWidth={2.2} aria-hidden="true" />
-            </a>
-          </Tooltip>
-        )}
-      </div>
-      {node.isDir && (
-        <div role="group" inert={!open ? true : undefined} className={"accordion-flow " + (open ? "is-open" : "")}>
-          <div className="accordion-flow-inner">
-            {children.map((child) => (
-              <TreeNode
-                key={child.fullPath}
-                node={child}
-                depth={depth + 1}
-                cwd={cwd}
-                onOpenFile={onOpenFile}
-                onAtMention={onAtMention}
-                expandedPaths={expandedPaths}
-                onToggleExpanded={onToggleExpanded}
-                refreshToken={refreshToken}
-                highlightedPaths={highlightedPaths}
-                gitStatusByPath={gitStatusByPath}
-                changedDirectoryPaths={changedDirectoryPaths}
-              />
-            ))}
-            {children.length === 0 && loaded && (
-              <div style={{ paddingLeft: 8 + (depth + 1) * 14, fontSize: 11, color: "var(--text-dim)", height: 22, display: "flex", alignItems: "center" }}>
-                {t("fileExplorer.emptyDir")}
-              </div>
-            )}
-          </div>
-        </div>
+          >
+            <Download size={11} strokeWidth={2.2} aria-hidden="true" />
+          </a>
+        </Tooltip>
       )}
     </div>
   );
-}
+});
 
 export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileExplorer({
   cwd,
@@ -568,15 +519,26 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   onRefreshDone,
   fileSearchOpen = false,
   onFileSearchOpenChange,
+  activeFilePath = null,
+  revealPath = null,
+  onRevealDone,
+  onGitStatusChange,
 }, ref) {
   const { t, tn } = useI18n();
-  const [roots, setRoots] = useState<FileNode[]>([]);
+  // Directory listings keyed by absolute path. The tree renders from a flat
+  // projection of this map, so 30k visible rows cost one array walk — never
+  // 30k mounted components.
+  const [childrenByPath, setChildrenByPath] = useState<Map<string, FileNode[]>>(new Map());
+  const [loadingPaths, setLoadingPaths] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
   const [treeRefreshKey, setTreeRefreshKey] = useState(0);
   const [highlightedPaths, setHighlightedPaths] = useState<Set<string>>(new Set());
   const [gitFiles, setGitFiles] = useState<GitFileStatus[]>([]);
+  const [focusedIndex, setFocusedIndex] = useState(0);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(0);
   const [uploadPhase, setUploadPhase] = useState<UploadPhase>("idle");
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -590,6 +552,11 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const searchInputRef = useRef<HTMLInputElement>(null);
   const prevCwdRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const loadingPathsRef = useRef<Set<string>>(new Set());
+  const rootRequestRef = useRef(0);
+  const expandedPathsRef = useRef<Set<string>>(new Set());
+  expandedPathsRef.current = expandedPaths;
   const refreshToken = `${refreshKey ?? 0}:${treeRefreshKey}`;
   // Which refresh the search request has already answered; re-baselined every
   // time the panel opens.
@@ -688,6 +655,31 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     } satisfies FileNode,
   })), [cwd, searchPaths]);
 
+  const searchFlatRows: FlatRow[] = useMemo(() => searchRows.map((row) => ({
+    kind: "node",
+    node: row.node,
+    depth: 0,
+    secondaryLabel: row.directory,
+  })), [searchRows]);
+
+  const roots = useMemo(() => childrenByPath.get(cwd) ?? [], [childrenByPath, cwd]);
+  const rows: FlatRow[] = useMemo(() => {
+    if (searchActive) return searchFlatRows;
+    return flattenVisibleRows(roots, expandedPaths, childrenByPath, 0, []);
+  }, [searchActive, searchFlatRows, roots, expandedPaths, childrenByPath]);
+  const rowsRef = useRef<FlatRow[]>([]);
+  rowsRef.current = rows;
+  const focusedIndexRef = useRef(0);
+  focusedIndexRef.current = focusedIndex;
+
+  const normalizedActiveFilePath = activeFilePath ? normalizeFilePathSlashes(activeFilePath) : null;
+  const totalListHeight = rows.length * ROW_HEIGHT;
+  const windowStart = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN_ROWS);
+  const windowEnd = Math.min(
+    rows.length,
+    Math.ceil((scrollTop + (viewportHeight || ROW_HEIGHT)) / ROW_HEIGHT) + OVERSCAN_ROWS,
+  );
+
   const gitStatusByPath = useMemo(() => new Map(
     gitFiles.map((status) => [normalizeFilePathSlashes(status.filePath), status]),
   ), [gitFiles]);
@@ -710,11 +702,166 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
 
   const handleToggleExpanded = useCallback((fullPath: string, open: boolean) => {
     setExpandedPaths((prev) => {
+      if (prev.has(fullPath) === open) return prev;
       const next = new Set(prev);
       if (open) next.add(fullPath); else next.delete(fullPath);
       return next;
     });
   }, []);
+  // Single fetch path for every directory in the flat map. The ref guards
+  // against duplicate in-flight requests; the state copy drives spinners.
+  const fetchDir = useCallback((dirPath: string) => {
+    if (loadingPathsRef.current.has(dirPath)) return Promise.resolve();
+    loadingPathsRef.current.add(dirPath);
+    setLoadingPaths((prev) => new Set(prev).add(dirPath));
+    return fetchEntries(dirPath)
+      .then((entries) => {
+        setChildrenByPath((prev) => {
+          const next = new Map(prev);
+          next.set(dirPath, entries);
+          return next;
+        });
+        if (dirPath === cwd) setError(null);
+      })
+      .catch((e) => {
+        if (dirPath === cwd) setError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        loadingPathsRef.current.delete(dirPath);
+        setLoadingPaths((prev) => {
+          const next = new Set(prev);
+          next.delete(dirPath);
+          return next;
+        });
+      });
+  }, [cwd]);
+
+  // Scroll the virtual window so a row is visible, then focus it. The focus
+  // retries across frames: the scroll triggers an async window re-render and
+  // the row element may not exist on the first frame.
+  const goToRow = useCallback((index: number) => {
+    const list = rowsRef.current;
+    if (index < 0 || index >= list.length || list[index].kind !== "node") return;
+    setFocusedIndex(index);
+    const container = scrollRef.current;
+    if (container) {
+      const top = index * ROW_HEIGHT;
+      const bottom = top + ROW_HEIGHT;
+      const nextTop = top < container.scrollTop
+        ? top
+        : bottom > container.scrollTop + container.clientHeight
+          ? bottom - container.clientHeight
+          : container.scrollTop;
+      if (nextTop !== container.scrollTop) {
+        container.scrollTop = nextTop;
+        setScrollTop(nextTop);
+      }
+    }
+    const attemptFocus = (triesLeft: number) => {
+      const el = scrollRef.current?.querySelector<HTMLElement>(`[data-index="${index}"]`);
+      if (el) {
+        el.focus({ preventScroll: true });
+        return;
+      }
+      if (triesLeft > 0) requestAnimationFrame(() => attemptFocus(triesLeft - 1));
+    };
+    requestAnimationFrame(() => attemptFocus(5));
+  }, []);
+
+  const handleActivateRow = useCallback((node: FileNode, index: number) => {
+    setFocusedIndex(index);
+    if (node.isDir) {
+      setExpandedPaths((prev) => {
+        if (prev.has(node.fullPath)) {
+          const next = new Set(prev);
+          next.delete(node.fullPath);
+          return next;
+        }
+        return new Set(prev).add(node.fullPath);
+      });
+    } else {
+      onOpenFile(node.fullPath, node.name);
+    }
+  }, [onOpenFile]);
+
+  const handleRowKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>, node: FileNode, index: number) => {
+    if (event.target !== event.currentTarget) return;
+    const list = rowsRef.current;
+    const row = list[index];
+    const depth = row && row.kind === "node" ? row.depth : 0;
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      handleActivateRow(node, index);
+    } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      let next = index + delta;
+      while (next >= 0 && next < list.length && list[next].kind !== "node") next += delta;
+      if (next >= 0 && next < list.length) goToRow(next);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      const first = list.findIndex((r) => r.kind === "node");
+      if (first >= 0) goToRow(first);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      for (let i = list.length - 1; i >= 0; i -= 1) {
+        if (list[i].kind === "node") {
+          goToRow(i);
+          break;
+        }
+      }
+    } else if (event.key === "ArrowRight") {
+      if (!node.isDir) return;
+      event.preventDefault();
+      if (!expandedPathsRef.current.has(node.fullPath)) {
+        handleToggleExpanded(node.fullPath, true);
+      } else if (index + 1 < list.length) {
+        // Flat order guarantees the first child (or its empty placeholder)
+        // follows its parent.
+        goToRow(index + 1);
+      }
+    } else if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      if (node.isDir && expandedPathsRef.current.has(node.fullPath)) {
+        handleToggleExpanded(node.fullPath, false);
+      } else {
+        // The parent row always precedes its children in flat order.
+        for (let i = index - 1; i >= 0; i -= 1) {
+          const candidate = list[i];
+          if (candidate.kind === "node" && candidate.depth === depth - 1) {
+            goToRow(i);
+            break;
+          }
+        }
+      }
+    }
+  }, [goToRow, handleActivateRow, handleToggleExpanded]);
+
+  const handleTreeScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    setScrollTop(el.scrollTop);
+    setViewportHeight(el.clientHeight);
+  }, []);
+
+  // Track the viewport height so the window math stays correct across panel
+  // resizes; rows themselves are fixed-height and never measured.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    setViewportHeight(el.clientHeight);
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (scrollRef.current) setViewportHeight(scrollRef.current.clientHeight);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  // Keep keyboard focus on a real row when collapsing shrinks the list.
+  useEffect(() => {
+    setFocusedIndex((prev) => Math.min(prev, Math.max(0, rowsRef.current.length - 1)));
+  }, [rows.length]);
 
   const applyUploadResult = useCallback((data: UploadResponse) => {
     const uploaded = data.uploaded ?? [];
@@ -807,6 +954,9 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     openUploadPicker() {
       if (!uploadBusy) uploadInputRef.current?.click();
     },
+    collapseAll() {
+      setExpandedPaths(new Set());
+    },
   }), [uploadBusy]);
 
   useEffect(() => {
@@ -831,29 +981,116 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       setUploadSummary(null);
       setPendingConflict(null);
       setUploadError(null);
+      setChildrenByPath(new Map());
+      loadingPathsRef.current = new Set();
+      setLoadingPaths(new Set());
+      setFocusedIndex(0);
+      setScrollTop(0);
     }
 
     setLoading(cwdChanged);
     setError(null);
-    let cancelled = false;
-    fetchEntries(cwd)
-      .then((entries) => { if (!cancelled) setRoots(entries); })
-      .catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : String(e)); })
-      .finally(() => { if (!cancelled) setLoading(false); onRefreshDoneRef.current?.(); });
-    return () => { cancelled = true; };
+    // Refresh re-reads the root plus every expanded directory so renames and
+    // deletions surface; the expand effect below covers newly opened ones.
+    // expandedPaths is read via ref: depending on the state would re-fire
+    // this effect on every expand and refetch the world each time.
+    // Settle the root request explicitly: only cwd fetches drive the
+    // full-list loading state and the toolbar spinner's done signal.
+    const requestId = ++rootRequestRef.current;
+    void fetchDir(cwd).finally(() => {
+      if (rootRequestRef.current !== requestId) return;
+      setLoading(false);
+      onRefreshDoneRef.current?.();
+    });
+    if (!cwdChanged) {
+      for (const path of expandedPathsRef.current) fetchDir(path);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cwd, refreshKey, treeRefreshKey]);
 
+  // Fetch any expanded directory that has no listing yet. Clicks, keyboard,
+  // and reveal all funnel through expandedPaths, so this single effect covers
+  // every expansion path — including levels that mount while a reveal
+  // ancestor chain is still loading.
+  useEffect(() => {
+    for (const path of expandedPaths) {
+      if (!childrenByPath.has(path)) fetchDir(path);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expandedPaths, childrenByPath, cwd]);
+
+  const [isGitRepo, setIsGitRepo] = useState(false);
   useEffect(() => {
     let cancelled = false;
     fetchGitStatus(cwd)
       .then((status) => {
-        if (!cancelled) setGitFiles(status.isGitRepository ? status.files : []);
+        if (cancelled) return;
+        setGitFiles(status.isGitRepository ? status.files : []);
+        setIsGitRepo(status.isGitRepository);
       })
       .catch(() => {
-        if (!cancelled) setGitFiles([]);
+        if (cancelled) return;
+        setGitFiles([]);
+        setIsGitRepo(false);
       });
     return () => { cancelled = true; };
   }, [cwd, refreshKey, treeRefreshKey]);
+
+  useEffect(() => {
+    onGitStatusChange?.(gitFiles.length, isGitRepo);
+  }, [gitFiles, isGitRepo, onGitStatusChange]);
+
+  // One-shot reveal from the file panel: expand every ancestor directory of
+  // the target, highlight the row, and scroll the virtual window to it. The
+  // effect re-runs as ancestor listings resolve (rows identity changes), so
+  // deep chains settle level by level; it gives up once every ancestor is
+  // loaded but the target still isn't listed.
+  useEffect(() => {
+    if (!revealPath) return;
+    const normalizedCwd = normalizeFilePathSlashes(cwd).replace(/\/$/, "");
+    const normalizedTarget = normalizeFilePathSlashes(revealPath);
+    if (normalizedTarget !== normalizedCwd && !normalizedTarget.startsWith(`${normalizedCwd}/`)) {
+      onRevealDone?.();
+      return;
+    }
+    const relative = normalizedTarget.slice(normalizedCwd.length + 1);
+    const segments = relative.split("/").filter(Boolean);
+    setExpandedPaths((prev) => {
+      // Return the previous set when nothing changes: a fresh identity would
+      // recompute rows, refire this effect, and loop until reveal clears.
+      let changed = false;
+      const next = new Set(prev);
+      let prefix = normalizedCwd;
+      for (let i = 0; i < segments.length - 1; i += 1) {
+        prefix = `${prefix}/${segments[i]}`;
+        for (const spelling of [prefix, joinFilePath(cwd, segments.slice(0, i + 1).join("/"))]) {
+          if (!next.has(spelling)) {
+            next.add(spelling);
+            changed = true;
+          }
+        }
+      }
+      return changed ? next : prev;
+    });
+    setHighlightedPaths((prev) => {
+      if (prev.has(revealPath)) return prev;
+      return new Set(prev).add(revealPath);
+    });
+    const targetIndex = rows.findIndex(
+      (row) => row.kind === "node" && normalizeFilePathSlashes(row.node.fullPath) === normalizedTarget,
+    );
+    if (targetIndex >= 0) {
+      goToRow(targetIndex);
+      onRevealDone?.();
+      return;
+    }
+    const ancestorsLoaded = segments.slice(0, -1).every((_, level) => {
+      const ancestor = joinFilePath(cwd, segments.slice(0, level + 1).join("/"));
+      return childrenByPath.has(ancestor)
+        || childrenByPath.has(`${normalizedCwd}/${segments.slice(0, level + 1).join("/")}`);
+    });
+    if (ancestorsLoaded) onRevealDone?.();
+  }, [cwd, revealPath, onRevealDone, rows, childrenByPath, goToRow]);
 
   const showUploadFeedback = uploadBusy || pendingConflict !== null || uploadError !== null || uploadSummary !== null;
 
@@ -864,8 +1101,69 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     );
   }, [cwd, onAtMentions, uploadSummary]);
 
+  // The tree shell always mounts (role=tree is a structural contract); only
+  // the inner content swaps between state messages and the virtual window.
+  // The window itself mounts ~60 rows no matter how far the user scrolls.
+  const treeRows = (
+    <div style={{ height: totalListHeight, position: "relative" }}>
+        {rows.slice(windowStart, windowEnd).map((row, offset) => {
+          const index = windowStart + offset;
+          if (row.kind !== "node") {
+            return (
+              <div
+                key={`empty:${row.key}`}
+                style={{ position: "absolute", top: index * ROW_HEIGHT, left: 0, right: 0, height: ROW_HEIGHT }}
+              >
+                <ExplorerRow
+                  row={row}
+                  index={index}
+                  rowCount={rows.length}
+                  cwd={cwd}
+                  open={false}
+                  loading={false}
+                  highlighted={false}
+                  isActiveFile={false}
+                  focused={false}
+                  gitStatusByPath={gitStatusByPath}
+                  changedDirectoryPaths={changedDirectoryPaths}
+                  onAtMention={onAtMention}
+                  onActivate={handleActivateRow}
+                  onKeyDown={handleRowKeyDown}
+                  onFocusRow={setFocusedIndex}
+                />
+              </div>
+            );
+          }
+          const { node } = row;
+          return (
+            <div
+              key={node.fullPath}
+              style={{ position: "absolute", top: index * ROW_HEIGHT, left: 0, right: 0, height: ROW_HEIGHT }}
+            >
+              <ExplorerRow
+                row={row}
+                index={index}
+                rowCount={rows.length}
+                cwd={cwd}
+                open={node.isDir && expandedPaths.has(node.fullPath)}
+                loading={loadingPaths.has(node.fullPath)}
+                highlighted={highlightedPaths.has(node.fullPath)}
+                isActiveFile={!node.isDir && normalizedActiveFilePath === normalizeFilePathSlashes(node.fullPath)}
+                focused={index === focusedIndex}
+                gitStatusByPath={gitStatusByPath}
+                changedDirectoryPaths={changedDirectoryPaths}
+                onAtMention={onAtMention}
+                onActivate={handleActivateRow}
+                onKeyDown={handleRowKeyDown}
+                onFocusRow={setFocusedIndex}
+              />
+            </div>
+          );
+        })}
+      </div>
+  );
   return (
-    <div style={{ minHeight: "100%" }}>
+    <div style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
       <input ref={uploadInputRef} type="file" multiple hidden onChange={handleUploadInput} />
       {/* Pinned: the result list scrolls, so an un-sticky box leaves you
           unable to edit the query that produced it. */}
@@ -1055,73 +1353,42 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         </div>
       )}
 
-      <div role="tree" aria-label={t("sessionSidebar.explorer")} style={{ padding: "2px 4px" }}>
+      <div
+        ref={scrollRef}
+        role="tree"
+        aria-label={t("sessionSidebar.explorer")}
+        onScroll={handleTreeScroll}
+        style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "2px 4px", outline: "none" }}
+      >
         {searchActive ? (
           searchLoading ? (
             <div role="status" style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>{t("fileExplorer.searching")}</div>
           ) : searchFailed ? (
             <div role="alert" style={{ padding: "8px 12px", fontSize: 11, color: "var(--status-error)" }}>{t("fileExplorer.searchFailed")}</div>
-          ) : searchRows.length === 0 ? (
+          ) : rows.length === 0 ? (
             <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>{t("fileExplorer.noMatchingFiles")}</div>
           ) : (
-            <>
-              {searchRows.map((row) => (
-                <TreeNode
-                  key={row.path}
-                  node={row.node}
-                  depth={0}
-                  cwd={cwd}
-                  onOpenFile={onOpenFile}
-                  onAtMention={onAtMention}
-                  expandedPaths={EMPTY_PATH_SET}
-                  onToggleExpanded={noop}
-                  secondaryLabel={row.directory}
-                  highlightedPaths={highlightedPaths}
-                  gitStatusByPath={gitStatusByPath}
-                  changedDirectoryPaths={changedDirectoryPaths}
-                />
-              ))}
-              {searchTruncated && (
-                // Without this the list looks complete, and a broad query in a
-                // large repo silently hides everything past the cap.
-                <div style={{ padding: "6px 12px 8px", fontSize: 10, color: "var(--text-dim)" }}>
-                  {t("fileExplorer.searchTruncated", { count: searchRows.length })}
-                </div>
-              )}
-            </>
+            treeRows
           )
+        ) : loading ? (
+          <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>{t("fileExplorer.loadingFiles")}</div>
+        ) : error ? (
+          <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--status-error)" }}>{error}</div>
+        ) : rows.length === 0 ? (
+          <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>
+            {t("fileExplorer.noFilesFound")}
+          </div>
         ) : (
-          <>
-            {loading ? (
-              <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>{t("fileExplorer.loadingFiles")}</div>
-            ) : error ? (
-              <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--status-error)" }}>{error}</div>
-            ) : (
-              roots.map((node) => (
-                <TreeNode
-                  key={node.fullPath}
-                  node={node}
-                  depth={0}
-                  cwd={cwd}
-                  onOpenFile={onOpenFile}
-                  onAtMention={onAtMention}
-                  expandedPaths={expandedPaths}
-                  onToggleExpanded={handleToggleExpanded}
-                  refreshToken={refreshToken}
-                  highlightedPaths={highlightedPaths}
-                  gitStatusByPath={gitStatusByPath}
-                  changedDirectoryPaths={changedDirectoryPaths}
-                />
-              ))
-            )}
-            {!loading && !error && roots.length === 0 && (
-              <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>
-                {t("fileExplorer.noFilesFound")}
-              </div>
-            )}
-          </>
+          treeRows
         )}
       </div>
+      {searchActive && !searchLoading && !searchFailed && rows.length > 0 && searchTruncated && (
+        // Without this the list looks complete, and a broad query in a
+        // large repo silently hides everything past the cap.
+        <div style={{ padding: "6px 12px 8px", fontSize: 10, color: "var(--text-dim)", flexShrink: 0 }}>
+          {t("fileExplorer.searchTruncated", { count: searchRows.length })}
+        </div>
+      )}
     </div>
   );
 });
