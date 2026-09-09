@@ -1318,7 +1318,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (runError) {
         addNotice({ type: "error", message: runError });
         toast.error(isQuotaLikeError(runError) ? "Quota reached" : "Request failed", runError, { timeout: 12000 });
-      } else if (quotaMessage && isQuotaLikeError(quotaMessage)) {
+      } else if (quotaMessage && isQuotaLikeError(quotaMessage) && !hadContent) {
+        // Quota mid-run already toasted via the notice path; only re-surface
+        // here when the run then stopped with no visible content, so a
+        // content-producing run does not get a duplicate toast.
         addNotice({ type: "error", message: quotaMessage });
         toast.error("Quota reached", quotaMessage, { timeout: 12000 });
       } else if (!hadContent && !allowEmptyResponse) {
@@ -1625,7 +1628,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (terminalError && isQuotaLikeError(terminalError)) {
           lastQuotaErrorRef.current = terminalError;
         }
-        const errorMessage = terminalError ?? (quotaMessage && isQuotaLikeError(quotaMessage) ? quotaMessage : null);
+        // terminalError always surfaces (including a quota error carried on
+        // the final assistant message). The stored quotaMessage is only a
+        // fallback for silent stops — mid-run quota notices already toasted,
+        // and re-toasting a content-producing run would duplicate the toast.
+        const errorMessage = terminalError
+          ?? (!hadContent && quotaMessage && isQuotaLikeError(quotaMessage) ? quotaMessage : null);
         if (errorMessage) {
           addNotice({ type: "error", message: errorMessage });
           toast.error(isQuotaLikeError(errorMessage) ? "Quota reached" : "Request failed", errorMessage, { timeout: 12000 });
