@@ -55,11 +55,16 @@ export const metadata: Metadata = {
 
 // theme-color adapts to light/dark so the browser chrome / iOS status bar
 // matches the active theme. `viewportFit: cover` lets us honor safe-area-inset
-// (used by DirectoryPicker footer) on notched devices.
+// (used by DirectoryPicker footer) on notched devices. `interactiveWidget:
+// resizes-content` makes the soft keyboard shrink the layout viewport (and
+// 100dvh) instead of only the visual one: the flex layout then keeps the
+// composer above the keyboard, rather than the browser panning the page on
+// every keystroke to reveal the caret.
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
+  interactiveWidget: "resizes-content",
   themeColor: [
     { media: "(prefers-color-scheme: light)", color: "#FAF9F6" },
     { media: "(prefers-color-scheme: dark)", color: "#1B1916" },
