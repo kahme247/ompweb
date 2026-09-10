@@ -1237,7 +1237,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         return;
       }
 
-      if (e.key === "Enter" && !e.shiftKey) {
+      // Soft keyboards rarely offer Shift+Enter; on the mobile breakpoint Enter
+      // inserts a newline and the Send button submits.
+      if (e.key === "Enter" && !e.shiftKey && !isMobile) {
         e.preventDefault();
         if (isStreaming && (onSteer || onFollowUp)) {
           // Submit-during-run behavior comes from Settings (Steer current run
@@ -1250,7 +1252,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }
       }
     },
-    [isStreaming, onSteer, onFollowUp, onAbort, onMinimize, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, isRecording, isTranscribing, cancelDictation, stopDictation, toggleDictation]
+    [isMobile, isStreaming, onSteer, onFollowUp, onAbort, onMinimize, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, isRecording, isTranscribing, cancelDictation, stopDictation, toggleDictation]
   );
 
   const handleInput = useCallback(() => {
