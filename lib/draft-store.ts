@@ -28,9 +28,14 @@ const drafts: Map<string, ChatDraft> = (globalThis.__ompChatDrafts ??= readStore
 function readStoredDrafts(): Map<string, ChatDraft> {
   const stored = new Map<string, ChatDraft>();
   try {
-    for (let i = 0; i < sessionStorage.length && stored.size < MAX_DRAFTS; i++) {
-      const storageKey = sessionStorage.key(i);
+    // Snapshot keys: removing overflow can change Storage's enumeration order.
+    const storageKeys = Array.from({ length: sessionStorage.length }, (_, i) => sessionStorage.key(i));
+    for (const storageKey of storageKeys) {
       if (!storageKey?.startsWith(STORAGE_PREFIX)) continue;
+      if (stored.size >= MAX_DRAFTS) {
+        sessionStorage.removeItem(storageKey);
+        continue;
+      }
       const value = sessionStorage.getItem(storageKey);
       if (value) {
         stored.set(storageKey.slice(STORAGE_PREFIX.length), { value, images: [], files: [] });
