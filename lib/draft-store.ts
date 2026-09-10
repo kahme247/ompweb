@@ -39,6 +39,8 @@ function readStoredDrafts(): Map<string, ChatDraft> {
       const value = sessionStorage.getItem(storageKey);
       if (value) {
         stored.set(storageKey.slice(STORAGE_PREFIX.length), { value, images: [], files: [] });
+      } else {
+        sessionStorage.removeItem(storageKey);
       }
     }
   } catch {
