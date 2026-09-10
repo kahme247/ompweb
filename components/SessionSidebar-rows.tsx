@@ -24,6 +24,24 @@ import {
   SidebarPortalMenu,
   UnreadSessionIndicator,
 } from "./SessionSidebar-chrome";
+
+/**
+ * Right-edge status column shared by project headers and session rows.
+ *
+ * Session rows lay out `[status slot][gap][meta]` right-aligned at
+ * `rowRight - 8`, project headers `[activity slot][gap][actions][gap][toggle]`
+ * at `rowRight - 6`. Reserving the same total width in both (`8 + 46 + 2 + 6`
+ * vs `6 + 2 + 24 + 2 + 22 + 6`) centres every indicator — running ring, unread
+ * dot, project activity dot — on `rowRight - 62`, so it never moves.
+ *
+ * The session row's indicator must live outside the meta layer: that layer
+ * fades out when the hover/focus action button takes over, and a dot rendered
+ * inside the actions layer would jump right by the width difference.
+ */
+const SIDEBAR_STATUS_SLOT = 12;
+const SIDEBAR_STATUS_GAP = 2;
+const SIDEBAR_TRAILING_META_WIDTH = 46;
+
 interface ProjectRowProps {
   project: ManagedProject;
   isActive: boolean;
@@ -299,7 +317,7 @@ function ProjectRow({
             data-running={(activity?.running ?? 0) > 0 ? "true" : "false"}
             role="status"
             aria-live="polite"
-            style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 11, height: 11, margin: "0 2px 0 0", flexShrink: 0, lineHeight: 0 }}
+            style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: SIDEBAR_STATUS_SLOT, height: SIDEBAR_STATUS_SLOT, flexShrink: 0, lineHeight: 0 }}
           >
             <span
               aria-hidden="true"
@@ -1011,15 +1029,15 @@ const SessionItem = memo(function SessionItem({
           </button>
           {session.worktreeBranch && <span title={t("sessionSidebar.worktreeTitle", { path: session.cwd })} style={{ display: "flex", alignItems: "center", gap: 3, maxWidth: 56, minWidth: 0, overflow: "hidden", color: "var(--text-dim)", fontSize: 10, flexShrink: 1 }}><GitBranch size={10} strokeWidth={2.4} aria-hidden="true" /><span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.worktreeBranch}</span></span>}
           {hasChildren && <button className="session-item-icon-button" onClick={(event) => { event.stopPropagation(); onToggleCollapse?.(); }} title={collapsed ? t("sessionSidebar.expandForks") : t("sessionSidebar.collapseForks")} aria-label={collapsed ? t("sessionSidebar.expandForks") : t("sessionSidebar.collapseForks")} aria-expanded={!collapsed} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 24, height: 24, padding: 0, flexShrink: 0, border: "none", background: "none", color: "var(--text-dim)", cursor: "pointer", transform: collapsed ? "rotate(-90deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }}><ChevronDown size={12} strokeWidth={1.8} aria-hidden="true" /></button>}
-          <div style={{ display: "flex", alignItems: "center", gap: 2, flexShrink: 0 }}>
-            <div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "flex-end", width: 64, height: 24, flexShrink: 0 }}>
-              <div aria-hidden={showActions} style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 2, width: "100%", whiteSpace: "nowrap", opacity: showActions ? 0 : 1, pointerEvents: showActions ? "none" : "auto", transition: "opacity var(--dur-fast) var(--ease-out-warm)" }}>
-                {isRunning && <RunningSessionIndicator size={12} />}
-                {!isRunning && isUnread && <UnreadSessionIndicator size={11} />}
-                {relativeTime && <span title={new Date(session.modified).toLocaleString(locale)} style={{ minWidth: 42, whiteSpace: "nowrap", textAlign: "right", color: isSelected ? "var(--accent)" : "var(--text-dim)", fontSize: 10, fontVariantNumeric: "tabular-nums" }}>{relativeTime}</span>}
-              </div>
+          <div style={{ display: "flex", alignItems: "center", gap: SIDEBAR_STATUS_GAP, flexShrink: 0 }}>
+            {(isRunning || isUnread) && (
+              <span style={{ display: "flex", alignItems: "center", justifyContent: "center", width: SIDEBAR_STATUS_SLOT, height: SIDEBAR_STATUS_SLOT, flexShrink: 0 }}>
+                {isRunning ? <RunningSessionIndicator size={12} /> : <UnreadSessionIndicator size={11} />}
+              </span>
+            )}
+            <div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "flex-end", width: SIDEBAR_TRAILING_META_WIDTH, height: 24, flexShrink: 0 }}>
+              {relativeTime && <span aria-hidden={showActions} title={new Date(session.modified).toLocaleString(locale)} style={{ minWidth: 42, whiteSpace: "nowrap", textAlign: "right", color: isSelected ? "var(--accent)" : "var(--text-dim)", fontSize: 10, fontVariantNumeric: "tabular-nums", opacity: showActions ? 0 : 1, transition: "opacity var(--dur-fast) var(--ease-out-warm)" }}>{relativeTime}</span>}
               <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 2, opacity: showActions ? 1 : 0, pointerEvents: showActions ? "auto" : "none", transition: "opacity var(--dur-fast) var(--ease-out-warm)" }}>
-                {isRunning && <span style={{ display: "flex", alignItems: "center", marginRight: 2 }}><RunningSessionIndicator size={12} /></span>}
                 <button type="button" ref={menuButtonRef} className="session-item-icon-button" onClick={(event) => { event.stopPropagation(); setActionMenuOpen((open) => !open); }} title={t("projects.actions")} aria-label={t("projects.actions")} aria-expanded={actionMenuOpen} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 24, height: 24, padding: 0, lineHeight: 0, border: "none", borderRadius: "var(--radius-control)", background: actionMenuOpen ? "var(--bg-selected)" : "transparent", color: actionMenuOpen ? "var(--text)" : "var(--text-dim)", cursor: "pointer" }}>
                   <MoreHorizontal size={14} strokeWidth={2} aria-hidden="true" />
                 </button>

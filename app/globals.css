@@ -1581,12 +1581,8 @@ pre, code {
   from { opacity: 0; transform: translateY(-5px); }
   to { opacity: 1; transform: translateY(0); }
 }
-.sidebar-project-activity {
-  transition: transform var(--dur-fast) var(--ease-out-warm), opacity var(--dur-fast) var(--ease-out-warm);
-}
-.sidebar-project:hover .sidebar-project-activity {
-  transform: translateX(-1px);
-}
+/* The activity dot is part of the sidebar's shared right-edge status column
+   (see SessionSidebar-rows.tsx) — it must not move on hover. */
 .sidebar-project-activity[data-running="true"] .sidebar-project-activity-dot {
   position: relative;
   isolation: isolate;
