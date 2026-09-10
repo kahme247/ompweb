@@ -291,8 +291,8 @@ const assistantMsg = (id, text) => ({
 });
 
 /** Mount + hydrate, then send a prompt and open the stream. Returns the ES. */
-async function startRun(t, sid, message) {
-  const w = await mountSession(sid);
+async function startRun(t, sid, message, strictMode = false) {
+  const w = await mountSession(sid, undefined, strictMode);
   if (t) t.after(unmountAll);
   assert.equal(w.latest.loading, false, "hydration must complete");
   assert.equal(w.latest.agentRunning, false);
@@ -429,7 +429,7 @@ test("delivery before promotion acknowledgement does not relabel the next duplic
   t.after(unmountAll);
   resetWorld();
   primeSession("delivered-promotion", [userMsg("u0", "q")]);
-  const { w, es } = await startRun(t, "delivered-promotion", "run");
+  const { w, es } = await startRun(t, "delivered-promotion", "run", true);
   await act(async () => {
     es.emit({ type: "agent_start" });
     await w.latest.handleFollowUp("target");
@@ -451,6 +451,32 @@ test("delivery before promotion acknowledgement does not relabel the next duplic
     await promotion;
   });
   assert.deepEqual(w.latest.queuedMessages, { steering: [], followUp: ["target"] });
+});
+
+test("a batched local removal and promotion acknowledgement preserve the next duplicate in StrictMode", async (t) => {
+  t.after(unmountAll);
+  resetWorld();
+  primeSession("removed-promotion", [userMsg("u0", "q")]);
+  const w = await mountSession("removed-promotion", undefined, true);
+  await act(async () => {
+    await w.latest.handleFollowUp("target");
+    await w.latest.handleFollowUp("target");
+  });
+  let release;
+  const acknowledgement = new Promise((resolve) => { release = resolve; });
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "promote_queued_message",
+    produce: () => acknowledgement,
+  });
+  let promotion;
+  await act(async () => { promotion = w.latest.promoteQueuedToSteer("target"); });
+  await act(async () => {
+    React.startTransition(() => w.latest.removeQueuedMessage("target"));
+    release({ value: { success: true, data: { promoted: true } } });
+    await promotion;
+  });
+  assert.deepEqual(w.latest.queuedMessages, { steering: [], followUp: ["target"] });
+  assert.deepEqual(w.latest.notices, []);
 });
 
 test("promotion acknowledgements after navigation cannot change the newly mounted session", async (t) => {
