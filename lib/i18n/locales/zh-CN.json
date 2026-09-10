@@ -250,6 +250,8 @@
   "chatInput.fastLabel": "快速",
   "chatInput.queuedDelete": "删除",
   "chatInput.queuedDeleteTitle": "移除这条已排队消息",
+  "chatInput.queuedDeleteConfirmBody": "要从队列面板移除这条消息吗？此处的删除无法撤销。智能体仍可能发送其已加入队列的消息。",
+  "chatInput.cancel": "取消",
   "chatInput.queuedEdit": "编辑",
   "chatInput.queuedEditTitle": "编辑这条已排队消息",
   "chatInput.queuedFollowUp": "已排队的后续消息",

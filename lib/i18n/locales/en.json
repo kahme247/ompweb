@@ -263,6 +263,8 @@
   "chatInput.fastLabel": "Fast",
   "chatInput.queuedDelete": "Delete",
   "chatInput.queuedDeleteTitle": "Remove this queued message",
+  "chatInput.queuedDeleteConfirmBody": "Remove this message from the queue panel? This cannot be undone here. The agent may still deliver a message it has already queued.",
+  "chatInput.cancel": "Cancel",
   "chatInput.queuedEdit": "Edit",
   "chatInput.queuedEditTitle": "Edit this queued message",
   "chatInput.queuedFollowUp": "Queued follow-up",

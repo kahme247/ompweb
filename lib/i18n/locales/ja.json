@@ -250,6 +250,8 @@
   "chatInput.fastLabel": "高速",
   "chatInput.queuedDelete": "削除",
   "chatInput.queuedDeleteTitle": "このキューされたメッセージを削除",
+  "chatInput.queuedDeleteConfirmBody": "このメッセージをキューパネルから削除しますか？ここでの削除は取り消せません。エージェントがすでにキューに保持しているメッセージは、引き続き配信される場合があります。",
+  "chatInput.cancel": "キャンセル",
   "chatInput.queuedEdit": "編集",
   "chatInput.queuedEditTitle": "このキューされたメッセージを編集",
   "chatInput.queuedFollowUp": "キューされたフォローアップ",
