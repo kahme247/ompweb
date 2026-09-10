@@ -34,8 +34,11 @@ import {
   AppUpdateTransportError,
   COMPLETED_APP_UPDATE_KEY,
   DISMISSED_APP_UPDATE_KEY,
+  DISMISSED_OMP_UPDATE_KEY,
   fetchAppUpdateJson,
   isExactLegacyTargetCompletion,
+  readDismissedVersion,
+  rememberDismissedVersion,
   sanitizeAppUpdateError,
   waitForAppUpdateDwell,
 } from "./AppShell-app-update";
@@ -249,6 +252,10 @@ export function AppShell() {
       .then((data: { currentVersion?: string | null; availableVersion?: string | null; updateAvailable?: boolean; updateCommand?: string } | null) => {
         setOmpUpdateAvailable(Boolean(data?.updateAvailable));
         if (!data?.updateAvailable || !data.availableVersion) return;
+        // This check re-runs on every visibilitychange back to the tab, so a
+        // version the user already dismissed must not be re-announced.
+        if (readDismissedVersion(DISMISSED_OMP_UPDATE_KEY) === data.availableVersion) return;
+        const version = data.availableVersion;
         const cmd = data.updateCommand || "omp update";
         toast.info(
           translate("appShell.ompUpdateAvailable"),
@@ -281,7 +288,7 @@ export function AppShell() {
               </button>
             </div>
           </div>,
-          { id: "omp-update-available", timeout: 0 }
+          { id: "omp-update-available", timeout: 0, onClose: () => rememberDismissedVersion(DISMISSED_OMP_UPDATE_KEY, version) }
         );
       })
       .catch(() => {});
@@ -311,15 +318,15 @@ export function AppShell() {
 
     if (autoOpen && !data.selfUpdateStatus && data.updateAvailable && data.availableVersion) {
       if (data.selfUpdateSupported === true) {
-        let dismissed: string | null = null;
-        try { dismissed = window.localStorage.getItem(DISMISSED_APP_UPDATE_KEY); } catch {}
-        if (dismissed !== data.availableVersion) {
+        if (readDismissedVersion(DISMISSED_APP_UPDATE_KEY) !== data.availableVersion) {
           setAppUpdatePhase("idle");
           setAppUpdateError(null);
           setAppUpdateDialogOpen(true);
         }
       } else {
         const cmd = data.updateCommand || "npm install -g @kahme247/ompweb";
+        const version = data.availableVersion;
+        if (readDismissedVersion(DISMISSED_APP_UPDATE_KEY) === version) return data;
         toast.info(
           translate("appShell.appUpdateAvailable"),
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
@@ -351,7 +358,7 @@ export function AppShell() {
               </button>
             </div>
           </div>,
-          { id: "app-update-available", timeout: 0 }
+          { id: "app-update-available", timeout: 0, onClose: () => rememberDismissedVersion(DISMISSED_APP_UPDATE_KEY, version) }
         );
       }
     }
@@ -566,7 +573,7 @@ export function AppShell() {
 
   const dismissAppUpdate = useCallback(() => {
     if (appUpdatePhase === "idle" && appUpdate?.availableVersion) {
-      try { window.localStorage.setItem(DISMISSED_APP_UPDATE_KEY, appUpdate.availableVersion); } catch {}
+      rememberDismissedVersion(DISMISSED_APP_UPDATE_KEY, appUpdate.availableVersion);
       toast.info(t("appUpdateDialog.settingsLater"));
     }
     setAppUpdateDialogOpen(false);

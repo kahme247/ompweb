@@ -1,6 +1,7 @@
 import type { AppUpdateInfo } from "./AppUpdateDialog";
 
 export const DISMISSED_APP_UPDATE_KEY = "omp-web:dismissed-app-update";
+export const DISMISSED_OMP_UPDATE_KEY = "omp-web:dismissed-omp-update";
 export const COMPLETED_APP_UPDATE_KEY = "omp-web:completed-app-update";
 export const APP_UPDATE_POLL_MS = 500;
 export const APP_UPDATE_STOPPING_POLL_MS = 200;
@@ -9,6 +10,27 @@ export const APP_UPDATE_PREPARING_MIN_MS = 1_000;
 export const APP_UPDATE_VISIBLE_STAGE_MIN_MS = 1_000;
 export const APP_UPDATE_COMPLETED_RELOAD_MS = 3_000;
 export const APP_UPDATE_ERROR_MAX_LENGTH = 240;
+
+/**
+ * Dismissed-update versions, remembered per notification. Closing an update
+ * toast must survive the visibilitycheck that re-runs the update checks, and
+ * localStorage throws in private mode / at quota.
+ */
+export function readDismissedVersion(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+export function rememberDismissedVersion(key: string, version: string): void {
+  try {
+    window.localStorage.setItem(key, version);
+  } catch {
+    // Dismissal is best-effort: the toast stays closed for this page anyway.
+  }
+}
 
 export async function waitForAppUpdateDwell(startedAt: number | null, minimumMs: number): Promise<void> {
   if (startedAt == null) return;
