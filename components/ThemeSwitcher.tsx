@@ -181,8 +181,7 @@ export function ThemeSwitcher() {
           style={{
             position: "absolute",
             top: "calc(100% + 4px)",
-            left: isMobile ? undefined : 0,
-            right: isMobile ? 0 : undefined,
+            left: 0,
             zIndex: 50,
             minWidth: isMobile ? 220 : 350,
             maxWidth: "92vw",
