@@ -1269,10 +1269,14 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
         />
       )}
 
-      {/* Full composer - always mounted; hidden when minimized to preserve ref + state */}
-      <div className="relative" style={{ flexShrink: 0, display: composerMinimized ? "none" : undefined }}>
+      {/* Full composer - always mounted; hidden when minimized to preserve ref + state.
+          A flex column that may shrink: when the panels + widgets + input are
+          taller than the viewport (soft keyboard up, Tasks expanded), the
+          panels block below scrolls and the input stays reachable instead of
+          being clipped off the bottom. */}
+      <div className="relative" style={{ display: composerMinimized ? "none" : "flex", flexDirection: "column", minHeight: 0 }}>
         {/* Minimize chevron above the composer area */}
-        <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
+        <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px`, flexShrink: 0 }}>
           <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto", display: "flex", justifyContent: "center" }}>
             <button
               type="button"
@@ -1298,6 +1302,8 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
         <div
           style={{
             padding: `0 ${CHAT_COLUMN_PADDING}px`,
+            minHeight: 0,
+            overflowY: "auto",
           }}
         >
           <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
