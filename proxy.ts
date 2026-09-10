@@ -26,5 +26,7 @@ export function proxy(request: NextRequest) {
 }
 
 // The sign-in screen still needs its Next.js JavaScript and CSS before a
-// session exists; these are public build assets, not workspace data.
-export const config = { matcher: "/((?!_next/static|_next/image|favicon.ico).*)" };
+// session exists; these are public build assets, not workspace data. The
+// same goes for the web app manifest and its icons: browsers fetch them
+// without cookies, and a login redirect there breaks PWA installation.
+export const config = { matcher: "/((?!_next/static|_next/image|favicon\\.ico|manifest\\.webmanifest|icon\\.svg|icon\\.png|icon-192\\.png).*)" };
