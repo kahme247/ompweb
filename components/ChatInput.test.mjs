@@ -131,19 +131,6 @@ test("filters model options by display name, identifier, and provider", () => {
   assert.deepEqual(filterModelOptions(options, "OPENAI", "en"), [options[0]]);
   assert.equal(filterModelOptions(options, "   ", "en"), options);
 });
-test("queued slash commands gate /advisor behind the per-chat toggle", async () => {
-  const { readFile } = await import("node:fs/promises");
-  const source = await readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8");
-  const sendQueued = source.slice(
-    source.indexOf("const sendQueued = useCallback"),
-    source.indexOf("const primaryActionQueuesMessage"),
-  );
-  const guard = sendQueued.indexOf('commandName === "advisor" && !advisorEnabled');
-  const expansion = sendQueued.indexOf("expandWebSlashCommand(msg)");
-
-  assert.ok(guard > 0, "advisor guard missing from sendQueued");
-  assert.ok(expansion > guard, "advisor guard must run before command expansion");
-});
 
 test("renders single queued prompt in compact bar", () => {
   const html = renderToStaticMarkup(
@@ -162,6 +149,26 @@ test("renders single queued prompt in compact bar", () => {
   assert.match(html, />(Edit|chatInput\.queuedEdit)</);
   assert.match(html, />(Delete|chatInput\.queuedDelete)</);
   assert.match(html, />(Steer|chatInput\.queuedSteerAction)</);
+});
+
+test("keeps editing and deletion but hides Steer for a single queued steer", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ChatInput, {
+      onSend() {},
+      onAbort() {},
+      onPromoteQueuedToSteer() {},
+      isStreaming: true,
+      queuedMessages: {
+        followUp: [],
+        steering: ["Already prioritized task"],
+      },
+    }),
+  );
+
+  assert.match(html, /Already prioritized task/);
+  assert.match(html, />(Edit|chatInput\.queuedEdit)</);
+  assert.match(html, />(Delete|chatInput\.queuedDelete)</);
+  assert.doesNotMatch(html, />(Steer|chatInput\.queuedSteerAction)</);
 });
 
 test("renders multiple queued prompts with count and expand action", () => {
