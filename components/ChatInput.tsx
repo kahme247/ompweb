@@ -120,9 +120,9 @@ interface Props {
   modelCapacity?: { contextWindow?: number; maxTokens?: number } | null;
   /** Generation speed shown in the context ring popover. */
   generationSpeed?: GenerationSpeedInfo | null;
-  /** Remove one queued message from the queue panel (Edit/Delete/Steer). */
+  /** Remove one queued message from the queue panel (Edit/Delete). */
   onRemoveQueuedMessage?: (text: string) => void;
-  /** Relabel the first queued follow-up as a steering message. */
+  /** Promote the first matching native follow-up into steering. */
   onPromoteQueuedToSteer?: (text: string) => void;
   slashCommands?: SlashCommandInfo[];
   slashCommandsLoading?: boolean;

@@ -309,6 +309,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // get_state snapshots may lag behind the RPC round-trip, so a snapshot
   // reporting queuedMessageCount === 0 must not wipe a queue we just wrote.
   const queueMutatedAtRef = useRef(0);
+  const queuedPromotionsRef = useRef<Map<string, { sessionId: string; consumed: boolean }> | null>(null);
+  if (queuedPromotionsRef.current === null) queuedPromotionsRef.current = new Map();
+  const queuedPromotions = queuedPromotionsRef.current;
   const agentRunningRef = useRef(false);
   const bashRunningRef = useRef(false);
   const bashRecoveryIdRef = useRef(0);
@@ -1559,45 +1562,76 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const consumeQueuedMessage = useCallback((text: string) => {
     if (!text) return;
+    const promotion = queuedPromotions.get(text);
+    const sid = sessionIdRef.current;
     setQueuedMessages((prev) => {
       const si = prev.steering.indexOf(text);
       if (si !== -1) return { ...prev, steering: prev.steering.filter((_, i) => i !== si) };
       const fi = prev.followUp.indexOf(text);
-      if (fi !== -1) return { ...prev, followUp: prev.followUp.filter((_, i) => i !== fi) };
+      if (fi !== -1) {
+        // A pending acknowledgement must not promote the next same-text item.
+        if (promotion?.sessionId === sid) promotion.consumed = true;
+        return { ...prev, followUp: prev.followUp.filter((_, i) => i !== fi) };
+      }
       return prev;
     });
-  }, []);
+  }, [queuedPromotions]);
 
   /** Remove one queued message from the client-side queue mirror. omp's RPC
-   *  protocol has no queue-mutation commands, so this only affects the queue
+   *  protocol has no queue-removal command, so this only affects the queue
    *  panel: a message removed here may still be delivered by the running agent
    *  (it then arrives in the chat like any delivered turn). */
   const removeQueuedMessage = useCallback((text: string) => {
     if (!text) return;
+    const promotion = queuedPromotions.get(text);
+    const sid = sessionIdRef.current;
     setQueuedMessages((prev) => {
       const si = prev.steering.indexOf(text);
       const fi = prev.followUp.indexOf(text);
       if (si === -1 && fi === -1) return prev;
+      if (fi !== -1 && promotion?.sessionId === sid) promotion.consumed = true;
       return {
         steering: si === -1 ? prev.steering : prev.steering.filter((_, i) => i !== si),
         followUp: fi === -1 ? prev.followUp : prev.followUp.filter((_, i) => i !== fi),
       };
     });
-  }, []);
+  }, [queuedPromotions]);
 
-  /** Promote the first queued follow-up to a steering message (client-side
-   *  relabel; the delivery order itself is owned by omp). */
-  const promoteQueuedToSteer = useCallback((text: string) => {
-    if (!text) return;
-    setQueuedMessages((prev) => {
-      const fi = prev.followUp.indexOf(text);
-      if (fi === -1) return prev;
-      return {
-        steering: [...prev.steering, text],
-        followUp: prev.followUp.filter((_, i) => i !== fi),
-      };
-    });
-  }, []);
+  /** Move the first matching native follow-up into steering, then relabel its
+   *  still-undelivered chip. Never enqueue a second copy via steer. */
+  const promoteQueuedToSteer = useCallback(async (text: string) => {
+    const sid = sessionIdRef.current;
+    if (!hookAliveRef.current || !sid || !text || !queuedMessages.followUp.includes(text)) return;
+    // Text is the existing chip identity. Suppress overlap, not later retries.
+    if (queuedPromotions.get(text)?.sessionId === sid) return;
+    const promotion = { sessionId: sid, consumed: false };
+    queuedPromotions.set(text, promotion);
+    try {
+      const result = await sendAgentCommand<{ promoted: boolean }>(sid, {
+        type: "promote_queued_message",
+        message: text,
+      });
+      if (!hookAliveRef.current || sessionIdRef.current !== sid) return;
+      if (result?.promoted !== true) {
+        addNotice({ type: "warning", message: translate("agentSession.queuedPromotionUnavailable") });
+        return;
+      }
+      setQueuedMessages((prev) => {
+        if (!hookAliveRef.current || sessionIdRef.current !== sid || promotion.consumed) return prev;
+        const fi = prev.followUp.indexOf(text);
+        if (fi === -1) return prev;
+        return {
+          steering: [...prev.steering, text],
+          followUp: prev.followUp.filter((_, i) => i !== fi),
+        };
+      });
+    } catch (error) {
+      if (!hookAliveRef.current || sessionIdRef.current !== sid) return;
+      addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      if (queuedPromotions.get(text) === promotion) queuedPromotions.delete(text);
+    }
+  }, [addNotice, queuedMessages.followUp, queuedPromotions]);
 
   // Mirror queued texts into sessionStorage so a reload can restore them.
   // The dirty gate keeps the initial empty state from wiping a stored queue
@@ -3090,9 +3124,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [messages, streamState, agentRunning, agentPhase, extensionWidgets, isCompacting, retryInfo, activeSubagentCount, todoPhases, scrollToBottom, loading]);
 
-  useEffect(() => () => {
-    hookAliveRef.current = false;
-    if (followScrollFrameRef.current !== null) cancelAnimationFrame(followScrollFrameRef.current);
+  useEffect(() => {
+    hookAliveRef.current = true;
+    return () => {
+      hookAliveRef.current = false;
+      if (followScrollFrameRef.current !== null) cancelAnimationFrame(followScrollFrameRef.current);
+    };
   }, []);
 
   // Load model list
