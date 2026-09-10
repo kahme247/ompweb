@@ -1,7 +1,6 @@
 import type { ChatDraftFile, ChatDraftImage } from "@/lib/draft-store";
 import {
-  MAX_ATTACHED_TEXT_BYTES,
-  MAX_ATTACHED_TEXT_FILES,
+  selectTextAttachments,
   type AttachedTextFileData,
 } from "@/lib/chat-attachments";
 import {
@@ -40,13 +39,11 @@ export function textFileToDraftFile(file: AttachedTextFile): ChatDraftFile {
 }
 
 export function draftFilesToAttachedFiles(files: ChatDraftFile[] | undefined): AttachedTextFile[] {
-  return (files ?? [])
-    .filter((file) => typeof file.name === "string"
-      && typeof file.mimeType === "string"
-      && typeof file.content === "string"
-      && Number.isFinite(file.size)
-      && file.size <= MAX_ATTACHED_TEXT_BYTES)
-    .slice(0, MAX_ATTACHED_TEXT_FILES);
+  const shaped = (files ?? []).filter((file) => typeof file.name === "string"
+    && typeof file.mimeType === "string"
+    && typeof file.content === "string"
+    && Number.isFinite(file.size));
+  return selectTextAttachments(shaped, { usedBytes: 0, usedSlots: 0 }).accepted;
 }
 
 export function revokeImagePreview(image: AttachedImage): void {

@@ -45,8 +45,10 @@ import { ComposerModeStatus, ModelErrorBanner, QueuedActionButton } from "./Chat
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
 import {
   composeMessageWithTextAttachments,
-  MAX_ATTACHED_TEXT_BYTES,
+  describeTextAttachmentSkip,
+  formatAttachmentBytes,
   MAX_ATTACHED_TEXT_FILES,
+  selectTextAttachments,
 } from "@/lib/chat-attachments";
 import {
   MAX_ATTACHED_IMAGE_BYTES,
@@ -328,6 +330,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const attachmentRevisionRef = useRef(0);
   const pendingImageCountRef = useRef(0);
   const pendingTextFileCountRef = useRef(0);
+  const pendingTextFileBytesRef = useRef(0);
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
   attachedTextFilesRef.current = attachedTextFiles;
@@ -429,7 +432,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         setAttachError(
           remaining === 0
             ? `Maximum of ${MAX_ATTACHED_IMAGES} attached images reached.`
-            : `${files.length} image(s) skipped: images up to ${Math.round(MAX_ATTACHED_IMAGE_BYTES / 1024 / 1024)} MB are supported.`,
+            : `${files.length} image(s) skipped: images up to ${formatAttachmentBytes(MAX_ATTACHED_IMAGE_BYTES)} are supported.`,
         );
       }
       return;
@@ -482,21 +485,24 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       0,
       MAX_ATTACHED_TEXT_FILES - attachedTextFilesRef.current.length - pendingTextFileCountRef.current,
     );
-    const textFiles = files
-      .filter((file) => file.size <= MAX_ATTACHED_TEXT_BYTES)
-      .slice(0, remaining);
+    // In-flight batches reserve their bytes too, so two overlapping drops
+    // cannot each fit under the aggregate budget on their own.
+    const { accepted: textFiles, tooLarge, overBudget } = selectTextAttachments(files, {
+      usedBytes: attachedTextFilesRef.current.reduce((total, file) => total + file.size, 0) + pendingTextFileBytesRef.current,
+      usedSlots: attachedTextFilesRef.current.length + pendingTextFileCountRef.current,
+    });
+    // Report every dropped candidate, not just an entirely rejected batch: a
+    // drop of several files can lose some to the budget while accepting others.
+    const limitMessage = remaining === 0 && files.length > 0
+      ? `Maximum of ${MAX_ATTACHED_TEXT_FILES} text files reached.`
+      : describeTextAttachmentSkip({ tooLarge, overBudget });
     if (!textFiles.length) {
-      if (files.length > 0) {
-        setAttachError(
-          remaining === 0
-            ? `Maximum of ${MAX_ATTACHED_TEXT_FILES} text files reached.`
-            : `${files.length} file(s) skipped: files up to ${Math.round(MAX_ATTACHED_TEXT_BYTES / 1024)} KB are supported.`,
-        );
-      }
+      if (files.length > 0) setAttachError(limitMessage ?? `${files.length} file(s) skipped.`);
       return;
     }
     const revision = attachmentRevisionRef.current;
     pendingTextFileCountRef.current += textFiles.length;
+    pendingTextFileBytesRef.current += textFiles.reduce((total, file) => total + file.size, 0);
     try {
       const readFiles = await Promise.all(
         textFiles.map(async (file): Promise<AttachedTextFile> => ({
@@ -520,15 +526,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         ...prev,
         ...newFiles.slice(0, Math.max(0, MAX_ATTACHED_TEXT_FILES - prev.length)),
       ]);
-      if (skipped > 0) {
-        setAttachError(`${skipped} file(s) skipped: binary or non-text files cannot be attached.`);
-      } else {
-        setAttachError(null);
-      }
+      setAttachError(
+        limitMessage
+          ?? (skipped > 0 ? `${skipped} file(s) skipped: binary or non-text files cannot be attached.` : null),
+      );
     } catch {
       setAttachError("One or more files could not be read. Try a different file.");
     } finally {
       pendingTextFileCountRef.current -= textFiles.length;
+      pendingTextFileBytesRef.current -= textFiles.reduce((total, file) => total + file.size, 0);
     }
   }, []);
 
