@@ -1637,15 +1637,11 @@ export function AppShell() {
               <div
                 className="shell-topbar-center"
                 style={{
-                  position: "absolute",
-                  left: "50%",
-                  transform: "translateX(-50%)",
+                  flex: 1,
+                  minWidth: 0,
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  maxWidth: "min(460px, calc(100% - 380px))",
-                  pointerEvents: "none",
-                  zIndex: 10,
                 }}
               >
                 <div
@@ -1664,7 +1660,6 @@ export function AppShell() {
                     whiteSpace: "nowrap",
                     minWidth: 0,
                     maxWidth: "min(400px, 30vw)",
-                    pointerEvents: "auto",
                     flexShrink: 1,
                   }}
                 >
