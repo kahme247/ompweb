@@ -18,6 +18,8 @@ function browserHistory({ prior = true, standalone = false } = {}) {
   entries.push({ url: "https://omp.test/?session=first", state: nextState });
   let index = entries.length - 1;
   const pending = [];
+  let activated = false;
+  let skippable = false;
   const result = { entries, departed: false, closeAttempts: 0 };
   function fire(type, extra = {}) {
     const event = { type, defaultPrevented: false, stopped: false, preventDefault() { this.defaultPrevented = true; }, stopImmediatePropagation() { this.stopped = true; }, ...extra };
@@ -28,6 +30,11 @@ function browserHistory({ prior = true, standalone = false } = {}) {
     return event;
   }
   const win = {
+    activate() { activated = true; skippable = false; },
+    nativeBack() {
+      if (skippable) result.departed = true;
+      else this.history.back();
+    },
     location: { href: entries[index].url },
     navigation: { get canGoBack() { return index > 0; } },
     matchMedia: () => ({ matches: standalone }),
@@ -45,6 +52,7 @@ function browserHistory({ prior = true, standalone = false } = {}) {
         win.location.href = entries[index].url;
       },
       pushState(state, _, url) {
+        if (!activated) skippable = true;
         entries.splice(index + 1);
         entries.push({ state: structuredClone(state), url: new URL(url ?? win.location.href, win.location.href).href });
         index += 1;
@@ -55,6 +63,8 @@ function browserHistory({ prior = true, standalone = false } = {}) {
       forward() { this.go(1); },
     },
   };
+  // The root layout installs this bridge before Next's popstate listener.
+  win.addEventListener("popstate", (event) => fire("omp:sidebar-popstate", { detail: event }));
   // Router integration and actual listener ordering need browser verification;
   // this model tests navigation outcomes, not a simulated Next listener.
   result.window = win;
@@ -63,6 +73,9 @@ function browserHistory({ prior = true, standalone = false } = {}) {
     while (pending.length) {
       const target = index + pending.shift();
       if (target < 0 || target >= entries.length) continue;
+      // Chromium stops honoring earlier activation after history traversal.
+      // A subsequent pushState makes this document skippable by native Back.
+      activated = false;
       if (entries[target].url.startsWith("https://previous.test/")) {
         if (fire("beforeunload").defaultPrevented) continue;
         result.departed = true;
@@ -142,6 +155,26 @@ test("dirty second Back cancels without losing content and Leave exits without a
     await act(() => shell.api.leave());
     await world.flush();
     assert.equal(world.departed, true);
+  } finally {
+    await act(() => clearDraft(draftKey));
+    await shell.unmount();
+  }
+});
+
+test("native Back keeps a dirty conversation guarded without another tap between Back presses", async () => {
+  const world = browserHistory();
+  const shell = await mount(world);
+  try {
+    await act(() => setDraft(draftKey, { value: "do not discard", images: [], files: [] }));
+    world.window.activate();
+    world.window.nativeBack();
+    await world.flush();
+    assert.equal(shell.api.sidebarOpen, true);
+    world.window.nativeBack();
+    await world.flush();
+    assert.equal(world.departed, false);
+    assert.equal(shell.api.exitConfirmationOpen, true);
+    assert.equal(getDraft(draftKey)?.value, "do not discard");
   } finally {
     await act(() => clearDraft(draftKey));
     await shell.unmount();

@@ -23,7 +23,7 @@ export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, 
   const [exitNeedsNativeBack, setExitNeedsNativeBack] = useState(false);
   const [restoreVersion, setRestoreVersion] = useState(0);
   const snapshot = useRef<HistorySnapshot | null>(null);
-  const pending = useRef<"collapse" | "leave" | null>(null);
+  const pending = useRef<"collapse" | "leave" | { sidebarOpen: boolean } | null>(null);
   const leaveAllowed = useRef(false);
   const latest = useRef({ active, sidebarOpen, setSidebarOpen });
   latest.current = { active, sidebarOpen, setSidebarOpen };
@@ -73,10 +73,13 @@ export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, 
       if (pending.current) {
         const action = pending.current;
         pending.current = null;
-        if (action === "leave") {
+        if (typeof action === "object") {
+          writeEntry("top", action.sidebarOpen);
+        } else if (action === "leave") {
           leaveFromBase();
         } else if ((latest.current.active && !latest.current.sidebarOpen) || hasUnsentDrafts()) {
-          writeEntry("top", latest.current.sidebarOpen, true);
+          pending.current = { sidebarOpen: latest.current.sidebarOpen };
+          window.history.forward();
         }
         return;
       }
@@ -86,12 +89,15 @@ export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, 
       } else if (latest.current.active && !latest.current.sidebarOpen) {
         latest.current.setSidebarOpen(true);
         writeEntry("base", true);
-        // Reuse the same pair only while content needs an in-app exit guard.
-        // pushState from the base replaces the forward entry, never appends
-        // another sentinel behind it.
-        if (hasUnsentDrafts()) writeEntry("top", true, true);
+        // Reuse the forward entry. pushState after Back makes Chromium mark
+        // this document skippable, even if the user typed before pressing Back.
+        if (hasUnsentDrafts()) {
+          pending.current = { sidebarOpen: true };
+          window.history.forward();
+        }
       } else if (hasUnsentDrafts()) {
-        writeEntry("top", true, true);
+        pending.current = { sidebarOpen: true };
+        window.history.forward();
         setExitConfirmationOpen(true);
       } else {
         leaveFromBase();
@@ -102,10 +108,11 @@ export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, 
       setExitNeedsNativeBack(false);
       setRestoreVersion((version) => version + 1);
     };
-    window.addEventListener("popstate", onPopState, true);
+    const onSidebarPopState = (event: Event) => onPopState((event as CustomEvent<PopStateEvent>).detail);
+    window.addEventListener("omp:sidebar-popstate", onSidebarPopState);
     window.addEventListener("pageshow", onPageShow);
     return () => {
-      window.removeEventListener("popstate", onPopState, true);
+      window.removeEventListener("omp:sidebar-popstate", onSidebarPopState);
       window.removeEventListener("pageshow", onPageShow);
     };
   }, [leaveFromBase, writeEntry]);
