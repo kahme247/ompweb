@@ -2703,7 +2703,7 @@ html.dark .dropdown-surface :is(select, option) {
 
 .shell-topbar {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   justify-content: space-between;
 }
 .shell-topbar-center {
@@ -2743,7 +2743,13 @@ html.dark .dropdown-surface :is(select, option) {
     margin: 0;
   }
   .shell-topbar [data-topbar-right-group] {
-    padding: 0 0 4px !important;
+    padding: 0 !important;
+  }
+}
+
+@container topbar-speed (max-width: 60px) {
+  .shell-metric-pill {
+    display: none !important;
   }
 }
 

@@ -1752,9 +1752,14 @@ export function AppShell() {
               marginLeft: "auto",
               display: "flex",
               alignItems: "center",
+              justifyContent: "flex-end",
               gap: 6,
               paddingRight: rightPanelOpen ? 8 : 44,
-              flexShrink: 0,
+              minWidth: 0,
+              width: 200,
+              containerType: "inline-size",
+              containerName: "topbar-speed",
+              flexShrink: 1,
             }}
           >
 
@@ -1764,7 +1769,7 @@ export function AppShell() {
                 ? `${generationSpeed.current.toFixed(1)} t/s`
                 : null;
               const averageSpeedStr = generationSpeed?.average !== null && generationSpeed?.average !== undefined
-                ? `AVG ${generationSpeed.average.toFixed(1)} t/s`
+                ? `${generationSpeed.average.toFixed(1)} t/s`
                 : null;
               if (!currentSpeedStr && !averageSpeedStr) return null;
               const speedTitle = currentSpeedStr
@@ -1790,11 +1795,17 @@ export function AppShell() {
                     fontVariantNumeric: "tabular-nums",
                     whiteSpace: "nowrap",
                     cursor: "default",
-                    flexShrink: 0,
+                    minWidth: 0,
+                    overflow: "hidden",
+                    flexShrink: 1,
                   }}
                 >
-                  <Zap size={11} strokeWidth={2} aria-hidden="true" style={{ color: currentSpeedStr ? "var(--accent)" : "var(--text-dim)" }} />
-                  <span style={{ fontWeight: currentSpeedStr ? 600 : 400 }}>
+                  {currentSpeedStr ? (
+                    <Zap size={11} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0, color: "var(--accent)" }} />
+                  ) : (
+                    <span style={{ flexShrink: 0, color: "var(--text-dim)" }}>AVG</span>
+                  )}
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", fontWeight: currentSpeedStr ? 600 : 400 }}>
                     {currentSpeedStr ?? averageSpeedStr}
                   </span>
                 </div>
