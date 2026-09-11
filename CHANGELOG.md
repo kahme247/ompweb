@@ -8,6 +8,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Fixes & Improvements
 
+- Keep session action menus visible on touch devices beside fixed-width, right-aligned timestamps, with larger tap targets and titles using the remaining row width.
 - Hide the Steer action when the only queued message is already a steer, matching the expanded queue while keeping Edit and Delete available.
 - Keep the theme picker inside the mobile viewport by opening it to the right of its toolbar anchor.
 

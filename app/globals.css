@@ -1517,6 +1517,68 @@ pre, code {
   border-radius: 4px;
 }
 
+.session-item-trailing {
+  height: 24px;
+}
+.session-item-metadata {
+  width: 100%;
+}
+.session-item-time {
+  width: 42px;
+}
+.session-item-actions {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.session-item-menu-button {
+  width: 24px;
+  height: 24px;
+}
+[data-actions-visible="true"] .session-item-metadata {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+[data-actions-visible="true"] .session-item-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Touch rows keep the compact timestamp immediately beside a full-size menu target. */
+@media (hover: none), (pointer: coarse) {
+  .session-item-row {
+    min-height: 44px;
+  }
+  .session-item-trailing {
+    --session-trailing-width: auto;
+    height: 44px;
+    gap: 2px;
+  }
+  .session-item-row .session-item-metadata {
+    width: auto;
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+  }
+  .session-item-time {
+    width: 32px;
+  }
+  .session-item-row .session-item-actions {
+    position: static;
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .session-item-menu-button {
+    width: 44px;
+    height: 44px;
+    flex-shrink: 0;
+  }
+  .session-item-row .session-item-button {
+    align-self: stretch;
+  }
+}
+
 .sidebar-project-header > button:focus-visible,
 .sidebar-project-identity:focus-visible,
 .sidebar-project-action:focus-visible,
