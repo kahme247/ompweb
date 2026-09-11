@@ -297,8 +297,9 @@ test("wide layouts do not restore sidebar state from a previous mobile history e
   } finally { await shell.unmount(); }
 });
 
-test("direct standalone launch confirms dirty Back and disarms if the shell cannot close programmatically", async () => {
-  const world = browserHistory({ prior: false, standalone: true });
+for (const standalone of [false, true]) {
+test(`direct ${standalone ? "standalone" : "browser"} launch confirms dirty Back and limits app-close guidance to standalone`, async () => {
+  const world = browserHistory({ prior: false, standalone });
   const shell = await mount(world);
   try {
     await act(() => setDraft(draftKey, { value: "", images: [], files: [{ name: "draft.txt", content: "draft", mimeType: "text/plain", size: 5 }] }));
@@ -309,8 +310,8 @@ test("direct standalone launch confirms dirty Back and disarms if the shell cann
     assert.equal(shell.api.exitConfirmationOpen, true);
     await act(() => shell.api.leave());
     await world.flush();
-    assert.equal(world.closeAttempts, 1);
-    assert.equal(shell.api.exitNeedsNativeBack, true);
+    assert.equal(world.closeAttempts, standalone ? 1 : 0);
+    assert.equal(shell.api.exitNeedsNativeBack, standalone);
     assert.equal(world.entries.length, 2);
     assert.equal(world.fire("beforeunload").defaultPrevented, false);
     world.window.history.back();
@@ -321,3 +322,4 @@ test("direct standalone launch confirms dirty Back and disarms if the shell cann
     await shell.unmount();
   }
 });
+}

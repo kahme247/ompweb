@@ -14,6 +14,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 - Open the conversation sidebar on Back before leaving in narrow, overlay-sidebar layouts. On every layout, warn before Back, reload, or close can discard unsent text or attachments. Cancel keeps the current conversation and drafts; switching conversations still preserves drafts.
 - Keep unsent-content confirmation active across consecutive Back presses on Android Chrome, including after switching to a new session.
 - Some installed browsers cannot close a directly launched app programmatically. After confirming Leave, use native Back or Close if prompted. Chrome may bypass sidebar-first Back until the first interaction after launch, and Android process termination can bypass page warnings.
+- Show app-close guidance only in standalone installed apps, never in ordinary browser tabs.
 
 ---
 

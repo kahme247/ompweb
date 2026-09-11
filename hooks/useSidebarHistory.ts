@@ -58,8 +58,10 @@ export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, 
     // At a direct-launch root history.back() is a no-op, unlike native Android
     // Back. Only an installed shell may be asked to close. Some shells refuse;
     // leave the guard disarmed and tell the user to use native Back once more.
-    if (window.matchMedia("(display-mode: standalone)").matches) window.close();
-    setExitNeedsNativeBack(true);
+    if (window.matchMedia("(display-mode: standalone)").matches) {
+      window.close();
+      setExitNeedsNativeBack(true);
+    }
   }, []);
 
   useEffect(() => {
