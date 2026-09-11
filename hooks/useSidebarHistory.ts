@@ -85,7 +85,7 @@ export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, 
       }
       if (leaveAllowed.current) return;
       if (marker.entry === "top") {
-        latest.current.setSidebarOpen(marker.sidebarOpen);
+        if (latest.current.active) latest.current.setSidebarOpen(marker.sidebarOpen);
       } else if (latest.current.active && !latest.current.sidebarOpen) {
         latest.current.setSidebarOpen(true);
         writeEntry("base", true);

@@ -91,12 +91,12 @@ function browserHistory({ prior = true, standalone = false } = {}) {
   return result;
 }
 
-async function mount(world, { open = false, strict = false } = {}) {
+async function mount(world, { open = false, strict = false, active = true } = {}) {
   globalThis.window = world.window;
   let api;
   function Shell({ url = "first" }) {
     const [sidebarOpen, setSidebarOpen] = React.useState(open);
-    const navigation = useSidebarHistory({ active: true, ready: true, sidebarOpen, setSidebarOpen, url });
+    const navigation = useSidebarHistory({ active, ready: true, sidebarOpen, setSidebarOpen, url });
     api = { ...navigation, sidebarOpen, setSidebarOpen };
     return null;
   }
@@ -237,7 +237,7 @@ test("a new-session URL committed during sidebar collapse survives the pending t
 
 test("desktop open sidebar has no clean interception; attachment-only stored drafts protect Back and reload", async () => {
   const world = browserHistory();
-  const shell = await mount(world, { open: true });
+  const shell = await mount(world, { open: true, active: false });
   try {
     assert.equal(world.entries.length, 2);
     assert.equal(world.fire("beforeunload").defaultPrevented, false);
@@ -257,6 +257,44 @@ test("desktop open sidebar has no clean interception; attachment-only stored dra
     await act(() => clearDraft(draftKey));
     await shell.unmount();
   }
+});
+
+test("wide layouts keep a collapsed sidebar unchanged while protecting drafts on the first Back", async () => {
+  const world = browserHistory();
+  const shell = await mount(world, { active: false });
+  try {
+    assert.equal(world.entries.length, 2);
+    await act(() => setDraft(draftKey, { value: "desktop draft", images: [], files: [] }));
+    world.window.activate();
+    world.window.nativeBack();
+    await world.flush();
+    assert.equal(shell.api.exitConfirmationOpen, true);
+    assert.equal(shell.api.sidebarOpen, false);
+    await act(() => shell.api.cancelExit());
+    assert.equal(getDraft(draftKey)?.value, "desktop draft");
+    assert.equal(world.fire("beforeunload").defaultPrevented, true);
+    await act(() => clearDraft(draftKey));
+    await world.flush();
+    world.window.history.back();
+    await world.flush();
+    assert.equal(world.departed, true);
+  } finally {
+    await act(() => clearDraft(draftKey));
+    await shell.unmount();
+  }
+});
+
+test("wide layouts do not restore sidebar state from a previous mobile history entry", async () => {
+  const world = browserHistory();
+  let shell = await mount(world);
+  await shell.unmount();
+  shell = await mount(world, { active: false, open: true });
+  try {
+    await world.flush();
+    world.window.history.forward();
+    await world.flush();
+    assert.equal(shell.api.sidebarOpen, true);
+  } finally { await shell.unmount(); }
 });
 
 test("direct standalone launch confirms dirty Back and disarms if the shell cannot close programmatically", async () => {

@@ -1343,7 +1343,7 @@ export function AppShell() {
   const showPlaceholder = initialSessionRestored && !showChat;
 
   const sidebarHistory = useSidebarHistory({
-    active: showChat || Boolean(initialSessionId),
+    active: isMobile && (showChat || Boolean(initialSessionId)),
     ready: mobileSidebarReady,
     sidebarOpen,
     setSidebarOpen,
