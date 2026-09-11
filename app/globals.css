@@ -2334,6 +2334,8 @@ html.dark .dropdown-surface :is(select, option) {
 /* Provider Sub-navigation & Cards */
 .providers-segmented {
   display: inline-flex;
+  flex-wrap: wrap;
+  max-width: 100%;
   align-items: stretch;
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
@@ -2354,7 +2356,8 @@ html.dark .dropdown-surface :is(select, option) {
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
   transition: background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm);
 }
 
