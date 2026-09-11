@@ -209,6 +209,32 @@ test("session replacement, repeated close/Back, StrictMode and reload retain one
   } finally { await shell.unmount(); }
 });
 
+test("a new-session URL committed during sidebar collapse survives the pending traversal", async () => {
+  const world = browserHistory();
+  const shell = await mount(world);
+  try {
+    await act(() => shell.api.setSidebarOpen(true));
+    world.window.history.replaceState({ __NA: true, __PRIVATE_NEXTJS_INTERNALS_TREE: { tree: "new-session" } }, "", "/");
+    await shell.update("new");
+    await act(() => shell.api.setSidebarOpen(false));
+    await act(() => setDraft(draftKey, { value: "new draft", images: [], files: [] }));
+    world.window.activate();
+    await world.flush();
+    assert.equal(world.window.location.href, "https://omp.test/");
+    assert.equal(world.entries.length, 3);
+    world.window.nativeBack();
+    await world.flush();
+    world.window.nativeBack();
+    await world.flush();
+    assert.equal(world.departed, false);
+    assert.equal(shell.api.exitConfirmationOpen, true);
+    assert.equal(getDraft(draftKey)?.value, "new draft");
+  } finally {
+    await act(() => clearDraft(draftKey));
+    await shell.unmount();
+  }
+});
+
 test("desktop open sidebar has no clean interception; attachment-only stored drafts protect Back and reload", async () => {
   const world = browserHistory();
   const shell = await mount(world, { open: true });

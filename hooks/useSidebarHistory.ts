@@ -118,7 +118,7 @@ export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, 
   }, [leaveFromBase, writeEntry]);
 
   useLayoutEffect(() => {
-    if (!ready || pending.current) return;
+    if (!ready) return;
     if (leaveAllowed.current && (!sidebarOpen || snapshot.current?.href !== window.location.href)) {
       leaveAllowed.current = false;
       setExitNeedsNativeBack(false);
@@ -135,6 +135,12 @@ export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, 
     };
     snapshot.current = { marker, state, href: window.location.href };
     if (leaveAllowed.current) return;
+    // A route commit can strip our marker while a traversal is pending.
+    // Repair the current entry so its later popstate can finish that traversal.
+    if (pending.current) {
+      writeEntry(marker.entry, sidebarOpen);
+      return;
+    }
     const needsTop = (active && !sidebarOpen) || dirty;
     if (needsTop && marker.entry === "base") {
       writeEntry("base", true);
