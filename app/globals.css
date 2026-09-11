@@ -1545,8 +1545,18 @@ pre, code {
   pointer-events: auto;
 }
 
+.sidebar-project-actions {
+  visibility: hidden;
+}
+.sidebar-project-actions[data-actions-visible="true"] {
+  visibility: visible;
+}
+
 /* Touch rows keep the compact timestamp immediately beside a full-size menu target. */
 @media (hover: none), (pointer: coarse) {
+  .sidebar-project-actions {
+    visibility: visible;
+  }
   .session-item-row {
     min-height: 44px;
   }

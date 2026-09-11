@@ -332,9 +332,10 @@ function ProjectRow({
           </span>
         )}
         <div
+          className="sidebar-project-actions"
+          data-actions-visible={showActions ? "true" : "false"}
           style={{
             flexShrink: 0,
-            visibility: showActions ? "visible" : "hidden",
           }}
         >
           <button
