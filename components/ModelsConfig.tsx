@@ -1983,13 +1983,15 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
           </div>
         )}
 
-        {/* Footer for saving models.yml */}
+        {/* Save controls */}
         {(subTab === "custom" || !embedded) && (
-          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "12px 18px", borderTop: "1px solid var(--border)", background: "var(--bg-panel)", borderRadius: "0 0 var(--radius-card) var(--radius-card)", flexShrink: 0, marginTop: 16 }}>
-            <div style={{ flex: "1 1 220px", minWidth: 0, overflowWrap: "anywhere", fontSize: 12, color: saveError ? "var(--status-error)" : "var(--text-muted)" }}>
-              {saveError ? saveError : <code>~/.omp/agent/models.yml</code>}
-            </div>
-            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, marginLeft: "auto" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10, flexWrap: "wrap", marginTop: 16, flexShrink: 0 }}>
+            {saveError && (
+              <div style={{ flex: "1 1 220px", minWidth: 0, overflowWrap: "anywhere", fontSize: 12, color: "var(--status-error)" }}>
+                {saveError}
+              </div>
+            )}
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <button onClick={() => loadConfig()} disabled={loading} style={{ padding: "6px 14px", background: "none", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", cursor: "pointer", fontSize: 12.5 }}>
                 {t("modelsConfig.cancel")}
               </button>
