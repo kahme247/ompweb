@@ -54,7 +54,7 @@ import {
   loadSidebarWidth,
   projectLabel,
 } from "./AppShell-layout";
-import type { SessionInfo, SessionTreeNode } from "@/lib/types";
+import type { ManagedProject, SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo, GenerationSpeedInfo } from "@/lib/pi-types";
 import type { SettingsTab } from "./SettingsTabs";
@@ -99,6 +99,11 @@ export function AppShell() {
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   // When user clicks +, we only store the cwd — no fake session id
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
+  const [workspaceOptions, setWorkspaceOptions] = useState<{ projects: ManagedProject[]; selectedProject: string | null; cwd: string | null }>({ projects: [], selectedProject: null, cwd: null });
+  const [addProjectOpen, setAddProjectOpen] = useState(false);
+  const handleWorkspaceOptionsChange = useCallback((projects: ManagedProject[], selectedProject: string | null, cwd: string | null) => {
+    setWorkspaceOptions({ projects, selectedProject, cwd });
+  }, []);
   const [initialCwdStatus, setInitialCwdStatus] = useState<"idle" | "validating" | "ready" | "error">(
     () => initialNavigation.requestedCwd ? "validating" : "idle",
   );
@@ -1335,6 +1340,7 @@ export function AppShell() {
 
   // Show chat area if a session is selected, or if we have a cwd to start a new session in
   const effectiveNewSessionCwd = newSessionCwd ?? (selectedSession === null && activeCwd ? activeCwd : null);
+  const newSessionProject = (workspaceOptions.cwd === effectiveNewSessionCwd ? workspaceOptions.selectedProject : null) ?? effectiveNewSessionCwd ?? "";
   const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
   // While restoring initial session from URL, don't show the placeholder
   const showPlaceholder = initialSessionRestored && !showChat;
@@ -1366,6 +1372,9 @@ export function AppShell() {
       onSessionDeleted={handleSessionDeleted}
       selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
       onCwdChange={handleCwdChange}
+      onWorkspaceOptionsChange={handleWorkspaceOptionsChange}
+      addProjectOpen={addProjectOpen}
+      setAddProjectOpen={setAddProjectOpen}
       usageVisible={providerUsageVisible}
       settingsOpen={Boolean(settingsTab)}
       onOpenSettings={() => setSettingsTab((prev) => prev ? null : "general")}
@@ -1860,6 +1869,48 @@ export function AppShell() {
               key={sessionKey}
               session={selectedSession}
               newSessionCwd={effectiveNewSessionCwd}
+              newSessionWorkspace={effectiveNewSessionCwd && (
+                <div className="mb-4 flex min-w-0 flex-col gap-2">
+                  <label htmlFor="new-session-workspace" style={{ fontSize: 13, fontWeight: 500, color: "var(--text-muted)" }}>
+                    {t("settingsConfig.chipWorkspace")}
+                  </label>
+                  <select
+                    id="new-session-workspace"
+                    aria-describedby="new-session-workspace-path"
+                    value={effectiveNewSessionCwd}
+                    onChange={(event) => {
+                      const cwd = event.target.value;
+                      if (!cwd) {
+                        setAddProjectOpen(true);
+                        return;
+                      }
+                      if (cwd === effectiveNewSessionCwd) return;
+                      suppressCwdRef.current = cwd;
+                      setActiveCwd(cwd);
+                      handleNewSession("", cwd);
+                    }}
+                    style={{ width: "100%", minWidth: 0, minHeight: 44, padding: "8px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 16 }}
+                  >
+                    {!workspaceOptions.projects.some((project) => comparableProjectPath(project.path) === comparableProjectPath(newSessionProject)) && (
+                      <option value={effectiveNewSessionCwd}>{projectLabel(effectiveNewSessionCwd)}</option>
+                    )}
+                    {workspaceOptions.projects.map((project) => {
+                      const current = comparableProjectPath(project.path) === comparableProjectPath(newSessionProject);
+                      const label = project.alias ?? projectLabel(project.path);
+                      const duplicate = workspaceOptions.projects.some((other) => other.path !== project.path && (other.alias ?? projectLabel(other.path)) === label);
+                      return (
+                        <option key={project.path} value={current ? effectiveNewSessionCwd : project.path}>
+                          {duplicate ? `${label} — ${project.path}` : label}
+                        </option>
+                      );
+                    })}
+                    <option value="">+ {t("projects.add")}</option>
+                  </select>
+                  <div id="new-session-workspace-path" style={{ fontSize: 12, color: "var(--text-muted)", fontFamily: "var(--font-mono)", overflowWrap: "anywhere" }}>
+                    {effectiveNewSessionCwd}
+                  </div>
+                </div>
+              )}
               onAgentEnd={handleAgentEnd}
               onSessionCreated={handleSessionCreated}
               onSessionForked={handleSessionForked}
