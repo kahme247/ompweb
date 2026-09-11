@@ -2361,10 +2361,6 @@ html.dark .dropdown-surface :is(select, option) {
   transition: background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm);
 }
 
-.providers-segmented-btn + .providers-segmented-btn {
-  border-left: 1px solid var(--border);
-}
-
 .providers-segmented-btn:hover {
   background: var(--bg-hover);
   color: var(--text);
