@@ -1072,7 +1072,7 @@ const SessionItem = memo(function SessionItem({
     </div>
       <ConfirmDialog
         open={confirmDelete}
-        onOpenChange={setConfirmDelete}
+        onOpenChange={(open) => { if (open) setConfirmDelete(true); else closeConfirmation(); }}
         title={<span style={{ overflowWrap: "anywhere" }}>{t("sessionSidebar.deleteConfirm", { title })}</span>}
         description={t("sessionSidebar.deleteConfirmBody")}
         confirmLabel={t("sessionSidebar.delete")}
