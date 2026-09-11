@@ -162,8 +162,8 @@ export const RightPanel = memo(function RightPanel({
         }}
       >
         {/* Right panel toolbar: tabs + editor integrations (chat, path, explorer) */}
-        <div style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", height: 36 }}>
-          <div style={{ flex: 1, overflow: "hidden", minWidth: 0 }}>
+        <div className="right-panel-toolbar" style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", minHeight: isMobile ? 44 : 36, paddingRight: isMobile ? 44 : 36, flexWrap: isMobile ? "wrap" : "nowrap" }}>
+          <div style={{ flex: isMobile ? "1 0 100%" : 1, overflow: "hidden", minWidth: 0 }}>
             <TabBar
               tabs={fileTabs}
               activeTabId={rightView === "file" ? activeFileTabId ?? "" : ""}
@@ -206,11 +206,12 @@ export const RightPanel = memo(function RightPanel({
                 onClick={() => fileExplorerRef.current?.collapseAll()}
                 title={t("sessionSidebar.collapseExplorer")}
                 aria-label={t("sessionSidebar.collapseExplorer")}
-                style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, padding: 0, background: "none", border: "none", borderRadius: "var(--radius-control)", color: "var(--text-dim)", cursor: "pointer" }}
+                style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, width: isMobile ? "auto" : 26, height: 26, padding: isMobile ? "0 8px" : 0, background: "none", border: "none", borderRadius: "var(--radius-control)", color: "var(--text-muted)", cursor: "pointer", fontSize: 11 }}
                 onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "none"; }}
               >
-                <ChevronsDownUp size={13} strokeWidth={2} aria-hidden="true" />
+                <ChevronsDownUp size={isMobile ? 16 : 13} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0 }} />
+                {isMobile && <span>{t("sessionSidebar.collapseExplorer")}</span>}
               </button>
               <button
                 aria-label={t("sessionSidebar.refreshExplorer")}

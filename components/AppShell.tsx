@@ -1555,19 +1555,17 @@ export function AppShell() {
         {/* Top bar: 3-zone segmented control bar */}
         <div ref={topBarRef} className="shell-topbar" style={{
           position: "relative",
-          display: "flex",
           alignItems: "center",
-          justifyContent: "space-between",
           flexShrink: 0,
           borderBottom: "1px solid var(--border)",
-          height: isMobile ? 44 : 36,
+          minHeight: isMobile ? 44 : 36,
           background: "var(--bg-panel)",
           padding: isMobile ? "0 4px" : "0 8px",
-          gap: 8,
+          gap: "0 8px",
           minWidth: 0,
         }}>
           {/* Left Zone: Utility group (sidebar, theme, language) & session controls (history, branches, system) */}
-          <div style={{ display: "flex", alignItems: "center", gap: 4, height: "100%", flexShrink: 0 }}>
+          <div className="shell-topbar-tools" style={{ display: "flex", alignItems: "center", gap: 4, height: isMobile ? 43 : 35, minWidth: 0, flexShrink: 0 }}>
             <button
               onClick={handleSidebarToggle}
               title={sidebarOpen ? t("appShell.hideSidebar") : t("appShell.showSidebar")}
@@ -1644,8 +1642,9 @@ export function AppShell() {
               <div
                 className="shell-topbar-center"
                 style={{
-                  flex: 1,
                   minWidth: 0,
+                  containerType: "inline-size",
+                  containerName: "breadcrumb",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
@@ -1754,8 +1753,7 @@ export function AppShell() {
               display: "flex",
               alignItems: "center",
               gap: 6,
-              height: "100%",
-              paddingRight: isMobile ? (rightPanelOpen ? 0 : 44) : rightPanelOpen ? 8 : 44,
+              paddingRight: rightPanelOpen ? 8 : 44,
               flexShrink: 0,
             }}
           >
