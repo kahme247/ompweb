@@ -130,12 +130,12 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       {/* Hero Provider Header Card */}
       <div style={{ padding: "14px 16px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", display: "flex", flexDirection: "column", gap: 10, boxShadow: "var(--shadow-card)" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flex: "1 1 220px", minWidth: 0 }}>
             <div style={{ width: 36, height: 36, borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", border: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
               <ProviderIcon id={name} size={20} />
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0, overflowWrap: "anywhere" }}>
               <div style={{ fontSize: 15, fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--text)" }}>{name}</div>
               <div style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{hostName}</div>
             </div>
@@ -1860,15 +1860,15 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                         const models = pData.models ?? [];
                         return (
                           <div key={pName} className="settings-card" style={{ flexDirection: "column", alignItems: "stretch", gap: 12 }}>
-                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-                              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 10, flex: "1 1 220px", minWidth: 0 }}>
                                 <ProviderIcon id={pName} size={22} />
-                                <div>
+                                <div style={{ minWidth: 0, overflowWrap: "anywhere" }}>
                                   <div style={{ fontSize: 13.5, fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--text)" }}>{pName}</div>
                                   <div style={{ fontSize: 11.5, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{pData.baseUrl || t("modelsConfig.defaultEndpoint")}</div>
                                 </div>
                               </div>
-                              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
                                 <button
                                   type="button"
                                   onClick={() => addModel(pName)}
