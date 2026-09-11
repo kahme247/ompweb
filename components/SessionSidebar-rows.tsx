@@ -6,6 +6,7 @@ import { useI18n } from "@/lib/i18n";
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { Check, ChevronDown, ChevronRight, Folder, GitBranch, MoreHorizontal, Plus, Trash2 } from "lucide-react";
 import { Tooltip } from "./ui/primitives";
+import { ConfirmDialog } from "./ui/field";
 import { copyText } from "@/lib/clipboard";
 import { transcriptToMarkdown } from "@/lib/transcript";
 import { toast } from "./ui/toast";
@@ -115,6 +116,7 @@ function ProjectRow({
   const [focusWithin, setFocusWithin] = useState(false);
   const [showAllSessions, setShowAllSessions] = useState(false);
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
   const actionButtonRef = useRef<HTMLButtonElement>(null);
   const [aliasEditing, setAliasEditing] = useState(false);
   const [aliasValue, setAliasValue] = useState("");
@@ -147,6 +149,21 @@ function ProjectRow({
 
   return (
     <section className="sidebar-project" data-active={isActive ? "true" : "false"} style={{ marginBottom: 12 }}>
+      <ConfirmDialog
+        open={confirmRemove}
+        onOpenChange={setConfirmRemove}
+        title={<span style={{ overflowWrap: "anywhere" }}>{t("projects.remove", { name: label })}</span>}
+        description={<span style={{ overflowWrap: "anywhere" }}>{t("projects.removeTitle", { name: label })}</span>}
+        confirmLabel={t("projects.removeConfirmLabel")}
+        cancelLabel={t("sessionSidebar.cancel")}
+        danger
+        busy={removeBusy}
+        onConfirm={() => {
+          if (removeBusy) return;
+          setConfirmRemove(false);
+          onRemoveProject(project.path);
+        }}
+      />
       <div
         className="sidebar-project-header"
         draggable={!aliasEditing}
@@ -370,7 +387,7 @@ function ProjectRow({
             <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { setActionMenuOpen(false); void onMoveProject(project.path, 1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
               {t("projects.moveDown")}
             </button>
-            <button type="button" role="menuitem" className="sidebar-menu-item" disabled={removeBusy} onClick={() => { setActionMenuOpen(false); void onRemoveProject(project.path); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--status-error)", cursor: removeBusy ? "default" : "pointer", textAlign: "left", fontSize: 11 }}>
+            <button type="button" role="menuitem" className="sidebar-menu-item" disabled={removeBusy} onClick={() => { setActionMenuOpen(false); setConfirmRemove(true); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--status-error)", cursor: removeBusy ? "default" : "pointer", textAlign: "left", fontSize: 11 }}>
               {t("projects.remove", { name: label })}
             </button>
           </SidebarPortalMenu>
@@ -871,7 +888,7 @@ const SessionItem = memo(function SessionItem({
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const title = session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
   const relativeTime = formatRelativeTime(session.modified, locale, relativeTimeNow);
- const confirming = confirmArchive || confirmDelete;
+ const confirming = confirmArchive;
  const showActions = hovered || focusWithin || actionMenuOpen;
   const rowBackground = confirming
     ? "color-mix(in srgb, var(--accent) 6%, transparent)"
@@ -921,6 +938,7 @@ const SessionItem = memo(function SessionItem({
  }, [session.id, onDeleted, t]);
 
   const handleDelete = useCallback(async () => {
+    if (deleting) return;
     setConfirmDelete(false);
     setDeleting(true);
     try {
@@ -931,7 +949,7 @@ const SessionItem = memo(function SessionItem({
       setDeleting(false);
       toast.error(t("sessionSidebar.deleteFailed"));
     }
-  }, [session.id, onDeleted, t]);
+  }, [session.id, onDeleted, t, deleting]);
   const [copyingTranscript, setCopyingTranscript] = useState(false);
   const handleCopyTranscript = useCallback(async () => {
     if (copyingTranscript) return;
@@ -958,6 +976,7 @@ const SessionItem = memo(function SessionItem({
  }, []);
 
   return (
+    <>
     <div
  onClick={confirmArchive || confirmDelete || renaming ? undefined : onClick}
       onMouseEnter={() => setHovered(true)}
@@ -1006,12 +1025,10 @@ const SessionItem = memo(function SessionItem({
       {confirming ? (
         <>
           <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, color: "var(--text)" }}>
-            {confirmArchive
-              ? t("sessionSidebar.archiveConfirm", { title: title.length > 22 ? `${title.slice(0, 22)}…` : title })
-              : t("sessionSidebar.deleteConfirm", { title: title.length > 22 ? `${title.slice(0, 22)}…` : title })}
+            {t("sessionSidebar.archiveConfirm", { title: title.length > 22 ? `${title.slice(0, 22)}…` : title })}
           </span>
-          <button onClick={(event) => { event.stopPropagation(); if (confirmArchive) void handleArchive(); else void handleDelete(); }} style={{ height: 28, padding: "0 10px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "var(--on-accent)", cursor: "pointer", fontSize: 11, fontWeight: 600 }}>
-            {confirmArchive ? t("sessionSidebar.archive") : t("sessionSidebar.delete")}
+          <button onClick={(event) => { event.stopPropagation(); void handleArchive(); }} style={{ height: 28, padding: "0 10px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "var(--on-accent)", cursor: "pointer", fontSize: 11, fontWeight: 600 }}>
+            {t("sessionSidebar.archive")}
           </button>
           <button onClick={(event) => { event.stopPropagation(); closeConfirmation(); }} autoFocus style={{ height: 28, padding: "0 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text-muted)", cursor: "pointer", fontSize: 11 }}>
             {t("sessionSidebar.cancel")}
@@ -1022,7 +1039,7 @@ const SessionItem = memo(function SessionItem({
       ) : (
         <>
           {depth > 0 && <GitBranch size={11} strokeWidth={2} style={{ flexShrink: 0, color: "var(--text-dim)" }} aria-hidden="true" />}
-          <button ref={contentButtonRef} type="button" className="session-item-button" aria-current={isSelected ? "true" : undefined} onKeyDown={(event) => { if (event.key === "Delete") { event.preventDefault(); setConfirmDelete(true); } }} style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0 }}>
+          <button ref={contentButtonRef} type="button" className="session-item-button" aria-current={isSelected ? "true" : undefined} onKeyDown={(event) => { if (event.key === "Delete" && !deleting) { event.preventDefault(); setConfirmDelete(true); } }} style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0 }}>
             <span title={title} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 12.5, fontWeight: isSelected ? 600 : 500, lineHeight: 1.35, letterSpacing: "-0.005em" }}>
               {title}
             </span>
@@ -1045,7 +1062,7 @@ const SessionItem = memo(function SessionItem({
  <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleArchive(); }} disabled={hasChildren} title={hasChildren ? t("sessionSidebar.archiveLeafOnly") : t("sessionSidebar.archive")} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: hasChildren ? "var(--text-dim)" : "var(--text-muted)", cursor: hasChildren ? "not-allowed" : "pointer", textAlign: "left", fontSize: 11, opacity: hasChildren ? 0.55 : 1 }}>{t("sessionSidebar.archive")}</button>
                   <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { startRename(event); setActionMenuOpen(false); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.rename")}</button>
                   <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleCopyTranscript(); }} disabled={copyingTranscript} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: copyingTranscript ? "default" : "pointer", textAlign: "left", fontSize: 11, opacity: copyingTranscript ? 0.55 : 1 }}>{t("sessionSidebar.copyTranscript")}</button>
-                  <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleDelete(); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--status-error)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.delete")}</button>
+                  <button type="button" role="menuitem" className="sidebar-menu-item" disabled={deleting} onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); setConfirmDelete(true); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--status-error)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.delete")}</button>
                 </SidebarPortalMenu>
               </div>
             </div>
@@ -1053,6 +1070,18 @@ const SessionItem = memo(function SessionItem({
         </>
       )}
     </div>
+      <ConfirmDialog
+        open={confirmDelete}
+        onOpenChange={setConfirmDelete}
+        title={<span style={{ overflowWrap: "anywhere" }}>{t("sessionSidebar.deleteConfirm", { title })}</span>}
+        description={t("sessionSidebar.deleteConfirmBody")}
+        confirmLabel={t("sessionSidebar.delete")}
+        cancelLabel={t("sessionSidebar.cancel")}
+        danger
+        busy={deleting}
+        onConfirm={handleDelete}
+      />
+    </>
   );
 });
 export {

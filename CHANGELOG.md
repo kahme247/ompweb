@@ -8,6 +8,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Fixes & Improvements
 
+- Confirm session deletion and workspace removal in dialogs on desktop and mobile. Cancel leaves data untouched; workspace removal keeps files and sessions.
 - Hide the Steer action when the only queued message is already a steer, matching the expanded queue while keeping Edit and Delete available.
 - Keep the theme picker inside the mobile viewport by opening it to the right of its toolbar anchor.
 
