@@ -152,7 +152,7 @@ export const RightPanel = memo(function RightPanel({
       {/* Right panel: file viewer — always mounted, width animated via CSS */}
       <div
         ref={rightPanelRef}
-        className={`right-panel-container${rightPanelOpen ? " right-panel-open" : " right-panel-closed"}${rightPanelWidth !== null ? " right-panel-custom-width" : ""}${rightPanelResizing ? " right-panel-resizing" : ""}`}
+        className={`right-panel-container${rightPanelOpen ? " right-panel-open" : " right-panel-closed"}${rightPanelResizing ? " right-panel-resizing" : ""}`}
         style={{
           display: "flex",
           flexDirection: "column",
@@ -162,8 +162,8 @@ export const RightPanel = memo(function RightPanel({
         }}
       >
         {/* Right panel toolbar: tabs + editor integrations (chat, path, explorer) */}
-        <div className="right-panel-toolbar" style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", minHeight: isMobile ? 44 : 36, paddingRight: isMobile ? 44 : 36, flexWrap: isMobile ? "wrap" : "nowrap" }}>
-          <div style={{ flex: isMobile ? "1 0 100%" : 1, overflow: "hidden", minWidth: 0 }}>
+        <div className="right-panel-toolbar" style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", minHeight: isMobile ? 44 : 36, paddingRight: isMobile ? 44 : 36, flexWrap: "wrap" }}>
+          <div style={{ flex: isMobile ? "1 0 100%" : "1 1 160px", overflow: "hidden", minWidth: 0 }}>
             <TabBar
               tabs={fileTabs}
               activeTabId={rightView === "file" ? activeFileTabId ?? "" : ""}

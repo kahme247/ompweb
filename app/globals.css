@@ -2671,6 +2671,10 @@ html.dark .dropdown-surface :is(select, option) {
   background: var(--border);
   flex-shrink: 0;
 }
+  .right-panel-toolbar > [role="toolbar"] {
+    flex-wrap: wrap;
+    max-width: 100%;
+  }
 @media (max-width: 640px) {
   .shell-toolbar-btn {
     width: 40px;
@@ -2683,10 +2687,6 @@ html.dark .dropdown-surface :is(select, option) {
     display: flex;
     align-items: center;
     min-height: 44px;
-  }
-  .right-panel-toolbar > [role="toolbar"] {
-    flex-wrap: wrap;
-    max-width: 100%;
   }
   .right-panel-toolbar > [role="toolbar"] > button {
     min-width: 40px;
@@ -3256,24 +3256,19 @@ html.dark .dropdown-surface :is(select, option) {
   .right-panel-container {
     overflow: hidden;
     transition: width var(--dur-med) var(--ease-out-warm), min-width var(--dur-med) var(--ease-out-warm);
-    flex-shrink: 0;
+    flex-shrink: 1;
   }
   .right-panel-container.right-panel-open {
     width: var(--right-panel-width, 42%);
-    min-width: 300px;
+    min-width: 0;
   }
   .right-panel-container.right-panel-closed {
     width: 0;
     min-width: 0;
     border-left: none !important;
   }
-  /* keep inner content at fixed width so it doesn't reflow during animation */
+  /* Follow the panel's available width, including interface scaling and borders. */
   .right-panel-container > * {
-    width: 42vw;
-    min-width: 300px;
-  }
-  /* user-chosen pixel width: content follows the container instead */
-  .right-panel-container.right-panel-custom-width > * {
     width: 100%;
     min-width: 0;
   }
