@@ -6,6 +6,11 @@ const os = require("node:os");
 const { spawn } = require("node:child_process");
 
 const forwardedSignals = ["SIGINT", "SIGTERM"];
+// SIGHUP arrives when a CLI-run launcher loses its terminal (window closed,
+// session ended). The child must die gracefully, not verbatim: a verbatim
+// SIGHUP terminates Node without running exit handlers, orphaning the detached
+// omp children it spawned. Translate it to a graceful SIGTERM tree kill.
+const translatedSignals = { SIGHUP: "SIGTERM" };
 const shutdownTimeoutMs = 5_000;
 // Time to wait for a terminated process tree to actually exit (used as the
 // default for terminateChildProcess and by the update worker's stop gate).
@@ -75,20 +80,23 @@ function wireChildProcessLifecycle(child, parentProcess = process, timeoutMs = s
   const signalHandlers = new Map();
   let shutdownTimer;
   const platform = parentProcess.platform ?? process.platform;
-
   const forceKill = () => killChildTree(child, true, platform);
-
+  const killChildOnSignal = (childSignal) => {
+    if (shutdownTimer) {
+      forceKill();
+      return;
+    }
+    shutdownTimer = setTimeout(forceKill, timeoutMs);
+    shutdownTimer.unref?.();
+    killChildTree(child, false, platform, childSignal);
+  };
   for (const signal of forwardedSignals) {
-    const handler = () => {
-      if (shutdownTimer) {
-        forceKill();
-        return;
-      }
-
-      shutdownTimer = setTimeout(forceKill, timeoutMs);
-      shutdownTimer.unref?.();
-      killChildTree(child, false, platform, signal);
-    };
+    const handler = () => killChildOnSignal(signal);
+    signalHandlers.set(signal, handler);
+    parentProcess.on(signal, handler);
+  }
+  for (const [signal, childSignal] of Object.entries(translatedSignals)) {
+    const handler = () => killChildOnSignal(childSignal);
     signalHandlers.set(signal, handler);
     parentProcess.on(signal, handler);
   }
