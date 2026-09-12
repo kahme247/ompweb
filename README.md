@@ -29,6 +29,10 @@ A clean, modern web UI for the [oh-my-pi (omp)](https://github.com/can1357/oh-my
 - [omp](https://github.com/can1357/oh-my-pi) installed and available on your `PATH` (or specified via `OMP_WEB_OMP_BIN`)
 - Node.js `>= 22.19.0`
 
+The **Steer** action on a queued follow-up requires an omp runtime with the `promote_queued_message` RPC command (not available in omp 18.1.16). Older runtimes report an error and leave the message queued as a follow-up; ompweb does not send a duplicate steering message.
+
+Queue **Delete** and **Edit** additionally require `remove_queued_message`. Deletion is confirmed by OMP before the chip disappears; editing recalls text only after cancellation succeeds. Unsupported runtimes or messages that are no longer pending leave the queue unchanged and display a notice.
+
 ## Quick Start
 
 **Run directly without installing:**

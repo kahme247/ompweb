@@ -1,5 +1,4 @@
-// Queued-prompt tracking and sessionStorage persistence helpers
-// extracted from useAgentSession (pure logic only — no hook state).
+// Queued-prompt tracking, persistence, and same-document queue notifications.
 
 export interface QueuedMessages {
   steering: string[];
@@ -65,4 +64,24 @@ export function clearPersistedQueue(sessionId: string | null): void {
   } catch {
     // ignore storage errors
   }
+}
+
+type QueueListener = (sessionId: string, queue: QueuedMessages) => void;
+const queueListeners = new Set<QueueListener>();
+
+/** Publish the already-applied snapshot, not a removal to repeat per listener. */
+export function publishQueueChange(sessionId: string, queue: QueuedMessages): void {
+  persistQueue(sessionId, queue);
+  for (const listener of [...queueListeners]) {
+    try {
+      listener(sessionId, queue);
+    } catch {
+      // A failing subscriber must not stop the others.
+    }
+  }
+}
+
+export function subscribeQueueChanges(listener: QueueListener): () => void {
+  queueListeners.add(listener);
+  return () => { queueListeners.delete(listener); };
 }

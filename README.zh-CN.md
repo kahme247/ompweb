@@ -29,6 +29,10 @@
 - 已安装 [omp](https://github.com/can1357/oh-my-pi) 且在 `PATH` 中（或通过 `OMP_WEB_OMP_BIN` 指定路径）
 - Node.js `>= 22.19.0`
 
+将排队的后续消息转为 **Steer** 需要 omp 运行时支持 `promote_queued_message` RPC 命令（omp 18.1.16 尚不支持）。旧版运行时会返回错误，消息仍作为后续消息排队；ompweb 不会重复发送一条引导消息。
+
+队列中的 **Delete** 和 **Edit** 还需要支持 `remove_queued_message`。只有 OMP 确认取消后才会移除消息；编辑时也必须先取消成功，再将文本恢复到输入框。运行时不支持该命令或消息已不在队列中时，界面保留队列并显示提示。
+
 ## 快速开始
 
 **免安装直接运行：**

@@ -8,6 +8,9 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Fixes & Improvements
 
+- Promote queued follow-ups through OMP's `promote_queued_message` command before relabeling them as steering; unsupported runtimes leave the queue unchanged.
+- Cancel queued messages in OMP before removing their chips or recalling them for editing. Requires native `remove_queued_message` support; failed cancellation leaves the message visible.
+- Preserve question-dialog answers and selections when an SSE reconnect replays the same pending request.
 - Keep composer controls on one line, with equally sized Send, Stop, and Queue buttons and model names truncating before short effort labels.
 - Align the + button and primary action with matching composer insets.
 - Clearly dim Attach files while the agent is running; queued messages remain text-only.
