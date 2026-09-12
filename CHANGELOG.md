@@ -15,6 +15,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 - Keep workspace header action menus visible on touch devices without first selecting or expanding the workspace.
 - Hide the Steer action when the only queued message is already a steer, matching the expanded queue while keeping Edit and Delete available.
 - Keep the theme picker inside the mobile viewport by opening it to the right of its toolbar anchor.
+- Choose the destination workspace directly above the new-session composer. The selector stays in sync with the sidebar, shows workspace names and the exact destination path, preserves the selected worktree, and opens the existing Add workspace dialog.
 - Match browser and installed-app chrome to the selected theme, with OMP Midnight as the launch fallback.
 - Open the conversation sidebar on Back before leaving in narrow, overlay-sidebar layouts. On every layout, warn before Back, reload, or close can discard unsent text or attachments. Cancel keeps the current conversation and drafts; switching conversations still preserves drafts.
 - Keep unsent-content confirmation active across consecutive Back presses on Android Chrome, including after switching to a new session.
