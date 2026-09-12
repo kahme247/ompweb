@@ -33,6 +33,7 @@ interface UseGlobalKeyboardShortcutsOptions {
  * Shortcuts handled here:
  *   Esc          – stop the running agent (via module-level abort handler)
  *   Ctrl+Alt+N   – create a new session in the active project directory
+ *   Ctrl/Cmd+A   – select the active message, transcript, or file contents
  *
  * Note: Esc inside <textarea> or <input> is deliberately NOT handled here.
  * ChatInput manages its own Esc logic (closing slash / @ file menus, stopping
@@ -43,6 +44,56 @@ export function useGlobalKeyboardShortcuts(
   options: UseGlobalKeyboardShortcutsOptions,
 ): void {
   const { onNewSession, activeCwd } = options;
+
+  useEffect(() => {
+    let interactionTarget: Element | null = null;
+    const scopeFor = (node: Node | null): HTMLElement | null =>
+      (node instanceof Element ? node : node?.parentElement)?.closest<HTMLElement>("[data-selection-scope]") ?? null;
+    const trackInteraction = (event: Event) => {
+      interactionTarget = event.target instanceof Element ? event.target : null;
+    };
+    const selectAll = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || event.key.toLowerCase() !== "a"
+        || (!event.ctrlKey && !event.metaKey) || event.altKey || event.shiftKey) return;
+
+      const target = event.target;
+      if (target instanceof Element && (
+        target.closest("input, textarea, select, iframe")
+        || (target instanceof HTMLElement && target.isContentEditable)
+      )) return;
+
+      const activeScope = scopeFor(interactionTarget ?? document.activeElement);
+      // Moving outside a content region must not revive an old text selection.
+      if (interactionTarget && !activeScope) return;
+      const selection = window.getSelection();
+      if (!selection) return;
+      let scope = activeScope;
+      if (selection.rangeCount && !selection.isCollapsed) {
+        const selectedScope = scopeFor(selection.getRangeAt(0).commonAncestorContainer);
+        // A range spanning messages belongs to their enclosing transcript.
+        // A stale range in another pane must not override the latest interaction.
+        if (selectedScope && (!activeScope || selectedScope.contains(activeScope) || activeScope.contains(selectedScope))) {
+          scope = selectedScope;
+        }
+      }
+      if (!scope?.isConnected || !scope.checkVisibility({ checkVisibilityCSS: true })
+        || scope.closest("[inert], [aria-hidden='true']")) return;
+
+      const range = document.createRange();
+      range.selectNodeContents(scope);
+      event.preventDefault();
+      selection.removeAllRanges();
+      selection.addRange(range);
+    };
+    document.addEventListener("pointerdown", trackInteraction, true);
+    document.addEventListener("focusin", trackInteraction, true);
+    window.addEventListener("keydown", selectAll);
+    return () => {
+      document.removeEventListener("pointerdown", trackInteraction, true);
+      document.removeEventListener("focusin", trackInteraction, true);
+      window.removeEventListener("keydown", selectAll);
+    };
+  }, []);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent): void => {
