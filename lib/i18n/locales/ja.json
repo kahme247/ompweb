@@ -674,6 +674,8 @@
   "messageView.readFiles": "読み取ったファイル",
   "messageView.responseError": "応答エラー",
   "messageView.showDetails": "詳細を表示",
+  "messageView.showFullInput": "入力全体を表示",
+  "messageView.collapseInput": "入力を折りたたむ",
   "messageView.showExtensionMessage": "拡張機能メッセージを表示",
   "messageView.taskSubagents": "サブエージェント",
   "messageView.thinking": "思考",

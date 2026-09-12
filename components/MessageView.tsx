@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useState, useRef, useEffect, useMemo, useCallback, type ComponentProps } from "react";
+import { memo, useState, useId, useRef, useEffect, useMemo, useCallback, type ComponentProps } from "react";
 import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, ChevronDown, Brain, EyeOff, CircleAlert, CircleSlash, LoaderCircle, FileText, Search, FileEdit, Terminal, CheckSquare, Bot, Code2, Globe, MessagesSquare, Wrench } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
 import { ClickableImage } from "./ImageLightbox";
@@ -892,6 +892,8 @@ const ToolCallBlock = memo(function ToolCallBlock({
   // A running tool opens its row when the interface keeps tool calls expanded
   // ("Keep tool calls collapsed" off) so its output is watchable live.
   const [expanded, setExpanded] = useState(Boolean(isStreaming || isRunning) && !defaultCollapsed);
+  const [inputExpanded, setInputExpanded] = useState(false);
+  const inputId = useId();
   // The row can also mount while the tool is idle and start running later (the
   // assistant message commits before `tool_execution_start`). It is never
   // auto-collapsed: the output stays where the user was reading it.
@@ -1009,6 +1011,29 @@ const ToolCallBlock = memo(function ToolCallBlock({
             <div className="tool-call-command">
               <span className="tool-call-command-prompt" aria-hidden>$</span>
               <code>{command}</code>
+              <button
+                type="button"
+                className="tool-call-input-toggle"
+                aria-expanded={inputExpanded}
+                aria-controls={inputId}
+                onClick={() => setInputExpanded((value) => !value)}
+              >
+                {t(inputExpanded ? "messageView.collapseInput" : "messageView.showFullInput")}
+              </button>
+            </div>
+            <div id={inputId} hidden={!inputExpanded} className="tool-call-input">
+              {inputExpanded && (
+                block.input && typeof block.input === "object" && !Array.isArray(block.input) && Object.keys(block.input).length > 0 ? (
+                  <dl>
+                    {Object.entries(block.input).map(([key, value]) => (
+                      <div key={key}>
+                        <dt>{key}</dt>
+                        <dd><pre>{typeof value === "string" ? value : safeJson(value)}</pre></dd>
+                      </div>
+                    ))}
+                  </dl>
+                ) : <pre>{safeJson(block.input)}</pre>
+              )}
             </div>
             {todoSummary && (
               <div className="tool-call-todo-badge">

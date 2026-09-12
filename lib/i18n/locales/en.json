@@ -701,6 +701,8 @@
   "messageView.readFiles": "Read files",
   "messageView.responseError": "Response error",
   "messageView.showDetails": "Show details",
+  "messageView.showFullInput": "Show full input",
+  "messageView.collapseInput": "Collapse input",
   "messageView.showExtensionMessage": "Show extension message",
   "messageView.taskSubagents": "Subagents",
   "messageView.thinking": "Thinking",
