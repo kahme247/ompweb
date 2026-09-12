@@ -14,9 +14,14 @@ function printHelp() {
   console.log(`Usage: node bin/omp-web-tray.js [command] [options]
        ompweb-tray [command] [options]
 
+Platform notes:
+  Windows  System Tray shortcuts and background service
+  Linux    StatusNotifierItem tray (KDE Plasma and compatible) — see ompweb-systemd
+           for the systemd user service this tray manages
+
 Commands:
-  --install, install      Install Windows System Tray shortcuts and background service
-  --uninstall, uninstall  Uninstall Windows System Tray shortcuts and background service
+  --install, install      Install system tray shortcuts and background service
+  --uninstall, uninstall  Uninstall system tray shortcuts and background service
   --start, start          Start the background system tray manager
   --stop, stop            Stop running background system tray and server processes
   --restart, restart      Restart running background system tray and server
@@ -26,9 +31,9 @@ Commands:
 Options:
   -p, --port <port>       Server port for background service (default 30177)
   -H, --hostname <host>   Bind address (default 127.0.0.1)
-  -m, --mode <mode>       Execution mode: "start" or "dev" (default "start")
-      --no-autostart      Disable automatic Windows startup on logon
-      --start             Start tray manager immediately after installation
+  -m, --mode <mode>       Execution mode: "start" or "dev" (default "start", Windows only)
+      --no-autostart      Disable automatic startup on logon
+      --start             Start tray manager immediately after installation (Windows)
       --clean-config      Also delete ~/.omp/agent/web-service.json on uninstallation
       --json              Output status as JSON
   -h, --help              Show this help
@@ -37,6 +42,12 @@ Options:
 }
 
 async function runCli(argv = process.argv.slice(2)) {
+  // Linux dispatches to the StatusNotifierItem tray implementation.
+  if (process.platform === "linux") {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return require("./linux-tray").runCli(argv);
+  }
+
   const { values: cliArgs, positionals } = parseArgs({
     args: argv,
     options: {

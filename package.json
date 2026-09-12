@@ -17,7 +17,9 @@
   "bin": {
     "ompweb": "bin/omp-web.js",
     "ompweb-tray": "bin/omp-web-tray.js",
-    "ompweb-launchd": "bin/omp-web-launchd.js"
+    "ompweb-tray-linux": "bin/linux-tray.js",
+    "ompweb-launchd": "bin/omp-web-launchd.js",
+    "ompweb-systemd": "bin/omp-web-systemd.js"
   },
   "files": [
     "bin",
@@ -48,12 +50,18 @@
     "tray:uninstall": "node bin/omp-web-tray.js --uninstall",
     "tray:start": "node bin/omp-web-tray.js --start",
     "tray:status": "node bin/omp-web-tray.js --status",
+    "systemd:install": "node bin/omp-web-systemd.js install",
+    "systemd:uninstall": "node bin/omp-web-systemd.js uninstall",
+    "systemd:start": "node bin/omp-web-systemd.js start",
+    "systemd:stop": "node bin/omp-web-systemd.js stop",
+    "systemd:status": "node bin/omp-web-systemd.js status",
     "prepack": "npm run build",
     "release:check": "npm run typecheck && npm run lint && npm test && npm run build"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
     "cmdk": "^1.1.1",
+    "dbus-next": "^0.10.2",
     "katex": "^0.16.47",
     "lucide-react": "^1.39.0",
     "mammoth": "^1.12.2",
