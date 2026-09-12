@@ -1517,6 +1517,78 @@ pre, code {
   border-radius: 4px;
 }
 
+.session-item-trailing {
+  height: 24px;
+}
+.session-item-metadata {
+  width: 100%;
+}
+.session-item-time {
+  width: 42px;
+}
+.session-item-actions {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.session-item-menu-button {
+  width: 24px;
+  height: 24px;
+}
+[data-actions-visible="true"] .session-item-metadata {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+[data-actions-visible="true"] .session-item-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.sidebar-project-actions {
+  visibility: hidden;
+}
+.sidebar-project-actions[data-actions-visible="true"] {
+  visibility: visible;
+}
+
+/* Touch rows keep the compact timestamp immediately beside a full-size menu target. */
+@media (hover: none), (pointer: coarse) {
+  .sidebar-project-actions {
+    visibility: visible;
+  }
+  .session-item-row {
+    min-height: 44px;
+  }
+  .session-item-trailing {
+    --session-trailing-width: auto;
+    height: 44px;
+    gap: 2px;
+  }
+  .session-item-row .session-item-metadata {
+    width: auto;
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+  }
+  .session-item-time {
+    width: 32px;
+  }
+  .session-item-row .session-item-actions {
+    position: static;
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .session-item-menu-button {
+    width: 44px;
+    height: 44px;
+    flex-shrink: 0;
+  }
+  .session-item-row .session-item-button {
+    align-self: stretch;
+  }
+}
+
 .sidebar-project-header > button:focus-visible,
 .sidebar-project-identity:focus-visible,
 .sidebar-project-action:focus-visible,
@@ -2334,12 +2406,17 @@ html.dark .dropdown-surface :is(select, option) {
 /* Provider Sub-navigation & Cards */
 .providers-segmented {
   display: inline-flex;
+  flex-wrap: nowrap;
   align-items: stretch;
+  width: max-content;
+  max-width: 100%;
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
   background: var(--bg-panel);
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   margin-bottom: 24px;
+  box-sizing: border-box;
 }
 
 .providers-segmented-btn {
@@ -2355,11 +2432,8 @@ html.dark .dropdown-surface :is(select, option) {
   font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
+  flex-shrink: 0;
   transition: background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm);
-}
-
-.providers-segmented-btn + .providers-segmented-btn {
-  border-left: 1px solid var(--border);
 }
 
 .providers-segmented-btn:hover {
@@ -2671,6 +2745,10 @@ html.dark .dropdown-surface :is(select, option) {
   background: var(--border);
   flex-shrink: 0;
 }
+  .right-panel-toolbar > [role="toolbar"] {
+    flex-wrap: wrap;
+    max-width: 100%;
+  }
 @media (max-width: 640px) {
   .shell-toolbar-btn {
     width: 40px;
@@ -2678,6 +2756,74 @@ html.dark .dropdown-surface :is(select, option) {
   }
   .shell-toolbar-divider {
     margin: 0 4px;
+  }
+  .right-panel-toolbar > div:first-child {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+  }
+  .right-panel-toolbar > [role="toolbar"] > button {
+    min-width: 40px;
+    min-height: 40px;
+  }
+  .right-panel-toolbar .tabbar-scroll {
+    width: 100%;
+  }
+  .right-panel-toolbar .tabbar-scroll,
+  .right-panel-toolbar .tabbar-tab {
+    height: 44px !important;
+  }
+}
+
+.shell-topbar {
+  display: flex;
+  flex-wrap: nowrap;
+  justify-content: space-between;
+}
+.shell-topbar-center {
+  position: absolute;
+  top: 4.5px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: clamp(0px, calc(100% - 480px), 400px);
+  pointer-events: none;
+}
+.shell-topbar-center > .shell-topbar-breadcrumb {
+  pointer-events: auto;
+}
+
+/* Hide only the breadcrumb when the sidebars leave too little title space. */
+@container breadcrumb (max-width: 180px) {
+  .shell-topbar-breadcrumb {
+    visibility: hidden;
+  }
+}
+
+@media (max-width: 960px) {
+  .shell-topbar-center {
+    display: none !important;
+  }
+}
+
+@media (max-width: 640px) {
+  .shell-topbar {
+    gap: 0 4px !important;
+    padding-right: 48px !important;
+  }
+  .shell-topbar-tools {
+    gap: 2px !important;
+  }
+  .shell-topbar .shell-toolbar-divider {
+    margin: 0;
+  }
+  .shell-topbar [data-topbar-right-group] {
+    padding: 0 !important;
+  }
+}
+
+@container topbar-speed (max-width: 60px) {
+  .shell-metric-pill {
+    display: none !important;
   }
 }
 
@@ -2731,11 +2877,6 @@ html.dark .dropdown-surface :is(select, option) {
   border-color: var(--accent);
 }
 
-@media (max-width: 960px) {
-  .shell-topbar-center {
-    display: none !important;
-  }
-}
 
 @media (max-width: 640px) {
   .shell-metric-pill {
@@ -3195,24 +3336,19 @@ html.dark .dropdown-surface :is(select, option) {
   .right-panel-container {
     overflow: hidden;
     transition: width var(--dur-med) var(--ease-out-warm), min-width var(--dur-med) var(--ease-out-warm);
-    flex-shrink: 0;
+    flex-shrink: 1;
   }
   .right-panel-container.right-panel-open {
     width: var(--right-panel-width, 42%);
-    min-width: 300px;
+    min-width: 0;
   }
   .right-panel-container.right-panel-closed {
     width: 0;
     min-width: 0;
     border-left: none !important;
   }
-  /* keep inner content at fixed width so it doesn't reflow during animation */
+  /* Follow the panel's available width, including interface scaling and borders. */
   .right-panel-container > * {
-    width: 42vw;
-    min-width: 300px;
-  }
-  /* user-chosen pixel width: content follows the container instead */
-  .right-panel-container.right-panel-custom-width > * {
     width: 100%;
     min-width: 0;
   }

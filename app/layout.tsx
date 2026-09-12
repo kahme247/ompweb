@@ -1,5 +1,7 @@
 import type { Metadata, Viewport } from "next";
+import Script from "next/script";
 import { Geist, JetBrains_Mono, Noto_Sans_Mono, Noto_Serif_SC, Source_Serif_4 } from "next/font/google";
+import { ThemeColor } from "@/hooks/useTheme";
 import "./globals.css";
 
 const geist = Geist({
@@ -53,22 +55,14 @@ export const metadata: Metadata = {
   },
 };
 
-// theme-color adapts to light/dark so the browser chrome / iOS status bar
-// matches the active theme. `viewportFit: cover` lets us honor safe-area-inset
-// (used by DirectoryPicker footer) on notched devices. `interactiveWidget:
-// resizes-content` makes the soft keyboard shrink the layout viewport (and
-// 100dvh) instead of only the visual one: the flex layout then keeps the
-// composer above the keyboard, rather than the browser panning the page on
-// every keystroke to reveal the caret.
+// `viewportFit: cover` honors safe-area-inset on notched devices.
+// `interactiveWidget: resizes-content` makes the soft keyboard shrink the
+// layout viewport, keeping the composer above the keyboard.
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
   interactiveWidget: "resizes-content",
-  themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#FAF9F6" },
-    { media: "(prefers-color-scheme: dark)", color: "#1B1916" },
-  ],
 };
 
 export default function RootLayout({
@@ -79,12 +73,18 @@ export default function RootLayout({
   return (
     <html lang="en" translate="no" className={`${geist.variable} ${jetbrainsMono.variable} ${notoSansMono.variable} ${sourceSerif.variable} ${notoSerifSC.variable} notranslate`} suppressHydrationWarning>
       <head>
+        <ThemeColor />
         <meta name="google" content="notranslate" />
-        {/* Pre-hydration: apply stored theme before first paint to avoid a flash
-            of the wrong theme. Matches html.dark / html.omp selectors in globals.css. */}
+        {/* Register before Next's router. Owned sidebar traversals must be handled
+            before the router can synchronously restore an older session URL. */}
+        <Script id="sidebar-history" strategy="beforeInteractive">
+          {`window.addEventListener("popstate",function(event){window.dispatchEvent(new CustomEvent("omp:sidebar-popstate",{detail:event}))});`}
+        </Script>
+        {/* Apply the stored theme and its CSS background to browser chrome before
+            first paint. The hydrated hook keeps both in sync afterward. */}
         <script
           dangerouslySetInnerHTML={{
-            __html: `(function(){try{var t=localStorage.getItem("omp-theme"),d=matchMedia("(prefers-color-scheme: dark)").matches;var dt={"dark":1,"omp":1,"dracula":1,"harbor":1,"one-dark-pro":1,"rose-pine":1,"catppuccin-mocha":1,"gruvbox-dark":1,"nord":1,"tokyo-night":1};var lt={"light":1,"one-light":1,"catppuccin-latte":1,"rose-pine-dawn":1};var res=t==="system"?(d?"dark":"light"):(!t?"omp":t);if(!dt[res]&&!lt[res]&&res!=="omp")res="omp";var dark=!!dt[res]&&res!=="omp";if(dark)document.documentElement.classList.add("dark");if(res==="omp"){document.documentElement.classList.add("omp")}else{document.documentElement.classList.add("theme-"+res)}document.documentElement.setAttribute("data-theme",res);}catch(e){}})();`,
+            __html: `(function(){try{var t;try{t=localStorage.getItem("omp-theme")}catch(e){}var d=matchMedia("(prefers-color-scheme: dark)").matches;var dt={"dark":1,"omp":1,"dracula":1,"harbor":1,"one-dark-pro":1,"rose-pine":1,"catppuccin-mocha":1,"gruvbox-dark":1,"nord":1,"tokyo-night":1};var lt={"light":1,"one-light":1,"catppuccin-latte":1,"rose-pine-dawn":1};var res=t==="system"?(d?"dark":"light"):(!t?"omp":t);if(!dt[res]&&!lt[res]&&res!=="omp")res="omp";var dark=!!dt[res]&&res!=="omp";if(dark)document.documentElement.classList.add("dark");if(res==="omp"){document.documentElement.classList.add("omp")}else{document.documentElement.classList.add("theme-"+res)}document.documentElement.setAttribute("data-theme",res);var m=document.querySelector('meta[name="theme-color"]'),c=getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();if(m&&c)m.setAttribute("content",c);}catch(e){}})();`,
           }}
         />
         <script

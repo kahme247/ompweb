@@ -7,8 +7,8 @@ export default function manifest(): MetadataRoute.Manifest {
     description: "Web UI for the oh-my-pi (omp) coding agent",
     start_url: "/",
     display: "standalone",
-    background_color: "#FAF9F6",
-    theme_color: "#FAF9F6",
+    background_color: "#000000",
+    theme_color: "#000000",
     // Chrome's install prompt requires both a 192px and a 512px PNG.
     icons: [
       { src: "/icon.svg", type: "image/svg+xml", sizes: "any" },

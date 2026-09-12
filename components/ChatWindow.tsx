@@ -34,6 +34,7 @@ import { getDraftSummary } from "@/lib/draft-store";
 interface Props {
   session: SessionInfo | null;
   newSessionCwd: string | null;
+  newSessionWorkspace?: ReactNode;
   toolCallsDefaultCollapsed?: boolean;
   onAgentEnd?: () => void;
   onSessionCreated?: (session: SessionInfo) => void;
@@ -494,7 +495,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
   );
 });
 
-export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed = true, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenProviders }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCallsDefaultCollapsed = true, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenProviders }: Props) {
   const { t, tn } = useI18n();
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -1119,6 +1120,7 @@ export function ChatWindow({ session, newSessionCwd, toolCallsDefaultCollapsed =
                 <OmpRuntimeVersion />
               </div>
             </div>
+            <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>{newSessionWorkspace}</div>
             <NoticeShelf notices={notices} onDismiss={dismissNotice} align="right" />
             {chatInputElement}
           </div>
