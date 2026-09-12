@@ -1581,19 +1581,17 @@ export function AppShell() {
         {/* Top bar: 3-zone segmented control bar */}
         <div ref={topBarRef} className="shell-topbar" style={{
           position: "relative",
-          display: "flex",
           alignItems: "center",
-          justifyContent: "space-between",
           flexShrink: 0,
           borderBottom: "1px solid var(--border)",
-          height: isMobile ? 44 : 36,
+          minHeight: isMobile ? 44 : 36,
           background: "var(--bg-panel)",
           padding: isMobile ? "0 4px" : "0 8px",
-          gap: 8,
+          gap: "0 8px",
           minWidth: 0,
         }}>
           {/* Left Zone: Utility group (sidebar, theme, language) & session controls (history, branches, system) */}
-          <div style={{ display: "flex", alignItems: "center", gap: 4, height: "100%", flexShrink: 0 }}>
+          <div className="shell-topbar-tools" style={{ display: "flex", alignItems: "center", gap: 4, height: isMobile ? 43 : 35, minWidth: 0, flexShrink: 0 }}>
             <button
               onClick={handleSidebarToggle}
               title={sidebarOpen ? t("appShell.hideSidebar") : t("appShell.showSidebar")}
@@ -1670,8 +1668,9 @@ export function AppShell() {
               <div
                 className="shell-topbar-center"
                 style={{
-                  flex: 1,
                   minWidth: 0,
+                  containerType: "inline-size",
+                  containerName: "breadcrumb",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
@@ -1779,10 +1778,14 @@ export function AppShell() {
               marginLeft: "auto",
               display: "flex",
               alignItems: "center",
+              justifyContent: "flex-end",
               gap: 6,
-              height: "100%",
-              paddingRight: isMobile ? (rightPanelOpen ? 0 : 44) : rightPanelOpen ? 8 : 44,
-              flexShrink: 0,
+              paddingRight: rightPanelOpen ? 8 : 44,
+              minWidth: 0,
+              width: 200,
+              containerType: "inline-size",
+              containerName: "topbar-speed",
+              flexShrink: 1,
             }}
           >
 
@@ -1792,7 +1795,7 @@ export function AppShell() {
                 ? `${generationSpeed.current.toFixed(1)} t/s`
                 : null;
               const averageSpeedStr = generationSpeed?.average !== null && generationSpeed?.average !== undefined
-                ? `AVG ${generationSpeed.average.toFixed(1)} t/s`
+                ? `${generationSpeed.average.toFixed(1)} t/s`
                 : null;
               if (!currentSpeedStr && !averageSpeedStr) return null;
               const speedTitle = currentSpeedStr
@@ -1818,11 +1821,17 @@ export function AppShell() {
                     fontVariantNumeric: "tabular-nums",
                     whiteSpace: "nowrap",
                     cursor: "default",
-                    flexShrink: 0,
+                    minWidth: 0,
+                    overflow: "hidden",
+                    flexShrink: 1,
                   }}
                 >
-                  <Zap size={11} strokeWidth={2} aria-hidden="true" style={{ color: currentSpeedStr ? "var(--accent)" : "var(--text-dim)" }} />
-                  <span style={{ fontWeight: currentSpeedStr ? 600 : 400 }}>
+                  {currentSpeedStr ? (
+                    <Zap size={11} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0, color: "var(--accent)" }} />
+                  ) : (
+                    <span style={{ flexShrink: 0, color: "var(--text-dim)" }}>AVG</span>
+                  )}
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", fontWeight: currentSpeedStr ? 600 : 400 }}>
                     {currentSpeedStr ?? averageSpeedStr}
                   </span>
                 </div>

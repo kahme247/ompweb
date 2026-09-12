@@ -130,12 +130,12 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       {/* Hero Provider Header Card */}
       <div style={{ padding: "14px 16px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", display: "flex", flexDirection: "column", gap: 10, boxShadow: "var(--shadow-card)" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flex: "1 1 220px", minWidth: 0 }}>
             <div style={{ width: 36, height: 36, borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", border: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
               <ProviderIcon id={name} size={20} />
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0, overflowWrap: "anywhere" }}>
               <div style={{ fontSize: 15, fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--text)" }}>{name}</div>
               <div style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{hostName}</div>
             </div>
@@ -1805,8 +1805,8 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                 </div>
               ) : (
                 <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-                  <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
-                    <div>
+                  <div style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
+                    <div style={{ flex: "1 1 220px", minWidth: 0, overflowWrap: "anywhere" }}>
                       <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text)" }}>{t("modelsConfig.customProviders")}</div>
                       <div style={{ fontSize: 12.5, color: "var(--text-muted)", marginTop: 3 }}>
                         Custom endpoints, local Ollama / vLLM models, or reverse proxies defined in <code style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}>~/.omp/agent/models.yml</code>.
@@ -1860,15 +1860,15 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                         const models = pData.models ?? [];
                         return (
                           <div key={pName} className="settings-card" style={{ flexDirection: "column", alignItems: "stretch", gap: 12 }}>
-                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-                              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 10, flex: "1 1 220px", minWidth: 0 }}>
                                 <ProviderIcon id={pName} size={22} />
-                                <div>
+                                <div style={{ minWidth: 0, overflowWrap: "anywhere" }}>
                                   <div style={{ fontSize: 13.5, fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--text)" }}>{pName}</div>
                                   <div style={{ fontSize: 11.5, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>{pData.baseUrl || t("modelsConfig.defaultEndpoint")}</div>
                                 </div>
                               </div>
-                              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
                                 <button
                                   type="button"
                                   onClick={() => addModel(pName)}
@@ -1983,12 +1983,14 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
           </div>
         )}
 
-        {/* Footer for saving models.yml */}
+        {/* Save controls */}
         {(subTab === "custom" || !embedded) && (
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "12px 18px", borderTop: "1px solid var(--border)", background: "var(--bg-panel)", borderRadius: "0 0 var(--radius-card) var(--radius-card)", flexShrink: 0, marginTop: 16 }}>
-            <div style={{ fontSize: 12, color: saveError ? "var(--status-error)" : "var(--text-muted)" }}>
-              {saveError ? saveError : <code>~/.omp/agent/models.yml</code>}
-            </div>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10, flexWrap: "wrap", marginTop: 16, flexShrink: 0 }}>
+            {saveError && (
+              <div style={{ flex: "1 1 220px", minWidth: 0, overflowWrap: "anywhere", fontSize: 12, color: "var(--status-error)" }}>
+                {saveError}
+              </div>
+            )}
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <button onClick={() => loadConfig()} disabled={loading} style={{ padding: "6px 14px", background: "none", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", cursor: "pointer", fontSize: 12.5 }}>
                 {t("modelsConfig.cancel")}
