@@ -477,6 +477,46 @@ test("an answered dialog handoff cannot clear the next unanswered request", asyn
   assert.equal(w.latest.extensionDialog?.id, next.id, "a delayed response timer only clears its own request");
 });
 
+for (const failure of ["HTTP rejection", "connection failure"]) {
+  test(`a failed question response preserves the pending question for retry: ${failure}`, async (t) => {
+    t.after(unmountAll);
+    resetWorld();
+    const sid = `answer-failure-${failure}`;
+    primeSession(sid, [userMsg("u0", "q")]);
+    const { w, es } = await startRun(null, sid, "ask");
+    const request = { type: "extension_ui_request", id: "retry-answer", method: "editor", title: "Answer" };
+    await act(() => es.emit(request));
+    world.holds.push({
+      match: (method, _url, body) => method === "POST" && body?.type === "extension_ui_response",
+      produce: async () => {
+        if (failure === "connection failure") throw new Error("connection lost");
+        return { status: 500, value: { error: "answer delivery failed" } };
+      },
+    });
+    await act(async () => { await w.latest.respondToExtensionUi(request, { value: "my retained answer" }); });
+    await settle(300);
+    assert.equal(w.latest.extensionDialog?.id, request.id, "failure must not unmount and erase the answer");
+    assert.equal(w.latest.notices.at(-1)?.type, "error");
+    await act(() => es.emit({ ...request }));
+    assert.equal(w.latest.extensionDialog?.id, request.id);
+    await act(async () => { await w.latest.respondToExtensionUi(request, { value: "my retained answer" }); });
+    await settle(300);
+    assert.equal(w.latest.extensionDialog, null, "a successful retry closes the answered question");
+  });
+}
+
+test("a stale local queue action reports that its target is unavailable", async (t) => {
+  t.after(unmountAll);
+  resetWorld();
+  primeSession("missing-local-target", [userMsg("u0", "q")]);
+  const w = await mountSession("missing-local-target");
+  await act(async () => {
+    assert.equal(await w.latest.removeQueuedMessage("already delivered", "followUp"), false);
+  });
+  assert.deepEqual(w.latest.queuedMessages, { steering: [], followUp: [] });
+  assert.equal(w.latest.notices.at(-1)?.type, "warning");
+});
+
 
 test("queued promotion waits for native acknowledgement and its promoted occurrence can be cancelled", async (t) => {
   t.after(unmountAll);

@@ -11,7 +11,7 @@ import { useDictation } from "@/hooks/useDictation";
 import type { GenerationSpeedInfo, SessionStatsInfo } from "@/lib/pi-types";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { ContextDetailPanel } from "./ComposerPanels";
-import { clearDraft, getDraft, setDraft } from "@/lib/draft-store";
+import { clearDraft, getDraft, recoverDraftText, setDraft, subscribeDraftRecovery } from "@/lib/draft-store";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import type { AttachedImage, AttachedTextFile } from "./ChatInput-draft-attachments";
 import {
@@ -631,6 +631,23 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     setAttachedTextFiles(draftFilesToAttachedFiles(draft?.files));
   }, [draftKey]);
 
+  useLayoutEffect(() => subscribeDraftRecovery((key, text) => {
+    if (draftKeyRef.current !== key) return;
+    // Merge with pending edits rather than replacing them with a store snapshot.
+    setValue((current) => current ? `${text}\n\n${current}` : text);
+    setAtQuery(null);
+    setHistoryMenuOpen(false);
+    requestAnimationFrame(() => {
+      if (draftKeyRef.current !== key) return;
+      const ta = textareaRef.current;
+      if (!ta) return;
+      ta.focus();
+      ta.setSelectionRange(text.length, text.length);
+      ta.style.height = "auto";
+      ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
+    });
+  }), []);
+
   useEffect(() => {
     const ta = textareaRef.current;
     if (!ta) return;
@@ -1053,24 +1070,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       );
       setQueuedDeleteTarget(null);
       if (!removed || action !== "edit") return;
-      // Save even if this composer unmounted while native cancellation ran.
-      if (key) {
-        const draft = getDraft(key) ?? { value: "", images: [], files: [] };
-        setDraft(key, { ...draft, value: draft.value ? `${entry.text}\n\n${draft.value}` : entry.text });
-      }
-      if (draftKeyRef.current !== key) return;
-      // Do not discard a draft typed while cancellation was in flight.
-      setValue((current) => current ? `${entry.text}\n\n${current}` : entry.text);
-      setAtQuery(null);
-      setHistoryMenuOpen(false);
-      requestAnimationFrame(() => {
-        const ta = textareaRef.current;
-        if (!ta) return;
-        ta.focus();
-        ta.setSelectionRange(entry.text.length, entry.text.length);
-        ta.style.height = "auto";
-        ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
-      });
+      // Recover through the store even if a new composer now owns this key.
+      recoverDraftText(key, entry.text);
     } catch (error) {
       setQueuedDeleteTarget(null);
       toast.error(error instanceof Error ? error.message : String(error));

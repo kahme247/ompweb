@@ -82,8 +82,6 @@ const PENDING_UI_METHODS = new Set(["select", "confirm", "input", "editor", "ope
 const PASSTHROUGH_COMMANDS = new Set([
   "abort",
   "abort_and_prompt",
-  "promote_queued_message",
-  "remove_queued_message",
   "set_thinking_level",
   "cycle_thinking_level",
   "cycle_model",
@@ -1089,6 +1087,14 @@ export class AgentSessionWrapper {
           ...(toImageContents(command.images) ? { images: toImageContents(command.images) } : {}),
         });
         return null;
+      }
+
+      case "remove_queued_message":
+      case "promote_queued_message": {
+        // Queue mutations are synchronous control operations, like get_state.
+        // Expiry must not abort unrelated work or replay a possibly applied mutation.
+        const result = await this.proc.sendCommand(command as { type: string }, GET_STATE_TIMEOUT_MS);
+        return result ?? null;
       }
 
       case "abort":

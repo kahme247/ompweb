@@ -163,3 +163,54 @@ for (const navigation of ["draft-key change", "unmount"]) {
     }
   });
 }
+
+for (const navigation of ["original composer", "same-key remount"]) {
+  test(`queued Edit restores ${navigation} without losing batched typing or duplicating recalled text`, async () => {
+    installBrowser();
+    const draftKey = `edit-recovery-${navigation}`;
+    const ref = React.createRef();
+    let release;
+    const cancellation = new Promise((resolve) => { release = resolve; });
+    const render = () => React.createElement(ChatInput, {
+      ref, draftKey, queuedMessages: { steering: [], followUp: ["queued question"] }, isStreaming: true,
+      onSend() {}, onAbort() {}, onRemoveQueuedMessage: () => cancellation,
+    });
+    let renderer;
+    const textarea = () => renderer.root.findByType("textarea");
+    const type = (value) => textarea().props.onChange({ target: { value, selectionStart: value.length } });
+    try {
+      await act(() => { renderer = TestRenderer.create(render()); });
+      await act(() => type("original draft"));
+      await act(async () => {
+        ref.current.addFiles([new File(["keep this attachment"], "notes.txt", { type: "text/plain" })]);
+      });
+      const originalFiles = getDraft(draftKey).files;
+      await act(() => renderer.root.findAllByType("button").find((button) => button.props.children === "Edit").props.onClick());
+      if (navigation === "same-key remount") {
+        await act(() => renderer.unmount());
+        await act(() => { renderer = TestRenderer.create(render()); });
+      }
+      await act(async () => {
+        type("typed while waiting");
+        ref.current.insertText("and queued insertion");
+        assert.equal(getDraft(draftKey).value, "original draft", "pending React updates have not been persisted yet");
+        release(true);
+        await cancellation;
+      });
+      const recovered = "queued question\n\ntyped while waiting and queued insertion";
+      assert.equal(textarea().props.value, recovered);
+      assert.equal(getDraft(draftKey).value, recovered);
+      assert.deepEqual(getDraft(draftKey).files, originalFiles);
+
+      await act(() => type(`${textarea().props.value}\nnext user edit`));
+      assert.equal(textarea().props.value, `${recovered}\nnext user edit`);
+      assert.equal(getDraft(draftKey).value, `${recovered}\nnext user edit`);
+      assert.deepEqual(getDraft(draftKey).files, originalFiles);
+    } finally {
+      await act(() => renderer?.unmount());
+      clearDraft(draftKey);
+      delete globalThis.window;
+      delete globalThis.document;
+    }
+  });
+}
