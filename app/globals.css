@@ -2784,6 +2784,18 @@ html.dark .dropdown-surface :is(select, option) {
   flex-wrap: nowrap;
   justify-content: space-between;
 }
+.shell-topbar-overflow {
+  display: contents;
+}
+.shell-topbar-overflow > summary {
+  display: none;
+}
+.shell-topbar-overflow-content {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 100%;
+}
 .shell-topbar-center {
   position: absolute;
   top: 4.5px;
@@ -2816,6 +2828,34 @@ html.dark .dropdown-surface :is(select, option) {
   }
   .shell-topbar-tools {
     gap: 2px !important;
+  }
+  .shell-topbar-overflow {
+    display: block;
+  }
+  .shell-topbar-overflow > summary {
+    display: flex;
+    list-style: none;
+  }
+  .shell-topbar-overflow > summary::-webkit-details-marker {
+    display: none;
+  }
+  .shell-topbar-overflow:not([open]) > .shell-topbar-overflow-content,
+  .shell-topbar-overflow:not([data-mobile="true"]) > .shell-topbar-overflow-content {
+    display: none;
+  }
+  .shell-topbar-overflow-content {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 4px;
+    right: 4px;
+    height: 48px;
+    gap: 4px;
+    padding: 4px;
+    z-index: 500;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-control);
+    box-shadow: var(--shadow-pop);
   }
   .shell-topbar .shell-toolbar-divider {
     margin: 0;

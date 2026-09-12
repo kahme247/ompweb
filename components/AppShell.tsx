@@ -15,7 +15,7 @@ import { type FileExplorerHandle } from "./FileExplorer";
 import type { RightPanelView } from "./RightPanel";
 import { BranchNavigator } from "./BranchNavigator";
 import { LanguageSwitcher } from "./LanguageSwitcher";
-import { Check, Folder, History, Menu, PanelLeft, Terminal, Wand2, Zap } from "lucide-react";
+import { Check, Ellipsis, Folder, History, Menu, PanelLeft, Terminal, Wand2, Zap } from "lucide-react";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
@@ -655,6 +655,32 @@ export function AppShell() {
 
   // Single active panel — only one dropdown open at a time
   const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | null>(null);
+  const mobileToolsRef = useRef<HTMLDetailsElement>(null);
+  const mobileToolsContentRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!isMobile) return;
+    const closeOnOutside = (event: PointerEvent) => {
+      const tools = mobileToolsRef.current;
+      if (tools?.open && !tools.contains(event.target as Node)) {
+        tools.open = false;
+        setActiveTopPanel(null);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      const tools = mobileToolsRef.current;
+      // Nested pickers and session panels handle their own Escape first.
+      if (event.key !== "Escape" || event.defaultPrevented || activeTopPanel || !tools?.open) return;
+      event.stopPropagation();
+      tools.open = false;
+      tools.querySelector("summary")?.focus();
+    };
+    document.addEventListener("pointerdown", closeOnOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [isMobile, activeTopPanel]);
   const toggleTopPanel = useCallback((panel: "branches" | "system") => {
     if (isMobile) setSidebarOpen(false);
     setActiveTopPanel((cur) => cur === panel ? null : panel);
@@ -1614,6 +1640,23 @@ export function AppShell() {
             >
               {sidebarOpen ? <PanelLeft size={16} strokeWidth={1.8} aria-hidden="true" /> : <Menu size={16} strokeWidth={1.8} aria-hidden="true" />}
             </button>
+            <details
+              ref={mobileToolsRef}
+              className="shell-topbar-overflow"
+              data-mobile={isMobile}
+              open={isMobile ? undefined : true}
+              onToggle={(event) => {
+                if (!event.currentTarget.open) setActiveTopPanel(null);
+              }}
+            >
+              <summary
+                className="shell-toolbar-btn ui-focus-ring"
+                title={t("chatInput.moreControls")}
+                aria-label={t("chatInput.moreControls")}
+              >
+                <Ellipsis size={16} strokeWidth={1.8} aria-hidden="true" />
+              </summary>
+              <div ref={mobileToolsContentRef} className="shell-topbar-overflow-content">
             <ThemeSwitcher />
             <LanguageSwitcher />
             {showChat && (
@@ -1633,7 +1676,7 @@ export function AppShell() {
                   activeLeafId={branchActiveLeafId}
                   onLeafChange={handleBranchLeafChange}
                   inline
-                  containerRef={topBarRef}
+                  containerRef={isMobile ? mobileToolsContentRef : topBarRef}
                   open={activeTopPanel === "branches"}
                   onToggle={() => toggleTopPanel("branches")}
                   hasSession
@@ -1650,6 +1693,55 @@ export function AppShell() {
                 </button>
               </>
             )}
+          {activeTopPanel === "system" && (
+            <div data-top-panel className="dropdown-surface" style={{
+              position: "absolute",
+              top: "calc(100% + 4px)",
+              left: isMobile ? 4 : 8,
+              right: "auto",
+              width: "auto",
+              minWidth: isMobile ? undefined : 420,
+              maxWidth: "min(680px, calc(100vw - 24px))",
+              maxHeight: "min(70vh, calc(100dvh - 56px))",
+              overflowY: "auto",
+              overflowX: "hidden",
+              zIndex: 500,
+            }}>
+              {activeTopPanel === "system" && (
+                <div className="session-info-popover" style={{
+                  background: "var(--bg-panel)",
+                  borderBottom: "1px solid var(--border)",
+                  boxShadow: "var(--shadow-pop)",
+                  minWidth: isMobile ? undefined : 420,
+                }}>
+                  {systemPrompt ? (
+                    <div style={{
+                      maxHeight: "min(600px, 75vh)",
+                      overflowY: "auto",
+                      padding: "12px 16px",
+                      color: "var(--text-muted)",
+                      fontSize: 12,
+                      lineHeight: 1.6,
+                      whiteSpace: "pre-wrap",
+                      fontFamily: "var(--font-mono)",
+                    }}>
+                      {systemPrompt}
+                    </div>
+                  ) : systemPrompt === "" ? (
+                    <div style={{ padding: "10px 16px", fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
+                      {t("appShell.systemPromptEmpty")}
+                    </div>
+                  ) : (
+                    <div style={{ padding: "10px 16px", fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
+                      {systemPromptLoading ? t("appShell.systemPromptLoading") : t("appShell.systemPromptLoadHint")}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+              </div>
+            </details>
           </div>
 
           {/* Center Zone: Workspace & Session Breadcrumb + Auto-name action */}
@@ -1854,53 +1946,6 @@ export function AppShell() {
               );
             })()}
           </div>
-          {activeTopPanel === "system" && (
-            <div data-top-panel className="dropdown-surface" style={{
-              position: "absolute",
-              top: "calc(100% + 4px)",
-              left: isMobile ? 4 : 8,
-              right: "auto",
-              width: "auto",
-              minWidth: isMobile ? undefined : 420,
-              maxWidth: "min(680px, calc(100vw - 24px))",
-              maxHeight: "min(70vh, calc(100dvh - 56px))",
-              overflowY: "auto",
-              overflowX: "hidden",
-              zIndex: 500,
-            }}>
-              {activeTopPanel === "system" && (
-                <div className="session-info-popover" style={{
-                  background: "var(--bg-panel)",
-                  borderBottom: "1px solid var(--border)",
-                  boxShadow: "var(--shadow-pop)",
-                  minWidth: isMobile ? undefined : 420,
-                }}>
-                  {systemPrompt ? (
-                    <div style={{
-                      maxHeight: "min(600px, 75vh)",
-                      overflowY: "auto",
-                      padding: "12px 16px",
-                      color: "var(--text-muted)",
-                      fontSize: 12,
-                      lineHeight: 1.6,
-                      whiteSpace: "pre-wrap",
-                      fontFamily: "var(--font-mono)",
-                    }}>
-                      {systemPrompt}
-                    </div>
-                  ) : systemPrompt === "" ? (
-                    <div style={{ padding: "10px 16px", fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
-                      {t("appShell.systemPromptEmpty")}
-                    </div>
-                  ) : (
-                    <div style={{ padding: "10px 16px", fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
-                      {systemPromptLoading ? t("appShell.systemPromptLoading") : t("appShell.systemPromptLoadHint")}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
 
         </div>
 
