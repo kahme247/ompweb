@@ -830,6 +830,56 @@ function keepTaskToolResultDetails(details: Record<string, unknown>): Record<str
   return Object.keys(kept).length > 0 ? kept : null;
 }
 
+function keepHubToolResultDetails(details: Record<string, unknown>): Record<string, unknown> | null {
+  const op = details.op;
+  if (typeof op !== "string" || (op !== "send" && op !== "jobs")) return null;
+  const kept: Record<string, unknown> = { op };
+  if (op === "send") {
+    const to = hubDetailTargets(details.to);
+    if (to) kept.to = to;
+    if (Array.isArray(details.receipts)) {
+      const receipts = details.receipts
+        .slice(0, TASK_DETAIL_MAX_ROWS)
+        .map((raw) => {
+          if (!isRecord(raw)) return null;
+          const out: Record<string, string> = {};
+          if (typeof raw.to === "string") out.to = truncateTaskDetailText(raw.to);
+          if (typeof raw.outcome === "string") out.outcome = truncateTaskDetailText(raw.outcome);
+          return Object.keys(out).length > 0 ? out : null;
+        })
+        .filter((entry): entry is Record<string, string> => entry !== null);
+      if (receipts.length > 0) kept.receipts = receipts;
+    }
+  } else {
+    if (Array.isArray(details.jobs)) {
+      const jobs = details.jobs
+        .slice(0, TASK_DETAIL_MAX_ROWS)
+        .map((raw) => {
+          if (!isRecord(raw)) return null;
+          const out: Record<string, unknown> = {};
+          for (const key of ["id", "type", "status", "label", "resolvedModel"] as const) {
+            if (typeof raw[key] === "string") out[key] = truncateTaskDetailText(raw[key]);
+          }
+          if (typeof raw.durationMs === "number" && Number.isFinite(raw.durationMs)) out.durationMs = raw.durationMs;
+          return Object.keys(out).length > 0 ? out : null;
+        })
+        .filter((entry): entry is Record<string, unknown> => entry !== null);
+      if (jobs.length > 0) kept.jobs = jobs;
+    }
+  }
+  return Object.keys(kept).length > 1 ? kept : null;
+}
+
+function hubDetailTargets(value: unknown): string[] | undefined {
+  const list = Array.isArray(value) ? value : typeof value === "string" ? [value] : undefined;
+  if (!list) return undefined;
+  const out = list
+    .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+    .slice(0, TASK_DETAIL_MAX_ROWS)
+    .map((entry) => truncateTaskDetailText(entry));
+  return out.length > 0 ? out : undefined;
+}
+
 function stripToolResultDetails(message: AgentMessage): AgentMessage {
   if (message.role !== "toolResult" || message.details === undefined) return message;
   const { details, ...rest } = message;
@@ -840,6 +890,10 @@ function stripToolResultDetails(message: AgentMessage): AgentMessage {
     if (message.toolName === "task") {
       const taskDetails = keepTaskToolResultDetails(details);
       if (taskDetails) Object.assign(kept, taskDetails);
+    }
+    if (message.toolName === "hub") {
+      const hubDetails = keepHubToolResultDetails(details);
+      if (hubDetails) Object.assign(kept, hubDetails);
     }
     if (Object.keys(kept).length > 0) return { ...rest, details: kept };
   }

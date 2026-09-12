@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useState, useRef, useEffect, useMemo, useCallback, type ComponentProps } from "react";
-import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, ChevronDown, Brain, EyeOff, CircleAlert, CircleSlash, LoaderCircle, FileText, Search, FileEdit, Terminal, CheckSquare, Bot, Code2, Globe, Wrench } from "lucide-react";
+import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, ChevronDown, Brain, EyeOff, CircleAlert, CircleSlash, LoaderCircle, FileText, Search, FileEdit, Terminal, CheckSquare, Bot, Code2, Globe, MessagesSquare, Wrench } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
 import { ClickableImage } from "./ImageLightbox";
 import { translate, useI18n, type Locale } from "@/lib/i18n";
@@ -11,6 +11,7 @@ import { Tooltip, Collapsible, CollapsibleTrigger } from "./ui/primitives";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { formatCompactNumber } from "@/lib/format";
 import { TaskResultPanel } from "./MessageView-task-panel";
+import { HubResultPanel } from "./MessageView-hub-panel";
 import { getResultDiff, PairedDiffResult, PairedResult } from "./MessageView-diff-view";
 import {
   getToolPreview,
@@ -19,6 +20,9 @@ import {
   getToolResultMeta,
   getToolCategory,
   getTodoSummary,
+  getHubJobs,
+  getHubJobsHeader,
+  getHubSendSummary,
   summarizeToolCallGroup,
   getSemanticToolLabel,
   type ToolCategory,
@@ -62,6 +66,8 @@ function ToolCategoryIcon({
       return <CheckSquare size={size} strokeWidth={1.8} className={className} style={{ color: "var(--accent, #EC5BAB)", ...style }} />;
     case "task":
       return <Bot size={size} strokeWidth={1.8} className={className} style={{ color: "var(--accent-2, #7DD7E8)", ...style }} />;
+    case "hub":
+      return <MessagesSquare size={size} strokeWidth={1.8} className={className} style={{ color: "var(--accent-2, #7DD7E8)", ...style }} />;
     case "code":
       return <Code2 size={size} strokeWidth={1.8} className={className} style={{ color: "var(--accent, #EC5BAB)", ...style }} />;
     case "web":
@@ -914,6 +920,27 @@ const ToolCallBlock = memo(function ToolCallBlock({
   const semantic = getSemanticToolLabel(block);
   const todoSummary = category === "todo" ? getTodoSummary(block.input) : null;
   const preview = getToolPreview(block);
+  // Outgoing steering (`hub` op send) and the job roster (`hub` op jobs) get
+  // the TUI's row titles: `IRC → X injected` and `waiting on N jobs`.
+  const hubSend = category === "hub" ? getHubSendSummary(block.input) : null;
+  const hubJobs = category === "hub" ? getHubJobs(result?.details) : null;
+  const hubReceiptOutcome = (() => {
+    const receipts = (result?.details as { receipts?: Array<{ outcome?: unknown }> } | undefined)?.receipts;
+    if (!Array.isArray(receipts) || receipts.length === 0) return null;
+    const outcomes = receipts.map((receipt) => (typeof receipt?.outcome === "string" ? receipt.outcome : null));
+    if (outcomes.some((outcome) => outcome === null || outcome !== outcomes[0])) return null;
+    return outcomes[0];
+  })();
+  const hubTool = hubSend
+    ? `IRC → ${hubSend.to.join(", ")}${hubReceiptOutcome ? ` ${hubReceiptOutcome}` : ""}`
+    : hubJobs
+      ? getHubJobsHeader(hubJobs)
+      : null;
+  const hubPreview = hubSend
+    ? (hubSend.snippet || hubSend.to.join(", "))
+    : hubJobs
+      ? hubJobs.map((job) => job.label).join(" · ")
+      : null;
 
   const cleanFilePath = semantic.isFile && typeof block.input === "object" && block.input && "path" in block.input
     ? String((block.input as Record<string, unknown>).path).split(":")[0]
@@ -937,7 +964,7 @@ const ToolCallBlock = memo(function ToolCallBlock({
           <span className="activity-tool-icon" aria-hidden>
             <ToolCategoryIcon category={category} size={12} />
           </span>
-          <span className={`activity-row-tool${isError ? " activity-row-tool-error" : ""}`}>{block.toolName}</span>
+          <span className={`activity-row-tool${isError ? " activity-row-tool-error" : ""}`}>{hubTool ?? block.toolName}</span>
           <span className="activity-row-preview">
             {cleanFilePath && onOpenFile ? (
               <span
@@ -954,12 +981,12 @@ const ToolCallBlock = memo(function ToolCallBlock({
                     onOpenFile(cleanFilePath);
                   }
                 }}
-                title={preview}
+                title={hubPreview ?? preview}
               >
-                {preview}
+                {hubPreview ?? preview}
               </span>
             ) : (
-              preview
+              hubPreview ?? preview
             )}
           </span>
           {duration !== undefined && (
@@ -992,6 +1019,7 @@ const ToolCallBlock = memo(function ToolCallBlock({
               </div>
             )}
             <TaskResultPanel details={result?.details} />
+            <HubResultPanel input={block.input} result={result} />
             {isRunning && (resultText ?? "").trim() === "" ? (
               // No output yet: say so instead of the "(no output)" marker that
               // would claim the tool finished with nothing.
@@ -1015,7 +1043,7 @@ const ToolCallBlock = memo(function ToolCallBlock({
                       ))}
                     </div>
                   )}
-                  {!(resultIsEmpty && resultImages.length > 0) && (
+                  {!(hubJobs || (hubSend && !isError)) && !(resultIsEmpty && resultImages.length > 0) && (
                     <PairedResult text={formatToolOutput(resultText ?? "", block.toolName)} isEmpty={resultIsEmpty} isError={isError} />
                   )}
                 </>

@@ -2,12 +2,13 @@ import { formatCompactNumber } from "@/lib/format";
 import { isRecord } from "@/lib/type-guards";
 import type { ToolCallContent, ToolResultMessage } from "@/lib/types";
 
-export type ToolCategory = "read" | "search" | "edit" | "terminal" | "todo" | "task" | "code" | "web" | "other";
+export type ToolCategory = "read" | "search" | "edit" | "terminal" | "todo" | "task" | "code" | "web" | "hub" | "other";
 
 export function getToolCategory(toolName: string): ToolCategory {
   // User-run shell rows synthesize "bash (local)" (MessageView.tsx) — one
   // shell execution either way, so drop any trailing "(...)" qualifier first.
   const name = toolName.toLowerCase().replace(/\s*\(.*\)\s*$/, "");
+  if (name === "hub") return "hub";
   if (name === "read" || name.endsWith(".read") || name.endsWith("_read") || name === "file_read") return "read";
   if (name === "grep" || name === "glob" || name.includes("search") || name.endsWith(".grep") || name.endsWith(".glob")) return "search";
   if (name === "edit" || name === "write" || name === "ast_edit" || name.endsWith(".edit") || name.endsWith(".write")) return "edit";
@@ -48,6 +49,62 @@ export function getTodoSummary(input: unknown): { op: string; action: string; la
   }
 }
 
+export interface HubSendSummary {
+  to: string[];
+  message: string;
+  snippet: string;
+}
+
+/** Outgoing agent steering: `hub` with `op: "send"` — the TUI's `IRC → X` row. */
+export function getHubSendSummary(input: unknown): HubSendSummary | null {
+  if (!isRecord(input) || input.op !== "send") return null;
+  const raw = Array.isArray(input.to) ? input.to : typeof input.to === "string" ? [input.to] : [];
+  const to = raw
+    .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+    .slice(0, 10);
+  if (to.length === 0) return null;
+  const message = typeof input.message === "string" ? input.message : "";
+  const firstLine = message.split("\n").map((line) => line.trim()).find((line) => line.length > 0) ?? "";
+  const snippet = firstLine.length > 120 ? `${firstLine.slice(0, 120)}…` : firstLine;
+  return { to, message, snippet };
+}
+
+export interface HubJobRow {
+  id: string;
+  type: string;
+  status: string;
+  label: string;
+  durationMs?: number;
+  resolvedModel?: string;
+}
+
+/** Live job roster: `hub` with `op: "jobs"` — the TUI's `waiting on N jobs` row. */
+export function getHubJobs(details: unknown): HubJobRow[] | null {
+  if (!isRecord(details) || details.op !== "jobs" || !Array.isArray(details.jobs)) return null;
+  const rows: HubJobRow[] = [];
+  for (const raw of details.jobs) {
+    if (!isRecord(raw)) continue;
+    const id = typeof raw.id === "string" && raw.id ? raw.id : null;
+    if (!id) continue;
+    rows.push({
+      id,
+      type: typeof raw.type === "string" ? raw.type : "task",
+      status: typeof raw.status === "string" ? raw.status : "running",
+      label: typeof raw.label === "string" && raw.label ? raw.label : id,
+      ...(typeof raw.durationMs === "number" && Number.isFinite(raw.durationMs) ? { durationMs: raw.durationMs } : {}),
+      ...(typeof raw.resolvedModel === "string" && raw.resolvedModel ? { resolvedModel: raw.resolvedModel } : {}),
+    });
+    if (rows.length >= 50) break;
+  }
+  return rows.length > 0 ? rows : null;
+}
+
+export function getHubJobsHeader(jobs: HubJobRow[]): string {
+  const waiting = jobs.some((job) => job.status === "running" || job.status === "started" || job.status === "waiting");
+  return waiting ? `waiting on ${jobs.length} job${jobs.length === 1 ? "" : "s"}` : `${jobs.length} job${jobs.length === 1 ? "" : "s"}`;
+}
+
+
 export function getToolPreview(block: ToolCallContent): string {
   const input = block.input;
   if (!input || typeof input !== "object") return "";
@@ -55,6 +112,16 @@ export function getToolPreview(block: ToolCallContent): string {
   if (getToolCategory(block.toolName) === "todo") {
     const todoSummary = getTodoSummary(input);
     if (todoSummary) return todoSummary.label;
+  }
+
+  if (getToolCategory(block.toolName) === "hub" && isRecord(input)) {
+    if (input.op === "send") {
+      const send = getHubSendSummary(input);
+      if (send) return send.snippet;
+      return "send";
+    }
+    if (input.op === "jobs") return "jobs";
+    if (typeof input.op === "string") return input.op;
   }
 
   const keys = Object.keys(input);
@@ -80,6 +147,16 @@ export function getSemanticToolLabel(block: ToolCallContent): { action: string; 
     if (todoSummary) {
       return { action: todoSummary.action, target: todoSummary.task ?? todoSummary.label };
     }
+  }
+
+  if (category === "hub" && isRecord(input)) {
+    if (input.op === "send") {
+      const send = getHubSendSummary(input);
+      if (send) return { action: "IRC", target: `→ ${send.to.join(", ")}` };
+      return { action: "IRC", target: "send" };
+    }
+    if (input.op === "jobs") return { action: "hub", target: "jobs" };
+    if (typeof input.op === "string") return { action: "hub", target: input.op };
   }
 
   if (isRecord(input)) {
@@ -133,6 +210,7 @@ export function summarizeToolCallGroup(blocks: ToolCallContent[]): {
     task: 0,
     code: 0,
     web: 0,
+    hub: 0,
     other: 0,
   };
 
@@ -150,7 +228,7 @@ export function summarizeToolCallGroup(blocks: ToolCallContent[]): {
   if (counts.task > 0) parts.push(`spawned ${counts.task} subagent${counts.task > 1 ? "s" : ""}`);
   if (counts.code > 0) parts.push(`executed ${counts.code} code cell${counts.code > 1 ? "s" : ""}`);
   if (counts.web > 0) parts.push(`browsed ${counts.web} page${counts.web > 1 ? "s" : ""}`);
-  if (counts.other > 0) parts.push(`used ${counts.other} other tool${counts.other > 1 ? "s" : ""}`);
+  if (counts.hub > 0) parts.push(`coordinated ${counts.hub} agent handoff${counts.hub > 1 ? "s" : ""}`);
 
   const activeCategories = (Object.keys(counts) as ToolCategory[]).filter((c) => counts[c] > 0);
 
@@ -175,6 +253,13 @@ export function summarizeToolCallGroup(blocks: ToolCallContent[]): {
 export function formatToolCommand(block: ToolCallContent): string {
   const input = block.input;
   if (input && typeof input.command === "string") return input.command;
+  if (getToolCategory(block.toolName) === "hub" && isRecord(input) && typeof input.op === "string") {
+    if (input.op === "send") {
+      const send = getHubSendSummary(input);
+      return send ? `hub send → ${send.to.join(", ")}` : "hub send";
+    }
+    return `hub ${input.op}`;
+  }
   if (input && typeof input.path === "string") return `${block.toolName} ${input.path}`;
   if (input && typeof input.file_path === "string") return `${block.toolName} ${input.file_path}`;
   if (input && typeof input.query === "string") return `${block.toolName} ${input.query}`;

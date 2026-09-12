@@ -159,6 +159,85 @@ test("irc:incoming custom messages title with the sender name", () => {
   assert.doesNotMatch(html, /Incoming IRC message from agent/);
 });
 
+test("hub send renders as an IRC row with the steered message", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    isStreaming: true,
+    toolCallsDefaultCollapsed: false,
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", toolCallId: "call-hub-1", toolName: "hub", input: { op: "send", to: "VisualFix", message: "Please ensure the readout path is fixed.\nThanks." } }],
+    },
+    toolResults: new Map([[
+      "call-hub-1",
+      {
+        role: "toolResult",
+        toolCallId: "call-hub-1",
+        toolName: "hub",
+        content: [{ type: "text", text: "Delivered to 1 peer(s):\n- VisualFix: injected" }],
+        details: { op: "send", to: ["VisualFix"], receipts: [{ to: "VisualFix", outcome: "injected" }] },
+      },
+    ]]),
+  }));
+
+  assert.match(html, /IRC → VisualFix injected/);
+  assert.match(html, /Please ensure the readout path is fixed/);
+  assert.doesNotMatch(html, /Delivered to 1 peer/);
+});
+
+test("hub jobs renders the waiting roster instead of raw markdown", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    isStreaming: true,
+    toolCallsDefaultCollapsed: false,
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", toolCallId: "call-hub-2", toolName: "hub", input: { op: "jobs" } }],
+    },
+    toolResults: new Map([[
+      "call-hub-2",
+      {
+        role: "toolResult",
+        toolCallId: "call-hub-2",
+        toolName: "hub",
+        content: [{ type: "text", text: "## Still Running (2)\n\n- `VisualFix` [task]" }],
+        details: {
+          op: "jobs",
+          jobs: [
+            { id: "VisualFix", type: "task", status: "running", label: "VisualFix", durationMs: 1890000 },
+            { id: "VisualTrace", type: "task", status: "running", label: "VisualTrace", durationMs: 1890000 },
+          ],
+        },
+      },
+    ]]),
+  }));
+
+  assert.match(html, /waiting on 2 jobs/);
+  assert.match(html, /VisualTrace/);
+  assert.match(html, /31m30s/);
+  assert.doesNotMatch(html, /Still Running/);
+});
+
+test("hub jobs without structured details keeps the raw result", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    isStreaming: true,
+    toolCallsDefaultCollapsed: false,
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", toolCallId: "call-hub-3", toolName: "hub", input: { op: "jobs" } }],
+    },
+    toolResults: new Map([[
+      "call-hub-3",
+      {
+        role: "toolResult",
+        toolCallId: "call-hub-3",
+        toolName: "hub",
+        content: [{ type: "text", text: "## Still Running (1)" }],
+      },
+    ]]),
+  }));
+
+  assert.match(html, /Still Running/);
+});
+
 test("advisor custom messages use the localized advisor label", () => {
   const html = renderToStaticMarkup(React.createElement(MessageView, {
     message: { role: "custom", customType: "advisor", content: "Consider handling the edge case.", display: true },
