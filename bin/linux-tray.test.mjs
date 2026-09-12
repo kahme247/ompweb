@@ -240,7 +240,11 @@ test("writeServiceEnv writes atomically with mode 600 and readServiceEnv round-t
   try {
     const file = path.join(dir, "web-service.env");
     writeServiceEnv({ PORT: "40100", OMP_WEB_PASSWORD: "s3cret" }, file);
-    assert.equal(statSync(file).mode & 0o777, 0o600);
+    // Windows has no Unix permission bits (chmod is best-effort there), so
+    // the mode assertion only applies elsewhere.
+    if (process.platform !== "win32") {
+      assert.equal(statSync(file).mode & 0o777, 0o600);
+    }
     assert.deepEqual(readServiceEnv(file), { PORT: "40100", OMP_WEB_PASSWORD: "s3cret" });
     assert.ok(escapeEnvValue("a\nb").includes(" "));
   } finally {

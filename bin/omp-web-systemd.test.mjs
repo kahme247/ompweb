@@ -39,8 +39,10 @@ test("buildUnit renders ExecStart, EnvironmentFile, and install target", () => {
   assert.ok(!unit.includes("OMP_WEB_PASSWORD"));
   assert.match(unit, /Restart=on-failure/);
   assert.match(unit, /WantedBy=default\.target/);
-  // PATH prefers the omp and ompweb directories, then node and standard bins.
-  assert.match(unit, /"PATH=\/home\/u\/.bun\/bin:\/usr\/local\/bin:.*\/usr\/bin:\/bin"/);
+  // PATH order uses the host delimiter and node dir, so it is Linux-only.
+  if (process.platform === "linux") {
+    assert.match(unit, /"PATH=\/home\/u\/.bun\/bin:\/usr\/local\/bin:.*\/usr\/bin:\/bin"/);
+  }
   // Only one Environment line with quoted pairs.
   const envLines = unit.split("\n").filter((line) => line.startsWith("Environment="));
   assert.equal(envLines.length, 1);
@@ -53,7 +55,10 @@ test("buildUnit dedupes PATH dirs without omp", () => {
     home: "/home/u",
   });
   assert.ok(!unit.includes("OMP_WEB_OMP_BIN"));
-  assert.match(unit, /"PATH=\/usr\/bin:.*\/home\/u\/\.local\/bin:/);
+  // PATH order uses the host delimiter and node dir, so it is Linux-only.
+  if (process.platform === "linux") {
+    assert.match(unit, /"PATH=\/usr\/bin:.*\/home\/u\/\.local\/bin:/);
+  }
 });
 
 test("resolveOmpwebBin honors OMP_WEB_SYSTEMD_BIN override", () => {
@@ -72,7 +77,12 @@ test("resolveOmpwebBin rejects a non-executable override", () => {
   try {
     const plain = path.join(dir, "ompweb");
     writeFileSync(plain, "not executable\n", { mode: 0o644 });
-    assert.throws(() => resolveOmpwebBin({ OMP_WEB_SYSTEMD_BIN: plain }), /not executable/);
+    if (process.platform === "win32") {
+      // X_OK always passes on Windows, so the override is accepted.
+      assert.equal(resolveOmpwebBin({ OMP_WEB_SYSTEMD_BIN: plain }), plain);
+    } else {
+      assert.throws(() => resolveOmpwebBin({ OMP_WEB_SYSTEMD_BIN: plain }), /not executable/);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

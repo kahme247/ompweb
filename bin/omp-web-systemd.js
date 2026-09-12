@@ -326,10 +326,6 @@ async function runCli(argv = process.argv.slice(2)) {
     allowPositionals: true,
   });
 
-  if (process.platform !== "linux") {
-    fail("systemd services are Linux-only (see ompweb-launchd for macOS, ompweb --install-tray for Windows)");
-  }
-
   if (cliArgs.version || positionals.includes("version")) {
     console.log(readPackageVersion());
     return { exitCode: 0 };
@@ -340,6 +336,18 @@ async function runCli(argv = process.argv.slice(2)) {
   }
 
   const command = positionals[0] ?? "status";
+  if (!["install", "uninstall", "start", "stop", "restart", "open", "status"].includes(command)) {
+    console.error(`Unknown command: ${command}`);
+    printHelp();
+    return { exitCode: 2 };
+  }
+
+  // Help, version, and unknown-command usage (above) work everywhere; the
+  // commands below need systemd.
+  if (process.platform !== "linux") {
+    fail("systemd services are Linux-only (see ompweb-launchd for macOS, ompweb --install-tray for Windows)");
+  }
+
   const installOpts = {
     port: cliArgs.port ? parseInt(cliArgs.port, 10) : undefined,
     hostname: cliArgs.hostname,
@@ -369,10 +377,6 @@ async function runCli(argv = process.argv.slice(2)) {
       const status = printStatus(cliArgs.json);
       return { exitCode: 0, status };
     }
-    default:
-      console.error(`Unknown command: ${command}`);
-      printHelp();
-      return { exitCode: 2 };
   }
   return { exitCode: 0 };
 }
