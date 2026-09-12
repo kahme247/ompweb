@@ -8,6 +8,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Fixes & Improvements
 
+- Keep Cancel and Submit reachable in mobile extension questions by scrolling long questions and answers above a fixed action row and sizing the editor for short viewports.
 - Hide the Steer action when the only queued message is already a steer, matching the expanded queue while keeping Edit and Delete available.
 - Keep the theme picker inside the mobile viewport by opening it to the right of its toolbar anchor.
 

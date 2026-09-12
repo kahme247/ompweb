@@ -92,15 +92,18 @@ export function ExtensionDialog({
         className={attached ? undefined : "animate-scale-in"}
         style={{
           width: attached ? "100%" : "min(560px, 100%)",
+          display: "flex",
+          flexDirection: "column",
           border: "1px solid var(--border)",
           borderRadius: attached ? "var(--radius-card)" : "var(--radius-modal)",
           background: "var(--bg)",
           boxShadow: attached ? "var(--shadow-card)" : "var(--shadow-modal)",
           overflow: "hidden",
           outline: "none",
-          maxHeight: attached ? "min(420px, 60vh)" : undefined,
+          maxHeight: attached ? "min(420px, 60dvh)" : "100%",
         }}
       >
+        <div style={{ minHeight: 0, overflowY: "auto", overscrollBehavior: "contain", overflowWrap: "anywhere" }}>
         <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--border)" }}>
           <div style={{ color: "var(--text)", fontSize: 14, fontWeight: 650 }}>{request.title}</div>
           <div style={{ marginTop: 3, color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)" }}>{t("chatWindow.extensionRequest")}</div>
@@ -173,7 +176,8 @@ export function ExtensionDialog({
               }}
               style={{
                 width: "100%",
-                minHeight: 220,
+                height: "min(220px, 30dvh)",
+                minHeight: 80,
                 padding: 10,
                 borderRadius: 7,
                 border: "1px solid var(--border)",
@@ -188,8 +192,9 @@ export function ExtensionDialog({
             />
           )}
         </div>
+        </div>
 
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, padding: "10px 14px", borderTop: "1px solid var(--border)", background: "var(--bg-panel)" }}>
+        <div style={{ display: "flex", flexShrink: 0, justifyContent: "flex-end", gap: 8, padding: "10px 14px", borderTop: "1px solid var(--border)", background: "var(--bg-panel)" }}>
           <button
             onClick={cancel}
             style={{
