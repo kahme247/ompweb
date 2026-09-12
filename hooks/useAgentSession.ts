@@ -279,7 +279,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [extensionCustomUi, setExtensionCustomUi] = useState<ExtensionUiCustomRequest | null>(null);
   const [extensionStatuses, setExtensionStatuses] = useState<ExtensionStatusItem[]>([]);
   const [extensionWidgets, setExtensionWidgets] = useState<ExtensionWidgetItem[]>([]);
-  const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [] });
+  const [queuedMessages, setQueuedMessagesState] = useState<QueuedMessages>(EMPTY_QUEUE);
+  const queuedMessagesRef = useRef<QueuedMessages>(EMPTY_QUEUE);
+  // Serialize queue transitions in event/effect handlers, not React's
+  // replayable render-phase updaters. Promotion bookkeeping and its queue
+  // removal must observe the same transition, even before React commits.
+  const updateQueuedMessages = useCallback((update: QueuedMessages | ((prev: QueuedMessages) => QueuedMessages)) => {
+    const next = typeof update === "function" ? update(queuedMessagesRef.current) : update;
+    queuedMessagesRef.current = next;
+    setQueuedMessagesState(next);
+  }, []);
   const [subagents, setSubagents] = useState<SubagentInfo[]>([]);
   const [subagentEvents, setSubagentEvents] = useState<Record<string, SubagentActivityEvent[]>>({});
   const [subagentTranscriptVersions, setSubagentTranscriptVersions] = useState<Record<string, number>>({});
@@ -309,6 +318,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // get_state snapshots may lag behind the RPC round-trip, so a snapshot
   // reporting queuedMessageCount === 0 must not wipe a queue we just wrote.
   const queueMutatedAtRef = useRef(0);
+  const queuedPromotionsRef = useRef<Map<string, { sessionId: string; consumed: boolean }> | null>(null);
+  if (queuedPromotionsRef.current === null) queuedPromotionsRef.current = new Map();
+  const queuedPromotions = queuedPromotionsRef.current;
   const agentRunningRef = useRef(false);
   const bashRunningRef = useRef(false);
   const bashRecoveryIdRef = useRef(0);
@@ -730,9 +742,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (liveState.extensionStatuses !== undefined) setExtensionStatuses(liveState.extensionStatuses ?? []);
           if (liveState.extensionWidgets !== undefined) setExtensionWidgets(liveState.extensionWidgets ?? []);
           if (liveState.todoPhases !== undefined) setTodoPhases(liveState.todoPhases ?? []);
-          if (liveState.queuedMessageCount === 0 && Date.now() - queueMutatedAtRef.current >= 5000) setQueuedMessages(EMPTY_QUEUE);
+          if (liveState.queuedMessageCount === 0 && Date.now() - queueMutatedAtRef.current >= 5000) updateQueuedMessages(EMPTY_QUEUE);
         } else if (!agentState.running && Date.now() - queueMutatedAtRef.current >= 5000) {
-          setQueuedMessages(EMPTY_QUEUE);
+          updateQueuedMessages(EMPTY_QUEUE);
         }
         if (showLoading) setLoading(false);
         return agentState;
@@ -757,7 +769,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Ensure the flag is cleared even if the pre-state early-return path was taken
       if (showLoading && includeState && !messagesLoaded) initialHydrationPendingRef.current = false;
     }
-  }, [refreshSubagentHistory, applyAuthoritativeModel, beginAuthoritativeModelSync]);
+  }, [refreshSubagentHistory, applyAuthoritativeModel, beginAuthoritativeModelSync, updateQueuedMessages]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null, includePreCompaction = false): Promise<boolean> => {
     const seq = ++contextRequestSeqRef.current;
@@ -1462,7 +1474,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (state?.todoPhases !== undefined) setTodoPhases(state.todoPhases ?? []);
       // And the only reliable re-sync for a missed subagent lifecycle frame.
       void refreshSubagentRoster(sid);
-      if ((!state || state.queuedMessageCount === 0) && Date.now() - queueMutatedAtRef.current >= 5000) setQueuedMessages(EMPTY_QUEUE);
+      if ((!state || state.queuedMessageCount === 0) && Date.now() - queueMutatedAtRef.current >= 5000) updateQueuedMessages(EMPTY_QUEUE);
       const busy = data.running && state
         && (state.isStreaming || state.isPromptRunning || state.isCompacting);
       if (busy || !agentRunningRef.current) return;
@@ -1486,7 +1498,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         void reconcileAgentState(sid);
       }
     }
-  }, [finishPromptWithoutStream, refreshSubagentRoster]);
+  }, [finishPromptWithoutStream, refreshSubagentRoster, updateQueuedMessages]);
 
   // Recovery net for missed SSE events: while the agent is running, verify
   // against the server periodically and whenever the tab returns to the
@@ -1559,45 +1571,76 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const consumeQueuedMessage = useCallback((text: string) => {
     if (!text) return;
-    setQueuedMessages((prev) => {
+    const promotion = queuedPromotions.get(text);
+    const sid = sessionIdRef.current;
+    updateQueuedMessages((prev) => {
       const si = prev.steering.indexOf(text);
       if (si !== -1) return { ...prev, steering: prev.steering.filter((_, i) => i !== si) };
       const fi = prev.followUp.indexOf(text);
-      if (fi !== -1) return { ...prev, followUp: prev.followUp.filter((_, i) => i !== fi) };
+      if (fi !== -1) {
+        // A pending acknowledgement must not promote the next same-text item.
+        if (promotion?.sessionId === sid) promotion.consumed = true;
+        return { ...prev, followUp: prev.followUp.filter((_, i) => i !== fi) };
+      }
       return prev;
     });
-  }, []);
+  }, [queuedPromotions, updateQueuedMessages]);
 
   /** Remove one queued message from the client-side queue mirror. omp's RPC
-   *  protocol has no queue-mutation commands, so this only affects the queue
+   *  protocol has no queue-removal command, so this only affects the queue
    *  panel: a message removed here may still be delivered by the running agent
    *  (it then arrives in the chat like any delivered turn). */
   const removeQueuedMessage = useCallback((text: string) => {
     if (!text) return;
-    setQueuedMessages((prev) => {
+    const promotion = queuedPromotions.get(text);
+    const sid = sessionIdRef.current;
+    updateQueuedMessages((prev) => {
       const si = prev.steering.indexOf(text);
       const fi = prev.followUp.indexOf(text);
       if (si === -1 && fi === -1) return prev;
+      if (fi !== -1 && promotion?.sessionId === sid) promotion.consumed = true;
       return {
         steering: si === -1 ? prev.steering : prev.steering.filter((_, i) => i !== si),
         followUp: fi === -1 ? prev.followUp : prev.followUp.filter((_, i) => i !== fi),
       };
     });
-  }, []);
+  }, [queuedPromotions, updateQueuedMessages]);
 
-  /** Promote the first queued follow-up to a steering message (client-side
-   *  relabel; the delivery order itself is owned by omp). */
-  const promoteQueuedToSteer = useCallback((text: string) => {
-    if (!text) return;
-    setQueuedMessages((prev) => {
-      const fi = prev.followUp.indexOf(text);
-      if (fi === -1) return prev;
-      return {
-        steering: [...prev.steering, text],
-        followUp: prev.followUp.filter((_, i) => i !== fi),
-      };
-    });
-  }, []);
+  /** Move the first matching native follow-up into steering, then relabel its
+   *  still-undelivered chip. Never enqueue a second copy via steer. */
+  const promoteQueuedToSteer = useCallback(async (text: string) => {
+    const sid = sessionIdRef.current;
+    if (!hookAliveRef.current || !sid || !text || !queuedMessages.followUp.includes(text)) return;
+    // Text is the existing chip identity. Suppress overlap, not later retries.
+    if (queuedPromotions.get(text)?.sessionId === sid) return;
+    const promotion = { sessionId: sid, consumed: false };
+    queuedPromotions.set(text, promotion);
+    try {
+      const result = await sendAgentCommand<{ promoted: boolean }>(sid, {
+        type: "promote_queued_message",
+        message: text,
+      });
+      if (!hookAliveRef.current || sessionIdRef.current !== sid) return;
+      if (result?.promoted !== true) {
+        addNotice({ type: "warning", message: translate("agentSession.queuedPromotionUnavailable") });
+        return;
+      }
+      updateQueuedMessages((prev) => {
+        if (!hookAliveRef.current || sessionIdRef.current !== sid || promotion.consumed) return prev;
+        const fi = prev.followUp.indexOf(text);
+        if (fi === -1) return prev;
+        return {
+          steering: [...prev.steering, text],
+          followUp: prev.followUp.filter((_, i) => i !== fi),
+        };
+      });
+    } catch (error) {
+      if (!hookAliveRef.current || sessionIdRef.current !== sid) return;
+      addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      if (queuedPromotions.get(text) === promotion) queuedPromotions.delete(text);
+    }
+  }, [addNotice, queuedMessages.followUp, queuedPromotions, updateQueuedMessages]);
 
   // Mirror queued texts into sessionStorage so a reload can restore them.
   // The dirty gate keeps the initial empty state from wiping a stored queue
@@ -1710,7 +1753,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               if (d.state?.todoPhases !== undefined) setTodoPhases(d.state.todoPhases ?? []);
               // omp reports only a queued count; an empty (or dead) session
               // means the client-tracked queue texts are stale.
-              if ((!d.state || d.state.queuedMessageCount === 0) && Date.now() - queueMutatedAtRef.current >= 5000) setQueuedMessages(EMPTY_QUEUE);
+              if ((!d.state || d.state.queuedMessageCount === 0) && Date.now() - queueMutatedAtRef.current >= 5000) updateQueuedMessages(EMPTY_QUEUE);
             })
             .catch(() => {});
         }
@@ -2131,7 +2174,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, clearTerminalReconcileTimer, consumeQueuedMessage, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, mergeSubagents, onAgentEnd, reconcileAgentState, resetSubagentActivityState, applyAuthoritativeModel, beginAuthoritativeModelSync, surfaceQuotaOnStream]);
+  }, [addNotice, clearTerminalReconcileTimer, consumeQueuedMessage, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, mergeSubagents, onAgentEnd, reconcileAgentState, resetSubagentActivityState, applyAuthoritativeModel, beginAuthoritativeModelSync, surfaceQuotaOnStream, updateQueuedMessages]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean> => {
@@ -2789,13 +2832,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // omp emits no queue snapshots; track the queued text locally until it
       // is delivered (user message_end) or the queue count drops to zero.
       queueMutatedAtRef.current = Date.now();
-      setQueuedMessages((prev) => ({ ...prev, steering: [...prev.steering, message] }));
+      updateQueuedMessages((prev) => ({ ...prev, steering: [...prev.steering, message] }));
     } catch (e) {
       console.error("Failed to steer:", e);
       addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
       opts.chatInputRef?.current?.insertIfEmpty(message);
     }
-  }, [addNotice, opts.chatInputRef]);
+  }, [addNotice, opts.chatInputRef, updateQueuedMessages]);
 
   const handlePromptWithStreamingBehavior = useCallback(async (
     message: string,
@@ -2813,7 +2856,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         ...(piImages?.length ? { images: piImages } : {}),
       });
       queueMutatedAtRef.current = Date.now();
-      setQueuedMessages((prev) => behavior === "steer"
+      updateQueuedMessages((prev) => behavior === "steer"
         ? { ...prev, steering: [...prev.steering, message] }
         : { ...prev, followUp: [...prev.followUp, message] });
     } catch (e) {
@@ -2821,7 +2864,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
       opts.chatInputRef?.current?.insertIfEmpty(message);
     }
-  }, [addNotice, opts.chatInputRef]);
+  }, [addNotice, opts.chatInputRef, updateQueuedMessages]);
 
   const handleFollowUp = useCallback(async (message: string, images?: AttachedImage[]) => {
     const sid = sessionIdRef.current;
@@ -2834,13 +2877,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         ...(piImages?.length ? { images: piImages } : {}),
       });
       queueMutatedAtRef.current = Date.now();
-      setQueuedMessages((prev) => ({ ...prev, followUp: [...prev.followUp, message] }));
+      updateQueuedMessages((prev) => ({ ...prev, followUp: [...prev.followUp, message] }));
     } catch (e) {
       console.error("Failed to follow up:", e);
       addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
       opts.chatInputRef?.current?.insertIfEmpty(message);
     }
-  }, [addNotice, opts.chatInputRef]);
+  }, [addNotice, opts.chatInputRef, updateQueuedMessages]);
 
   const handleAbortCompaction = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -2963,7 +3006,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (agentState.state.extensionStatuses !== undefined) setExtensionStatuses(agentState.state.extensionStatuses ?? []);
           if (agentState.state.extensionWidgets !== undefined) setExtensionWidgets(agentState.state.extensionWidgets ?? []);
           if (agentState.state.queuedMessageCount === 0 && Date.now() - queueMutatedAtRef.current >= 5000) {
-            setQueuedMessages(EMPTY_QUEUE);
+            updateQueuedMessages(EMPTY_QUEUE);
             // The queue drained while the page was closed — a stored copy
             // from a previous page load is stale.
             clearPersistedQueue(session.id);
@@ -2972,7 +3015,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             // texts persisted by the previous page load.
             const persisted = readPersistedQueue(session.id);
             if (persisted) {
-              setQueuedMessages((prev) => (isEmptyQueue(prev) ? persisted : prev));
+              updateQueuedMessages((prev) => (isEmptyQueue(prev) ? persisted : prev));
             }
           }
         }
@@ -3090,9 +3133,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [messages, streamState, agentRunning, agentPhase, extensionWidgets, isCompacting, retryInfo, activeSubagentCount, todoPhases, scrollToBottom, loading]);
 
-  useEffect(() => () => {
-    hookAliveRef.current = false;
-    if (followScrollFrameRef.current !== null) cancelAnimationFrame(followScrollFrameRef.current);
+  useEffect(() => {
+    hookAliveRef.current = true;
+    return () => {
+      hookAliveRef.current = false;
+      if (followScrollFrameRef.current !== null) cancelAnimationFrame(followScrollFrameRef.current);
+    };
   }, []);
 
   // Load model list

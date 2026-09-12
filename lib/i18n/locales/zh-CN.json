@@ -21,6 +21,7 @@
   "agentSession.sendFailed": "发送消息失败：{detail}",
   "agentSession.sessionRenamed": "会话已重命名为 {name}",
   "agentSession.shellSessionFailed": "无法为 shell 命令创建会话",
+  "agentSession.queuedPromotionUnavailable": "该后续消息已不在队列中，无法转为引导消息。",
   "agentSession.startingAgent": "正在启动 omp……会话首次启动可能需要一些时间。",
   "agentSession.toolPresetNotice": "工具预设在会话启动时生效；当前会话将保留现有工具。",
   "archiveBrowser.title": "已归档会话",
