@@ -104,6 +104,10 @@ export interface ToolResultMessage {
   isError?: boolean;
   details?: unknown;
   timestamp?: number;
+  /** Live snapshot of a tool that is still executing (omp's
+   * `tool_execution_update`), not a committed result. Rendering treats it as
+   * "running" and keeps it out of the session's toolResult list. */
+  partial?: boolean;
 }
 
 export interface CustomMessage {

@@ -19,10 +19,47 @@ export interface ChatDraft {
 // globalThis so dev Fast Refresh doesn't wipe drafts mid-typing.
 declare global {
   var __ompChatDrafts: Map<string, ChatDraft> | undefined;
+  var __ompChatDraftListeners: Set<() => void> | undefined;
 }
 
 const MAX_DRAFTS = 50;
-const drafts: Map<string, ChatDraft> = (globalThis.__ompChatDrafts ??= new Map());
+const STORAGE_PREFIX = "omp-draft-";
+const drafts: Map<string, ChatDraft> = (globalThis.__ompChatDrafts ??= readStoredDrafts());
+
+function readStoredDrafts(): Map<string, ChatDraft> {
+  const stored = new Map<string, ChatDraft>();
+  try {
+    // Snapshot keys: removing overflow can change Storage's enumeration order.
+    const storageKeys = Array.from({ length: sessionStorage.length }, (_, i) => sessionStorage.key(i));
+    for (const storageKey of storageKeys) {
+      if (!storageKey?.startsWith(STORAGE_PREFIX)) continue;
+      if (stored.size >= MAX_DRAFTS) {
+        sessionStorage.removeItem(storageKey);
+        continue;
+      }
+      const value = sessionStorage.getItem(storageKey);
+      if (value) {
+        stored.set(storageKey.slice(STORAGE_PREFIX.length), { value, images: [], files: [] });
+      } else {
+        sessionStorage.removeItem(storageKey);
+      }
+    }
+  } catch {
+    // Storage may be unavailable (SSR or browser policy); keep drafts in memory.
+  }
+  return stored;
+}
+
+const listeners = (globalThis.__ompChatDraftListeners ??= new Set<() => void>());
+
+export function hasUnsentDrafts(): boolean {
+  return drafts.size > 0;
+}
+
+export function subscribeDrafts(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
+}
 
 function cloneDraft(draft: ChatDraft): ChatDraft {
   return {
@@ -52,16 +89,32 @@ export function getDraftSummary(key: string): { text: string; hasAttachments: bo
 
 export function setDraft(key: string, draft: ChatDraft): void {
   if (isEmptyDraft(draft)) {
-    drafts.delete(key);
+    clearDraft(key);
     return;
   }
   if (drafts.size >= MAX_DRAFTS && !drafts.has(key)) {
     const oldestKey = drafts.keys().next().value;
-    if (oldestKey) drafts.delete(oldestKey);
+    if (oldestKey !== undefined) clearDraft(oldestKey);
   }
   drafts.set(key, cloneDraft(draft));
+  try {
+    // Persist only text: attachment payloads can exhaust the tab's storage quota.
+    if (draft.value) sessionStorage.setItem(STORAGE_PREFIX + key, draft.value);
+    else sessionStorage.removeItem(STORAGE_PREFIX + key);
+  } catch {
+    // Preserve the in-memory draft if storage is unavailable or full.
+  }
+  for (const listener of listeners) listener();
 }
 
 export function clearDraft(key: string): void {
-  drafts.delete(key);
+  const deleted = drafts.delete(key);
+  try {
+    sessionStorage.removeItem(STORAGE_PREFIX + key);
+  } catch {
+    // Storage may be unavailable.
+  }
+  if (deleted) {
+    for (const listener of listeners) listener();
+  }
 }

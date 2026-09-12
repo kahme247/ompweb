@@ -1,7 +1,10 @@
 import type { CSSProperties } from "react";
 
-const ANSI_ESCAPE_RE = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g;
-const ANSI_ESCAPE_AT_START_RE = /^\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/;
+// OSC must precede the single-char Fe branch, whose class `[@-Z\\-_]` also
+// matches `]`. OSC content excludes ESC so an unterminated sequence cannot
+// make every later `ESC ]` rescan to the end of the string.
+const ANSI_ESCAPE_RE = /\x1B(?:\][^\x07\x1B]*(?:\x07|\x1B\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])/g;
+const ANSI_ESCAPE_AT_START_RE = /^\x1B(?:\][^\x07\x1B]*(?:\x07|\x1B\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])/;
 const ANSI_SGR_RE = /\x1B\[([0-9;]*)m/g;
 const TUI_CURSOR_MARKER_RE = /\x1B_pi:c\x07/g;
 
@@ -192,10 +195,13 @@ export function parseAnsiLine(line: string): AnsiSegment[] {
   let match: RegExpExecArray | null;
   ANSI_SGR_RE.lastIndex = 0;
 
+  const pushText = (raw: string) => {
+    const text = stripAnsi(raw);
+    if (text) segments.push({ text, style });
+  };
+
   while ((match = ANSI_SGR_RE.exec(line)) !== null) {
-    if (match.index > lastIndex) {
-      segments.push({ text: line.slice(lastIndex, match.index), style });
-    }
+    pushText(line.slice(lastIndex, match.index));
     const codes = match[1]
       ? match[1].split(";").map((part) => Number(part || "0"))
       : [0];
@@ -203,9 +209,6 @@ export function parseAnsiLine(line: string): AnsiSegment[] {
     lastIndex = match.index + match[0].length;
   }
 
-  if (lastIndex < line.length) {
-    segments.push({ text: line.slice(lastIndex), style });
-  }
-
+  pushText(line.slice(lastIndex));
   return segments;
 }

@@ -8,7 +8,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { MessageView, SafeMarkdownBody, TaskResultPanel } = await jiti.import("./MessageView.tsx");
+const { MessageView, SafeMarkdownBody, TaskResultPanel, isInterruptedMessage } = await jiti.import("./MessageView.tsx");
 const { CodeBlock } = await jiti.import("./MermaidBlock.tsx");
 
 test("large message content avoids the markdown pipeline until requested", () => {
@@ -169,6 +169,77 @@ test("advisor custom messages use the localized advisor label", () => {
 });
 
 
+test("a running tool call shows a spinner instead of the no-result marker", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", toolCallId: "call-1", toolName: "bash", input: { command: "long-job" } }],
+    },
+    toolResults: new Map([[
+      "call-1",
+      { role: "toolResult", toolCallId: "call-1", toolName: "bash", content: [], partial: true },
+    ]]),
+  }));
+
+  assert.match(html, /activity-row-spinner/);
+  assert.doesNotMatch(html, /lucide-check/);
+  assert.doesNotMatch(html, /lucide-circle-slash/);
+});
+
+test("a running tool with no output yet says so instead of reporting no output", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    toolCallsDefaultCollapsed: false,
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", toolCallId: "call-1", toolName: "bash", input: { command: "long-job" } }],
+    },
+    toolResults: new Map([[
+      "call-1",
+      { role: "toolResult", toolCallId: "call-1", toolName: "bash", content: [], partial: true },
+    ]]),
+  }));
+
+  assert.match(html, /data-tool-running="true"/);
+  assert.doesNotMatch(html, /No output/);
+});
+
+test("a running tool streams its output before the result is committed", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    toolCallsDefaultCollapsed: false,
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", toolCallId: "call-1", toolName: "bash", input: { command: "long-job" } }],
+    },
+    toolResults: new Map([[
+      "call-1",
+      { role: "toolResult", toolCallId: "call-1", toolName: "bash", content: [{ type: "text", text: "line-1\nline-2" }], partial: true },
+    ]]),
+  }));
+
+  assert.match(html, /data-tool-output="true"/);
+  assert.match(html, /line-1/);
+  assert.match(html, /line-2/);
+  assert.doesNotMatch(html, /data-tool-running="true"/);
+});
+
+test("a committed tool result replaces the running affordances", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    toolCallsDefaultCollapsed: false,
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", toolCallId: "call-1", toolName: "bash", input: { command: "long-job" } }],
+    },
+    toolResults: new Map([[
+      "call-1",
+      { role: "toolResult", toolCallId: "call-1", toolName: "bash", content: [{ type: "text", text: "done" }], timestamp: 3000 },
+    ]]),
+  }));
+
+  assert.doesNotMatch(html, /activity-row-spinner/);
+  assert.doesNotMatch(html, /data-tool-running="true"/);
+  assert.match(html, /lucide-check/);
+});
+
 test("expanded edit results with a patch render the split diff view", () => {
   const html = renderToStaticMarkup(React.createElement(MessageView, {
     isStreaming: true,
@@ -195,4 +266,120 @@ test("expanded edit results with a patch render the split diff view", () => {
   assert.match(html, /added const here = 2;/);
   assert.match(html, /dropped const gone = 1;/);
   assert.doesNotMatch(html, /<pre/);
+});
+
+test("consecutive tool calls group into an activity group summary", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    isStreaming: true,
+    toolCallsDefaultCollapsed: true,
+    message: {
+      role: "assistant",
+      content: [
+        { type: "toolCall", toolCallId: "call-1", toolName: "read", input: { path: "a.ts" } },
+        { type: "toolCall", toolCallId: "call-2", toolName: "read", input: { path: "b.ts" } },
+        { type: "toolCall", toolCallId: "call-3", toolName: "grep", input: { pattern: "test" } },
+      ],
+    },
+  }));
+
+  assert.match(html, /activity-group/);
+  assert.match(html, /Read 2 files and searched 1 time/);
+});
+
+test("bash (local) rows count as terminal commands in group summaries", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    isStreaming: true,
+    toolCallsDefaultCollapsed: true,
+    message: {
+      role: "assistant",
+      content: [
+        { type: "toolCall", toolCallId: "call-1", toolName: "bash", input: { command: "go vet ./..." } },
+        { type: "toolCall", toolCallId: "call-2", toolName: "bash (local)", input: { command: "go test ./..." } },
+      ],
+    },
+  }));
+
+  assert.match(html, /Ran 2 commands/);
+});
+
+test("todo tool calls render clean status badge with action and task name", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    isStreaming: true,
+    toolCallsDefaultCollapsed: false,
+    message: {
+      role: "assistant",
+      content: [
+        { type: "toolCall", toolCallId: "call-1", toolName: "todo", input: { op: "done", task: "Build redesigned component" } },
+      ],
+    },
+  }));
+
+  assert.match(html, /tool-call-todo-badge/);
+  assert.match(html, /Completed/);
+  assert.match(html, /Build redesigned component/);
+});
+
+test("isInterruptedMessage identifies user interruptions accurately", () => {
+  assert.equal(isInterruptedMessage("Interrupted by user"), true);
+  assert.equal(isInterruptedMessage("interrupted by user"), true);
+  assert.equal(isInterruptedMessage("Interrupted"), true);
+  assert.equal(isInterruptedMessage("Request aborted"), true);
+  assert.equal(isInterruptedMessage("Aborted"), true);
+  assert.equal(isInterruptedMessage(null, "aborted"), true);
+  assert.equal(isInterruptedMessage("Generation stopped by user"), true);
+  assert.equal(isInterruptedMessage("429 Too Many Requests"), false);
+  assert.equal(isInterruptedMessage("Provider connection failed"), false);
+  assert.equal(isInterruptedMessage(null), false);
+});
+
+test("interrupted assistant message renders user-friendly status badge without responseError prefix", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    toolCallsDefaultCollapsed: false,
+    message: {
+      role: "assistant",
+      errorMessage: "Interrupted by user",
+      content: [],
+    },
+  }));
+
+  assert.match(html, /role="status"/);
+  assert.match(html, /Generation stopped by user/);
+  assert.doesNotMatch(html, /messageView\.responseError/);
+  assert.doesNotMatch(html, /Response error/);
+  assert.doesNotMatch(html, /role="alert"/);
+});
+
+test("actual error assistant message renders alert badge without responseError prefix", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    toolCallsDefaultCollapsed: false,
+    message: {
+      role: "assistant",
+      errorMessage: "429 Too Many Requests: Rate limit exceeded",
+      content: [],
+    },
+  }));
+
+  assert.match(html, /role="alert"/);
+  assert.match(html, /429 Too Many Requests: Rate limit exceeded/);
+  assert.doesNotMatch(html, /messageView\.responseError/);
+  assert.doesNotMatch(html, /Response error:/);
+});
+
+test("interrupted message with partial content renders content before interrupted badge", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    toolCallsDefaultCollapsed: false,
+    message: {
+      role: "assistant",
+      errorMessage: "Interrupted by user",
+      content: [
+        { type: "text", text: "Partial generated response text" },
+      ],
+    },
+  }));
+
+  const contentIdx = html.indexOf("Partial generated response text");
+  const statusIdx = html.indexOf("Generation stopped by user");
+  assert.ok(contentIdx !== -1, "partial content must be rendered");
+  assert.ok(statusIdx !== -1, "status badge must be rendered");
+  assert.ok(contentIdx < statusIdx, "content must precede the interrupted status badge");
 });

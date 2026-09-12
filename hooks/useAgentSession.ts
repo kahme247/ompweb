@@ -8,6 +8,7 @@ import type {
   ExtensionWidgetItem,
   SessionInfo,
   SessionTreeNode,
+  ToolResultMessage,
 } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
@@ -15,6 +16,7 @@ import { sendAgentCommand, setSessionAdvisorSpawn } from "@/lib/agent-client";
 import { translate } from "@/lib/i18n";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { createMessageUpdateCoalescer, type MessageUpdateCoalescer } from "@/lib/message-update-coalescer";
+import { createReconcileGuard, type ReconcileGuard } from "@/lib/reconcile-guard";
 import { getToolNamesForPreset, type ToolPreset } from "@/lib/tool-presets";
 import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-preset-preference";
 import { toast } from "@/components/ui/toast";
@@ -122,6 +124,52 @@ export type {
 export type { QueuedMessages } from "./useAgentSession-queue";
 export type { NoticeItem, NoticeType } from "./useAgentSession-notices";
 
+/** Read the error carried by OMP's assistant/error frames without rendering
+ * arbitrary payloads as [object Object]. OMP normally puts provider failures
+ * on the assistant message (`stopReason: "error"`, `errorMessage`) and then
+ * emits a plain `agent_end`, so this must be collected before that terminal
+ * frame arrives. */
+function readAgentError(value: unknown): string | null {
+  if (typeof value === "string") {
+    const text = value.trim();
+    return text || null;
+  }
+  if (!isRecord(value)) return null;
+  for (const key of ["errorMessage", "error", "message", "detail"]) {
+    const text = readAgentError(value[key]);
+    if (text) return text;
+  }
+  return value.stopReason === "error" ? translate("agentSession.responseFailed") : null;
+}
+
+function readTerminalAgentError(event: AgentEvent): string | null {
+  for (const value of [event.errorMessage, event.error, event.message]) {
+    const text = readAgentError(value);
+    if (text) return text;
+  }
+  if (Array.isArray(event.messages)) {
+    for (let i = event.messages.length - 1; i >= 0; i -= 1) {
+      const text = readAgentError(event.messages[i]);
+      if (text) return text;
+    }
+  }
+  return null;
+}
+
+/** Tool calls and empty assistant envelopes are not a response. If the model
+ * fails after starting a tool turn, the terminal fallback must still explain
+ * the stop instead of treating the tool activity as a successful answer. */
+function hasVisibleAssistantContent(value: unknown): boolean {
+  if (!isRecord(value) || value.role !== "assistant") return false;
+  if (!Array.isArray(value.content)) return typeof value.content === "string" && value.content.trim().length > 0;
+  return value.content.some((block) => {
+    if (!isRecord(block)) return false;
+    if (block.type === "text") return typeof block.text === "string" && block.text.trim().length > 0;
+    if (block.type === "image") return true;
+    return false;
+  });
+}
+
 export interface UseAgentSessionOptions {
   session: SessionInfo | null;
   newSessionCwd: string | null;
@@ -158,6 +206,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [entryIds, setEntryIds] = useState<string[]>([]);
   const [showPreCompactionHistory, setShowPreCompactionHistory] = useState(false);
   const [streamState, dispatch] = useReducer(streamReducer, { isStreaming: false, streamingMessage: null });
+  // Latest streaming snapshot for event handlers that must not close over a
+  // stale streamState (quota error stamping onto the live assistant bubble).
+  const streamStateRef = useRef(streamState);
+  streamStateRef.current = streamState;
   const [agentRunning, setAgentRunning] = useState(false);
   const [bashRunning, setBashRunning] = useState(false);
   const [pendingBash, setPendingBash] = useState<{ command: string; excludeFromContext: boolean } | null>(null);
@@ -201,6 +253,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [compactError, setCompactError] = useState<string | null>(null);
   const [compactResult, setCompactResult] = useState<CompactResultInfo | null>(null);
   const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
+  // In-flight tool executions, keyed by toolCallId: omp reports a tool's output
+  // as it runs (`tool_execution_start` / `tool_execution_update` / `_end`), but
+  // the matching `toolResult` message only lands when the tool finishes. Until
+  // then these entries keep the tool call row live (running indicator + streamed
+  // output). The committed toolResult always wins over the live entry, and the
+  // entry is dropped as soon as it arrives.
+  const [liveToolResults, setLiveToolResults] = useState<Map<string, ToolResultMessage>>(() => new Map());
   const [slashCommands, setSlashCommands] = useState<SlashCommandInfo[]>([]);
   const [slashCommandsLoading, setSlashCommandsLoading] = useState(false);
   const [noticeState, dispatchNotice] = useReducer(noticeReducer, { visible: [], pending: [] });
@@ -220,6 +279,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useEffect(() => () => {
     clearTerminalReconcileTimer();
   }, [clearTerminalReconcileTimer]);
+  /** Upsert (or with `null`, drop) the live entry for one in-flight tool. */
+  const setLiveToolResult = useCallback((toolCallId: string, result: ToolResultMessage | null) => {
+    setLiveToolResults((prev) => {
+      if (result === null) {
+        if (!prev.has(toolCallId)) return prev;
+        const next = new Map(prev);
+        next.delete(toolCallId);
+        return next;
+      }
+      const next = new Map(prev);
+      next.set(toolCallId, result);
+      return next;
+    });
+  }, []);
+  const clearLiveToolResults = useCallback(() => {
+    setLiveToolResults((prev) => (prev.size === 0 ? prev : new Map()));
+  }, []);
   // Blocks prompt submission while the initial hydration's live-state fetch is
   // still pending. Without this, showLoading=false after disk messages lets
   // a prompt increment runId before the stale pre-prompt state arrives and
@@ -282,11 +358,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // so a stale get_subagents cannot target a session that was switched away.
   const rosterRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const promptRunIdRef = useRef(0);
+  // Coalesces concurrent reconcileAgentState triggers (15s interval,
+  // visibilitychange, online, todo events) into one in-flight request per
+  // run — a slow /api/agent/[id] response must not stack stale polls that
+  // then overwrite newer state out of order.
+  const reconcileGuardRef = useRef<ReconcileGuard | null>(null);
+  // timeoutMs: a reconcile GET that never settles (hung connection, lost
+  // response) must not block future calibration forever — the guard
+  // auto-releases the lock and the next trigger re-issues.
+  if (reconcileGuardRef.current === null) reconcileGuardRef.current = createReconcileGuard({ timeoutMs: 30_000 });
   // Last quota-like error seen during the current run, and whether the run
   // produced any assistant content. Used to surface a persistent error when
   // the agent stops without a visible failure.
   const lastQuotaErrorRef = useRef<string | null>(null);
+  // Provider failures are carried by the final assistant message in OMP and
+  // agent_end itself is often deliberately payload-free. Keep the message
+  // until the terminal path can surface it exactly once.
+  const lastRunErrorRef = useRef<string | null>(null);
   const runHadContentRef = useRef(false);
+  const slashCommandRunRef = useRef(false);
   // Bumped on every roster clear (run end): in-flight get_subagents/history
   // responses from the finished run must not merge into the cleared (or next
   // run's) roster. The prompt runId alone is not enough — it is not
@@ -303,6 +393,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     });
   }
   const eventCoalescer = eventCoalescerRef.current;
+
+  /** Stamp a quota error onto the live assistant bubble so it renders as the
+   * inline chat error banner (MessageView) instead of toast-only. No-op when
+   * nothing is streaming. */
+  const surfaceQuotaOnStream = useCallback((errorMessage: string) => {
+    const current = streamStateRef.current.streamingMessage;
+    if (!current || current.role !== "assistant") return;
+    if (typeof current.errorMessage === "string" && current.errorMessage.trim()) return;
+    dispatch({
+      type: "update",
+      message: { ...current, errorMessage, stopReason: "error" },
+    });
+  }, []);
 
   const setToolPresetState = opts.setToolPreset ?? setToolPreset;
 
@@ -1243,6 +1346,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (runId !== undefined && promptRunIdRef.current !== runId) return;
     const hadContent = runHadContentRef.current;
     const quotaMessage = lastQuotaErrorRef.current;
+    const runError = lastRunErrorRef.current;
+    const allowEmptyResponse = slashCommandRunRef.current;
     try {
       // Pass the fence into loadSession: the pre-check above only guards the
       // start — a next prompt that begins while the reload is in flight must
@@ -1252,19 +1357,30 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (runId !== undefined && promptRunIdRef.current !== runId) return;
       optimisticUserMessageKeyRef.current = null;
       if (!agentRunningRef.current) return;
-      if (!hadContent && quotaMessage && isQuotaLikeError(quotaMessage)) {
+      if (runError) {
+        addNotice({ type: "error", message: runError });
+        if (!isQuotaLikeError(runError)) {
+          toast.error("Request failed", runError, { timeout: 12000 });
+        } else {
+          surfaceQuotaOnStream(runError);
+        }
+      } else if (quotaMessage && isQuotaLikeError(quotaMessage) && !hadContent) {
+        // Silent stop: no assistant bubble to stamp — the shelf notice is the
+        // in-chat message. Mid-run quota already toasted via the notice path.
         addNotice({ type: "error", message: quotaMessage });
-        toast.error("Quota reached", quotaMessage, { timeout: 12000 });
-      } else if (!hadContent && !quotaMessage) {
+      } else if (!hadContent && !allowEmptyResponse) {
         // Fallback for silent stops with no visible content and no explicit
-        // error — avoid leaving the user with a disappeared spinner and no
-        // explanation (e.g. provider 429 that never emitted a notice).
-        // Only surface if the transcript hasn't already grown (loadSession
-        // would have added a message for non-empty runs).
+        // error — never leave the user with a disappeared spinner and no
+        // explanation. Builtin slash commands are allowed to complete without
+        // an assistant message, hence allowEmptyResponse above.
+        const message = translate("agentSession.responseFailed");
+        addNotice({ type: "error", message });
+        toast.error("Request failed", message, { timeout: 10000 });
       }
       agentRunningRef.current = false;
       setAgentRunning(false);
       setAgentPhase(null);
+      clearLiveToolResults();
       setRetryInfo(null);
       setSubagents([]);
       setAdvisorActiveAt(0);
@@ -1279,9 +1395,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       dispatch({ type: "end" });
       runHadContentRef.current = false;
       lastQuotaErrorRef.current = null;
+      lastRunErrorRef.current = null;
+      slashCommandRunRef.current = false;
       onAgentEnd?.();
     }
-  }, [addNotice, clearTerminalReconcileTimer, loadSession, onAgentEnd, refreshSubagentHistory, resetSubagentActivityState]);
+  }, [addNotice, clearLiveToolResults, clearTerminalReconcileTimer, loadSession, onAgentEnd, refreshSubagentHistory, resetSubagentActivityState, surfaceQuotaOnStream]);
   const waitForPromptSettlement = useCallback(async (sid: string, runId?: number) => {
     await delay(PROMPT_SETTLE_INITIAL_DELAY_MS);
     const startedAt = Date.now();
@@ -1346,6 +1464,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const reconcileAgentState = useCallback(async (sid: string) => {
     if (!agentRunningRef.current) return;
     const runId = promptRunIdRef.current;
+    // One request at a time per run: concurrent triggers coalesce into the
+    // in-flight request and re-issue on its completion (see release below).
+    const guard = reconcileGuardRef.current;
+    if (!guard) return;
+    const token = guard.tryAcquire();
+    if (token === null) return;
     try {
       const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
       if (!res.ok) return;
@@ -1377,6 +1501,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       await finishPromptWithoutStream(sid, runId);
     } catch {
       // Network still down — the next poll / visibility / online tick retries.
+    } finally {
+      // A trigger that landed while this request was in flight must not be
+      // lost: re-issue one reconcile immediately (only if still relevant).
+      // The token scopes the release: if a new run reset the guard (or this
+      // request lost ownership to a newer acquire), the stale owner's
+      // release() is a no-op — it must not clear the new run's lock.
+      const reissue = guard.release(token);
+      if (reissue && agentRunningRef.current && promptRunIdRef.current === runId && sessionIdRef.current === sid) {
+        void reconcileAgentState(sid);
+      }
     }
   }, [finishPromptWithoutStream, refreshSubagentRoster]);
 
@@ -1510,9 +1644,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         agentRunningRef.current = true;
         setAgentRunning(true);
         setAgentPhase({ kind: "waiting_model" });
+        clearLiveToolResults();
         dispatch({ type: "start" });
         runHadContentRef.current = false;
         lastQuotaErrorRef.current = null;
+        lastRunErrorRef.current = null;
         break;
       case "agent_end": {
         // isTerminal === false means an async delivery resumes this run soon.
@@ -1533,28 +1669,31 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // even when omp sent no terminal notice.
         const hadContent = runHadContentRef.current;
         const quotaMessage = lastQuotaErrorRef.current;
-        const endErrorMessage = typeof event.errorMessage === "string" ? event.errorMessage.trim() : "";
-        const endMessage = typeof event.message === "string" ? event.message.trim() : "";
-        const terminalError = endErrorMessage || endMessage;
+        const terminalError = readTerminalAgentError(event) ?? lastRunErrorRef.current;
+        const wasSlashCommand = slashCommandRunRef.current;
         if (terminalError && isQuotaLikeError(terminalError)) {
           lastQuotaErrorRef.current = terminalError;
         }
-        if (!hadContent) {
-          if (quotaMessage && isQuotaLikeError(quotaMessage)) {
-            const msg = quotaMessage || terminalError;
-            addNotice({ type: "error", message: msg });
-            toast.error("Quota reached", msg, { timeout: 12000 });
-          } else if (terminalError) {
-            const level = isQuotaLikeError(terminalError) ? "error" : "warning";
-            addNotice({ type: level, message: terminalError });
-            if (level === "error") toast.error("Request failed", terminalError, { timeout: 10000 });
-          } else if (quotaMessage && !hadContent) {
-            // Fallback already handled above; keep for symmetry.
+        // terminalError always surfaces (including a quota error carried on
+        // the final assistant message). The stored quotaMessage is only a
+        // fallback for silent stops — mid-run quota notices already toasted,
+        // and re-toasting a content-producing run would duplicate the toast.
+        const errorMessage = terminalError
+          ?? (!hadContent && quotaMessage && isQuotaLikeError(quotaMessage) ? quotaMessage : null);
+        if (errorMessage) {
+          addNotice({ type: "error", message: errorMessage });
+          if (isQuotaLikeError(errorMessage)) {
+            // Inline chat banner on the live bubble when still streaming;
+            // otherwise the shelf notice is the in-chat message. No toast —
+            // quota must read as a chat message, not a transient popup.
+            surfaceQuotaOnStream(errorMessage);
+          } else {
+            toast.error("Request failed", errorMessage, { timeout: 12000 });
           }
-        } else if (terminalError && isQuotaLikeError(terminalError)) {
-          // Run had content but still ended with quota error (e.g. mid-stream)
-          addNotice({ type: "error", message: terminalError });
-          toast.error("Quota reached", terminalError, { timeout: 12000 });
+        } else if (!hadContent && !wasSlashCommand) {
+          const message = translate("agentSession.responseFailed");
+          addNotice({ type: "error", message });
+          toast.error("Request failed", message, { timeout: 10000 });
         }
         // async, and a next prompt (or session switch) that starts while it is
         // in flight must not be overwritten by this finished run's snapshot.
@@ -1563,6 +1702,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         agentRunningRef.current = false;
         setAgentRunning(false);
         setAgentPhase(null);
+        clearLiveToolResults();
         setRetryInfo(null);
         setSubagents([]);
         setAdvisorActiveAt(0);
@@ -1572,6 +1712,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // Reset per-run trackers after dispatch so fallback above can read them.
         runHadContentRef.current = false;
         lastQuotaErrorRef.current = null;
+        lastRunErrorRef.current = null;
+        slashCommandRunRef.current = false;
         if (endedSid) {
           void loadSession(endedSid, false, false, endedRunId);
           const endToken = beginAuthoritativeModelSync();
@@ -1614,21 +1756,39 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         void finishPromptWithoutStream(sessionIdRef.current, promptRunIdRef.current);
         break;
       case "prompt_error": {
-        const promptMsg = (event.errorMessage as string | undefined)?.trim() ?? translate("agentSession.commandFailed");
-        addNotice({ type: "error", message: promptMsg });
-        if (isQuotaLikeError(promptMsg)) {
-          lastQuotaErrorRef.current = promptMsg;
-          toast.error("Quota reached", promptMsg, { timeout: 12000 });
-        }
+        const promptMsg = readAgentError(event.errorMessage)
+          ?? readAgentError(event.error)
+          ?? readAgentError(event.message)
+          ?? translate("agentSession.commandFailed");
+        lastRunErrorRef.current = promptMsg;
         // A failed prompt is terminal: no agent_end follows it. Without this the
         // spinner and the locked input wait for the 15s reconcile poll. Fenced
         // with the run id for the same reason as prompt_result above.
         if (agentRunningRef.current) void finishPromptWithoutStream(sessionIdRef.current, promptRunIdRef.current);
+        else {
+          addNotice({ type: "error", message: promptMsg });
+          if (isQuotaLikeError(promptMsg)) surfaceQuotaOnStream(promptMsg);
+        }
+        break;
+      }
+      case "error":
+      case "agent_error":
+      case "turn_error":
+      case "model_error":
+      case "server_error":
+      case "internal_error":
+      case "rpc_frame_error": {
+        const message = readTerminalAgentError(event) ?? translate("agentSession.responseFailed");
+        lastRunErrorRef.current = message;
+        if (!agentRunningRef.current) addNotice({ type: "error", message });
         break;
       }
       case "notice": {
         const level = event.level as string | undefined;
-        const message = (event.message as string | undefined)?.trim() ?? "";
+        const message = readAgentError(event.message)
+          ?? readAgentError(event.errorMessage)
+          ?? readAgentError(event.error)
+          ?? "";
         if (/^xd:\/\/:\s*mounted\s+mcp__/i.test(message)) {
           toast.info("MCP tools updated", message, { clamp: true });
         } else {
@@ -1639,10 +1799,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           });
           if (isQuotaLikeError(message)) {
             lastQuotaErrorRef.current = message;
-            // Quota errors are actionable (wait 4h / upgrade) — keep them
-            // visible both as a shelf error and a dismissible toast.
+            // Quota errors are actionable (wait 4h / upgrade) — show them as
+            // an inline chat error on the live assistant bubble, plus a shelf
+            // entry. Toast is omitted: the in-chat banner is the message.
             if (noticeType !== "error") addNotice({ type: "error", message });
-            toast.error("Quota reached", message, { timeout: 12000 });
+            surfaceQuotaOnStream(message);
           }
         }
         break;
@@ -1654,7 +1815,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           addNotice({ type: "info", message: text });
           if (isQuotaLikeError(text)) {
             lastQuotaErrorRef.current = text;
-            toast.error("Quota reached", text, { timeout: 12000 });
+            surfaceQuotaOnStream(text);
           }
         }
         break;
@@ -1707,6 +1868,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // reconcile) — they would resurrect a ghost streaming bubble.
         if (!agentRunningRef.current) break;
         const msg = event.message as Partial<AgentMessage> | undefined;
+        const messageError = readAgentError(msg);
+        if (messageError) lastRunErrorRef.current = messageError;
         if (msg?.role === "user") {
           break;
         }
@@ -1717,7 +1880,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setAdvisorActiveAt((prev) => (prev === 0 ? Date.now() : prev));
         }
         if (msg) {
-          runHadContentRef.current = true;
+          if (hasVisibleAssistantContent(msg)) runHadContentRef.current = true;
           const text = extractMessageText(msg);
           if (text && isQuotaLikeError(text)) lastQuotaErrorRef.current = text.slice(0, 800);
           dispatch({ type: "update", message: normalizeToolCalls(msg as AgentMessage) });
@@ -1731,8 +1894,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // appending it again would duplicate it.
         if (!agentRunningRef.current) break;
         const completed = event.message as AgentMessage | undefined;
+        const messageError = readAgentError(completed);
+        if (messageError) lastRunErrorRef.current = messageError;
         if (completed) {
-          runHadContentRef.current = true;
+          if (hasVisibleAssistantContent(completed)) runHadContentRef.current = true;
           const text = extractMessageText(completed as Partial<AgentMessage>);
           if (text && isQuotaLikeError(text)) lastQuotaErrorRef.current = text.slice(0, 800);
         }
@@ -1761,6 +1926,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // The advisor model injects its review as a custom message mid-run;
           // surface it as live advisor activity for the composer thunder icon.
           if ((completed as CustomMessage).customType === "advisor") setAdvisorActiveAt(Date.now());
+          // The committed result supersedes the live snapshot for this call.
+          if (completed.role === "toolResult" && typeof completed.toolCallId === "string") {
+            setLiveToolResult(completed.toolCallId, null);
+          }
           setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
         }
         if (completed?.role === "assistant") {
@@ -1785,10 +1954,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setAgentPhase({ kind: "waiting_model" });
         break;
       }
+      case "turn_end": {
+        const messageError = readTerminalAgentError(event);
+        if (messageError) lastRunErrorRef.current = messageError;
+        break;
+      }
       case "tool_execution_start": {
         const id = event.toolCallId as string;
         const name = event.toolName as string;
-        runHadContentRef.current = true;
+        // Seed the live entry immediately: the row must show a running tool
+        // from the first frame, before any output exists.
+        setLiveToolResult(id, { role: "toolResult", toolCallId: id, toolName: name, content: [], partial: true });
         setAgentPhase((prev) => {
           const tools = prev?.kind === "running_tools" ? [...prev.tools] : [];
           if (!tools.some((t) => t.id === id)) tools.push({ id, name });
@@ -1796,8 +1972,42 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
         break;
       }
+      case "tool_execution_update": {
+        // omp streams the FULL accumulated partial result per output chunk, so
+        // the newest frame replaces the previous snapshot (the SSE coalescer
+        // already drops superseded frames within a display frame).
+        const id = event.toolCallId as string;
+        const partial = isRecord(event.partialResult) ? event.partialResult : null;
+        const content = Array.isArray(partial?.content) ? (partial.content as ToolResultMessage["content"]) : [];
+        const toolName = typeof event.toolName === "string" ? event.toolName : undefined;
+        setLiveToolResults((prev) => {
+          const existing = prev.get(id);
+          const next = new Map(prev);
+          next.set(id, {
+            role: "toolResult",
+            toolCallId: id,
+            ...(toolName ?? existing?.toolName ? { toolName: toolName ?? existing?.toolName } : {}),
+            content,
+            ...(partial?.details !== undefined ? { details: partial.details } : {}),
+            partial: true,
+          });
+          return next;
+        });
+        break;
+      }
       case "tool_execution_end": {
         const id = event.toolCallId as string;
+        const finalResult = isRecord(event.result) ? event.result : null;
+        // Hold the final snapshot (no longer `partial`) until the committed
+        // toolResult message lands a frame later, so the row never blanks out.
+        setLiveToolResult(id, {
+          role: "toolResult",
+          toolCallId: id,
+          toolName: typeof event.toolName === "string" ? event.toolName : undefined,
+          content: Array.isArray(finalResult?.content) ? (finalResult.content as ToolResultMessage["content"]) : [],
+          isError: finalResult?.isError === true || event.isError === true,
+          ...(finalResult?.details !== undefined ? { details: finalResult.details } : {}),
+        });
         if (event.toolName === "todo" && sessionIdRef.current) {
           void reconcileAgentState(sessionIdRef.current);
         }
@@ -1990,7 +2200,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, clearTerminalReconcileTimer, consumeQueuedMessage, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, mergeSubagents, onAgentEnd, reconcileAgentState, resetSubagentActivityState, applyAuthoritativeModel, beginAuthoritativeModelSync]);
+  }, [addNotice, clearLiveToolResults, clearTerminalReconcileTimer, consumeQueuedMessage, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, mergeSubagents, onAgentEnd, reconcileAgentState, resetSubagentActivityState, applyAuthoritativeModel, beginAuthoritativeModelSync, setLiveToolResult, surfaceQuotaOnStream]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean> => {
@@ -2026,6 +2236,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
     promptRunIdRef.current = promptRunId;
     agentRunningRef.current = true;
+    slashCommandRunRef.current = isSlashCommandPrompt;
+    // A new run starts fresh: drop any rescued in-flight reconcile state from
+    // the previous run (its late response is fenced out by the new run id).
+    reconcileGuardRef.current?.reset();
+    clearLiveToolResults();
     setAgentRunning(true);
     setAgentPhase(isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" });
     setAdvisorActiveAt(0);
@@ -2118,10 +2333,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       agentRunningRef.current = false;
       setAgentRunning(false);
       setAgentPhase(null);
+      clearLiveToolResults();
+      lastQuotaErrorRef.current = null;
+      lastRunErrorRef.current = null;
+      slashCommandRunRef.current = false;
       dispatch({ type: "end" });
       return false;
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, opts.chatInputRef, refreshSubagentRoster, registerHostTools, registerHostUriSchemes, clearTerminalReconcileTimer]);
+  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, opts.chatInputRef, refreshSubagentRoster, registerHostTools, registerHostUriSchemes, clearLiveToolResults, clearTerminalReconcileTimer]);
 
   /** Abort the running agent and send the message as a fresh prompt
    * (abort_and_prompt). Only valid mid-run; the old turn's agent_end is
@@ -2767,8 +2986,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, []);
 
   // Load session on mount
+  // React StrictMode re-invokes this effect for the freshly mounted keyed
+  // <ChatWindow> (setup → cleanup → setup), which made every session switch
+  // fetch and commit the whole transcript twice — in dev, the doubled
+  // transcript commit is the dominant cost of switching sessions. Latch on the
+  // session id so one mounted instance loads its session exactly once; the
+  // surviving first invocation still owns the async continuation (SSE attach,
+  // roster hydration), which its cleanup does not tear down.
+  const mountedSessionLoadRef = useRef<string | null>(null);
   useEffect(() => {
     if (session) {
+      if (mountedSessionLoadRef.current === session.id) return;
+      mountedSessionLoadRef.current = session.id;
       sessionIdRef.current = session.id;
       loadSession(session.id, true, true).then((agentState) => {
         if (agentState?.running) {
@@ -3015,6 +3244,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands, setActiveLeafId, setData, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,
+    liveToolResults,
     // Subscriptions
     handleAgentEventRef,
   };

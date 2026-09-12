@@ -87,9 +87,10 @@ test("renders goal, planning, and advisor indicators at the composer", () => {
 
   assert.match(html, /Ship the active goal bar/);
   assert.match(html, /(Planning in progress|chatInput\.planningInProgress)/);
-  // The per-chat advisor toggle renders pressed with its disable title.
-  assert.match(html, /aria-pressed="true"/);
-  assert.match(html, /title="(Disable advisor for this chat|chatInput\.advisorDisableTitle|Advisor: [^"]*)"/);
+  // The advisor toggle moved into the plus menu: no pressed toggle inline,
+  // but the plus trigger renders for the same props.
+  assert.doesNotMatch(html, /aria-pressed="true"/);
+  assert.match(html, /aria-label="(More actions|chatInput\.plusMenu)"/);
 });
 
 test("renders the compact toolbar action", () => {
@@ -130,19 +131,6 @@ test("filters model options by display name, identifier, and provider", () => {
   assert.deepEqual(filterModelOptions(options, "OPENAI", "en"), [options[0]]);
   assert.equal(filterModelOptions(options, "   ", "en"), options);
 });
-test("queued slash commands gate /advisor behind the per-chat toggle", async () => {
-  const { readFile } = await import("node:fs/promises");
-  const source = await readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8");
-  const sendQueued = source.slice(
-    source.indexOf("const sendQueued = useCallback"),
-    source.indexOf("const primaryActionQueuesMessage"),
-  );
-  const guard = sendQueued.indexOf('commandName === "advisor" && !advisorEnabled');
-  const expansion = sendQueued.indexOf("expandWebSlashCommand(msg)");
-
-  assert.ok(guard > 0, "advisor guard missing from sendQueued");
-  assert.ok(expansion > guard, "advisor guard must run before command expansion");
-});
 
 test("renders single queued prompt in compact bar", () => {
   const html = renderToStaticMarkup(
@@ -163,6 +151,26 @@ test("renders single queued prompt in compact bar", () => {
   assert.match(html, />(Steer|chatInput\.queuedSteerAction)</);
 });
 
+test("keeps editing and deletion but hides Steer for a single queued steer", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ChatInput, {
+      onSend() {},
+      onAbort() {},
+      onPromoteQueuedToSteer() {},
+      isStreaming: true,
+      queuedMessages: {
+        followUp: [],
+        steering: ["Already prioritized task"],
+      },
+    }),
+  );
+
+  assert.match(html, /Already prioritized task/);
+  assert.match(html, />(Edit|chatInput\.queuedEdit)</);
+  assert.match(html, />(Delete|chatInput\.queuedDelete)</);
+  assert.doesNotMatch(html, />(Steer|chatInput\.queuedSteerAction)</);
+});
+
 test("renders multiple queued prompts with count and expand action", () => {
   const html = renderToStaticMarkup(
     React.createElement(ChatInput, {
@@ -181,17 +189,57 @@ test("renders multiple queued prompts with count and expand action", () => {
   assert.match(html, /First task/);
 });
 
-test("model picker dropdown source uses scale-immune anchored positioning", async () => {
-  const { readFile } = await import("node:fs/promises");
-  const source = await readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8");
 
-  // Ensures the model picker dropdown is anchored with CSS positioning (bottom: calc(100% + 6px), left: 0)
-  // and doesn't rely on raw viewport getBoundingClientRect measurements that break when html zoom is applied.
-  assert.doesNotMatch(source, /setModelDropdownRect/);
-  assert.match(source, /bottom:\s*isMobile\s*\?\s*8\s*:\s*["']calc\(100%\s*\+\s*6px\)["']/);
+test("nested model picker groups by provider and pins the current provider first", async () => {
+  const { groupModelOptionsByProvider, orderProviderGroups } = await jiti.import("./ChatInput-model-picker.tsx");
+  const options = [
+    { provider: "anthropic", modelId: "claude", name: "Claude" },
+    { provider: "openai", modelId: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
+    { provider: "openai", modelId: "gpt-5.5", name: "GPT-5.5" },
+    { provider: "pi", modelId: "pi-1", name: "Pi" },
+  ];
+  const grouped = groupModelOptionsByProvider(options);
+  assert.deepEqual(grouped.map((g) => g.provider), ["anthropic", "openai", "pi"]);
+  assert.equal(grouped[1].options.length, 2);
+
+  const ordered = orderProviderGroups(grouped, "openai");
+  assert.deepEqual(ordered.map((g) => g.provider), ["openai", "anthropic", "pi"]);
 });
 
-test("renders the tool preset picker trigger when a handler is provided", () => {
+test("model picker panel renders providers rail, models pane, and Add Providers", async () => {
+  const { ModelPickerPanel } = await jiti.import("./ChatInput-model-picker.tsx");
+  const html = renderToStaticMarkup(
+    React.createElement(ModelPickerPanel, {
+      modelOptions: [
+        { provider: "codex", modelId: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
+        { provider: "codex", modelId: "gpt-5.6-terra", name: "GPT-5.6 Terra" },
+        { provider: "pi", modelId: "pi-1", name: "Pi One" },
+      ],
+      filteredModelOptions: [
+        { provider: "codex", modelId: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
+        { provider: "codex", modelId: "gpt-5.6-terra", name: "GPT-5.6 Terra" },
+        { provider: "pi", modelId: "pi-1", name: "Pi One" },
+      ],
+      currentModel: { provider: "codex", modelId: "gpt-5.6-sol" },
+      modelSearchQuery: "",
+      onSearchQueryChange() {},
+      isMobile: false,
+      onSelectModel() {},
+      onOpenProviders() {},
+    }),
+  );
+
+  assert.match(html, /picker-nested-providers/);
+  assert.match(html, /picker-nested-models/);
+  assert.match(html, /GPT-5\.6 Sol/);
+  assert.match(html, /GPT-5\.6 Terra/);
+  assert.match(html, />codex</);
+  assert.match(html, />pi</);
+  assert.match(html, />(Add Providers|chatInput\.addProviders)</);
+});
+
+
+test("exposes tool presets through the plus menu when a handler is provided", () => {
   const html = renderToStaticMarkup(
     React.createElement(ChatInput, {
       onSend() {},
@@ -202,11 +250,13 @@ test("renders the tool preset picker trigger when a handler is provided", () => 
     }),
   );
 
-  assert.match(html, /aria-label="Change tool preset: full"/);
+  // No inline preset trigger remains; the plus trigger carries the menu.
+  assert.doesNotMatch(html, /aria-label="Change tool preset: full"/);
+  assert.match(html, /aria-label="(More actions|chatInput\.plusMenu)"/);
   assert.match(html, /aria-haspopup="menu"/);
 });
 
-test("tool preset picker is absent without a change handler", () => {
+test("plus trigger renders without change handlers", () => {
   const html = renderToStaticMarkup(
     React.createElement(ChatInput, {
       onSend() {},
@@ -216,6 +266,7 @@ test("tool preset picker is absent without a change handler", () => {
   );
 
   assert.doesNotMatch(html, /Change tool preset/);
+  assert.match(html, /aria-label="(More actions|chatInput\.plusMenu)"/);
 });
 
 test("renders live status bar attached to the composer top edge when statusText is provided", () => {

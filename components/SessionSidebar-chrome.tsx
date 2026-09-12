@@ -4,6 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProp
 import { createPortal } from "react-dom";
 import { useI18n } from "@/lib/i18n";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
+import OmpWebLogo from "./OmpWebLogo";
 /**
  * Path label that ellipsizes on the LEFT, keeping the (most relevant) trailing
  * segments visible: "…orkspace/pi-web". Shows as much of the path as fits
@@ -322,14 +323,18 @@ function OmpWebTitle() {
         fontFamily: "var(--font-mono)",
         minWidth: "6ch",
         lineHeight: 1,
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 7,
       }}
       title={showVersion ? "Show ompweb name" : "Show ompweb version"}
     >
+      <OmpWebLogo size={20} />
       {!scrambling && !showVersion ? (
-        <>
+        <span>
           <span style={{ color: "var(--accent)" }}>omp</span>
           <span style={{ color: "var(--text)" }}>web</span>
-        </>
+        </span>
       ) : (
         <span style={{ color: showVersion ? "var(--accent)" : "var(--text)" }}>{display}</span>
       )}

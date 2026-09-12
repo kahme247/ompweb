@@ -3,10 +3,10 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Command } from "cmdk";
-import { Moon, Plus, Sun, MessageSquare } from "lucide-react";
+import { Check, MessageSquare, Monitor, Moon, Plus, Sparkles, Sun } from "lucide-react";
 import type { SessionInfo } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
-import { useTheme } from "@/hooks/useTheme";
+import { ALL_THEMES, useTheme } from "@/hooks/useTheme";
 
 type Props = {
   onSelectSession: (session: SessionInfo) => void;
@@ -26,7 +26,7 @@ function relativeTime(value: string, locale: string): string {
 
 export const CommandPalette = memo(function CommandPalette({ onSelectSession, onNewSession, currentModel }: Props) {
   const { t, locale } = useI18n();
-  const { isDark, toggleTheme } = useTheme();
+  const { isDark, toggleTheme, setTheme, preference } = useTheme();
   const [open, setOpen] = useState(false);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(false);
@@ -99,6 +99,63 @@ export const CommandPalette = memo(function CommandPalette({ onSelectSession, on
           <Command.Group heading={t("commandPalette.actions")}>
             <Command.Item value={t("commandPalette.newSession")} onSelect={() => choose(onNewSession)} style={{ display: "flex", gap: 10, padding: "9px 10px", borderRadius: "var(--radius-control)", color: "var(--text)", cursor: "pointer" }}><Plus size={15} color="var(--accent)" />{t("commandPalette.newSession")}</Command.Item>
             <Command.Item value={t("commandPalette.toggleTheme")} onSelect={() => choose(toggleTheme)} style={{ display: "flex", gap: 10, padding: "9px 10px", borderRadius: "var(--radius-control)", color: "var(--text)", cursor: "pointer" }}>{isDark ? <Sun size={15} color="var(--accent)" /> : <Moon size={15} color="var(--accent)" />}{t("commandPalette.toggleTheme")}</Command.Item>
+          </Command.Group>
+          <Command.Group heading={t("commandPalette.themes") || "Themes"}>
+            {ALL_THEMES.map((theme) => (
+              <Command.Item
+                key={theme.id}
+                value={`${t("commandPalette.themes") || "Theme"}: ${theme.name}`}
+                onSelect={() => choose(() => setTheme(theme.id))}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  padding: "9px 10px",
+                  borderRadius: "var(--radius-control)",
+                  color: "var(--text)",
+                  cursor: "pointer",
+                }}
+              >
+                <span
+                  style={{
+                    width: 13,
+                    height: 13,
+                    borderRadius: "50%",
+                    backgroundColor: theme.bg,
+                    border: theme.id === "omp" ? "1.5px solid #7DD7E8" : "1px solid color-mix(in srgb, var(--border) 80%, transparent)",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    flexShrink: 0,
+                  }}
+                >
+                  <span style={{ width: 5, height: 5, borderRadius: "50%", backgroundColor: theme.accent }} />
+                </span>
+                <span style={{ flex: 1, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                  {theme.name}
+                  {theme.id === "omp" && <Sparkles size={12} color="var(--accent)" />}
+                </span>
+                {preference === theme.id && <Check size={14} color="var(--accent)" />}
+              </Command.Item>
+            ))}
+            <Command.Item
+              key="system"
+              value={`${t("commandPalette.themes") || "Theme"}: ${t("appShell.themeSystem") || "System"}`}
+              onSelect={() => choose(() => setTheme("system"))}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                padding: "9px 10px",
+                borderRadius: "var(--radius-control)",
+                color: "var(--text)",
+                cursor: "pointer",
+              }}
+            >
+              <Monitor size={14} color="var(--text-muted)" style={{ flexShrink: 0 }} />
+              <span style={{ flex: 1 }}>{t("appShell.themeSystem") || "System (Auto)"}</span>
+              {preference === "system" && <Check size={14} color="var(--accent)" />}
+            </Command.Item>
           </Command.Group>
           <Command.Group heading={t("commandPalette.models")}>
             <Command.Item value={currentModel ?? t("commandPalette.currentModel")} disabled style={{ padding: "9px 10px", color: "var(--text-muted)", fontSize: 13 }}>{t("commandPalette.currentModel")}: {currentModel ?? t("commandPalette.notAvailable")}</Command.Item>

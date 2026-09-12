@@ -1,6 +1,22 @@
 import type { Metadata, Viewport } from "next";
-import { Noto_Sans_Mono, Noto_Serif_SC, Source_Serif_4 } from "next/font/google";
+import Script from "next/script";
+import { Geist, JetBrains_Mono, Noto_Sans_Mono, Noto_Serif_SC, Source_Serif_4 } from "next/font/google";
+import { ThemeColor } from "@/hooks/useTheme";
+import { SIDEBAR_HISTORY_BRIDGE_SCRIPT } from "@/lib/sidebar-history-bridge";
 import "./globals.css";
+
+const geist = Geist({
+  subsets: ["latin"],
+  variable: "--font-geist",
+  display: "swap",
+});
+
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ["latin"],
+  weight: ["400", "500", "600"],
+  variable: "--font-jb-mono",
+  display: "swap",
+});
 
 const notoSansMono = Noto_Sans_Mono({
   subsets: ["latin", "cyrillic"],
@@ -40,17 +56,14 @@ export const metadata: Metadata = {
   },
 };
 
-// theme-color adapts to light/dark so the browser chrome / iOS status bar
-// matches the active theme. `viewportFit: cover` lets us honor safe-area-inset
-// (used by DirectoryPicker footer) on notched devices.
+// `viewportFit: cover` honors safe-area-inset on notched devices.
+// `interactiveWidget: resizes-content` makes the soft keyboard shrink the
+// layout viewport, keeping the composer above the keyboard.
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
-  themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#FAF9F6" },
-    { media: "(prefers-color-scheme: dark)", color: "#1B1916" },
-  ],
+  interactiveWidget: "resizes-content",
 };
 
 export default function RootLayout({
@@ -59,14 +72,20 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" translate="no" className={`${notoSansMono.variable} ${sourceSerif.variable} ${notoSerifSC.variable} notranslate`} suppressHydrationWarning>
+    <html lang="en" translate="no" className={`${geist.variable} ${jetbrainsMono.variable} ${notoSansMono.variable} ${sourceSerif.variable} ${notoSerifSC.variable} notranslate`} suppressHydrationWarning>
       <head>
+        <ThemeColor />
         <meta name="google" content="notranslate" />
-        {/* Pre-hydration: apply stored theme before first paint to avoid a flash
-            of the wrong theme. Matches html.dark selector in globals.css. */}
+        {/* Register before Next's router. Owned sidebar traversals must be handled
+            before the router can synchronously restore an older session URL. */}
+        <Script id="sidebar-history" strategy="beforeInteractive">
+          {SIDEBAR_HISTORY_BRIDGE_SCRIPT}
+        </Script>
+        {/* Apply the stored theme and its CSS background to browser chrome before
+            first paint. The hydrated hook keeps both in sync afterward. */}
         <script
           dangerouslySetInnerHTML={{
-            __html: `(function(){try{var t=localStorage.getItem("omp-theme"),d=matchMedia("(prefers-color-scheme: dark)").matches;if(t==="dark"||(t!=="light"&&t!=="dark"&&d))document.documentElement.classList.add("dark")}catch(e){}})();`,
+            __html: `(function(){try{var t;try{t=localStorage.getItem("omp-theme")}catch(e){}var d=matchMedia("(prefers-color-scheme: dark)").matches;var dt={"dark":1,"omp":1,"dracula":1,"harbor":1,"one-dark-pro":1,"rose-pine":1,"catppuccin-mocha":1,"gruvbox-dark":1,"nord":1,"tokyo-night":1};var lt={"light":1,"one-light":1,"catppuccin-latte":1,"rose-pine-dawn":1};var res=t==="system"?(d?"dark":"light"):(!t?"omp":t);if(!dt[res]&&!lt[res]&&res!=="omp")res="omp";var dark=!!dt[res]&&res!=="omp";if(dark)document.documentElement.classList.add("dark");if(res==="omp"){document.documentElement.classList.add("omp")}else{document.documentElement.classList.add("theme-"+res)}document.documentElement.setAttribute("data-theme",res);var m=document.querySelector('meta[name="theme-color"]'),c=getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();if(m&&c)m.setAttribute("content",c);}catch(e){}})();`,
           }}
         />
         <script

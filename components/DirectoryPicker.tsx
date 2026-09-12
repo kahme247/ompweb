@@ -227,7 +227,7 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
         </div>
         <div className="directory-picker-footer" style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 10, flexShrink: 0, padding: "10px 18px", borderTop: "1px solid var(--border)" }}>
           <button className="directory-picker-action" type="button" onClick={onCancel} disabled={busy} style={{ padding: "6px 14px", border: "1px solid var(--border)", borderRadius: 6, background: "none", color: "var(--text-muted)", cursor: busy ? "default" : "pointer", fontSize: 13 }}>{t("directoryPicker.cancel")}</button>
-          <button className="directory-picker-action" type="button" onClick={submitSelection} disabled={!canSelect} title={hasUncommittedPath ? t("directoryPicker.openPathBeforeSelecting") : t("directoryPicker.selectCurrentDirectory")} style={{ padding: "6px 16px", border: 0, borderRadius: 6, background: "var(--accent)", color: "var(--on-accent)", fontSize: 13, fontWeight: 600, opacity: canSelect ? 1 : 0.6, cursor: canSelect ? "pointer" : "default" }}>
+          <button className="directory-picker-action" type="button" onClick={submitSelection} disabled={!canSelect} title={hasUncommittedPath ? t("directoryPicker.openPathBeforeSelecting") : t("directoryPicker.selectCurrentDirectory")} style={{ padding: "6px 16px", border: 0, borderRadius: 6, background: "var(--accent-strong)", color: "var(--on-accent)", fontSize: 13, fontWeight: 600, opacity: canSelect ? 1 : 0.6, cursor: canSelect ? "pointer" : "default" }}>
             {busy ? t("directoryPicker.checking") : t("directoryPicker.selectThisFolder")}
           </button>
         </div>

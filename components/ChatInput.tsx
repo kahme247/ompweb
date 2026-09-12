@@ -1,11 +1,16 @@
 "use client";
 
-import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, ListChecks, Search, Shrink, Sparkles, Wrench, Zap } from "lucide-react";
+import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
+import { ChevronDown, ListChecks, Loader2, Mic, Paperclip, Plus, Shrink, Sparkles, Wrench, Zap } from "lucide-react";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
 import { toast } from "@/components/ui/toast";
+import { ConfirmDialog } from "@/components/ui/field";
+import { useDictation } from "@/hooks/useDictation";
+import type { GenerationSpeedInfo, SessionStatsInfo } from "@/lib/pi-types";
+import { formatCompactNumber, formatPercent } from "@/lib/format";
+import { ContextDetailPanel } from "./ComposerPanels";
 import { clearDraft, getDraft, setDraft } from "@/lib/draft-store";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import type { AttachedImage, AttachedTextFile } from "./ChatInput-draft-attachments";
@@ -35,12 +40,15 @@ import {
   readVisibleModelKeys,
   type ModelOption,
 } from "./ChatInput-model-options";
+import { ModelPickerPanel } from "./ChatInput-model-picker";
 import { ComposerModeStatus, ModelErrorBanner, QueuedActionButton } from "./ChatInput-banners";
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
 import {
   composeMessageWithTextAttachments,
-  MAX_ATTACHED_TEXT_BYTES,
+  describeTextAttachmentSkip,
+  formatAttachmentBytes,
   MAX_ATTACHED_TEXT_FILES,
+  selectTextAttachments,
 } from "@/lib/chat-attachments";
 import {
   MAX_ATTACHED_IMAGE_BYTES,
@@ -107,6 +115,14 @@ interface Props {
   advisorModel?: { name: string; reasoning: string | null } | null;
   /** Compact the session context from the composer toolbar. */
   onCompact?: () => void;
+  /** Live context totals feeding the composer context ring. */
+  contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null;
+  /** Session stats shown in the context ring popover. */
+  sessionStats?: SessionStatsInfo | null;
+  /** Model capacity shown in the context ring popover. */
+  modelCapacity?: { contextWindow?: number; maxTokens?: number } | null;
+  /** Generation speed shown in the context ring popover. */
+  generationSpeed?: GenerationSpeedInfo | null;
   /** Remove one queued message from the queue panel (Edit/Delete/Steer). */
   onRemoveQueuedMessage?: (text: string) => void;
   /** Relabel the first queued follow-up as a steering message. */
@@ -128,6 +144,8 @@ interface Props {
   onMinimize?: () => void;
   /** Active status label attached to the composer's top edge (e.g. "Waiting for model..."). */
   statusText?: string | null;
+  /** Open Settings → API Keys & Providers from the model picker footer. */
+  onOpenProviders?: () => void;
 }
 
 export interface ChatInputHandle {
@@ -136,9 +154,85 @@ export interface ChatInputHandle {
   insertIfEmpty: (text: string) => void;
   prependText: (text: string) => void;
   addFiles: (files: File[]) => void;
+  openContextPanel: () => void;
+}
+const COMPOSITION_END_ENTER_GRACE_MS = 100;
+
+// The history / slash / @ menus are absolutely positioned relative to the
+// composer input. On the empty-session page the composer sits inside an
+// `overflow-y-auto` wrapper, so the part of a menu that extends past that
+// wrapper's edge gets clipped. Before paint we measure the nearest clipping
+// ancestor and pick the side (above/below the input) with more room, then cap
+// the menu height so it never overflows that boundary.
+const MENU_EDGE_PAD = 8;
+
+function getMenuBoundary(el: HTMLElement | null): { top: number; bottom: number } {
+  if (typeof window === "undefined" || !el) return { top: 0, bottom: 0 };
+  let node: HTMLElement | null = el.parentElement;
+  while (node && node !== document.body && node !== document.documentElement) {
+    if (getComputedStyle(node).overflowY !== "visible") {
+      const rect = node.getBoundingClientRect();
+      return { top: rect.top, bottom: rect.bottom };
+    }
+    node = node.parentElement;
+  }
+  return { top: 0, bottom: window.innerHeight };
 }
 
-const COMPOSITION_END_ENTER_GRACE_MS = 100;
+type MenuPlacement = "up" | "down";
+
+/**
+ * Resolves the anchor rect (the relative parent of the menu) and the nearest
+ * clipping boundary, then returns which side to open on and the max height
+ * (CSS px) that fits. `vhFraction`/`capPx` reproduce the menu's existing
+ * `min(<vhFraction>vh, <capPx>px)` default so the unconstrained case is
+ * byte-for-byte unchanged.
+ */
+function useDropdownFlip(
+  open: boolean,
+  menuRef: React.RefObject<HTMLDivElement | null>,
+  vhFraction: number,
+  capPx: number,
+) {
+  const [placement, setPlacement] = useState<MenuPlacement>("up");
+  const [maxHeight, setMaxHeight] = useState<number | null>(null);
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setPlacement("up");
+      setMaxHeight(null);
+      return;
+    }
+    const menu = menuRef.current;
+    const anchor = menu?.parentElement;
+    if (!menu || !anchor) return;
+    const boundary = getMenuBoundary(menu);
+    const rect = anchor.getBoundingClientRect();
+    const vh = window.innerHeight;
+    const defaultPx = Math.min(vh * vhFraction, capPx);
+    // The menu bottom (up) / top (down) is anchored 8px off the input edge.
+    const upSpace = rect.top - 8 - boundary.top - MENU_EDGE_PAD;
+    const downSpace = boundary.bottom - (rect.bottom + 8) - MENU_EDGE_PAD;
+
+    if (upSpace >= defaultPx || upSpace >= downSpace) {
+      setPlacement("up");
+      setMaxHeight(Math.max(0, Math.min(defaultPx, upSpace)));
+    } else {
+      setPlacement("down");
+      setMaxHeight(Math.max(0, Math.min(defaultPx, downSpace)));
+    }
+  }, [open, menuRef, vhFraction, capPx]);
+
+  return { placement, maxHeight };
+}
+
+function menuDropStyle(placement: MenuPlacement, maxHeight: number | null): React.CSSProperties {
+  return {
+    ...(placement === "down" ? { top: "calc(100% + 8px)" } : { bottom: "calc(100% + 8px)" }),
+    maxHeight: maxHeight !== null ? `${maxHeight}px` : undefined,
+  };
+}
+
 
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, fastModeEnabled, fastModeActive, fastModeSupported, onFastModeChange,
@@ -153,9 +247,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   advisorActive,
   advisorModel,
   onCompact,
+  contextUsage,
+  sessionStats,
+  modelCapacity,
+  generationSpeed,
   onRemoveQueuedMessage,
   onPromoteQueuedToSteer,
-  draftKey,
+  draftKey = "new:unassigned",
   cwd,
   activeGoal,
   activePlan,
@@ -163,6 +261,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   onAdvisorChange,
   onMinimize,
   statusText,
+  onOpenProviders,
 }: Props, ref) {
   const isMobile = useIsMobile();
   const { t, tn, locale } = useI18n();
@@ -171,9 +270,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     [locale],
   );
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
+  const [queuedDeleteTarget, setQueuedDeleteTarget] = useState<{
+    text: string;
+    draftKey: string | undefined;
+    queue: Props["queuedMessages"];
+  } | null>(null);
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
-  const [toolPresetDropdownOpen, setToolPresetDropdownOpen] = useState(false);
+  const [contextOpen, setContextOpen] = useState(false);
+  const [plusMenuOpen, setPlusMenuOpen] = useState(false);
+  const [plusExpanded, setPlusExpanded] = useState<"tools" | "advisor" | null>(null);
   const [modelSearchQuery, setModelSearchQuery] = useState("");
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
@@ -201,8 +307,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
   const modelSearchInputRef = useRef<HTMLInputElement>(null);
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
-  const toolPresetDropdownRef = useRef<HTMLDivElement>(null);
+  const contextWrapRef = useRef<HTMLDivElement>(null);
+  const plusMenuRef = useRef<HTMLDivElement>(null);
   const historyMenuRef = useRef<HTMLDivElement>(null);
+  const slashMenuRef = useRef<HTMLDivElement>(null);
+  const atMenuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isComposingRef = useRef(false);
   const lastCompositionEndAtRef = useRef(0);
@@ -221,9 +330,51 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const attachmentRevisionRef = useRef(0);
   const pendingImageCountRef = useRef(0);
   const pendingTextFileCountRef = useRef(0);
+  const pendingTextFileBytesRef = useRef(0);
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
   attachedTextFilesRef.current = attachedTextFiles;
+
+  const insertTextAtCursor = useCallback((text: string) => {
+    const ta = textareaRef.current;
+    if (!ta) {
+      setValue((v) => v + (v ? " " : "") + text);
+      return;
+    }
+    const start = ta.selectionStart ?? ta.value.length;
+    const end = ta.selectionEnd ?? ta.value.length;
+    const before = ta.value.slice(0, start);
+    const after = ta.value.slice(end);
+    const sep = before.length > 0 && !before.endsWith(" ") ? " " : "";
+    const newVal = before + sep + text + after;
+    setValue(newVal);
+    setAtQuery(null);
+    requestAnimationFrame(() => {
+      if (!ta) return;
+      const pos = start + sep.length + text.length;
+      ta.setSelectionRange(pos, pos);
+      ta.focus();
+      ta.style.height = "auto";
+      ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+    });
+  }, []);
+
+  const { isRecording, isTranscribing, toggle: toggleDictation, cancel: cancelDictation, stop: stopDictation } = useDictation({
+    onTranscript: insertTextAtCursor,
+    onError: (err) => {
+      const msg =
+        err === "Microphone not supported in this browser or context"
+          ? t("chatInput.dictationNotSupported")
+          : err === "Microphone access denied"
+          ? t("chatInput.dictationPermissionDenied")
+          : err === "No speech detected"
+          ? t("chatInput.dictationNoSpeech")
+          : err === "Transcription failed"
+          ? t("chatInput.dictationFailed")
+          : err;
+      toast.error(msg);
+    },
+  });
 
   useImperativeHandle(ref, () => ({
     focus() {
@@ -259,31 +410,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
       });
     },
-    insertText(text: string) {
-      const ta = textareaRef.current;
-      if (!ta) {
-        setValue((v) => v + (v ? " " : "") + text);
-        return;
-      }
-      const start = ta.selectionStart ?? ta.value.length;
-      const end = ta.selectionEnd ?? ta.value.length;
-      const before = ta.value.slice(0, start);
-      const after = ta.value.slice(end);
-      const sep = before.length > 0 && !before.endsWith(" ") ? " " : "";
-      const newVal = before + sep + text + after;
-      setValue(newVal);
-      setAtQuery(null);
-      requestAnimationFrame(() => {
-        if (!ta) return;
-        const pos = start + sep.length + text.length;
-        ta.setSelectionRange(pos, pos);
-        ta.focus();
-        ta.style.height = "auto";
-        ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-      });
-    },
+    insertText: insertTextAtCursor,
     addFiles(files: File[]) {
       processFiles(files);
+    },
+    openContextPanel() {
+      setContextOpen(true);
     },
   }));
 
@@ -300,7 +432,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         setAttachError(
           remaining === 0
             ? `Maximum of ${MAX_ATTACHED_IMAGES} attached images reached.`
-            : `${files.length} image(s) skipped: images up to ${Math.round(MAX_ATTACHED_IMAGE_BYTES / 1024 / 1024)} MB are supported.`,
+            : `${files.length} image(s) skipped: images up to ${formatAttachmentBytes(MAX_ATTACHED_IMAGE_BYTES)} are supported.`,
         );
       }
       return;
@@ -353,21 +485,24 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       0,
       MAX_ATTACHED_TEXT_FILES - attachedTextFilesRef.current.length - pendingTextFileCountRef.current,
     );
-    const textFiles = files
-      .filter((file) => file.size <= MAX_ATTACHED_TEXT_BYTES)
-      .slice(0, remaining);
+    // In-flight batches reserve their bytes too, so two overlapping drops
+    // cannot each fit under the aggregate budget on their own.
+    const { accepted: textFiles, tooLarge, overBudget } = selectTextAttachments(files, {
+      usedBytes: attachedTextFilesRef.current.reduce((total, file) => total + file.size, 0) + pendingTextFileBytesRef.current,
+      usedSlots: attachedTextFilesRef.current.length + pendingTextFileCountRef.current,
+    });
+    // Report every dropped candidate, not just an entirely rejected batch: a
+    // drop of several files can lose some to the budget while accepting others.
+    const limitMessage = remaining === 0 && files.length > 0
+      ? `Maximum of ${MAX_ATTACHED_TEXT_FILES} text files reached.`
+      : describeTextAttachmentSkip({ tooLarge, overBudget });
     if (!textFiles.length) {
-      if (files.length > 0) {
-        setAttachError(
-          remaining === 0
-            ? `Maximum of ${MAX_ATTACHED_TEXT_FILES} text files reached.`
-            : `${files.length} file(s) skipped: files up to ${Math.round(MAX_ATTACHED_TEXT_BYTES / 1024)} KB are supported.`,
-        );
-      }
+      if (files.length > 0) setAttachError(limitMessage ?? `${files.length} file(s) skipped.`);
       return;
     }
     const revision = attachmentRevisionRef.current;
     pendingTextFileCountRef.current += textFiles.length;
+    pendingTextFileBytesRef.current += textFiles.reduce((total, file) => total + file.size, 0);
     try {
       const readFiles = await Promise.all(
         textFiles.map(async (file): Promise<AttachedTextFile> => ({
@@ -391,15 +526,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         ...prev,
         ...newFiles.slice(0, Math.max(0, MAX_ATTACHED_TEXT_FILES - prev.length)),
       ]);
-      if (skipped > 0) {
-        setAttachError(`${skipped} file(s) skipped: binary or non-text files cannot be attached.`);
-      } else {
-        setAttachError(null);
-      }
+      setAttachError(
+        limitMessage
+          ?? (skipped > 0 ? `${skipped} file(s) skipped: binary or non-text files cannot be attached.` : null),
+      );
     } catch {
       setAttachError("One or more files could not be read. Try a different file.");
     } finally {
       pendingTextFileCountRef.current -= textFiles.length;
+      pendingTextFileBytesRef.current -= textFiles.reduce((total, file) => total + file.size, 0);
     }
   }, []);
 
@@ -455,7 +590,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     }
   }, [clearImages, clearTextFiles, draftKey]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!draftKey || draftKeyRef.current !== draftKey) return;
     setDraft(draftKey, {
       value,
@@ -464,7 +599,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     });
   }, [attachedImages, attachedTextFiles, draftKey, value]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const previousDraftKey = draftKeyRef.current;
     if (previousDraftKey === draftKey) return;
 
@@ -473,6 +608,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     // validation banner along with the old draft.
     attachmentRevisionRef.current += 1;
     setAttachError(null);
+    setQueuedDeleteTarget(null);
 
     if (previousDraftKey) {
       setDraft(previousDraftKey, {
@@ -553,6 +689,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
     : null;
+  const historyFlip = useDropdownFlip(historyMenuOpen && inputHistory.length > 0, historyMenuRef, 0.44, 360);
+  const slashFlip = useDropdownFlip(slashMenuOpen && slashQuery !== null, slashMenuRef, 0.56, 460);
+  const atFlip = useDropdownFlip(atMenuOpen && atQuery !== null, atMenuRef, 0.48, 400);
+  const plusFlip = useDropdownFlip(plusMenuOpen, plusMenuRef, 0.44, 320);
   const [dormantSkillNames, setDormantSkillNames] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
@@ -890,6 +1030,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const queuedCount = queuedEntries.length;
 
   const [queueExpanded, setQueueExpanded] = useState(false);
+  // Invalidate confirmation if delivery or navigation changes the queue.
+  const activeDeleteTarget = queuedDeleteTarget?.draftKey === draftKey
+    && queuedDeleteTarget?.queue === queuedMessages ? queuedDeleteTarget : null;
 
   const handleItemEdit = useCallback((text: string) => {
     onRemoveQueuedMessage?.(text);
@@ -907,8 +1050,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   }, [onRemoveQueuedMessage]);
 
   const handleItemDelete = useCallback((text: string) => {
-    onRemoveQueuedMessage?.(text);
-  }, [onRemoveQueuedMessage]);
+    setQueuedDeleteTarget({ text, draftKey, queue: queuedMessages });
+  }, [draftKey, queuedMessages]);
 
   const handleItemSteer = useCallback((entry: { kind: "follow-up" | "steer"; text: string }) => {
     if (entry.kind === "follow-up") {
@@ -987,6 +1130,24 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         if (recentlyComposed) e.preventDefault();
         return;
       }
+      if (isRecording || isTranscribing) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          cancelDictation();
+          return;
+        }
+        if (isRecording && e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          stopDictation();
+          return;
+        }
+      }
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "m") {
+        e.preventDefault();
+        toggleDictation();
+        return;
+      }
+
 
       if (historyMenuOpen && !isComposing) {
         if (e.key === "ArrowDown") {
@@ -1092,7 +1253,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         return;
       }
 
-      if (e.key === "Enter" && !e.shiftKey) {
+      // Soft keyboards rarely offer Shift+Enter; on the mobile breakpoint Enter
+      // inserts a newline and the Send button submits.
+      if (e.key === "Enter" && !e.shiftKey && !isMobile) {
         e.preventDefault();
         if (isStreaming && (onSteer || onFollowUp)) {
           // Submit-during-run behavior comes from Settings (Steer current run
@@ -1105,7 +1268,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }
       }
     },
-    [isStreaming, onSteer, onFollowUp, onAbort, onMinimize, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value]
+    [isMobile, isStreaming, onSteer, onFollowUp, onAbort, onMinimize, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, isRecording, isTranscribing, cancelDictation, stopDictation, toggleDictation]
   );
 
   const handleInput = useCallback(() => {
@@ -1190,16 +1353,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     [locale, modelOptions, modelSearchQuery],
   );
 
-  // Group options by provider, preserving insertion order.
-  const modelsByProvider: { provider: string; options: ModelOption[] }[] = React.useMemo(() => {
-    const groups: { provider: string; options: ModelOption[] }[] = [];
-    for (const opt of filteredModelOptions) {
-      const group = groups.find((g) => g.provider === opt.provider);
-      if (group) group.options.push(opt);
-      else groups.push({ provider: opt.provider, options: [opt] });
-    }
-    return groups;
-  }, [filteredModelOptions]);
+  // Grouping for the nested picker lives in ChatInput-model-picker (providers rail + models pane).
 
   const displayModelName = model
     ? (modelOptions.find((o) => o.modelId === model.modelId && o.provider === model.provider)?.name
@@ -1229,6 +1383,23 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         saved: formatTokenCount(compactSavedTokens, locale),
       })
     : null;
+  // Composer context ring: live totals, falling back to the session snapshot.
+  const ringCtx = contextUsage ?? sessionStats?.contextUsage ?? null;
+  const ringPct = ringCtx?.percent ?? null;
+  const ringTone = ringPct !== null && ringPct > 90
+    ? "var(--status-error)"
+    : ringPct !== null && ringPct > 70
+      ? "var(--status-warning)"
+      : "var(--text-muted)";
+  const ringTitle = ringCtx?.contextWindow
+    ? [
+        ringPct !== null ? formatPercent(ringPct) : null,
+        ringCtx.tokens !== null && ringCtx.tokens !== undefined
+          ? `${formatCompactNumber(ringCtx.tokens)} / ${formatCompactNumber(ringCtx.contextWindow)}`
+          : formatCompactNumber(ringCtx.contextWindow),
+        t("chatInput.compactContext"),
+      ].filter(Boolean).join(" · ")
+    : t("chatInput.compactContext");
   const thinkingDisplayLabel = (() => {
     const lvl = thinkingLevel ?? "auto";
     if (lvl === "auto" || !thinkingLevelMap) return lvl;
@@ -1265,11 +1436,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (thinkingDropdownRef.current && !thinkingDropdownRef.current.contains(e.target as Node)) {
         setThinkingDropdownOpen(false);
       }
-      if (toolPresetDropdownRef.current && !toolPresetDropdownRef.current.contains(e.target as Node)) {
-        setToolPresetDropdownOpen(false);
+      if (plusMenuRef.current && !plusMenuRef.current.contains(e.target as Node)) {
+        setPlusMenuOpen(false);
       }
       if (historyMenuRef.current && !historyMenuRef.current.contains(e.target as Node) && !textareaRef.current?.contains(e.target as Node)) {
         setHistoryMenuOpen(false);
+      }
+      if (contextWrapRef.current && !contextWrapRef.current.contains(e.target as Node)) {
+        setContextOpen(false);
       }
     };
     document.addEventListener("mousedown", handler);
@@ -1284,6 +1458,27 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
          padding: "0 16px calc(8px + env(safe-area-inset-bottom))",
       }}
     >
+      <ConfirmDialog
+        open={activeDeleteTarget !== null}
+        onOpenChange={(open) => { if (!open) setQueuedDeleteTarget(null); }}
+        title={t("chatInput.queuedDeleteTitle")}
+        description={(
+          <>
+            {t("chatInput.queuedDeleteConfirmBody")}
+            <span style={{ display: "block", marginTop: 12, maxHeight: 180, overflowY: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+              {activeDeleteTarget?.text}
+            </span>
+          </>
+        )}
+        confirmLabel={t("chatInput.queuedDelete")}
+        cancelLabel={t("chatInput.cancel")}
+        danger
+        onConfirm={() => {
+          if (!activeDeleteTarget) return;
+          setQueuedDeleteTarget(null);
+          onRemoveQueuedMessage?.(activeDeleteTarget.text);
+        }}
+      />
       {/* Hidden file input */}
       <input
         ref={fileInputRef}
@@ -1466,9 +1661,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 position: "absolute",
                 left: 0,
                 right: 0,
-                bottom: "calc(100% + 8px)",
                 zIndex: 120,
-                maxHeight: "min(44vh, 360px)",
+                display: "flex",
+                flexDirection: "column",
+                ...menuDropStyle(historyFlip.placement, historyFlip.maxHeight),
               }}
             >
               <div
@@ -1480,6 +1676,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   display: "flex",
                   alignItems: "center",
                   color: "var(--text-dim)",
+                  flexShrink: 0,
                 }}
               >
                 <svg
@@ -1498,7 +1695,17 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   <path d="M12 7v5l3 2" />
                 </svg>
               </div>
-              <div style={{ maxHeight: "calc(min(44vh, 360px) - 31px)", overflowY: "auto", padding: 4 }}>
+              <div
+                style={{
+                  flex: 1,
+                  minHeight: 0,
+                  maxHeight: historyFlip.maxHeight !== null
+                    ? `${Math.max(0, historyFlip.maxHeight - 31)}px`
+                    : "calc(min(44vh, 360px) - 31px)",
+                  overflowY: "auto",
+                  padding: 4,
+                }}
+              >
                 {inputHistory.map((item, index) => {
                   const active = index === historyActiveIndex;
                   return (
@@ -1543,14 +1750,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           )}
           {slashMenuOpen && slashQuery !== null && (
             <div
+              ref={slashMenuRef}
               className="dropdown-surface"
               style={{
                 position: "absolute",
                 left: 0,
                 right: 0,
-                bottom: "calc(100% + 8px)",
                 zIndex: 120,
-                maxHeight: "min(56vh, 460px)",
+                display: "flex",
+                flexDirection: "column",
+                ...menuDropStyle(slashFlip.placement, slashFlip.maxHeight),
               }}
             >
               <div
@@ -1563,12 +1772,23 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   gap: 8,
                   fontSize: 11,
                   color: "var(--text-dim)",
+                  flexShrink: 0,
                 }}
               >
                 <span>{slashCommandsLoading ? t("chatInput.loadingCommands") : t("chatInput.slashCommandsHeader", { countLabel: slashCommandCountLabel })}</span>
                 <span style={{ fontFamily: "var(--font-mono)" }}>{t("chatInput.tabEnterHint")}</span>
               </div>
-              <div style={{ maxHeight: "calc(min(56vh, 460px) - 34px)", overflowY: "auto", padding: 10 }}>
+              <div
+                style={{
+                  flex: 1,
+                  minHeight: 0,
+                  maxHeight: slashFlip.maxHeight !== null
+                    ? `${Math.max(0, slashFlip.maxHeight - 34)}px`
+                    : "calc(min(56vh, 460px) - 34px)",
+                  overflowY: "auto",
+                  padding: 10,
+                }}
+              >
                 {!slashCommandsLoading && filteredSlashCommands.length === 0 ? (
                   <div style={{ padding: "2px 2px 4px", fontSize: 12, color: "var(--text-dim)" }}>
                     {t("chatInput.noCommandsFound")}
@@ -1681,14 +1901,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               : "";
             return (
               <div
+                ref={atMenuRef}
                 className="dropdown-surface"
                 style={{
                   position: "absolute",
                   left: 0,
                   right: 0,
-                  bottom: "calc(100% + 8px)",
                   zIndex: 120,
-                  maxHeight: "min(48vh, 400px)",
+                  display: "flex",
+                  flexDirection: "column",
+                  ...menuDropStyle(atFlip.placement, atFlip.maxHeight),
                 }}
               >
                 <div
@@ -1701,6 +1923,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     gap: 8,
                     fontSize: 11,
                     color: "var(--text-dim)",
+                    flexShrink: 0,
                   }}
                 >
                   <span>
@@ -1710,7 +1933,17 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   </span>
                   <span style={{ fontFamily: "var(--font-mono)" }}>{t("chatInput.tabEnterHint")}</span>
                 </div>
-                <div style={{ maxHeight: "calc(min(48vh, 400px) - 34px)", overflowY: "auto", padding: 4 }}>
+                <div
+                  style={{
+                    flex: 1,
+                    minHeight: 0,
+                    maxHeight: atFlip.maxHeight !== null
+                      ? `${Math.max(0, atFlip.maxHeight - 34)}px`
+                      : "calc(min(48vh, 400px) - 34px)",
+                    overflowY: "auto",
+                    padding: 4,
+                  }}
+                >
                   {!indexLoading && atMatches.length === 0 ? (
                     <div style={{ padding: "6px 8px", fontSize: 12, color: "var(--text-dim)" }}>
                       {needsServerSearch && !serverResultInUse ? t("chatInput.searching") : t("chatInput.noMatchingFiles")}
@@ -1815,9 +2048,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 <QueuedActionButton onClick={handleQueuedDelete} title={t("chatInput.queuedDeleteTitle")}>
                   {t("chatInput.queuedDelete")}
                 </QueuedActionButton>
-                <QueuedActionButton onClick={handleQueuedSteer} title={t("chatInput.queuedSteerTitle")} accent>
-                  {t("chatInput.queuedSteerAction")}
-                </QueuedActionButton>
+                {firstQueued?.kind === "follow-up" && (
+                  <QueuedActionButton onClick={handleQueuedSteer} title={t("chatInput.queuedSteerTitle")} accent>
+                    {t("chatInput.queuedSteerAction")}
+                  </QueuedActionButton>
+                )}
               </div>
             ) : (
               <div>
@@ -2048,9 +2283,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             }}
           />
 
-          {/* Toolbar: attachment · advisor · model · settings · reasoning · fast · compact · send/queue/stop */}
-
-          {/* Toolbar: attachment · model · settings · reasoning · fast · context ring · send/stop */}
+          {/* Toolbar: plus menu · model · reasoning · fast · compact · send/queue/stop */}
           <div style={{
             display: "flex",
             alignItems: "center",
@@ -2060,67 +2293,139 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             borderTop: "1px solid color-mix(in srgb, var(--border) 62%, transparent)",
             flexWrap: isMobile ? "wrap" : "nowrap",
           }}>
-            {/* Attachment */}
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              disabled={isStreaming}
-              title={t("chatInput.attachFile")}
-              aria-label={t("chatInput.attachFile")}
-              style={{
-                flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
-                width: 28, height: 28, padding: 0,
-                background: "none", border: "none",
-                borderRadius: 7,
-                color: (attachedImages.length || attachedTextFiles.length) ? "var(--accent)" : "var(--text-muted)",
-                cursor: isStreaming ? "not-allowed" : "pointer",
-                opacity: isStreaming ? 0.5 : 1,
-                transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
-              }}
-              onMouseEnter={(e) => {
-                if (isStreaming) return;
-                e.currentTarget.style.background = "var(--bg-hover)";
-                e.currentTarget.style.color = (attachedImages.length || attachedTextFiles.length) ? "var(--accent)" : "var(--text)";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = "none";
-                e.currentTarget.style.color = (attachedImages.length || attachedTextFiles.length) ? "var(--accent)" : "var(--text-muted)";
-              }}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                <polyline points="14 2 14 8 20 8" />
-              </svg>
-            </button>
-
-            {/* Advisor toggle — per-chat: gates the /advisor command and the
-                thunder indicator; active state follows this session only. */}
-            {onAdvisorChange && (
+            {/* Plus menu — attachment · tools submenu · advisor submenu */}
+            <div ref={plusMenuRef} style={{ position: "relative", flexShrink: 0 }}>
               <button
-                type="button"
-                onClick={() => onAdvisorChange(!advisorEnabled)}
-                aria-pressed={advisorEnabled}
-                title={advisorEnabled
-                  ? t("chatInput.advisorDisableTitle", { model: advisorModel?.name ?? t("messageView.advisorLabel"), reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault") })
-                  : t("chatInput.advisorEnableTitle")}
-                aria-label={advisorEnabled
-                  ? t("chatInput.advisorDisableTitle", { model: advisorModel?.name ?? t("messageView.advisorLabel"), reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault") })
-                  : t("chatInput.advisorEnableTitle")}
+                onClick={() => setPlusMenuOpen((v) => !v)}
+                title={t("chatInput.plusMenu")}
+                aria-label={t("chatInput.plusMenu")}
+                aria-expanded={plusMenuOpen}
+                aria-haspopup="menu"
                 style={{
-                  flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
+                  display: "flex", alignItems: "center", justifyContent: "center",
                   width: 28, height: 28, padding: 0,
-                  background: "none", border: "none",
+                  background: plusMenuOpen ? "var(--bg-hover)" : "none",
+                  border: "none",
                   borderRadius: 7,
-                  color: advisorEnabled ? "var(--accent)" : "var(--text-muted)",
+                  color: plusMenuOpen ? "var(--text)" : "var(--text-muted)",
                   cursor: "pointer",
                   transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
                 }}
-                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = plusMenuOpen ? "var(--bg-hover)" : "none"; e.currentTarget.style.color = plusMenuOpen ? "var(--text)" : "var(--text-muted)"; }}
               >
-                <Sparkles size={14} strokeWidth={2} aria-hidden="true" />
+                <Plus size={14} strokeWidth={2} aria-hidden="true" />
               </button>
-            )}
-
+              {plusMenuOpen && (
+                <div
+                  className="picker-panel"
+                  role="menu"
+                  aria-label={t("chatInput.plusMenu")}
+                  onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); setPlusMenuOpen(false); } }}
+                  style={{
+                    position: "absolute", left: 0,
+                    zIndex: 100, width: 230, maxWidth: "calc(100vw - 32px)",
+                    overflowY: "auto",
+                    ...menuDropStyle(plusFlip.placement, plusFlip.maxHeight),
+                  }}
+                >
+                  <div className="picker-panel-header">
+                    <Plus size={12} strokeWidth={2} style={{ color: "var(--text-muted)", flexShrink: 0 }} aria-hidden="true" />
+                    <span className="picker-panel-title">{t("chatInput.plusMenu")}</span>
+                  </div>
+                  <button
+                    role="menuitem"
+                    onClick={() => { setPlusMenuOpen(false); fileInputRef.current?.click(); }}
+                    disabled={isStreaming}
+                    title={t("chatInput.attachFile")}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 8, width: "100%",
+                      padding: "7px 10px", border: 0, borderRadius: 5,
+                      background: "transparent", color: isStreaming ? "var(--text-dim)" : "var(--text-muted)",
+                      cursor: isStreaming ? "not-allowed" : "pointer", fontSize: 12, textAlign: "left",
+                    }}
+                  >
+                    <Paperclip size={12} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden="true" />
+                    <span style={{ flex: 1 }}>{t("chatInput.attachFile")}</span>
+                  </button>
+                  {onToolPresetChange && (
+                    <>
+                      <button
+                        role="menuitem"
+                        aria-expanded={plusExpanded === "tools"}
+                        onClick={() => setPlusExpanded((v) => (v === "tools" ? null : "tools"))}
+                        title={t("chatInput.changeToolPresetTitle", { preset: toolPreset ?? "full" })}
+                        style={{
+                          display: "flex", alignItems: "center", gap: 8, width: "100%",
+                          padding: "7px 10px", border: 0, borderRadius: 5,
+                          background: plusExpanded === "tools" ? "var(--bg-selected)" : "transparent",
+                          color: "var(--text-muted)", cursor: "pointer", fontSize: 12, textAlign: "left",
+                        }}
+                      >
+                        <Wrench size={12} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden="true" />
+                        <span style={{ flex: 1 }}>{t("chatInput.toolPresetLabel")}</span>
+                        <span style={{ color: "var(--text-dim)", textTransform: "capitalize" }}>{toolPreset ?? "full"}</span>
+                        <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7, transform: plusExpanded === "tools" ? "rotate(180deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }} aria-hidden="true" />
+                      </button>
+                      {plusExpanded === "tools" && TOOL_PRESET_OPTIONS.map((opt) => {
+                        const isActive = (toolPreset ?? "full") === opt.value;
+                        return (
+                          <button
+                            className="picker-row"
+                            role="menuitemradio"
+                            aria-checked={isActive}
+                            data-active={isActive}
+                            key={opt.value}
+                            title={t(opt.descriptionKey)}
+                            onClick={() => { setPlusMenuOpen(false); if (!isActive) onToolPresetChange(opt.value); }}
+                            style={{ paddingLeft: 30 }}
+                          >
+                            <span className="picker-check">
+                              {isActive && <svg width="11" height="11" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>}
+                            </span>
+                            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textTransform: "capitalize" }}>{opt.value}</span>
+                          </button>
+                        );
+                      })}
+                    </>
+                  )}
+                  {onAdvisorChange && (
+                    <>
+                      <button
+                        role="menuitem"
+                        aria-expanded={plusExpanded === "advisor"}
+                        onClick={() => setPlusExpanded((v) => (v === "advisor" ? null : "advisor"))}
+                        title={advisorEnabled ? t("chatInput.advisorDisableTitle", { model: advisorModel?.name ?? t("messageView.advisorLabel"), reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault") }) : t("chatInput.advisorEnableTitle")}
+                        style={{
+                          display: "flex", alignItems: "center", gap: 8, width: "100%",
+                          padding: "7px 10px", border: 0, borderRadius: 5,
+                          background: plusExpanded === "advisor" ? "var(--bg-selected)" : "transparent",
+                          color: advisorEnabled ? "var(--accent)" : "var(--text-muted)", cursor: "pointer", fontSize: 12, textAlign: "left",
+                        }}
+                      >
+                        <Sparkles size={12} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden="true" />
+                        <span style={{ flex: 1 }}>{t("messageView.advisorLabel")}</span>
+                        <span style={{ color: "var(--text-dim)" }}>{advisorEnabled ? t("chatInput.plusOn") : t("chatInput.plusOff")}</span>
+                        <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7, transform: plusExpanded === "advisor" ? "rotate(180deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }} aria-hidden="true" />
+                      </button>
+                      {plusExpanded === "advisor" && (
+                        <button
+                          className="picker-row"
+                          role="menuitem"
+                          onClick={() => { setPlusMenuOpen(false); onAdvisorChange(!advisorEnabled); }}
+                          title={advisorEnabled ? t("chatInput.advisorDisableTitle", { model: advisorModel?.name ?? t("messageView.advisorLabel"), reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault") }) : t("chatInput.advisorEnableTitle")}
+                          style={{ paddingLeft: 30 }}
+                        >
+                          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {advisorEnabled ? t("chatInput.advisorDisableTitle", { model: advisorModel?.name ?? t("messageView.advisorLabel"), reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault") }) : t("chatInput.advisorEnableTitle")}
+                          </span>
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
             {/* Model selector — compact text button with dropdown */}
             {(modelOptions.length > 0 || currentName || modelError || showModelsLoading) && onModelChange && (
               <div ref={dropdownRef} style={{ position: "relative", minWidth: 0 }}>
@@ -2181,11 +2486,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                       bottom: isMobile ? 8 : "calc(100% + 6px)",
                       ...(isMobile
                         ? { left: 8, right: 8, maxWidth: "calc(100vw - 16px)" }
-                        : { left: 0, width: "max-content", minWidth: 200, maxWidth: "min(320px, calc(100vw - 32px))" }),
+                        : { left: 0, width: "min(360px, calc(100vw - 32px))" }),
                       zIndex: 500,
                       display: "flex",
                       flexDirection: "column",
-                      maxHeight: isMobile ? "calc(100dvh - 32px)" : "min(380px, 60vh)",
+                      height: isMobile ? undefined : "min(360px, calc(100dvh - 32px))",
+                      maxHeight: isMobile ? "calc(100dvh - 32px)" : undefined,
                     }}
                   >
                       <div className="picker-panel-header">
@@ -2196,52 +2502,27 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         <span className="picker-panel-title">{t("chatInput.modelsLabel")}</span>
                         <span className="picker-panel-count">{modelOptions.length}</span>
                       </div>
-                      <label className="picker-search">
-                        <Search size={13} strokeWidth={1.8} color="var(--text-dim)" aria-hidden="true" />
-                        <input
-                          ref={modelSearchInputRef}
-                          type="search"
-                          autoComplete="off"
-                          spellCheck={false}
-                          value={modelSearchQuery}
-                          onChange={(e) => setModelSearchQuery(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Escape") {
-                              e.preventDefault();
-                              setModelDropdownOpen(false);
-                            }
-                          }}
-                          placeholder={t("chatInput.searchModels")}
-                          aria-label={t("chatInput.searchModels")}
-                        />
-                      </label>
-                      <div className="picker-list">
-                        {modelsByProvider.length === 0 ? (
-                          <div style={{ padding: "9px 8px", color: "var(--text-dim)", fontSize: 12, whiteSpace: "nowrap" }}>
-                            {modelSearchQuery.trim() ? t("chatInput.noMatchingModels") : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noAvailableModels")}
-                          </div>
-                        ) : modelsByProvider.map((group) => (
-                          <div key={group.provider}>
-                            <div className="picker-group-label">{group.provider}</div>
-                            {group.options.map((opt) => {
-                              const isActive = opt.modelId === model?.modelId && opt.provider === model?.provider;
-                              return (
-                                <button
-                                  className="picker-row"
-                                  data-active={isActive}
-                                  key={`${opt.provider}:${opt.modelId}`}
-                                  onClick={() => { setModelDropdownOpen(false); if (!isActive || isAutoModelSelection) onModelChange(opt.provider, opt.modelId); }}
-                                >
-                                  <span className="picker-check">
-                                    {isActive && <svg width="11" height="11" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>}
-                                  </span>
-                                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{opt.name}</span>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        ))}
-                      </div>
+                      <ModelPickerPanel
+                        modelOptions={modelOptions}
+                        filteredModelOptions={filteredModelOptions}
+                        currentModel={model}
+                        modelSearchQuery={modelSearchQuery}
+                        onSearchQueryChange={setModelSearchQuery}
+                        searchInputRef={modelSearchInputRef}
+                        showModelsLoading={showModelsLoading}
+                        isMobile={isMobile}
+                        onSelectModel={(provider, modelId) => {
+                          setModelDropdownOpen(false);
+                          if (provider !== model?.provider || modelId !== model?.modelId || isAutoModelSelection) {
+                            onModelChange(provider, modelId);
+                          }
+                        }}
+                        onClose={() => setModelDropdownOpen(false)}
+                        onOpenProviders={onOpenProviders ? () => {
+                          setModelDropdownOpen(false);
+                          onOpenProviders();
+                        } : undefined}
+                      />
                     </div>
                 )}
               </div>
@@ -2322,75 +2603,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </div>
             )}
 
-            {/* Tool preset selector — a browser-side preference applied when
-                spawning NEW sessions (omp's RPC cannot retool a live session,
-                which the change notice below communicates). */}
-            {onToolPresetChange && (
-              <div ref={toolPresetDropdownRef} style={{ position: "relative" }}>
-                <button
-                  onClick={() => setToolPresetDropdownOpen((v) => !v)}
-                  title={t("chatInput.changeToolPresetTitle", { preset: toolPreset ?? "full" })}
-                  aria-label={`${t("chatInput.changeToolPreset")}: ${toolPreset ?? "full"}`}
-                  aria-expanded={toolPresetDropdownOpen}
-                  aria-haspopup="menu"
-                  style={{
-                    display: "flex", alignItems: "center", gap: 5,
-                    height: 28, padding: "0 8px", background: toolPresetDropdownOpen ? "var(--bg-hover)" : "none",
-                    border: "none", borderRadius: 7, color: "var(--text-muted)", cursor: "pointer",
-                    fontSize: 12,
-                    transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
-                  }}
-                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.background = toolPresetDropdownOpen ? "var(--bg-hover)" : "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
-                >
-                  <Wrench size={11} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden="true" />
-                  <span style={{ whiteSpace: "nowrap", textTransform: "capitalize" }}>{toolPreset ?? "full"}</span>
-                  <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7, transform: toolPresetDropdownOpen ? "rotate(180deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }} aria-hidden="true" />
-                </button>
-                {toolPresetDropdownOpen && (
-                  <div
-                    className="picker-panel"
-                    role="menu"
-                    style={{
-                      position: "absolute", bottom: "calc(100% + 6px)", left: 0,
-                      zIndex: 100, width: 260, maxWidth: "calc(100vw - 32px)",
-                    }}
-                  >
-                    <div className="picker-panel-header">
-                      <Wrench size={12} strokeWidth={1.8} style={{ color: "var(--text-muted)", flexShrink: 0 }} aria-hidden="true" />
-                      <span className="picker-panel-title">{t("chatInput.toolPresetLabel")}</span>
-                      <span className="picker-panel-count">{TOOL_PRESET_OPTIONS.length}</span>
-                    </div>
-                    <div className="picker-thinking-cards">
-                      {TOOL_PRESET_OPTIONS.map((opt) => {
-                        const isActive = (toolPreset ?? "full") === opt.value;
-                        return (
-                          <button
-                            className="picker-thinking-card"
-                            data-active={isActive}
-                            role="menuitemradio"
-                            aria-checked={isActive}
-                            key={opt.value}
-                            title={t(opt.descriptionKey)}
-                            onClick={() => { setToolPresetDropdownOpen(false); if (!isActive) onToolPresetChange(opt.value); }}
-                          >
-                            <span className="picker-check">
-                              {isActive && <svg width="11" height="11" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>}
-                            </span>
-                            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textTransform: "capitalize" }}>{opt.value}</span>
-                            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11, color: "var(--text-dim)" }}>{t(opt.descriptionKey)}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                    <div className="picker-panel-footer">
-                      <span>{t("chatInput.toolPresetFooter")}</span>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
             {/* Fast toggle — only for models that support fast mode. Stays
                 visible while the agent runs (disabled) so it does not look
                 like fast mode was reset; the toggle affects the family tier
@@ -2443,31 +2655,153 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </span>
             )}
 
-            {/* Compact context — replaces the context ring (usage lives in the top bar) */}
+            {/* Context ring: usage gauge opening the session context popover */}
             {onCompact && (
-              <button
-                type="button"
-                onClick={isCompacting ? onAbortCompaction : onCompact}
-                disabled={isStreaming && !isCompacting}
-                title={isCompacting ? t("chatInput.stopCompaction") : t("chatInput.compactContext")}
-                aria-label={isCompacting ? t("chatInput.stopCompaction") : t("chatInput.compactContext")}
-                style={{
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  width: 28, height: 28, padding: 0,
-                  background: "none", border: "none",
-                  borderRadius: 7,
-                  color: isCompacting ? "var(--accent)" : "var(--text-muted)",
-                  cursor: isStreaming && !isCompacting ? "not-allowed" : "pointer",
-                  opacity: isStreaming && !isCompacting ? 0.5 : 1,
-                  transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
-                }}
-                onMouseEnter={(e) => { if (!(isStreaming && !isCompacting)) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
-              >
-                <Shrink size={14} strokeWidth={1.8} aria-hidden="true" />
-              </button>
+              <div ref={contextWrapRef} style={{ position: "relative", flexShrink: 0 }}>
+                <button
+                  type="button"
+                  onClick={() => setContextOpen((open) => !open)}
+                  title={ringTitle}
+                  aria-label={t("composerContext.title")}
+                  aria-expanded={contextOpen}
+                  aria-haspopup="dialog"
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    width: 28, height: 28, padding: 0,
+                    background: contextOpen ? "var(--bg-hover)" : "none", border: "none",
+                    borderRadius: 7,
+                    color: isCompacting ? "var(--accent)" : "var(--text-muted)",
+                    cursor: "pointer",
+                    transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = contextOpen ? "var(--bg-hover)" : "none"; }}
+                >
+                  {isCompacting ? (
+                    <Loader2 size={14} strokeWidth={2} aria-hidden="true" style={{ animation: "spin 0.8s linear infinite" }} />
+                  ) : (
+                    <span style={{ position: "relative", width: 20, height: 20, display: "inline-flex" }} aria-hidden="true">
+                      <svg width="20" height="20" viewBox="0 0 20 20">
+                        <circle cx="10" cy="10" r="8" fill="none" stroke="var(--border)" strokeWidth="2.5" />
+                        {ringPct !== null && (
+                          <circle
+                            cx="10"
+                            cy="10"
+                            r="8"
+                            fill="none"
+                            stroke={ringTone}
+                            strokeWidth="2.5"
+                            strokeLinecap="round"
+                            strokeDasharray={2 * Math.PI * 8}
+                            strokeDashoffset={2 * Math.PI * 8 * (1 - Math.min(100, Math.max(0, ringPct)) / 100)}
+                            transform="rotate(-90 10 10)"
+                            style={{ transition: "stroke-dashoffset var(--dur-med) var(--ease-out-warm)" }}
+                          />
+                        )}
+                      </svg>
+                      {ringPct !== null && (
+                        <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 7, fontWeight: 700, fontFamily: "var(--font-mono)", color: ringTone }}>
+                          {Math.round(ringPct)}
+                        </span>
+                      )}
+                    </span>
+                  )}
+                </button>
+                {contextOpen && (
+                  <div
+                    role="dialog"
+                    aria-label={t("composerContext.title")}
+                    className="picker-panel"
+                    style={{
+                      position: isMobile ? "fixed" : "absolute",
+                      bottom: isMobile ? 8 : "calc(100% + 8px)",
+                      ...(isMobile
+                        ? { left: 8, right: 8 }
+                        : { right: 0, width: 360, maxWidth: "min(360px, calc(100vw - 32px))" }),
+                      background: "var(--bg-panel)",
+                      border: "1px solid var(--border)",
+                      borderRadius: "var(--radius-card)",
+                      boxShadow: "var(--shadow-pop)",
+                      zIndex: 60,
+                      padding: 12,
+                      maxHeight: isMobile ? "calc(100dvh - 32px)" : "min(50vh, 380px)",
+                      overflowY: "auto",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 10 }}>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>{t("composerContext.title")}</span>
+                      {ringPct !== null && (
+                        <span style={{ fontSize: 11, fontFamily: "var(--font-mono)", fontWeight: 700, color: ringTone, fontVariantNumeric: "tabular-nums" }}>
+                          {formatPercent(ringPct)}
+                        </span>
+                      )}
+                    </div>
+                    <ContextDetailPanel
+                      sessionStats={sessionStats}
+                      contextUsage={contextUsage}
+                      modelCapacity={modelCapacity}
+                      generationSpeed={generationSpeed}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (isCompacting) onAbortCompaction?.();
+                        else onCompact?.();
+                        setContextOpen(false);
+                      }}
+                      disabled={isStreaming && !isCompacting}
+                      title={isCompacting ? t("chatInput.stopCompaction") : t("chatInput.compactContext")}
+                      style={{
+                        display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+                        width: "100%", boxSizing: "border-box", height: 30, marginTop: 10, padding: "0 12px",
+                        background: "var(--bg-subtle)", border: "1px solid var(--border)", borderRadius: "var(--radius-control)",
+                        color: isCompacting ? "var(--accent)" : "var(--text)",
+                        cursor: isStreaming && !isCompacting ? "not-allowed" : "pointer",
+                        opacity: isStreaming && !isCompacting ? 0.5 : 1,
+                        fontSize: 12, fontWeight: 600,
+                        transition: "background var(--dur-fast) var(--ease-out-warm)",
+                      }}
+                      onMouseEnter={(e) => { if (!(isStreaming && !isCompacting)) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-subtle)"; }}
+                    >
+                      {isCompacting ? (
+                        <Loader2 size={13} strokeWidth={2} aria-hidden="true" style={{ animation: "spin 0.8s linear infinite" }} />
+                      ) : (
+                        <Shrink size={13} strokeWidth={2} aria-hidden="true" />
+                      )}
+                      {isCompacting ? t("chatInput.stopCompaction") : t("chatInput.compactContext")}
+                    </button>
+                  </div>
+                )}
+              </div>
             )}
 
+            {/* Dictation */}
+            <button
+              type="button"
+              onClick={toggleDictation}
+              disabled={isTranscribing}
+              title={isRecording ? t("chatInput.stopDictation") : isTranscribing ? t("chatInput.transcribing") : t("chatInput.startDictation")}
+              aria-label={isRecording ? t("chatInput.stopDictation") : isTranscribing ? t("chatInput.transcribing") : t("chatInput.startDictation")}
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "center",
+                width: 28, height: 28, padding: 0,
+                background: isRecording ? "var(--danger-subtle, rgba(239, 68, 68, 0.15))" : "none",
+                border: isRecording ? "1px solid var(--danger, #ef4444)" : "none",
+                borderRadius: 7,
+                color: isRecording ? "var(--danger, #ef4444)" : isTranscribing ? "var(--accent)" : "var(--text-muted)",
+                cursor: isTranscribing ? "wait" : "pointer",
+                transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
+              }}
+              onMouseEnter={(e) => { if (!isRecording && !isTranscribing) e.currentTarget.style.background = "var(--bg-hover)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = isRecording ? "var(--danger-subtle, rgba(239, 68, 68, 0.15))" : "none"; }}
+            >
+              {isTranscribing ? (
+                <Loader2 size={14} strokeWidth={1.8} className="animate-spin" aria-hidden="true" />
+              ) : (
+                <Mic size={14} strokeWidth={1.8} aria-hidden="true" />
+              )}
+            </button>
             {/* Primary action: Send (idle) / Queue (typed while running) / Stop (running) */}
             {primaryActionQueuesMessage ? (
               <button

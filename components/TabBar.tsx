@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { X } from "lucide-react";
+import { Folder, GitBranch, X } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
 import { getFileIcon } from "./FileIcons";
 
@@ -17,9 +17,19 @@ interface Props {
   activeTabId: string;
   onSelectTab: (id: string) => void;
   onCloseTab: (id: string) => void;
+  /** Pinned Explorer tab rendered before the file tabs (right-panel tab redesign). */
+  explorerSelected?: boolean;
+  onSelectExplorer?: () => void;
+  /** Changed-file count badge on the Explorer tab. */
+  explorerBadge?: number;
+  /** Pinned Git changes tab rendered after Explorer (Tauri parity). */
+  gitSelected?: boolean;
+  onSelectGit?: () => void;
+  /** Changed-file count badge on the Git tab. */
+  gitBadge?: number;
 }
 
-export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab }: Props) {
+export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, explorerSelected = false, onSelectExplorer, explorerBadge = 0, gitSelected = false, onSelectGit, gitBadge = 0 }: Props) {
   const { t } = useI18n();
   const [hoveredClose, setHoveredClose] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -54,6 +64,159 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab }: Props) {
         height: 36,
       }}
     >
+      {onSelectExplorer && (
+        <div
+          data-tab-id="explorer"
+          className="tabbar-tab ui-focus-ring"
+          onClick={onSelectExplorer}
+          role="tab"
+          tabIndex={explorerSelected ? 0 : -1}
+          aria-selected={explorerSelected}
+          aria-label={t("sessionSidebar.explorer")}
+          title={explorerBadge > 0 ? t("sessionSidebar.explorerChanged", { count: explorerBadge }) : t("sessionSidebar.explorer")}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelectExplorer(); }
+            if (event.key === "ArrowRight" && tabs.length > 0) {
+              event.preventDefault();
+              onSelectTab(tabs[0].id);
+              listRef.current?.querySelector<HTMLElement>(`[data-tab-id="${CSS.escape(tabs[0].id)}"]`)?.focus();
+            }
+          }}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            height: 36,
+            paddingLeft: 12,
+            paddingRight: 10,
+            borderRight: "1px solid var(--border)",
+            background: explorerSelected ? "var(--bg)" : "var(--bg-panel)",
+            cursor: "pointer",
+            fontSize: 12,
+            color: explorerSelected ? "var(--text)" : "var(--text-muted)",
+            whiteSpace: "nowrap",
+            flexShrink: 0,
+            userSelect: "none",
+            position: "relative",
+            transition: `background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)`,
+          }}
+        >
+          {explorerSelected && (
+            <span
+              aria-hidden="true"
+              style={{
+                position: "absolute",
+                left: 0,
+                right: 0,
+                bottom: 0,
+                height: 2,
+                background: "var(--accent)",
+                borderTopLeftRadius: "var(--radius-control)",
+                borderTopRightRadius: "var(--radius-control)",
+              }}
+            />
+          )}
+          <span style={{ flexShrink: 0, opacity: explorerSelected ? 1 : 0.7, display: "flex", alignItems: "center", color: explorerSelected ? "var(--accent)" : undefined }}>
+            <Folder size={13} strokeWidth={2} aria-hidden="true" />
+          </span>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", fontWeight: explorerSelected ? 500 : 400 }}>
+            {t("sessionSidebar.explorer")}
+          </span>
+          {explorerBadge > 0 && (
+            <span
+              aria-hidden="true"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                minWidth: 16,
+                height: 15,
+                padding: "0 4px",
+                borderRadius: 8,
+                background: "color-mix(in srgb, var(--status-modified) 18%, transparent)",
+                color: "var(--status-modified)",
+                fontSize: 10,
+                fontWeight: 700,
+              }}
+            >
+              {explorerBadge > 99 ? "99+" : explorerBadge}
+            </span>
+          )}
+        </div>
+      )}
+      {onSelectGit && (
+        <div
+          data-tab-id="git"
+          className="tabbar-tab ui-focus-ring"
+          onClick={onSelectGit}
+          role="tab"
+          tabIndex={gitSelected ? 0 : -1}
+          aria-selected={gitSelected}
+          aria-label={t("tabBar.git")}
+          title={gitBadge > 0 ? t("sessionSidebar.explorerChanged", { count: gitBadge }) : t("tabBar.git")}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelectGit(); }
+          }}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            height: 36,
+            paddingLeft: 12,
+            paddingRight: 10,
+            borderRight: "1px solid var(--border)",
+            background: gitSelected ? "var(--bg)" : "var(--bg-panel)",
+            cursor: "pointer",
+            fontSize: 12,
+            color: gitSelected ? "var(--text)" : "var(--text-muted)",
+            whiteSpace: "nowrap",
+            flexShrink: 0,
+            userSelect: "none",
+            position: "relative",
+            transition: `background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)`,
+          }}
+        >
+          {gitSelected && (
+            <span
+              aria-hidden="true"
+              style={{
+                position: "absolute",
+                left: 0,
+                right: 0,
+                bottom: 0,
+                height: 2,
+                background: "var(--accent)",
+                borderTopLeftRadius: "var(--radius-control)",
+                borderTopRightRadius: "var(--radius-control)",
+              }}
+            />
+          )}
+          <span style={{ flexShrink: 0, opacity: gitSelected ? 1 : 0.7, display: "flex", alignItems: "center", color: gitSelected ? "var(--accent)" : undefined }}>
+            <GitBranch size={13} strokeWidth={2} aria-hidden="true" />
+          </span>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", fontWeight: gitSelected ? 500 : 400 }}>
+            {t("tabBar.git")}
+          </span>
+          {gitBadge > 0 && (
+            <span
+              aria-hidden="true"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                minWidth: 16,
+                height: 15,
+                padding: "0 4px",
+                borderRadius: 8,
+                background: "color-mix(in srgb, var(--status-modified) 18%, transparent)",
+                color: "var(--status-modified)",
+                fontSize: 10,
+                fontWeight: 700,
+              }}
+            >
+              {gitBadge > 99 ? "99+" : gitBadge}
+            </span>
+          )}
+        </div>
+      )}
       {tabs.map((tab) => {
         const isActive = tab.id === activeTabId;
         return (

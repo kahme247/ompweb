@@ -33,6 +33,8 @@ interface ToastOptions {
   duration?: number;
   /** Stable id for deduplication — same id will replace existing toast instead of stacking. */
   id?: string;
+  /** Fired when the toast closes (dismissed by the user, `toast.close`, or timeout). */
+  onClose?: () => void;
 }
 
 const manager = Toast.createToastManager<ToastData>();
@@ -48,6 +50,7 @@ function add(kind: ToastKind, title: React.ReactNode, description?: React.ReactN
     type: kind,
     data: { kind, clamp: options?.clamp },
     ...(timeout !== undefined ? { timeout } : {}),
+    ...(options?.onClose ? { onClose: options.onClose } : {}),
   });
 }
 export const toast = {

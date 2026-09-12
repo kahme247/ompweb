@@ -43,6 +43,9 @@ export function MermaidBlock({ code, isStreaming, defaultPreview = false }: Merm
         securityLevel: "strict",
         suppressErrorRendering: true,
         theme: isDark ? "dark" : "default",
+        // Blend the diagram canvas into the app surface instead of mermaid's
+        // own gray box (which sticks out on pure-black themes).
+        themeVariables: { background: "transparent" },
       });
 
       const parsed = await mermaid.parse(code, { suppressErrors: true });

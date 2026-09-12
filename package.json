@@ -1,6 +1,6 @@
 {
   "name": "@kahme247/ompweb",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Web UI for the oh-my-pi (omp) coding agent",
   "homepage": "https://github.com/kahme247/ompweb#readme",
   "repository": {
@@ -81,6 +81,7 @@
     "eslint-config-next": "16.3.4",
     "jiti": "^2.7.0",
     "postcss": "^8",
+    "react-test-renderer": "^19.2.8",
     "tailwindcss": "^4.3.3",
     "typescript": "^5",
     "typescript-language-server": "^6.0.0"
