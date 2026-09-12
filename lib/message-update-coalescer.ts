@@ -5,11 +5,17 @@
 // one re-renders the whole streaming bubble. Only the latest pending update is
 // worth showing; buffer it and flush at animation-frame rate.
 //
+// `tool_execution_update` frames are coalesced the same way (omp sends the full
+// accumulated partial result roughly per output chunk — measured ~10-100+/s on
+// chatty commands), keyed by toolCallId so concurrent tools keep their own
+// latest snapshot.
+//
 // Ordering contract:
-// - Any non-update event type flushes the pending update synchronously BEFORE
+// - Any non-update event type flushes the pending updates synchronously BEFORE
 //   it is dispatched, so no state is applied out of order.
 // - `message_end` carries the complete message and therefore supersedes
-//   (drops) any pending partial update.
+//   (drops) any pending partial update. It does NOT drop pending tool updates:
+//   those belong to a tool the committed message merely announced.
 
 export type CoalescableEvent = { type: string; [key: string]: unknown };
 
@@ -42,6 +48,9 @@ export function createMessageUpdateCoalescer(
   schedule: FlushScheduler = defaultScheduler,
 ): MessageUpdateCoalescer {
   let pending: CoalescableEvent | null = null;
+  // Latest snapshot per in-flight tool. Map preserves insertion order, so
+  // concurrent tools dispatch in the order they first reported progress.
+  const pendingToolUpdates = new Map<string, CoalescableEvent>();
   let cancelScheduled: (() => void) | null = null;
 
   const cancel = () => {
@@ -54,30 +63,57 @@ export function createMessageUpdateCoalescer(
   const flush = () => {
     cancelScheduled = null;
     const event = pending;
+    const toolEvents = [...pendingToolUpdates.values()];
     pending = null;
+    pendingToolUpdates.clear();
     if (event) dispatch(event);
+    for (const toolEvent of toolEvents) dispatch(toolEvent);
+  };
+
+  const scheduleFlush = () => {
+    if (!cancelScheduled) cancelScheduled = schedule(flush);
   };
 
   return {
     push(event: CoalescableEvent) {
       if (event.type === "message_update") {
         pending = event;
-        if (!cancelScheduled) cancelScheduled = schedule(flush);
+        scheduleFlush();
+        return;
+      }
+      if (event.type === "tool_execution_update") {
+        // A frame without an id cannot be keyed; dispatch it straight away
+        // rather than letting two tools overwrite each other's slot.
+        const toolCallId = typeof event.toolCallId === "string" ? event.toolCallId : null;
+        if (!toolCallId) {
+          flush();
+          dispatch(event);
+          return;
+        }
+        pendingToolUpdates.set(toolCallId, event);
+        scheduleFlush();
         return;
       }
       if (event.type === "message_end") {
+        // The complete message supersedes any pending partial message update.
+        // A buffered tool update belongs to the tool the committed message
+        // announced, so it survives and its scheduled flush stays armed.
         pending = null;
-        cancel();
-      } else if (pending) {
+        if (pendingToolUpdates.size === 0) cancel();
+      } else if (pending || pendingToolUpdates.size > 0) {
         cancel();
         const buffered = pending;
+        const toolEvents = [...pendingToolUpdates.values()];
         pending = null;
-        dispatch(buffered);
+        pendingToolUpdates.clear();
+        if (buffered) dispatch(buffered);
+        for (const toolEvent of toolEvents) dispatch(toolEvent);
       }
       dispatch(event);
     },
     reset() {
       pending = null;
+      pendingToolUpdates.clear();
       cancel();
     },
   };

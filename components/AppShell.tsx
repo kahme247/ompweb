@@ -1963,6 +1963,7 @@ export function AppShell() {
               onSessionStatsPanelOpen={openSessionStatsPanel}
               onGenerationSpeedChange={handleGenerationSpeedChange}
               onOpenProviders={() => setSettingsTab("providers")}
+              toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
             />
           ) : initialCwdStatus === "validating" ? (
             <div

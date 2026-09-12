@@ -169,6 +169,77 @@ test("advisor custom messages use the localized advisor label", () => {
 });
 
 
+test("a running tool call shows a spinner instead of the no-result marker", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", toolCallId: "call-1", toolName: "bash", input: { command: "long-job" } }],
+    },
+    toolResults: new Map([[
+      "call-1",
+      { role: "toolResult", toolCallId: "call-1", toolName: "bash", content: [], partial: true },
+    ]]),
+  }));
+
+  assert.match(html, /activity-row-spinner/);
+  assert.doesNotMatch(html, /lucide-check/);
+  assert.doesNotMatch(html, /lucide-circle-slash/);
+});
+
+test("a running tool with no output yet says so instead of reporting no output", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    toolCallsDefaultCollapsed: false,
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", toolCallId: "call-1", toolName: "bash", input: { command: "long-job" } }],
+    },
+    toolResults: new Map([[
+      "call-1",
+      { role: "toolResult", toolCallId: "call-1", toolName: "bash", content: [], partial: true },
+    ]]),
+  }));
+
+  assert.match(html, /data-tool-running="true"/);
+  assert.doesNotMatch(html, /No output/);
+});
+
+test("a running tool streams its output before the result is committed", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    toolCallsDefaultCollapsed: false,
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", toolCallId: "call-1", toolName: "bash", input: { command: "long-job" } }],
+    },
+    toolResults: new Map([[
+      "call-1",
+      { role: "toolResult", toolCallId: "call-1", toolName: "bash", content: [{ type: "text", text: "line-1\nline-2" }], partial: true },
+    ]]),
+  }));
+
+  assert.match(html, /data-tool-output="true"/);
+  assert.match(html, /line-1/);
+  assert.match(html, /line-2/);
+  assert.doesNotMatch(html, /data-tool-running="true"/);
+});
+
+test("a committed tool result replaces the running affordances", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    toolCallsDefaultCollapsed: false,
+    message: {
+      role: "assistant",
+      content: [{ type: "toolCall", toolCallId: "call-1", toolName: "bash", input: { command: "long-job" } }],
+    },
+    toolResults: new Map([[
+      "call-1",
+      { role: "toolResult", toolCallId: "call-1", toolName: "bash", content: [{ type: "text", text: "done" }], timestamp: 3000 },
+    ]]),
+  }));
+
+  assert.doesNotMatch(html, /activity-row-spinner/);
+  assert.doesNotMatch(html, /data-tool-running="true"/);
+  assert.match(html, /lucide-check/);
+});
+
 test("expanded edit results with a patch render the split diff view", () => {
   const html = renderToStaticMarkup(React.createElement(MessageView, {
     isStreaming: true,

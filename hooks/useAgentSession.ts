@@ -8,6 +8,7 @@ import type {
   ExtensionWidgetItem,
   SessionInfo,
   SessionTreeNode,
+  ToolResultMessage,
 } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
@@ -252,6 +253,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [compactError, setCompactError] = useState<string | null>(null);
   const [compactResult, setCompactResult] = useState<CompactResultInfo | null>(null);
   const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
+  // In-flight tool executions, keyed by toolCallId: omp reports a tool's output
+  // as it runs (`tool_execution_start` / `tool_execution_update` / `_end`), but
+  // the matching `toolResult` message only lands when the tool finishes. Until
+  // then these entries keep the tool call row live (running indicator + streamed
+  // output). The committed toolResult always wins over the live entry, and the
+  // entry is dropped as soon as it arrives.
+  const [liveToolResults, setLiveToolResults] = useState<Map<string, ToolResultMessage>>(() => new Map());
   const [slashCommands, setSlashCommands] = useState<SlashCommandInfo[]>([]);
   const [slashCommandsLoading, setSlashCommandsLoading] = useState(false);
   const [noticeState, dispatchNotice] = useReducer(noticeReducer, { visible: [], pending: [] });
@@ -271,6 +279,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useEffect(() => () => {
     clearTerminalReconcileTimer();
   }, [clearTerminalReconcileTimer]);
+  /** Upsert (or with `null`, drop) the live entry for one in-flight tool. */
+  const setLiveToolResult = useCallback((toolCallId: string, result: ToolResultMessage | null) => {
+    setLiveToolResults((prev) => {
+      if (result === null) {
+        if (!prev.has(toolCallId)) return prev;
+        const next = new Map(prev);
+        next.delete(toolCallId);
+        return next;
+      }
+      const next = new Map(prev);
+      next.set(toolCallId, result);
+      return next;
+    });
+  }, []);
+  const clearLiveToolResults = useCallback(() => {
+    setLiveToolResults((prev) => (prev.size === 0 ? prev : new Map()));
+  }, []);
   // Blocks prompt submission while the initial hydration's live-state fetch is
   // still pending. Without this, showLoading=false after disk messages lets
   // a prompt increment runId before the stale pre-prompt state arrives and
@@ -1355,6 +1380,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       agentRunningRef.current = false;
       setAgentRunning(false);
       setAgentPhase(null);
+      clearLiveToolResults();
       setRetryInfo(null);
       setSubagents([]);
       setAdvisorActiveAt(0);
@@ -1373,7 +1399,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       slashCommandRunRef.current = false;
       onAgentEnd?.();
     }
-  }, [addNotice, clearTerminalReconcileTimer, loadSession, onAgentEnd, refreshSubagentHistory, resetSubagentActivityState, surfaceQuotaOnStream]);
+  }, [addNotice, clearLiveToolResults, clearTerminalReconcileTimer, loadSession, onAgentEnd, refreshSubagentHistory, resetSubagentActivityState, surfaceQuotaOnStream]);
   const waitForPromptSettlement = useCallback(async (sid: string, runId?: number) => {
     await delay(PROMPT_SETTLE_INITIAL_DELAY_MS);
     const startedAt = Date.now();
@@ -1618,6 +1644,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         agentRunningRef.current = true;
         setAgentRunning(true);
         setAgentPhase({ kind: "waiting_model" });
+        clearLiveToolResults();
         dispatch({ type: "start" });
         runHadContentRef.current = false;
         lastQuotaErrorRef.current = null;
@@ -1675,6 +1702,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         agentRunningRef.current = false;
         setAgentRunning(false);
         setAgentPhase(null);
+        clearLiveToolResults();
         setRetryInfo(null);
         setSubagents([]);
         setAdvisorActiveAt(0);
@@ -1898,6 +1926,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // The advisor model injects its review as a custom message mid-run;
           // surface it as live advisor activity for the composer thunder icon.
           if ((completed as CustomMessage).customType === "advisor") setAdvisorActiveAt(Date.now());
+          // The committed result supersedes the live snapshot for this call.
+          if (completed.role === "toolResult" && typeof completed.toolCallId === "string") {
+            setLiveToolResult(completed.toolCallId, null);
+          }
           setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
         }
         if (completed?.role === "assistant") {
@@ -1930,6 +1962,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "tool_execution_start": {
         const id = event.toolCallId as string;
         const name = event.toolName as string;
+        // Seed the live entry immediately: the row must show a running tool
+        // from the first frame, before any output exists.
+        setLiveToolResult(id, { role: "toolResult", toolCallId: id, toolName: name, content: [], partial: true });
         setAgentPhase((prev) => {
           const tools = prev?.kind === "running_tools" ? [...prev.tools] : [];
           if (!tools.some((t) => t.id === id)) tools.push({ id, name });
@@ -1937,8 +1972,42 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
         break;
       }
+      case "tool_execution_update": {
+        // omp streams the FULL accumulated partial result per output chunk, so
+        // the newest frame replaces the previous snapshot (the SSE coalescer
+        // already drops superseded frames within a display frame).
+        const id = event.toolCallId as string;
+        const partial = isRecord(event.partialResult) ? event.partialResult : null;
+        const content = Array.isArray(partial?.content) ? (partial.content as ToolResultMessage["content"]) : [];
+        const toolName = typeof event.toolName === "string" ? event.toolName : undefined;
+        setLiveToolResults((prev) => {
+          const existing = prev.get(id);
+          const next = new Map(prev);
+          next.set(id, {
+            role: "toolResult",
+            toolCallId: id,
+            ...(toolName ?? existing?.toolName ? { toolName: toolName ?? existing?.toolName } : {}),
+            content,
+            ...(partial?.details !== undefined ? { details: partial.details } : {}),
+            partial: true,
+          });
+          return next;
+        });
+        break;
+      }
       case "tool_execution_end": {
         const id = event.toolCallId as string;
+        const finalResult = isRecord(event.result) ? event.result : null;
+        // Hold the final snapshot (no longer `partial`) until the committed
+        // toolResult message lands a frame later, so the row never blanks out.
+        setLiveToolResult(id, {
+          role: "toolResult",
+          toolCallId: id,
+          toolName: typeof event.toolName === "string" ? event.toolName : undefined,
+          content: Array.isArray(finalResult?.content) ? (finalResult.content as ToolResultMessage["content"]) : [],
+          isError: finalResult?.isError === true || event.isError === true,
+          ...(finalResult?.details !== undefined ? { details: finalResult.details } : {}),
+        });
         if (event.toolName === "todo" && sessionIdRef.current) {
           void reconcileAgentState(sessionIdRef.current);
         }
@@ -2131,7 +2200,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, clearTerminalReconcileTimer, consumeQueuedMessage, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, mergeSubagents, onAgentEnd, reconcileAgentState, resetSubagentActivityState, applyAuthoritativeModel, beginAuthoritativeModelSync, surfaceQuotaOnStream]);
+  }, [addNotice, clearLiveToolResults, clearTerminalReconcileTimer, consumeQueuedMessage, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, mergeSubagents, onAgentEnd, reconcileAgentState, resetSubagentActivityState, applyAuthoritativeModel, beginAuthoritativeModelSync, setLiveToolResult, surfaceQuotaOnStream]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean> => {
@@ -2171,6 +2240,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // A new run starts fresh: drop any rescued in-flight reconcile state from
     // the previous run (its late response is fenced out by the new run id).
     reconcileGuardRef.current?.reset();
+    clearLiveToolResults();
     setAgentRunning(true);
     setAgentPhase(isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" });
     setAdvisorActiveAt(0);
@@ -2263,13 +2333,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       agentRunningRef.current = false;
       setAgentRunning(false);
       setAgentPhase(null);
+      clearLiveToolResults();
       lastQuotaErrorRef.current = null;
       lastRunErrorRef.current = null;
       slashCommandRunRef.current = false;
       dispatch({ type: "end" });
       return false;
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, opts.chatInputRef, refreshSubagentRoster, registerHostTools, registerHostUriSchemes, clearTerminalReconcileTimer]);
+  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, opts.chatInputRef, refreshSubagentRoster, registerHostTools, registerHostUriSchemes, clearLiveToolResults, clearTerminalReconcileTimer]);
 
   /** Abort the running agent and send the message as a fresh prompt
    * (abort_and_prompt). Only valid mid-run; the old turn's agent_end is
@@ -2915,8 +2986,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, []);
 
   // Load session on mount
+  // React StrictMode re-invokes this effect for the freshly mounted keyed
+  // <ChatWindow> (setup → cleanup → setup), which made every session switch
+  // fetch and commit the whole transcript twice — in dev, the doubled
+  // transcript commit is the dominant cost of switching sessions. Latch on the
+  // session id so one mounted instance loads its session exactly once; the
+  // surviving first invocation still owns the async continuation (SSE attach,
+  // roster hydration), which its cleanup does not tear down.
+  const mountedSessionLoadRef = useRef<string | null>(null);
   useEffect(() => {
     if (session) {
+      if (mountedSessionLoadRef.current === session.id) return;
+      mountedSessionLoadRef.current = session.id;
       sessionIdRef.current = session.id;
       loadSession(session.id, true, true).then((agentState) => {
         if (agentState?.running) {
@@ -3163,6 +3244,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands, setActiveLeafId, setData, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,
+    liveToolResults,
     // Subscriptions
     handleAgentEventRef,
   };

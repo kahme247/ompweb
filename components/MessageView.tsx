@@ -880,7 +880,20 @@ const ToolCallBlock = memo(function ToolCallBlock({
   onOpenFile?: (filePath: string) => void;
 }) {
   const { t } = useI18n();
-  const [expanded, setExpanded] = useState(Boolean(isStreaming) && !defaultCollapsed);
+  // `partial` results are omp's live snapshots for a tool that is still
+  // executing (see lib/types.ts); the committed toolResult replaces them.
+  const isRunning = result?.partial === true;
+  // A running tool opens its row when the interface keeps tool calls expanded
+  // ("Keep tool calls collapsed" off) so its output is watchable live.
+  const [expanded, setExpanded] = useState(Boolean(isStreaming || isRunning) && !defaultCollapsed);
+  // The row can also mount while the tool is idle and start running later (the
+  // assistant message commits before `tool_execution_start`). It is never
+  // auto-collapsed: the output stays where the user was reading it.
+  const wasRunningRef = useRef(false);
+  useEffect(() => {
+    if (isRunning && !wasRunningRef.current && !defaultCollapsed) setExpanded(true);
+    wasRunningRef.current = isRunning;
+  }, [isRunning, defaultCollapsed]);
   const resultText = result
     ? (typeof result.content === "string"
         ? result.content
@@ -913,9 +926,9 @@ const ToolCallBlock = memo(function ToolCallBlock({
           <span className={`activity-row-indicator${isError ? " activity-row-indicator-error" : ""}`} aria-hidden>
             {isError ? (
               <CircleAlert size={12} strokeWidth={1.8} />
-            ) : result ? (
+            ) : result && !isRunning ? (
               <Check size={12} strokeWidth={2} />
-            ) : isStreaming ? (
+            ) : isRunning || isStreaming ? (
               <LoaderCircle size={12} strokeWidth={1.8} className="activity-row-spinner" />
             ) : (
               <CircleSlash size={12} strokeWidth={1.8} style={{ opacity: 0.5 }} />
@@ -979,7 +992,13 @@ const ToolCallBlock = memo(function ToolCallBlock({
               </div>
             )}
             <TaskResultPanel details={result?.details} />
-            {result ? (
+            {isRunning && (resultText ?? "").trim() === "" ? (
+              // No output yet: say so instead of the "(no output)" marker that
+              // would claim the tool finished with nothing.
+              <div data-tool-running="true" style={{ color: "var(--text-dim)", fontSize: 12 }}>
+                {t("chatWindow.runningTool")}
+              </div>
+            ) : result ? (
               resultDiff ? (
                 <PairedDiffResult diff={resultDiff} />
               ) : (
@@ -1039,7 +1058,11 @@ const ToolCallGroupBlock = memo(function ToolCallGroupBlock({
   const groupSummary = useMemo(() => summarizeToolCallGroup(blocks), [blocks]);
 
   const hasError = blocks.some((b) => toolResults?.get(b.toolCallId)?.isError);
-  const isPending = isStreaming && blocks.some((b) => !toolResults?.has(b.toolCallId));
+  // A partial snapshot is a tool still executing, not a settled result.
+  const isPending = isStreaming && blocks.some((b) => {
+    const result = toolResults?.get(b.toolCallId);
+    return !result || result.partial === true;
+  });
 
   const totalDuration = useMemo(() => {
     if (!toolCallDurations) return undefined;

@@ -528,6 +528,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     notices, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     isAutoModelSelection,
     agentPhase, activeGoal, activePlan,
+    liveToolResults,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
     isNew,
     sessionIdRef, messagesEndRef, scrollContainerRef,
@@ -842,6 +843,23 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     });
     return { toolResultsMap, lastAnchorIdx, hasCompaction, visibleRefIndexByMessage };
   }, [messages]);
+  // Runtime tool results span committed messages plus the tool calls omp is
+  // still executing. A committed result always wins; the live snapshot only
+  // covers the window between `tool_execution_start` and the toolResult message
+  // landing, which is what makes the row show a running indicator and streamed
+  // output instead of a dead "no result" row.
+  const toolResultsWithLive = useMemo<Map<string, ToolResultMessage>>(() => {
+    if (liveToolResults.size === 0) return conversationMeta.toolResultsMap;
+    const merged = new Map(liveToolResults);
+    for (const [toolCallId, result] of conversationMeta.toolResultsMap) merged.set(toolCallId, result);
+    return merged;
+  }, [liveToolResults, conversationMeta]);
+  const conversationMetaWithLive = useMemo(
+    () => (toolResultsWithLive === conversationMeta.toolResultsMap
+      ? conversationMeta
+      : { ...conversationMeta, toolResultsMap: toolResultsWithLive }),
+    [conversationMeta, toolResultsWithLive],
+  );
   // The ref array is sized by the count of user/assistant messages — exactly
   // what conversationMeta's visibleRefIndexByMessage already tallies, so no
   // separate filter pass (which would re-run on every streaming frame).
@@ -1179,7 +1197,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
             <CommittedTranscript
               messages={messages}
               entryIds={entryIds}
-              conversationMeta={conversationMeta}
+              conversationMeta={conversationMetaWithLive}
               messageRefs={messageRefs}
               isStreaming={streamState.isStreaming}
               sessionBusy={sessionBusy}
@@ -1205,6 +1223,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
                 modelNames={modelNames}
                 cwd={messageCwd}
                 onOpenFile={onOpenFile}
+                toolResults={toolResultsWithLive}
                 toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
                 liveTokensPerSecond={tokensPerSecond}
               />

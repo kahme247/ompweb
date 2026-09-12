@@ -448,6 +448,76 @@ test("tool activity and turn_end errors do not count as a successful answer", as
   assert.equal(w.latest.agentRunning, false);
 });
 
+test("tool output streams live before the toolResult message lands", async (t) => {
+  t.after(unmountAll);
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  const { w, es } = await startRun(t, "s1", "q1");
+
+  const toolCallAssistant = {
+    ...assistantMsg("a1", ""),
+    content: [{ type: "toolCall", toolCallId: "tc1", toolName: "bash", input: { command: "long-job" } }],
+  };
+  await act(async () => {
+    es.emit({ type: "agent_start" });
+    es.emit({ type: "message_end", message: toolCallAssistant });
+    await Promise.resolve();
+  });
+  assert.equal(w.latest.liveToolResults.size, 0, "nothing is live before the tool starts");
+
+  // The tool starts: its row must go live immediately, with no output yet.
+  await act(async () => {
+    es.emit({ type: "tool_execution_start", toolCallId: "tc1", toolName: "bash", args: { command: "long-job" } });
+    await Promise.resolve();
+  });
+  const started = w.latest.liveToolResults.get("tc1");
+  assert.equal(started?.partial, true, "a running tool is a partial result");
+  assert.equal(started?.toolName, "bash");
+  assert.deepEqual(started?.content, []);
+
+  // omp sends the FULL accumulated output per chunk; only the latest survives
+  // a display frame.
+  await act(async () => {
+    es.emit({ type: "tool_execution_update", toolCallId: "tc1", toolName: "bash", partialResult: { content: [{ type: "text", text: "line-1\n" }] } });
+    es.emit({ type: "tool_execution_update", toolCallId: "tc1", toolName: "bash", partialResult: { content: [{ type: "text", text: "line-1\nline-2\n" }] } });
+    await Promise.resolve();
+  });
+  await settle(90);
+  const streamed = w.latest.liveToolResults.get("tc1");
+  assert.equal(streamed?.partial, true);
+  assert.equal(streamed?.content?.[0]?.text, "line-1\nline-2\n", "latest accumulated snapshot wins");
+
+  // The tool finishes, then omp commits the toolResult message. The committed
+  // result supersedes the live snapshot.
+  await act(async () => {
+    es.emit({ type: "tool_execution_end", toolCallId: "tc1", toolName: "bash", result: { content: [{ type: "text", text: "line-1\nline-2\n" }] } });
+    await Promise.resolve();
+  });
+  assert.equal(w.latest.liveToolResults.get("tc1")?.partial, undefined, "a finished tool is no longer partial");
+  await act(async () => {
+    es.emit({
+      type: "message_end",
+      message: { role: "toolResult", toolCallId: "tc1", toolName: "bash", content: [{ type: "text", text: "line-1\nline-2\n" }] },
+    });
+    await Promise.resolve();
+  });
+  assert.equal(w.latest.liveToolResults.size, 0, "the committed result replaces the live entry");
+  assert.equal(w.latest.messages.at(-1)?.role, "toolResult");
+
+  // Terminal frames clear anything still in flight.
+  await act(async () => {
+    es.emit({ type: "tool_execution_start", toolCallId: "tc2", toolName: "bash" });
+    await Promise.resolve();
+  });
+  assert.equal(w.latest.liveToolResults.size, 1);
+  world.sessions.get("s1").messages = [userMsg("u0", "q"), userMsg("u1", "q1"), toolCallAssistant];
+  await act(async () => {
+    es.emit({ type: "agent_end", isTerminal: true });
+  });
+  await settle();
+  assert.equal(w.latest.liveToolResults.size, 0, "a finished run leaves no live tool state");
+});
+
 test("late frames after the run finished are ignored (no ghost bubble, no double completion)", async (t) => {
   t.after(unmountAll);
   resetWorld();
