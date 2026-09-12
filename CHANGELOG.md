@@ -15,6 +15,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 - Keep resized file panels and their contents inside the window at intermediate widths and non-default interface scales, wrapping file and Explorer actions when space is tight.
 - Keep session action menus visible on touch devices beside fixed-width, right-aligned timestamps, with larger tap targets and titles using the remaining row width.
 - Keep workspace header action menus visible on touch devices without first selecting or expanding the workspace.
+- Keep provider and OMP System navigation in one horizontally scrollable row on narrow screens, and keep Save and Cancel in normal flow with inline save errors.
 - Hide the Steer action when the only queued message is already a steer, matching the expanded queue while keeping Edit and Delete available.
 - Keep the theme picker inside the mobile viewport by opening it to the right of its toolbar anchor.
 - Choose the destination workspace directly above the new-session composer. The selector stays in sync with the sidebar, shows workspace names and the exact destination path, preserves the selected worktree, and opens the existing Add workspace dialog.
