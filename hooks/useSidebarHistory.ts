@@ -129,7 +129,11 @@ export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, 
     // router.replace can replace custom state. Retain our pair across URL
     // commits; a real reload recovers it from history.state instead.
     const marker: SidebarEntry = state[HISTORY_KEY] ?? snapshot.current?.marker ?? {
-      id: crypto.randomUUID(),
+      // `crypto.randomUUID` is secure-context only, so plain-HTTP LAN origins
+      // (e.g. http://<lan-ip>:30177) need a fallback.
+      id: typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
       entry: "base",
       previous: (window as Window & { navigation?: { canGoBack: boolean } }).navigation?.canGoBack
         ?? window.history.length > 1,
