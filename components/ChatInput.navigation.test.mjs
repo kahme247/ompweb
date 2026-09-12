@@ -1,33 +1,32 @@
+import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { afterEach, beforeEach } from "node:test";
 import React, { act } from "react";
-import TestRenderer from "react-test-renderer";
+import { cleanup, render, screen, waitFor } from "@testing-library/react/pure.js";
+import userEvent from "@testing-library/user-event";
 import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
 const { ChatInput } = await jiti.import("./ChatInput.tsx");
 const { useSidebarHistory } = await jiti.import("@/hooks/useSidebarHistory");
 const { clearDraft, getDraft } = await jiti.import("@/lib/draft-store");
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-function installBrowser() {
-  const listeners = new Map();
-  globalThis.window = {
-    matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
-    addEventListener(type, fn) {
-      if (!listeners.has(type)) listeners.set(type, new Set());
-      listeners.get(type).add(fn);
-    },
-    removeEventListener(type, fn) { listeners.get(type)?.delete(fn); },
-  };
-  globalThis.document = { documentElement: {}, addEventListener() {}, removeEventListener() {} };
-  globalThis.localStorage = { getItem: () => null };
-  globalThis.requestAnimationFrame = () => 0;
-  return () => {
-    const event = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
-    for (const fn of listeners.get("beforeunload") ?? []) fn(event);
-    return event.defaultPrevented;
-  };
+beforeEach(() => {
+  window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+});
+afterEach(() => {
+  cleanup();
+  clearDraft("new:unassigned");
+  clearDraft("draft-a");
+  clearDraft("draft-b");
+  localStorage.clear();
+  delete window.matchMedia;
+});
+
+function warnsOnExit() {
+  const event = new Event("beforeunload", { cancelable: true });
+  window.dispatchEvent(event);
+  return event.defaultPrevented;
 }
 
 function Guard() {
@@ -37,41 +36,32 @@ function Guard() {
   return null;
 }
 
-const enter = { key: "Enter", nativeEvent: {}, preventDefault() {}, shiftKey: false };
-
 test("no-key composer text survives minimization and warns on document exit until sent", async () => {
-  const warnsOnExit = installBrowser();
-  const ref = React.createRef();
+  const user = userEvent.setup();
   const sent = [];
   function Shell({ minimized = false }) {
     return React.createElement(React.Fragment, null,
       React.createElement(Guard),
       React.createElement("div", { style: { display: minimized ? "none" : undefined } },
-        React.createElement(ChatInput, { ref, onSend: (text) => sent.push(text), onAbort() {}, isStreaming: false })),
+        React.createElement(ChatInput, { onSend: (text) => sent.push(text), onAbort() {}, isStreaming: false })),
     );
   }
-  let renderer;
-  try {
-    await act(() => { renderer = TestRenderer.create(React.createElement(Shell)); });
-    assert.equal(warnsOnExit(), false);
-    await act(() => ref.current.insertText("unsent in a new composer"));
-    assert.equal(warnsOnExit(), true);
-    await act(() => renderer.update(React.createElement(Shell, { minimized: true })));
-    assert.equal(warnsOnExit(), true);
-    assert.equal(renderer.root.findByType("textarea").props.value, "unsent in a new composer");
-    await act(() => renderer.root.findByType("textarea").props.onKeyDown(enter));
-    assert.deepEqual(sent, ["unsent in a new composer"]);
-    assert.equal(warnsOnExit(), false);
-  } finally {
-    await act(() => renderer?.unmount());
-    clearDraft("new:unassigned");
-    delete globalThis.window;
-    delete globalThis.document;
-  }
+  const { rerender } = render(React.createElement(Shell));
+  assert.equal(warnsOnExit(), false);
+  await user.type(screen.getByRole("textbox"), "unsent in a new composer");
+  assert.equal(warnsOnExit(), true);
+  rerender(React.createElement(Shell, { minimized: true }));
+  assert.equal(warnsOnExit(), true);
+  assert.equal(screen.getByRole("textbox", { hidden: true }).value, "unsent in a new composer");
+  rerender(React.createElement(Shell));
+  await user.click(screen.getByRole("textbox"));
+  await user.keyboard("{Enter}");
+  assert.deepEqual(sent, ["unsent in a new composer"]);
+  assert.equal(warnsOnExit(), false);
 });
 
 test("attachment-only drafts stay protected across live draft-key changes and restore without warning on internal picks", async () => {
-  const warnsOnExit = installBrowser();
+  const user = userEvent.setup();
   const ref = React.createRef();
   const sent = [];
   function Shell({ session }) {
@@ -80,26 +70,19 @@ test("attachment-only drafts stay protected across live draft-key changes and re
       React.createElement(ChatInput, { draftKey: session, ref, onSend: (text) => sent.push(text), onAbort() {}, isStreaming: false }),
     );
   }
-  let renderer;
-  try {
-    await act(() => { renderer = TestRenderer.create(React.createElement(Shell, { session: "draft-a" })); });
-    await act(async () => {
-      ref.current.addFiles([new File(["important attachment"], "notes.txt", { type: "text/plain" })]);
-    });
-    assert.equal(warnsOnExit(), true);
-    await act(() => renderer.update(React.createElement(Shell, { session: "draft-b" })));
-    assert.equal(renderer.root.findByType("textarea").props.value, "");
-    assert.equal(getDraft("draft-a")?.files[0]?.content, "important attachment");
-    assert.equal(warnsOnExit(), true);
-    await act(() => renderer.update(React.createElement(Shell, { session: "draft-a" })));
-    await act(() => renderer.root.findByType("textarea").props.onKeyDown(enter));
-    assert.match(sent[0], /important attachment/);
-    assert.equal(warnsOnExit(), false);
-  } finally {
-    await act(() => renderer?.unmount());
-    clearDraft("draft-a");
-    clearDraft("draft-b");
-    delete globalThis.window;
-    delete globalThis.document;
-  }
+  const { rerender } = render(React.createElement(Shell, { session: "draft-a" }));
+  await act(async () => {
+    ref.current.addFiles([new File(["important attachment"], "notes.txt", { type: "text/plain" })]);
+  });
+  await waitFor(() => assert.equal(getDraft("draft-a")?.files[0]?.content, "important attachment"));
+  assert.equal(warnsOnExit(), true);
+  rerender(React.createElement(Shell, { session: "draft-b" }));
+  assert.equal(screen.getByRole("textbox").value, "");
+  assert.equal(getDraft("draft-a")?.files[0]?.content, "important attachment");
+  assert.equal(warnsOnExit(), true);
+  rerender(React.createElement(Shell, { session: "draft-a" }));
+  await user.click(screen.getByRole("textbox"));
+  await user.keyboard("{Enter}");
+  assert.match(sent[0], /important attachment/);
+  assert.equal(warnsOnExit(), false);
 });
