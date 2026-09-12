@@ -4,6 +4,16 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ---
 
+## Unreleased
+
+### Fixes & Improvements
+
+- Keep composer controls on one line, with equally sized Send, Stop, and Queue buttons and model names truncating before short effort labels.
+- Align the + button and primary action with matching composer insets.
+- Clearly dim Attach files while the agent is running; queued messages remain text-only.
+
+---
+
 ## [v0.5.0] - 2026-09-12
 
 This release brings live tool-output streaming, a workspace picker for new sessions, voice dictation, new themes, an activity timeline with transcript export, and a redesigned settings experience.
