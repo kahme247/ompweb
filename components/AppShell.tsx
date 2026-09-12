@@ -1384,6 +1384,10 @@ export function AppShell() {
   const effectiveNewSessionCwd = newSessionCwd ?? (selectedSession === null && activeCwd ? activeCwd : null);
   const newSessionProject = (workspaceOptions.cwd === effectiveNewSessionCwd ? workspaceOptions.selectedProject : null) ?? effectiveNewSessionCwd ?? "";
   const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
+  const currentRate = generationSpeed?.current;
+  const rate = currentRate ?? generationSpeed?.average;
+  const speed = showChat ? formatGenerationSpeed(rate) : null;
+  const hasGenerationSpeed = speed !== null;
   useLayoutEffect(() => {
     const header = topBarRef.current;
     const details = mobileToolsRef.current;
@@ -1436,7 +1440,7 @@ export function AppShell() {
       observer.disconnect();
       document.fonts.removeEventListener("loadingdone", update);
     };
-  }, [isMobile, locale, rightPanelOpen, showChat]);
+  }, [hasGenerationSpeed, isMobile, locale, rightPanelOpen, showChat]);
   // While restoring initial session from URL, don't show the placeholder
   const showPlaceholder = initialSessionRestored && !showChat;
 
@@ -1948,8 +1952,8 @@ export function AppShell() {
               justifyContent: "flex-end",
               gap: 6,
               paddingRight: rightPanelOpen ? 8 : 44,
-              minWidth: "calc(10ch + 33px)",
-              width: 200,
+              minWidth: hasGenerationSpeed ? "calc(10ch + 33px)" : 0,
+              width: hasGenerationSpeed ? 200 : 0,
               fontSize: 11,
               fontFamily: "var(--font-mono)",
               containerType: "inline-size",
@@ -1960,9 +1964,6 @@ export function AppShell() {
 
             {/* Generation speed pill */}
             {showChat && (() => {
-              const currentRate = generationSpeed?.current;
-              const rate = currentRate ?? generationSpeed?.average;
-              const speed = formatGenerationSpeed(rate);
               if (!speed || rate == null) return null;
               const isLive = currentRate != null;
               const speedTitle = t(isLive ? "appShell.tooltipCurrentSpeed" : "appShell.tooltipAverageSpeed", {
