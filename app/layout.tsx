@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import Script from "next/script";
 import { Geist, JetBrains_Mono, Noto_Sans_Mono, Noto_Serif_SC, Source_Serif_4 } from "next/font/google";
 import { ThemeColor } from "@/hooks/useTheme";
+import { SIDEBAR_HISTORY_BRIDGE_SCRIPT } from "@/lib/sidebar-history-bridge";
 import "./globals.css";
 
 const geist = Geist({
@@ -78,7 +79,7 @@ export default function RootLayout({
         {/* Register before Next's router. Owned sidebar traversals must be handled
             before the router can synchronously restore an older session URL. */}
         <Script id="sidebar-history" strategy="beforeInteractive">
-          {`window.addEventListener("popstate",function(event){window.dispatchEvent(new CustomEvent("omp:sidebar-popstate",{detail:event}))});`}
+          {SIDEBAR_HISTORY_BRIDGE_SCRIPT}
         </Script>
         {/* Apply the stored theme and its CSS background to browser chrome before
             first paint. The hydrated hook keeps both in sync afterward. */}

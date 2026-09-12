@@ -25,6 +25,7 @@ import { encodeFilePathForApi, getFileName, getRelativeFilePath } from "@/lib/fi
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import { comparableProjectPath } from "@/lib/comparable-path";
+import { clearDraft } from "@/lib/draft-store";
 import { showCompletionNotification } from "@/lib/browser-notifications";
 import {
   APP_UPDATE_COMPLETED_RELOAD_MS,
@@ -1178,6 +1179,9 @@ export function AppShell() {
   }, [router, hydrateSelectedSession]);
 
   const handleSessionDeleted = useCallback((sessionId: string) => {
+    // The composer for this session can never be reopened, so its draft would
+    // otherwise keep the exit guard armed for unreachable content.
+    clearDraft(sessionId);
     setRefreshKey((k) => k + 1);
     if (selectedSession?.id === sessionId) {
       const cwd = selectedSession.cwd;
