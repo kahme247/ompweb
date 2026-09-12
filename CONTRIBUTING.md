@@ -23,6 +23,19 @@ npm test                                           # unit tests
 Avoid `npm run build` during local development — it writes to `.next/` and
 interferes with the dev server. Builds are for release work.
 
+### React tests
+
+Tests use `node:test` and `jiti`; no Jest or Vitest configuration is required.
+For interactive components and hooks, import `tests/setup-dom.mjs` before
+`@testing-library/react/pure.js`, and register `cleanup` with `afterEach`.
+Use DOM queries and `@testing-library/user-event` for component interactions,
+and `renderHook` for hook state and lifecycle tests. Keep the real jsdom
+`window` and `document`; mock only the browser or network APIs a scenario needs.
+
+Static HTML tests can continue using `react-dom/server`. Layout, scrolling,
+and native browser navigation still require real-browser verification.
+The jsdom dependency stays on 29.x to support the Node 22.19.0 baseline.
+
 ## Conventions
 
 - **Styling**: use the design tokens in `app/globals.css` (colors, radius,
