@@ -2825,7 +2825,7 @@ html.dark .dropdown-surface :is(select, option) {
   }
 }
 
-@container topbar-speed (max-width: 60px) {
+@container topbar-speed (width < calc(10ch + 33px)) {
   .shell-metric-pill {
     display: none !important;
   }

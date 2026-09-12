@@ -19,6 +19,7 @@ import { Check, Folder, History, Menu, PanelLeft, Terminal, Wand2, Zap } from "l
 import { ThemeSwitcher } from "./ThemeSwitcher";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
+import { formatGenerationSpeed } from "@/lib/generation-speed";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { copyText } from "@/lib/clipboard";
 import { encodeFilePathForApi, getFileName, getRelativeFilePath } from "@/lib/file-paths";
@@ -1796,6 +1797,8 @@ export function AppShell() {
               paddingRight: rightPanelOpen ? 8 : 44,
               minWidth: 0,
               width: 200,
+              fontSize: 11,
+              fontFamily: "var(--font-mono)",
               containerType: "inline-size",
               containerName: "topbar-speed",
               flexShrink: 1,
@@ -1804,20 +1807,20 @@ export function AppShell() {
 
             {/* Generation speed pill */}
             {showChat && (() => {
-              const currentSpeedStr = generationSpeed?.current !== null && generationSpeed?.current !== undefined
-                ? `${generationSpeed.current.toFixed(1)} t/s`
-                : null;
-              const averageSpeedStr = generationSpeed?.average !== null && generationSpeed?.average !== undefined
-                ? `${generationSpeed.average.toFixed(1)} t/s`
-                : null;
-              if (!currentSpeedStr && !averageSpeedStr) return null;
-              const speedTitle = currentSpeedStr
-                ? t("appShell.tooltipCurrentSpeed", { value: currentSpeedStr })
-                : t("appShell.tooltipAverageSpeed", { value: averageSpeedStr! });
+              const currentRate = generationSpeed?.current;
+              const rate = currentRate ?? generationSpeed?.average;
+              const speed = formatGenerationSpeed(rate);
+              if (!speed || rate == null) return null;
+              const isLive = currentRate != null;
+              const speedTitle = t(isLive ? "appShell.tooltipCurrentSpeed" : "appShell.tooltipAverageSpeed", {
+                value: `${rate.toFixed(1)} t/s`,
+              });
 
               return (
                 <div
                   title={speedTitle}
+                  role="img"
+                  aria-label={speedTitle}
                   className="shell-metric-pill shell-pill-extra"
                   style={{
                     display: "inline-flex",
@@ -1828,24 +1831,24 @@ export function AppShell() {
                     borderRadius: "var(--radius-control)",
                     border: "1px solid var(--border)",
                     background: "var(--bg-subtle)",
-                    color: currentSpeedStr ? "var(--accent)" : "var(--text-muted)",
+                    color: isLive ? "var(--accent)" : "var(--text-muted)",
                     fontSize: 11,
                     fontFamily: "var(--font-mono)",
                     fontVariantNumeric: "tabular-nums",
                     whiteSpace: "nowrap",
                     cursor: "default",
-                    minWidth: 0,
-                    overflow: "hidden",
-                    flexShrink: 1,
+                    width: "calc(10ch + 33px)",
+                    flexShrink: 0,
                   }}
                 >
-                  {currentSpeedStr ? (
+                  {isLive ? (
                     <Zap size={11} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0, color: "var(--accent)" }} />
                   ) : (
-                    <span style={{ flexShrink: 0, color: "var(--text-dim)" }}>AVG</span>
+                    <span aria-hidden="true" style={{ width: 11, lineHeight: "11px", textAlign: "center", flexShrink: 0, color: "var(--text-dim)" }}>~</span>
                   )}
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", fontWeight: currentSpeedStr ? 600 : 400 }}>
-                    {currentSpeedStr ?? averageSpeedStr}
+                  <span style={{ display: "inline-flex", gap: "1ch", fontWeight: isLive ? 600 : 400 }}>
+                    <span style={{ width: "5ch", textAlign: "right" }}>{speed.value}</span>
+                    <span style={{ width: "4ch" }}>{speed.unit}</span>
                   </span>
                 </div>
               );
