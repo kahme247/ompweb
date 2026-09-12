@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import React from "react";
+import React, { act } from "react";
+import TestRenderer from "react-test-renderer";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createJiti } from "jiti";
 
@@ -10,6 +11,57 @@ const jiti = createJiti(import.meta.url, {
 });
 const { MessageView, SafeMarkdownBody, TaskResultPanel, isInterruptedMessage } = await jiti.import("./MessageView.tsx");
 const { CodeBlock } = await jiti.import("./MermaidBlock.tsx");
+const { Collapsible } = await jiti.import("./ui/primitives.tsx");
+
+test("expanded grouped tool inputs follow streaming arguments without toggling output", async () => {
+  const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  const code = "print('first')\nprint('complete')";
+  const editInput = { path: "/tmp/example.ts", patch: "-old\n+new", options: { dryRun: false } };
+  const toolResults = new Map([["edit-call", {
+    role: "toolResult", toolCallId: "edit-call", content: [{ type: "text", text: "Edit complete" }],
+  }]]);
+  const props = (input) => ({
+    isStreaming: true,
+    toolCallsDefaultCollapsed: false,
+    toolResults,
+    message: {
+      role: "assistant", model: "test", provider: "test",
+      content: [
+        { type: "toolCall", toolCallId: "eval-call", toolName: "eval", input: { language: "py", code: input } },
+        { type: "toolCall", toolCallId: "edit-call", toolName: "edit", input: editInput },
+      ],
+    },
+  });
+  let renderer;
+  try {
+    await act(() => { renderer = TestRenderer.create(React.createElement(MessageView, props("print('first')"))); });
+    // Open both tool rows through the shared disclosure's public change handler.
+    await act(() => {
+      for (const row of renderer.root.findAllByType(Collapsible).slice(1)) row.props.onOpenChange(true);
+    });
+    const toggles = () => renderer.root.findAllByType("button").filter((node) => node.props["aria-controls"] && node.children.includes("Show full input"));
+    const inputPanels = () => renderer.root.findAll((node) => node.type === "div" && node.props.className === "tool-call-input");
+    assert.equal(toggles().length, 2);
+    assert.ok(inputPanels().every((node) => node.props.hidden));
+    await act(() => { for (const toggle of toggles()) toggle.props.onClick(); });
+    assert.equal(inputPanels()[0].findAllByType("pre")[1].children.join(""), "print('first')");
+    assert.equal(inputPanels()[1].findAllByType("pre")[1].children.join(""), editInput.patch);
+    assert.deepEqual(JSON.parse(inputPanels()[1].findAllByType("pre")[2].children.join("")), editInput.options);
+    await act(() => renderer.update(React.createElement(MessageView, props(code))));
+    assert.equal(inputPanels()[0].findAllByType("pre")[1].children.join(""), code);
+    const output = () => renderer.root.findAll((node) => node.type === "pre" && node.props["data-tool-output"] === "true").map((node) => node.children.join(""));
+    assert.deepEqual(output(), ["Edit complete"]);
+    await act(() => {
+      for (const toggle of renderer.root.findAllByType("button").filter((node) => node.children.includes("Collapse input"))) toggle.props.onClick();
+    });
+    assert.ok(inputPanels().every((node) => node.props.hidden));
+    assert.deepEqual(output(), ["Edit complete"]);
+  } finally {
+    await act(() => renderer?.unmount());
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+  }
+});
 
 test("large message content avoids the markdown pipeline until requested", () => {
   const largeMessage = "x".repeat(100_001);

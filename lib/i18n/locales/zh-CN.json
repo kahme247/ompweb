@@ -674,6 +674,8 @@
   "messageView.readFiles": "已读取的文件",
   "messageView.responseError": "响应错误",
   "messageView.showDetails": "显示详情",
+  "messageView.showFullInput": "显示完整输入",
+  "messageView.collapseInput": "收起输入",
   "messageView.showExtensionMessage": "显示扩展消息",
   "messageView.taskSubagents": "子代理",
   "messageView.thinking": "思考",

@@ -3139,7 +3139,7 @@ html.dark .dropdown-surface :is(select, option) {
 }
 .tool-call-command {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 7px;
   min-width: 0;
   padding: 5px 8px;
@@ -3154,11 +3154,50 @@ html.dark .dropdown-surface :is(select, option) {
   flex: 0 0 auto;
 }
 .tool-call-command code {
+  flex: 1;
   min-width: 0;
   overflow: hidden;
   color: var(--text);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.tool-call-input-toggle {
+  flex: 0 0 auto;
+  min-height: 32px;
+  padding: 4px;
+  border-radius: var(--radius-control);
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+.tool-call-input-toggle:hover {
+  background: var(--bg-hover);
+}
+.tool-call-input-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.tool-call-input {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.tool-call-input dl, .tool-call-input dd, .tool-call-input pre {
+  margin: 0;
+}
+.tool-call-input dl > div + div {
+  margin-top: 8px;
+}
+.tool-call-input dt {
+  color: var(--text-muted);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.tool-call-input pre {
+  color: var(--text);
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .tool-call-output {
   max-height: 260px;
