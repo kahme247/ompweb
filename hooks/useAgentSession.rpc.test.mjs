@@ -537,6 +537,104 @@ test("queued promotion waits for native acknowledgement and its promoted occurre
   }, "Steer then Delete must leave the same-text follow-up queued");
 });
 
+test("promotion acknowledgement updates remounted observers and Delete cancels steering only", async (t) => {
+  t.after(unmountAll);
+  resetWorld();
+  const sid = "promotion-remount";
+  primeSession(sid, [userMsg("u0", "q")]);
+  primeSession("promotion-unrelated", [userMsg("u1", "other session")]);
+  const old = await mountSession(sid);
+  await act(async () => {
+    await old.latest.handleFollowUp("target");
+    await old.latest.handleFollowUp("target");
+  });
+  world.agents.set(sid, { running: true, state: { queuedMessageCount: 2, isStreaming: true } });
+  let release;
+  const acknowledgement = new Promise((resolve) => { release = resolve; });
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "promote_queued_message",
+    produce: () => acknowledgement,
+  });
+  let promotion;
+  await act(async () => { promotion = old.latest.promoteQueuedToSteer("target"); });
+  await act(() => old.renderer.unmount());
+  activeRenderers.delete(old.renderer);
+
+  const current = await mountSession(sid, undefined, true);
+  await act(() => lastEs().open());
+  const observer = await mountSession(sid);
+  await act(() => lastEs().open());
+  const unrelated = await mountSession("promotion-unrelated");
+  await act(async () => { await unrelated.latest.handleFollowUp("target"); });
+  assert.deepEqual(current.latest.queuedMessages, { steering: [], followUp: ["target", "target"] });
+  await act(async () => {
+    release({ value: { success: true, data: { promoted: true } } });
+    await promotion;
+  });
+  const promoted = { steering: ["target"], followUp: ["target"] };
+  assert.deepEqual(current.latest.queuedMessages, promoted);
+  assert.deepEqual(observer.latest.queuedMessages, promoted, "observers adopt one promotion, not one each");
+  assert.deepEqual(JSON.parse(queueStore.get(`omp-queue-${sid}`)), promoted);
+  assert.deepEqual(unrelated.latest.queuedMessages, { steering: [], followUp: ["target"] });
+  assert.deepEqual(JSON.parse(queueStore.get("omp-queue-promotion-unrelated")), unrelated.latest.queuedMessages);
+  assert.deepEqual(unrelated.latest.notices, []);
+
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "remove_queued_message" && body?.queue === "steering",
+    produce: async () => ({ value: { success: true, data: { removed: true } } }),
+  });
+  await act(async () => {
+    assert.equal(await current.latest.removeQueuedMessage("target", "steering"), true);
+  });
+  assert.deepEqual(world.calls.filter((call) => call.body?.type === "remove_queued_message").map((call) => call.body), [
+    { type: "remove_queued_message", message: "target", queue: "steering" },
+  ]);
+  const remaining = { steering: [], followUp: ["target"] };
+  assert.deepEqual(current.latest.queuedMessages, remaining);
+  assert.deepEqual(observer.latest.queuedMessages, remaining);
+  assert.deepEqual(JSON.parse(queueStore.get(`omp-queue-${sid}`)), remaining);
+});
+
+test("remounted delivery before promotion acknowledgement preserves the next duplicate and pending guard", async (t) => {
+  t.after(unmountAll);
+  resetWorld();
+  const sid = "promotion-remount-delivery";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const old = await mountSession(sid);
+  await act(async () => {
+    await old.latest.handleFollowUp("target");
+    await old.latest.handleFollowUp("target");
+  });
+  world.agents.set(sid, { running: true, state: { queuedMessageCount: 2, isStreaming: true } });
+  let release;
+  const acknowledgement = new Promise((resolve) => { release = resolve; });
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "promote_queued_message",
+    produce: () => acknowledgement,
+  });
+  let promotion;
+  await act(async () => { promotion = old.latest.promoteQueuedToSteer("target"); });
+  await act(() => old.renderer.unmount());
+  activeRenderers.delete(old.renderer);
+  const current = await mountSession(sid, undefined, true);
+  const es = lastEs();
+  await act(() => es.open());
+  await act(async () => {
+    await current.latest.promoteQueuedToSteer("target");
+    assert.equal(await current.latest.removeQueuedMessage("target", "followUp"), false);
+    es.emit({ type: "message_end", message: userMsg("delivered", "target") });
+    release({ value: { success: true, data: { promoted: true } } });
+    await promotion;
+  });
+  const remaining = { steering: [], followUp: ["target"] };
+  assert.deepEqual(current.latest.queuedMessages, remaining);
+  assert.deepEqual(JSON.parse(queueStore.get(`omp-queue-${sid}`)), remaining);
+  assert.equal(current.latest.messages.filter((message) => message.role === "user" && message.content === "target").length, 1);
+  assert.equal(world.calls.filter((call) => call.body?.type === "promote_queued_message").length, 1);
+  assert.equal(world.calls.some((call) => call.body?.type === "remove_queued_message"), false);
+  assert.deepEqual(current.latest.notices, []);
+});
+
 test("queued promotion preserves the follow-up and reports native refusal or rejection", async (t) => {
   for (const outcome of [
     { name: "not-found", response: { value: { success: true, data: { promoted: false } } }, noticeType: "warning" },
@@ -695,6 +793,9 @@ test("promotion acknowledgements after navigation cannot change the newly mounte
       assert.deepEqual(current.latest.queuedMessages, { steering: [], followUp: ["target"] });
       assert.deepEqual(current.latest.notices, []);
       assert.equal(world.calls.some((call) => call.url === "/api/agent/new-promotion" && call.body?.type === "promote_queued_message"), false);
+      assert.deepEqual(JSON.parse(queueStore.get("omp-queue-old-promotion")), response.status
+        ? { steering: [], followUp: ["target"] }
+        : { steering: ["target"], followUp: [] }, "an unobserved session still records the native result");
     });
   }
 });

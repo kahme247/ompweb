@@ -47,6 +47,7 @@ import {
   EMPTY_QUEUE,
   clearPersistedQueue,
   isEmptyQueue,
+  pendingQueuedPromotions,
   persistQueue,
   publishQueueChange,
   readPersistedQueue,
@@ -346,9 +347,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // reporting queuedMessageCount === 0 must not wipe a queue we just wrote.
   const queueMutatedAtRef = useRef(0);
   const queuedRemovalRef = useRef<{ sessionId: string } | null>(null);
-  const queuedPromotionsRef = useRef<Map<string, { sessionId: string; consumed: boolean }> | null>(null);
-  if (queuedPromotionsRef.current === null) queuedPromotionsRef.current = new Map();
-  const queuedPromotions = queuedPromotionsRef.current;
   const agentRunningRef = useRef(false);
   const bashRunningRef = useRef(false);
   const bashRecoveryIdRef = useRef(0);
@@ -1601,27 +1599,27 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const consumeQueuedMessage = useCallback((text: string) => {
     if (!text) return;
-    const promotion = queuedPromotions.get(text);
     const sid = sessionIdRef.current;
+    const promotion = sid ? pendingQueuedPromotions.get(sid)?.get(text) : undefined;
     updateQueuedMessages((prev) => {
       const si = prev.steering.indexOf(text);
       if (si !== -1) return { ...prev, steering: prev.steering.filter((_, i) => i !== si) };
       const fi = prev.followUp.indexOf(text);
       if (fi !== -1) {
         // A pending acknowledgement must not promote the next same-text item.
-        if (promotion?.sessionId === sid) promotion.consumed = true;
+        if (promotion) promotion.consumed = true;
         return { ...prev, followUp: prev.followUp.filter((_, i) => i !== fi) };
       }
       return prev;
     });
-  }, [queuedPromotions, updateQueuedMessages]);
+  }, [updateQueuedMessages]);
 
   /** Only remove a chip after omp confirms cancellation of its queued payload. */
   const removeQueuedMessage = useCallback(async (text: string, queue: keyof QueuedMessages): Promise<boolean> => {
     const sid = sessionIdRef.current;
     if (!hookAliveRef.current || !sid || !text || !queuedMessagesRef.current[queue].includes(text)) return false;
     // Do not race another removal or promotion against the same queue mirror.
-    if (queuedRemovalRef.current?.sessionId === sid || queuedPromotions.get(text)?.sessionId === sid) return false;
+    if (queuedRemovalRef.current?.sessionId === sid || pendingQueuedPromotions.get(sid)?.has(text)) return false;
     const removal = { sessionId: sid };
     queuedRemovalRef.current = removal;
     try {
@@ -1651,43 +1649,52 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (queuedRemovalRef.current === removal) queuedRemovalRef.current = null;
     }
-  }, [addNotice, queuedPromotions]);
+  }, [addNotice]);
 
   /** Move the first matching native follow-up into steering, then relabel its
    *  still-undelivered chip. Never enqueue a second copy via steer. */
   const promoteQueuedToSteer = useCallback(async (text: string) => {
     const sid = sessionIdRef.current;
-    if (!hookAliveRef.current || !sid || !text || !queuedMessages.followUp.includes(text)) return;
+    if (!hookAliveRef.current || !sid || !text || !queuedMessagesRef.current.followUp.includes(text)) return;
     // Text is the existing chip identity. Suppress overlap, not later retries.
-    if (queuedPromotions.get(text)?.sessionId === sid || queuedRemovalRef.current?.sessionId === sid) return;
-    const promotion = { sessionId: sid, consumed: false };
+    let queuedPromotions = pendingQueuedPromotions.get(sid);
+    if (queuedPromotions?.has(text) || queuedRemovalRef.current?.sessionId === sid) return;
+    if (!queuedPromotions) {
+      queuedPromotions = new Map();
+      pendingQueuedPromotions.set(sid, queuedPromotions);
+    }
+    const promotion = { consumed: false };
     queuedPromotions.set(text, promotion);
     try {
       const result = await sendAgentCommand<{ promoted: boolean }>(sid, {
         type: "promote_queued_message",
         message: text,
       });
-      if (!hookAliveRef.current || sessionIdRef.current !== sid) return;
       if (result?.promoted !== true) {
-        addNotice({ type: "warning", message: translate("agentSession.queuedPromotionUnavailable") });
+        if (hookAliveRef.current && sessionIdRef.current === sid) {
+          addNotice({ type: "warning", message: translate("agentSession.queuedPromotionUnavailable") });
+        }
         return;
       }
-      updateQueuedMessages((prev) => {
-        if (!hookAliveRef.current || sessionIdRef.current !== sid || promotion.consumed) return prev;
-        const fi = prev.followUp.indexOf(text);
-        if (fi === -1) return prev;
-        return {
-          steering: [...prev.steering, text],
-          followUp: prev.followUp.filter((_, i) => i !== fi),
-        };
+      if (promotion.consumed) return;
+      const mirror = hookAliveRef.current && sessionIdRef.current === sid
+        ? queuedMessagesRef.current
+        : readPersistedQueue(sid);
+      if (!mirror) return;
+      const fi = mirror.followUp.indexOf(text);
+      if (fi === -1) return;
+      publishQueueChange(sid, {
+        steering: [...mirror.steering, text],
+        followUp: mirror.followUp.filter((_, i) => i !== fi),
       });
     } catch (error) {
       if (!hookAliveRef.current || sessionIdRef.current !== sid) return;
       addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
     } finally {
       if (queuedPromotions.get(text) === promotion) queuedPromotions.delete(text);
+      if (queuedPromotions.size === 0) pendingQueuedPromotions.delete(sid);
     }
-  }, [addNotice, queuedMessages.followUp, queuedPromotions, updateQueuedMessages]);
+  }, [addNotice]);
 
   useEffect(() => subscribeQueueChanges((sid, queue) => {
     if (!hookAliveRef.current || sessionIdRef.current !== sid) return;

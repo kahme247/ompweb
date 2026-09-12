@@ -7,6 +7,10 @@ export interface QueuedMessages {
 
 export const EMPTY_QUEUE: QueuedMessages = { steering: [], followUp: [] };
 
+// In-flight RPCs outlive their initiating hook. Remounted delivery handlers must
+// mark the same occurrence consumed before its acknowledgement can relabel it.
+export const pendingQueuedPromotions = new Map<string, Map<string, { consumed: boolean }>>();
+
 // omp reports only queuedMessageCount over RPC; the queued texts live in React
 // state and would vanish on reload. Mirror them into sessionStorage (per
 // session, best-effort, size-bounded) so a reload can restore the queue panel.
