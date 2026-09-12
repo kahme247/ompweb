@@ -1329,7 +1329,7 @@ function HiddenExtensionView({ message, cwd, onOpenFile }: { message: CustomMess
             }}
           >
             <EyeOff size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.85 }} />
-            <span style={{ fontFamily: "var(--font-mono)", fontWeight: 650, letterSpacing: "0.01em", color: "var(--text-muted)", fontSize: 11 }}>
+            <span style={{ userSelect: "none", fontFamily: "var(--font-mono)", fontWeight: 650, letterSpacing: "0.01em", color: "var(--text-muted)", fontSize: 11 }}>
               {label}
             </span>
             {preview ? (
