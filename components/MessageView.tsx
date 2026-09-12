@@ -333,6 +333,8 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
       <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", maxWidth: "85%", minWidth: 0 }}>
         <div
           className="chat-message-card"
+          data-selection-scope="message"
+          tabIndex={-1}
           style={{
             maxWidth: "100%",
             minWidth: 0,
@@ -665,7 +667,7 @@ function AssistantMessageView({
         })()}
       </div>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+      <div data-selection-scope="message" tabIndex={-1} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
         {groupAdjacentBlocks(blockItems).map((group, groupIdx) => {
           if (group.type === "single") {
             const { block, originalIndex } = group.item;
@@ -1193,7 +1195,7 @@ function CompactionMessageView({ message }: { message: CustomMessage }) {
           <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 650 }}>{t("messageView.compactionLabel")}</span>
           {time && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>{time}</span>}
         </div>
-        <div style={{ padding: "11px 13px 12px" }}>
+        <div data-selection-scope="message" tabIndex={-1} style={{ padding: "11px 13px 12px" }}>
           <div style={{ color: "var(--text)", fontSize: 15, fontWeight: 700, lineHeight: 1.35 }}>{t("messageView.conversationCompacted")}</div>
           {(method || (tokensBefore !== null && tokensAfter !== null)) && (
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
@@ -1301,7 +1303,7 @@ function HiddenExtensionView({ message, cwd, onOpenFile }: { message: CustomMess
 
   return (
     <div style={{ marginBottom: 8, display: "flex", justifyContent: "center" }}>
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 0, width: "100%", maxWidth: 640 }}>
+      <div data-selection-scope="message" tabIndex={-1} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 0, width: "100%", maxWidth: 640 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, width: "100%" }}>
           <div style={{ flex: 1, height: 1, background: "var(--border)", opacity: 0.55 }} />
           <button
@@ -1310,6 +1312,7 @@ function HiddenExtensionView({ message, cwd, onOpenFile }: { message: CustomMess
             aria-expanded={expanded}
             aria-label={expanded ? t("messageView.collapse") : t("messageView.expand")}
             style={{
+              userSelect: expanded ? "none" : undefined,
               display: "inline-flex",
               alignItems: "center",
               gap: 6,
@@ -1326,7 +1329,7 @@ function HiddenExtensionView({ message, cwd, onOpenFile }: { message: CustomMess
             }}
           >
             <EyeOff size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.85 }} />
-            <span style={{ fontFamily: "var(--font-mono)", fontWeight: 650, letterSpacing: "0.01em", color: "var(--text-muted)", fontSize: 11 }}>
+            <span style={{ userSelect: "none", fontFamily: "var(--font-mono)", fontWeight: 650, letterSpacing: "0.01em", color: "var(--text-muted)", fontSize: 11 }}>
               {label}
             </span>
             {preview ? (
@@ -1339,7 +1342,7 @@ function HiddenExtensionView({ message, cwd, onOpenFile }: { message: CustomMess
           </button>
           <div style={{ flex: 1, height: 1, background: "var(--border)", opacity: 0.55 }} />
         </div>
-        {time ? <span style={{ marginTop: 2, color: "var(--text-dim)", fontSize: 10, fontVariantNumeric: "tabular-nums", opacity: 0.75 }}>{time}</span> : null}
+        {time ? <span style={{ userSelect: "none", marginTop: 2, color: "var(--text-dim)", fontSize: 10, fontVariantNumeric: "tabular-nums", opacity: 0.75 }}>{time}</span> : null}
         {expanded ? (
           <div
             style={{
@@ -1378,6 +1381,7 @@ function HiddenExtensionView({ message, cwd, onOpenFile }: { message: CustomMess
             </div>
             <div
               style={{
+                userSelect: "none",
                 display: "flex",
                 alignItems: "center",
                 gap: 8,
@@ -1491,6 +1495,8 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
   return (
     <div style={{ marginBottom: 16 }}>
       <div
+        data-selection-scope="message"
+        tabIndex={-1}
         style={{
           border: "1px solid var(--border)",
           borderRadius: 8,
@@ -1500,6 +1506,7 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
       >
         <div
           style={{
+            userSelect: "none",
             display: "flex",
             alignItems: "center",
             gap: 8,
@@ -1557,6 +1564,7 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
 
         <div
           style={{
+            userSelect: "none",
             display: "flex",
             alignItems: "center",
             gap: 8,
@@ -1747,7 +1755,7 @@ function BashExecutionView({ message, sessionId }: { message: BashExecutionMessa
     : null;
 
   return (
-    <div style={{ margin: "6px 0" }}>
+    <div data-selection-scope="message" tabIndex={-1} style={{ margin: "6px 0" }}>
       <ToolCallBlock block={block} result={result} />
       {downloadUrl && (
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 6 }}>

@@ -1160,7 +1160,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
       </div>
 
       {/* Content area */}
-      <div ref={contentRef} className="file-viewer-content" style={{ flex: 1, overflow: "auto", background: "var(--bg)" }}>
+      <div ref={contentRef} data-selection-scope="document" tabIndex={-1} className="file-viewer-content" style={{ flex: 1, overflow: "auto", background: "var(--bg)" }}>
         {displayMode === "diff" && hasGitDiff ? (
           <DiffView patch={gitDiff.patch!} />
         ) : isHtml && displayMode === "preview" ? (

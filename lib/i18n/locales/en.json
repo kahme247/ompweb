@@ -1091,6 +1091,8 @@
   "settingsConfig.interfaceBehaviorDesc": "Controls interface presentation, notification sounds, and execution submission mode.",
   "settingsConfig.keepToolCallsCollapsed": "Keep tool calls collapsed",
   "settingsConfig.keepToolCallsCollapsedDesc": "Show only compact headers while tools execute.",
+  "settingsConfig.scopeNativeSelectAll": "Scope native Select All (experimental)",
+  "settingsConfig.scopeNativeSelectAllDesc": "Limit whole-page selections from browser or touch menus to the active message, chat, or file. May also narrow deliberate whole-page selections. Turn off if selection handles or menus misbehave. Keyboard shortcuts are unaffected.",
   "settingsConfig.completionSound": "Completion sound",
   "settingsConfig.completionSoundDesc": "Play a tone when the agent completes a run.",
   "settingsConfig.providerUsage": "Provider usage limits",
