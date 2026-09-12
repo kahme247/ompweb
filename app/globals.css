@@ -2406,12 +2406,17 @@ html.dark .dropdown-surface :is(select, option) {
 /* Provider Sub-navigation & Cards */
 .providers-segmented {
   display: inline-flex;
+  flex-wrap: nowrap;
   align-items: stretch;
+  width: max-content;
+  max-width: 100%;
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
   background: var(--bg-panel);
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   margin-bottom: 24px;
+  box-sizing: border-box;
 }
 
 .providers-segmented-btn {
@@ -2427,11 +2432,8 @@ html.dark .dropdown-surface :is(select, option) {
   font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
+  flex-shrink: 0;
   transition: background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm);
-}
-
-.providers-segmented-btn + .providers-segmented-btn {
-  border-left: 1px solid var(--border);
 }
 
 .providers-segmented-btn:hover {
