@@ -4,7 +4,20 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ---
 
-## Unreleased
+## [v0.5.0] - 2026-09-12
+
+This release brings live tool-output streaming, a workspace picker for new sessions, voice dictation, new themes, an activity timeline with transcript export, and a redesigned settings experience.
+
+### Highlights
+
+- **Live tool output**: Tool calls now show a running indicator with streamed output while the tool executes, instead of a dead row awaiting the result.
+- **Workspace picker for new sessions**: Choose the destination workspace directly above the new-session composer, with workspace names, exact paths, and worktree preservation.
+- **Voice dictation**: Provider-agnostic speech-to-text dictation in the composer.
+- **New themes**: OMP Midnight plus popular light and dark palettes with previews and CommandPalette support.
+- **Activity timeline**: Activity group summaries, a minimap rail, and transcript export.
+- **Composer upgrades**: Plus menu, context-ring gauge, context detail panel, and a `/loop` command to repeat a task up to N attempts.
+- **Redesigned settings**: Full-page centered layout with a provider grid.
+- **Long-session stability**: Targeted cache invalidation, oversized-file handling, better error surfacing, and render optimization.
 
 ### Fixes & Improvements
 
@@ -18,12 +31,43 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 - Keep provider and OMP System navigation in one horizontally scrollable row on narrow screens, and keep Save and Cancel in normal flow with inline save errors.
 - Hide the Steer action when the only queued message is already a steer, matching the expanded queue while keeping Edit and Delete available.
 - Keep the theme picker inside the mobile viewport by opening it to the right of its toolbar anchor.
-- Choose the destination workspace directly above the new-session composer. The selector stays in sync with the sidebar, shows workspace names and the exact destination path, preserves the selected worktree, and opens the existing Add workspace dialog.
 - Match browser and installed-app chrome to the selected theme, with OMP Midnight as the launch fallback.
 - Open the conversation sidebar on Back before leaving in narrow, overlay-sidebar layouts. On every layout, warn before Back, reload, or close can discard unsent text or attachments. Cancel keeps the current conversation and drafts; switching conversations still preserves drafts.
 - Keep unsent-content confirmation active across consecutive Back presses on Android Chrome, including after switching to a new session.
 - Some installed browsers cannot close a directly launched app programmatically. After confirming Leave, use native Back or Close if prompted. Chrome may bypass sidebar-first Back until the first interaction after launch, and Android process termination can bypass page warnings.
 - Show app-close guidance only in standalone installed apps, never in ordinary browser tabs.
+
+---
+
+## [v0.4.2] - 2026-09-02
+
+### Fixes & Improvements
+
+- Handle provider daily usage windows and Windows npm spawn shells in the self-update flow.
+
+---
+
+## [v0.4.1] - 2026-09-02
+
+### Fixes & Improvements
+
+- Surface quota 429 RESOURCE_EXHAUSTED errors persistently instead of stopping silently.
+- Pin the live agent status bar to the top edge of the composer.
+- Keep the running indicator visible on selected/hovered sessions.
+
+---
+
+## [v0.4.0] - 2026-09-02
+
+This release adds native autostart services, self-updates, a redesigned top bar, usage analytics, and composer upgrades.
+
+### Highlights
+
+- **Native autostart**: Windows Task Scheduler service, system tray manager, desktop shortcuts, and macOS launchd installer.
+- **Self-updates**: Durable auto-update for OMP and omp-web with unified notifications.
+- **Top bar redesign**: 3-zone layout with centered breadcrumb, provider cards, and zoom-aware menus.
+- **Usage analytics**: Dashboard with persistent SQLite store plus provider usage limits.
+- **Composer upgrades**: Tool preset picker, collapsible input, file search in the Explorer, and workspace-level OMP launch arguments.
 
 ---
 
