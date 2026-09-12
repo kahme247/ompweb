@@ -19,6 +19,7 @@ export interface ChatDraft {
 // globalThis so dev Fast Refresh doesn't wipe drafts mid-typing.
 declare global {
   var __ompChatDrafts: Map<string, ChatDraft> | undefined;
+  var __ompChatDraftListeners: Set<() => void> | undefined;
 }
 
 const MAX_DRAFTS = 50;
@@ -47,6 +48,17 @@ function readStoredDrafts(): Map<string, ChatDraft> {
     // Storage may be unavailable (SSR or browser policy); keep drafts in memory.
   }
   return stored;
+}
+
+const listeners = (globalThis.__ompChatDraftListeners ??= new Set<() => void>());
+
+export function hasUnsentDrafts(): boolean {
+  return drafts.size > 0;
+}
+
+export function subscribeDrafts(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
 }
 
 function cloneDraft(draft: ChatDraft): ChatDraft {
@@ -92,13 +104,17 @@ export function setDraft(key: string, draft: ChatDraft): void {
   } catch {
     // Preserve the in-memory draft if storage is unavailable or full.
   }
+  for (const listener of listeners) listener();
 }
 
 export function clearDraft(key: string): void {
-  drafts.delete(key);
+  const deleted = drafts.delete(key);
   try {
     sessionStorage.removeItem(STORAGE_PREFIX + key);
   } catch {
     // Storage may be unavailable.
+  }
+  if (deleted) {
+    for (const listener of listeners) listener();
   }
 }
