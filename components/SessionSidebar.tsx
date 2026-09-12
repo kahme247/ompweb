@@ -427,7 +427,14 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   // their containing project.
   const lastSyncedCwdPropRef = useRef<string | null>(null);
   useEffect(() => {
-    if (selectedCwdProp && selectedCwdProp !== lastSyncedCwdPropRef.current) {
+    // A withdrawn command must not swallow the next one: without this reset,
+    // re-commanding a cwd the sidebar already synced (A -> sidebar B -> A)
+    // stays stuck on B.
+    if (!selectedCwdProp) {
+      lastSyncedCwdPropRef.current = null;
+      return;
+    }
+    if (selectedCwdProp !== lastSyncedCwdPropRef.current) {
       provisionalSelectionRef.current = false;
       lastSyncedCwdPropRef.current = selectedCwdProp;
       setSelectedCwd(selectedCwdProp);
