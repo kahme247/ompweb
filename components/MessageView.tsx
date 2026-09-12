@@ -1193,7 +1193,11 @@ const ToolCallGroupBlock = memo(function ToolCallGroupBlock({
   );
 }, (prev, next) => (
   prev.items.length === next.items.length
-  && prev.items.every((item, i) => item.block.toolCallId === next.items[i]?.block.toolCallId)
+  && prev.items.every((item, i) => (
+    item.block.toolCallId === next.items[i]?.block.toolCallId
+    && item.block.toolName === next.items[i]?.block.toolName
+    && inputsShallowEqual(item.block.input, next.items[i]?.block.input)
+  ))
   && prev.onOpenFile === next.onOpenFile
   && (!prev.toolResults || !next.toolResults || prev.items.every((item) => prev.toolResults?.get(item.block.toolCallId) === next.toolResults?.get(item.block.toolCallId)))
 ));
