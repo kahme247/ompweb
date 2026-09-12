@@ -98,7 +98,7 @@ export function AppShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const isMobile = useIsMobile();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   // When user clicks +, we only store the cwd — no fake session id
@@ -657,8 +657,16 @@ export function AppShell() {
   const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | null>(null);
   const mobileToolsRef = useRef<HTMLDetailsElement>(null);
   const mobileToolsContentRef = useRef<HTMLDivElement>(null);
+  const restoreToolsFocusRef = useRef(false);
+  const [compactTopbar, setCompactTopbar] = useState<boolean | null>(null);
+  useLayoutEffect(() => {
+    if (compactTopbar && restoreToolsFocusRef.current) {
+      mobileToolsRef.current?.querySelector("summary")?.focus();
+      restoreToolsFocusRef.current = false;
+    }
+  }, [compactTopbar]);
   useEffect(() => {
-    if (!isMobile) return;
+    if (!compactTopbar) return;
     const closeOnOutside = (event: PointerEvent) => {
       const tools = mobileToolsRef.current;
       if (tools?.open && !tools.contains(event.target as Node)) {
@@ -680,7 +688,7 @@ export function AppShell() {
       document.removeEventListener("pointerdown", closeOnOutside);
       document.removeEventListener("keydown", closeOnEscape);
     };
-  }, [isMobile, activeTopPanel]);
+  }, [compactTopbar, activeTopPanel]);
   const toggleTopPanel = useCallback((panel: "branches" | "system") => {
     if (isMobile) setSidebarOpen(false);
     setActiveTopPanel((cur) => cur === panel ? null : panel);
@@ -1376,6 +1384,59 @@ export function AppShell() {
   const effectiveNewSessionCwd = newSessionCwd ?? (selectedSession === null && activeCwd ? activeCwd : null);
   const newSessionProject = (workspaceOptions.cwd === effectiveNewSessionCwd ? workspaceOptions.selectedProject : null) ?? effectiveNewSessionCwd ?? "";
   const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
+  useLayoutEffect(() => {
+    const header = topBarRef.current;
+    const details = mobileToolsRef.current;
+    const content = mobileToolsContentRef.current;
+    const right = header?.querySelector<HTMLElement>("[data-topbar-right-group]");
+    const tools = header?.querySelector<HTMLElement>(".shell-topbar-tools");
+    if (!header || !details || !content || !right || !tools) return;
+    const update = () => {
+      const hadControlsFocus = content.contains(document.activeElement);
+      // Measure the real controls even while their disclosure is closed.
+      const closed = !details.open;
+      const display = content.style.display;
+      const visibility = content.style.visibility;
+      content.style.visibility = "hidden";
+      content.style.display = "flex";
+      details.open = true;
+      const children = Array.from(content.children).filter((child) =>
+        !["absolute", "fixed"].includes(getComputedStyle(child).position));
+      const contentStyle = getComputedStyle(content);
+      const headerStyle = getComputedStyle(header);
+      const rightStyle = getComputedStyle(right);
+      const controlsWidth = children.reduce((width, child) => {
+        const style = getComputedStyle(child);
+        return width + child.getBoundingClientRect().width
+          + parseFloat(style.marginLeft) + parseFloat(style.marginRight);
+      }, 0) + Math.max(0, children.length - 1) * parseFloat(contentStyle.columnGap);
+      const required = controlsWidth
+        + (tools.firstElementChild?.getBoundingClientRect().width ?? 0)
+        + parseFloat(getComputedStyle(tools).columnGap)
+        + parseFloat(headerStyle.paddingLeft) + parseFloat(headerStyle.paddingRight)
+        + parseFloat(headerStyle.columnGap)
+        + parseFloat(rightStyle.minWidth)
+        + parseFloat(rightStyle.paddingLeft) + parseFloat(rightStyle.paddingRight);
+      if (closed) details.open = false;
+      content.style.display = display;
+      content.style.visibility = visibility;
+      const compact = required > header.clientWidth;
+      if (compact && details.dataset.compact !== "true" && hadControlsFocus) {
+        restoreToolsFocusRef.current = true;
+      }
+      setCompactTopbar(compact);
+    };
+    const observer = new ResizeObserver(update);
+    observer.observe(header);
+    observer.observe(content);
+    for (const child of content.children) observer.observe(child);
+    document.fonts.addEventListener("loadingdone", update);
+    update();
+    return () => {
+      observer.disconnect();
+      document.fonts.removeEventListener("loadingdone", update);
+    };
+  }, [isMobile, locale, rightPanelOpen, showChat]);
   // While restoring initial session from URL, don't show the placeholder
   const showPlaceholder = initialSessionRestored && !showChat;
 
@@ -1643,8 +1704,8 @@ export function AppShell() {
             <details
               ref={mobileToolsRef}
               className="shell-topbar-overflow"
-              data-mobile={isMobile}
-              open={isMobile ? undefined : true}
+              data-compact={compactTopbar === null ? "pending" : compactTopbar}
+              open={compactTopbar ? undefined : true}
               onToggle={(event) => {
                 if (!event.currentTarget.open) setActiveTopPanel(null);
               }}
@@ -1676,7 +1737,7 @@ export function AppShell() {
                   activeLeafId={branchActiveLeafId}
                   onLeafChange={handleBranchLeafChange}
                   inline
-                  containerRef={isMobile ? mobileToolsContentRef : topBarRef}
+                  containerRef={compactTopbar ? mobileToolsContentRef : topBarRef}
                   open={activeTopPanel === "branches"}
                   onToggle={() => toggleTopPanel("branches")}
                   hasSession
@@ -1887,7 +1948,7 @@ export function AppShell() {
               justifyContent: "flex-end",
               gap: 6,
               paddingRight: rightPanelOpen ? 8 : 44,
-              minWidth: 0,
+              minWidth: "calc(10ch + 33px)",
               width: 200,
               fontSize: 11,
               fontFamily: "var(--font-mono)",
