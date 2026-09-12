@@ -1303,7 +1303,7 @@ function HiddenExtensionView({ message, cwd, onOpenFile }: { message: CustomMess
 
   return (
     <div style={{ marginBottom: 8, display: "flex", justifyContent: "center" }}>
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 0, width: "100%", maxWidth: 640 }}>
+      <div data-selection-scope="message" tabIndex={-1} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 0, width: "100%", maxWidth: 640 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, width: "100%" }}>
           <div style={{ flex: 1, height: 1, background: "var(--border)", opacity: 0.55 }} />
           <button
@@ -1312,6 +1312,7 @@ function HiddenExtensionView({ message, cwd, onOpenFile }: { message: CustomMess
             aria-expanded={expanded}
             aria-label={expanded ? t("messageView.collapse") : t("messageView.expand")}
             style={{
+              userSelect: expanded ? "none" : undefined,
               display: "inline-flex",
               alignItems: "center",
               gap: 6,
@@ -1341,7 +1342,7 @@ function HiddenExtensionView({ message, cwd, onOpenFile }: { message: CustomMess
           </button>
           <div style={{ flex: 1, height: 1, background: "var(--border)", opacity: 0.55 }} />
         </div>
-        {time ? <span style={{ marginTop: 2, color: "var(--text-dim)", fontSize: 10, fontVariantNumeric: "tabular-nums", opacity: 0.75 }}>{time}</span> : null}
+        {time ? <span style={{ userSelect: "none", marginTop: 2, color: "var(--text-dim)", fontSize: 10, fontVariantNumeric: "tabular-nums", opacity: 0.75 }}>{time}</span> : null}
         {expanded ? (
           <div
             style={{
@@ -1353,7 +1354,7 @@ function HiddenExtensionView({ message, cwd, onOpenFile }: { message: CustomMess
               background: "var(--bg-subtle)",
             }}
           >
-            <div data-selection-scope="message" tabIndex={-1} style={{ padding: "8px 10px" }}>
+            <div style={{ padding: "8px 10px" }}>
               {images.length > 0 && (
                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: cleanText ? 8 : 0 }}>
                   {images.map((img, i) => {
@@ -1380,6 +1381,7 @@ function HiddenExtensionView({ message, cwd, onOpenFile }: { message: CustomMess
             </div>
             <div
               style={{
+                userSelect: "none",
                 display: "flex",
                 alignItems: "center",
                 gap: 8,
@@ -1493,6 +1495,8 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
   return (
     <div style={{ marginBottom: 16 }}>
       <div
+        data-selection-scope="message"
+        tabIndex={-1}
         style={{
           border: "1px solid var(--border)",
           borderRadius: 8,
@@ -1502,6 +1506,7 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
       >
         <div
           style={{
+            userSelect: "none",
             display: "flex",
             alignItems: "center",
             gap: 8,
@@ -1519,7 +1524,7 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
         </div>
 
         {contentExpanded ? (
-          <div data-selection-scope="message" tabIndex={-1} style={{ padding: "6px 9px" }}>
+          <div style={{ padding: "6px 9px" }}>
             {images.length > 0 && (
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: displayText ? 8 : 0 }}>
                 {images.map((img, i) => {
@@ -1559,6 +1564,7 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
 
         <div
           style={{
+            userSelect: "none",
             display: "flex",
             alignItems: "center",
             gap: 8,

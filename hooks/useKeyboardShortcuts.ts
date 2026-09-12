@@ -53,7 +53,7 @@ export function useGlobalKeyboardShortcuts(
       interactionTarget = event.target instanceof Element ? event.target : null;
     };
     const selectAll = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.isComposing || event.key.toLowerCase() !== "a"
+      if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.key.toLowerCase() !== "a"
         || (!event.ctrlKey && !event.metaKey) || event.altKey || event.shiftKey) return;
 
       const target = event.target;
@@ -71,8 +71,8 @@ export function useGlobalKeyboardShortcuts(
       if (selection.rangeCount && !selection.isCollapsed) {
         const selectedScope = scopeFor(selection.getRangeAt(0).commonAncestorContainer);
         // A range spanning messages belongs to their enclosing transcript.
-        // A stale range in another pane must not override the latest interaction.
-        if (selectedScope && (!activeScope || selectedScope.contains(activeScope) || activeScope.contains(selectedScope))) {
+        // A retained child selection must not override newer enclosing-pane focus.
+        if (selectedScope && (!activeScope || selectedScope.contains(activeScope))) {
           scope = selectedScope;
         }
       }
