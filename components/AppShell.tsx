@@ -4,9 +4,11 @@ import { useState, useCallback, useRef, useEffect, useLayoutEffect } from "react
 import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
+import { useSidebarHistory } from "@/hooks/useSidebarHistory";
 import { SessionSidebar } from "./SessionSidebar";
 import { ToastProvider } from "./ui/toast";
 import { toast } from "./ui/toast";
+import { ConfirmDialog } from "./ui/field";
 import { ChatWindow } from "./ChatWindow";
 import { type Tab } from "./TabBar";
 import { type FileExplorerHandle } from "./FileExplorer";
@@ -1015,6 +1017,9 @@ export function AppShell() {
     // re-select, notification click) must not bump sessionKey: that remounts
     // ChatWindow, reconnects SSE, and drops the mid-run streaming view.
     setSettingsTab(null);
+    // Re-picking the current conversation still closes/rearms the drawer,
+    // without remounting the chat or disturbing its draft.
+    if (isMobile && !isRestore) setSidebarOpen(false);
     if (!isRestore && session.id === selectedSession?.id) return;
     setNewSessionCwd(null);
     setSelectedSession(session);
@@ -1022,8 +1027,6 @@ export function AppShell() {
     setSystemPrompt(null);
     setSystemPromptLoading(false);
     setInitialSessionRestored(true);
-    // On mobile, collapse the overlay drawer so the chat is revealed after pick.
-    if (isMobile && !isRestore) setSidebarOpen(false);
     if (isRestore) {
       // Suppress the redundant sessionKey bump that would come from the
       // onCwdChange effect firing after setSelectedCwd in the sidebar. We
@@ -1339,6 +1342,19 @@ export function AppShell() {
   // While restoring initial session from URL, don't show the placeholder
   const showPlaceholder = initialSessionRestored && !showChat;
 
+  const sidebarHistory = useSidebarHistory({
+    active: isMobile && (showChat || Boolean(initialSessionId)),
+    ready: mobileSidebarReady,
+    sidebarOpen,
+    setSidebarOpen,
+    url: searchParams.toString(),
+  });
+  useEffect(() => {
+    if (sidebarHistory.exitNeedsNativeBack) {
+      toast.info(t("appShell.exitNativeBackTitle"), t("appShell.exitNativeBackDescription"));
+    }
+  }, [sidebarHistory.exitNeedsNativeBack, t]);
+
   const activeCwdName = activeCwd ? getFileName(activeCwd) || activeCwd : null;
   const windowTitle = activeCwdName ? `${activeCwdName} - omp web` : "omp web";
 
@@ -1377,6 +1393,16 @@ export function AppShell() {
   return (
     <>
     <ToastProvider>
+      <ConfirmDialog
+        open={sidebarHistory.exitConfirmationOpen}
+        onOpenChange={(open) => { if (!open) sidebarHistory.cancelExit(); }}
+        title={t("appShell.exitTitle")}
+        description={t("appShell.exitDescription")}
+        confirmLabel={t("appShell.exitLeave")}
+        cancelLabel={t("appShell.exitStay")}
+        danger
+        onConfirm={sidebarHistory.leave}
+      />
       <CommandPalette
         onSelectSession={handleSelectSession}
         onNewSession={() => {

@@ -253,7 +253,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   generationSpeed,
   onRemoveQueuedMessage,
   onPromoteQueuedToSteer,
-  draftKey,
+  draftKey = "new:unassigned",
   cwd,
   activeGoal,
   activePlan,
@@ -590,7 +590,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     }
   }, [clearImages, clearTextFiles, draftKey]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!draftKey || draftKeyRef.current !== draftKey) return;
     setDraft(draftKey, {
       value,
@@ -599,7 +599,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     });
   }, [attachedImages, attachedTextFiles, draftKey, value]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const previousDraftKey = draftKeyRef.current;
     if (previousDraftKey === draftKey) return;
 
