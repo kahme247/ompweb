@@ -880,7 +880,6 @@ const SessionItem = memo(function SessionItem({
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const renameCancelRef = useRef(false);
- const [confirmArchive, setConfirmArchive] = useState(false);
  const [confirmDelete, setConfirmDelete] = useState(false);
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -889,13 +888,10 @@ const SessionItem = memo(function SessionItem({
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const title = session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
   const relativeTime = formatRelativeTime(session.modified, locale, relativeTimeNow);
- const confirming = confirmArchive;
  const showActions = hovered || focusWithin || actionMenuOpen;
-  const rowBackground = confirming
-    ? "color-mix(in srgb, var(--accent) 6%, transparent)"
-    : isSelected
-      ? "color-mix(in srgb, var(--bg-selected) 70%, transparent)"
-      : hovered ? "var(--bg-hover)" : "transparent";
+  const rowBackground = isSelected
+    ? "color-mix(in srgb, var(--bg-selected) 70%, transparent)"
+    : hovered ? "var(--bg-hover)" : "transparent";
 
   const startRename = useCallback((event: React.MouseEvent) => {
     event.stopPropagation();
@@ -926,7 +922,6 @@ const SessionItem = memo(function SessionItem({
   }, [renameValue, session.id, session.name, onRenamed]);
 
  const handleArchive = useCallback(async () => {
- setConfirmArchive(false);
  setDeleting(true);
  try {
  const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/archive`, { method: "POST" });
@@ -970,7 +965,6 @@ const SessionItem = memo(function SessionItem({
   }, [copyingTranscript, session.id, session.cwd, title, t]);
 
  const closeConfirmation = useCallback(() => {
- setConfirmArchive(false);
  setConfirmDelete(false);
  setActionMenuOpen(false);
  requestAnimationFrame(() => contentButtonRef.current?.focus());
@@ -981,7 +975,7 @@ const SessionItem = memo(function SessionItem({
     <div
       className="session-item-row"
       data-actions-visible={showActions}
- onClick={confirmArchive || confirmDelete || renaming ? undefined : onClick}
+ onClick={confirmDelete || renaming ? undefined : onClick}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       onFocus={() => setFocusWithin(true)}
@@ -989,13 +983,13 @@ const SessionItem = memo(function SessionItem({
         if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocusWithin(false);
       }}
       onKeyDown={(event) => {
-        if ((confirmArchive || confirmDelete || actionMenuOpen) && event.key === "Escape") {
+        if ((confirmDelete || actionMenuOpen) && event.key === "Escape") {
           event.stopPropagation();
           closeConfirmation();
         }
       }}
       style={{
-        height: confirming ? 34 : 30,
+        height: 30,
         display: "flex",
         alignItems: "center",
         gap: 6,
@@ -1006,11 +1000,11 @@ const SessionItem = memo(function SessionItem({
         overflow: "hidden",
         background: rowBackground,
         opacity: deleting ? 0.5 : 1,
-        cursor: confirming || renaming ? "default" : "pointer",
+        cursor: renaming ? "default" : "pointer",
         transition: "background var(--dur-fast) var(--ease-out-warm), opacity var(--dur-fast) var(--ease-out-warm)",
       }}
     >
-      {(isSelected || confirming) && (
+      {isSelected && (
         <span
           aria-hidden="true"
           style={{
@@ -1025,19 +1019,7 @@ const SessionItem = memo(function SessionItem({
           }}
         />
       )}
-      {confirming ? (
-        <>
-          <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, color: "var(--text)" }}>
-            {t("sessionSidebar.archiveConfirm", { title: title.length > 22 ? `${title.slice(0, 22)}…` : title })}
-          </span>
-          <button onClick={(event) => { event.stopPropagation(); void handleArchive(); }} style={{ height: 28, padding: "0 10px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "var(--on-accent)", cursor: "pointer", fontSize: 11, fontWeight: 600 }}>
-            {t("sessionSidebar.archive")}
-          </button>
-          <button onClick={(event) => { event.stopPropagation(); closeConfirmation(); }} autoFocus style={{ height: 28, padding: "0 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text-muted)", cursor: "pointer", fontSize: 11 }}>
-            {t("sessionSidebar.cancel")}
-          </button>
-        </>
-      ) : renaming ? (
+      {renaming ? (
         <input ref={inputRef} autoFocus aria-label={t("sessionSidebar.rename")} value={renameValue} onChange={(event) => setRenameValue(event.target.value)} onBlur={commitRename} onKeyDown={(event) => { if (event.key === "Enter") void commitRename(); if (event.key === "Escape") { event.preventDefault(); renameCancelRef.current = true; setRenaming(false); } }} style={{ flex: 1, height: 25, padding: "3px 7px", border: "1px solid var(--accent)", borderRadius: "var(--radius-control)", outline: "none", background: "var(--bg)", color: "var(--text)", fontSize: 12 }} />
       ) : (
         <>

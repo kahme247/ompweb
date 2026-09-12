@@ -909,7 +909,6 @@
   "sessionSidebar.creating": "创建中…",
   "sessionSidebar.customPath": "自定义路径…",
   "sessionSidebar.archive": "归档",
-  "sessionSidebar.archiveConfirm": "归档“{title}”？",
   "sessionSidebar.archiveLeafOnly": "请先归档子会话",
   "sessionSidebar.archiveBrowser": "已归档会话",
   "sessionSidebar.archiveBrowserTitle": "打开已归档会话浏览器",

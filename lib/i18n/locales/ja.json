@@ -909,7 +909,6 @@
   "sessionSidebar.creating": "作成中…",
   "sessionSidebar.customPath": "カスタムパス…",
   "sessionSidebar.archive": "アーカイブ",
-  "sessionSidebar.archiveConfirm": "「{title}」をアーカイブしますか？",
   "sessionSidebar.archiveLeafOnly": "先に子セッションをアーカイブしてください",
   "sessionSidebar.archiveBrowser": "アーカイブされたセッション",
   "sessionSidebar.archiveBrowserTitle": "アーカイブされたセッションを開く",

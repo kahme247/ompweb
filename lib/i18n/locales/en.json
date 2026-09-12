@@ -935,7 +935,6 @@
   "sessionSidebar.creating": "Creating…",
   "sessionSidebar.customPath": "Custom path…",
   "sessionSidebar.archive": "Archive",
-  "sessionSidebar.archiveConfirm": "Archive “{title}”?",
   "sessionSidebar.archiveLeafOnly": "Archive child sessions first",
   "sessionSidebar.archiveBrowser": "Archived Sessions",
   "sessionSidebar.archiveBrowserTitle": "Open archived sessions browser",
