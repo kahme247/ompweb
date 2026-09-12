@@ -130,6 +130,7 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   // Interface & Behavior
   { id: "completion-sound", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.completionSound", descKey: "settingsConfig.completionSoundDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Completion sound", fallbackDesc: "Play a tone when the agent completes a run.", scope: "UI" },
   { id: "keep-tool-calls-collapsed", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.keepToolCallsCollapsed", descKey: "settingsConfig.keepToolCallsCollapsedDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Keep tool calls collapsed", fallbackDesc: "Show only compact headers while tools execute.", scope: "UI" },
+  { id: "scope-native-select-all", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.scopeNativeSelectAll", descKey: "settingsConfig.scopeNativeSelectAllDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Scope native Select All (experimental)", fallbackDesc: "Limit whole-page selections from browser or touch menus to the active message, chat, or file. May also narrow deliberate whole-page selections. Turn off if selection handles or menus misbehave. Keyboard shortcuts are unaffected.", scope: "UI" },
   { id: "provider-usage", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.providerUsage", descKey: "settingsConfig.providerUsageDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Provider usage limits", fallbackDesc: "Show provider usage in the sidebar, above Settings.", scope: "UI" },
   { id: "chat-font-size", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.chatFontSize", descKey: "settingsConfig.chatFontSizeDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Chat Font Size", fallbackDesc: "Adjust text size for conversation messages, code blocks, and markdown output.", scope: "UI" },
   { id: "ui-scale", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.uiScale", descKey: "settingsConfig.uiScaleDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Interface Scale", fallbackDesc: "Adjust overall UI zoom and display density across sidebars, dialogs, buttons, and toolbars.", scope: "UI" },
@@ -355,12 +356,14 @@ function NativeSetting({ label, description, scope, searchId, children }: { labe
   );
 }
 
-export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, providerUsageVisible, onProviderUsageVisibleChange, cwd, sessionId, onModelsSaved, onPluginsReloaded, appUpdate, onRefreshAppUpdate, onOmpUpdateAvailabilityChange, onRequestAppUpdate, onSelectTab, onClose }: {
+export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, providerUsageVisible, onProviderUsageVisibleChange, scopeNativeSelectAll, onScopeNativeSelectAllChange, cwd, sessionId, onModelsSaved, onPluginsReloaded, appUpdate, onRefreshAppUpdate, onOmpUpdateAvailabilityChange, onRequestAppUpdate, onSelectTab, onClose }: {
   activeTab: SettingsTab;
   toolCallsDefaultCollapsed: boolean;
   onToolCallsDefaultCollapsedChange: (collapsed: boolean) => void;
   providerUsageVisible: boolean;
   onProviderUsageVisibleChange: (visible: boolean) => void;
+  scopeNativeSelectAll: boolean;
+  onScopeNativeSelectAllChange: (enabled: boolean) => void;
   cwd: string | null;
   sessionId: string | null;
   onModelsSaved: () => void;
@@ -759,6 +762,9 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                 <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
                   <NativeSetting searchId="keep-tool-calls-collapsed" label={t("settingsConfig.keepToolCallsCollapsed")} description={t("settingsConfig.keepToolCallsCollapsedDesc")} scope="UI">
                     <ToggleSwitch checked={toolCallsDefaultCollapsed} onChange={onToolCallsDefaultCollapsedChange} />
+                  </NativeSetting>
+                  <NativeSetting searchId="scope-native-select-all" label={t("settingsConfig.scopeNativeSelectAll")} description={t("settingsConfig.scopeNativeSelectAllDesc")} scope="UI">
+                    <ToggleSwitch checked={scopeNativeSelectAll} onChange={onScopeNativeSelectAllChange} />
                   </NativeSetting>
                   <NativeSetting searchId="completion-sound" label={t("settingsConfig.completionSound")} description={t("settingsConfig.completionSoundDesc")} scope="UI">
                     <ToggleSwitch

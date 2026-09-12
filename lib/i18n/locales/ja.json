@@ -1062,6 +1062,8 @@
   "settingsConfig.interfaceBehaviorDesc": "Controls interface presentation, notification sounds, and execution submission mode.",
   "settingsConfig.keepToolCallsCollapsed": "Keep tool calls collapsed",
   "settingsConfig.keepToolCallsCollapsedDesc": "Show only compact headers while tools execute.",
+  "settingsConfig.scopeNativeSelectAll": "ネイティブの「すべて選択」の範囲を制限（試験的）",
+  "settingsConfig.scopeNativeSelectAllDesc": "ブラウザーやタッチメニューによるページ全体の選択を、操作中のメッセージ、チャット、ファイル内に制限します。意図的なページ全体の選択も制限される場合があります。選択ハンドルやメニューに問題がある場合はオフにしてください。キーボードショートカットには影響しません。",
   "settingsConfig.completionSound": "完了音",
   "settingsConfig.completionSoundDesc": "エージェントの実行完了時に音を鳴らします。",
   "settingsConfig.providerUsage": "プロバイダー使用量の制限",

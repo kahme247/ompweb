@@ -1062,6 +1062,8 @@
   "settingsConfig.interfaceBehaviorDesc": "控制界面展示、通知提示音及执行发送模式。",
   "settingsConfig.keepToolCallsCollapsed": "保持工具调用折叠",
   "settingsConfig.keepToolCallsCollapsedDesc": "工具执行时仅显示精简标头。",
+  "settingsConfig.scopeNativeSelectAll": "限制原生“全选”范围（实验性）",
+  "settingsConfig.scopeNativeSelectAllDesc": "将浏览器或触控菜单产生的整页选择限制在当前消息、聊天或文件内。也可能缩小主动选择整页的范围。如果选择手柄或菜单出现异常，请关闭此选项。键盘快捷键不受影响。",
   "settingsConfig.completionSound": "完成提示音",
   "settingsConfig.completionSoundDesc": "智能体完成运行时播放提示音。",
   "settingsConfig.providerUsage": "提供商用量限额",

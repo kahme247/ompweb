@@ -82,6 +82,7 @@ const RightPanel = dynamic(() => import("./RightPanel").then((m) => m.RightPanel
 
 const TOOL_CALLS_COLLAPSED_STORAGE_KEY = "omp-web:tool-calls-collapsed";
 const PROVIDER_USAGE_VISIBLE_STORAGE_KEY = "omp-web:provider-usage-visible";
+const NATIVE_SELECT_ALL_STORAGE_KEY = "omp-web:scope-native-select-all";
 
 const CommandPalette = dynamic(() => import("./CommandPalette").then((m) => m.CommandPalette), {
   ssr: false,
@@ -124,6 +125,7 @@ export function AppShell() {
   const [sidebarWidth, setSidebarWidth] = useState<number>(SIDEBAR_DEFAULT_WIDTH);
   const [toolCallsDefaultCollapsed, setToolCallsDefaultCollapsed] = useState(true);
   const [providerUsageVisible, setProviderUsageVisible] = useState(true);
+  const [scopeNativeSelectAll, setScopeNativeSelectAll] = useState(false);
   const [sidebarResizing, setSidebarResizing] = useState(false);
   // Active drag handlers so an unmount mid-drag can detach them.
   const sidebarResizeHandlersRef = useRef<{ onMove: (ev: MouseEvent) => void; onUp: () => void } | null>(null);
@@ -135,6 +137,7 @@ export function AppShell() {
     try {
       setToolCallsDefaultCollapsed(window.localStorage.getItem(TOOL_CALLS_COLLAPSED_STORAGE_KEY) !== "false");
       setProviderUsageVisible(window.localStorage.getItem(PROVIDER_USAGE_VISIBLE_STORAGE_KEY) !== "false");
+      setScopeNativeSelectAll(window.localStorage.getItem(NATIVE_SELECT_ALL_STORAGE_KEY) === "true");
     } catch {
       // Keep the compact default when storage is unavailable.
     }
@@ -151,6 +154,14 @@ export function AppShell() {
     setProviderUsageVisible(visible);
     try {
       window.localStorage.setItem(PROVIDER_USAGE_VISIBLE_STORAGE_KEY, String(visible));
+    } catch {
+      // The preference still applies for this page load.
+    }
+  }, []);
+  const handleScopeNativeSelectAllChange = useCallback((enabled: boolean) => {
+    setScopeNativeSelectAll(enabled);
+    try {
+      window.localStorage.setItem(NATIVE_SELECT_ALL_STORAGE_KEY, String(enabled));
     } catch {
       // The preference still applies for this page load.
     }
@@ -1101,6 +1112,7 @@ export function AppShell() {
   useGlobalKeyboardShortcuts({
     onNewSession: (cwd: string) => handleNewSession(`kb-${Date.now()}`, cwd),
     activeCwd,
+    scopeNativeSelectAll,
   });
 
   // Client-built transient SessionInfo (new session / fork) lacks the
@@ -1670,6 +1682,8 @@ export function AppShell() {
             onToolCallsDefaultCollapsedChange={handleToolCallsDefaultCollapsedChange}
             providerUsageVisible={providerUsageVisible}
             onProviderUsageVisibleChange={handleProviderUsageVisibleChange}
+            scopeNativeSelectAll={scopeNativeSelectAll}
+            onScopeNativeSelectAllChange={handleScopeNativeSelectAllChange}
             cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd}
             sessionId={selectedSession?.id ?? null}
             onModelsSaved={() => setModelsRefreshKey((k) => k + 1)}
