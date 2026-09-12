@@ -2789,7 +2789,7 @@ html.dark .dropdown-surface :is(select, option) {
   top: 4.5px;
   left: 50%;
   transform: translateX(-50%);
-  width: clamp(0px, calc(100% - 480px), 400px);
+  width: clamp(0px, calc(100% - 520px), 400px);
   pointer-events: none;
 }
 .shell-topbar-center > .shell-topbar-breadcrumb {
@@ -2797,7 +2797,7 @@ html.dark .dropdown-surface :is(select, option) {
 }
 
 /* Hide only the breadcrumb when the sidebars leave too little title space. */
-@container breadcrumb (max-width: 180px) {
+@container breadcrumb (max-width: 200px) {
   .shell-topbar-breadcrumb {
     visibility: hidden;
   }
