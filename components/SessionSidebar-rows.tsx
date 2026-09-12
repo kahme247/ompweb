@@ -1038,7 +1038,7 @@ const SessionItem = memo(function SessionItem({
               </span>
             )}
             <div className="session-item-trailing" style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "flex-end", width: `var(--session-trailing-width, ${SIDEBAR_TRAILING_META_WIDTH}px)`, flexShrink: 0 }}>
-              <div className="session-item-metadata" style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", transition: "opacity var(--dur-fast) var(--ease-out-warm)" }}>
+              <div className="session-item-metadata" style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", transition: "opacity var(--dur-fast) var(--ease-out-warm), visibility var(--dur-fast) var(--ease-out-warm)" }}>
                 {relativeTime && <span className="session-item-time" title={new Date(session.modified).toLocaleString(locale)} style={{ flexShrink: 0, whiteSpace: "nowrap", textAlign: "right", color: isSelected ? "var(--accent)" : "var(--text-dim)", fontSize: 10, fontVariantNumeric: "tabular-nums" }}>{relativeTime}</span>}
               </div>
               <div className="session-item-actions" style={{ inset: 0, display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 2, transition: "opacity var(--dur-fast) var(--ease-out-warm)" }}>
