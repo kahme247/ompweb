@@ -2784,6 +2784,18 @@ html.dark .dropdown-surface :is(select, option) {
   flex-wrap: nowrap;
   justify-content: space-between;
 }
+.shell-topbar-overflow {
+  display: contents;
+}
+.shell-topbar-overflow > summary {
+  display: none;
+}
+.shell-topbar-overflow-content {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 100%;
+}
 .shell-topbar-center {
   position: absolute;
   top: 4.5px;
@@ -2823,9 +2835,47 @@ html.dark .dropdown-surface :is(select, option) {
   .shell-topbar [data-topbar-right-group] {
     padding: 0 !important;
   }
+  .shell-topbar-overflow[data-compact="pending"] {
+    display: block;
+  }
+  .shell-topbar-overflow[data-compact="pending"] > summary {
+    display: flex;
+    list-style: none;
+  }
+  .shell-topbar-overflow[data-compact="pending"] > .shell-topbar-overflow-content {
+    display: none;
+  }
 }
 
-@container topbar-speed (max-width: 60px) {
+.shell-topbar-overflow[data-compact="true"] {
+  display: block;
+}
+.shell-topbar-overflow[data-compact="true"] > summary {
+  display: flex;
+  list-style: none;
+}
+.shell-topbar-overflow > summary::-webkit-details-marker {
+  display: none;
+}
+.shell-topbar-overflow[data-compact="true"]:not([open]) > .shell-topbar-overflow-content {
+  display: none;
+}
+.shell-topbar-overflow[data-compact="true"] > .shell-topbar-overflow-content {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 4px;
+  right: 4px;
+  height: 48px;
+  gap: 4px;
+  padding: 4px;
+  z-index: 500;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-pop);
+}
+
+@container topbar-speed (width < calc(10ch + 33px)) {
   .shell-metric-pill {
     display: none !important;
   }

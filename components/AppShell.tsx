@@ -15,10 +15,11 @@ import { type FileExplorerHandle } from "./FileExplorer";
 import type { RightPanelView } from "./RightPanel";
 import { BranchNavigator } from "./BranchNavigator";
 import { LanguageSwitcher } from "./LanguageSwitcher";
-import { Check, Folder, History, Menu, PanelLeft, Terminal, Wand2, Zap } from "lucide-react";
+import { Check, Ellipsis, Folder, History, Menu, PanelLeft, Terminal, Wand2, Zap } from "lucide-react";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
+import { formatGenerationSpeed } from "@/lib/generation-speed";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { copyText } from "@/lib/clipboard";
 import { encodeFilePathForApi, getFileName, getRelativeFilePath } from "@/lib/file-paths";
@@ -97,7 +98,7 @@ export function AppShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const isMobile = useIsMobile();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   // When user clicks +, we only store the cwd — no fake session id
@@ -654,6 +655,40 @@ export function AppShell() {
 
   // Single active panel — only one dropdown open at a time
   const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | null>(null);
+  const mobileToolsRef = useRef<HTMLDetailsElement>(null);
+  const mobileToolsContentRef = useRef<HTMLDivElement>(null);
+  const restoreToolsFocusRef = useRef(false);
+  const [compactTopbar, setCompactTopbar] = useState<boolean | null>(null);
+  useLayoutEffect(() => {
+    if (compactTopbar && restoreToolsFocusRef.current) {
+      mobileToolsRef.current?.querySelector("summary")?.focus();
+      restoreToolsFocusRef.current = false;
+    }
+  }, [compactTopbar]);
+  useEffect(() => {
+    if (!compactTopbar) return;
+    const closeOnOutside = (event: PointerEvent) => {
+      const tools = mobileToolsRef.current;
+      if (tools?.open && !tools.contains(event.target as Node)) {
+        tools.open = false;
+        setActiveTopPanel(null);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      const tools = mobileToolsRef.current;
+      // Nested pickers and session panels handle their own Escape first.
+      if (event.key !== "Escape" || event.defaultPrevented || activeTopPanel || !tools?.open) return;
+      event.stopPropagation();
+      tools.open = false;
+      tools.querySelector("summary")?.focus();
+    };
+    document.addEventListener("pointerdown", closeOnOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [compactTopbar, activeTopPanel]);
   const toggleTopPanel = useCallback((panel: "branches" | "system") => {
     if (isMobile) setSidebarOpen(false);
     setActiveTopPanel((cur) => cur === panel ? null : panel);
@@ -1349,6 +1384,63 @@ export function AppShell() {
   const effectiveNewSessionCwd = newSessionCwd ?? (selectedSession === null && activeCwd ? activeCwd : null);
   const newSessionProject = (workspaceOptions.cwd === effectiveNewSessionCwd ? workspaceOptions.selectedProject : null) ?? effectiveNewSessionCwd ?? "";
   const showChat = selectedSession !== null || effectiveNewSessionCwd !== null;
+  const currentRate = generationSpeed?.current;
+  const rate = currentRate ?? generationSpeed?.average;
+  const speed = showChat ? formatGenerationSpeed(rate) : null;
+  const hasGenerationSpeed = speed !== null;
+  useLayoutEffect(() => {
+    const header = topBarRef.current;
+    const details = mobileToolsRef.current;
+    const content = mobileToolsContentRef.current;
+    const right = header?.querySelector<HTMLElement>("[data-topbar-right-group]");
+    const tools = header?.querySelector<HTMLElement>(".shell-topbar-tools");
+    if (!header || !details || !content || !right || !tools) return;
+    const update = () => {
+      const hadControlsFocus = content.contains(document.activeElement);
+      // Measure the real controls even while their disclosure is closed.
+      const closed = !details.open;
+      const display = content.style.display;
+      const visibility = content.style.visibility;
+      content.style.visibility = "hidden";
+      content.style.display = "flex";
+      details.open = true;
+      const children = Array.from(content.children).filter((child) =>
+        !["absolute", "fixed"].includes(getComputedStyle(child).position));
+      const contentStyle = getComputedStyle(content);
+      const headerStyle = getComputedStyle(header);
+      const rightStyle = getComputedStyle(right);
+      const controlsWidth = children.reduce((width, child) => {
+        const style = getComputedStyle(child);
+        return width + child.getBoundingClientRect().width
+          + parseFloat(style.marginLeft) + parseFloat(style.marginRight);
+      }, 0) + Math.max(0, children.length - 1) * parseFloat(contentStyle.columnGap);
+      const required = controlsWidth
+        + (tools.firstElementChild?.getBoundingClientRect().width ?? 0)
+        + parseFloat(getComputedStyle(tools).columnGap)
+        + parseFloat(headerStyle.paddingLeft) + parseFloat(headerStyle.paddingRight)
+        + parseFloat(headerStyle.columnGap)
+        + parseFloat(rightStyle.minWidth)
+        + parseFloat(rightStyle.paddingLeft) + parseFloat(rightStyle.paddingRight);
+      if (closed) details.open = false;
+      content.style.display = display;
+      content.style.visibility = visibility;
+      const compact = required > header.clientWidth;
+      if (compact && details.dataset.compact !== "true" && hadControlsFocus) {
+        restoreToolsFocusRef.current = true;
+      }
+      setCompactTopbar(compact);
+    };
+    const observer = new ResizeObserver(update);
+    observer.observe(header);
+    observer.observe(content);
+    for (const child of content.children) observer.observe(child);
+    document.fonts.addEventListener("loadingdone", update);
+    update();
+    return () => {
+      observer.disconnect();
+      document.fonts.removeEventListener("loadingdone", update);
+    };
+  }, [hasGenerationSpeed, isMobile, locale, rightPanelOpen, showChat]);
   // While restoring initial session from URL, don't show the placeholder
   const showPlaceholder = initialSessionRestored && !showChat;
 
@@ -1613,6 +1705,23 @@ export function AppShell() {
             >
               {sidebarOpen ? <PanelLeft size={16} strokeWidth={1.8} aria-hidden="true" /> : <Menu size={16} strokeWidth={1.8} aria-hidden="true" />}
             </button>
+            <details
+              ref={mobileToolsRef}
+              className="shell-topbar-overflow"
+              data-compact={compactTopbar === null ? "pending" : compactTopbar}
+              open={compactTopbar ? undefined : true}
+              onToggle={(event) => {
+                if (!event.currentTarget.open) setActiveTopPanel(null);
+              }}
+            >
+              <summary
+                className="shell-toolbar-btn ui-focus-ring"
+                title={t("chatInput.moreControls")}
+                aria-label={t("chatInput.moreControls")}
+              >
+                <Ellipsis size={16} strokeWidth={1.8} aria-hidden="true" />
+              </summary>
+              <div ref={mobileToolsContentRef} className="shell-topbar-overflow-content">
             <ThemeSwitcher />
             <LanguageSwitcher />
             {showChat && (
@@ -1632,7 +1741,7 @@ export function AppShell() {
                   activeLeafId={branchActiveLeafId}
                   onLeafChange={handleBranchLeafChange}
                   inline
-                  containerRef={topBarRef}
+                  containerRef={compactTopbar ? mobileToolsContentRef : topBarRef}
                   open={activeTopPanel === "branches"}
                   onToggle={() => toggleTopPanel("branches")}
                   hasSession
@@ -1649,6 +1758,55 @@ export function AppShell() {
                 </button>
               </>
             )}
+          {activeTopPanel === "system" && (
+            <div data-top-panel className="dropdown-surface" style={{
+              position: "absolute",
+              top: "calc(100% + 4px)",
+              left: isMobile ? 4 : 8,
+              right: "auto",
+              width: "auto",
+              minWidth: isMobile ? undefined : 420,
+              maxWidth: "min(680px, calc(100vw - 24px))",
+              maxHeight: "min(70vh, calc(100dvh - 56px))",
+              overflowY: "auto",
+              overflowX: "hidden",
+              zIndex: 500,
+            }}>
+              {activeTopPanel === "system" && (
+                <div className="session-info-popover" style={{
+                  background: "var(--bg-panel)",
+                  borderBottom: "1px solid var(--border)",
+                  boxShadow: "var(--shadow-pop)",
+                  minWidth: isMobile ? undefined : 420,
+                }}>
+                  {systemPrompt ? (
+                    <div style={{
+                      maxHeight: "min(600px, 75vh)",
+                      overflowY: "auto",
+                      padding: "12px 16px",
+                      color: "var(--text-muted)",
+                      fontSize: 12,
+                      lineHeight: 1.6,
+                      whiteSpace: "pre-wrap",
+                      fontFamily: "var(--font-mono)",
+                    }}>
+                      {systemPrompt}
+                    </div>
+                  ) : systemPrompt === "" ? (
+                    <div style={{ padding: "10px 16px", fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
+                      {t("appShell.systemPromptEmpty")}
+                    </div>
+                  ) : (
+                    <div style={{ padding: "10px 16px", fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
+                      {systemPromptLoading ? t("appShell.systemPromptLoading") : t("appShell.systemPromptLoadHint")}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+              </div>
+            </details>
           </div>
 
           {/* Center Zone: Workspace & Session Breadcrumb + Auto-name action */}
@@ -1794,8 +1952,10 @@ export function AppShell() {
               justifyContent: "flex-end",
               gap: 6,
               paddingRight: rightPanelOpen ? 8 : 44,
-              minWidth: 0,
-              width: 200,
+              minWidth: hasGenerationSpeed ? "calc(10ch + 33px)" : 0,
+              width: hasGenerationSpeed ? 200 : 0,
+              fontSize: 11,
+              fontFamily: "var(--font-mono)",
               containerType: "inline-size",
               containerName: "topbar-speed",
               flexShrink: 1,
@@ -1804,20 +1964,17 @@ export function AppShell() {
 
             {/* Generation speed pill */}
             {showChat && (() => {
-              const currentSpeedStr = generationSpeed?.current !== null && generationSpeed?.current !== undefined
-                ? `${generationSpeed.current.toFixed(1)} t/s`
-                : null;
-              const averageSpeedStr = generationSpeed?.average !== null && generationSpeed?.average !== undefined
-                ? `${generationSpeed.average.toFixed(1)} t/s`
-                : null;
-              if (!currentSpeedStr && !averageSpeedStr) return null;
-              const speedTitle = currentSpeedStr
-                ? t("appShell.tooltipCurrentSpeed", { value: currentSpeedStr })
-                : t("appShell.tooltipAverageSpeed", { value: averageSpeedStr! });
+              if (!speed || rate == null) return null;
+              const isLive = currentRate != null;
+              const speedTitle = t(isLive ? "appShell.tooltipCurrentSpeed" : "appShell.tooltipAverageSpeed", {
+                value: `${rate.toFixed(1)} t/s`,
+              });
 
               return (
                 <div
                   title={speedTitle}
+                  role="img"
+                  aria-label={speedTitle}
                   className="shell-metric-pill shell-pill-extra"
                   style={{
                     display: "inline-flex",
@@ -1828,76 +1985,29 @@ export function AppShell() {
                     borderRadius: "var(--radius-control)",
                     border: "1px solid var(--border)",
                     background: "var(--bg-subtle)",
-                    color: currentSpeedStr ? "var(--accent)" : "var(--text-muted)",
+                    color: isLive ? "var(--accent)" : "var(--text-muted)",
                     fontSize: 11,
                     fontFamily: "var(--font-mono)",
                     fontVariantNumeric: "tabular-nums",
                     whiteSpace: "nowrap",
                     cursor: "default",
-                    minWidth: 0,
-                    overflow: "hidden",
-                    flexShrink: 1,
+                    width: "calc(10ch + 33px)",
+                    flexShrink: 0,
                   }}
                 >
-                  {currentSpeedStr ? (
+                  {isLive ? (
                     <Zap size={11} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0, color: "var(--accent)" }} />
                   ) : (
-                    <span style={{ flexShrink: 0, color: "var(--text-dim)" }}>AVG</span>
+                    <span aria-hidden="true" style={{ width: 11, lineHeight: "11px", textAlign: "center", flexShrink: 0, color: "var(--text-dim)" }}>~</span>
                   )}
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", fontWeight: currentSpeedStr ? 600 : 400 }}>
-                    {currentSpeedStr ?? averageSpeedStr}
+                  <span style={{ display: "inline-flex", gap: "1ch", fontWeight: isLive ? 600 : 400 }}>
+                    <span style={{ width: "5ch", textAlign: "right" }}>{speed.value}</span>
+                    <span style={{ width: "4ch" }}>{speed.unit}</span>
                   </span>
                 </div>
               );
             })()}
           </div>
-          {activeTopPanel === "system" && (
-            <div data-top-panel className="dropdown-surface" style={{
-              position: "absolute",
-              top: "calc(100% + 4px)",
-              left: isMobile ? 4 : 8,
-              right: "auto",
-              width: "auto",
-              minWidth: isMobile ? undefined : 420,
-              maxWidth: "min(680px, calc(100vw - 24px))",
-              maxHeight: "min(70vh, calc(100dvh - 56px))",
-              overflowY: "auto",
-              overflowX: "hidden",
-              zIndex: 500,
-            }}>
-              {activeTopPanel === "system" && (
-                <div className="session-info-popover" style={{
-                  background: "var(--bg-panel)",
-                  borderBottom: "1px solid var(--border)",
-                  boxShadow: "var(--shadow-pop)",
-                  minWidth: isMobile ? undefined : 420,
-                }}>
-                  {systemPrompt ? (
-                    <div style={{
-                      maxHeight: "min(600px, 75vh)",
-                      overflowY: "auto",
-                      padding: "12px 16px",
-                      color: "var(--text-muted)",
-                      fontSize: 12,
-                      lineHeight: 1.6,
-                      whiteSpace: "pre-wrap",
-                      fontFamily: "var(--font-mono)",
-                    }}>
-                      {systemPrompt}
-                    </div>
-                  ) : systemPrompt === "" ? (
-                    <div style={{ padding: "10px 16px", fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
-                      {t("appShell.systemPromptEmpty")}
-                    </div>
-                  ) : (
-                    <div style={{ padding: "10px 16px", fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
-                      {systemPromptLoading ? t("appShell.systemPromptLoading") : t("appShell.systemPromptLoadHint")}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
 
         </div>
 

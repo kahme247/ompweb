@@ -142,7 +142,7 @@ export function LanguageSwitcher() {
           style={{
             position: "absolute",
             top: "calc(100% + 4px)",
-            right: 0,
+            left: 0,
             zIndex: 50,
             minWidth: 120,
             margin: 0,
