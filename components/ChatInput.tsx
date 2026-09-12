@@ -2236,7 +2236,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               background: "var(--bg)",
               border: `1px solid ${bashMode ? "var(--tool-bg)" : "color-mix(in srgb, var(--border) 70%, transparent)"}`,
               borderRadius: (queuedCount > 0 || Boolean(statusText)) ? "0 0 var(--radius-card) var(--radius-card)" : "var(--radius-card)",
-              padding: "12px 12px 10px 14px",
+              padding: "12px 12px 10px",
               boxShadow: "var(--shadow-card)",
               transition: "border-color var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm), box-shadow var(--dur-fast) var(--ease-out-warm)",
             } as React.CSSProperties}
@@ -2284,14 +2284,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           />
 
           {/* Toolbar: plus menu · model · reasoning · fast · compact · send/queue/stop */}
-          <div style={{
+          <div className="composer-toolbar" style={{
             display: "flex",
             alignItems: "center",
             gap: 2,
             marginTop: 8,
             paddingTop: 8,
             borderTop: "1px solid color-mix(in srgb, var(--border) 62%, transparent)",
-            flexWrap: isMobile ? "wrap" : "nowrap",
+            flexWrap: "nowrap",
           }}>
             {/* Plus menu — attachment · tools submenu · advisor submenu */}
             <div ref={plusMenuRef} style={{ position: "relative", flexShrink: 0 }}>
@@ -2343,6 +2343,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                       padding: "7px 10px", border: 0, borderRadius: 5,
                       background: "transparent", color: isStreaming ? "var(--text-dim)" : "var(--text-muted)",
                       cursor: isStreaming ? "not-allowed" : "pointer", fontSize: 12, textAlign: "left",
+                      opacity: isStreaming ? 0.5 : 1,
                     }}
                   >
                     <Paperclip size={12} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden="true" />
@@ -2428,15 +2429,19 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             </div>
             {/* Model selector — compact text button with dropdown */}
             {(modelOptions.length > 0 || currentName || modelError || showModelsLoading) && onModelChange && (
-              <div ref={dropdownRef} style={{ position: "relative", minWidth: 0 }}>
+              <div ref={dropdownRef} className="composer-model-control" style={{ position: "relative", minWidth: 0 }}>
                 <button
                   onClick={() => setModelDropdownOpen((v) => !v)}
                   disabled={modelSelectorDisabled}
+                  aria-label={`${t("chatInput.changeModel")}: ${currentName ?? (modelOptions.length > 0
+                    ? t("chatInput.selectModel")
+                    : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noModels"))}`}
                   style={{
                     display: "flex", alignItems: "center", gap: 5,
                     height: 28,
-                    maxWidth: 190,
-                    padding: "0 8px",
+                    maxWidth: "100%",
+                    width: "100%",
+                    padding: "0 4px",
                     overflow: "hidden",
                     background: modelDropdownOpen ? "var(--bg-hover)" : "none",
                     border: "none",
@@ -2530,7 +2535,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
             {/* Thinking selector — compact, expressive, and consistent with models */}
             {onThinkingLevelChange && (
-              <div ref={thinkingDropdownRef} style={{ position: "relative" }}>
+              <div ref={thinkingDropdownRef} className="composer-thinking-control" style={{ position: "relative", minWidth: 0 }}>
                 <button
                   onClick={() => setThinkingDropdownOpen((v) => !v)}
                   disabled={isStreaming}
@@ -2540,7 +2545,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   aria-haspopup="menu"
                   style={{
                     display: "flex", alignItems: "center", gap: 5,
-                    height: 28, padding: "0 8px", background: thinkingDropdownOpen ? "var(--bg-hover)" : "none",
+                    height: 28, width: "100%", padding: "0 4px", background: thinkingDropdownOpen ? "var(--bg-hover)" : "none",
                     border: "none", borderRadius: 7, color: "var(--text-muted)", cursor: isStreaming ? "not-allowed" : "pointer",
                     opacity: isStreaming ? 0.5 : 1, fontSize: 12,
                     transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
@@ -2552,7 +2557,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     <path d="M9.5 2A5.5 5.5 0 0 0 4 7.5c0 1.7.78 3.21 2 4.21V14a1 1 0 0 0 1 1h5a1 1 0 0 0 1-1v-2.29c1.22-1 2-2.51 2-4.21A5.5 5.5 0 0 0 9.5 2z" />
                     <line x1="7" y1="18" x2="12" y2="18" /><line x1="8" y1="21" x2="11" y2="21" />
                   </svg>
-                  <span style={{ whiteSpace: "nowrap", textTransform: "capitalize" }}>{thinkingDisplayLabel}</span>
+                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textTransform: "capitalize" }}>{thinkingDisplayLabel}</span>
                   <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7, transform: thinkingDropdownOpen ? "rotate(180deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }} aria-hidden="true" />
                 </button>
                 {thinkingDropdownOpen && (
@@ -2610,9 +2615,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             {fastModeSupported && onFastModeChange && (
               <button
                 type="button"
+                className="composer-fast-control"
                 onClick={() => { if (isStreaming) return; onFastModeChange(!fastModeEnabled); }}
                 disabled={isStreaming}
                 title={fastModeEnabled && fastModeActive === false ? "Fast mode is enabled but inactive for this model" : `Turn OMP Fast mode ${fastModeEnabled ? "off" : "on"} for this model`}
+                aria-label={t("chatInput.fastLabel")}
                 aria-pressed={fastModeEnabled}
                 style={{
                   display: "flex", alignItems: "center", gap: 5,
@@ -2632,11 +2639,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
                 </svg>
-                {t("chatInput.fastLabel")}
+                <span>{t("chatInput.fastLabel")}</span>
               </button>
             )}
 
-            <div style={{ flex: 1 }} />
+            <div style={{ marginLeft: "auto" }} />
 
             {/* Advisor activity — thunder while the advisor model reviews this run */}
             {advisorActive && (
@@ -2806,12 +2813,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             {primaryActionQueuesMessage ? (
               <button
                 type="button"
+                className="composer-primary-action"
                 onClick={() => sendQueued("followup")}
                 title={t("chatInput.queueMessage")}
                 style={{
                   display: "flex", alignItems: "center", gap: 6,
-                  height: 28,
-                  padding: "0 14px",
                   background: "var(--accent-strong)",
                   border: "none",
                   borderRadius: 8,
@@ -2828,12 +2834,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             ) : isStreaming ? (
               <button
                 type="button"
+                className="composer-primary-action"
                 onClick={isCompacting ? onAbortCompaction : onAbort}
                 title={t("chatInput.stopAgent")}
                 style={{
                   display: "flex", alignItems: "center", gap: 6,
-                  height: 28,
-                  padding: "0 14px",
                   background: "var(--accent-strong)",
                   border: "none",
                   borderRadius: 8,
@@ -2852,12 +2857,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             ) : (
               <button
                 type="button"
+                className="composer-primary-action"
                 onClick={handleSend}
                 disabled={!value.trim() && !attachedImages.length && !attachedTextFiles.length}
                 style={{
                   display: "flex", alignItems: "center", gap: 6,
-                  height: 28,
-                  padding: "0 14px",
                   background: (value.trim() || attachedImages.length || attachedTextFiles.length) ? "var(--accent-strong)" : "var(--bg-panel)",
                   border: "none",
                   borderRadius: 8,

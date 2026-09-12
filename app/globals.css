@@ -1700,6 +1700,72 @@ pre, code {
 .chat-input-shell:focus-within {
   transform: none;
 }
+.composer-toolbar {
+  container-type: inline-size;
+}
+.composer-toolbar > button {
+  flex-shrink: 0;
+}
+.composer-model-control {
+  flex: 1 1 0;
+  max-width: 140px;
+  min-width: 24px !important;
+}
+.composer-thinking-control {
+  flex: 0 1 auto;
+  min-width: 24px !important;
+  max-width: 100px;
+}
+.composer-primary-action {
+  flex-shrink: 0;
+  min-width: 7em;
+  justify-content: center;
+  white-space: nowrap;
+  min-height: 28px;
+  padding: 4px 10px;
+  line-height: 20px;
+}
+@container (max-width: 400px) {
+  .composer-model-control > button > svg:first-child,
+  .composer-thinking-control > button > svg:first-child,
+  .composer-fast-control > span {
+    display: none;
+  }
+  .composer-fast-control {
+    justify-content: center;
+    width: 28px;
+    padding-inline: 0 !important;
+  }
+}
+@container (max-width: 300px) {
+  .composer-model-control,
+  .composer-thinking-control {
+    flex: 0 0 24px;
+  }
+  .composer-model-control > button,
+  .composer-thinking-control > button {
+    justify-content: center;
+    gap: 0 !important;
+  }
+  .composer-model-control > button > svg:first-child,
+  .composer-thinking-control > button > svg:first-child {
+    display: block;
+  }
+  .composer-model-control > button > span,
+  .composer-model-control > button > svg:last-child,
+  .composer-thinking-control > button > span,
+  .composer-thinking-control > button > svg:last-child {
+    display: none;
+  }
+  .composer-toolbar > button:not(.composer-primary-action),
+  .composer-toolbar > div > button,
+  .composer-toolbar > span {
+    width: 24px !important;
+  }
+  .composer-primary-action {
+    padding-inline: 6px;
+  }
+}
 .composer-control-shelf {
   animation: ui-slide-up var(--dur-fast) var(--ease-out-warm) both;
 }
