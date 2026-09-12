@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronRight, Gauge } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
 import { formatUsageReset, usageTone, useProviderUsage } from "./AppShell-provider-usage";
@@ -66,15 +66,17 @@ export function ProviderUsageBar() {
   const { snapshot, loading, error } = useProviderUsage("", 5 * 60_000);
   const reports = snapshot?.reports ?? [];
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState<boolean>(() => {
-    if (typeof window === "undefined") return true;
+  // The first render must match the server, where localStorage is unavailable,
+  // so start collapsed and apply the stored preference after mounting.
+  const [collapsed, setCollapsed] = useState(true);
+  useEffect(() => {
     try {
-      // No stored choice yet → start hidden; an explicit expand persists.
-      return window.localStorage.getItem(COLLAPSED_STORAGE_KEY) !== "false";
+      // No stored choice yet → stay hidden; an explicit expand persists.
+      if (window.localStorage.getItem(COLLAPSED_STORAGE_KEY) === "false") setCollapsed(false);
     } catch {
-      return true;
+      // Storage unavailable: keep the collapsed default.
     }
-  });
+  }, []);
 
   let worst: { percent: number; window: string } | null = null;
   for (const report of reports) {
