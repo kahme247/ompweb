@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ExtensionUiRequest } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
 import { useModalDialog } from "@/hooks/useModalDialog";
@@ -38,8 +38,12 @@ export function ExtensionDialog({
   const { t } = useI18n();
   const [value, setValue] = useState(request.method === "editor" ? request.prefill ?? "" : "");
   const [selectedOption, setSelectedOption] = useState<string | null>(null);
+  const requestIdRef = useRef(request.id);
 
   useEffect(() => {
+    // SSE reconnects replay the same request as a fresh object, not a new question.
+    if (requestIdRef.current === request.id) return;
+    requestIdRef.current = request.id;
     setValue(request.method === "editor" ? request.prefill ?? "" : "");
     setSelectedOption(null);
   }, [request]);

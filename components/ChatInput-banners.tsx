@@ -11,11 +11,13 @@ export function QueuedActionButton({
   onClick,
   title,
   accent = false,
+  disabled = false,
   children,
 }: {
   onClick: () => void;
   title: string;
   accent?: boolean;
+  disabled?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -23,6 +25,7 @@ export function QueuedActionButton({
       type="button"
       onClick={onClick}
       title={title}
+      disabled={disabled}
       style={{
         flexShrink: 0,
         padding: "4px 8px", minHeight: 24,
@@ -30,7 +33,8 @@ export function QueuedActionButton({
         borderRadius: 6,
         background: "transparent",
         color: accent ? "var(--accent)" : "var(--text-dim)",
-        cursor: "pointer",
+        cursor: disabled ? "wait" : "pointer",
+        opacity: disabled ? 0.5 : 1,
         fontSize: 11,
         fontWeight: accent ? 600 : 400,
         transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",

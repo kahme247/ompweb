@@ -103,3 +103,114 @@ test("attachment-only drafts stay protected across live draft-key changes and re
     delete globalThis.document;
   }
 });
+
+for (const navigation of ["draft-key change", "unmount"]) {
+  test(`queued Edit recovers the old draft after ${navigation} while cancellation is pending`, async () => {
+    installBrowser();
+    const oldKey = `edit-old-${navigation}`;
+    const newKey = `edit-new-${navigation}`;
+    const ref = React.createRef();
+    let release;
+    const cancellation = new Promise((resolve) => { release = resolve; });
+    const queuedMessages = { steering: [], followUp: ["queued question"] };
+    const render = (draftKey) => React.createElement(ChatInput, {
+      ref, draftKey, queuedMessages, isStreaming: true,
+      onSend() {}, onAbort() {}, onRemoveQueuedMessage: () => cancellation,
+    });
+    let renderer;
+    const type = (value) => renderer.root.findByType("textarea").props.onChange({ target: { value, selectionStart: value.length } });
+    try {
+      await act(() => { renderer = TestRenderer.create(render(oldKey)); });
+      await act(() => type("original draft"));
+      await act(async () => {
+        ref.current.addFiles([new File(["keep this attachment"], "notes.txt", { type: "text/plain" })]);
+      });
+      const originalFiles = getDraft(oldKey).files;
+      await act(() => renderer.root.findAllByType("button").find((button) => button.props.children === "Edit").props.onClick());
+      await act(() => type("draft updated while waiting"));
+      assert.equal(getDraft(oldKey).value, "draft updated while waiting", "Edit must wait for cancellation acknowledgement");
+
+      if (navigation === "unmount") {
+        await act(() => renderer.unmount());
+        await act(() => { renderer = TestRenderer.create(render(newKey)); });
+      } else {
+        await act(() => renderer.update(render(newKey)));
+      }
+      await act(() => type("new session draft"));
+      await act(async () => {
+        release(true);
+        await cancellation;
+      });
+      assert.equal(renderer.root.findByType("textarea").props.value, "new session draft");
+      assert.equal(getDraft(newKey).value, "new session draft");
+      assert.equal(getDraft(oldKey).value, "queued question\n\ndraft updated while waiting");
+      assert.deepEqual(getDraft(oldKey).files, originalFiles);
+
+      if (navigation === "unmount") {
+        await act(() => renderer.unmount());
+        await act(() => { renderer = TestRenderer.create(render(oldKey)); });
+      } else {
+        await act(() => renderer.update(render(oldKey)));
+      }
+      assert.equal(renderer.root.findByType("textarea").props.value, "queued question\n\ndraft updated while waiting");
+      assert.equal(getDraft(newKey).value, "new session draft", "returning to the old chat preserves the new chat's draft");
+    } finally {
+      await act(() => renderer?.unmount());
+      clearDraft(oldKey);
+      clearDraft(newKey);
+      delete globalThis.window;
+      delete globalThis.document;
+    }
+  });
+}
+
+for (const navigation of ["original composer", "same-key remount"]) {
+  test(`queued Edit restores ${navigation} without losing batched typing or duplicating recalled text`, async () => {
+    installBrowser();
+    const draftKey = `edit-recovery-${navigation}`;
+    const ref = React.createRef();
+    let release;
+    const cancellation = new Promise((resolve) => { release = resolve; });
+    const render = () => React.createElement(ChatInput, {
+      ref, draftKey, queuedMessages: { steering: [], followUp: ["queued question"] }, isStreaming: true,
+      onSend() {}, onAbort() {}, onRemoveQueuedMessage: () => cancellation,
+    });
+    let renderer;
+    const textarea = () => renderer.root.findByType("textarea");
+    const type = (value) => textarea().props.onChange({ target: { value, selectionStart: value.length } });
+    try {
+      await act(() => { renderer = TestRenderer.create(render()); });
+      await act(() => type("original draft"));
+      await act(async () => {
+        ref.current.addFiles([new File(["keep this attachment"], "notes.txt", { type: "text/plain" })]);
+      });
+      const originalFiles = getDraft(draftKey).files;
+      await act(() => renderer.root.findAllByType("button").find((button) => button.props.children === "Edit").props.onClick());
+      if (navigation === "same-key remount") {
+        await act(() => renderer.unmount());
+        await act(() => { renderer = TestRenderer.create(render()); });
+      }
+      await act(async () => {
+        type("typed while waiting");
+        ref.current.insertText("and queued insertion");
+        assert.equal(getDraft(draftKey).value, "original draft", "pending React updates have not been persisted yet");
+        release(true);
+        await cancellation;
+      });
+      const recovered = "queued question\n\ntyped while waiting and queued insertion";
+      assert.equal(textarea().props.value, recovered);
+      assert.equal(getDraft(draftKey).value, recovered);
+      assert.deepEqual(getDraft(draftKey).files, originalFiles);
+
+      await act(() => type(`${textarea().props.value}\nnext user edit`));
+      assert.equal(textarea().props.value, `${recovered}\nnext user edit`);
+      assert.equal(getDraft(draftKey).value, `${recovered}\nnext user edit`);
+      assert.deepEqual(getDraft(draftKey).files, originalFiles);
+    } finally {
+      await act(() => renderer?.unmount());
+      clearDraft(draftKey);
+      delete globalThis.window;
+      delete globalThis.document;
+    }
+  });
+}

@@ -20,6 +20,7 @@ export interface ChatDraft {
 declare global {
   var __ompChatDrafts: Map<string, ChatDraft> | undefined;
   var __ompChatDraftListeners: Set<() => void> | undefined;
+  var __ompChatDraftRecoveryListeners: Set<(key: string, text: string) => void> | undefined;
 }
 
 const MAX_DRAFTS = 50;
@@ -51,6 +52,7 @@ function readStoredDrafts(): Map<string, ChatDraft> {
 }
 
 const listeners = (globalThis.__ompChatDraftListeners ??= new Set<() => void>());
+const recoveryListeners = (globalThis.__ompChatDraftRecoveryListeners ??= new Set<(key: string, text: string) => void>());
 
 export function hasUnsentDrafts(): boolean {
   return drafts.size > 0;
@@ -59,6 +61,11 @@ export function hasUnsentDrafts(): boolean {
 export function subscribeDrafts(listener: () => void): () => void {
   listeners.add(listener);
   return () => { listeners.delete(listener); };
+}
+
+export function subscribeDraftRecovery(listener: (key: string, text: string) => void): () => void {
+  recoveryListeners.add(listener);
+  return () => { recoveryListeners.delete(listener); };
 }
 
 function cloneDraft(draft: ChatDraft): ChatDraft {
@@ -76,6 +83,16 @@ function isEmptyDraft(draft: ChatDraft): boolean {
 export function getDraft(key: string): ChatDraft | null {
   const draft = drafts.get(key);
   return draft ? cloneDraft(draft) : null;
+}
+
+export function recoverDraftText(key: string, text: string): void {
+  if (key) {
+    const draft = getDraft(key) ?? { value: "", images: [], files: [] };
+    setDraft(key, { ...draft, value: draft.value ? `${text}\n\n${draft.value}` : text });
+  }
+  // Publish the recovery intent separately: ordinary persistence must not
+  // reapply it, and the mounted composer may have React updates still queued.
+  for (const listener of recoveryListeners) listener(key, text);
 }
 
 export function getDraftSummary(key: string): { text: string; hasAttachments: boolean } {

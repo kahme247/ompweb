@@ -11,7 +11,7 @@ import { useDictation } from "@/hooks/useDictation";
 import type { GenerationSpeedInfo, SessionStatsInfo } from "@/lib/pi-types";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { ContextDetailPanel } from "./ComposerPanels";
-import { clearDraft, getDraft, setDraft } from "@/lib/draft-store";
+import { clearDraft, getDraft, recoverDraftText, setDraft, subscribeDraftRecovery } from "@/lib/draft-store";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import type { AttachedImage, AttachedTextFile } from "./ChatInput-draft-attachments";
 import {
@@ -123,10 +123,10 @@ interface Props {
   modelCapacity?: { contextWindow?: number; maxTokens?: number } | null;
   /** Generation speed shown in the context ring popover. */
   generationSpeed?: GenerationSpeedInfo | null;
-  /** Remove one queued message from the queue panel (Edit/Delete/Steer). */
-  onRemoveQueuedMessage?: (text: string) => void;
-  /** Relabel the first queued follow-up as a steering message. */
-  onPromoteQueuedToSteer?: (text: string) => void;
+  /** Cancel one pending message in omp before removing it from the queue panel. */
+  onRemoveQueuedMessage?: (text: string, queue: keyof QueuedMessages) => Promise<boolean>;
+  /** Promote the first matching native follow-up into steering. */
+  onPromoteQueuedToSteer?: (text: string) => void | Promise<void>;
   slashCommands?: SlashCommandInfo[];
   slashCommandsLoading?: boolean;
   onLoadSlashCommands?: () => Promise<SlashCommandInfo[]> | SlashCommandInfo[];
@@ -272,6 +272,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
   const [queuedDeleteTarget, setQueuedDeleteTarget] = useState<{
     text: string;
+    kind: "follow-up" | "steer";
     draftKey: string | undefined;
     queue: Props["queuedMessages"];
   } | null>(null);
@@ -629,6 +630,23 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     });
     setAttachedTextFiles(draftFilesToAttachedFiles(draft?.files));
   }, [draftKey]);
+
+  useLayoutEffect(() => subscribeDraftRecovery((key, text) => {
+    if (draftKeyRef.current !== key) return;
+    // Merge with pending edits rather than replacing them with a store snapshot.
+    setValue((current) => current ? `${text}\n\n${current}` : text);
+    setAtQuery(null);
+    setHistoryMenuOpen(false);
+    requestAnimationFrame(() => {
+      if (draftKeyRef.current !== key) return;
+      const ta = textareaRef.current;
+      if (!ta) return;
+      ta.focus();
+      ta.setSelectionRange(text.length, text.length);
+      ta.style.height = "auto";
+      ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
+    });
+  }), []);
 
   useEffect(() => {
     const ta = textareaRef.current;
@@ -1019,9 +1037,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     && Boolean(onFollowUp);
 
   // ── Queued follow-up bar ────────────────────────────────────────────────
-  // omp reports only a queued count over RPC; the texts are tracked in a
-  // client-side mirror, so Edit/Delete/Steer act on that mirror through the
-  // session hook's helpers.
+  // Texts are mirrored locally; mutations wait for native acknowledgement.
   const queuedEntries = [
     ...(queuedMessages?.followUp ?? []).map((text) => ({ kind: "follow-up" as const, text })),
     ...(queuedMessages?.steering ?? []).map((text) => ({ kind: "steer" as const, text })),
@@ -1030,49 +1046,59 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const queuedCount = queuedEntries.length;
 
   const [queueExpanded, setQueueExpanded] = useState(false);
+  const [queueActionPending, setQueueActionPending] = useState(false);
+  const queueActionPendingRef = useRef(false);
   // Invalidate confirmation if delivery or navigation changes the queue.
   const activeDeleteTarget = queuedDeleteTarget?.draftKey === draftKey
     && queuedDeleteTarget?.queue === queuedMessages ? queuedDeleteTarget : null;
 
-  const handleItemEdit = useCallback((text: string) => {
-    onRemoveQueuedMessage?.(text);
-    setValue(text);
-    setAtQuery(null);
-    setHistoryMenuOpen(false);
-    requestAnimationFrame(() => {
-      const ta = textareaRef.current;
-      if (!ta) return;
-      ta.focus();
-      ta.setSelectionRange(text.length, text.length);
-      ta.style.height = "auto";
-      ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
-    });
-  }, [onRemoveQueuedMessage]);
-
-  const handleItemDelete = useCallback((text: string) => {
-    setQueuedDeleteTarget({ text, draftKey, queue: queuedMessages });
-  }, [draftKey, queuedMessages]);
-
-  const handleItemSteer = useCallback((entry: { kind: "follow-up" | "steer"; text: string }) => {
-    if (entry.kind === "follow-up") {
-      onPromoteQueuedToSteer?.(entry.text);
+  const handleQueueAction = useCallback(async (
+    entry: { kind: "follow-up" | "steer"; text: string },
+    action: "edit" | "delete" | "steer",
+  ) => {
+    if (queueActionPendingRef.current) return;
+    queueActionPendingRef.current = true;
+    setQueueActionPending(true);
+    const key = draftKeyRef.current;
+    try {
+      if (action === "steer") {
+        if (entry.kind === "follow-up") await onPromoteQueuedToSteer?.(entry.text);
+        return;
+      }
+      const removed = await onRemoveQueuedMessage?.(
+        entry.text, entry.kind === "steer" ? "steering" : "followUp",
+      );
+      setQueuedDeleteTarget(null);
+      if (!removed || action !== "edit") return;
+      // Recover through the store even if a new composer now owns this key.
+      recoverDraftText(key, entry.text);
+    } catch (error) {
+      setQueuedDeleteTarget(null);
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      queueActionPendingRef.current = false;
+      setQueueActionPending(false);
     }
-  }, [onPromoteQueuedToSteer]);
+  }, [onRemoveQueuedMessage, onPromoteQueuedToSteer]);
+
+  const handleItemDelete = useCallback((entry: { kind: "follow-up" | "steer"; text: string }) => {
+    setQueuedDeleteTarget({ ...entry, draftKey, queue: queuedMessages });
+  }, [draftKey, queuedMessages]);
 
   const handleQueuedEdit = useCallback(() => {
     if (!firstQueued) return;
-    handleItemEdit(firstQueued.text);
-  }, [firstQueued, handleItemEdit]);
+    void handleQueueAction(firstQueued, "edit");
+  }, [firstQueued, handleQueueAction]);
 
   const handleQueuedDelete = useCallback(() => {
     if (!firstQueued) return;
-    handleItemDelete(firstQueued.text);
+    handleItemDelete(firstQueued);
   }, [firstQueued, handleItemDelete]);
 
   const handleQueuedSteer = useCallback(() => {
     if (!firstQueued) return;
-    handleItemSteer(firstQueued);
-  }, [firstQueued, handleItemSteer]);
+    void handleQueueAction(firstQueued, "steer");
+  }, [firstQueued, handleQueueAction]);
 
   const getNextSlashIndex = useCallback((direction: "up" | "down" | "left" | "right") => {
     const lastIndex = filteredSlashCommands.length - 1;
@@ -1473,10 +1499,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         confirmLabel={t("chatInput.queuedDelete")}
         cancelLabel={t("chatInput.cancel")}
         danger
+        busy={queueActionPending}
         onConfirm={() => {
           if (!activeDeleteTarget) return;
-          setQueuedDeleteTarget(null);
-          onRemoveQueuedMessage?.(activeDeleteTarget.text);
+          void handleQueueAction(activeDeleteTarget, "delete");
         }}
       />
       {/* Hidden file input */}
@@ -2042,14 +2068,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 >
                   {firstQueued?.text}
                 </span>
-                <QueuedActionButton onClick={handleQueuedEdit} title={t("chatInput.queuedEditTitle")}>
+                <QueuedActionButton disabled={queueActionPending || !onRemoveQueuedMessage} onClick={handleQueuedEdit} title={t("chatInput.queuedEditTitle")}>
                   {t("chatInput.queuedEdit")}
                 </QueuedActionButton>
-                <QueuedActionButton onClick={handleQueuedDelete} title={t("chatInput.queuedDeleteTitle")}>
+                <QueuedActionButton disabled={queueActionPending || !onRemoveQueuedMessage} onClick={handleQueuedDelete} title={t("chatInput.queuedDeleteTitle")}>
                   {t("chatInput.queuedDelete")}
                 </QueuedActionButton>
                 {firstQueued?.kind === "follow-up" && (
-                  <QueuedActionButton onClick={handleQueuedSteer} title={t("chatInput.queuedSteerTitle")} accent>
+                  <QueuedActionButton disabled={queueActionPending || !onPromoteQueuedToSteer} onClick={handleQueuedSteer} title={t("chatInput.queuedSteerTitle")} accent>
                     {t("chatInput.queuedSteerAction")}
                   </QueuedActionButton>
                 )}
@@ -2184,14 +2210,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         >
                           {entry.text}
                         </span>
-                        <QueuedActionButton onClick={() => handleItemEdit(entry.text)} title={t("chatInput.queuedEditTitle")}>
+                        <QueuedActionButton disabled={queueActionPending || !onRemoveQueuedMessage} onClick={() => void handleQueueAction(entry, "edit")} title={t("chatInput.queuedEditTitle")}>
                           {t("chatInput.queuedEdit")}
                         </QueuedActionButton>
-                        <QueuedActionButton onClick={() => handleItemDelete(entry.text)} title={t("chatInput.queuedDeleteTitle")}>
+                        <QueuedActionButton disabled={queueActionPending || !onRemoveQueuedMessage} onClick={() => handleItemDelete(entry)} title={t("chatInput.queuedDeleteTitle")}>
                           {t("chatInput.queuedDelete")}
                         </QueuedActionButton>
                         {entry.kind === "follow-up" && (
-                          <QueuedActionButton onClick={() => handleItemSteer(entry)} title={t("chatInput.queuedSteerTitle")} accent>
+                          <QueuedActionButton disabled={queueActionPending || !onPromoteQueuedToSteer} onClick={() => void handleQueueAction(entry, "steer")} title={t("chatInput.queuedSteerTitle")} accent>
                             {t("chatInput.queuedSteerAction")}
                           </QueuedActionButton>
                         )}
