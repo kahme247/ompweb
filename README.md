@@ -37,6 +37,11 @@ A clean, modern web UI for the [oh-my-pi (omp)](https://github.com/can1357/oh-my
 npx @kahme247/ompweb@latest
 ```
 
+or
+```bash
+nix run github:kahme247/ompweb
+```
+
 **Or install globally:**
 
 ```bash
