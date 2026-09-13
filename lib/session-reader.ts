@@ -560,7 +560,7 @@ export function getTodoPhasesFromEntries(entries: SessionEntry[], leafId?: strin
     entry = entry.parentId ? byId.get(entry.parentId) : undefined;
   }
 
-  for (let index = path.length - 1; index >= 0; index--) {
+  for (let index = 0; index < path.length; index++) {
     const current = path[index];
     if (current.type === "custom" && current.customType === "user_todo_edit") {
       const phases = isRecord(current.data) ? parseTodoPhases(current.data.phases) : null;
