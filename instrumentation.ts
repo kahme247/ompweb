@@ -76,12 +76,25 @@ export async function register(): Promise<void> {
     process.exit(2);
   });
   let lastTick = Date.now();
+  let lastCpu = process.cpuUsage();
   const watchdog = setInterval(() => {
     const now = Date.now();
+    const cpu = process.cpuUsage();
     const drift = now - lastTick;
+    const cpuMs = (cpu.user - lastCpu.user + cpu.system - lastCpu.system) / 1000;
     lastTick = now;
+    lastCpu = cpu;
     if (drift > 45_000) {
-      appendDiag("stall", `event loop unresponsive for ~${Math.round(drift / 1000)}s — a synchronous operation is blocking every request`);
+      // Wall-clock drift alone cannot tell a blocked loop from a sleeping
+      // machine: an hour with the lid closed looks like an hour-long stall
+      // but burns no CPU. Label accordingly so the journal does not mislead
+      // the next long-idle investigation.
+      const seconds = Math.round(drift / 1000);
+      if (cpuMs < Math.min(5_000, drift / 2)) {
+        appendDiag("sleep", `event loop gap of ~${seconds}s with negligible CPU time — machine was asleep/suspended or CPU-starved, not a synchronous block`);
+      } else {
+        appendDiag("stall", `event loop unresponsive for ~${seconds}s — a synchronous operation is blocking every request`);
+      }
     }
   }, 15_000);
   watchdog.unref?.();

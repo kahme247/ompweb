@@ -36,4 +36,8 @@ test("a CLOSED event stream retries with backoff even while the agent is idle", 
   assert.match(source, /eventStreamRetryMsRef\.current = Math\.min\(delay \* 2, EVENT_STREAM_RETRY_MAX_MS\)/);
   // A successful open resets the backoff to the floor.
   assert.match(source, /es\.onopen = \(\) => \{\s*\n\s*eventStreamRetryMsRef\.current = EVENT_STREAM_RETRY_MIN_MS;/);
+  // Building a fresh stream drops any still-pending backoff timer first: a
+  // send during the wait must not let the orphaned timer fire later and tear
+  // down the healthy replacement mid-run.
+  assert.match(source, /const connectEvents = useCallback\(\(sid: string\)[\s\S]*?clearTimeout\(reconnectTimerRef\.current\);\s*\n\s*reconnectTimerRef\.current = undefined;\s*\n\s*if \(eventSourceRef\.current\)/);
 });

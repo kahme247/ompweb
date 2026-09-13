@@ -936,6 +936,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const reconnectActionsRef = useRef<((sid: string) => void) | null>(null);
 
   const connectEvents = useCallback((sid: string): Promise<EventStreamConnectionResult> => {
+    // A backoff timer from an earlier CLOSED stream may still be pending (e.g.
+    // the user sent a message while it waited). It must not fire later and
+    // tear down the healthy stream built here — drop it before replacing.
+    clearTimeout(reconnectTimerRef.current);
+    reconnectTimerRef.current = undefined;
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
       eventSourceRef.current = null;

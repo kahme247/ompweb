@@ -111,10 +111,13 @@ export async function listAllSessions(): Promise<SessionInfo[]> {
     return globalThis.__piSessionListPromise;
   }
 
+  // Flipped once the watchdog below retires this scan: a hung load that
+  // resolves after the slot moved on must not overwrite fresher cache data.
+  let retired = false;
   const loadPromise = loadAllSessions().then((data) => {
     // An invalidation may happen while the scan is in flight. Do not let that
     // older result repopulate the cache after a session mutation.
-    if ((globalThis.__piSessionListGeneration ?? 0) === generation) {
+    if ((globalThis.__piSessionListGeneration ?? 0) === generation && !retired) {
       globalThis.__piSessionListCache = { data, ts: Date.now() };
     }
     return data;
@@ -134,8 +137,13 @@ export async function listAllSessions(): Promise<SessionInfo[]> {
     if (globalThis.__piSessionListPromise === trackedPromise) {
       globalThis.__piSessionListPromise = undefined;
       globalThis.__piSessionListPromiseGeneration = undefined;
+      retired = true;
     }
   }, SESSION_LIST_LOAD_DEADLINE_MS);
+  watchdog.unref?.();
+
+  globalThis.__piSessionListPromise = trackedPromise;
+  globalThis.__piSessionListPromiseGeneration = generation;
   watchdog.unref?.();
 
   globalThis.__piSessionListPromise = trackedPromise;
