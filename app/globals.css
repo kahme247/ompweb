@@ -568,6 +568,18 @@ html.dark {
   }
 }
 
+/* iOS Safari / WKWebView zooms the page when an editable control with a computed
+   font-size below 16px gains focus. There is no user-facing toggle, and
+   `maximum-scale=1` has been ignored since iOS 17.4, so the reliable fix is to
+   floor form-control font size at 16px on small screens (see issue #87). */
+@media (max-width: 640px) {
+  input,
+  textarea,
+  select {
+    font-size: max(16px, 1em) !important;
+  }
+}
+
 /* General UI scale / density scaling tokens — zoom is non-standard but supported in Chromium; keep both zoom and transform for coverage. */
 @layer base {
   :root {
