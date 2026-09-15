@@ -2,15 +2,17 @@ import { type ChildProcessWithoutNullStreams, spawn } from "child_process";
 import { createInterface } from "readline";
 import { sanitizeProjectCommandEnvironment } from "../project-command-env";
 import { resolveOmpBin } from "./omp-cli";
-import { encodeRpcFrames, RpcFrameDecoder, type RpcFrameRecord, type RpcProtocolVersion } from "./rpc-frame";
+import { encodeRpcCommand, RpcFrameDecoder, type RpcFrameRecord, type RpcProtocolVersion } from "./rpc-frame";
 
 /**
  * Process + protocol layer for `omp --mode rpc-ui` (NDJSON over stdio).
  * Protocol v1: commands `{id, type, ...}` on stdin; `{type:"response", id, ...}`
  * plus interleaved event frames on stdout. omp announces readiness with a
  * `{type:"ready"}` frame before accepting commands. When readiness advertises
- * protocol v2, callers negotiate it before sending normal commands; oversized
- * logical frames are then carried as bounded `rpc_chunk` sequences.
+ * protocol v2, callers negotiate it before sending normal commands and omp's
+ * oversized outbound frames arrive as bounded `rpc_chunk` sequences, which the
+ * decoder below reassembles. Commands written to stdin stay single unchunked
+ * JSONL objects — see `encodeRpcCommand` (issue #105).
  */
 
 export interface RpcResponseFrame {
@@ -86,12 +88,9 @@ export class RpcProcess {
   private exited = false;
   private exitInfo: { code: number | null; signal: NodeJS.Signals | null } | null = null;
   private protocolVersion: RpcProtocolVersion = 1;
-  private nextChunkId = 1;
   private readonly spawnProcess: typeof spawn;
-  // Serializes physical stdin writes: a v2 logical frame can span multiple
-  // `rpc_chunk` records (>1 MiB payloads), and two frames written concurrently
-  // would interleave their chunk sequences on stdin, which RpcFrameDecoder
-  // rejects. Each logical frame is enqueued whole.
+  // Commands are written to stdin one logical frame at a time (never chunked,
+  // however large) so two of them cannot interleave on the pipe.
   private writeQueue: Promise<void> = Promise.resolve();
 
   constructor(options: RpcProcessOptions) {
@@ -293,15 +292,15 @@ export class RpcProcess {
   }
 
   private writeFrame(frame: RpcFrame, callback: (error?: Error | null) => void): void {
-    let lines: string[];
+    let line: string;
     try {
-      lines = encodeRpcFrames(frame, this.protocolVersion, `web-${this.nextChunkId++}`);
+      line = encodeRpcCommand(frame);
     } catch (error) {
       callback(error instanceof Error ? error : new Error(String(error)));
       return;
     }
-    // Enqueue the entire encoded logical frame; the next frame's physical
-    // records only start after this frame's last write callback completes.
+    // Commands are serialized so two of them never interleave on the pipe and a
+    // failed write cannot reorder the responses callers are awaiting.
     this.writeQueue = this.writeQueue.then(
       () => new Promise<void>((resolve) => {
         if (this.exited || this.child.stdin.destroyed) {
@@ -309,16 +308,10 @@ export class RpcProcess {
           resolve();
           return;
         }
-        let index = 0;
-        const writeNext = (error?: Error | null) => {
-          if (error || index === lines.length) {
-            callback(error ?? null);
-            resolve();
-            return;
-          }
-          this.child.stdin.write(lines[index++], writeNext);
-        };
-        writeNext();
+        this.child.stdin.write(line, (error) => {
+          callback(error ?? null);
+          resolve();
+        });
       }),
     );
   }

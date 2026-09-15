@@ -1,7 +1,25 @@
-/** Bounded protocol-v2 framing for OMP's NDJSON RPC transport. */
+/**
+ * Framing for OMP's NDJSON RPC transport.
+ *
+ * Protocol-v2 chunking is an OUTBOUND encoding (omp -> host): OMP splits a
+ * logical frame larger than `maxFrameBytes` into `rpc_chunk` records and
+ * `RpcFrameDecoder` reassembles them. The host's own commands are never
+ * chunked — OMP's stdin reader parses one JSONL object per line and never runs
+ * the chunk decoder, so a chunked command is answered `success:false,
+ * error:"Unknown command: rpc_chunk"` with no id to correlate and the prompt
+ * never acks (issue #105).
+ */
 import { isRecord } from "../type-guards";
+/** Largest logical frame OMP emits before it chunks (also the protocol-v1 write cap). */
 export const MAX_RPC_FRAME_BYTES = 1024 * 1024;
 export const MAX_RPC_REASSEMBLED_BYTES = 64 * 1024 * 1024;
+/**
+ * Largest command omp-web writes to OMP's stdin as one JSONL object. Command
+ * bodies are already capped at 8 MiB by the agent routes
+ * (`MAX_AGENT_COMMAND_REQUEST_BYTES`); this bound only turns a pathological
+ * command into a clear error instead of an unbounded pipe write.
+ */
+export const MAX_INBOUND_COMMAND_BYTES = 32 * 1024 * 1024;
 const RPC_CHUNK_PAYLOAD_BYTES = 256 * 1024;
 
 export type RpcProtocolVersion = 1 | 2;
@@ -18,10 +36,6 @@ interface PendingChunks {
 
 function isSafeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value);
-}
-
-function lineByteLength(value: string): number {
-  return Buffer.byteLength(value, "utf8") + 1;
 }
 
 function decodeBase64(value: unknown): Buffer {
@@ -78,23 +92,19 @@ export class RpcFrameDecoder {
   }
 }
 
-/** Physical JSONL records for a logical RPC frame at the selected protocol. */
-export function encodeRpcFrames(frame: RpcFrameRecord, protocolVersion: RpcProtocolVersion, chunkId: string): string[] {
+/**
+ * Physical JSONL record for one command on OMP's stdin.
+ *
+ * Always a single unchunked line, however large: `maxFrameBytes` bounds omp's
+ * outbound physical frames, not the host's commands (see the file header and
+ * issue #105). Base64 attachment payloads routinely exceed 1 MiB and used to be
+ * split into `rpc_chunk` records that OMP rejected.
+ */
+export function encodeRpcCommand(frame: RpcFrameRecord): string {
   const json = JSON.stringify(frame);
-  if (lineByteLength(json) <= MAX_RPC_FRAME_BYTES) return [`${json}\n`];
-  if (protocolVersion === 1) throw new Error("RPC frame exceeds the v1 transport limit");
-  const bytes = Buffer.from(json, "utf8");
-  if (bytes.byteLength > MAX_RPC_REASSEMBLED_BYTES) throw new Error("RPC frame exceeds the v2 reassembly limit");
-  const count = Math.ceil(bytes.byteLength / RPC_CHUNK_PAYLOAD_BYTES);
-  const lines: string[] = [];
-  for (let index = 0; index < count; index++) {
-    const chunk = {
-      type: "rpc_chunk", chunkId, index, count, byteLength: bytes.byteLength,
-      data: bytes.subarray(index * RPC_CHUNK_PAYLOAD_BYTES, (index + 1) * RPC_CHUNK_PAYLOAD_BYTES).toString("base64"),
-    };
-    const line = JSON.stringify(chunk);
-    if (lineByteLength(line) > MAX_RPC_FRAME_BYTES) throw new Error("RPC chunk exceeds the transport limit");
-    lines.push(`${line}\n`);
+  const byteLength = Buffer.byteLength(json, "utf8") + 1;
+  if (byteLength > MAX_INBOUND_COMMAND_BYTES) {
+    throw new Error(`RPC command exceeds the ${MAX_INBOUND_COMMAND_BYTES}-byte inbound transport limit`);
   }
-  return lines;
+  return `${json}\n`;
 }
