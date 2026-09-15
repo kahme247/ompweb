@@ -192,6 +192,8 @@ interface Props {
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
   entryId?: string;
+  /** Entry omp's `branch` command accepts for this message (a user entry, #103). */
+  forkEntryId?: string;
   onFork?: (entryId: string) => void;
   forking?: boolean;
   onNavigate?: (entryId: string) => boolean | Promise<boolean>;
@@ -232,12 +234,12 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, liveTokensPerSecond }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, forkEntryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, liveTokensPerSecond }: Props) {
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onNavigate={onNavigate} prevAssistantEntryId={prevAssistantEntryId} onEditContent={onEditContent} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} liveTokensPerSecond={liveTokensPerSecond} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} forkEntryId={forkEntryId} onFork={onFork} forking={forking} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} liveTokensPerSecond={liveTokensPerSecond} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -268,6 +270,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.cwd === next.cwd
     && prev.onOpenFile === next.onOpenFile
     && prev.entryId === next.entryId
+    && prev.forkEntryId === next.forkEntryId
     && prev.onFork === next.onFork
     && prev.forking === next.forking
     && prev.onNavigate === next.onNavigate
@@ -293,6 +296,46 @@ function imageBlockSrc(img: ImageContent): string {
       : "";
 }
 
+/**
+ * "New session" (fork) action, shared by user and assistant messages.
+ *
+ * omp's `branch` command accepts a user-message entry only (an assistant entry
+ * answers "Invalid entry ID for branching"), so `entryId` is the branch point
+ * resolved by `resolveForkEntryIds` — for an assistant reply, the user prompt
+ * that started its turn (#103).
+ */
+function ForkSessionButton({ entryId, onFork, forking }: {
+  entryId: string;
+  onFork: (entryId: string) => void;
+  forking?: boolean;
+}) {
+  const { t } = useI18n();
+  return (
+    <Tooltip content={forking ? t("messageView.creatingSession") : t("messageView.newSessionTitle")}>
+      <button
+        onClick={() => { onFork(entryId); }}
+        disabled={forking}
+        aria-label={forking ? t("messageView.creatingSession") : t("messageView.newSessionTitle")}
+        style={{
+          display: "flex", alignItems: "center", gap: 4,
+          padding: "3px 8px", height: 24, minHeight: 24,
+          background: "none", border: "none",
+          borderRadius: 5,
+          color: forking ? "var(--accent)" : "var(--text-dim)",
+          cursor: forking ? "not-allowed" : "pointer",
+          fontSize: 11, fontWeight: 400,
+          whiteSpace: "nowrap",
+          transition: "color var(--dur-fast) var(--ease-out-warm)",
+        }}
+        onMouseEnter={(e) => { if (!forking) e.currentTarget.style.color = "var(--accent)"; }}
+        onMouseLeave={(e) => { if (!forking) e.currentTarget.style.color = "var(--text-dim)"; }}
+      >
+        <GitFork size={11} strokeWidth={1.8} />
+        {forking ? t("messageView.creating") : t("messageView.newSession")}
+      </button>
+    </Tooltip>
+  );
+}
 function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent }: {  message: UserMessage;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
@@ -407,29 +450,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
                 </Tooltip>
               )}
               {canFork && (
-                <Tooltip content={forking ? t("messageView.creatingSession") : t("messageView.newSessionTitle")}>
-                  <button
-                    onClick={() => { onFork!(entryId!); }}
-                    disabled={forking}
-                    aria-label={forking ? t("messageView.creatingSession") : t("messageView.newSessionTitle")}
-                    style={{
-                      display: "flex", alignItems: "center", gap: 4,
-                      padding: "3px 8px", height: 24, minHeight: 24,
-                      background: "none", border: "none",
-                      borderRadius: 5,
-                      color: forking ? "var(--accent)" : "var(--text-dim)",
-                      cursor: forking ? "not-allowed" : "pointer",
-                      fontSize: 11, fontWeight: 400,
-                      whiteSpace: "nowrap",
-                      transition: "color var(--dur-fast) var(--ease-out-warm)",
-                    }}
-                    onMouseEnter={(e) => { if (!forking) e.currentTarget.style.color = "var(--accent)"; }}
-                    onMouseLeave={(e) => { if (!forking) e.currentTarget.style.color = "var(--text-dim)"; }}
-                  >
-                    <GitFork size={11} strokeWidth={1.8} />
-                    {forking ? t("messageView.creating") : t("messageView.newSession")}
-                  </button>
-                </Tooltip>
+                <ForkSessionButton entryId={entryId!} onFork={onFork!} forking={forking} />
               )}
             </div>
           )}
@@ -465,6 +486,9 @@ function AssistantMessageView({
   prevTimestamp,
   sessionId,
   entryId,
+  forkEntryId,
+  onFork,
+  forking,
   toolCallsDefaultCollapsed,
   liveTokensPerSecond,
 }: {
@@ -478,6 +502,10 @@ function AssistantMessageView({
   prevTimestamp?: number;
   sessionId?: string;
   entryId?: string;
+  /** User entry omp's `branch` command accepts for this reply (#103). */
+  forkEntryId?: string;
+  onFork?: (entryId: string) => void;
+  forking?: boolean;
   toolCallsDefaultCollapsed: boolean;
   liveTokensPerSecond?: number | null;
 }) {
@@ -485,6 +513,7 @@ function AssistantMessageView({
   const time = showTimestamp ? formatTime(message.timestamp, locale) : null;
   const bodyRef = useRef<HTMLDivElement>(null);
   const texts = (message.content ?? []).filter((block): block is TextContent => block.type === "text").map((block) => block.text);
+  const canFork = !!forkEntryId && !!onFork;
   const blockItems = (message.content ?? [])
     .map((block, originalIndex) => ({ block, originalIndex }))
     .filter(({ block }) => !isEmptyThinkingBlock(block, { isStreaming }));
@@ -706,9 +735,12 @@ function AssistantMessageView({
         )}
       </div>
 
-      {!isStreaming && (texts.some((text) => text.trim()) || time) && (
+      {!isStreaming && (texts.some((text) => text.trim()) || time || canFork) && (
         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 6, marginTop: 3 }}>
-          <MessageCopyActions texts={texts} bodyRef={bodyRef} />
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 3 }}>
+            <MessageCopyActions texts={texts} bodyRef={bodyRef} />
+            {canFork && <ForkSessionButton entryId={forkEntryId!} onFork={onFork!} forking={forking} />}
+          </div>
           {time && <span style={{ fontSize: 10, color: "var(--text-dim)", marginLeft: "auto" }}>{time}</span>}
         </div>
       )}

@@ -598,3 +598,72 @@ test("interrupted message with partial content renders content before interrupte
   assert.ok(statusIdx !== -1, "status badge must be rendered");
   assert.ok(contentIdx < statusIdx, "content must precede the interrupted status badge");
 });
+
+const FORK_LABEL = "Fork a new session from this point";
+
+test("agent replies offer copy and fork, forking at the turn's user message", async (t) => {
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+  t.after(() => {
+    if (originalMatchMedia) window.matchMedia = originalMatchMedia;
+    else delete window.matchMedia;
+  });
+  const forked = [];
+  const view = render(React.createElement(MessageView, {
+    message: { role: "assistant", model: "test", provider: "test", content: [{ type: "text", text: "Done." }] },
+    entryId: "assistant-1",
+    // Resolved by resolveForkEntryIds: omp's `branch` accepts a user entry only.
+    forkEntryId: "user-1",
+    onFork: (entryId) => forked.push(entryId),
+  }));
+  assert.ok(view.getByRole("button", { name: "Copy message" }));
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: FORK_LABEL })); });
+  assert.deepEqual(forked, ["user-1"]);
+  view.unmount();
+});
+
+test("agent replies without text still offer the new-session action", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    message: {
+      role: "assistant", model: "test", provider: "test",
+      content: [{ type: "toolCall", toolCallId: "tool-1", toolName: "read", input: { path: "a.ts" } }],
+    },
+    entryId: "assistant-2",
+    forkEntryId: "user-1",
+    onFork: () => {},
+  }));
+  assert.doesNotMatch(html, /aria-label="Copy message"/);
+  assert.match(html, new RegExp(`aria-label="${FORK_LABEL}"`));
+});
+
+test("a streaming reply and an unforkable row keep no fork action", () => {
+  const reply = { role: "assistant", model: "test", provider: "test", content: [{ type: "text", text: "Streaming" }] };
+  const streaming = renderToStaticMarkup(React.createElement(MessageView, {
+    message: reply, entryId: "assistant-3", forkEntryId: "user-1", onFork: () => {}, isStreaming: true,
+  }));
+  assert.doesNotMatch(streaming, new RegExp(`aria-label="${FORK_LABEL}"`));
+
+  const noTarget = renderToStaticMarkup(React.createElement(MessageView, {
+    message: reply, entryId: "assistant-4", onFork: () => {},
+  }));
+  assert.doesNotMatch(noTarget, new RegExp(`aria-label="${FORK_LABEL}"`));
+});
+
+test("user messages still fork at their own entry", async (t) => {
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+  t.after(() => {
+    if (originalMatchMedia) window.matchMedia = originalMatchMedia;
+    else delete window.matchMedia;
+  });
+  const forked = [];
+  const view = render(React.createElement(MessageView, {
+    message: { role: "user", content: "Keep this forkable." },
+    entryId: "user-7",
+    forkEntryId: "user-7",
+    onFork: (entryId) => forked.push(entryId),
+  }));
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: FORK_LABEL })); });
+  assert.deepEqual(forked, ["user-7"]);
+  view.unmount();
+});
