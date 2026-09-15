@@ -23,6 +23,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 - Clearly dim Attach files while the agent is running; queued messages remain text-only.
 - Recover saved responses before reporting an empty agent reply after returning to a backgrounded page or PWA. Preserve provider errors and distinguish new runs from older answers.
 - Catch up missed conversation entries incrementally after reconnecting or returning to the page, including during active runs. Restore quiet partial responses and live tool output without duplicating history or overwriting newer updates.
+- Show the **New session** fork action below agent replies as well as user prompts, so the newest message in a conversation can fork the session. omp's `branch` command accepts a user entry only, so each reply forks at the prompt that started its turn; replies with no earlier prompt keep no fork action.
 
 ---
 

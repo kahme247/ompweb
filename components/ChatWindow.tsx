@@ -6,6 +6,7 @@ import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecuti
 import { translate, useI18n } from "@/lib/i18n";
 import { getDisplayableAssistantBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { isGroupAnchor, planTranscriptRows, type TranscriptRow } from "@/lib/chat-transcript-plan";
+import { resolveForkEntryIds } from "@/lib/chat-fork";
 import { MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ExtensionDialog } from "./ExtensionDialog";
@@ -341,6 +342,12 @@ const CommittedTranscript = memo(function CommittedTranscript({
 }: CommittedTranscriptProps) {
   const { t } = useI18n();
   const { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage } = conversationMeta;
+  // omp's `branch` command accepts a user entry only, so every row forks at the
+  // user prompt that started its turn (#103).
+  const forkEntryIds = useMemo(
+    () => resolveForkEntryIds(messages.map((message) => message.role), entryIds),
+    [messages, entryIds],
+  );
 
   const attachVisibleRef = (idx: number, refIndex: number) => (el: HTMLDivElement | null) => {
     messageRefs.current[refIndex] = el;
@@ -369,6 +376,9 @@ const CommittedTranscript = memo(function CommittedTranscript({
       }
     }
     if (options.showTimestamp !== undefined) showTimestamp = options.showTimestamp;
+    // Forking needs a branch point omp accepts, and a first user prompt has no
+    // earlier context to fork from — that one row keeps no fork action.
+    const canOfferFork = !sessionBusy && !isNew && !!forkEntryIds[idx] && !(idx === 0 && msg.role === "user");
     const view = (
       <MessageView
         key={`${keyPrefix}-view-${idx}`}
@@ -378,8 +388,9 @@ const CommittedTranscript = memo(function CommittedTranscript({
         cwd={messageCwd}
         onOpenFile={onOpenFile}
         entryId={entryIds[idx]}
-        onFork={sessionBusy || isNew || (idx === 0 && msg.role === "user") ? undefined : handleFork}
-        forking={forkingEntryId === entryIds[idx]}
+        forkEntryId={forkEntryIds[idx]}
+        onFork={canOfferFork ? handleFork : undefined}
+        forking={forkingEntryId === forkEntryIds[idx]}
         onNavigate={sessionBusy ? undefined : handleNavigate}
         prevAssistantEntryId={sessionBusy ? undefined : prevAssistantEntryId}
         onEditContent={handleEditContent}
