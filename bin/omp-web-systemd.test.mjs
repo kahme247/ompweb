@@ -127,6 +127,7 @@ test("install creates the env file and unit with LAN settings", { skip: process.
       PORT: "40123",
     };
     delete childEnv.PI_CODING_AGENT_DIR;
+    delete childEnv.OMP_WEB_OMP_BIN;
 
     const result = spawnSync(process.execPath, [path.join(process.cwd(), "bin", "omp-web-systemd.js"), "install", "--no-autostart"], {
       env: childEnv,
