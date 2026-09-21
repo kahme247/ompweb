@@ -2,7 +2,7 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
 import React, { act } from "react";
-import { cleanup, render, screen, waitFor } from "@testing-library/react/pure.js";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react/pure.js";
 import userEvent from "@testing-library/user-event";
 import { createJiti } from "jiti";
 
@@ -86,3 +86,102 @@ test("attachment-only drafts stay protected across live draft-key changes and re
   assert.match(sent[0], /important attachment/);
   assert.equal(warnsOnExit(), false);
 });
+
+for (const navigation of ["draft-key change", "unmount"]) {
+  test(`queued Edit recovers the old draft after ${navigation} while cancellation is pending`, async () => {
+    const oldKey = `edit-old-${navigation}`;
+    const newKey = `edit-new-${navigation}`;
+    const ref = React.createRef();
+    let release;
+    const cancellation = new Promise((resolve) => { release = resolve; });
+    const queuedMessages = { steering: [], followUp: ["queued question"] };
+    const chat = (draftKey) => React.createElement(ChatInput, {
+      ref, draftKey, queuedMessages, isStreaming: true,
+      onSend() {}, onAbort() {}, onRemoveQueuedMessage: () => cancellation,
+    });
+    let view = render(chat(oldKey));
+    try {
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "original draft" } });
+      await act(async () => {
+        ref.current.addFiles([new File(["keep this attachment"], "notes.txt", { type: "text/plain" })]);
+      });
+      const originalFiles = getDraft(oldKey).files;
+      fireEvent.click(screen.getByRole("button", { name: "Edit", exact: true }));
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "draft updated while waiting" } });
+      assert.equal(getDraft(oldKey).value, "draft updated while waiting", "Edit must wait for cancellation acknowledgement");
+
+      if (navigation === "unmount") {
+        view.unmount();
+        view = render(chat(newKey));
+      } else {
+        view.rerender(chat(newKey));
+      }
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "new session draft" } });
+      await act(async () => {
+        release(true);
+        await cancellation;
+      });
+      assert.equal(screen.getByRole("textbox").value, "new session draft");
+      assert.equal(getDraft(newKey).value, "new session draft");
+      assert.equal(getDraft(oldKey).value, "queued question\n\ndraft updated while waiting");
+      assert.deepEqual(getDraft(oldKey).files, originalFiles);
+
+      if (navigation === "unmount") {
+        view.unmount();
+        view = render(chat(oldKey));
+      } else {
+        view.rerender(chat(oldKey));
+      }
+      assert.equal(screen.getByRole("textbox").value, "queued question\n\ndraft updated while waiting");
+      assert.equal(getDraft(newKey).value, "new session draft", "returning to the old chat preserves the new chat's draft");
+    } finally {
+      view.unmount();
+      clearDraft(oldKey);
+      clearDraft(newKey);
+    }
+  });
+}
+
+for (const navigation of ["original composer", "same-key remount"]) {
+  test(`queued Edit restores ${navigation} without losing batched typing or duplicating recalled text`, async () => {
+    const draftKey = `edit-recovery-${navigation}`;
+    const ref = React.createRef();
+    let release;
+    const cancellation = new Promise((resolve) => { release = resolve; });
+    const chat = () => React.createElement(ChatInput, {
+      ref, draftKey, queuedMessages: { steering: [], followUp: ["queued question"] }, isStreaming: true,
+      onSend() {}, onAbort() {}, onRemoveQueuedMessage: () => cancellation,
+    });
+    let view = render(chat());
+    try {
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "original draft" } });
+      await act(async () => {
+        ref.current.addFiles([new File(["keep this attachment"], "notes.txt", { type: "text/plain" })]);
+      });
+      const originalFiles = getDraft(draftKey).files;
+      fireEvent.click(screen.getByRole("button", { name: "Edit", exact: true }));
+      if (navigation === "same-key remount") {
+        view.unmount();
+        view = render(chat());
+      }
+      await act(async () => {
+        fireEvent.change(screen.getByRole("textbox"), { target: { value: "typed while waiting" } });
+        ref.current.insertText("and queued insertion");
+        release(true);
+        await cancellation;
+      });
+      const recovered = "queued question\n\ntyped while waiting and queued insertion";
+      assert.equal(screen.getByRole("textbox").value, recovered);
+      assert.equal(getDraft(draftKey).value, recovered);
+      assert.deepEqual(getDraft(draftKey).files, originalFiles);
+
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: `${recovered}\nnext user edit` } });
+      assert.equal(screen.getByRole("textbox").value, `${recovered}\nnext user edit`);
+      assert.equal(getDraft(draftKey).value, `${recovered}\nnext user edit`);
+      assert.deepEqual(getDraft(draftKey).files, originalFiles);
+    } finally {
+      view.unmount();
+      clearDraft(draftKey);
+    }
+  });
+}
