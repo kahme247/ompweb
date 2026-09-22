@@ -80,6 +80,71 @@ function which(name, env = process.env) {
   return null;
 }
 
+// Read the interpreter of a launcher script (e.g. `#!/usr/bin/env bun`).
+// Bun/npm global installs of omp are scripts that need their interpreter on
+// PATH at service runtime; the generated unit must include its directory
+// (issue #116). Returns the raw interpreter token (e.g. `bun` or
+// `/opt/bun/bin/bun`), or null when the file is a native binary,
+// unreadable, or has no shebang. Symlinks are resolved first: the `omp` on
+// PATH is usually a link to the real launcher.
+function readLauncherInterpreter(binPath) {
+  let target = binPath;
+  try {
+    target = fs.realpathSync(binPath);
+  } catch {
+    // Fall through and try the path as given.
+  }
+  let fd;
+  try {
+    fd = fs.openSync(target, "r");
+    const buffer = Buffer.alloc(1024);
+    const bytes = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    const firstLine = buffer.subarray(0, bytes).toString("utf8").split("\n", 1)[0].replace(/\r$/, "");
+    const match = /^#!\s*(.+?)\s*$/.exec(firstLine);
+    if (!match) return null;
+    const parts = match[1].split(/\s+/).filter(Boolean);
+    if (parts.length === 0) return null;
+    let command = parts[0];
+    if (path.basename(command) === "env") {
+      // Skip env flags (`-S`, `-i`, `--split-string`, ...); for
+      // `-S "cmd args"` the command is the first word of the next token.
+      const rest = parts.slice(1).filter((token) => !token.startsWith("-"));
+      if (rest.length === 0) return null;
+      command = rest[0];
+    }
+    command = command.replace(/^['"]|['"]$/g, "").split(/\s+/)[0];
+    return command || null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Ignore close errors on a best-effort probe.
+      }
+    }
+  }
+}
+
+// Resolve the directory holding the interpreter a launcher script needs, or
+// null when the binary is native / the interpreter is unknown. An absolute
+// shebang path's own directory wins; otherwise the interpreter is looked up
+// on the installer's PATH (split on `:` — unit files are Linux-only).
+function launcherInterpreterDir(binPath, env = process.env) {
+  const interpreter = readLauncherInterpreter(binPath);
+  if (!interpreter) return null;
+  if (path.posix.isAbsolute(interpreter) || path.win32.isAbsolute(interpreter)) {
+    try {
+      if (fs.statSync(interpreter).isFile()) return path.dirname(interpreter);
+    } catch {
+      // Fall through to a PATH lookup by command name.
+    }
+  }
+  const onPath = which(path.basename(interpreter), env);
+  return onPath ? path.dirname(onPath) : null;
+}
+
 function readPackageVersion() {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -150,8 +215,13 @@ function validateHostname(value) {
 // tray or an editor can change them without reinstalling the unit.
 function buildUnit({ ompwebBin, env: extraEnv = {}, home = HOME, envPath = getServiceEnvPath(home) }) {
   const ompBin = extraEnv.OMP_WEB_OMP_BIN ?? null;
+  const interpreterDir = ompBin ? launcherInterpreterDir(ompBin) : null;
   const pathDirs = [
     ...(ompBin ? [path.dirname(ompBin)] : []),
+    // Launcher scripts (e.g. Bun/npm global installs of omp) run through an
+    // interpreter resolved via `env`; without its directory the service
+    // fails with exit 127 even though the binary itself is on PATH (#116).
+    ...(interpreterDir ? [interpreterDir] : []),
     path.dirname(ompwebBin),
     path.dirname(process.execPath),
     path.join(home, ".local", "bin"),
@@ -217,6 +287,9 @@ function install(options = {}) {
   } else if (!ompBin) {
     console.warn("warning: omp binary not found; live-agent features will be unavailable (set OMP_WEB_OMP_BIN)");
   }
+  // Note: the missing-interpreter check lives in runCli (before the Linux
+  // gate) so it fails loudly on every platform; install() only reuses the
+  // resolved ompBin for the unit + env file.
 
   let port;
   let hostname;
@@ -378,6 +451,24 @@ async function runCli(argv = process.argv.slice(2)) {
     return { exitCode: 2 };
   }
 
+  // Validate the install inputs before the platform gate so misconfigured
+  // launchers fail loudly on any platform (and stay testable on Windows).
+  // Missing `omp` only warns (live-agent features retry on demand), but a
+  // launcher script whose interpreter is nowhere on PATH would install a
+  // unit that can only fail later with exit 127 (issue #116) — fail now.
+  if (command === "install") {
+    const ompBin = process.env.OMP_WEB_OMP_BIN ?? which("omp");
+    if (process.env.OMP_WEB_OMP_BIN && !isExecutableFile(process.env.OMP_WEB_OMP_BIN)) {
+      fail(`OMP_WEB_OMP_BIN=${process.env.OMP_WEB_OMP_BIN} is not executable`);
+    } else if (ompBin && readLauncherInterpreter(ompBin) && !launcherInterpreterDir(ompBin)) {
+      fail(
+        `omp at ${ompBin} is a launcher script whose interpreter ` +
+        `(${readLauncherInterpreter(ompBin)}) was not found on PATH; ` +
+        `install that runtime (or point OMP_WEB_OMP_BIN at a standalone binary) and reinstall`,
+      );
+    }
+  }
+
   if (process.platform !== "linux") {
     fail("systemd services are Linux-only (use ompweb-launchd on macOS or ompweb --install-tray on Windows)");
   }
@@ -436,6 +527,8 @@ module.exports = {
   escapeUnitPath,
   escapeUnitValue,
   formatExecStart,
+  launcherInterpreterDir,
+  readLauncherInterpreter,
   readStatus,
   resolveOmpwebBin,
   runCli,

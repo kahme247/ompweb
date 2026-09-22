@@ -12,6 +12,8 @@ const {
   escapeUnitPath,
   escapeUnitValue,
   formatExecStart,
+  launcherInterpreterDir,
+  readLauncherInterpreter,
   resolveOmpwebBin,
   runCli,
   validateHostname,
@@ -72,6 +74,42 @@ test("buildUnit points at the generated env file and keeps runtime settings out 
   assert.match(unit, /WantedBy=default\.target/);
   if (process.platform === "linux") {
     assert.match(unit, /"PATH=\/home\/u\/\.bun\/bin:\/usr\/local\/bin:.*\/usr\/bin:\/bin"/);
+  }
+});
+
+test("buildUnit adds the launcher interpreter dir for Bun/npm installs of omp", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "ompweb-systemd-bun-"));
+  try {
+    const fakeBinDir = path.join(dir, "local", "bin");
+    const fakeBunDir = path.join(dir, "mise", "shims");
+    mkdirSync(fakeBinDir, { recursive: true });
+    mkdirSync(fakeBunDir, { recursive: true });
+    // Bun global installs are launcher scripts needing `bun` at runtime.
+    writeFileSync(path.join(fakeBinDir, "omp"), "#!/usr/bin/env bun\n", { mode: 0o755 });
+    writeFileSync(path.join(fakeBunDir, "bun"), "#!/bin/sh\n", { mode: 0o755 });
+
+    assert.equal(readLauncherInterpreter(path.join(fakeBinDir, "omp")), "bun");
+    assert.equal(
+      launcherInterpreterDir(path.join(fakeBinDir, "omp"), { PATH: [fakeBunDir, "/usr/bin"].join(path.delimiter) }),
+      fakeBunDir,
+    );
+    // Null when the interpreter is not installed: keep the old PATH shape.
+    assert.equal(launcherInterpreterDir(path.join(fakeBinDir, "omp"), { PATH: "/usr/bin" }), null);
+
+    const unit = buildUnit({
+      ompwebBin: "/usr/local/bin/ompweb",
+      env: { OMP_WEB_OMP_BIN: path.join(fakeBinDir, "omp") },
+      home: "/home/u",
+      envPath: "/home/u/.omp/agent/web-service.env",
+    });
+    const pathLine = unit.split("\n").find((line) => line.startsWith("Environment="));
+    assert.ok(pathLine?.includes(`PATH=${escapeUnitValue(fakeBinDir)}${path.delimiter}`), `unit PATH missing omp dir: ${pathLine}`);
+    assert.ok(!pathLine?.includes(escapeUnitValue(fakeBunDir)), `unit PATH should not invent a bun dir: ${pathLine}`);
+    // Native binaries have no shebang: PATH keeps the old shape.
+    writeFileSync(path.join(fakeBinDir, "omp-native"), "\x7fELF-native-binary", { mode: 0o755 });
+    assert.equal(readLauncherInterpreter(path.join(fakeBinDir, "omp-native")), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -145,6 +183,35 @@ test("install creates the env file and unit with LAN settings", { skip: process.
     });
     assert.match(readFileSync(unitPath, "utf8"), /EnvironmentFile=.*web-service\.env/);
     assert.match(result.stdout, /config:.*web-service\.env/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("install fails loudly when the omp launcher interpreter is missing", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "ompweb-systemd-missing-interp-"));
+  try {
+    const binDir = path.join(dir, "bin");
+    const fakeOmpweb = path.join(binDir, "ompweb");
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(fakeOmpweb, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    // Launcher script needing an interpreter that is nowhere on PATH.
+    writeFileSync(path.join(binDir, "omp"), "#!/usr/bin/env bun\n", { mode: 0o755 });
+
+    const childEnv = {
+      ...process.env,
+      PATH: [binDir, path.dirname(process.execPath)].join(path.delimiter),
+      OMP_WEB_SYSTEMD_BIN: fakeOmpweb,
+      OMP_WEB_OMP_BIN: path.join(binDir, "omp"),
+      PORT: "40123",
+    };
+    const result = spawnSync(process.execPath, [path.join(process.cwd(), "bin", "omp-web-systemd.js"), "install", "--no-autostart"], {
+      env: childEnv,
+      encoding: "utf8",
+    });
+    // runCli fails before the platform gate (platform-agnostic message).
+    assert.match(result.stderr, /interpreter.*bun.*not found on PATH/);
+    assert.notEqual(result.status, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
