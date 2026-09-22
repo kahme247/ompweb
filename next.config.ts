@@ -1,9 +1,15 @@
 import type { NextConfig } from "next";
 import { readFileSync } from "fs";
-import { join } from "path";
-import { PHASE_DEVELOPMENT_SERVER } from "next/constants";
+import { dirname, join } from "path";
+import { fileURLToPath } from "url";
+import { PHASE_DEVELOPMENT_SERVER } from "next/constants.js";
 
-const { version } = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf8")) as { version: string };
+// The WASM SWC build used on wasm-first targets (e.g. aarch64-linux-android)
+// does not transpile ESM to CJS, so this file loads as ESM there and
+// `__dirname` is undefined. `typeof` on an undeclared identifier is safe.
+const packageDir = typeof __dirname !== "undefined" ? __dirname : dirname(fileURLToPath(import.meta.url));
+
+const { version } = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8")) as { version: string };
 
 // Function form: `phase` is authoritative even when the host environment
 // carries a stray NODE_ENV (e.g. NODE_ENV=production inherited by `next dev`
