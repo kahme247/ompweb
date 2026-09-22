@@ -33,8 +33,8 @@ export function ModelsConfigSurface({ embedded, isMobile, onClose, children }: {
         style={{
           width: isMobile ? "calc(100vw - 16px)" : 860,
           maxWidth: "calc(100vw - 16px)",
-          height: isMobile ? "calc(100dvh - 16px)" : "78vh",
-          maxHeight: "calc(100dvh - 16px)",
+          height: isMobile ? "calc((100dvh / var(--ui-scale)) - 16px)" : "calc(78vh / var(--ui-scale))",
+          maxHeight: "calc((100dvh / var(--ui-scale)) - 16px)",
           padding: 0,
           display: "flex",
           flexDirection: "column",
@@ -425,7 +425,7 @@ export function AddProviderPicker({
         style={{
           width: 820,
           maxWidth: "min(92vw, 820px)",
-          maxHeight: "min(72dvh, calc(100dvh - 32px))",
+          maxHeight: "min(calc(72dvh / var(--ui-scale)), calc((100dvh / var(--ui-scale)) - 32px))",
           padding: 0,
           display: "flex",
           flexDirection: "column",

@@ -139,7 +139,7 @@ export function ModelCatalogPicker({ open, providerName, providerBaseUrl, existi
         style={{
           width: 720,
           maxWidth: "min(92vw, 720px)",
-          maxHeight: "min(72dvh, calc(100dvh - 32px))",
+          maxHeight: "min(calc(72dvh / var(--ui-scale)), calc((100dvh / var(--ui-scale)) - 32px))",
           padding: 0,
           display: "flex",
           flexDirection: "column",

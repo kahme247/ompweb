@@ -580,7 +580,12 @@ html.dark {
   }
 }
 
-/* General UI scale / density scaling tokens — zoom is non-standard but supported in Chromium; keep both zoom and transform for coverage. */
+/* General UI scale. Chromium zoom multiplies the used box, so these rules also
+   shrink the layout box by --ui-scale and the painted result matches the viewport.
+   Do not add transform: scale() — it would double-scale on top of zoom.
+   Do not divide body: it is height 100% of html (including the inline style in layout.tsx).
+   Height on these layered rules loses to the unlayered html, body box below, so the
+   same box is repeated unlayered after that rule. Standard stays at zoom 1. */
 @layer base {
   :root {
     --ui-scale: 1;
@@ -588,6 +593,10 @@ html.dark {
   html[data-ui-scale="compact"] {
     --ui-scale: 0.9;
     zoom: 0.9;
+    height: calc(100% / var(--ui-scale));
+    max-height: calc(100% / var(--ui-scale));
+    width: calc(100% / var(--ui-scale));
+    max-width: calc(100% / var(--ui-scale));
   }
   html[data-ui-scale="standard"] {
     --ui-scale: 1;
@@ -596,10 +605,18 @@ html.dark {
   html[data-ui-scale="comfortable"] {
     --ui-scale: 1.1;
     zoom: 1.1;
+    height: calc(100% / var(--ui-scale));
+    max-height: calc(100% / var(--ui-scale));
+    width: calc(100% / var(--ui-scale));
+    max-width: calc(100% / var(--ui-scale));
   }
   html[data-ui-scale="large"] {
     --ui-scale: 1.2;
     zoom: 1.2;
+    height: calc(100% / var(--ui-scale));
+    max-height: calc(100% / var(--ui-scale));
+    width: calc(100% / var(--ui-scale));
+    max-width: calc(100% / var(--ui-scale));
   }
 }
 /* Theme toggle: circular wipe via View Transitions API.
@@ -639,6 +656,17 @@ html, body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   font-size: 14px;
   overscroll-behavior: none;
+}
+
+/* Unlayered so this beats html, body { height/max-height: 100% }. The same
+   declarations inside @layer base do not. Do not also divide body. */
+html[data-ui-scale="compact"],
+html[data-ui-scale="comfortable"],
+html[data-ui-scale="large"] {
+  height: calc(100% / var(--ui-scale));
+  max-height: calc(100% / var(--ui-scale));
+  width: calc(100% / var(--ui-scale));
+  max-width: calc(100% / var(--ui-scale));
 }
 
 /* Thin custom scrollbars (WebKit/Blink). Firefox uses scrollbar-color below. */
