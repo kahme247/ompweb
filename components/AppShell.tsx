@@ -15,7 +15,7 @@ import { type FileExplorerHandle } from "./FileExplorer";
 import type { RightPanelView } from "./RightPanel";
 import { BranchNavigator } from "./BranchNavigator";
 import { LanguageSwitcher } from "./LanguageSwitcher";
-import { Check, Ellipsis, Folder, History, Menu, PanelLeft, Terminal, Wand2, Zap } from "lucide-react";
+import { Check, Ellipsis, Folder, History, Menu, PanelLeft, PanelRight, Terminal, Wand2, Zap } from "lucide-react";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
@@ -52,6 +52,7 @@ import {
   RIGHT_PANEL_WIDTH_STORAGE_KEY,
   SIDEBAR_DEFAULT_WIDTH,
   SIDEBAR_WIDTH_STORAGE_KEY,
+  WorkspaceState,
   clampRightPanelWidth,
   clampSidebarWidth,
   loadRightPanelWidth,
@@ -733,7 +734,10 @@ export function AppShell() {
   }, []);
 
   const handleSidebarToggle = useCallback(() => {
-    if (isMobile) setActiveTopPanel(null);
+    if (isMobile) {
+      setActiveTopPanel(null);
+      if (mobileToolsRef.current) mobileToolsRef.current.open = false;
+    }
     setSidebarOpen((open) => !open);
   }, [isMobile]);
 
@@ -1723,8 +1727,8 @@ export function AppShell() {
             <details
               ref={mobileToolsRef}
               className="shell-topbar-overflow"
-              data-compact={compactTopbar === null ? "pending" : compactTopbar}
-              open={compactTopbar ? undefined : true}
+              data-compact={isMobile ? "true" : compactTopbar === null ? "pending" : compactTopbar}
+              open={isMobile ? undefined : compactTopbar ? undefined : true}
               onToggle={(event) => {
                 if (!event.currentTarget.open) setActiveTopPanel(null);
               }}
@@ -1882,7 +1886,7 @@ export function AppShell() {
                   }}
                 >
                   {effectiveProject ? (
-                    <>
+                    <span className="shell-topbar-project-context" style={{ display: "contents" }}>
                       <Folder size={12} strokeWidth={1.8} style={{ opacity: 0.6, flexShrink: 0 }} aria-hidden="true" />
                       <span
                         style={{
@@ -1899,7 +1903,7 @@ export function AppShell() {
                         {projectLabel(effectiveProject)}
                       </span>
                       <span style={{ color: "var(--text-dim)", flexShrink: 0, opacity: 0.5 }}>/</span>
-                    </>
+                    </span>
                   ) : null}
                   <span
                     style={{
@@ -2091,34 +2095,27 @@ export function AppShell() {
               toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
             />
           ) : initialCwdStatus === "validating" ? (
-            <div
-              role="status"
-              style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: 24, color: "var(--text-muted)", textAlign: "center" }}
-            >
-              <div style={{ fontSize: 14, color: "var(--text)" }}>{t("appShell.openingWorkspace")}</div>
-              <div style={{ maxWidth: "min(720px, 100%)", overflowWrap: "anywhere", fontFamily: "var(--font-mono)", fontSize: 12 }}>
-                {initialNavigation.requestedCwd}
-              </div>
-            </div>
+            <WorkspaceState
+              kind="loading"
+              title={t("appShell.openingWorkspace")}
+              detail={<span className="workspace-state-path">{initialNavigation.requestedCwd}</span>}
+            />
           ) : initialCwdStatus === "error" ? (
-            <div
-              role="alert"
-              style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: 24, color: "var(--text-muted)", textAlign: "center" }}
-            >
-              <div style={{ fontSize: 14, color: "var(--status-error)" }}>{t("appShell.unableToOpenWorkspace")}</div>
-              <div style={{ maxWidth: "min(720px, 100%)", overflowWrap: "anywhere", fontFamily: "var(--font-mono)", fontSize: 12 }}>
-                {initialNavigation.requestedCwd}
-              </div>
-              <div style={{ maxWidth: 720, fontSize: 12 }}>{initialCwdError}</div>
-            </div>
+            <WorkspaceState
+              kind="error"
+              title={t("appShell.unableToOpenWorkspace")}
+              detail={(
+                <>
+                  <span className="workspace-state-path">{initialNavigation.requestedCwd}</span>
+                  <span>{initialCwdError}</span>
+                </>
+              )}
+            />
           ) : !showPlaceholder ? (
             <PanelLoadingFallback />
+          ) : activeCwd ? (
+            <WorkspaceState kind="empty" title={t("appShell.selectSessionHint")} />
           ) : (
-            activeCwd ? (
-              <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 16 }}>
-                <span className="display-serif">{t("appShell.selectSessionHint")}</span>
-              </div>
-            ) : (
               <div style={{ position: "absolute", top: 12, left: 12, display: "flex", alignItems: "flex-start", gap: 8, userSelect: "none", pointerEvents: "none" }}>
                 <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.7, flexShrink: 0 }}>
                   <line x1="20" y1="12" x2="4" y2="12" /><polyline points="10 6 4 12 10 18" />
@@ -2143,7 +2140,6 @@ export function AppShell() {
                   </div>
                 </div>
               </div>
-            )
           )}
         </div>
           </>
@@ -2198,24 +2194,20 @@ export function AppShell() {
     </div>
     {!settingsTab && (
       <button
-      onClick={() => setRightPanelOpen((v) => !v)}
-      title={rightPanelOpen ? t("appShell.hideFilePanel") : t("appShell.showFilePanel")}
-      aria-label={rightPanelOpen ? t("appShell.hideFilePanel") : t("appShell.showFilePanel")}
-      style={{
-        position: "fixed", top: 0, right: 0, zIndex: 300,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        width: isMobile ? 44 : 36, height: isMobile ? 44 : 36, padding: 0,
-        background: "var(--bg-panel)", border: "none", borderLeft: "1px solid var(--border)", borderBottom: "1px solid var(--border)",
-        color: rightPanelOpen ? "var(--text)" : "var(--text-muted)",
-        cursor: "pointer", transition: "color var(--dur-fast) var(--ease-out-warm)",
-      }}
-      onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-      onMouseLeave={(e) => { e.currentTarget.style.color = rightPanelOpen ? "var(--text)" : "var(--text-muted)"; }}
-    >
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
-      </svg>
-    </button>
+        type="button"
+        className="shell-toolbar-btn shell-panel-toggle ui-focus-ring"
+        onClick={() => setRightPanelOpen((v) => !v)}
+        title={rightPanelOpen ? t("appShell.hideFilePanel") : t("appShell.showFilePanel")}
+        aria-label={rightPanelOpen ? t("appShell.hideFilePanel") : t("appShell.showFilePanel")}
+        aria-pressed={rightPanelOpen}
+        style={{
+          position: "fixed", top: 0, right: 0, zIndex: 300,
+          width: isMobile ? 44 : 36, height: isMobile ? 44 : 36, padding: 0,
+          borderLeft: "1px solid var(--border)", borderBottom: "1px solid var(--border)",
+        }}
+      >
+        <PanelRight size={16} strokeWidth={1.8} aria-hidden="true" />
+      </button>
     )}
     <AppUpdateDialog open={appUpdateDialogOpen} update={appUpdate} phase={appUpdatePhase} visibleStage={appUpdateVisibleStage} error={appUpdateError} onProceed={() => void proceedWithAppUpdate()} onNotNow={dismissAppUpdate} />
     {archiveBrowserOpen && (

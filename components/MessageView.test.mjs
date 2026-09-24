@@ -646,6 +646,8 @@ test("a streaming reply and an unforkable row keep no fork action", () => {
     message: reply, entryId: "assistant-3", forkEntryId: "user-1", onFork: () => {}, isStreaming: true,
   }));
   assert.doesNotMatch(streaming, new RegExp(`aria-label="${FORK_LABEL}"`));
+  assert.doesNotMatch(streaming, /aria-label="Copy message"/);
+  assert.doesNotMatch(streaming, /aria-label="Read aloud"/);
 
   const noTarget = renderToStaticMarkup(React.createElement(MessageView, {
     message: reply, entryId: "assistant-4", onFork: () => {},

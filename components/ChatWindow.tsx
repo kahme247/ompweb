@@ -16,6 +16,7 @@ import { ComposerPanels } from "./ComposerPanels";
 import OmpWebLogo from "./OmpWebLogo";
 import { CHAT_COLUMN_MAX_WIDTH, MINIMAP_WIDTH } from "@/lib/chat-layout";
 import { useAgentSession, type AgentPhase, type NoticeItem, type SubagentInfo } from "@/hooks/useAgentSession";
+import { WorkspaceState } from "./AppShell-layout";
 import { useAudio } from "@/hooks/useAudio";
 import { useSpeechSynthesis, SpeechSynthesisProvider } from "@/hooks/useSpeechSynthesis";
 import { useDragDrop } from "@/hooks/useDragDrop";
@@ -1119,19 +1120,11 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
   const belowEditorWidgets = extensionWidgets.filter((widget) => widget.placement === "belowEditor");
 
   if (loading) {
-    return (
-      <div role="status" className="flex h-full items-center justify-center" style={{ color: "var(--text-muted)" }}>
-        {t("chatWindow.loadingSession")}
-      </div>
-    );
+    return <WorkspaceState kind="loading" title={t("chatWindow.loadingSession")} />;
   }
 
   if (error) {
-    return (
-      <div role="alert" className="flex h-full items-center justify-center" style={{ color: "var(--accent-strong)", padding: "0 16px", textAlign: "center", fontSize: 13 }}>
-        {error}
-      </div>
-    );
+    return <WorkspaceState kind="error" title={error} />;
   }
   return (
     <SpeechSynthesisProvider value={tts}>
@@ -1298,6 +1291,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
               <MessageView
                 key={streamState.streamingMessage.timestamp ?? "stream"}
                 message={streamState.streamingMessage as AgentMessage}
+                isStreaming={streamState.isStreaming}
                 modelNames={modelNames}
                 cwd={messageCwd}
                 onOpenFile={onOpenFile}

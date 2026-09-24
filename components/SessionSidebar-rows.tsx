@@ -177,7 +177,9 @@ function ProjectRow({
           margin: 0,
           padding: "0 6px 0 0",
           borderRadius: "var(--radius-control)",
-          background: hovered ? "var(--bg-hover)" : "transparent",
+          background: isActive
+            ? (hovered ? "var(--bg-hover)" : "var(--bg-subtle)")
+            : (hovered ? "var(--bg-hover)" : "transparent"),
           transition: SIDEBAR_BUTTON_TRANSITION,
           ...(isDragTarget ? { outline: "1px solid var(--accent)", outlineOffset: -1 } : {}),
         }}
@@ -250,7 +252,7 @@ function ProjectRow({
               gap: 7,
               padding: "0 4px 0 10px",
               background: "none", border: "none",
-              color: hovered ? "var(--text)" : "var(--text-muted)",
+              color: isActive ? "var(--text)" : hovered ? "var(--text)" : "var(--text-muted)",
               cursor: "pointer",
               textAlign: "left",
             }}

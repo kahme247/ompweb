@@ -58,6 +58,7 @@ function SidebarIconButton({
       aria-label={label}
       title={title ?? label}
       onClick={onClick}
+      className="sidebar-icon-button"
       disabled={disabled}
       aria-pressed={active}
       style={{

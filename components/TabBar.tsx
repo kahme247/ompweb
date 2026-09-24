@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Folder, GitBranch, X } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
 import { getFileIcon } from "./FileIcons";
@@ -49,10 +49,60 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, explorerSel
     }
   }, [activeTabId, tabs]);
 
+  const orderedTabIds = [
+    ...(onSelectExplorer ? ["explorer"] : []),
+    ...(onSelectGit ? ["git"] : []),
+    ...tabs.map((tab) => tab.id),
+  ];
+
+  const selectTabById = (id: string) => {
+    if (id === "explorer") onSelectExplorer?.();
+    else if (id === "git") onSelectGit?.();
+    else {
+      const tab = tabs.find((item) => item.id === id);
+      if (tab) onSelectTab(tab.id);
+    }
+  };
+
+  const focusTabById = (id: string) => {
+    requestAnimationFrame(() => {
+      listRef.current?.querySelector<HTMLElement>(`[data-tab-id="${CSS.escape(id)}"]`)?.focus();
+    });
+  };
+
+  const handleTabKeyDown = (event: KeyboardEvent<HTMLElement>, id: string) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      selectTabById(id);
+      return;
+    }
+
+    const index = orderedTabIds.indexOf(id);
+    if (index < 0 || orderedTabIds.length === 0) return;
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") nextIndex = (index + 1) % orderedTabIds.length;
+    else if (event.key === "ArrowLeft") nextIndex = (index - 1 + orderedTabIds.length) % orderedTabIds.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = orderedTabIds.length - 1;
+    if (nextIndex !== null) {
+      event.preventDefault();
+      const nextId = orderedTabIds[nextIndex];
+      selectTabById(nextId);
+      focusTabById(nextId);
+      return;
+    }
+
+    if ((event.key === "Delete" || event.key === "Backspace") && tabs.some((tab) => tab.id === id)) {
+      event.preventDefault();
+      onCloseTab(id);
+    }
+  };
+
   return (
     <div
       ref={listRef}
       role="tablist"
+      aria-orientation="horizontal"
       aria-label="Open files"
       className="tabbar-scroll"
       style={{
@@ -74,14 +124,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, explorerSel
           aria-selected={explorerSelected}
           aria-label={t("sessionSidebar.explorer")}
           title={explorerBadge > 0 ? t("sessionSidebar.explorerChanged", { count: explorerBadge }) : t("sessionSidebar.explorer")}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelectExplorer(); }
-            if (event.key === "ArrowRight" && tabs.length > 0) {
-              event.preventDefault();
-              onSelectTab(tabs[0].id);
-              listRef.current?.querySelector<HTMLElement>(`[data-tab-id="${CSS.escape(tabs[0].id)}"]`)?.focus();
-            }
-          }}
+          onKeyDown={(event) => handleTabKeyDown(event, "explorer")}
           style={{
             display: "flex",
             alignItems: "center",
@@ -153,9 +196,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, explorerSel
           aria-selected={gitSelected}
           aria-label={t("tabBar.git")}
           title={gitBadge > 0 ? t("sessionSidebar.explorerChanged", { count: gitBadge }) : t("tabBar.git")}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelectGit(); }
-          }}
+          onKeyDown={(event) => handleTabKeyDown(event, "git")}
           style={{
             display: "flex",
             alignItems: "center",
@@ -229,22 +270,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, explorerSel
             tabIndex={isActive ? 0 : -1}
             aria-selected={isActive}
             aria-label={tab.filePath}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onSelectTab(tab.id); }
-              if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); onCloseTab(tab.id); }
-              if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
-                event.preventDefault();
-                const index = tabs.findIndex((item) => item.id === tab.id);
-                const next = tabs[(index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length];
-                if (next) {
-                  onSelectTab(next.id);
-                  // Roving tabindex: move DOM focus to the newly selected tab
-                  // so the visible focus ring follows the selection.
-                  const nextEl = listRef.current?.querySelector<HTMLElement>(`[data-tab-id="${CSS.escape(next.id)}"]`);
-                  nextEl?.focus();
-                }
-              }
-            }}
+            onKeyDown={(event) => handleTabKeyDown(event, tab.id)}
             onMouseDown={(e) => {
               if (e.button === 1) e.preventDefault();
             }}
@@ -306,7 +332,8 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, explorerSel
             </span>
             <button
               onClick={(e) => { e.stopPropagation(); onCloseTab(tab.id); }}
-              tabIndex={-1}
+              tabIndex={isActive ? 0 : -1}
+              onKeyDown={(event) => event.stopPropagation()}
               className="tabbar-close ui-focus-ring"
               onMouseEnter={() => setHoveredClose(tab.id)}
               onMouseLeave={() => setHoveredClose(null)}
