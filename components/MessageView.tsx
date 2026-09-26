@@ -1627,7 +1627,7 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
             {!displayText ? (
               <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("messageView.noMessage")}</span>
             ) : isPlainText ? (
-              <pre style={{ margin: 0, maxHeight: 420, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.5, color: "var(--text-muted)" }}>
+              <pre style={{ margin: 0, maxHeight: 420, overflow: "auto", whiteSpace: "pre", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.5, color: "var(--text-muted)" }}>
                 {displayText}
               </pre>
             ) : (

@@ -387,7 +387,7 @@ test("advisor custom messages use the localized advisor label", () => {
   assert.doesNotMatch(html, /customType/);
 });
 
-test("async-result notices keep their line breaks and drop the wrapper tag", () => {
+test("async-result notices keep their exact line layout and drop the wrapper tag", () => {
   const html = renderToStaticMarkup(React.createElement(MessageView, {
     message: {
       role: "custom",
@@ -396,7 +396,8 @@ test("async-result notices keep their line breaks and drop the wrapper tag", () 
       display: true,
     },
   }));
-  assert.match(html, /<pre[^>]*>Background job bg_1 has completed\. Resume your work using the result below\.\n\/root\/repo\n---\nWall time: 0\.16 seconds<\/pre>/);
+  assert.match(html, /<pre style="[^"]*white-space:pre;[^"]*">Background job bg_1 has completed\. Resume your work using the result below\.\n\/root\/repo\n---\nWall time: 0\.16 seconds<\/pre>/);
+  assert.doesNotMatch(html, /word-break/);
   assert.doesNotMatch(html, /system-notice|<h2/);
 });
 
