@@ -48,6 +48,12 @@ interface CompactionResultLike {
 }
 
 const IDLE_DESTROY_MS = 10 * 60 * 1000;
+const DISCONNECT_DESTROY_MS = process.env.OMP_WEB_DISCONNECT_DESTROY_MS !== undefined
+  ? Math.max(0, Number(process.env.OMP_WEB_DISCONNECT_DESTROY_MS) || 0)
+  : 60_000;
+const MAX_ACTIVE_SESSIONS = process.env.OMP_WEB_MAX_ACTIVE_SESSIONS !== undefined
+  ? Math.max(0, Number(process.env.OMP_WEB_MAX_ACTIVE_SESSIONS) || 0)
+  : 3;
 const READY_TIMEOUT_MS = 120_000;
 const MCP_LIST_TIMEOUT_MS = 15_000;
 const GET_STATE_TIMEOUT_MS = 5_000;
@@ -254,6 +260,8 @@ export class AgentSessionWrapper {
   private responseRunActive = false;
   private fastModeEnabled = false;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  lastActiveTime = Date.now();
+  private disconnectTimer: NodeJS.Timeout | null = null;
   private onDestroyCallback: (() => void) | null = null;
   private onIdentityChangeCallback: ((oldId: string, newId: string) => void) | null = null;
   private unsubscribeFrames: (() => void) | null = null;
@@ -313,6 +321,21 @@ export class AgentSessionWrapper {
 
   isRunning(): boolean {
     return this.isAlive() && (this.promptRunning || this.streaming || this.compacting || this.bashRunning);
+  }
+
+  private resetDisconnectTimer(): void {
+    if (this.disconnectTimer) {
+      clearTimeout(this.disconnectTimer);
+      this.disconnectTimer = null;
+    }
+    if (DISCONNECT_DESTROY_MS <= 0) return;
+    if (this.listeners.length === 0 && this.isAlive()) {
+      this.disconnectTimer = setTimeout(() => {
+        if (this.listeners.length === 0 && !this.isRunning() && this.isAlive()) {
+          this.destroy();
+        }
+      }, DISCONNECT_DESTROY_MS);
+    }
   }
 
   /** NDJSON messages are fresh snapshots; copy containers, not token payloads. */
@@ -831,6 +854,11 @@ export class AgentSessionWrapper {
 
   onEvent(listener: EventListener): () => void {
     this.listeners.push(listener);
+    this.lastActiveTime = Date.now();
+    if (this.disconnectTimer) {
+      clearTimeout(this.disconnectTimer);
+      this.disconnectTimer = null;
+    }
     const now = Date.now();
     for (const [id, event] of this.pendingUiRequests) {
       const expiresAt = event.expiresAt as number | undefined;
@@ -848,6 +876,7 @@ export class AgentSessionWrapper {
       if (this.listeners.length === 0) {
         this.rejectPendingHostTools("The web UI disconnected while the agent was waiting for this host tool");
         this.rejectPendingHostUris("The web UI disconnected while the agent was waiting for this URI request");
+        this.resetDisconnectTimer();
       }
     };
   }
@@ -1428,6 +1457,10 @@ export class AgentSessionWrapper {
     this.responseRunActive = false;
     this.clearLiveSnapshots();
     if (this.idleTimer) clearTimeout(this.idleTimer);
+    if (this.disconnectTimer) {
+      clearTimeout(this.disconnectTimer);
+      this.disconnectTimer = null;
+    }
     if (this.sessionFileSignalTimer) {
       clearTimeout(this.sessionFileSignalTimer);
       this.sessionFileSignalTimer = null;
@@ -1516,6 +1549,37 @@ export async function restartAllRpcSessions(): Promise<number> {
   const sessions = [...new Set(getRegistry().values())];
   await Promise.all(sessions.map((session) => session.destroyAndWait()));
   return sessions.length;
+}
+
+/**
+ * Evict oldest idle sessions if live sessions count reaches or exceeds the limit.
+ * Sessions currently running prompts or bash commands are never evicted.
+ */
+export async function evictStaleRpcSessions(limit = MAX_ACTIVE_SESSIONS): Promise<number> {
+  if (limit <= 0) return 0;
+  const registry = getRegistry();
+  const liveSessions = [...new Set(registry.values())].filter((s) => s.isAlive());
+  if (liveSessions.length < limit) return 0;
+
+  const candidates = liveSessions
+    .filter((s) => !s.isRunning())
+    .sort((a, b) => a.lastActiveTime - b.lastActiveTime);
+
+  const toEvictCount = liveSessions.length - limit + 1;
+  let evicted = 0;
+  for (let i = 0; i < toEvictCount && i < candidates.length; i++) {
+    const candidate = candidates[i];
+    if (candidate) {
+      try {
+        await candidate.destroyAndWait();
+        evicted += 1;
+      } catch {
+        candidate.destroy();
+        evicted += 1;
+      }
+    }
+  }
+  return evicted;
 }
 
 // ----------------------------------------------------------------------------
@@ -1621,6 +1685,7 @@ export async function startRpcSession(
   if (inflight) return inflight;
 
   const starting = (async () => {
+    await evictStaleRpcSessions();
     // The wrapper needs the process and the process's onExit needs the wrapper;
     // the holder breaks that cycle (onExit only fires once the child dies).
     const holder: { wrapper?: AgentSessionWrapper } = {};
