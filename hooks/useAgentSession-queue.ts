@@ -1,5 +1,4 @@
-// Queued-prompt tracking and sessionStorage persistence helpers
-// extracted from useAgentSession (pure logic only — no hook state).
+// Queued-prompt tracking, persistence, and same-document queue notifications.
 
 export interface QueuedMessages {
   steering: string[];
@@ -7,6 +6,10 @@ export interface QueuedMessages {
 }
 
 export const EMPTY_QUEUE: QueuedMessages = { steering: [], followUp: [] };
+
+// In-flight RPCs outlive their initiating hook. Remounted delivery handlers must
+// mark the same occurrence consumed before its acknowledgement can relabel it.
+export const pendingQueuedPromotions = new Map<string, Map<string, { consumed: boolean }>>();
 
 // omp reports only queuedMessageCount over RPC; the queued texts live in React
 // state and would vanish on reload. Mirror them into sessionStorage (per
@@ -65,4 +68,24 @@ export function clearPersistedQueue(sessionId: string | null): void {
   } catch {
     // ignore storage errors
   }
+}
+
+type QueueListener = (sessionId: string, queue: QueuedMessages) => void;
+const queueListeners = new Set<QueueListener>();
+
+/** Publish the already-applied snapshot, not a removal to repeat per listener. */
+export function publishQueueChange(sessionId: string, queue: QueuedMessages): void {
+  persistQueue(sessionId, queue);
+  for (const listener of [...queueListeners]) {
+    try {
+      listener(sessionId, queue);
+    } catch {
+      // A failing subscriber must not stop the others.
+    }
+  }
+}
+
+export function subscribeQueueChanges(listener: QueueListener): () => void {
+  queueListeners.add(listener);
+  return () => { queueListeners.delete(listener); };
 }
