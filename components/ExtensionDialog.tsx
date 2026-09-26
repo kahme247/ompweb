@@ -195,9 +195,9 @@ export function ExtensionDialog({
                 color: "var(--text)",
                 outline: "none",
                 resize: "vertical",
-                fontSize: 13,
+                fontSize: request.promptStyle ? "var(--chat-font-size)" : 13,
                 lineHeight: 1.55,
-                fontFamily: "var(--font-mono)",
+                fontFamily: request.promptStyle ? "inherit" : "var(--font-mono)",
               }}
             />
           )}

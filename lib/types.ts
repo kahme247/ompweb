@@ -208,6 +208,8 @@ export type ExtensionUiRequest =
       method: "editor";
       title: string;
       prefill?: string;
+      /** omp sets this for plain-text answers (ask "Other"); render as prose, not code. */
+      promptStyle?: boolean;
       timeout?: number;
       expiresAt?: number;
     }
