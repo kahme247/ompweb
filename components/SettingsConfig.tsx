@@ -67,6 +67,10 @@ const nativeSelectStyle = {
   background: "var(--bg)",
   color: "var(--text)",
   fontSize: "var(--text-sm)",
+  maxWidth: "100%",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+  whiteSpace: "nowrap",
   cursor: "pointer",
   appearance: "none" as const,
   WebkitAppearance: "none" as const,
@@ -272,7 +276,7 @@ function ToggleSwitch({
         justifyContent: "center",
         width: 44,
         height: 44,
-        padding: 10,
+        padding: 0,
         border: "none",
         background: "transparent",
         cursor: disabled ? "not-allowed" : "pointer",
@@ -367,7 +371,7 @@ function NativeSetting({ label, description, scope, searchId, children }: { labe
         </div>
         <span id={descId} className="settings-card-desc">{description}</span>
       </div>
-      <span style={{ flexShrink: 0 }}>{enhancedChild}</span>
+      <span className="settings-card-control">{enhancedChild}</span>
     </div>
   );
 }

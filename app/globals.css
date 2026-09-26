@@ -2717,6 +2717,32 @@ html.dark .dropdown-surface :is(select, option) {
   min-width: 0;
 }
 
+.settings-card-control {
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+/* Dropdowns take at most half the card and ellipsize long option labels. */
+.settings-card-control:has(> select) {
+  flex-shrink: 1;
+  max-width: 50%;
+}
+
+@media (max-width: 640px) {
+  /* Stack dropdown rows so the select spans the full card below its label. */
+  .settings-card:has(> .settings-card-control > select) {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .settings-card-control:has(> select) {
+    max-width: none;
+  }
+  .settings-card-control > select {
+    width: 100%;
+  }
+}
+
 .settings-card-title {
   font-size: 13.5px;
   font-weight: 600;
