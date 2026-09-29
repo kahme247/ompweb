@@ -1403,8 +1403,12 @@ export class AgentSessionWrapper {
         if (("answers" in rest || pendingAsk) && !isAskAnswers(rest.answers) && !(pendingAsk && rest.cancelled === true)) {
           throw new WebRpcError("Invalid ask dialog answers", "invalid_ask_answers");
         }
+        const wasPending = this.pendingUiRequests.has(id);
         this.forgetPendingUiRequest(id);
         this.proc.sendFrame({ type: "extension_ui_response", id, ...rest });
+        // omp sends no cancel for an answered dialog; other tabs on this
+        // session would keep showing it, so settle it for them here.
+        if (wasPending) this.emit({ type: "extension_ui_request", id: `cancel:${id}`, method: "cancel", targetId: id });
         return null;
       }
 

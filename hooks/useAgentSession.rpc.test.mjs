@@ -2053,3 +2053,21 @@ test("unmount before replacement open cannot restore stale wrapper registrations
   await act(async () => { lateOpen({}); });
   assert.equal(world.calls.slice(before).some((c) => c.method === "POST"), false);
 });
+
+test("the answering tab keeps its dialog mounted during a synchronized cancel hand-off", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  const { w, es } = await startStreamingRun("s1");
+  await act(async () => {
+    es.emit({ type: "extension_ui_request", id: "question", method: "confirm", title: "Keep going?" });
+  });
+  assert.equal(w.latest.extensionDialog?.id, "question");
+  await act(async () => {
+    const response = w.latest.respondToExtensionUi(w.latest.extensionDialog, { confirmed: true });
+    es.emit({ type: "extension_ui_request", id: "cancel:question", method: "cancel", targetId: "question" });
+    await response;
+  });
+  assert.equal(w.latest.extensionDialog?.id, "question", "the local hand-off window must survive its own synchronized cancel");
+  await settle(300);
+  assert.equal(w.latest.extensionDialog, null);
+});
