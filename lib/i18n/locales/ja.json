@@ -268,6 +268,8 @@
   "branchNavigator.roleUser": "U",
   "chatInput.composerLabel": "メッセージ入力",
   "chatInput.attachFile": "ファイルを添付",
+  "chatInput.pasteImage": "画像を貼り付け",
+  "chatInput.clipboardImageFailed": "画像を貼り付けられませんでした。画像をコピーしてクリップボードへのアクセスを許可するか、代わりにファイルを添付してください。",
   "chatInput.attachmentImageLimit": "添付できる画像は最大 {count} 件です。",
   "chatInput.attachmentImagesSkipped": "{count} 件の画像をスキップしました：画像は {size} 以下のみ対応しています。",
   "chatInput.attachmentImageReadFailed": "画像を読み取れませんでした。別のファイルを試してください。",

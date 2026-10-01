@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, ListChecks, Loader2, Mic, Paperclip, Plus, Shrink, Sparkles, Wrench, X, Zap } from "lucide-react";
+import { ChevronDown, ClipboardPaste, ListChecks, Loader2, Mic, Paperclip, Plus, Shrink, Sparkles, Wrench, X, Zap } from "lucide-react";
 import { getSubmitDuringRunBehavior, isWordCompletionEnabled } from "@/lib/composer-prefs";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
@@ -571,6 +571,27 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     void processImageFiles(imageFiles);
     void processTextFiles(otherFiles);
   }, [isStreaming, processImageFiles, processTextFiles]);
+
+  const processFilesRef = useRef(processFiles);
+  processFilesRef.current = processFiles;
+  const pasteClipboardImage = useCallback(async () => {
+    setPlusMenuOpen(false);
+    const revision = attachmentRevisionRef.current;
+    try {
+      // Start the read in the click gesture: Safari requires user activation.
+      const items = await navigator.clipboard.read();
+      const files: File[] = [];
+      for (const item of items) {
+        const type = item.types.find((type) => type.startsWith("image/"));
+        if (type) files.push(new File([await item.getType(type)], "clipboard-image", { type }));
+      }
+      if (revision !== attachmentRevisionRef.current) return;
+      if (files.length) processFilesRef.current(files);
+      else setAttachError(t("chatInput.clipboardImageFailed"));
+    } catch {
+      if (revision === attachmentRevisionRef.current) setAttachError(t("chatInput.clipboardImageFailed"));
+    }
+  }, [t]);
 
   const removeImage = useCallback((index: number) => {
     setAttachedImages((prev) => {
@@ -1641,6 +1662,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
+  const attachmentMenuItemStyle: React.CSSProperties = {
+    display: "flex", alignItems: "center", gap: 8, width: "100%",
+    padding: "7px 10px", border: 0, borderRadius: 5,
+    background: "transparent", color: isStreaming ? "var(--text-dim)" : "var(--text-muted)",
+    cursor: isStreaming ? "not-allowed" : "pointer", fontSize: 12, textAlign: "left",
+    opacity: isStreaming ? 0.5 : 1,
+  };
+
   return (
     <div
       role="group"
@@ -2602,16 +2631,20 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     onClick={() => { setPlusMenuOpen(false); fileInputRef.current?.click(); }}
                     disabled={isStreaming}
                     title={t("chatInput.attachFile")}
-                    style={{
-                      display: "flex", alignItems: "center", gap: 8, width: "100%",
-                      padding: "7px 10px", border: 0, borderRadius: 5,
-                      background: "transparent", color: isStreaming ? "var(--text-dim)" : "var(--text-muted)",
-                      cursor: isStreaming ? "not-allowed" : "pointer", fontSize: 12, textAlign: "left",
-                      opacity: isStreaming ? 0.5 : 1,
-                    }}
+                    style={attachmentMenuItemStyle}
                   >
                     <Paperclip size={12} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden="true" />
                     <span style={{ flex: 1 }}>{t("chatInput.attachFile")}</span>
+                  </button>
+                  <button
+                    role="menuitem"
+                    type="button"
+                    onClick={() => void pasteClipboardImage()}
+                    disabled={isStreaming}
+                    style={attachmentMenuItemStyle}
+                  >
+                    <ClipboardPaste size={12} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden="true" />
+                    <span style={{ flex: 1 }}>{t("chatInput.pasteImage")}</span>
                   </button>
                   {onToolPresetChange && (
                     <>

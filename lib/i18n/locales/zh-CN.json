@@ -268,6 +268,8 @@
   "branchNavigator.roleUser": "U",
   "chatInput.composerLabel": "消息编辑器",
   "chatInput.attachFile": "附加文件",
+  "chatInput.pasteImage": "粘贴图片",
+  "chatInput.clipboardImageFailed": "无法粘贴图片。请复制图片并允许访问剪贴板，或改为附加文件。",
   "chatInput.attachmentImageLimit": "最多附加 {count} 张图片。",
   "chatInput.attachmentImagesSkipped": "已跳过 {count} 张图片：仅支持不超过 {size} 的图片。",
   "chatInput.attachmentImageReadFailed": "无法读取一张或多张图片，请尝试其他文件。",

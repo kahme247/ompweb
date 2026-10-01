@@ -281,6 +281,8 @@
   "branchNavigator.roleUser": "U",
   "chatInput.composerLabel": "Message composer",
   "chatInput.attachFile": "Attach files",
+  "chatInput.pasteImage": "Paste image",
+  "chatInput.clipboardImageFailed": "No image could be pasted. Copy an image and allow clipboard access, or attach a file instead.",
   "chatInput.attachmentImageLimit": "Maximum of {count} attached images reached.",
   "chatInput.attachmentImagesSkipped": "{count} image(s) skipped: images up to {size} are supported.",
   "chatInput.attachmentImageReadFailed": "One or more images could not be read. Try a different file.",
