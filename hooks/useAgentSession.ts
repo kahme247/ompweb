@@ -2470,6 +2470,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // the previous terminal reload or interrupted turn can still be in flight.
     // Unlike loadSession, this must not replace the optimistic user bubble.
     const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/context?boundary=1`);
+    if (res.status === 404) {
+      // A session whose prompts so far were all local slash commands (skill
+      // activation, …) never started an agent run, so omp wrote no session
+      // file yet. There is no prior run to diff against — proceed with an
+      // empty baseline instead of failing the send.
+      return [];
+    }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const snapshot = await res.json() as { entryIds: string[] };
     return snapshot.entryIds;

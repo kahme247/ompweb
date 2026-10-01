@@ -1332,6 +1332,35 @@ test("abort_and_prompt: the aborted run's terminal agent_end is consumed, the ne
   assert.equal(w.latest.streamState.streamingMessage?.content?.[0]?.text, "new run streaming");
 });
 
+test("send tolerates a missing session file (local-only slash commands) and still dispatches", async () => {
+  resetWorld();
+  // A session whose only prompts were local slash commands never started an
+  // agent run, so omp wrote no session file: every /api/sessions/<id> read
+  // 404s while the live RPC wrapper answers /api/agent/<id> normally.
+  world.agents.set("fileless", { running: false, state: {} });
+  const w = await mountSession("fileless");
+  assert.equal(w.latest.loading, false, "hydration completes without a file");
+  assert.equal(w.latest.agentRunning, false);
+
+  let sendPromise;
+  await act(async () => {
+    sendPromise = w.latest.handleSend("hello after skill");
+    await sleep(30);
+  });
+  const es = lastEs();
+  await act(async () => {
+    es.open();
+    await sendPromise;
+  });
+  assert.equal(
+    callsTo("POST", "/api/agent/fileless").some((c) => c.body?.type === "prompt" && c.body?.message === "hello after skill"),
+    true,
+    "prompt must be dispatched despite the boundary 404",
+  );
+  assert.equal(w.latest.agentRunning, true, "run starts optimistically");
+  assert.equal(w.latest.notices.length, 0, "no failed-send notice");
+});
+
 test("a reconcile response that straddles a run boundary is dropped by the run-id fence", async () => {
   resetWorld();
   primeSession("s1", [userMsg("u0", "q")]);
