@@ -364,6 +364,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
         forkEditsPrompt={forkTarget?.editPrompt}
         onFork={canOfferFork ? handleFork : undefined}
         forking={forkingEntryId === forkTarget?.entryId}
+        forkDisabled={forkingEntryId !== null}
         onNavigate={sessionBusy ? undefined : handleNavigate}
         prevAssistantEntryId={sessionBusy ? undefined : prevAssistantEntryId}
         onEditContent={handleEditContent}

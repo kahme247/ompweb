@@ -349,6 +349,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const queuedRemovalRef = useRef<{ sessionId: string } | null>(null);
   const agentRunningRef = useRef(false);
   const bashRunningRef = useRef(false);
+  const forkInFlightRef = useRef(false);
   const bashRecoveryIdRef = useRef(0);
   const handleAgentEventRef = useRef<((event: AgentEvent) => void) | null>(null);
   const initialScrollDoneRef = useRef(false);
@@ -2753,9 +2754,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // editPrompt: omp's `branch` drops the chosen user prompt from the fork and
   // returns its text — put it in the fork's composer (edit-and-resend).
   const handleFork = useCallback(async (entryId: string, editPrompt: boolean) => {
-    if (bashRunningRef.current || agentRunningRef.current) return;
+    if (bashRunningRef.current || agentRunningRef.current || forkInFlightRef.current) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
+    forkInFlightRef.current = true;
     setForkingEntryId(entryId);
     try {
       const result = await sendAgentCommand<{ cancelled?: boolean; newSessionId?: string; text?: string }>(sid, {
@@ -2781,6 +2783,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       console.error("Fork failed:", e);
     } finally {
+      forkInFlightRef.current = false;
       setForkingEntryId(null);
     }
   }, [advisorEnabled, onSessionForked]);

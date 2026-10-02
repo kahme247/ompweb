@@ -1977,6 +1977,29 @@ test("an edit-and-resend fork puts the branched prompt into the child's composer
   }
 });
 
+test("a second fork click while one is in flight sends no second fork command", async () => {
+  resetWorld();
+  primeSession("fork-busy", [userMsg("u0", "q")]);
+  const w = await mountSession("fork-busy", undefined, { onSessionForked: () => {} });
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  world.holds.push({
+    match: (method, url) => method === "POST" && url.startsWith("/api/agent/fork-busy"),
+    produce: async () => {
+      await gate;
+      return { value: { success: true, data: { newSessionId: "busy-child" } } };
+    },
+  });
+  let first;
+  await act(async () => { first = w.latest.handleFork("u0", false); await sleep(20); });
+  await act(async () => { await w.latest.handleFork("u0", false); });
+  release();
+  await act(async () => { await first; });
+  const forkCalls = world.calls.filter((c) => c.method === "POST" && c.url.startsWith("/api/agent/fork-busy"));
+  assert.equal(forkCalls.length, 1);
+  w.unmount();
+});
+
 test("catch-up metadata cannot overwrite a newer live todo snapshot during a run", async () => {
   resetWorld();
   primeSession("s1", [userMsg("u0", "q")]);
