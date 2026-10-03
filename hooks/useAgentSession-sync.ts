@@ -92,9 +92,16 @@ export function createSessionCatchUp(options: {
             if (base) params.set("cursor", JSON.stringify(base));
             if (view.leafId) params.set("leafId", view.leafId);
             if (view.includePreCompaction) params.set("includePreCompaction", "1");
-            const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/context?${params}`, { signal: AbortSignal.timeout(30_000) });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const page = await res.json() as SessionSyncResponse;
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 30_000);
+            let page: SessionSyncResponse;
+            try {
+              const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/context?${params}`, { signal: controller.signal });
+              if (!res.ok) throw new Error(`HTTP ${res.status}`);
+              page = await res.json() as SessionSyncResponse;
+            } finally {
+              clearTimeout(timeout);
+            }
             if (options.scope() !== scope || revision !== version || cursor !== publishedCursor || options.sessionId() !== sid) break;
             if (page.sessionId !== sid) break;
             if ((page.mode !== "append" && page.mode !== "replace") || page.context.messages.length !== page.context.entryIds.length) break;

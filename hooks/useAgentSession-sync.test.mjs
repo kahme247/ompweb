@@ -7,6 +7,9 @@ const jiti = createJiti(import.meta.url, { alias: { "@/": fileURLToPath(new URL(
 const { createSessionCatchUp } = await jiti.import("./useAgentSession-sync.ts");
 
 test("a newer user delivery cannot block recovery of an unrelated assistant partial", async (t) => {
+  const timeoutDescriptor = Object.getOwnPropertyDescriptor(AbortSignal, "timeout");
+  Object.defineProperty(AbortSignal, "timeout", { configurable: true, value: undefined });
+  t.after(() => Object.defineProperty(AbortSignal, "timeout", timeoutDescriptor));
   const context = { messages: [], entryIds: [], thinkingLevel: "off", model: null, todoPhases: [] };
   let displayed = "visible before the gap";
   let release;

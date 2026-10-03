@@ -738,13 +738,18 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
     nativeSettingsMutatedRef.current = false;
     setNativeSettingsLoading(true);
     setNativeSettingsError(null);
-    fetch("/api/omp-settings", { signal: AbortSignal.timeout(12000) })
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
+    fetch("/api/omp-settings", { signal: controller.signal })
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
       .then((data: { settings?: NativeSettings }) => {
         if (!nativeSettingsMutatedRef.current) setNativeSettings(data.settings ?? {});
       })
       .catch((error) => setNativeSettingsError(error instanceof Error ? error.message : String(error)))
-      .finally(() => setNativeSettingsLoading(false));
+      .finally(() => {
+        clearTimeout(timeout);
+        setNativeSettingsLoading(false);
+      });
   }, []);
 
   useEffect(() => {

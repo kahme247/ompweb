@@ -411,7 +411,10 @@ test("another browser's job for the same scope shows up with server audio, and a
   assert.equal(view.result.current.isTranscribing, false);
 });
 
-test("a finished job is claimed, and only the claimed text is inserted", async () => {
+test("a finished job is claimed without newer browser APIs, and only the claimed text is inserted", async () => {
+  override(AbortSignal, "timeout", undefined);
+  override(AbortSignal, "any", undefined);
+  override(Promise, "withResolvers", undefined);
   world.scopeJobs = [{ id: "job-1", status: "pending" }];
   world.pollResponses = [{ ok: true, status: 200, json: async () => ({ status: "done", text: "from the phone" }) }];
   const { view, transcripts } = mountDictation("session-1");

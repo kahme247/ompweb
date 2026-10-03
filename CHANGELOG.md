@@ -24,6 +24,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Fixes & Improvements
 
+- Fix settings crashes, stalled session catch-up, and failed voice transcription polling in browsers without `AbortSignal.timeout`, `AbortSignal.any`, or `Promise.withResolvers`, including development-mode clients. Client requests now use `AbortController` timers and ordinary promises while retaining timeouts and cancellation (#196).
 - The **Agent environment variables** editor in Settings → System & Updates now sits below its title and description and follows the page width, instead of sitting beside them and extending past the right edge. The text box also grows with its contents.
 - Show queued steers and follow-ups on every device viewing a session. The queue panel now shows omp's own queue (omp 18.4.4 or later) instead of a copy kept by the tab that sent them, so it also stays correct across reloads.
 - **Stop** no longer loses a queued steer or lets the agent run it anyway. The text of messages still waiting in the queue moves back into the composer (images attached to them are dropped). Requires omp 18.4.4 or later. A steer the model already picked up through live steering (for example on OpenAI models with `providers.openaiLiveSteering`) cannot be taken back: omp requeues it when the run stops and runs it next.

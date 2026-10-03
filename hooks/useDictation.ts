@@ -222,25 +222,30 @@ export function useDictation({ onTranscript, onError, scope }: UseDictationOptio
           failTranscription("Transcription timed out");
           return;
         }
-        const tick = Promise.withResolvers<void>();
-        window.setTimeout(tick.resolve, delay);
-        await tick.promise;
+        await new Promise<void>((resolve) => window.setTimeout(resolve, delay));
         delay = STT_POLL_INTERVAL_MS;
         if (stale()) return;
         const claimUrl = `${jobUrl}?claim=${encodeURIComponent((claimTokenRef.current ??= randomToken()))}&owner=${encodeURIComponent(ownerToken())}`;
         // Per-request timeout: a stalled request must not freeze the loop past its deadline.
-        const res = await fetch(claiming ? claimUrl : jobUrl, {
+        const requestController = new AbortController();
+        const abortRequest = () => requestController.abort();
+        signal.addEventListener("abort", abortRequest, { once: true });
+        const timeout = window.setTimeout(abortRequest, STT_POLL_REQUEST_TIMEOUT_MS);
+        const result = await fetch(claiming ? claimUrl : jobUrl, {
           method: claiming ? "DELETE" : "GET",
-          signal: AbortSignal.any([signal, AbortSignal.timeout(STT_POLL_REQUEST_TIMEOUT_MS)]),
+          signal: requestController.signal,
           cache: "no-store",
-        }).catch((err: unknown) => {
-          if (signal.aborted) throw err;
-          return null;
-        });
+        }).then(async (res) => ({ res, job: await res.json().catch(() => null) }))
+          .catch((err: unknown) => {
+            if (signal.aborted) throw err;
+            return null;
+          }).finally(() => {
+            window.clearTimeout(timeout);
+            signal.removeEventListener("abort", abortRequest);
+          });
         if (stale()) return;
-        if (!res) continue;
-        const job = await res.json().catch(() => null);
-        if (stale()) return;
+        if (!result) continue;
+        const { res, job } = result;
         if (res.status === 404) {
           // Server restarted, the job expired, or its tombstone was pruned
           // after another browser took it. Only local audio can be retried,
