@@ -2786,19 +2786,61 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   executeBashRef.current = executeBash;
 
   const withdrawAndAbort = useCallback(async (sid: string, onAbortSent: () => void) => {
-    // Take pending messages back out of omp BEFORE the abort, like the TUI's
-    // Esc: omp runs a queued steer as soon as an abort lands (and keeps a
-    // follow-up for after the next reply, #130). Withdrawn texts return to
-    // this session's draft; a message the model already took (removed:
-    // false) lands in the transcript instead. A steer whose send has not
-    // reached omp's queue snapshot yet is not withdrawn.
+    // Captured at the click: no abort below may reach a run that started
+    // since (this client's next prompt or another device's).
+    const runId = promptRunIdRef.current;
+    const runsEnded = runsEndedRef.current;
+    const sameRun = () => promptRunIdRef.current === runId && runsEndedRef.current === runsEnded;
+    // Like the TUI's Esc, omp takes every pending user message back and then
+    // aborts, in one step: it also catches a steer this client's queue
+    // snapshot does not list yet, or one the run already claimed but never
+    // recorded, which a removal by text cannot reach and which omp would
+    // otherwise run as a new turn right after the abort. The texts return to
+    // this session's draft (attached images are dropped). Known window: the
+    // texts exist only in the response until the abort finishes, so a reload
+    // during a slow abort loses them.
+    type RestoredQueue = { steering?: Array<{ text?: unknown; images?: unknown[] }>; followUp?: Array<{ text?: unknown; images?: unknown[] }> };
+    let restoredQueue: RestoredQueue | null | undefined;
+    let unsupported = false;
+    let failures = 0;
+    // A failure after omp already withdrew would lose the texts on the
+    // per-entry path (the queue is empty by then). Retrying the same command
+    // is safe instead: omp returns whatever is still queued.
+    for (let attempt = 0; attempt < 2 && restoredQueue === undefined && !unsupported && (attempt === 0 || sameRun()); attempt++) {
+      try {
+        restoredQueue = (await sendAgentCommand<RestoredQueue>(sid, { type: "abort_and_restore_queue" })) ?? null;
+      } catch (error) {
+        unsupported = error instanceof Error && error.message.includes("Unknown command");
+        if (!unsupported) failures += 1;
+      }
+    }
+    if (!unsupported) {
+      const steering = Array.isArray(restoredQueue?.steering) ? restoredQueue.steering : [];
+      const followUp = Array.isArray(restoredQueue?.followUp) ? restoredQueue.followUp : [];
+      const texts = [...steering, ...followUp]
+        // An image-only message comes back as omp's "[Image]" chip label; the
+        // images themselves are not restored, so neither is the label.
+        .filter((entry) => !(entry.text === "[Image]" && Array.isArray(entry.images) && entry.images.length > 0))
+        .map((entry) => entry.text)
+        .filter((text): text is string => typeof text === "string" && text.length > 0);
+      if (texts.length > 0) recoverDraftText(sid, texts.join("\n\n"));
+      // A failed attempt may have withdrawn messages whose texts were in the
+      // lost response; say so unless the retry brought texts back.
+      if (failures > 0 && texts.length === 0 && hookAliveRef.current && sessionIdRef.current === sid) {
+        addNotice({ type: "warning", message: translate("agentSession.queueRestoreUncertain") });
+      }
+      return;
+    }
+    // omp before abort_and_restore_queue: take pending messages back out of
+    // omp BEFORE the abort: omp runs a queued steer as soon as an abort lands
+    // (and keeps a follow-up for after the next reply, #130). A message the
+    // model already took (removed: false) lands in the transcript instead. A
+    // steer whose send has not reached omp's queue snapshot yet is not withdrawn.
     const pending = queuedMessagesRef.current;
     const entries = [
       ...pending.steering.map((text) => ({ text, queue: "steering" as const })),
       ...pending.followUp.map((text) => ({ text, queue: "followUp" as const })),
     ];
-    const runId = promptRunIdRef.current;
-    const runsEnded = runsEndedRef.current;
     const removed: boolean[] = [];
     const restored: boolean[] = [];
     let recoveredBlock = "";
@@ -2846,7 +2888,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     recoverWithdrawn();
     // The targeted run may have ended during the wait and another prompt
     // (this client's or another device's) started: this Stop is not for it.
-    if (promptRunIdRef.current === runId && runsEndedRef.current === runsEnded) {
+    if (sameRun()) {
       try {
         await sendAgentCommand(sid, { type: "abort" });
       } catch (e) {

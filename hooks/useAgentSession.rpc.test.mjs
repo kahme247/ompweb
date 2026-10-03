@@ -158,6 +158,14 @@ async function fetchStub(url, init = {}) {
       if (body?.type === "get_btw_history") {
         return jsonResponse(200, { success: true, data: { records: world.btwHistory.get(sid) ?? [] } });
       }
+      // omp before abort_and_restore_queue rejects it (its real wording), which keeps the
+      // per-entry withdrawal tests on their fallback path; tests of the atomic
+      // path set what omp hands back.
+      if (body?.type === "abort_and_restore_queue") {
+        return world.abortRestoreQueue
+          ? jsonResponse(200, { success: true, data: world.abortRestoreQueue })
+          : jsonResponse(400, { error: "Unknown command: abort_and_restore_queue", code: "rpc_command_failed" });
+      }
       return jsonResponse(200, { success: true, data: {} });
     }
   }
@@ -278,6 +286,7 @@ function resetWorld() {
   world.contextUnavailable = false;
   world.wrappers.clear();
   world.btwHistory.clear();
+  world.abortRestoreQueue = null;
 }
 
 function primeSession(sid, messages) {
@@ -3070,4 +3079,111 @@ test("REVIEW a 404 boundary on a live session (unreadable file / wrapper died) s
   );
   assert.equal(w.latest.notices.length, 0, "no failed-send notice");
   t.diagnostic("boundary 404 tolerated on a live session");
+});
+
+// The incident behind abort_and_restore_queue: a promoted steer was still in
+// omp when Stop landed but missing from this client's snapshot, so nothing
+// withdrew it and omp ran it as a new turn after the abort. omp's atomic Esc
+// takes back everything it holds, listed here or not.
+test("Stop takes queued input back through omp in one step, including a steer the snapshot missed", async () => {
+  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  resetWorld();
+  clearDraft("abort-atomic");
+  primeSession("abort-atomic", [userMsg("u0", "loaded question")]);
+  const { w } = await startRun("abort-atomic", "hello agent");
+  world.abortRestoreQueue = {
+    steering: [{ text: "steer the snapshot missed" }],
+    followUp: [{ text: "later follow-up", images: [{ type: "image", data: "x", mimeType: "image/png" }] }],
+  };
+
+  await act(async () => { await w.latest.handleAbort(); });
+
+  const commands = world.calls.map((c) => c.body?.type).filter(Boolean);
+  assert.equal(commands.filter((type) => type === "abort_and_restore_queue").length, 1);
+  assert.equal(commands.includes("abort"), false, "omp's own abort already stopped the run");
+  assert.equal(commands.includes("remove_queued_message"), false);
+  assert.equal(getDraft("abort-atomic")?.value, "steer the snapshot missed\n\nlater follow-up");
+  assert.deepEqual(w.latest.notices, []);
+  clearDraft("abort-atomic");
+});
+
+const isAtomicStop = (method, _url, body) => method === "POST" && body?.type === "abort_and_restore_queue";
+
+test("a failed atomic Stop is retried once and restores what omp still held", async () => {
+  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  resetWorld();
+  clearDraft("abort-atomic-retry");
+  primeSession("abort-atomic-retry", [userMsg("u0", "loaded question")]);
+  const { w } = await startRun("abort-atomic-retry", "hello agent");
+  world.holds.push({ match: isAtomicStop, produce: async () => ({ status: 502, value: { error: "Bad Gateway" } }) });
+  world.abortRestoreQueue = { steering: [{ text: "retry me" }], followUp: [] };
+
+  await act(async () => { await w.latest.handleAbort(); });
+
+  const commands = world.calls.map((c) => c.body?.type).filter(Boolean);
+  assert.equal(commands.filter((type) => type === "abort_and_restore_queue").length, 2);
+  assert.equal(commands.includes("abort"), false, "a failure is not mistaken for an omp without the command");
+  assert.equal(commands.includes("remove_queued_message"), false);
+  assert.equal(getDraft("abort-atomic-retry")?.value, "retry me");
+  assert.deepEqual(w.latest.notices, []);
+  clearDraft("abort-atomic-retry");
+});
+
+test("an atomic Stop whose texts were lost with a failed response warns", async () => {
+  resetWorld();
+  primeSession("abort-atomic-lost", [userMsg("u0", "loaded question")]);
+  const { w } = await startRun("abort-atomic-lost", "hello agent");
+  // omp withdrew and aborted, but the answer never arrived; the queue is empty now.
+  world.holds.push({ match: isAtomicStop, produce: async () => ({ status: 502, value: { error: "Bad Gateway" } }) });
+  world.abortRestoreQueue = { steering: [], followUp: [] };
+
+  await act(async () => { await w.latest.handleAbort(); });
+
+  assert.equal(world.calls.some((c) => c.body?.type === "abort"), false);
+  assert.deepEqual(w.latest.notices.map((n) => n.type), ["warning"]);
+});
+
+test("a failed atomic Stop never retries into a run started after the click", async () => {
+  resetWorld();
+  primeSession("abort-atomic-fenced", [userMsg("u0", "loaded question")]);
+  const { w, es } = await startRun("abort-atomic-fenced", "hello agent");
+  let release;
+  world.holds.push({ match: isAtomicStop, produce: () => new Promise((resolve) => { release = resolve; }) });
+  world.abortRestoreQueue = { steering: [], followUp: [] };
+  let stop;
+  await act(async () => { stop = w.latest.handleAbort(); });
+  await act(async () => {
+    es.emit({ type: "message_end", message: assistantMsg("a1", "answer") });
+    es.emit({ type: "agent_end", isTerminal: true });
+  });
+  await settle();
+  let sending;
+  await act(async () => { sending = w.latest.handleSend("next prompt"); await sleep(30); });
+  await act(async () => { lastEs().open(); await sending; });
+  await act(async () => {
+    release({ status: 502, value: { error: "Bad Gateway" } });
+    await stop;
+  });
+
+  assert.equal(world.calls.some((c) => c.body?.type === "prompt" && c.body?.message === "next prompt"), true);
+  assert.equal(world.calls.filter((c) => c.body?.type === "abort_and_restore_queue").length, 1, "no retry into the new run");
+  assert.equal(world.calls.some((c) => c.body?.type === "abort"), false, "nor a fallback abort");
+});
+
+test("overlapping Stops share one atomic withdrawal; an image-only entry does not come back as text", async () => {
+  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  resetWorld();
+  clearDraft("abort-atomic-twice");
+  primeSession("abort-atomic-twice", [userMsg("u0", "loaded question")]);
+  const { w } = await startRun("abort-atomic-twice", "hello agent");
+  world.abortRestoreQueue = {
+    steering: [{ text: "[Image]", images: [{ type: "image", data: "x", mimeType: "image/png" }] }],
+    followUp: [{ text: "words" }],
+  };
+
+  await act(async () => { await Promise.all([w.latest.handleAbort(), w.latest.handleAbort()]); });
+
+  assert.equal(world.calls.filter((c) => c.body?.type === "abort_and_restore_queue").length, 1);
+  assert.equal(getDraft("abort-atomic-twice")?.value, "words");
+  clearDraft("abort-atomic-twice");
 });

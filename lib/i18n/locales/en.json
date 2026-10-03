@@ -31,6 +31,7 @@
   "agentSession.queuedPromotionUnavailable": "The queued follow-up is no longer available to steer.",
   "agentSession.queuedRemovalUnavailable": "This message is no longer pending in that queue and could not be cancelled.",
   "agentSession.queueDiscardFailed": "The run was stopped, but some queued messages could not be taken back. The agent may still deliver them.",
+  "agentSession.queueRestoreUncertain": "The run was stopped, but the queued messages may not have come back to the composer. Check the queue and the chat before resending.",
   "agentSession.startingAgent": "Starting omp… the first launch of a session can take a while.",
   "agentSession.toolPresetNotice": "Tool presets apply when a session starts; this session keeps its current tools.",
   "agentSession.unknownSlashCommand": "/{name} is not a command this session can run — it was sent as plain text. TUI-only commands (for example /guided-goal) only work in the omp terminal.",

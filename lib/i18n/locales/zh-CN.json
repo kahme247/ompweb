@@ -31,6 +31,7 @@
   "agentSession.queuedPromotionUnavailable": "该后续消息已不在队列中，无法转为引导消息。",
   "agentSession.queuedRemovalUnavailable": "该消息已不在此队列中，无法取消。",
   "agentSession.queueDiscardFailed": "运行已停止，但部分排队消息未能取回。智能体仍可能发送它们。",
+  "agentSession.queueRestoreUncertain": "已停止运行，但队列中的消息可能没有回到输入框。重新发送前请检查队列和聊天记录。",
   "agentSession.startingAgent": "正在启动 omp……会话首次启动可能需要一些时间。",
   "agentSession.toolPresetNotice": "工具预设在会话启动时生效；当前会话将保留现有工具。",
   "agentSession.unknownSlashCommand": "/{name} 不是此会话可执行的命令，已作为普通文本发送。仅 TUI 可用的命令（例如 /guided-goal）只能在 omp 终端中运行。",

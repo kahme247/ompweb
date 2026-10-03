@@ -235,16 +235,23 @@ a number when requested and applies only if no newer snapshot or
 `queue_update` was applied (HTTP and SSE can reorder). Edit/Delete use
 `remove_queued_message` (act only on `removed: true`), Steer uses
 `promote_queued_message`; the chip changes when omp's next snapshot arrives.
-`handleAbort` coalesces overlapping Stops, then withdraws pending messages BEFORE sending `abort` (bounded by
-`WITHDRAW_BEFORE_ABORT_MS`), like the TUI's Esc: omp runs a queued steer as
-soon as an abort lands. Withdrawn text goes to the session draft via
-`recoverDraftText`, saved as each removal confirms. A follow-up that answers
-`removed: false` is retried on `steering` (a concurrent promotion moved it);
-never the reverse. The abort is fenced to the prompt run id captured at Stop,
-so it cannot kill a prompt started during the wait. Known gap: input taken by
-live steering answers `removed: false`, and RPC `abort` does not call
-`withdrawLiveSteering` (the TUI's `clearQueue({ forInterrupt: true })` does),
-so omp requeues it on abort and runs it next; omp-web cannot prevent that.
+`handleAbort` coalesces overlapping Stops, then sends `abort_and_restore_queue`:
+omp's Esc (`clearQueue({ forInterrupt: true })`, then abort) in one step,
+returning the withdrawn user messages, which go to the session draft via
+`recoverDraftText`. It covers what a client snapshot cannot: a steer promoted
+after the last `queue_update`, and live-steered input the run claimed but never
+recorded (omp would otherwise requeue it and drain it into a new turn right
+after the abort). Never reimplement this client-side. A failed request is
+retried once (omp returns whatever is still queued) and only while the run
+captured at the click is current; texts lost with a response that never
+arrived cannot be recovered, so the hook warns (`queueRestoreUncertain`).
+Fallback ONLY when omp answers "Unknown command" (omp without the command):
+withdraw each listed message with `remove_queued_message` BEFORE sending
+`abort` (bounded by `WITHDRAW_BEFORE_ABORT_MS`), saved as each removal
+confirms. A follow-up that answers `removed: false` is retried on `steering`
+(a concurrent promotion moved it); never the reverse. Every abort is fenced to
+the prompt run id captured at the click, so it cannot kill a prompt started
+during the wait.
 
 ### Running state SSE + reconciliation
 - The sidebar listens to `/api/agent/running/events`, backed by `subscribeRunningSessions()` in `lib/rpc-manager.ts`, so running badges update without polling.

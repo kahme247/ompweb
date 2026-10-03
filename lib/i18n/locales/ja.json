@@ -31,6 +31,7 @@
   "agentSession.queuedPromotionUnavailable": "このフォローアップはキューに存在しないため、ステアリングに変更できません。",
   "agentSession.queuedRemovalUnavailable": "このメッセージはそのキューに存在しないため、キャンセルできませんでした。",
   "agentSession.queueDiscardFailed": "実行は停止しましたが、キュー内の一部のメッセージを取り戻せませんでした。エージェントがそれらを配信する可能性があります。",
+  "agentSession.queueRestoreUncertain": "実行は停止しましたが、キュー内のメッセージが入力欄に戻っていない可能性があります。再送信する前にキューとチャットを確認してください。",
   "agentSession.startingAgent": "omp を起動しています… セッションの初回起動には時間がかかる場合があります。",
   "agentSession.toolPresetNotice": "ツールプリセットはセッション開始時に適用されます。このセッションは現在のツールを維持します。",
   "agentSession.unknownSlashCommand": "/{name} はこのセッションが実行できるコマンドではないため、通常のテキストとして送信されました。TUI 専用のコマンド（例: /guided-goal）は omp のターミナルでのみ動作します。",

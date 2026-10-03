@@ -1414,11 +1414,14 @@ export class AgentSessionWrapper {
         return result ?? null;
       }
 
+      // abort_and_restore_queue is omp's Esc: it takes queued user input back
+      // atomically, then aborts, and returns the withdrawn messages.
       case "abort":
+      case "abort_and_restore_queue": {
         this.responseObserved = false;
         this.responseRunActive = false;
-        await this.withFinalRunningNotification(async () => {
-          await this.proc.sendCommand({ type: "abort" });
+        const result = await this.withFinalRunningNotification(async () => {
+          const response: unknown = await this.proc.sendCommand({ type });
           // If the prompt was aborted before the agent loop started, no
           // agent_end will arrive to clear the flag; the streaming flag still
           // tracks a live turn that ends with its own agent_end.
@@ -1431,8 +1434,10 @@ export class AgentSessionWrapper {
           this.awaitingAgentStartDeadline = 0;
           this.continuationGraceUntil = 0;
           this.clearLiveSnapshots();
+          return response;
         });
-        return null;
+        return type === "abort" ? null : result ?? null;
+      }
 
       case "get_state": {
         try {
