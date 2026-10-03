@@ -104,7 +104,7 @@ type AutoNameStatus =
   | { kind: "error"; message: string };
 type TimerHandle = NodeJS.Timeout;
 
-export function AppShell() {
+export function AppShell({ appName }: { appName: string }) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
@@ -1731,7 +1731,7 @@ export function AppShell() {
   }, [sidebarHistory.exitNeedsNativeBack, t]);
 
   const activeCwdName = activeCwd ? getFileName(activeCwd) || activeCwd : null;
-  const windowTitle = activeCwdName ? `${activeCwdName} - omp web` : "omp web";
+  const windowTitle = activeCwdName ? `${activeCwdName} - ${appName}` : appName;
 
   useEffect(() => {
     const syncWindowTitle = () => {

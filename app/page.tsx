@@ -1,10 +1,13 @@
 import { Suspense } from "react";
+import { headers } from "next/headers";
 import { AppShell } from "@/components/AppShell";
+import { getInstallName } from "@/lib/install-name";
 
-export default function Home() {
+export default async function Home() {
+  const appName = getInstallName(await headers());
   return (
     <Suspense fallback={<RouteLoadingFallback />}>
-      <AppShell />
+      <AppShell appName={appName} />
     </Suspense>
   );
 }
