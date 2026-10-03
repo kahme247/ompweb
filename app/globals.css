@@ -1954,7 +1954,7 @@ pre, code {
   min-width: 24px !important;
   max-width: 100px;
 }
-.composer-slow-mode-badge {
+.composer-usage-limit-badge {
   flex: 0 1 auto;
   min-width: 0;
   max-width: 260px;
@@ -1982,10 +1982,12 @@ pre, code {
 @container (max-width: 400px) {
   .composer-model-control > button > svg:first-child,
   .composer-thinking-control > button > svg:first-child,
-  .composer-fast-control > span {
+  .composer-fast-control > span,
+  .composer-slow-control > span {
     display: none;
   }
-  .composer-fast-control {
+  .composer-fast-control,
+  .composer-slow-control {
     justify-content: center;
     width: 28px;
     padding-inline: 0 !important;
@@ -2061,7 +2063,7 @@ pre, code {
   .composer-toolbar-spacer { display: none; }
   .composer-primary-action { margin-left: auto; }
   /* Own row above the controls, so it never squeezes the model picker. */
-  .composer-slow-mode-badge { order: -1; flex-basis: 100%; max-width: none; }
+  .composer-usage-limit-badge { order: -1; flex-basis: 100%; max-width: none; }
 
   .sidebar-icon-button,
   .sidebar-project-action,
