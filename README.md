@@ -226,6 +226,7 @@ host (KDE Plasma, and most Wayland/X11 desktops).
 | `OMP_WEB_NO_OPEN` | Set to `1` to prevent auto-opening browser | `0` |
 | `OMP_WEB_DISABLE_AUTOUPDATE` | Set to `1` to disable update checks and in-app updates; restart after changing | `0` |
 | `OMP_WEB_OMP_BIN` | Path to `omp` binary if not on `PATH` | _auto-detected_ |
+| `OMP_WEB_DEV_ORIGIN` | Additional allowed hostname for the development server (no scheme or port); ignored in production | _None_ |
 | `PI_CODING_AGENT_DIR` | Custom omp agent directory | `~/.omp/agent` |
 | `OMP_WEB_STT_ENDPOINT` | OpenAI-compatible transcription endpoint URL | _None (disabled)_ |
 | `OMP_WEB_STT_KEY` | Optional API key for the STT endpoint | _None_ |
@@ -241,6 +242,19 @@ npm run dev
 ```
 
 The dev server runs at [http://127.0.0.1:30178](http://127.0.0.1:30178).
+
+The development server allows loopback and RFC1918 private IPv4 origins
+(`10.0.0.0/8`, `172.16.0.0/12`, and `192.168.0.0/16`). When using a tunnel
+or reverse proxy with a custom hostname, set it without editing `next.config.ts`:
+
+```bash
+OMP_WEB_DEV_ORIGIN=dev.example.com npm run dev
+```
+
+For a persistent setup, set the variable in your local environment or service
+configuration and restart the dev server. This does not change the bind address
+or enable authentication. Next.js hostname patterns cannot express IPv6 CIDRs;
+a private IPv6 origin must be supplied explicitly (for example, `[fd00::1]`).
 
 ### Checks
 

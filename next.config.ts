@@ -49,7 +49,14 @@ const nextConfig = (phase: string): NextConfig => {
       }
       return config;
     },
-    allowedDevOrigins: ["127.0.0.1", "192.168.*.*"],
+    allowedDevOrigins: [
+      "127.0.0.1",
+      // RFC1918 private IPv4 ranges. Next.js accepts hostname patterns, not CIDRs.
+      "10.*.*.*",
+      ...Array.from({ length: 16 }, (_, i) => `172.${16 + i}.*.*`),
+      "192.168.*.*",
+      ...(process.env.OMP_WEB_DEV_ORIGIN ? [process.env.OMP_WEB_DEV_ORIGIN] : []),
+    ],
     // Security: stop advertising the runtime, and surface dev-mode problems
     // earlier. Source maps in the browser bundle leak server path layout and
     // bloat downloads without helping end users of a published app.
