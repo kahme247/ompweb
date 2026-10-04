@@ -1968,6 +1968,7 @@ pre, code {
 .composer-thinking-control > button > .composer-thinking-glyph {
   font-size: 20px;
 }
+.picker-thinking-card > .composer-thinking-glyph,
 .picker-row > .composer-thinking-glyph {
   font-size: 16px;
   min-width: 1.1em;
