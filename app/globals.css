@@ -1945,7 +1945,9 @@ pre, code {
   flex-shrink: 0;
 }
 .composer-model-control {
-  flex: 1 1 0;
+  /* Hug the name; the toolbar spacer takes the slack, so no dead gap opens
+     between the model name and the controls that follow it. */
+  flex: 0 1 auto;
   max-width: 140px;
   min-width: 24px !important;
 }
@@ -1963,11 +1965,8 @@ pre, code {
   font-size: 1.15em;
   line-height: 1;
 }
-/* Geometric glyphs ink well inside their em box; 20px reads level with the
-   14px lucide toolbar icons, and menu glyphs lead their 12px row labels. */
-.composer-thinking-control > button > .composer-thinking-glyph {
-  font-size: 20px;
-}
+/* Menu glyphs lead their 12px row labels; the big trigger glyph only applies
+   to narrow toolbars (label hidden there), so desktop keeps icon + text. */
 .picker-thinking-card > .composer-thinking-glyph,
 .picker-row > .composer-thinking-glyph {
   font-size: 16px;
@@ -1999,11 +1998,15 @@ pre, code {
   line-height: 20px;
 }
 @container (max-width: 400px) {
-  .composer-model-control > button > svg:first-child,
   .composer-thinking-control > button > svg,
+  .composer-thinking-control > button > .composer-thinking-label,
   .composer-fast-control > span,
   .composer-slow-control > span {
     display: none;
+  }
+  /* Glyph-only trigger: size up to read level with the 14px lucide icons. */
+  .composer-thinking-control > button > .composer-thinking-glyph {
+    font-size: 20px;
   }
   .composer-fast-control,
   .composer-slow-control {

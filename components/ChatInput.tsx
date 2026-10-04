@@ -2978,9 +2978,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   onMouseEnter={(e) => { if (!isStreaming) { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; } }}
                   onMouseLeave={(e) => { e.currentTarget.style.background = thinkingDropdownOpen ? "var(--bg-hover)" : "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
                 >
-                  {/* TUI-style level glyph instead of the label, leaving the
-                      model name the room; the label stays in title/aria. */}
+                  {/* TUI-style level glyph; wide toolbars also show the level
+                      name (label hidden by CSS on narrow toolbars) and the
+                      label always stays in title/aria. */}
                   <span className="composer-thinking-glyph" aria-hidden="true">{THINKING_LEVEL_GLYPHS[thinkingLevel ?? "auto"] ?? thinkingDisplayLabel}</span>
+                  <span className="composer-thinking-label" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textTransform: "capitalize" }}>{thinkingDisplayLabel}</span>
                   <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7, transform: thinkingDropdownOpen ? "rotate(180deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }} aria-hidden="true" />
                 </button>
                 {thinkingDropdownOpen && (
