@@ -1963,9 +1963,14 @@ pre, code {
   font-size: 1.15em;
   line-height: 1;
 }
-/* Geometric glyphs ink well inside their em box; 18px matches the 14px lucide toolbar icons. */
+/* Geometric glyphs ink well inside their em box; 20px reads level with the
+   14px lucide toolbar icons, and menu glyphs lead their 12px row labels. */
 .composer-thinking-control > button > .composer-thinking-glyph {
-  font-size: 18px;
+  font-size: 20px;
+}
+.picker-row > .composer-thinking-glyph {
+  font-size: 16px;
+  min-width: 1.1em;
 }
 .composer-usage-limit-badge {
   flex: 0 1 auto;
