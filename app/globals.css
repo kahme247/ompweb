@@ -1963,6 +1963,10 @@ pre, code {
   font-size: 1.15em;
   line-height: 1;
 }
+/* Geometric glyphs ink well inside their em box; 18px matches the 14px lucide toolbar icons. */
+.composer-thinking-control > button > .composer-thinking-glyph {
+  font-size: 18px;
+}
 .composer-usage-limit-badge {
   flex: 0 1 auto;
   min-width: 0;
