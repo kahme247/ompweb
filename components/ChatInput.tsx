@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, ClipboardPaste, ListChecks, Loader2, Mic, Paperclip, Plus, Shrink, Snail, Sparkles, Wrench, X, Zap } from "lucide-react";
+import { ChevronDown, ClipboardPaste, ListChecks, Loader2, Mic, Paperclip, Plus, RotateCw, Shrink, Snail, Sparkles, Wrench, X, Zap } from "lucide-react";
 import { getSubmitDuringRunBehavior, isWordCompletionEnabled } from "@/lib/composer-prefs";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
@@ -70,6 +70,15 @@ import { GhostMirror } from "@/components/GhostMirror";
 import { useI18n } from "@/lib/i18n";
 import { selectableThinkingLevels, THINKING_LEVEL_GLYPHS } from "@/lib/thinking-levels";
 import type { ToolPreset } from "@/lib/tool-presets";
+
+function ThinkingGlyph({ level, label = level }: { level: string; label?: string }) {
+  const knownLevel = Object.hasOwn(THINKING_LEVEL_GLYPHS, level);
+  return (
+    <span className="composer-thinking-glyph" data-level={knownLevel ? level : undefined} aria-hidden="true">
+      {level === "auto" ? <RotateCw strokeWidth={2} /> : knownLevel ? null : label}
+    </span>
+  );
+}
 
 const SLOW_MODE_SAME_DAY_MS = 20 * 3_600_000;
 
@@ -2981,7 +2990,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   {/* TUI-style level glyph; wide toolbars also show the level
                       name (label hidden by CSS on narrow toolbars) and the
                       label always stays in title/aria. */}
-                  <span className="composer-thinking-glyph" aria-hidden="true">{THINKING_LEVEL_GLYPHS[thinkingLevel ?? "auto"] ?? thinkingDisplayLabel}</span>
+                  <ThinkingGlyph level={thinkingLevel ?? "auto"} label={thinkingDisplayLabel} />
                   <span className="composer-thinking-label" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textTransform: "capitalize" }}>{thinkingDisplayLabel}</span>
                   <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7, transform: thinkingDropdownOpen ? "rotate(180deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }} aria-hidden="true" />
                 </button>
@@ -3030,7 +3039,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                             <span className="picker-check">
                               {isActive && <svg width="11" height="11" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>}
                             </span>
-                            <span className="composer-thinking-glyph" aria-hidden="true">{THINKING_LEVEL_GLYPHS[lvl]}</span>
+                            <ThinkingGlyph level={lvl} label={displayLabel} />
                             <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textTransform: "capitalize" }}>{displayLabel}</span>
                           </button>
                         );

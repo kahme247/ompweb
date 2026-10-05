@@ -1957,20 +1957,69 @@ pre, code {
   max-width: 100px;
 }
 .composer-thinking-glyph {
-  min-width: 1em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-align: center;
-  font-size: 1.15em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  position: relative;
+  font-size: 14px;
   line-height: 1;
+}
+/* Draw the TUI shapes instead of relying on unequal font fallback metrics.
+   Match Auto's visible diameter, not the surrounding font's em square. */
+.composer-thinking-glyph[data-level] {
+  width: 1em;
+  height: 1em;
+}
+.composer-thinking-glyph > svg {
+  width: .8em;
+  height: .8em;
+}
+.composer-thinking-glyph[data-level]:not([data-level="auto"])::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: .65em;
+  height: .65em;
+  border: .075em solid currentColor;
+  border-radius: 50%;
+  box-sizing: border-box;
+}
+.composer-thinking-glyph[data-level="low"]::before {
+  background: conic-gradient(currentColor 90deg, transparent 90deg);
+}
+.composer-thinking-glyph[data-level="medium"]::before {
+  background: conic-gradient(currentColor 180deg, transparent 180deg);
+}
+.composer-thinking-glyph[data-level="high"]::before {
+  background: conic-gradient(from 90deg, currentColor 180deg, transparent 180deg);
+}
+.composer-thinking-glyph[data-level="xhigh"]::before {
+  background: conic-gradient(currentColor 270deg, transparent 270deg);
+}
+.composer-thinking-glyph:is([data-level="off"], [data-level="max"])::after {
+  content: "";
+  position: absolute;
+  background: currentColor;
+}
+.composer-thinking-glyph[data-level="off"]::after {
+  width: .65em;
+  height: .075em;
+  transform: rotate(-45deg);
+}
+.composer-thinking-glyph[data-level="max"]::after {
+  width: .35em;
+  height: .35em;
+  border-radius: 50%;
 }
 /* Menu glyphs lead their 12px row labels: 14px on desktop, 16px on narrow
    toolbars (the big-trigger container below). */
 .picker-thinking-card > .composer-thinking-glyph,
 .picker-row > .composer-thinking-glyph {
   font-size: 14px;
-  min-width: 1.1em;
+  min-width: 1em;
 }
 .composer-usage-limit-badge {
   flex: 0 1 auto;
