@@ -277,7 +277,7 @@ export function AppShell() {
   const [ompUpdatesDisabled, setOmpUpdatesDisabled] = useState(false);
   // Bumped on visibilitychange so the mount-time update checks re-run.
   const [updateCheckKey, setUpdateCheckKey] = useState(0);
-  // On mobile the sidebar is an overlay drawer; hide it by default so the chat
+  // On mobile the sidebar is a full-screen panel; hide it by default so the chat
   // is visible on load. Runs once the breakpoint resolves after hydration.
   useEffect(() => {
     if (isMobile) setSidebarOpen(false);
@@ -1876,6 +1876,7 @@ export function AppShell() {
       @media (max-width: 640px) {
         .sidebar-container.sidebar-mobile-pending.sidebar-open {
           transform: translateX(-100%);
+          visibility: hidden;
         }
       }
     `}

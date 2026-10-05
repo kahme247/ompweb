@@ -81,7 +81,7 @@ interface Props {
   };
   /** True when settings full-page view is currently open. */
   settingsOpen?: boolean;
-  /** Mobile full-screen drawer only: shows a top-left close control. */
+  /** Mobile full-screen panel dismissal; omitted on desktop. */
   onClose?: () => void;
 }
 
@@ -1191,29 +1191,14 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       {/* Header: branding + quiet utilities + New Session */}
       <div
         style={{
-          padding: "10px 10px 8px",
           borderBottom: "1px solid var(--border)",
           flexShrink: 0,
           display: "flex",
           flexDirection: "column",
-          gap: 8,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
-            {onClose && (
-              <button
-                type="button"
-                onClick={onClose}
-                title={t("appShell.hideSidebar")}
-                aria-label={t("appShell.hideSidebar")}
-                className="shell-toolbar-btn ui-focus-ring"
-              >
-                <X size={16} strokeWidth={1.8} aria-hidden="true" />
-              </button>
-            )}
-            <OmpWebTitle />
-          </div>
+        <div className="sidebar-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <OmpWebTitle />
           <div style={{ display: "flex", gap: 2 }}>
             {navigation && (
               <span className="sidebar-nav-buttons">
@@ -1272,6 +1257,11 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                 )}
               </SidebarIconButton>
             </Tooltip>
+            {onClose && (
+              <SidebarIconButton label={t("appShell.hideSidebar")} onClick={onClose}>
+                <X size={18} strokeWidth={1.8} aria-hidden="true" />
+              </SidebarIconButton>
+            )}
           </div>
         </div>
         <input
@@ -1291,7 +1281,8 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
           className="sidebar-new-session"
           title={selectedCwd ? t("sessionSidebar.newSessionIn", { cwd: selectedCwd }) : t("sessionSidebar.selectProjectFirst")}
           style={{
-            width: "100%",
+            width: "calc(100% - 20px)",
+            margin: "8px 10px",
             height: 38,
             boxSizing: "border-box",
             display: "flex",

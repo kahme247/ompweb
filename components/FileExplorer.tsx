@@ -286,7 +286,7 @@ const ExplorerRow = memo(function ExplorerRow({
   if (row.kind === "empty") {
     return (
       <div
-        style={{ paddingLeft: 8 + row.depth * 14, fontSize: 11, color: "var(--text-dim)", height: rowHeight, display: "flex", alignItems: "center" }}
+        style={{ paddingLeft: 10 + row.depth * 14, fontSize: 11, color: "var(--text-dim)", height: rowHeight, display: "flex", alignItems: "center" }}
       >
         {t("fileExplorer.emptyDir")}
       </div>
@@ -327,8 +327,8 @@ const ExplorerRow = memo(function ExplorerRow({
       style={{
         display: "flex",
         alignItems: "center",
-        gap: 4,
-        paddingLeft: 8 + row.depth * 14,
+        gap: 3,
+        paddingLeft: row.depth * 14,
         paddingRight: 8,
         height: rowHeight,
         cursor: "pointer",
@@ -342,8 +342,8 @@ const ExplorerRow = memo(function ExplorerRow({
     >
       {node.isDir && (
         <ChevronRight
-          size={10}
-          strokeWidth={2}
+          size={13}
+          strokeWidth={1.8}
           color="var(--text-dim)"
           style={{
             flexShrink: 0,
@@ -353,17 +353,18 @@ const ExplorerRow = memo(function ExplorerRow({
           aria-hidden="true"
         />
       )}
-      {!node.isDir && <span style={{ width: 10, flexShrink: 0 }} />}
+      {!node.isDir && <span style={{ width: 13, flexShrink: 0 }} />}
       <span style={{ flexShrink: 0, display: "flex", alignItems: "center", color: node.isDir ? "var(--text-muted)" : "var(--text-dim)" }}>
         {node.isDir ? (
-          open ? <FolderOpen size={14} strokeWidth={1.8} aria-hidden="true" /> : <Folder size={14} strokeWidth={1.8} aria-hidden="true" />
+          open ? <FolderOpen size={15} strokeWidth={1.8} aria-hidden="true" /> : <Folder size={15} strokeWidth={1.8} aria-hidden="true" />
         ) : (
-          getFileIcon(node.name, 14)
+          getFileIcon(node.name, 15)
         )}
       </span>
       <span
         style={{
-          fontSize: 12,
+          fontSize: 12.5,
+          fontWeight: 500,
           color: "var(--text)",
           overflow: "hidden",
           textOverflow: "ellipsis",
@@ -519,7 +520,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
 }, ref) {
   const { t, tn } = useI18n();
   const isMobile = useIsMobile();
-  const rowHeight = isMobile ? 44 : 24;
+  const rowHeight = isMobile ? 44 : 30;
   // Directory listings keyed by absolute path. The tree renders from a flat
   // projection of this map, so 30k visible rows cost one array walk — never
   // 30k mounted components.
@@ -1170,7 +1171,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
           top: 0,
           zIndex: 1,
           background: "var(--bg-panel)",
-          padding: "6px 8px 4px",
+          padding: "6px 10px 4px",
         }}>
           <input
             className="file-explorer-search-input"
@@ -1243,7 +1244,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         </div>
       )}
       {showUploadFeedback && (
-        <div style={{ padding: "6px 8px", borderBottom: "1px solid var(--border)" }}>
+        <div style={{ padding: "6px 10px", borderBottom: "1px solid var(--border)" }}>
         {uploadBusy && (
           <div role="status" aria-live="polite" aria-label={uploadPhase === "checking" ? t("fileExplorer.checkingFiles") : t("fileExplorer.uploadingPercent", { percent: uploadProgress })}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, minHeight: 14, color: "var(--text-muted)" }}>
@@ -1358,7 +1359,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         aria-label={t("sessionSidebar.explorer")}
         aria-busy={loading || searchLoading}
         onScroll={handleTreeScroll}
-        style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "2px 4px", outline: "none" }}
+        style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "2px 10px 10px", outline: "none" }}
       >
         {searchActive ? (
           searchLoading ? (

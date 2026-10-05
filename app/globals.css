@@ -4219,7 +4219,15 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
   -webkit-backdrop-filter: blur(2px);
 }
 
-/* Mobile sidebar: slide in/out as overlay */
+/* Match the main and Explorer header rows; New Session sits below this row. */
+.sidebar-header {
+  min-height: var(--shell-topbar-height);
+  padding: 0 10px;
+  box-shadow: inset 0 -1px 0 var(--border);
+  flex-shrink: 0;
+}
+
+/* Mobile workspace panels use the whole screen, leaving room for names. */
 @media (max-width: 640px) {
   .chat-stats-center {
     display: none !important;
@@ -4227,15 +4235,27 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
   .sidebar-container {
     position: fixed !important;
     inset: 0;
-    /* Full-screen drawer: safe-area padding (the list adds its own bottom). */
-    padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px);
-    transition: transform var(--dur-slow) var(--ease-out-warm);
+    padding: 0 env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px);
+    overflow: hidden;
+    transition: transform var(--dur-slow) var(--ease-out-warm), visibility 0s;
+  }
+  .sidebar-header {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+  /* Keep the close control reachable when touch targets crowd the header. */
+  @container (max-width: 380px) {
+    .sidebar-nav-buttons {
+      display: none;
+    }
   }
   .sidebar-container.sidebar-open {
     transform: translateX(0);
+    visibility: visible;
   }
   .sidebar-container.sidebar-closed {
     transform: translateX(-100%);
+    visibility: hidden;
+    transition-delay: 0s, var(--dur-slow);
   }
 
   /* Full-screen overlay that slides in from the right edge. Closed panels are
@@ -4269,6 +4289,7 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
   }
   /* Reduced motion: hide the closed panel immediately, not after the slide. */
   @media (prefers-reduced-motion: reduce) {
+    .sidebar-container,
     .right-panel-container {
       transition-delay: 0s !important;
     }
