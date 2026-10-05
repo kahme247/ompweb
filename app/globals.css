@@ -1965,11 +1965,11 @@ pre, code {
   font-size: 1.15em;
   line-height: 1;
 }
-/* Menu glyphs lead their 12px row labels; the big trigger glyph only applies
-   to narrow toolbars (label hidden there), so desktop keeps icon + text. */
+/* Menu glyphs lead their 12px row labels: 14px on desktop, 16px on narrow
+   toolbars (the big-trigger container below). */
 .picker-thinking-card > .composer-thinking-glyph,
 .picker-row > .composer-thinking-glyph {
-  font-size: 16px;
+  font-size: 14px;
   min-width: 1.1em;
 }
 .composer-usage-limit-badge {
@@ -2007,6 +2007,10 @@ pre, code {
   /* Glyph-only trigger: size up to read level with the 14px lucide icons. */
   .composer-thinking-control > button > .composer-thinking-glyph {
     font-size: 20px;
+  }
+  .picker-thinking-card > .composer-thinking-glyph,
+  .picker-row > .composer-thinking-glyph {
+    font-size: 16px;
   }
   .composer-fast-control,
   .composer-slow-control {
