@@ -251,6 +251,7 @@ host (KDE Plasma, and most Wayland/X11 desktops).
 | --- | --- | --- |
 | `PORT` | Server port | `30177` |
 | `OMP_WEB_HOSTNAME` | Server bind host | `127.0.0.1` |
+| `OMP_WEB_NAME` | Display name for installations, iOS home-screen titles, and browser tabs; restart after changing | Request hostname, or `omp web` for localhost/IP addresses |
 | `OMP_WEB_PASSWORD` | Optional password for web login | _None (auth disabled)_ |
 | `OMP_WEB_NO_OPEN` | Set to `1` to prevent auto-opening browser | `0` |
 | `OMP_WEB_DISABLE_AUTOUPDATE` | Set to `1` to disable update checks and in-app updates; restart after changing | `0` |
@@ -260,6 +261,29 @@ host (KDE Plasma, and most Wayland/X11 desktops).
 | `OMP_WEB_STT_ENDPOINT` | OpenAI-compatible transcription endpoint URL | _None (disabled)_ |
 | `OMP_WEB_STT_KEY` | Optional API key for the STT endpoint | _None_ |
 | `OMP_WEB_STT_MODEL` | Optional model name for the STT endpoint | _None_ |
+
+### Installation names
+
+By default, the full request hostname is used for the installation name and
+browser title; the manifest's `short_name` uses its first label (for example,
+`ai-web.example.dev` → `ai-web`). Internationalized domains display in Unicode,
+including `bücher.example` and `example.québec`. Named LAN hosts are preserved;
+localhost and IP addresses use `omp web`.
+
+Set `OMP_WEB_NAME="My OMP"` in the server environment or service configuration
+to use the same display name through a domain, Tailscale, and LAN access.
+The trimmed value overrides all display names, including `short_name`, without
+automatic truncation; choose a short value for home-screen labels. Empty or
+whitespace-only values use the hostname fallback. The value is read at runtime,
+so no rebuild is needed, but restart the server after changing its environment.
+Existing installations may need to be re-added to pick up a changed name.
+This changes display labels, not the browser origins of separate installations.
+
+**Rendering tradeoff:** `/` and `/login` are intentionally rendered dynamically
+per request rather than statically prerendered, because the root layout reads
+request headers for hostname-dependent metadata (and `/` passes the name to the
+app). This adds server rendering work per page request. Setting `OMP_WEB_NAME`
+does not currently restore static rendering.
 
 ## Development
 

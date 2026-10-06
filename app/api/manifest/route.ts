@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { MetadataRoute } from "next";
-import { getInstallName } from "@/lib/install-name";
+import { getInstallNames } from "@/lib/install-name";
 
 // Packaged public assets are read/encoded once per server module. Native
 // installers fetch HTTP icons without cookies, even with a credentialed manifest.
@@ -23,8 +23,8 @@ const manifest: MetadataRoute.Manifest = {
 
 // Authentication is enforced by the existing /api/ web-password proxy guard.
 export function GET(request: Request) {
-  const name = getInstallName(request.headers);
-  return Response.json({ ...manifest, name, short_name: name }, {
+  const { name, shortName } = getInstallNames(request.headers);
+  return Response.json({ ...manifest, name, short_name: shortName }, {
     headers: {
       "Content-Type": "application/manifest+json",
       "Cache-Control": "private, no-cache, max-age=0, must-revalidate",
