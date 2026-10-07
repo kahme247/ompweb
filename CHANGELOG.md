@@ -32,6 +32,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Fixes & Improvements
 
+- Stop aborting a running agent when its state request is slow. omp-web used to reset any session whose `get_state` reply took over 5 seconds, which aborted the run (shown as **Generation stopped by user**). The reply is usually instant but can be read late when omp-web is busy, for example while a phone tab wakes up and catches up on a very large session. The limit is now 60 seconds and can be changed with `OMP_WEB_GET_STATE_TIMEOUT_MS`; a running session that is still streaming is never reset over a late reply, only reported as busy.
 - Balance the composer icons on phones and narrow toolbars with a slightly smaller effort-level icon and a larger Slow-mode snail, while keeping menu icon sizes unchanged.
 - Keep the model picker on the left and reasoning effort, Fast, Slow, microphone, and Send/Stop controls in a right-aligned composer group, including wrapped mobile rows.
 - The Provider Usage panel now shows each account's email instead of omp's redacted form (`an*`); accounts without an email show as **Account N**. Only the email, plan and limits reach the browser.

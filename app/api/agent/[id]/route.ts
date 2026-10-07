@@ -118,6 +118,9 @@ export async function GET(
       if (error instanceof WebRpcError && error.code === "session_unresponsive") {
         return NextResponse.json({ running: false, recovered: true });
       }
+      if (error instanceof WebRpcError && error.code === "session_state_timeout") {
+        return NextResponse.json({ running: true, error: error.message, code: error.code }, { status: 503 });
+      }
       throw error;
     }
   } catch (error) {

@@ -256,6 +256,7 @@ host (KDE Plasma, and most Wayland/X11 desktops).
 | `OMP_WEB_DISABLE_AUTOUPDATE` | Set to `1` to disable update checks and in-app updates; restart after changing | `0` |
 | `OMP_WEB_OMP_BIN` | Path to `omp` binary if not on `PATH` | _auto-detected_ |
 | `OMP_WEB_DEV_ORIGIN` | Additional allowed hostname for the development server (no scheme or port); ignored in production | _None_ |
+| `OMP_WEB_GET_STATE_TIMEOUT_MS` | How long to wait for omp to report a session's state before treating an idle session as stuck and restarting it; a running session that is still streaming is never restarted | `60000` |
 | `PI_CODING_AGENT_DIR` | Custom omp agent directory | `~/.omp/agent` |
 | `OMP_WEB_STT_ENDPOINT` | OpenAI-compatible transcription endpoint URL | _None (disabled)_ |
 | `OMP_WEB_STT_KEY` | Optional API key for the STT endpoint | _None_ |

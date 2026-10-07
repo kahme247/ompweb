@@ -75,7 +75,22 @@ const DISCONNECT_DESTROY_MS = process.env.OMP_WEB_DISCONNECT_DESTROY_MS !== unde
   : 120_000;
 const READY_TIMEOUT_MS = 120_000;
 const MCP_LIST_TIMEOUT_MS = 15_000;
-const GET_STATE_TIMEOUT_MS = 5_000;
+/**
+ * Cap on omp answering `get_state`. omp itself answers in milliseconds, but its
+ * reply is only read once omp-web's own event loop is free: a synchronous read
+ * of a very large session file (a phone tab waking and catching up on a
+ * multi-hundred-MB session) can hold that loop for seconds, and the timer then
+ * fires before the waiting reply is processed. A miss recycles an idle child as
+ * wedged, so the window must outlast such stalls. Tunable with
+ * `OMP_WEB_GET_STATE_TIMEOUT_MS`.
+ */
+const GET_STATE_TIMEOUT_MS = (() => {
+  const value = Number(process.env.OMP_WEB_GET_STATE_TIMEOUT_MS);
+  return Number.isFinite(value) && value > 0 ? value : 60_000;
+})();
+/** Cap on small control commands (ask dialog, queue mutations, skill diagnostics).
+ * Expiry rejects the request only; it never recycles the child. */
+const CONTROL_COMMAND_TIMEOUT_MS = 5_000;
 /** Cap on the *acknowledgement* of a prompt frame — not on model execution.
  * omp acks a prompt as soon as it accepts it and the run then reports through
  * events (agent_start/agent_end), so an ack that never arrives means the child
@@ -514,8 +529,8 @@ export class AgentSessionWrapper {
       await this.proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
       // Opt into omp's all-questions ask dialog; older omp rejects the command
       // and keeps the per-question select/editor fallback.
-      // Bounded like get_state so a child that never answers cannot stall startup.
-      await this.proc.sendCommand({ type: "set_ask_dialog", enabled: true }, GET_STATE_TIMEOUT_MS).catch(() => {});
+      // Bounded so a child that never answers cannot stall startup.
+      await this.proc.sendCommand({ type: "set_ask_dialog", enabled: true }, CONTROL_COMMAND_TIMEOUT_MS).catch(() => {});
       const state = await this.getStateWithTimeout();
       this.applyIdentity(state);
       // Warn when the spawn cwd differs from the session's recorded directory.
@@ -661,7 +676,11 @@ export class AgentSessionWrapper {
     this.destroy();
   }
 
+  /** When the child last emitted a frame; a running child still emitting is busy, not wedged. */
+  private lastFrameAt = 0;
+
   private handleFrame(frame: RpcFrame): void {
+    this.lastFrameAt = Date.now();
     this.resetIdleTimer();
     const event = frame;
     let refreshSessionList = false;
@@ -1407,7 +1426,7 @@ export class AgentSessionWrapper {
         // The replacement process starts with subscriptions disabled; restore
         // the live roster/transcript event stream before reading its state.
         await proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
-        await proc.sendCommand({ type: "set_ask_dialog", enabled: true }, GET_STATE_TIMEOUT_MS).catch(() => {});
+        await proc.sendCommand({ type: "set_ask_dialog", enabled: true }, CONTROL_COMMAND_TIMEOUT_MS).catch(() => {});
         const state = await proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS);
         this.applyIdentity(state);
         // Same fresh-spawn guard as startRpcSession: a sessionless wrapper
@@ -1537,9 +1556,9 @@ export class AgentSessionWrapper {
 
       case "remove_queued_message":
       case "promote_queued_message": {
-        // Queue mutations are synchronous control operations, like get_state.
+        // Queue mutations are synchronous control operations.
         // Expiry must not abort unrelated work or replay a possibly applied mutation.
-        const result = await this.proc.sendCommand(command as { type: string }, GET_STATE_TIMEOUT_MS);
+        const result = await this.proc.sendCommand(command as { type: string }, CONTROL_COMMAND_TIMEOUT_MS);
         return result ?? null;
       }
 
@@ -1574,6 +1593,12 @@ export class AgentSessionWrapper {
           return this.buildWebState(state);
         } catch (error) {
           if (error instanceof RpcCommandTimeoutError) {
+            // A running child that kept emitting frames through the wait is
+            // busy, not wedged: the reply is late, usually because omp-web's own
+            // event loop was blocked. Recycling it would abort the user's run.
+            if (this.isRunning() && Date.now() - this.lastFrameAt < GET_STATE_TIMEOUT_MS) {
+              throw new WebRpcError("The OMP session is busy and did not report its state in time.", "session_state_timeout");
+            }
             await this.destroyAndWait();
             throw new WebRpcError("The OMP session stopped responding and was reset.", "session_unresponsive");
           }
@@ -1582,7 +1607,7 @@ export class AgentSessionWrapper {
       }
 
       case "get_skill_diagnostics": {
-        const result = await this.proc.sendCommand<unknown>({ type: "get_skill_diagnostics" }, GET_STATE_TIMEOUT_MS);
+        const result = await this.proc.sendCommand<unknown>({ type: "get_skill_diagnostics" }, CONTROL_COMMAND_TIMEOUT_MS);
         return this.requireSkillDiagnostics(result);
       }
 
@@ -1593,7 +1618,7 @@ export class AgentSessionWrapper {
         const result = await this.proc.sendCommand<unknown>({
           type: "set_skill_startup_diagnostics",
           enabled: command.enabled,
-        }, GET_STATE_TIMEOUT_MS);
+        }, CONTROL_COMMAND_TIMEOUT_MS);
         return this.requireSkillDiagnostics(result);
       }
 
