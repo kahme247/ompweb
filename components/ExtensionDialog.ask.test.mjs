@@ -2,7 +2,7 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import React from "react";
-import { cleanup, render, screen } from "@testing-library/react/pure.js";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react/pure.js";
 import userEvent from "@testing-library/user-event";
 import { createJiti } from "jiti";
 
@@ -108,4 +108,59 @@ test("Cancel answers cancelled", async () => {
   const responses = renderAsk([color]);
   await user.click(screen.getByRole("button", { name: "Cancel" }));
   assert.deepEqual(responses, [{ cancelled: true }]);
+});
+
+test("mobile ask preserves all choices and Other drafts across minimize, replay and breakpoints, then resets a fresh request", () => {
+  let request = { type: "extension_ui_request", id: "mobile-ask-1", method: "ask", questions: [color, extras, size] };
+  let mobile = true;
+  let minimized = false;
+  const responses = [];
+  let view;
+  const form = () => React.createElement(ExtensionDialog, {
+    request,
+    mobile,
+    minimized,
+    attached: !mobile,
+    onMinimize: () => { minimized = true; view.rerender(form()); },
+    onRespond: (_request, response) => responses.push(response),
+  });
+  view = render(form());
+  const otherFields = screen.getAllByRole("textbox");
+  fireEvent.click(screen.getByRole("radio", { name: "Red" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: /Egg/ }));
+  fireEvent.click(screen.getByRole("checkbox", { name: /Cheese/ }));
+  fireEvent.change(otherFields[1], { target: { value: "  pickles  " } });
+  fireEvent.change(otherFields[2], { target: { value: "  XL  " } });
+  fireEvent.click(screen.getByRole("button", { name: "Minimize request" }));
+  assert.equal(screen.queryByRole("dialog"), null);
+  request = JSON.parse(JSON.stringify(request));
+  view.rerender(form());
+  assert.equal(screen.queryByRole("dialog"), null, "same-id replay stays minimized");
+  mobile = false;
+  view.rerender(form());
+  mobile = true;
+  view.rerender(form());
+  minimized = false;
+  view.rerender(form());
+  assert.deepEqual(screen.getAllByRole("textbox"), otherFields, "same mounted fields survive every presentation");
+  assert.equal(otherFields[1].value, "  pickles  ");
+  assert.equal(otherFields[2].value, "  XL  ");
+  assert.equal(screen.getByRole("radio", { name: "Red" }).checked, true);
+  assert.equal(screen.getByRole("checkbox", { name: /Egg/ }).checked, true);
+  assert.equal(screen.getByRole("checkbox", { name: /Cheese/ }).checked, true);
+  assert.equal(document.activeElement, screen.getByRole("dialog"));
+  assert.deepEqual(responses, []);
+  fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+  assert.deepEqual(responses, [{ answers: [
+    { id: "color", selectedOptions: ["Red"] },
+    { id: "extras", selectedOptions: ["Cheese", "Egg"], customInput: "pickles" },
+    { id: "size", selectedOptions: [], customInput: "XL" },
+  ] }]);
+  request = { ...request, id: "mobile-ask-2" };
+  view.rerender(form());
+  assert.equal(screen.getByRole("radio", { name: /Green/ }).checked, true);
+  assert.equal(screen.getByRole("checkbox", { name: /Egg/ }).checked, false);
+  assert.equal(screen.getByRole("checkbox", { name: /Cheese/ }).checked, false);
+  assert.deepEqual(screen.getAllByRole("textbox").map((field) => field.value), ["", "", ""]);
+  assert.equal(screen.getByRole("button", { name: "Submit" }).disabled, true);
 });

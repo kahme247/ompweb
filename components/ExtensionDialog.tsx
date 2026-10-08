@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ChevronDown } from "lucide-react";
 import type { ExtensionUiRequest } from "@/lib/types";
 import type { RpcAskDialogAnswer } from "@/lib/pi-types";
 import { useI18n } from "@/lib/i18n";
@@ -29,25 +30,27 @@ function initialAskDrafts(request: ExtensionDialogRequest): AskDraft[] {
   });
 }
 
-/**
- * Overlay dialog for `select` / `confirm` / `input` / `editor` / `ask` extension UI
- * requests. Polished UX:
- *   - entrance animation (fade backdrop + scale-in panel)
- *   - focus trap: focus moves into the dialog on open and is returned to the
- *     opener on close; Tab/Shift-Tab wrap inside (via useModalDialog)
- *   - Escape closes as "cancelled" (document-level, top-of-stack only)
- *   - backdrop click closes as "cancelled"
- * Logic and i18n keys are unchanged from the in-ChatWindow original.
- */
+/** Persistent drafts shared by the attached desktop and full-screen mobile form. */
 export function ExtensionDialog({
   request,
   onRespond,
   attached = false,
+  mobile = false,
+  minimized = false,
+  obscured = false,
+  onMinimize,
 }: {
   request: ExtensionDialogRequest;
   onRespond: (request: ExtensionDialogRequest, response: ExtensionDialogResponse) => void;
   /** Render as a composer panel instead of a full-chat overlay. */
   attached?: boolean;
+  /** Full-screen presentation without changing the mounted form or its draft. */
+  mobile?: boolean;
+  /** Hide the form without unmounting it. */
+  minimized?: boolean;
+  /** A workspace panel currently covers the conversation. */
+  obscured?: boolean;
+  onMinimize?: () => void;
 }) {
   const { t } = useI18n();
   const [value, setValue] = useState(request.method === "editor" ? request.prefill ?? "" : "");
@@ -74,31 +77,125 @@ export function ExtensionDialog({
 
   const cancel = () => onRespond(request, { cancelled: true });
 
-  // useModalDialog gives us: focus-in on open, focus-restore on close,
-  // document-level Escape (top-of-stack), and Tab wrapping inside the panel.
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const minimize = () => onMinimize?.();
   const panelRef = useModalDialog<HTMLDivElement>({
     onClose: cancel,
-    // A composer-attached request is a regular in-flow panel, not a modal.
-    active: !attached,
+    active: !minimized && !mobile && !attached,
   });
+
+  useLayoutEffect(() => {
+    if (!mobile || minimized) return;
+    const wrapper = wrapperRef.current;
+    const viewport = window.visualViewport;
+    if (!wrapper) return;
+    const conversation = wrapper.closest<HTMLElement>("[data-request-viewport]");
+    // Soft keyboards can shrink only the visual viewport, leaving 100dvh
+    // unchanged. Follow its offset too when the browser pans a focused field.
+    const updateViewport = () => {
+      const bounds = conversation?.getBoundingClientRect();
+      const top = Math.max(bounds?.top ?? 0, viewport?.offsetTop ?? 0);
+      const bottom = Math.min(bounds?.bottom ?? ((viewport?.offsetTop ?? 0) + (viewport?.height ?? window.innerHeight)),
+        (viewport?.offsetTop ?? 0) + (viewport?.height ?? window.innerHeight));
+      wrapper.style.setProperty("--request-viewport-height", `${Math.max(0, bottom - top)}px`);
+      wrapper.style.setProperty("--request-viewport-top", `${top}px`);
+    };
+    updateViewport();
+    viewport?.addEventListener("resize", updateViewport);
+    viewport?.addEventListener("scroll", updateViewport);
+    window.addEventListener("resize", updateViewport);
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(updateViewport);
+    if (conversation) observer?.observe(conversation);
+    return () => {
+      viewport?.removeEventListener("resize", updateViewport);
+      viewport?.removeEventListener("scroll", updateViewport);
+      window.removeEventListener("resize", updateViewport);
+      observer?.disconnect();
+      wrapper.style.removeProperty("--request-viewport-height");
+      wrapper.style.removeProperty("--request-viewport-top");
+    };
+  }, [mobile, minimized]);
+
+  useLayoutEffect(() => {
+    if (!mobile || minimized) return;
+    const wrapper = wrapperRef.current;
+    const conversation = wrapper?.closest("[data-request-viewport]");
+    if (!wrapper || !conversation) return;
+    // Only isolate the covered conversation, never the toolbar or drawers.
+    // Siblings that mount later (status bars, drop overlays) are isolated too.
+    const isolated = new Map<Element, string | null>();
+    const isolate = () => {
+      for (let branch: Element | null = wrapper; branch && branch !== conversation; branch = branch.parentElement) {
+        for (const sibling of branch.parentElement?.children ?? []) {
+          if (sibling === branch || isolated.has(sibling)) continue;
+          isolated.set(sibling, sibling.getAttribute("inert"));
+          sibling.setAttribute("inert", "");
+        }
+      }
+    };
+    isolate();
+    const observer = typeof MutationObserver === "undefined" ? null : new MutationObserver(isolate);
+    observer?.observe(conversation, { childList: true, subtree: true });
+    return () => {
+      observer?.disconnect();
+      for (const [element, inert] of isolated) {
+        if (inert === null) element.removeAttribute("inert");
+        else element.setAttribute("inert", inert);
+      }
+    };
+  }, [mobile, minimized]);
+
   useEffect(() => {
-    if (!attached) return;
-    const frame = window.requestAnimationFrame(() => {
-      const panel = panelRef.current;
-      if (!panel) return;
-      // The frame runs after paint, by which time the user may already have
-      // focused something inside the panel. Never yank focus back.
-      if (panel.contains(document.activeElement)) return;
-      // Never land on a radio or checkbox: a stray Space on a focused radio
-      // selects that option, which silently overwrites what the user typed in
-      // "Other". Prefer the first text entry, then any button.
-      const target = panel.querySelector<HTMLElement>(
+    if (!mobile || minimized || obscured) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.isComposing || event.keyCode === 229
+        || !panelRef.current?.contains(event.target as Node)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      onMinimize?.();
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, [mobile, minimized, obscured, onMinimize, panelRef]);
+
+  const mobileRef = useRef(mobile);
+  mobileRef.current = mobile;
+  const obscuredRef = useRef(obscured);
+  obscuredRef.current = obscured;
+  useEffect(() => {
+    if (minimized || obscured) return;
+    const panel = panelRef.current;
+    if (!panel) return;
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    // Capture before unmount: the detached panel no longer has a conversation ancestor.
+    const conversation = panel.closest<HTMLElement>("[data-request-viewport]");
+    // Only opening/reopening a request moves focus. Breakpoint changes and
+    // same-id SSE replay must leave the user's current control untouched.
+    if (mobileRef.current || !panel.contains(opener)) {
+      const target = mobileRef.current ? panel : panel.querySelector<HTMLElement>(
         "input:not([type=radio]):not([type=checkbox]), textarea, button:not([disabled])",
       );
-      (target ?? panel).focus();
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [attached, panelRef, request.id]);
+      (target ?? panel).focus({ preventScroll: true });
+    }
+    return () => {
+      if (obscuredRef.current) return;
+      // A toolbar control may have taken focus while the response was in flight.
+      const active = document.activeElement;
+      if (mobileRef.current && active !== document.body && active && !panel.contains(active)) return;
+      // Restoring a composer textarea would reopen the mobile keyboard.
+      const editable = opener?.matches("input, textarea, [contenteditable]");
+      const unavailable = opener?.closest("[inert], [hidden]");
+      const fallback = document.querySelector<HTMLElement>("[data-extension-request-opener]");
+      const target = mobileRef.current
+        ? fallback ?? conversation
+        : opener?.isConnected && !editable && !unavailable && !panel.contains(opener)
+          ? opener
+          : fallback;
+      if (target?.isConnected && !target.closest("[inert], [hidden]")) {
+        target.focus({ preventScroll: true });
+      }
+    };
+  }, [minimized, obscured, panelRef, request.id]);
 
   const submitValue = () => {
     if (request.method === "confirm") {
@@ -125,13 +222,15 @@ export function ExtensionDialog({
 
   return (
     <div
-      className={attached ? undefined : "animate-fade-in"}
-      onMouseDown={attached ? undefined : (event) => {
+      ref={wrapperRef}
+      hidden={minimized}
+      className={`extension-dialog${mobile ? " extension-dialog--mobile" : attached ? " extension-dialog--attached" : " animate-fade-in"}`}
+      onMouseDown={attached || mobile ? undefined : (event) => {
         // Close when the pointer goes down on the backdrop itself (not when
         // the press starts inside the panel and is dragged out).
         if (event.target === event.currentTarget) cancel();
       }}
-      style={attached ? { width: "100%", flexShrink: 0 } : {
+      style={mobile ? undefined : attached ? { width: "100%", flexShrink: 1, minHeight: 0, display: "flex", flexDirection: "column" } : {
         position: "absolute",
         inset: 0,
         zIndex: 90,
@@ -145,42 +244,49 @@ export function ExtensionDialog({
       <div
         ref={panelRef}
         role="dialog"
-        aria-modal={attached ? undefined : "true"}
+        aria-modal={!mobile && !attached ? "true" : undefined}
         aria-label={title}
         tabIndex={-1}
-        className={attached ? undefined : "animate-scale-in"}
+        className={`extension-dialog-panel${!mobile && !attached ? " animate-scale-in" : ""}`}
         style={{
-          width: attached ? "100%" : "min(560px, 100%)",
+          width: mobile || attached ? "100%" : "min(560px, 100%)",
           display: "flex",
+          minHeight: 0,
           flexDirection: "column",
-          border: "1px solid var(--border)",
-          borderRadius: attached ? "var(--radius-card)" : "var(--radius-modal)",
+          border: mobile ? undefined : "1px solid var(--border)",
+          borderRadius: mobile ? undefined : attached ? "var(--radius-card)" : "var(--radius-modal)",
           background: "var(--bg)",
-          boxShadow: attached ? "var(--shadow-card)" : "var(--shadow-modal)",
+          boxShadow: mobile ? undefined : attached ? "var(--shadow-card)" : "var(--shadow-modal)",
           overflow: "hidden",
           outline: "none",
-          maxHeight: attached ? "min(420px, 60dvh)" : "100%",
+          maxHeight: mobile ? undefined : attached ? "min(420px, 60dvh)" : "100%",
         }}
       >
-        <div style={{ minHeight: 0, overflowY: "auto", overflowWrap: "anywhere" }}>
-        <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--border)" }}>
-          <div style={{ color: "var(--text)", fontSize: 14, fontWeight: 650, whiteSpace: "pre-wrap" }}>{title}</div>
-          <div style={{ marginTop: 3, color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)" }}>{t("chatWindow.extensionRequest")}</div>
+        <div className="extension-dialog-header" style={{ padding: "12px 14px", borderBottom: "1px solid var(--border)" }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ color: "var(--text)", fontSize: 14, fontWeight: 650, whiteSpace: "pre-wrap" }}>{title}</div>
+            <div style={{ marginTop: 3, color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)" }}>{t("chatWindow.extensionRequest")}</div>
+          </div>
+          {mobile && (
+            <button className="extension-dialog-minimize" type="button" onClick={minimize} aria-label={t("chatWindow.minimizeRequest")}>
+              <ChevronDown size={20} strokeWidth={2} aria-hidden />
+            </button>
+          )}
         </div>
 
-        <div style={{ padding: 14 }}>
+        <div className="extension-dialog-body" style={{ padding: 14 }}>
           {request.method === "confirm" && (
             <div style={{ color: "var(--text-muted)", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{request.message}</div>
           )}
           {request.method === "select" && (
-            <div style={{ display: "grid", gap: 8 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", minWidth: 0, gap: 8 }}>
               {request.options.map((option) => {
                 const selected = selectedOption === option;
                 return (
                   <button
                     key={option}
-                    onClick={() => attached ? setSelectedOption(option) : onRespond(request, { value: option })}
-                    aria-pressed={attached ? selected : undefined}
+                    onClick={() => attached || mobile ? setSelectedOption(option) : onRespond(request, { value: option })}
+                    aria-pressed={attached || mobile ? selected : undefined}
                     style={{
                       width: "100%",
                       padding: "7px 10px",
@@ -205,7 +311,6 @@ export function ExtensionDialog({
           )}
           {request.method === "input" && (
             <input
-              autoFocus
               aria-label={request.title || request.placeholder || "Input value"}
               value={value}
               placeholder={request.placeholder}
@@ -228,7 +333,6 @@ export function ExtensionDialog({
           )}
           {request.method === "editor" && (
             <textarea
-              autoFocus
               aria-label={request.title || "Input value"}
               value={value}
               onChange={(e) => setValue(e.target.value)}
@@ -253,11 +357,11 @@ export function ExtensionDialog({
             />
           )}
           {request.method === "ask" && (
-            <div style={{ display: "grid", gap: 16 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", minWidth: 0, gap: 16 }}>
               {request.questions.map((question, index) => {
                 const draft = askDraftAt(index);
                 return (
-                  <fieldset key={question.id} style={{ margin: 0, padding: 0, border: "none", minWidth: 0, display: "grid", gap: 8 }}>
+                  <fieldset key={question.id} style={{ margin: 0, padding: 0, border: "none", minWidth: 0, width: "100%", display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 8 }}>
                     <legend style={{ padding: 0, marginBottom: 8, color: "var(--text)", fontSize: 13, fontWeight: 600, lineHeight: 1.5 }}>
                       {question.header && (
                         <span style={{ display: "inline-block", marginRight: 6, padding: "0 7px", borderRadius: 999, border: "1px solid var(--border)", background: "var(--bg-subtle)", color: "var(--text-muted)", fontSize: 11, fontWeight: 500 }}>
@@ -273,6 +377,9 @@ export function ExtensionDialog({
                           key={option.label}
                           style={{
                             display: "flex",
+                            minWidth: 0,
+                            width: "100%",
+                            overflowWrap: "anywhere",
                             alignItems: "flex-start",
                             gap: 8,
                             padding: "8px 10px",
@@ -293,7 +400,7 @@ export function ExtensionDialog({
                               : { selected: [option.label], other: "" }))}
                             style={{ margin: "2px 0 0", accentColor: "var(--accent-strong)" }}
                           />
-                          <span style={{ minWidth: 0 }}>
+                          <span style={{ minWidth: 0, flex: 1, overflowWrap: "anywhere" }}>
                             {option.label}
                             {optionIndex === question.recommended && (
                               <span style={{ marginLeft: 6, color: "var(--accent)", fontSize: 11, fontWeight: 600 }}>{t("chatWindow.askRecommended")}</span>
@@ -302,7 +409,7 @@ export function ExtensionDialog({
                               <span style={{ display: "block", marginTop: 2, color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{option.description}</span>
                             )}
                             {option.preview && (
-                              <span style={{ display: "block", marginTop: 6, padding: "6px 8px", borderRadius: 6, background: "var(--tool-bg)", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre", overflowX: "auto" }}>{option.preview}</span>
+                              <span className="extension-dialog-preview" style={{ display: "block", marginTop: 6, padding: "6px 8px", borderRadius: 6, background: "var(--tool-bg)", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre", overflowX: "auto" }}>{option.preview}</span>
                             )}
                           </span>
                         </label>
@@ -340,9 +447,8 @@ export function ExtensionDialog({
             </div>
           )}
         </div>
-        </div>
 
-        <div style={{ display: "flex", flexShrink: 0, justifyContent: "flex-end", gap: 8, padding: "10px 14px", borderTop: "1px solid var(--border)", background: "var(--bg-panel)" }}>
+        <div className="extension-dialog-footer" style={{ display: "flex", flexShrink: 0, justifyContent: "flex-end", gap: 8, padding: "10px 14px", borderTop: "1px solid var(--border)", background: "var(--bg-panel)" }}>
           <button
             onClick={cancel}
             style={{
@@ -376,7 +482,7 @@ export function ExtensionDialog({
             >
               {t("chatWindow.confirm")}
             </button>
-          ) : (request.method === "select" && attached) || request.method === "ask" ? (
+          ) : (request.method === "select" && (attached || mobile)) || request.method === "ask" ? (
             <button
               onClick={submitValue}
               disabled={!canSubmit}

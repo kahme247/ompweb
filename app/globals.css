@@ -4523,3 +4523,100 @@ html[data-touch-targets="compact"] .settings-card {
 .chat-message[data-live="true"] { animation: chat-message-in var(--dur-med) var(--ease-out-warm) both; }
 .chat-message { animation: none; }
 .chat-message-card:hover { box-shadow: none !important; }
+
+/* Extension requests keep one mounted form across attached/full-screen views. */
+/* The conversation takes focus when a mobile request closes; that is not a control to outline. */
+[data-request-viewport]:focus,
+[data-request-viewport]:focus-visible { outline: none; }
+.extension-dialog[hidden] { display: none !important; }
+.extension-dialog,
+.extension-dialog-panel { min-width: 0; }
+.extension-dialog-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex-shrink: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.extension-dialog-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  overscroll-behavior: contain;
+}
+.extension-dialog-body :is(button, input, textarea, fieldset, legend, label) {
+  min-width: 0;
+  max-width: 100%;
+}
+.extension-dialog-body button {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.extension-dialog-preview {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overscroll-behavior-x: contain;
+}
+.extension-dialog-body input:is([type="radio"], [type="checkbox"]) {
+  flex-shrink: 0;
+}
+.extension-dialog-footer { flex-wrap: wrap; }
+.extension-dialog-footer > button { flex-shrink: 0; }
+.extension-dialog-minimize {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg-panel);
+  color: var(--text);
+  cursor: pointer;
+}
+.extension-dialog-minimize:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.extension-dialog--mobile {
+  position: fixed;
+  inset: calc(var(--request-viewport-top, 0px) / var(--ui-scale)) 0 auto;
+  z-index: 90;
+  display: flex;
+  width: 100%;
+  height: calc(var(--request-viewport-height, 100dvh) / var(--ui-scale));
+  overflow: hidden;
+  background: var(--bg);
+}
+.extension-dialog--mobile .extension-dialog-panel {
+  height: 100%;
+  border-radius: 0;
+}
+.extension-dialog--mobile .extension-dialog-header {
+  padding-top: calc(12px + env(safe-area-inset-top, 0px)) !important;
+  padding-left: calc(14px + env(safe-area-inset-left, 0px)) !important;
+  padding-right: calc(14px + env(safe-area-inset-right, 0px)) !important;
+}
+.extension-dialog--mobile .extension-dialog-body {
+  padding-left: calc(14px + env(safe-area-inset-left, 0px)) !important;
+  padding-right: calc(14px + env(safe-area-inset-right, 0px)) !important;
+}
+.extension-dialog--mobile .extension-dialog-footer {
+  padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)) !important;
+  padding-left: calc(14px + env(safe-area-inset-left, 0px)) !important;
+  padding-right: calc(14px + env(safe-area-inset-right, 0px)) !important;
+}
+html[data-touch-targets="accessible"] .extension-dialog--mobile :is(button, .extension-dialog-body label) { min-height: 44px; }
+.extension-dialog--mobile .extension-dialog-body :is(input:not([type="radio"]):not([type="checkbox"]), textarea) {
+  /* Avoid Safari's focus zoom without automatically opening the keyboard. */
+  font-size: max(16px, var(--chat-font-size)) !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .extension-dialog,
+  .extension-dialog-panel,
+  .extension-dialog button { animation: none !important; transition: none !important; }
+}

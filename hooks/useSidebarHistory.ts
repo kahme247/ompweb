@@ -12,12 +12,16 @@ type SidebarEntry = {
 };
 type HistorySnapshot = { marker: SidebarEntry; state: Record<string, unknown>; href: string };
 
-export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, url }: {
+export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, url, minimizeRequest = null, closePanel = null }: {
   active: boolean;
   ready: boolean;
   sidebarOpen: boolean;
   setSidebarOpen: (open: boolean) => void;
   url: string;
+  /** Visible mobile interactive request takes precedence over sidebar/exit Back. */
+  minimizeRequest?: (() => void) | null;
+  /** A file/context overlay gets Back before the pending question. */
+  closePanel?: (() => void) | null;
 }) {
   const [exitConfirmationOpen, setExitConfirmationOpen] = useState(false);
   const [exitNeedsNativeBack, setExitNeedsNativeBack] = useState(false);
@@ -25,8 +29,8 @@ export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, 
   const snapshot = useRef<HistorySnapshot | null>(null);
   const pending = useRef<"collapse" | "leave" | { sidebarOpen: boolean } | null>(null);
   const leaveAllowed = useRef(false);
-  const latest = useRef({ active, sidebarOpen, setSidebarOpen });
-  latest.current = { active, sidebarOpen, setSidebarOpen };
+  const latest = useRef({ active, sidebarOpen, setSidebarOpen, minimizeRequest, closePanel });
+  latest.current = { active, sidebarOpen, setSidebarOpen, minimizeRequest, closePanel };
 
   const subscribe = useCallback((onChange: () => void) => subscribeDrafts(() => {
     // A new edit invalidates an earlier authorization to discard, including
@@ -79,13 +83,28 @@ export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, 
           writeEntry("top", action.sidebarOpen);
         } else if (action === "leave") {
           leaveFromBase();
-        } else if ((latest.current.active && !latest.current.sidebarOpen) || hasUnsentDrafts()) {
+        } else if ((latest.current.active && (!latest.current.sidebarOpen || latest.current.minimizeRequest)) || hasUnsentDrafts()) {
           pending.current = { sidebarOpen: latest.current.sidebarOpen };
           window.history.forward();
         }
         return;
       }
       if (leaveAllowed.current) return;
+      if (marker.entry === "base" && latest.current.active && latest.current.minimizeRequest) {
+        const { closePanel, sidebarOpen: wasOpen, setSidebarOpen, minimizeRequest } = latest.current;
+        // The state this Back produces. React has not re-rendered yet, so the
+        // Forward entry must record it now or it keeps the stale value.
+        const nextOpen = closePanel ? wasOpen : false;
+        if (closePanel) closePanel();
+        else if (wasOpen) setSidebarOpen(false);
+        else minimizeRequest();
+        // Consume Back without opening the sidebar or truncating the forward
+        // buffer. Restore the existing top sentinel, never push another entry.
+        writeEntry("base", nextOpen);
+        pending.current = { sidebarOpen: nextOpen };
+        window.history.forward();
+        return;
+      }
       if (marker.entry === "top") {
         if (latest.current.active) latest.current.setSidebarOpen(marker.sidebarOpen);
       } else if (latest.current.active && !latest.current.sidebarOpen) {
@@ -147,7 +166,7 @@ export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, 
       writeEntry(marker.entry, sidebarOpen);
       return;
     }
-    const needsTop = (active && !sidebarOpen) || dirty;
+    const needsTop = (active && (!sidebarOpen || Boolean(minimizeRequest))) || dirty;
     if (needsTop && marker.entry === "base") {
       writeEntry("base", true);
       writeEntry("top", sidebarOpen, true);
@@ -157,7 +176,7 @@ export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, 
     } else {
       writeEntry(marker.entry, sidebarOpen);
     }
-  }, [active, ready, sidebarOpen, dirty, url, exitNeedsNativeBack, restoreVersion, writeEntry]);
+  }, [active, ready, sidebarOpen, minimizeRequest, dirty, url, exitNeedsNativeBack, restoreVersion, writeEntry]);
 
   useEffect(() => {
     if (!dirty) return;

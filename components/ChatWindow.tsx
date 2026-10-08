@@ -9,7 +9,7 @@ import { collectToolResults, isGroupAnchor, planTranscriptRows, type ActivityPie
 import { resolveForkTargets } from "@/lib/chat-fork";
 import { MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
-import { ExtensionDialog } from "./ExtensionDialog";
+import { InteractiveRequestPanel } from "./InteractiveRequestPanel";
 import { SubagentTranscriptDialog } from "./SubagentTranscriptDialog";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ComposerPanels } from "./ComposerPanels";
@@ -64,6 +64,9 @@ interface Props {
   onGenerationSpeedChange?: (speed: GenerationSpeedInfo | null) => void;
   /** Open Settings → API Keys & Providers (from the model picker). */
   onOpenProviders?: () => void;
+  /** Register only the visible mobile request with the shared Back bridge. */
+  onMobileRequestChange?: (minimize: (() => void) | null) => void;
+  requestObscured?: boolean;
 }
 
 function phaseLabel(phase: AgentPhase): string {
@@ -459,7 +462,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
   );
 });
 
-export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders, onMobileRequestChange, requestObscured }: Props) {
   const { t, tn } = useI18n();
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -886,9 +889,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
   // Reset minimized state on session switch (session-scoped)
   useEffect(() => { setComposerMinimized(false); }, [sessionKeyForPaging]);
-  // The extension dialog renders inside the collapsible composer wrapper;
-  // never let a pending approval prompt sit hidden behind the minimized pill.
-  useEffect(() => { if (extensionDialog) setComposerMinimized(false); }, [extensionDialog]);
   const messageCwd = session?.cwd ?? newSessionCwd ?? undefined;
   const activeBtwRecord = btw.records.find((record) => record.id === btw.activeId);
   const btwPanel: BtwPanelProps | null = activeBtwRecord ? {
@@ -1107,6 +1107,10 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     <AgentLinkContext.Provider value={openAgentLink}>
     <div
       className="relative flex h-full flex-col overflow-hidden"
+      data-request-viewport
+      tabIndex={-1}
+      role="region"
+      aria-label={t("chatWindow.conversation")}
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -1355,6 +1359,19 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
           </div>
         )}
       </div>
+      </>
+      )}
+
+      <InteractiveRequestPanel
+        request={extensionDialog}
+        mobile={isMobile}
+        obscured={requestObscured}
+        onRespond={respondToExtensionUi}
+        onMobileRequestChange={onMobileRequestChange}
+      />
+
+      {!isEmptyNew && (
+      <>
 
       {/* Minimized pill bar - shown when composer is collapsed */}
       {composerMinimized && (
@@ -1408,15 +1425,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
           }}
         >
           <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
-            {extensionDialog && (
-              <div style={{ marginBottom: 8 }}>
-                <ExtensionDialog
-                  request={extensionDialog}
-                  onRespond={respondToExtensionUi}
-                  attached
-                />
-              </div>
-            )}
             <SkillDiagnosticsNotice snapshot={skillDiagnostics} onDisable={() => setSkillStartupDiagnostics(false)} />
             <ComposerPanels
               todoPhases={todoPhases}

@@ -1432,7 +1432,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       console.error("Failed to send extension UI response:", e);
       if (hookAliveRef.current && sessionIdRef.current === sid) {
+        // Failed delivery leaves the draft available, not locally answered:
+        // subsequent cancellation from omp or another tab must still close it.
+        if (locallyAnsweredDialogRef.current === request.id) locallyAnsweredDialogRef.current = null;
         addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+        toast.error("Request failed", e instanceof Error ? e.message : String(e));
       }
     }
   }, [addNotice]);
