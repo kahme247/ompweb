@@ -862,6 +862,7 @@ test("an answered dialog handoff cannot clear the next unanswered request", asyn
 for (const failure of ["HTTP rejection", "connection failure"]) {
   test(`a failed question response preserves the pending question for retry: ${failure}`, async () => {
     resetWorld();
+    toastCalls.length = 0;
     const sid = `answer-failure-${failure}`;
     primeSession(sid, [userMsg("u0", "q")]);
     const { w, es } = await startRun(sid, "ask");
@@ -878,6 +879,7 @@ for (const failure of ["HTTP rejection", "connection failure"]) {
     await settle(300);
     assert.equal(w.latest.extensionDialog?.id, request.id, "failure must not unmount and erase the answer");
     assert.equal(w.latest.notices.at(-1)?.type, "error");
+    assert.deepEqual(toastCalls.at(-1), ["error", "Request failed", failure === "connection failure" ? "connection lost" : "answer delivery failed"]);
     await act(() => es.emit({ ...request }));
     assert.equal(w.latest.extensionDialog?.id, request.id);
     await act(async () => { await w.latest.respondToExtensionUi(request, { value: "my retained answer" }); });
@@ -885,6 +887,22 @@ for (const failure of ["HTTP rejection", "connection failure"]) {
     assert.equal(w.latest.extensionDialog, null, "a successful retry closes the answered question");
   });
 }
+
+test("a remotely cancelled question closes after local answer delivery failed", async () => {
+  resetWorld();
+  primeSession("answer-failed-remote-cancel", [userMsg("u0", "q")]);
+  const { w, es } = await startRun("answer-failed-remote-cancel", "ask");
+  const request = { type: "extension_ui_request", id: "failed-answer", method: "editor", title: "Answer" };
+  await act(() => es.emit(request));
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "extension_ui_response",
+    produce: async () => ({ status: 500, value: { error: "answer delivery failed" } }),
+  });
+  await act(async () => { await w.latest.respondToExtensionUi(request, { value: "retained draft" }); });
+  assert.equal(w.latest.extensionDialog?.id, request.id);
+  await act(() => es.emit({ type: "extension_ui_request", id: "remote-cancel", method: "cancel", targetId: request.id }));
+  assert.equal(w.latest.extensionDialog, null, "a failed local send must not suppress later remote cancellation");
+});
 
 test("a stale local queue action reports that its target is unavailable", async () => {
   resetWorld();

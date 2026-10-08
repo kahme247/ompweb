@@ -114,11 +114,15 @@ function browserHistory({ prior = true, standalone = false } = {}) {
   return result;
 }
 
-async function mount({ open = false, strict = false, active = true } = {}) {
+async function mount({ open = false, strict = false, active = true, requestOpen = false, panelOpen = false } = {}) {
   const hook = renderHook(({ url }) => {
     const [sidebarOpen, setSidebarOpen] = React.useState(open);
-    const navigation = useSidebarHistory({ active, ready: true, sidebarOpen, setSidebarOpen, url });
-    return { ...navigation, sidebarOpen, setSidebarOpen };
+    const [mobileRequestOpen, setMobileRequestOpen] = React.useState(requestOpen);
+    const [filePanelOpen, setFilePanelOpen] = React.useState(panelOpen);
+    const closePanel = React.useCallback(() => setFilePanelOpen(false), []);
+    const minimizeRequest = React.useCallback(() => setMobileRequestOpen(false), []);
+    const navigation = useSidebarHistory({ active, ready: true, sidebarOpen, setSidebarOpen, url, minimizeRequest: mobileRequestOpen ? minimizeRequest : null, closePanel: filePanelOpen ? closePanel : null });
+    return { ...navigation, sidebarOpen, setSidebarOpen, mobileRequestOpen, setMobileRequestOpen, filePanelOpen, setFilePanelOpen };
   }, {
     initialProps: { url: "first" },
     wrapper: strict ? React.StrictMode : undefined,
@@ -341,3 +345,135 @@ test(`direct ${standalone ? "standalone" : "browser"} launch confirms dirty Back
   }
 });
 }
+
+test("mobile request Back minimizes before sidebar Back without changing URL or truncating Forward", async () => {
+  const world = browserHistory();
+  const shell = await mount({ requestOpen: true });
+  try {
+    const future = { url: "https://omp.test/?session=future", state: { __NA: true, other: "future entry" } };
+    world.entries.push(future);
+    world.activate();
+    world.nativeBack();
+    await world.flush();
+    assert.equal(shell.api.mobileRequestOpen, false);
+    assert.equal(shell.api.sidebarOpen, false);
+    assert.equal(shell.api.exitConfirmationOpen, false);
+    assert.equal(world.departed, false);
+    assert.equal(world.window.location.href, "https://omp.test/?session=first");
+    assert.equal(world.entries.length, 4);
+    assert.deepEqual(world.entries[3], future);
+    assert.equal(world.window.history.state.other, "retained");
+    world.nativeBack();
+    await world.flush();
+    assert.equal(shell.api.sidebarOpen, true);
+    world.window.history.forward();
+    await world.flush();
+    assert.equal(shell.api.sidebarOpen, false);
+    assert.equal(shell.api.mobileRequestOpen, false);
+    assert.equal(world.entries.length, 4);
+    assert.deepEqual(world.entries[3], future);
+    world.nativeBack();
+    await world.flush();
+    world.nativeBack();
+    await world.flush();
+    assert.equal(world.departed, true);
+  } finally { await shell.unmount(); }
+});
+
+test("request Back precedes dirty exit guard and preserves composer attachment drafts", async () => {
+  const world = browserHistory();
+  const shell = await mount({ requestOpen: true });
+  const draft = { value: "keep composer", images: [{ data: "AA==", mimeType: "image/png" }], files: [] };
+  try {
+    await act(() => setDraft(draftKey, draft));
+    world.activate();
+    world.nativeBack();
+    await world.flush();
+    assert.equal(shell.api.mobileRequestOpen, false);
+    assert.equal(shell.api.sidebarOpen, false);
+    assert.equal(shell.api.exitConfirmationOpen, false);
+    assert.deepEqual(getDraft(draftKey), draft);
+    world.nativeBack();
+    await world.flush();
+    assert.equal(shell.api.sidebarOpen, true);
+    assert.equal(shell.api.exitConfirmationOpen, false);
+    world.nativeBack();
+    await world.flush();
+    assert.equal(shell.api.exitConfirmationOpen, true);
+    assert.equal(world.departed, false);
+    await act(() => shell.api.cancelExit());
+    assert.deepEqual(getDraft(draftKey), draft);
+    assert.equal(world.entries.length, 3);
+  } finally {
+    await act(() => clearDraft(draftKey));
+    await shell.unmount();
+  }
+});
+
+test("Back closes the sidebar before minimizing the question", async () => {
+  const world = browserHistory();
+  const shell = await mount({ open: true, requestOpen: true });
+  try {
+    world.activate();
+    world.nativeBack();
+    await world.flush();
+    assert.equal(shell.api.mobileRequestOpen, true);
+    assert.equal(shell.api.sidebarOpen, false);
+    assert.equal(world.departed, false);
+    assert.equal(world.entries.length, 3);
+    world.nativeBack();
+    await world.flush();
+    assert.equal(shell.api.mobileRequestOpen, false);
+    assert.equal(world.departed, false);
+    world.nativeBack();
+    await world.flush();
+    assert.equal(shell.api.sidebarOpen, true);
+    world.nativeBack();
+    await world.flush();
+    assert.equal(world.departed, true);
+  } finally { await shell.unmount(); }
+});
+
+test("request Back that closes the sidebar never records the open sidebar on the restored entry", async () => {
+  const world = browserHistory();
+  const shell = await mount({ open: true, requestOpen: true });
+  try {
+    world.activate();
+    world.nativeBack();
+    await world.flush();
+    assert.equal(shell.api.sidebarOpen, false);
+    assert.equal(shell.api.mobileRequestOpen, true);
+    assert.equal(world.entries.at(-1).state.__ompSidebarHistory.sidebarOpen, false);
+  } finally { await shell.unmount(); }
+});
+
+test("desktop request does not take over the mobile sidebar Back bridge", async () => {
+  const world = browserHistory();
+  const shell = await mount({ active: false, requestOpen: true });
+  try {
+    assert.equal(world.entries.length, 2);
+    world.activate();
+    world.nativeBack();
+    await world.flush();
+    assert.equal(shell.api.mobileRequestOpen, true);
+    assert.equal(shell.api.sidebarOpen, false);
+    assert.equal(world.departed, true);
+  } finally { await shell.unmount(); }
+});
+
+test("Back closes a file panel before reducing a pending question", async () => {
+  const world = browserHistory();
+  const shell = await mount({ requestOpen: true, panelOpen: true });
+  try {
+    world.activate();
+    world.nativeBack();
+    await world.flush();
+    assert.equal(shell.api.filePanelOpen, false);
+    assert.equal(shell.api.mobileRequestOpen, true);
+    assert.equal(shell.api.sidebarOpen, false);
+    world.nativeBack();
+    await world.flush();
+    assert.equal(shell.api.mobileRequestOpen, false);
+    assert.equal(world.departed, false);
+  } finally { await shell.unmount(); }
+});

@@ -313,6 +313,13 @@ during the wait.
 - Prompt runs use a monotonic run id; late SSE or slow reconciliation responses from an old run must be ignored so they cannot resurrect stale streaming bubbles.
 
 ### Composer-attached panels (`components/ComposerPanels.tsx`)
+- Mobile interactive questions (`InteractiveRequestPanel` / `ExtensionDialog`)
+  cover only the conversation (`data-request-viewport`), not the shell toolbar.
+  Isolation must stop at that boundary. Workspace drawers cover the question;
+  `requestObscured` prevents focus/Escape takeover while they are open. Back
+  closes an open drawer before minimizing the question. Keep the form mounted
+  throughout so answers survive panel visits; answer delivery failures also
+  produce a toast outside the covered chat.
 - The live todo plan (`TodoList`) and the subagent roster live **pinned above
   the chat input**, not inside the scrollable message list. `ComposerPanels`
   renders both, each independently collapsible via its header row (`chevron`);

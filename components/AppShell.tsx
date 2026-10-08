@@ -655,6 +655,10 @@ export function AppShell({ appName }: { appName: string }) {
   const chatInputRef = useRef<ChatInputHandle | null>(null);
   const topBarRef = useRef<HTMLDivElement>(null);
   const [sessionInfoContainer, setSessionInfoContainer] = useState<HTMLDivElement | null>(null);
+  const [minimizeMobileRequest, setMinimizeMobileRequest] = useState<(() => void) | null>(null);
+  const handleMobileRequestChange = useCallback((minimize: (() => void) | null) => {
+    setMinimizeMobileRequest(() => minimize);
+  }, []);
 
   // Branch navigator state — populated by ChatWindow via onBranchDataChange
   const [branchTree, setBranchTree] = useState<SessionTreeNode[]>([]);
@@ -1757,6 +1761,8 @@ export function AppShell({ appName }: { appName: string }) {
     ready: mobileSidebarReady,
     sidebarOpen,
     setSidebarOpen,
+    minimizeRequest: minimizeMobileRequest,
+    closePanel: rightPanelIsModal ? closeRightPanel : null,
     url: searchParams.toString(),
   });
   useEffect(() => {
@@ -2469,6 +2475,8 @@ export function AppShell({ appName }: { appName: string }) {
               onSessionForked={handleSessionForked}
               modelsRefreshKey={modelsRefreshKey}
               chatInputRef={chatInputRef}
+              onMobileRequestChange={handleMobileRequestChange}
+              requestObscured={isMobile && (sidebarOpen || rightPanelIsModal)}
               onOpenFile={handleOpenLinkedFile}
               onOpenUrl={handleSessionOpenUrl}
               onBranchDataChange={handleBranchDataChange}
