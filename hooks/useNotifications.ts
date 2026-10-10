@@ -1,7 +1,8 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
-import { toast } from "@/components/ui/toast";
+import { toast, toastHistory } from "@/components/ui/toast";
 import { translate } from "@/lib/i18n";
 import { DEFAULT_NOTIFICATION_PREFS, renderNotification, type NotificationEvent, type RenderedNotification } from "@/lib/notification-events";
+import { isRecord } from "@/lib/type-guards";
 import {
   ensurePushSubscription,
   getNotificationDeviceId,
@@ -102,10 +103,13 @@ export function useNotifications({ sessionId, locale, onOpenSession }: { session
   // Delivery to this tab and notification clicks.
   useEffect(() => {
     // The whole card opens the session (click, tap, or Enter on the focused card); no separate Open link.
-    const showToast = (rendered: RenderedNotification, type: NotificationEvent["type"]) => {
+    const openFor = (rendered: RenderedNotification) => {
       const target = rendered.sessionId;
+      return target ? () => openRef.current(target) : undefined;
+    };
+    const showToast = (rendered: RenderedNotification, type: NotificationEvent["type"]) => {
       const show = type === "error" ? toast.error : toast.info;
-      show(rendered.title, rendered.body, { id: rendered.tag, onClick: target ? () => openRef.current(target) : undefined });
+      show(rendered.title, rendered.body, { id: rendered.tag, onClick: openFor(rendered) });
     };
     const onMessage = (raw: Event) => {
       if (!(raw instanceof CustomEvent)) return;
@@ -119,6 +123,8 @@ export function useNotifications({ sessionId, locale, onOpenSession }: { session
       // Permission withdrawn or never granted: the toast is the only way left to tell the user.
       void showSystemNotification(rendered).then((shown) => {
         if (!shown) showToast(rendered, event.type);
+        // Shown by the OS: log it so the Notifications tab still lists it.
+        else toastHistory.record(event.type === "error" ? "error" : "info", rendered.title, rendered.body, { id: rendered.tag, onClick: openFor(rendered) });
       });
     };
     const onOpen = (raw: Event) => {
@@ -126,9 +132,16 @@ export function useNotifications({ sessionId, locale, onOpenSession }: { session
     };
     const onWorkerMessage = (message: MessageEvent) => {
       const data: unknown = message.data;
-      if (data && typeof data === "object" && "type" in data && data.type === "omp-open-session" && "sessionId" in data && typeof data.sessionId === "string") {
+      if (!isRecord(data)) return;
+      if (data.type === "omp-open-session" && typeof data.sessionId === "string") {
         openRef.current(data.sessionId);
+        return;
       }
+      // A push the service worker showed while this tab was open (subscribed browsers get pushes, not "os" frames).
+      const shown = data.notification;
+      if (data.type !== "omp-notification-shown" || !isRecord(shown) || typeof shown.title !== "string" || typeof shown.body !== "string" || typeof shown.tag !== "string" || typeof shown.sessionId !== "string") return;
+      const target = shown.sessionId;
+      toastHistory.record(shown.type === "error" ? "error" : "info", shown.title, shown.body, { id: shown.tag || undefined, onClick: target ? () => openRef.current(target) : undefined });
     };
     window.addEventListener(NOTIFICATION_MESSAGE_EVENT, onMessage);
     window.addEventListener(OPEN_SESSION_EVENT, onOpen);

@@ -61,6 +61,8 @@ export interface ToastHistoryEntry {
   title: React.ReactNode;
   description?: React.ReactNode;
   clamp?: boolean;
+  /** The toast's card action, run by clicking the entry. */
+  onClick?: () => void;
   at: number;
   read: boolean;
 }
@@ -82,13 +84,13 @@ export const toastHistory = {
   },
   get: () => history,
   /** Add an entry without showing a toast, e.g. for a notification already delivered by the OS. */
-  record(kind: ToastKind, title: React.ReactNode, description?: React.ReactNode, options?: { id?: string; clamp?: boolean }) {
+  record(kind: ToastKind, title: React.ReactNode, description?: React.ReactNode, options?: { id?: string; clamp?: boolean; onClick?: () => void }) {
     const id = options?.id ?? `recorded-${++recordedCount}`;
     // A reused id replaces its toast on screen, so it replaces its history entry
     // too. It keeps its read state: re-announcing the same notice (e.g. an
     // update toast on every tab focus) must not re-badge it.
     const read = history.some((e) => e.id === id && e.read);
-    const entry: ToastHistoryEntry = { id, kind, title, description, clamp: options?.clamp, at: Date.now(), read };
+    const entry: ToastHistoryEntry = { id, kind, title, description, clamp: options?.clamp, onClick: options?.onClick, at: Date.now(), read };
     setHistory([entry, ...history.filter((e) => e.id !== id)].slice(0, TOAST_HISTORY_LIMIT));
   },
   markAllRead: () => {
@@ -119,7 +121,7 @@ function add(kind: ToastKind, title: React.ReactNode, description?: React.ReactN
     timeout,
     ...(options?.onClose ? { onClose: options.onClose } : {}),
   });
-  toastHistory.record(kind, title, description, { id, clamp: options?.clamp });
+  toastHistory.record(kind, title, description, { id, clamp: options?.clamp, onClick: options?.onClick });
   return id;
 }
 export const toast = {

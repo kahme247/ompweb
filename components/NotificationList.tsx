@@ -52,6 +52,14 @@ function NotificationRow({ entry }: { entry: ToastHistoryEntry }) {
   return (
     <li
       data-swipe-dismiss
+      // With an action the row is the only way to run it (there is no Open link), so keyboard users can focus it.
+      tabIndex={entry.onClick ? 0 : undefined}
+      className={entry.onClick ? "ui-focus-ring" : undefined}
+      onKeyDown={entry.onClick ? (event) => {
+        if (event.key !== "Enter" || event.target !== event.currentTarget) return;
+        event.preventDefault();
+        entry.onClick?.();
+      } : undefined}
       onPointerDown={(event) => {
         clickGuard.onPointerDown(event);
         // A second finger never takes over a swipe in progress; any other
@@ -98,6 +106,12 @@ function NotificationRow({ entry }: { entry: ToastHistoryEntry }) {
         setOffset(0);
       }}
       onClickCapture={clickGuard.onClickCapture}
+      // Like the toast card: a click anywhere but the controls and expandable text opens it.
+      onClick={entry.onClick ? (event) => {
+        if (event.target instanceof Element && event.target.closest("button, a, input, textarea, select, [aria-expanded]")) return;
+        if (window.getSelection()?.isCollapsed === false) return;
+        entry.onClick?.();
+      } : undefined}
       style={{
         display: "flex",
         alignItems: "flex-start",
@@ -105,6 +119,7 @@ function NotificationRow({ entry }: { entry: ToastHistoryEntry }) {
         padding: 8,
         borderRadius: "var(--radius-control)",
         background: entry.read ? undefined : "var(--bg-subtle)",
+        cursor: entry.onClick ? "pointer" : undefined,
         touchAction: "pan-y",
         transform: leaving ? `translateX(${leaving * 110}%)` : offset ? `translateX(${offset}px)` : undefined,
         opacity: leaving ? 0 : 1 - Math.min(Math.abs(offset) / 400, 0.5),

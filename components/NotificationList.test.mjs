@@ -82,3 +82,37 @@ test("the click ending a drag is swallowed; taps and keyboard clicks still reach
   pointer(description(), "click", 101, 50);
   assert.equal(description().getAttribute("aria-expanded"), "false");
 });
+
+test("an entry with an action runs it on click or Enter, but not from its controls", () => {
+  const opened = [];
+  act(() => { toastHistory.record("info", "Agent finished", "A long description", { id: "n2", clamp: true, onClick: () => opened.push(1) }); });
+  const view = render(React.createElement(NotificationList));
+  const row = view.container.querySelector("li");
+  const enter = (target) => act(() => { target.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })); });
+  act(() => view.container.querySelector(".display-serif").click());
+  assert.equal(opened.length, 1);
+  assert.equal(row.tabIndex, 0);
+  assert.equal(row.style.cursor, "pointer");
+  enter(row);
+  assert.equal(opened.length, 2);
+  // Expandable text expands instead; a released text selection and Enter on the dismiss button do nothing.
+  const description = view.container.querySelector("[aria-expanded]");
+  act(() => description.click());
+  assert.equal(description.getAttribute("aria-expanded"), "true");
+  window.getSelection().selectAllChildren(view.container.querySelector(".display-serif"));
+  act(() => view.container.querySelector(".display-serif").click());
+  window.getSelection().removeAllRanges();
+  enter(view.container.querySelector("button"));
+  assert.equal(opened.length, 2);
+  // The dismiss button removes the entry without running its action.
+  act(() => view.container.querySelector("button").click());
+  assert.equal(opened.length, 2);
+  assert.equal(toastHistory.get().length, 0);
+});
+
+test("an entry without an action is not focusable or clickable", () => {
+  act(() => { toastHistory.record("info", "Saved", "Body", { id: "n3" }); });
+  const row = render(React.createElement(NotificationList)).container.querySelector("li");
+  assert.equal(row.hasAttribute("tabindex"), false);
+  assert.equal(row.style.cursor, "");
+});

@@ -103,3 +103,49 @@ test("a session notification toast opens its session from a card click; one with
   act(() => withoutSession.querySelector(".display-serif").click());
   assert.deepEqual(sessions, ["s1"]);
 });
+
+test("a notification the OS showed is listed in history and opens its session from there", async () => {
+  const sessions = [];
+  const { toastHistory } = await jiti.import("@/components/ui/toast");
+  const created = [];
+  // Bare `Notification` in the code under test resolves to the global, not window.
+  globalThis.Notification = window.Notification = class { static permission = "granted"; constructor(title) { created.push(title); } };
+  try {
+    renderHook(() => useNotifications({ sessionId: null, locale: "en", onOpenSession: (id) => sessions.push(id) }));
+    await act(async () => {
+      window.dispatchEvent(new window.CustomEvent(NOTIFICATION_MESSAGE_EVENT, { detail: { kind: "os", event: { type: "error", sessionId: "s9", sessionName: "Shown by OS", detail: "boom" } } }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.deepEqual(created, ["Shown by OS"]);
+    const entry = toastHistory.get().find((e) => e.title === "Shown by OS");
+    assert.ok(entry, "listed in the Notifications tab");
+    assert.equal(entry.kind, "error");
+    entry.onClick();
+    assert.deepEqual(sessions, ["s9"]);
+  } finally {
+    delete window.Notification;
+    delete globalThis.Notification;
+    toastHistory.clear();
+  }
+});
+
+test("a push the service worker showed is listed in history and opens its session; other messages are ignored", async () => {
+  const sessions = [];
+  const { toastHistory } = await jiti.import("@/components/ui/toast");
+  const worker = new window.EventTarget();
+  Object.defineProperty(window.navigator, "serviceWorker", { configurable: true, value: worker });
+  try {
+    renderHook(() => useNotifications({ sessionId: null, locale: "en", onOpenSession: (id) => sessions.push(id) }));
+    const post = (data) => act(() => { worker.dispatchEvent(new window.MessageEvent("message", { data })); });
+    post({ type: "omp-notification-shown", notification: { type: "error", title: "Pushed", body: "Run failed", tag: "s7:error", sessionId: "s7" } });
+    post({ type: "omp-notification-shown", notification: { title: 42 } });
+    post("junk");
+    const entries = toastHistory.get();
+    assert.deepEqual(entries.map((e) => [e.id, e.kind, e.title]), [["s7:error", "error", "Pushed"]]);
+    entries[0].onClick();
+    assert.deepEqual(sessions, ["s7"]);
+  } finally {
+    delete window.navigator.serviceWorker;
+    toastHistory.clear();
+  }
+});

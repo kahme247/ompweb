@@ -11,15 +11,27 @@ self.addEventListener("push", (event) => {
   } catch {
     // Unreadable payload: still show something (iOS revokes silent pushes).
   }
+  const shown = {
+    type: data.type === "error" ? "error" : "info",
+    title: data.title || "omp web",
+    body: data.body || "",
+    tag: data.tag || "",
+    sessionId: data.sessionId || "",
+  };
   event.waitUntil(
-    self.registration.showNotification(data.title || "omp web", {
-      body: data.body || "",
-      icon: "/icon-192.png",
-      badge: "/badge-96.png",
-      tag: data.tag || undefined,
-      renotify: Boolean(data.tag),
-      data: { url: data.url || "/", sessionId: data.sessionId || "" },
-    }),
+    (async () => {
+      await self.registration.showNotification(shown.title, {
+        body: shown.body,
+        icon: "/icon-192.png",
+        badge: "/badge-96.png",
+        tag: shown.tag || undefined,
+        renotify: Boolean(shown.tag),
+        data: { url: data.url || "/", sessionId: shown.sessionId },
+      });
+      // Open tabs list it in their Notifications tab, like a notification the page showed itself.
+      const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      for (const client of windows) client.postMessage({ type: "omp-notification-shown", notification: shown });
+    })(),
   );
 });
 

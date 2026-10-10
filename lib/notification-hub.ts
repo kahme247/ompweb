@@ -258,7 +258,8 @@ async function sendPush(device: NotificationDevice, event: NotificationEvent): P
   if (!subscription) return { ok: false, error: "no push subscription" };
   try {
     const { publicKey, privateKey } = vapidKeys();
-    await webpush.sendNotification(subscription, JSON.stringify(renderFor(event, device.prefs.locale)), {
+    // `type` lets the service worker tell open tabs which kind of entry to list.
+    await webpush.sendNotification(subscription, JSON.stringify({ ...renderFor(event, device.prefs.locale), type: event.type }), {
       TTL: PUSH_TTL_SECONDS,
       urgency: event.type === "input" || event.type === "error" ? "high" : "normal",
       timeout: PUSH_TIMEOUT_MS,
