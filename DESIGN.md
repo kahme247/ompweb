@@ -37,8 +37,9 @@ do not assume that Pi-specific implementation changes can be merged unchanged.
 - npm package and CLI command: `ompweb`.
 - Default server address: `http://127.0.0.1:30177`.
 - Existing `OMP_WEB_*` environment variables remain the configuration prefix
-  for compatibility: `OMP_WEB_HOSTNAME`, `OMP_WEB_NO_OPEN`,
-  `OMP_WEB_PASSWORD`, and `OMP_WEB_OMP_BIN`.
+  for compatibility: `OMP_WEB_HOSTNAME`, `OMP_WEB_NO_OPEN`, and
+  `OMP_WEB_OMP_BIN`. `OMP_WEB_PASSWORD` is accepted only as a migration step
+  (see the security contract).
 - `PI_CODING_AGENT_DIR` and OMP's own directory conventions are
   respected because they identify the user's existing OMP state.
 - The web UI displays its own package version separately from the detected
@@ -171,10 +172,13 @@ Deploy the frontend and API support together; no native OMP upgrade is required.
 
 - Bind loopback-only by default. A non-loopback hostname is an explicit opt-in.
 - `OMP_WEB_PASSWORD_HASH` protects every route with a password-only sign-in
-  screen. Only a scrypt hash is accepted (`ompweb hash-password`); a plaintext
-  `OMP_WEB_PASSWORD` or `--password` refuses to start, because every `omp`
-  session inherits the server's environment and an agent could print the
-  password into its transcript, session file and model-provider traffic.
+  screen. Only a scrypt hash reaches the server (`ompweb hash-password`),
+  because every `omp` session inherits the server's environment and an agent
+  could print the password into its transcript, session file and
+  model-provider traffic. `--password`, or a plaintext `OMP_WEB_PASSWORD` next
+  to a hash, refuses to start. A lone `OMP_WEB_PASSWORD` is hashed by the
+  launcher, removed from the server's environment, and logged as a warning with
+  the hash to use instead; the server itself still refuses a plaintext.
   Successful sign-in creates an HTTP-only, signed cookie with a 30-day expiry;
   the signing key is a per-installation random value mixed with the hash, so a
   copied password hash cannot forge a session and changing the password still

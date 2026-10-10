@@ -62,13 +62,14 @@ function readHiddenLine(prompt) {
       const bytes = Buffer.from(chunk);
       // Ctrl+C: stop waiting, and let the caller treat it as a cancel.
       if (bytes.includes(INTERRUPT_KEY)) return finish(null);
-      const newline = bytes.indexOf(0x0a);
+      // Raw mode turns off ICRNL, so Enter arrives as \r; a pasted line may end in \n.
+      const newline = bytes.findIndex((byte) => byte === 0x0d || byte === 0x0a);
       if (newline === -1) {
         chunks.push(bytes);
         return;
       }
       chunks.push(bytes.subarray(0, newline));
-      finish(Buffer.concat(chunks).toString("utf8").replace(/\r$/, ""));
+      finish(Buffer.concat(chunks).toString("utf8"));
     };
     const onEnd = () => finish(null);
     const onError = (error) => {

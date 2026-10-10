@@ -8,7 +8,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Breaking changes
 
-- **A plaintext web password is no longer accepted.** `OMP_WEB_PASSWORD` and `ompweb --password` now stop the server at startup instead of starting it, and omp-web refuses every request while a plaintext password is configured. Every `omp` session inherits omp-web's environment, so an agent running `env` could print the password into its session file and send it to the model provider. Replace it with `OMP_WEB_PASSWORD_HASH`: run `ompweb hash-password` (it reads the password from stdin, so it stays out of shell history and `ps`) and pass the printed `scrypt$…` value. There is no compatibility period and no plaintext fallback. The service installers hash an `OMP_WEB_PASSWORD` given at install time, so `OMP_WEB_PASSWORD='…' ompweb-systemd install` still works and now stores only the hash; the Linux tray's **Set Web Password…** does the same. Existing session cookies are invalidated.
+- **A plaintext web password no longer reaches the server.** `ompweb --password` now stops the launcher at startup, and the server refuses every request while a plaintext password is in its environment. Every `omp` session inherits omp-web's environment, so an agent running `env` could print the password into its session file and send it to the model provider. Replace it with `OMP_WEB_PASSWORD_HASH`: run `ompweb hash-password` (it reads the password from stdin, so it stays out of shell history and `ps`) and pass the printed `scrypt$…` value. As a migration step, `ompweb` still accepts `OMP_WEB_PASSWORD`: it hashes the password at startup, keeps it out of the server's environment, and logs a warning with the hash to set as `OMP_WEB_PASSWORD_HASH`. Switch soon: agents can still read the plaintext from the `ompweb` launcher process, and each start makes a new hash, so every restart signs all browsers out. Setting both variables stops the launcher. The service installers hash an `OMP_WEB_PASSWORD` given at install time, so `OMP_WEB_PASSWORD='…' ompweb-systemd install` still works and now stores only the hash; the Linux tray's **Set Web Password…** does the same. Existing session cookies are invalidated.
 
 ### Added
 
@@ -43,6 +43,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Fixes & Improvements
 
+- `ompweb hash-password` in a terminal finishes when you press Enter. The hidden prompt waited for a newline, but a terminal in raw mode sends Enter as a carriage return, so the prompt never ended.
 - Fit the agent's question panel on a phone. A long question, header or option preview no longer widens the panel past the screen and clips the answer text at the right edge, and previews wrap instead of scrolling sideways.
 - A question that arrives while you are composing on a touch device no longer pulls focus into its answer box, which raised the on-screen keyboard and scrolled the unread question away. The panel waits for a tap; on a desktop with a keyboard it focuses its first field as before.
 - Reach **Submit** with the keyboard open: the question panel is now capped to the visible area so its Cancel/Submit footer stays on screen, an inline send button appears beside the typed answer (same validation as the footer), and the dialog's buttons follow the **Touch Targets** setting.

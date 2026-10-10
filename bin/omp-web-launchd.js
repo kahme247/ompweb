@@ -80,7 +80,7 @@ function install(pkgArg) {
   const noOpen = process.env.OMP_WEB_NO_OPEN ?? "1";
   const disableAutoUpdate = process.env.OMP_WEB_DISABLE_AUTOUPDATE;
   const installName = process.env.OMP_WEB_NAME;
-  // Only a hash is stored in the plist: omp-web never reads a plaintext
+  // Only a hash is stored in the plist: omp-web never forwards a plaintext
   // password, and `OMP_WEB_PASSWORD` set for this install is hashed here.
   let passwordHash;
   try {

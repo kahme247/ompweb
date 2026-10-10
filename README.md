@@ -128,10 +128,15 @@ ompweb --version                           # Show version
 
 ### Password protection
 
-omp-web **never reads a plaintext password**. A password in `OMP_WEB_PASSWORD`
-or passed as `--password` stops the server at startup, because every `omp`
-session inherits the server's environment: an agent running `env` would print
-the password into its session file and send it to the model provider.
+omp-web **never passes a plaintext password to the server**, because every
+`omp` session inherits the server's environment: an agent running `env` would
+print the password into its session file and send it to the model provider.
+`--password` stops `ompweb` at startup. An `OMP_WEB_PASSWORD` still works for
+now: `ompweb` hashes it at startup, keeps it out of the server's environment,
+and logs a warning with the hash to put in `OMP_WEB_PASSWORD_HASH` instead.
+Switch soon: agents can still read the plaintext from the `ompweb` launcher
+process, and each start makes a new hash, so every restart signs all browsers
+out. Setting both variables stops `ompweb`; remove `OMP_WEB_PASSWORD`.
 
 Generate a hash instead and give that to the server:
 
