@@ -211,7 +211,7 @@ if (launchOptions.legacyPasswordSource === "env" && !passwordHash) {
   process.env.OMP_WEB_PASSWORD_HASH = passwordHash;
   delete process.env.OMP_WEB_PASSWORD;
   console.warn([
-    "Warning: OMP_WEB_PASSWORD holds a plaintext password. Stop using it.",
+    "Warning: OMP_WEB_PASSWORD holds a plaintext password. This option has been deprecated and is marked for removal.",
     "",
     "Every omp session inherits omp-web's environment, so an agent could print",
     "the password into its transcript. ompweb hashed it and kept it out of the",
