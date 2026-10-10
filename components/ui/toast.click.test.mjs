@@ -8,7 +8,7 @@ import { createJiti } from "jiti";
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tryNative: false, tsconfigPaths: true });
 // Same specifiers as useNotifications' own imports: on Windows a relative path
 // can load a second toast module, whose manager the rendered provider never sees.
-const { ClampedDescription, ToastProvider, toast } = await jiti.import("@/components/ui/toast");
+const { ClampedDescription, ToastProvider, toast, toastHistory } = await jiti.import("@/components/ui/toast");
 const { useNotifications } = await jiti.import("@/hooks/useNotifications");
 const { NOTIFICATION_MESSAGE_EVENT } = await jiti.import("@/lib/notification-client");
 
@@ -98,6 +98,8 @@ test("a session notification toast opens its session from a card click; one with
   assert.equal(withSession.querySelectorAll("button:not(.toast-close-button), a").length, 0);
   act(() => withSession.querySelector(".display-serif").click());
   assert.deepEqual(sessions, ["s1"]);
+  // Session notifications are a pushable type, so they are listed, unread.
+  assert.deepEqual(toastHistory.get().filter((e) => e.title === "Fix bug").map((e) => [e.id, e.read]), [["s1:completed", false]]);
   const withoutSession = deliver("", "No session");
   assert.equal(withoutSession.style.cursor, "");
   act(() => withoutSession.querySelector(".display-serif").click());

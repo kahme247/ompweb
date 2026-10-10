@@ -41,6 +41,8 @@ interface ToastOptions {
    * expandable text), then closes the toast.
    */
   onClick?: () => void;
+  /** List this toast in the Notifications tab. Only for the notification types that can also be pushed. */
+  history?: boolean;
 }
 
 const manager = Toast.createToastManager<ToastData>();
@@ -74,7 +76,7 @@ function setHistory(next: ToastHistoryEntry[]) {
 
 let recordedCount = 0;
 
-/** Recent toasts and OS notifications, newest first, kept in memory for the notification center. */
+/** Recent session notifications (`history: true` toasts), newest first, kept in memory for the Notifications tab. */
 export const toastHistory = {
   subscribe(listener: () => void) {
     historyListeners.add(listener);
@@ -84,11 +86,9 @@ export const toastHistory = {
   /** Add an entry without showing a toast, e.g. for a notification already delivered by the OS. */
   record(kind: ToastKind, title: React.ReactNode, description?: React.ReactNode, options?: { id?: string; clamp?: boolean }) {
     const id = options?.id ?? `recorded-${++recordedCount}`;
-    // A reused id replaces its toast on screen, so it replaces its history entry
-    // too. It keeps its read state: re-announcing the same notice (e.g. an
-    // update toast on every tab focus) must not re-badge it.
-    const read = history.some((e) => e.id === id && e.read);
-    const entry: ToastHistoryEntry = { id, kind, title, description, clamp: options?.clamp, at: Date.now(), read };
+    // A reused id (`<sessionId>:<type>`) replaces its toast on screen, so it
+    // replaces its history entry too, unread again: it is a new notification.
+    const entry: ToastHistoryEntry = { id, kind, title, description, clamp: options?.clamp, at: Date.now(), read: false };
     setHistory([entry, ...history.filter((e) => e.id !== id)].slice(0, TOAST_HISTORY_LIMIT));
   },
   markAllRead: () => {
@@ -119,7 +119,7 @@ function add(kind: ToastKind, title: React.ReactNode, description?: React.ReactN
     timeout,
     ...(options?.onClose ? { onClose: options.onClose } : {}),
   });
-  toastHistory.record(kind, title, description, { id, clamp: options?.clamp });
+  if (options?.history) toastHistory.record(kind, title, description, { id, clamp: options.clamp });
   return id;
 }
 export const toast = {

@@ -105,7 +105,7 @@ export function useNotifications({ sessionId, locale, onOpenSession }: { session
     const showToast = (rendered: RenderedNotification, type: NotificationEvent["type"]) => {
       const target = rendered.sessionId;
       const show = type === "error" ? toast.error : toast.info;
-      show(rendered.title, rendered.body, { id: rendered.tag, onClick: target ? () => openRef.current(target) : undefined });
+      show(rendered.title, rendered.body, { id: rendered.tag, history: true, onClick: target ? () => openRef.current(target) : undefined });
     };
     const onMessage = (raw: Event) => {
       if (!(raw instanceof CustomEvent)) return;

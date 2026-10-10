@@ -30,6 +30,17 @@ function mount() {
 }
 const settle = () => act(() => new Promise((resolve) => setTimeout(resolve, 250)));
 
+test("only unread rows carry the unread marker", () => {
+  act(() => {
+    toastHistory.record("info", "Old", undefined, { id: "old" });
+    toastHistory.markAllRead();
+    toastHistory.record("info", "New", undefined, { id: "new" });
+  });
+  const view = render(React.createElement(NotificationList));
+  const markedRows = Array.from(view.container.querySelectorAll("li")).filter((li) => li.querySelector('[role="img"]'));
+  assert.deepEqual(markedRows.map((li) => li.querySelector(".display-serif").textContent), ["New"]);
+});
+
 test("a sideways touch swipe from anywhere on the row slides it out, then removes it, in either direction", async () => {
   for (const points of [[[100, 50], [130, 54], [160, 58]], [[200, 50], [170, 46], [140, 44]]]) {
     const { row, description } = mount();
