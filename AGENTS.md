@@ -741,7 +741,10 @@ every toast also lands in `toastHistory`, the last 100 kept in memory for the
 right panel's Notifications tab; OS notifications call `toastHistory.record()`
 so they appear there too). Unread entries badge the right-panel toggle, which
 then opens the Notifications tab; entries become read when the user leaves
-that tab or uses Mark all as read. Toasts and Notifications entries dismiss on
+that tab, uses Mark all as read, or runs the toast's `onClick` action
+(`toastHistory.markRead`). A reused toast id is unread again unless the toast
+passes `keepRead` (the update notices, re-announced on every tab focus).
+Toasts and Notifications entries dismiss on
 a sideways touch/pen swipe (base-ui's toast swipe; `NotificationRow` for the
 list) and carry `data-swipe-dismiss`, which the mobile sidebar gesture skips.
 `useDragClickGuard` swallows the click that ends any drag on them, judged by

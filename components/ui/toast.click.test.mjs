@@ -8,7 +8,7 @@ import { createJiti } from "jiti";
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tryNative: false, tsconfigPaths: true });
 // Same specifiers as useNotifications' own imports: on Windows a relative path
 // can load a second toast module, whose manager the rendered provider never sees.
-const { ClampedDescription, ToastProvider, toast } = await jiti.import("@/components/ui/toast");
+const { ClampedDescription, ToastProvider, toast, toastHistory } = await jiti.import("@/components/ui/toast");
 const { useNotifications } = await jiti.import("@/hooks/useNotifications");
 const { NOTIFICATION_MESSAGE_EVENT } = await jiti.import("@/lib/notification-client");
 
@@ -31,23 +31,27 @@ function show(description, options = {}) {
   return { opened, card: () => document.querySelector(".toast-card") };
 }
 
-test("clicking anywhere on a toast card runs its action and closes it", () => {
+test("clicking anywhere on a toast card runs its action, closes it and marks it read", () => {
   const { opened, card } = show("Body");
   assert.equal(card().style.cursor, "pointer");
+  assert.equal(toastHistory.get()[0].read, false);
   const title = card().querySelector(".display-serif");
   pointer(title, "pointerdown", 100, 50);
   pointer(title, "click", 102, 51);
   assert.equal(opened.length, 1);
+  assert.equal(toastHistory.get()[0].read, true);
   assert.equal(card()?.hasAttribute("data-ending-style") ?? true, true);
 });
 
-test("Enter on the focused card runs its action; Enter inside it does not", () => {
+test("Enter on the focused card runs its action and marks it read; Enter inside it does not", () => {
   const { opened, card } = show(React.createElement("button", { type: "button" }, "inner"));
   const press = (target) => act(() => { target.dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })); });
   press(card().querySelector("button:not(.toast-close-button)"));
   assert.equal(opened.length, 0);
+  assert.equal(toastHistory.get()[0].read, false);
   press(card());
   assert.equal(opened.length, 1);
+  assert.equal(toastHistory.get()[0].read, true);
 });
 
 test("buttons, links, expandable text, drags and text selection do not trigger the card action", () => {
@@ -73,6 +77,7 @@ test("buttons, links, expandable text, drags and text selection do not trigger t
   window.getSelection().selectAllChildren(title);
   act(() => title.click());
   assert.equal(opened.length, 0);
+  assert.equal(toastHistory.get()[0].read, false);
 });
 
 test("a toast without an action keeps the default cursor", () => {

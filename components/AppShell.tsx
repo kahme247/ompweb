@@ -364,7 +364,7 @@ export function AppShell({ appName }: { appName: string }) {
           </div>,
           // Version in the id: re-announcing the same version keeps its
           // notification-center read state; a newer version is a new notice.
-          { id: `omp-update-available:${version}`, timeout: 0, onClose: () => rememberDismissedVersion(DISMISSED_OMP_UPDATE_KEY, version) }
+          { id: `omp-update-available:${version}`, keepRead: true, timeout: 0, onClose: () => rememberDismissedVersion(DISMISSED_OMP_UPDATE_KEY, version) }
         );
       })
       .catch(() => {});
@@ -434,7 +434,7 @@ export function AppShell({ appName }: { appName: string }) {
               </button>
             </div>
           </div>,
-          { id: `app-update-available:${version}`, timeout: 0, onClose: () => rememberDismissedVersion(DISMISSED_APP_UPDATE_KEY, version) }
+          { id: `app-update-available:${version}`, keepRead: true, timeout: 0, onClose: () => rememberDismissedVersion(DISMISSED_APP_UPDATE_KEY, version) }
         );
       }
     }

@@ -87,20 +87,24 @@ test("recorded OS notifications get distinct entries and notify subscribers", ()
   assert.equal(notified, 3);
 });
 
-test("new entries are unread until marked; a re-announced id keeps its read state", () => {
+test("new entries are unread until marked; a re-announced id stays read only with keepRead", () => {
   toastHistory.clear();
-  toast.info("Update available", undefined, { id: "update" });
+  toast.info("Update available", undefined, { id: "update", keepRead: true });
+  toast.info("Session s1 finished", undefined, { id: "s1:completed" });
   toastHistory.record("info", "Task finished");
-  assert.deepEqual(toastHistory.get().map((e) => e.read), [false, false]);
+  assert.deepEqual(toastHistory.get().map((e) => e.read), [false, false, false]);
 
   toastHistory.markAllRead();
-  assert.deepEqual(toastHistory.get().map((e) => e.read), [true, true]);
+  assert.deepEqual(toastHistory.get().map((e) => e.read), [true, true, true]);
 
   // The update toast re-fires on every tab focus; it must not re-badge.
-  toast.info("Update available", undefined, { id: "update" });
+  toast.info("Update available", undefined, { id: "update", keepRead: true });
+  // A session's next completion reuses its tag but is news.
+  toast.info("Session s1 finished", undefined, { id: "s1:completed" });
   toastHistory.record("info", "Another task finished");
   assert.deepEqual(toastHistory.get().map((e) => [e.title, e.read]), [
     ["Another task finished", false],
+    ["Session s1 finished", false],
     ["Update available", true],
     ["Task finished", true],
   ]);
