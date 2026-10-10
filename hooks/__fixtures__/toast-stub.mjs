@@ -8,7 +8,4 @@ export const toast = {
   info(...args) { toastCalls.push(["info", ...args]); },
   close() {},
 };
-export const toastHistory = {
-  record(...args) { toastCalls.push(["record", ...args]); },
-};
 export default toast;

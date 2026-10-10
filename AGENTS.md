@@ -736,12 +736,15 @@ motion: --dur-fast (150ms) --dur-med (220ms) --dur-slow (320ms) --ease-out-warm
 
 `components/ui/` holds the shared primitives (built on `@base-ui/react`):
 `primitives.tsx` (Dialog/Tooltip/Collapsible), `field.tsx` (form fields +
-ConfirmDialog), `toast.tsx` (`toast.success/error/info`, mounted in AppShell;
-every toast also lands in `toastHistory`, the last 100 kept in memory for the
-right panel's Notifications tab; OS notifications call `toastHistory.record()`
-so they appear there too). Unread entries badge the right-panel toggle, which
-then opens the Notifications tab; entries become read when the user leaves
-that tab or uses Mark all as read. Toasts and Notifications entries dismiss on
+ConfirmDialog), `toast.tsx` (`toast.success/error/info`, mounted in AppShell).
+Only toasts passed `history: true` land in `toastHistory`, the last 100 kept
+in memory for the right panel's Notifications tab; `useNotifications` sets it
+for session notifications (the pushable types: completed, input, error, model
+switch), so plain status toasts ("Saved", update notices) stay out. Unread
+entries badge the right-panel toggle, which then opens the Notifications tab;
+entries become read when the user leaves that tab or uses Mark all as read,
+and a reused id is unread again. Unread rows show a leading accent dot and a
+bold title; read rows are dimmed. Toasts and Notifications entries dismiss on
 a sideways touch/pen swipe (base-ui's toast swipe; `NotificationRow` for the
 list) and carry `data-swipe-dismiss`, which the mobile sidebar gesture skips.
 `useDragClickGuard` swallows the click that ends any drag on them, judged by

@@ -111,19 +111,20 @@ function NotificationRow({ entry }: { entry: ToastHistoryEntry }) {
         transition: dragging ? "none" : "transform var(--dur-fast) var(--ease-out-warm), opacity var(--dur-fast) var(--ease-out-warm)",
       }}
     >
-      <KindIcon kind={entry.kind} />
+      {/* Unread marker in a fixed leading slot, so read and unread rows keep their text aligned. */}
+      <span style={{ width: 8, flexShrink: 0, display: "flex", justifyContent: "center", paddingTop: 6 }}>
+        {!entry.read && <span role="img" aria-label={t("appShell.notificationUnread")} title={t("appShell.notificationUnread")} style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--accent)" }} />}
+      </span>
+      <span style={{ display: "flex", opacity: entry.read ? 0.6 : 1 }}><KindIcon kind={entry.kind} /></span>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
-          <span className="display-serif" style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.4, overflowWrap: "anywhere" }}>{entry.title}</span>
-          {!entry.read && (
-            <span role="img" aria-label={t("appShell.notificationUnread")} style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--accent)", flexShrink: 0, alignSelf: "center" }} />
-          )}
+          <span className="display-serif" style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.4, overflowWrap: "anywhere", color: entry.read ? "var(--text-muted)" : "var(--text)", fontWeight: entry.read ? 400 : 600 }}>{entry.title}</span>
           <time dateTime={new Date(entry.at).toISOString()} style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0 }}>
             {new Date(entry.at).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })}
           </time>
         </div>
         {entry.description != null && (
-          <div style={{ ...descriptionBaseStyle, overflowWrap: "anywhere" }}>
+          <div style={{ ...descriptionBaseStyle, overflowWrap: "anywhere", ...(entry.read ? { color: "var(--text-dim)" } : {}) }}>
             {entry.clamp ? <ClampedDescription>{entry.description}</ClampedDescription> : entry.description}
           </div>
         )}

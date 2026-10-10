@@ -43,6 +43,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Fixes & Improvements
 
+- The Notifications tab now tells unread notifications from read ones: an unread notification has an accent dot before it and a bold title on a tinted row, and read notifications are dimmed. The tab also lists only the notifications that can also be pushed (task finished, input needed, error, model switch). Confirmations such as "Saved", copy results, update notices and agent `notify` calls still show as toasts but no longer fill the tab. A session's next notification of the same type is unread again instead of inheriting the earlier one's read state.
 - Fit the agent's question panel on a phone. A long question, header or option preview no longer widens the panel past the screen and clips the answer text at the right edge, and previews wrap instead of scrolling sideways.
 - A question that arrives while you are composing on a touch device no longer pulls focus into its answer box, which raised the on-screen keyboard and scrolled the unread question away. The panel waits for a tap; on a desktop with a keyboard it focuses its first field as before.
 - Reach **Submit** with the keyboard open: the question panel is now capped to the visible area so its Cancel/Submit footer stays on screen, an inline send button appears beside the typed answer (same validation as the footer), and the dialog's buttons follow the **Touch Targets** setting.

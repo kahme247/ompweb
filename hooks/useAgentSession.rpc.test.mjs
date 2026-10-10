@@ -1870,11 +1870,11 @@ test("a btw follow-up asks in its topic; a refused ask keeps the composer text a
   assert.deepEqual(toastCalls, []);
 });
 
-test("the notify host tool lands in the notification center even without OS notification support", async () => {
+test("the notify host tool stays out of the Notifications tab, which lists only pushable notification types", async () => {
   toastCalls.length = 0;
   const result = await runHostTool("notify", { title: "Build done", message: "All green" }, { openUrl: () => "" });
   assert.deepEqual(result, { text: "Notification shown", isError: false });
-  assert.deepEqual(toastCalls, [["record", "info", "Build done", "All green"]]);
+  assert.deepEqual(toastCalls, []);
 });
 
 test("SSE open merges the btw history; a no-op cancel re-reads it and settles a record omp lost", async () => {
