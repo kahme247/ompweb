@@ -199,16 +199,34 @@ if (launchOptions.installTray || launchOptions.uninstallTray || launchOptions.tr
 const port = launchOptions.port;
 const hostname = launchOptions.hostname;
 const openBrowser = launchOptions.openBrowser;
-// Only a password hash is ever accepted (issue #239). A plaintext password —
-// from OMP_WEB_PASSWORD or the removed --password flag — stops the launcher
-// here, before any child can inherit it.
-if (launchOptions.legacyPassword !== undefined) {
+// Only a password hash reaches the server (issue #239). A plaintext
+// OMP_WEB_PASSWORD alone is migrated: hashed here and removed from the
+// environment before any child can inherit it. The removed --password flag,
+// or a plaintext set next to a hash, stops the launcher.
+let passwordHash = launchOptions.passwordHash;
+if (launchOptions.legacyPasswordSource === "env" && !passwordHash) {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { migrateLegacyPassword } = require("./omp-web-hash-password");
+  passwordHash = migrateLegacyPassword(process.env);
+  console.warn([
+    "Warning: OMP_WEB_PASSWORD holds a plaintext password. Stop using it.",
+    "",
+    "Every omp session inherits this process's environment, so an agent could",
+    "print the password into its transcript. ompweb hashed it for this run and",
+    "removed it from the environment, but a new hash is made on every start,",
+    "which signs every browser out on each restart.",
+    "",
+    "Remove OMP_WEB_PASSWORD and set this instead:",
+    "",
+    `  OMP_WEB_PASSWORD_HASH='${passwordHash}'`,
+  ].join("\n"));
+} else if (launchOptions.legacyPassword !== undefined) {
   console.error([
     "ompweb no longer accepts a plaintext password.",
     "",
     launchOptions.legacyPasswordSource === "flag"
       ? "The --password flag was removed."
-      : "OMP_WEB_PASSWORD is no longer read.",
+      : "OMP_WEB_PASSWORD_HASH is set, so remove OMP_WEB_PASSWORD.",
     "Every omp session inherits this process's environment, so an agent could",
     "print the password into its transcript.",
     "",
@@ -219,7 +237,6 @@ if (launchOptions.legacyPassword !== undefined) {
   ].join("\n"));
   process.exit(1);
 }
-const passwordHash = launchOptions.passwordHash;
 if (passwordHash !== undefined) {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { isPasswordHash } = require("./omp-web-password-hash");

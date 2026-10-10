@@ -9,7 +9,7 @@ function isEnabled(value) {
   return typeof value === "string" && TRUE_VALUES.has(value.trim().toLowerCase());
 }
 
-/** Legacy plaintext credential: still detected, only so `ompweb` can refuse it. */
+/** Legacy plaintext credential: detected so `ompweb` can migrate (env) or refuse (flag) it. */
 function legacyPassword(args, env) {
   const flagIndex = args.findIndex((arg) => arg === "--password" || arg.startsWith("--password="));
   if (flagIndex !== -1) {
@@ -45,9 +45,10 @@ Password:
   echo "a-long-random-password" | ompweb hash-password
   OMP_WEB_PASSWORD_HASH='scrypt$15$8$1$...' ompweb
 
-  ompweb never reads a plaintext password: OMP_WEB_PASSWORD and --password are
-  rejected at startup, because every omp session inherits the environment and
-  an agent could print the password into its transcript.
+  ompweb never passes a plaintext password on: --password is rejected, and an
+  OMP_WEB_PASSWORD is hashed at startup with a warning that prints its hash,
+  because every omp session inherits the environment and an agent could print
+  the password into its transcript.
 
 Security: use HTTPS via a trusted reverse proxy or VPN when binding to a
 non-loopback hostname, so the password and session cookie stay private.`);
@@ -56,7 +57,7 @@ non-loopback hostname, so the password and session cookie stay private.`);
 /**
  * Resolve launch options from argv and the environment. A legacy plaintext
  * password (env or `--password`) is reported instead of parsed: the caller
- * must stop with instructions rather than start an unprotected server.
+ * migrates or refuses it rather than passing it to the server.
  */
 function parseLaunchOptions(args = process.argv.slice(2), env = process.env) {
   const { values: cliArgs } = parseArgs({
