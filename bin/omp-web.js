@@ -206,27 +206,29 @@ const openBrowser = launchOptions.openBrowser;
 let passwordHash = launchOptions.passwordHash;
 if (launchOptions.legacyPasswordSource === "env" && !passwordHash) {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { migrateLegacyPassword } = require("./omp-web-hash-password");
-  passwordHash = migrateLegacyPassword(process.env);
+  const { hashPassword } = require("./omp-web-password-hash");
+  passwordHash = hashPassword(process.env.OMP_WEB_PASSWORD);
+  process.env.OMP_WEB_PASSWORD_HASH = passwordHash;
+  delete process.env.OMP_WEB_PASSWORD;
   console.warn([
     "Warning: OMP_WEB_PASSWORD holds a plaintext password. Stop using it.",
     "",
-    "Every omp session inherits this process's environment, so an agent could",
-    "print the password into its transcript. ompweb hashed it for this run and",
-    "removed it from the environment, but a new hash is made on every start,",
-    "which signs every browser out on each restart.",
+    "Every omp session inherits omp-web's environment, so an agent could print",
+    "the password into its transcript. ompweb hashed it and kept it out of the",
+    "server's environment, but agents can still read it from this launcher",
+    "process, and a new hash is made on every start, which signs every browser",
+    "out on each restart.",
     "",
     "Remove OMP_WEB_PASSWORD and set this instead:",
     "",
     `  OMP_WEB_PASSWORD_HASH='${passwordHash}'`,
   ].join("\n"));
+} else if (launchOptions.legacyPasswordSource === "env") {
+  console.error("OMP_WEB_PASSWORD_HASH and the plaintext OMP_WEB_PASSWORD are both set. Remove OMP_WEB_PASSWORD.");
+  process.exit(1);
 } else if (launchOptions.legacyPassword !== undefined) {
   console.error([
-    "ompweb no longer accepts a plaintext password.",
-    "",
-    launchOptions.legacyPasswordSource === "flag"
-      ? "The --password flag was removed."
-      : "OMP_WEB_PASSWORD_HASH is set, so remove OMP_WEB_PASSWORD.",
+    "ompweb no longer accepts a plaintext password: the --password flag was removed.",
     "Every omp session inherits this process's environment, so an agent could",
     "print the password into its transcript.",
     "",

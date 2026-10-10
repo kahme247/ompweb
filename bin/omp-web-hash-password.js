@@ -154,16 +154,4 @@ function resolvePasswordHash(env = process.env) {
   return typeof plaintext === "string" && plaintext.length > 0 ? hashPassword(plaintext) : null;
 }
 
-/**
- * Migration path for a plaintext `OMP_WEB_PASSWORD` given to the launcher:
- * hash it into `OMP_WEB_PASSWORD_HASH` and delete the plaintext from `env`,
- * so it never reaches the server or any process it spawns. Returns the hash.
- */
-function migrateLegacyPassword(env = process.env) {
-  const hash = hashPassword(env.OMP_WEB_PASSWORD);
-  env.OMP_WEB_PASSWORD_HASH = hash;
-  delete env.OMP_WEB_PASSWORD;
-  return hash;
-}
-
-module.exports = { migrateLegacyPassword, promptPassword, resolvePasswordHash, runHashPasswordCommand };
+module.exports = { promptPassword, resolvePasswordHash, runHashPasswordCommand };

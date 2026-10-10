@@ -46,9 +46,10 @@ Password:
   OMP_WEB_PASSWORD_HASH='scrypt$15$8$1$...' ompweb
 
   ompweb never passes a plaintext password on: --password is rejected, and an
-  OMP_WEB_PASSWORD is hashed at startup with a warning that prints its hash,
-  because every omp session inherits the environment and an agent could print
-  the password into its transcript.
+  OMP_WEB_PASSWORD is hashed at startup with a warning that prints its hash
+  (set alongside OMP_WEB_PASSWORD_HASH, it is rejected), because every omp
+  session inherits the environment and an agent could print the password
+  into its transcript.
 
 Security: use HTTPS via a trusted reverse proxy or VPN when binding to a
 non-loopback hostname, so the password and session cookie stay private.`);

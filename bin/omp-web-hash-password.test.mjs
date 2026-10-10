@@ -32,11 +32,3 @@ test("hash-password accepts Enter (\\r) at the hidden terminal prompt", { skip: 
   assert.ok(hash, output);
   assert.equal(verifyPassword("s3cret pw", hash), true);
 });
-
-test("migrateLegacyPassword swaps the plaintext for a verifying hash", () => {
-  const { migrateLegacyPassword } = require("./omp-web-hash-password.js");
-  const env = { OMP_WEB_PASSWORD: "s3cret pw", PORT: "1" };
-  const hash = migrateLegacyPassword(env);
-  assert.deepEqual(env, { OMP_WEB_PASSWORD_HASH: hash, PORT: "1" });
-  assert.equal(verifyPassword("s3cret pw", hash), true);
-});

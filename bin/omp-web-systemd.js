@@ -303,7 +303,7 @@ function install(options = {}) {
     fail(error instanceof Error ? error.message : String(error));
   }
 
-  // Only the hash reaches the env file: omp-web never reads a plaintext
+  // Only the hash reaches the env file: omp-web never forwards a plaintext
   // password, and `OMP_WEB_PASSWORD` set for this install is hashed here.
   let passwordHash;
   try {
