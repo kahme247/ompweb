@@ -76,7 +76,7 @@ function setHistory(next: ToastHistoryEntry[]) {
 
 let recordedCount = 0;
 
-/** Recent toasts and OS notifications, newest first, kept in memory for the notification center. */
+/** Recent session notifications (`history: true` toasts), newest first, kept in memory for the Notifications tab. */
 export const toastHistory = {
   subscribe(listener: () => void) {
     historyListeners.add(listener);

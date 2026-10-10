@@ -141,7 +141,7 @@ components/
   CommandPalette.tsx  ⌘K/Ctrl+K palette (cmdk): session switch, new session, theme
   ImageLightbox.tsx   click-to-preview lightbox for chat images (ClickableImage)
   BranchNavigator.tsx in-session branch switcher
-  NotificationList.tsx right-panel Notifications tab: in-memory history of toasts + OS notifications (`toastHistory`)
+  NotificationList.tsx right-panel Notifications tab: in-memory history of session notifications (`toastHistory`)
   ChatMinimap.tsx     scroll minimap alongside the message list
   MarkdownBody.tsx    markdown renderer
   ModelsConfig.tsx    modal for models/auth configuration

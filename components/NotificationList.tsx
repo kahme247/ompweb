@@ -113,9 +113,9 @@ function NotificationRow({ entry }: { entry: ToastHistoryEntry }) {
     >
       {/* Unread marker in a fixed leading slot, so read and unread rows keep their text aligned. */}
       <span style={{ width: 8, flexShrink: 0, display: "flex", justifyContent: "center", paddingTop: 6 }}>
-        {!entry.read && <span role="img" aria-label={t("appShell.notificationUnread")} title={t("appShell.notificationUnread")} style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--accent)" }} />}
+        {!entry.read && <span role="img" aria-label={t("appShell.notificationUnread")} style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--accent)" }} />}
       </span>
-      <span style={{ display: "flex", opacity: entry.read ? 0.6 : 1 }}><KindIcon kind={entry.kind} /></span>
+      <KindIcon kind={entry.kind} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
           <span className="display-serif" style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.4, overflowWrap: "anywhere", color: entry.read ? "var(--text-muted)" : "var(--text)", fontWeight: entry.read ? 400 : 600 }}>{entry.title}</span>
@@ -124,7 +124,7 @@ function NotificationRow({ entry }: { entry: ToastHistoryEntry }) {
           </time>
         </div>
         {entry.description != null && (
-          <div style={{ ...descriptionBaseStyle, overflowWrap: "anywhere", ...(entry.read ? { color: "var(--text-dim)" } : {}) }}>
+          <div style={{ ...descriptionBaseStyle, overflowWrap: "anywhere" }}>
             {entry.clamp ? <ClampedDescription>{entry.description}</ClampedDescription> : entry.description}
           </div>
         )}
