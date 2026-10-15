@@ -731,12 +731,31 @@ function scanFirstUserMessage(filePath: string): string {
   let text = "";
   try {
     forEachFileLineSync(filePath, (line) => {
-      if (!line.includes('"user"')) return;
+      if (!line.includes('"user"') && !line.includes('"skill-prompt"')) return;
       try {
-        const entry = JSON.parse(line) as { type?: string; message?: { role?: string; content?: unknown } };
-        if (entry.type !== "message" || entry.message?.role !== "user") return;
-        text = extractTextFromContent(entry.message.content);
-        return !text;
+        const entry = JSON.parse(line) as {
+          type?: string;
+          customType?: string;
+          content?: unknown;
+          message?: { role?: string; content?: unknown };
+        };
+        if (entry.type === "message" && entry.message?.role === "user") {
+          text = extractTextFromContent(entry.message.content);
+          return !text;
+        }
+        if (entry.type === "custom_message" && entry.customType === "skill-prompt") {
+          const content = typeof entry.content === "string" ? entry.content : "";
+          const parts = content.split(/\nUser:\s*/);
+          if (parts.length > 1 && parts[parts.length - 1].trim()) {
+            text = parts[parts.length - 1].trim();
+            return !text;
+          }
+          const skillMatch = /User invoked the "([^"]+)" skill/.exec(content);
+          if (skillMatch && skillMatch[1]) {
+            text = `Skill: ${skillMatch[1]}`;
+            return !text;
+          }
+        }
       } catch {
         // Torn or hand-edited line: skip it, as parseJsonlLenient does.
       }
