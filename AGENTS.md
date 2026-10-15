@@ -50,6 +50,8 @@ Shared foundations in `lib/omp/`:
 - `omp-cli.ts` — locate/probe the installed `omp` binary (`resolveOmpBin`,
   `getOmpVersion`).
 - `rpc-process.ts` — process + NDJSON protocol layer (`RpcProcess`).
+- `auth-gateway.ts` — shared, idle-killed `omp auth-gateway stdio` child:
+  omp's own credentials and models behind JSON-line gateway requests.
 
 ---
 
@@ -641,6 +643,10 @@ during the wait.
 - Store is per process (`globalThis` map) with caps (4 pending, 20 live) and
   TTLs; a server restart loses jobs, and the hook then re-uploads its local
   copy if it has one.
+- Without `OMP_WEB_STT_ENDPOINT`, `OMP_WEB_STT_MODEL` names an omp STT model
+  (e.g. `openai-codex/codex-transcribe`, the ChatGPT subscription) and jobs
+  go through `lib/omp/auth-gateway.ts` as base64 JSON — so the gateway's 25MB
+  body cap limits audio to 18MB there. omp-web never reads omp credentials.
 
 ### Completion sound
 - `hooks/useAudio.ts` stores the toggle in `localStorage` and reuses one `AudioContext`.
