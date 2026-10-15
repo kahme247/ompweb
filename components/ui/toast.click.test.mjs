@@ -10,13 +10,31 @@ const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tryNat
 // can load a second toast module, whose manager the rendered provider never sees.
 const { ClampedDescription, ToastProvider, toast } = await jiti.import("@/components/ui/toast");
 const { useNotifications } = await jiti.import("@/hooks/useNotifications");
-const { NOTIFICATION_MESSAGE_EVENT } = await jiti.import("@/lib/notification-client");
 const { notificationHistory } = await jiti.import("@/lib/notification-history");
+
+/** The tab side of the shared event-stream worker (lib/event-stream.ts), so a
+ * test can deliver frames on the notifications channel the hook opened. */
+const eventStreams = new Map();
+const eventWorker = {
+  onmessage: null,
+  onerror: null,
+  postMessage(message) {
+    if (message.op === "open") eventStreams.set(message.id, message.channel);
+    else if (message.op === "close") eventStreams.delete(message.id);
+  },
+};
+function deliverNotification(message) {
+  const id = [...eventStreams].findLast(([, channel]) => channel.kind === "notifications")?.[0];
+  assert.ok(id, "useNotifications must hold a notifications channel");
+  eventWorker.onmessage({ data: { id, type: "message", data: JSON.stringify({ type: "notification", ...message }) } });
+}
 
 before(() => {
   globalThis.AbortController = window.AbortController;
   window.Element.prototype.setPointerCapture = () => {};
   globalThis.fetch = async () => ({ ok: true, json: async () => ({}) });
+  // `new Worker()` yields the one shared fake (a constructor may return an object).
+  globalThis.Worker = function Worker() { return eventWorker; };
 });
 afterEach(() => { act(() => toast.close()); cleanup(); window.getSelection()?.removeAllRanges(); });
 
@@ -91,7 +109,7 @@ test("a session notification toast opens its session from a card click; one with
   // each card is found by its own title (the session name).
   const deliver = (sessionId, sessionName) => {
     act(() => {
-      window.dispatchEvent(new window.CustomEvent(NOTIFICATION_MESSAGE_EVENT, { detail: { kind: "toast", event: { type: "completed", sessionId, sessionName } } }));
+      deliverNotification({ kind: "toast", event: { type: "completed", sessionId, sessionName } });
     });
     return Array.from(document.querySelectorAll(".toast-card")).find((card) => card.querySelector(".display-serif")?.textContent === sessionName);
   };
@@ -115,7 +133,7 @@ test("a notification the OS showed is listed in history", async () => {
   try {
     renderHook(() => useNotifications({ sessionId: null, locale: "en", onOpenSession: () => {} }));
     await act(async () => {
-      window.dispatchEvent(new window.CustomEvent(NOTIFICATION_MESSAGE_EVENT, { detail: { kind: "os", event: { type: "error", sessionId: "s9", sessionName: "Shown by OS", detail: "boom" } } }));
+      deliverNotification({ kind: "os", event: { type: "error", sessionId: "s9", sessionName: "Shown by OS", detail: "boom" } });
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     assert.deepEqual(created, ["Shown by OS"]);

@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import { createHash } from "crypto";
 import { readFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -10,6 +11,13 @@ import { PHASE_DEVELOPMENT_SERVER } from "next/constants.js";
 const packageDir = typeof __dirname !== "undefined" ? __dirname : dirname(fileURLToPath(import.meta.url));
 
 const { version } = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8")) as { version: string };
+// public/event-stream-worker.js is served as-is (not bundled). SharedWorkers
+// are keyed by URL, so hash its content into the URL: a changed worker gets a
+// fresh instance instead of tabs attaching to a stale copy still running.
+const eventStreamWorkerVersion = createHash("sha256")
+  .update(readFileSync(join(packageDir, "public", "event-stream-worker.js")))
+  .digest("hex")
+  .slice(0, 12);
 
 // Function form: `phase` is authoritative even when the host environment
 // carries a stray NODE_ENV (e.g. NODE_ENV=production inherited by `next dev`
@@ -122,6 +130,7 @@ const nextConfig = (phase: string): NextConfig => {
     env: {
       NEXT_PUBLIC_APP_VERSION: version,
       NEXT_PUBLIC_OMP_WEB_VERSION: version,
+      NEXT_PUBLIC_EVENT_STREAM_WORKER_VERSION: eventStreamWorkerVersion,
     },
   };
 };

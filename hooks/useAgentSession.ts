@@ -33,6 +33,7 @@ import { createActiveGoal, parseActiveGoal, type ActiveGoal, type ActivePlan } f
 import type { HostToolDefinition, HostUriSchemeDefinition, RpcAskDialogAnswer, RpcAvailableSlashCommand, SessionStatsInfo, SlowModeScope, TodoPhase, UsageLimitState } from "@/lib/pi-types";
 import { isRecord } from "@/lib/type-guards";
 import { subscribeSessionsChanged } from "@/lib/session-change-bus";
+import { EVENT_STREAM_CLOSED, EVENT_STREAM_OPEN, openEventStream, type EventStream } from "@/lib/event-stream";
 import { createSessionCatchUp, type SessionCatchUp, type SessionLiveFields } from "./useAgentSession-sync";
 import type { SessionLiveSnapshot } from "@/lib/session-sync";
 import {
@@ -370,7 +371,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [advisorEnabled, setAdvisorEnabled] = useState(false);
   const activeSubagentCount = subagents.filter((subagent) => subagent.source !== "history" && subagent.status === "started").length;
 
-  const eventSourceRef = useRef<EventSource | null>(null);
+  const eventSourceRef = useRef<EventStream | null>(null);
   const reconnectTimerRef = useRef<NodeJS.Timeout | undefined>(undefined);
   const eventStreamRetryMsRef = useRef<number>(EVENT_STREAM_RETRY_MIN_MS);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
@@ -1119,7 +1120,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // A pending coalesced update belongs to the stream being replaced.
     eventCoalescer.reset();
     catchUp.disconnect();
-    const es = new EventSource(`/api/agent/${encodeURIComponent(sid)}/events`);
+    const es = openEventStream({ kind: "session", sessionId: sid });
     eventSourceRef.current = es;
     const runId = promptRunIdRef.current;
 
@@ -1196,9 +1197,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
       };
       es.onerror = () => {
-        if (es.readyState === EventSource.CLOSED) {
-          // Fatal error (404/409/500/content-type mismatch): the browser will
-          // not auto-reconnect. Settle the Promise and schedule a manual
+        if (es.readyState === EVENT_STREAM_CLOSED) {
+          // Fatal error (409 unmanaged wrapper, worker failure): the stream
+          // will not reconnect on its own. Settle the Promise and schedule a manual
           // reconnect with capped backoff — regardless of whether the agent is
           // running. Long-idle sessions (wrapper respawned server-side, server
           // restart, proxy timeout) previously stayed dead silently until a
@@ -1220,7 +1221,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             }, delay);
           }
         }
-        // Recoverable errors (CONNECTING): let EventSource auto-reconnect.
+        // Recoverable errors (CONNECTING): the stream reconnects on its own.
         // The timeout above resolves only to let callers decide whether this
         // connection must be ready before they continue.
       };
@@ -1458,7 +1459,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       clearTimeout(slowNotice);
     }
-    if (result.status === "connected" || result.source.readyState === EventSource.OPEN) return;
+    if (result.status === "connected" || result.source.readyState === EVENT_STREAM_OPEN) return;
     if (eventSourceRef.current === result.source) eventSourceRef.current = null;
     result.source.close();
     throw new EventStreamConnectionError(result.status);
@@ -2540,7 +2541,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     subscribe: (force) => {
       const sid = sessionIdRef.current;
       const source = eventSourceRef.current;
-      if (hookAliveRef.current && sid && (force || !source || source.readyState === EventSource.CLOSED)) {
+      if (hookAliveRef.current && sid && (force || !source || source.readyState === EVENT_STREAM_CLOSED)) {
         if (force) {
           responseRunVersionRef.current += 1;
           runHadContentRef.current = false;
@@ -2717,7 +2718,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             }
           }
           // No UI left to update on a dead instance — and attaching an
-          // EventSource now would leak it, since this instance's unmount
+          // event stream now would leak it, since this instance's unmount
           // cleanup already ran.
           if (!ownerGone) {
             await ensureEventsConnected(sid);
@@ -3384,9 +3385,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // history), but an unmounted chat must not attach a stream (its cleanup
       // already ran, so it would leak) nor promote itself — as in handleSend.
       const ownerGone = !hookAliveRef.current;
-      // The event route is observer-only: start the wrapper and attach before
-      // asking, so the first deltas are not missed.
-      if (!ownerGone && eventSourceRef.current?.readyState !== EventSource.OPEN) {
+      // The session channel is observer-only: start the wrapper and attach
+      // before asking, so the first deltas are not missed.
+      if (!ownerGone && eventSourceRef.current?.readyState !== EVENT_STREAM_OPEN) {
         await sendAgentCommand(sid, { type: "get_state" });
         await ensureEventsConnected(sid);
       }

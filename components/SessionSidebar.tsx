@@ -14,7 +14,7 @@ import { groupSessionsByProject, projectActivityCounts, sortManagedProjects } fr
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { Archive, ArrowLeft, ArrowRight, Check, ChevronRight, FileUp, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, X } from "lucide-react";
 import { publishSessionsChanged } from "@/lib/session-change-bus";
-import { NOTIFICATION_MESSAGE_EVENT, notificationClientId } from "@/lib/notification-client";
+import { openEventStream } from "@/lib/event-stream";
 import {
   EMPTY_PROJECT_SET,
   INITIAL_RESTORE_MAX_ATTEMPTS,
@@ -270,10 +270,9 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   }, []);
 
   useEffect(() => {
-    // Live running status and session-list invalidations arrive via SSE; the
-    // sidebar never has to poll while an agent is working. The same stream
-    // delivers this tab's notifications (handled by useNotifications).
-    const source = new EventSource(`/api/agent/running/events?clientId=${encodeURIComponent(notificationClientId)}`);
+    // Live running status and session-list invalidations arrive on the shared
+    // event stream; the sidebar never has to poll while an agent is working.
+    const source = openEventStream({ kind: "running" });
 
     source.onmessage = (e) => {
       try {
@@ -303,8 +302,6 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
         } else if (data.type === "sessions-changed") {
           if (data.refreshSessionList) scheduleRefresh();
           publishSessionsChanged(data.sessionIds ?? []);
-        } else if (data.type === "notification") {
-          window.dispatchEvent(new CustomEvent(NOTIFICATION_MESSAGE_EVENT, { detail: data }));
         }
       } catch {
         // ignore malformed frames
@@ -312,11 +309,10 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     };
 
     source.onerror = () => {
-      // EventSource auto-reconnects; until a fresh frame arrives, let the
+      // The stream reconnects on its own; until a fresh frame arrives, let the
       // polled /api/sessions fallback own running state again.
       sseAuthoritativeRef.current = false;
     };
-    // On error EventSource auto-reconnects; keep the last known state meanwhile.
     return () => {
       if (pendingRefreshRef.current) clearTimeout(pendingRefreshRef.current);
       source.close();

@@ -2,19 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { apiErrorResponse } from "@/lib/api-utils";
 import { getContentDisposition } from "@/lib/content-disposition";
 import fs from "fs";
-import { homedir } from "os";
 import path from "path";
-import {
-  getAllowedFileRoots,
-  getConfigAgentRoots,
-  isConfigRootDeniedFile,
-  isExistingFilePathAllowed,
-  isFilePathAllowed,
-  isUnderConfigRoot,
-  isWindowsAbsolutePath,
-  normalizeSlashes,
-  resolveRequestedFilePath,
-} from "@/lib/file-access";
+import { getAllowedFileRoots, isFilePathAllowed } from "@/lib/file-access";
+import { authorizeFileAccess, filePathFromSegments } from "@/lib/file-authorization";
 import {
   DOCX_PREVIEW_MAX_BYTES,
   IMAGE_PREVIEW_MAX_BYTES,
@@ -27,7 +17,6 @@ import {
   getStreamSecurityHeaders,
 } from "@/lib/file-types";
 import { resolveDirentIsDirectory } from "@/lib/file-dirent";
-import { isFilePathReferencedBySession } from "@/lib/session-file-references";
 import {
   inspectUploadTargets,
   parseUploadConflictStrategy,
@@ -43,7 +32,7 @@ const IGNORED_NAMES = new Set([
 
 const IGNORED_SUFFIXES = [".pyc"];
 
-const FILE_REQUEST_TYPES = ["list", "read", "download", "meta", "preview", "watch"] as const;
+const FILE_REQUEST_TYPES = ["list", "read", "download", "meta", "preview"] as const;
 type FileRequestType = typeof FILE_REQUEST_TYPES[number];
 const FILE_REQUEST_TYPE_SET = new Set<string>(FILE_REQUEST_TYPES);
 const MAX_UPLOAD_FILE_BYTES = 25 * 1024 * 1024;
@@ -75,31 +64,6 @@ function getLanguage(filePath: string): string {
   if (base === "makefile" || base === "gnumakefile") return "makefile";
   const ext = base.split(".").pop() ?? "";
   return EXT_TO_LANGUAGE[ext] ?? "text";
-}
-
-function filePathFromSegments(segments: string[]): string {
-  const joined = segments.join("/");
-  const slashJoined = normalizeSlashes(joined);
-  if (isWindowsAbsolutePath(slashJoined)) return slashJoined;
-  return "/" + joined.replace(/^\/+/, "");
-}
-
-/**
- * The catch-all param never carries a leading slash, so an absolute request is
- * indistinguishable from a relative one once it is joined — `filePathFromSegments`
- * guesses absolute by prefixing `/`, which is right for every real browse and
- * wrong for the bare workspace paths `MarkdownBody` linkifies (#135). Try the
- * absolute reading first and, only when no allowed root authorizes it, fan the
- * request out over the roots. Writes deliberately skip this (see
- * `getUploadDirectory`): a relative upload path must not select the target dir.
- */
-function resolveReadFilePath(segments: string[], allowedRoots: Set<string>): string {
-  // `~/…` chat links name the server user's home, as the agent's shell did.
-  // The expanded path then faces the same root/reference checks as any other.
-  if (segments[0] === "~") return normalizeSlashes(path.join(homedir(), ...segments.slice(1)));
-  const absolutePath = filePathFromSegments(segments);
-  if (isFilePathAllowed(absolutePath, allowedRoots)) return absolutePath;
-  return resolveRequestedFilePath(segments.join("/"), allowedRoots) ?? absolutePath;
 }
 
 function parseFileRequestType(value: string): FileRequestType | null {
@@ -448,36 +412,11 @@ export async function GET(
     }
     const sessionId = request.nextUrl.searchParams.get("sessionId");
 
-    const allowedRoots = await getAllowedFileRoots();
-    const filePath = resolveReadFilePath(segments, allowedRoots);
-    // Making the omp config root readable (so `~/.agents/AGENTS.md` and
-    // `~/.omp/AGENTS.md` open in the viewer, #135) also puts omp's credential
-    // store inside an allowed root. Deny those by name before anything can
-    // stat, read or download them. Only paths outside the config roots are
-    // exempt, so a workspace that happens to hold an `agent.db` still opens.
-    const configAgentRoots = getConfigAgentRoots();
-    if (isUnderConfigRoot(filePath, configAgentRoots) && isConfigRootDeniedFile(filePath)) {
-      return NextResponse.json({ error: "Access denied", code: "access_denied" }, { status: 403 });
+    const access = await authorizeFileAccess(segments, sessionId, type !== "list");
+    if (!access.ok) {
+      return NextResponse.json({ error: access.error, code: access.code }, { status: access.status });
     }
-    const allowedByRoot = isFilePathAllowed(filePath, allowedRoots);
-    const allowedBySessionReference =
-      !allowedByRoot &&
-      type !== "list" &&
-      await isFilePathReferencedBySession(filePath, sessionId);
-    if (!allowedByRoot && !allowedBySessionReference) {
-      return NextResponse.json({ error: "Access denied", code: "access_denied" }, { status: 403 });
-    }
-
-    let stat: fs.Stats;
-    try {
-      stat = fs.statSync(filePath);
-    } catch {
-      return NextResponse.json({ error: "Not found", code: "file_not_found" }, { status: 404 });
-    }
-
-    if (!allowedBySessionReference && !isExistingFilePathAllowed(filePath, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied", code: "access_denied" }, { status: 403 });
-    }
+    const { filePath, stat } = access;
 
     if (type === "read") {
       if (!stat.isFile()) {
@@ -556,61 +495,6 @@ export async function GET(
           "Content-Security-Policy": "default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
-        },
-      });
-    }
-
-    if (type === "watch") {
-      if (!stat.isFile()) {
-        return NextResponse.json({ error: "Not a file", code: "not_a_file" }, { status: 400 });
-      }
-      let watcher: fs.FSWatcher | null = null;
-      let lastMtimeMs = stat.mtimeMs;
-      let lastSize = stat.size;
-      const stream = new ReadableStream({
-        start(controller) {
-          const send = (eventName: string, data: Record<string, unknown>) => {
-            const payload = `event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`;
-            try {
-              controller.enqueue(new TextEncoder().encode(payload));
-            } catch {
-              // client disconnected
-            }
-          };
-          // Send initial ping so client knows connection is live
-          send("connected", { filePath });
-          try {
-            watcher = fs.watch(filePath, () => {
-              try {
-                const s = fs.statSync(filePath);
-                // Some platforms emit watch events for file reads/attribute
-                // access. Ignore those or the client's refresh read loops.
-                if (s.mtimeMs === lastMtimeMs && s.size === lastSize) return;
-                lastMtimeMs = s.mtimeMs;
-                lastSize = s.size;
-                send("change", { mtime: s.mtime.toISOString(), size: s.size });
-              } catch {
-                send("change", { mtime: new Date().toISOString(), size: 0 });
-              }
-            });
-            watcher.on("error", () => {
-              try { controller.close(); } catch { /* ignore */ }
-            });
-          } catch {
-            send("error", { message: "Failed to watch file" });
-            controller.close();
-          }
-        },
-        cancel() {
-          try { watcher?.close(); } catch { /* ignore */ }
-        },
-      });
-      return new Response(stream, {
-        headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache, no-transform",
-          Connection: "keep-alive",
-          "X-Accel-Buffering": "no",
         },
       });
     }

@@ -6,55 +6,75 @@ import { createJiti } from "jiti";
 import { act, cleanup, renderHook } from "@testing-library/react/pure.js";
 
 // useAgentSession is the chat state machine. These tests drive it through a
-// controllable fake EventSource + fetch router mounted via React Testing Library:
-// connection, streaming, terminal events, late/duplicate frames,
-// reconnect, and unmount — not source-string checks.
+// controllable fake shared-worker event stream + fetch router mounted via React
+// Testing Library: connection, streaming, terminal events, late/duplicate
+// frames, reconnect, and unmount — not source-string checks.
 
 
 // ---------------------------------------------------------------------------
-// Fake EventSource + fetch router
+// Fake shared-worker event streams + fetch router
 // ---------------------------------------------------------------------------
-class FakeEventSource {
+/** One stream the hook opened through lib/event-stream.ts, as the worker sees it. */
+class FakeStream {
   static CONNECTING = 0;
   static OPEN = 1;
   static CLOSED = 2;
-  constructor(url) {
-    this.url = String(url);
-    this.readyState = FakeEventSource.CONNECTING;
-    this.onopen = null;
-    this.onmessage = null;
-    this.onerror = null;
+  constructor(port, id, channel) {
+    this.port = port;
+    this.id = id;
+    this.channel = channel;
+    this.readyState = FakeStream.CONNECTING;
     this.closedByCaller = false;
     world.esInstances.push(this);
   }
+  deliver(message) {
+    this.port.onmessage?.({ data: { id: this.id, ...message } });
+  }
   open() {
     if (this.closedByCaller) return;
-    this.readyState = FakeEventSource.OPEN;
-    this.onopen?.({});
-    const sid = this.url.match(/\/api\/agent\/([^/]+)/)?.[1];
-    this.onmessage?.({ data: JSON.stringify({ type: "connected", web: world.streams.get(sid) ?? { streamId: `stream-${sid}`, sequence: 0 } }) });
+    this.readyState = FakeStream.OPEN;
+    this.deliver({ type: "open" });
+    const sid = this.channel.sessionId;
+    this.deliver({ type: "message", data: JSON.stringify({ type: "connected", web: world.streams.get(sid) ?? { streamId: `stream-${sid}`, sequence: 0 } }) });
   }
   emit(event, { persist = true } = {}) {
     if (this.closedByCaller) return;
-    const sid = this.url.match(/\/api\/agent\/([^/]+)/)?.[1];
+    const sid = this.channel.sessionId;
     const previous = world.streams.get(sid) ?? { streamId: `stream-${sid}`, sequence: 0 };
     const web = event.web ?? { ...previous, sequence: previous.sequence + 1 };
     world.streams.set(sid, web);
     if (event.type === "agent_start") this.running = true;
-    this.onmessage?.({ data: JSON.stringify({ ...event, web }) });
+    this.deliver({ type: "message", data: JSON.stringify({ ...event, web }) });
     // Native message_end precedes appendMessage; make that persistence explicit.
     if (event.type === "message_end" && persist && this.running) appendEntry(sid, event.message);
     if (event.type === "agent_end" && event.isTerminal !== false) this.running = false;
   }
   failFatal() {
-    // Browser-facing fatal error (404/500): readyState CLOSED + onerror.
+    // Fatal subscription error (409 unmanaged wrapper): CLOSED + onerror.
     if (this.closedByCaller) return;
-    this.readyState = FakeEventSource.CLOSED;
-    this.onerror?.({});
+    this.readyState = FakeStream.CLOSED;
+    this.deliver({ type: "error", readyState: FakeStream.CLOSED });
   }
-  close() {
-    this.closedByCaller = true;
-    this.readyState = FakeEventSource.CLOSED;
+}
+
+/** Speaks the tab<->worker protocol of public/event-stream-worker.js. */
+class FakeSharedWorker {
+  constructor() {
+    const streams = new Map();
+    this.port = {
+      onmessage: null,
+      start() {},
+      postMessage: (message) => {
+        if (message.op === "open") {
+          streams.set(message.id, new FakeStream(this.port, message.id, message.channel));
+        } else if (message.op === "close") {
+          const stream = streams.get(message.id);
+          if (!stream) return;
+          stream.closedByCaller = true;
+          stream.readyState = FakeStream.CLOSED;
+        }
+      },
+    };
   }
 }
 
@@ -176,7 +196,7 @@ async function fetchStub(url, init = {}) {
 // boundaries need doubles. Hidden tabs use the coalescer's 50ms timer.
 let visibilityState = "hidden";
 const overrides = [
-  [globalThis, "EventSource", { value: FakeEventSource }],
+  [globalThis, "SharedWorker", { value: FakeSharedWorker }],
   [globalThis, "fetch", { value: fetchStub }],
   [document, "hidden", { get: () => visibilityState === "hidden" }],
   [document, "visibilityState", { get: () => visibilityState }],
@@ -329,8 +349,8 @@ async function startRun(sid, message, strictMode = false, options = {}) {
     await sleep(30); // let the pre-connect get_state POST settle
   });
   const es = lastEs();
-  assert.ok(es, "an EventSource must have been created");
-  assert.match(es.url, /\/api\/agent\/.+\/events$/);
+  assert.ok(es, "an event stream must have been opened");
+  assert.deepEqual(es.channel, { kind: "session", sessionId: sid });
   await act(async () => {
     es.open(); // connect settles → prompt POST fires
     await sendPromise;
@@ -988,7 +1008,7 @@ test("ISSUE #167 sending a TUI-only command warns once and still delivers the te
   await settle();
   es = await send("/guided-goal again");
   assert.equal(w.latest.notices.length, 1, "the same name is not repeated");
-  es.close();
+  w.unmount();
 });
 
 test("full run over fake SSE: optimistic bubble, coalesced streaming, terminal reload", async () => {
@@ -1678,7 +1698,7 @@ test("fatal SSE error mid-run reconnects after 1s and the new stream delivers ev
   const instanceCount = world.esInstances.length;
 
   es1.failFatal();
-  assert.equal(es1.readyState, FakeEventSource.CLOSED);
+  assert.equal(es1.readyState, FakeStream.CLOSED);
   await settle(1500); // > reconnect backoff
   assert.equal(world.esInstances.length, instanceCount + 1, "a replacement stream must be created");
 
@@ -3139,10 +3159,10 @@ test("unmount before replacement open cannot restore stale wrapper registrations
   await act(async () => { publishSessionsChanged(["s1"]); });
   await settle();
   const replacement = lastEs();
-  const lateOpen = replacement.onopen;
   await act(async () => { w.unmount(); });
   const before = world.calls.length;
-  await act(async () => { lateOpen({}); });
+  // The worker's open for the replacement lands after unmount closed it.
+  await act(async () => { replacement.deliver({ type: "open" }); });
   assert.equal(world.calls.slice(before).some((c) => c.method === "POST"), false);
 });
 
@@ -3601,7 +3621,7 @@ test("a fresh chat hydrates and follows skill diagnostics after slash discovery 
 
   await act(async () => { await w.latest.loadSlashCommands(); });
   const es = lastEs();
-  assert.match(es?.url ?? "", /\/api\/agent\/fresh-skills\/events$/, "the created runtime must be observed before its first prompt");
+  assert.deepEqual(es?.channel, { kind: "session", sessionId: "fresh-skills" }, "the created runtime must be observed before its first prompt");
   await act(async () => {
     es.open();
     await sleep(30);
