@@ -63,6 +63,11 @@ import {
   buildEntriesFromFiles, buildAtInsertText, extractAtQuery, filterFileEntries,
   type AtQueryMatch, type FileIndexEntry,
 } from "@/lib/file-fuzzy";
+import {
+  extractSlashQuery,
+  buildSlashInsertText,
+  type SlashQueryMatch,
+} from "@/lib/slash-autocomplete";
 import { FolderIcon, getFileIcon } from "./FileIcons";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useWordPrediction, type PredictWord, type PredictWordFeedback } from "@/hooks/useWordPrediction";
@@ -415,6 +420,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
+  const [slashMatch, setSlashMatch] = useState<SlashQueryMatch | null>(null);
+  const updateSlashQuery = useCallback((text: string, cursor: number | null) => {
+    const pos = cursor ?? text.length;
+    setSlashMatch(extractSlashQuery(text.slice(0, pos)));
+  }, []);
   const [atQuery, setAtQuery] = useState<AtQueryMatch | null>(null);
   const [atMenuOpen, setAtMenuOpen] = useState(false);
   const [atActiveIndex, setAtActiveIndex] = useState(0);
@@ -474,6 +484,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const newVal = before + sep + text + after;
     setValue(newVal);
     setAtQuery(null);
+    setSlashMatch(null);
     requestAnimationFrame(() => {
       if (!ta) return;
       const pos = start + sep.length + text.length;
@@ -495,6 +506,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (current.trim()) return;
       setValue(text);
       setAtQuery(null);
+      setSlashMatch(null);
       requestAnimationFrame(() => {
         if (!ta) return;
         ta.focus();
@@ -511,6 +523,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       const combined = [text, current].filter((t) => t.trim()).join("\n\n");
       setValue(combined);
       setAtQuery(null);
+      setSlashMatch(null);
       requestAnimationFrame(() => {
         if (!ta) return;
         ta.focus();
@@ -734,6 +747,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const clearInput = useCallback(() => {
     setValue("");
     setAtQuery(null);
+    setSlashMatch(null);
     setHistoryMenuOpen(false);
     if (draftKey) clearDraft(draftKey);
     if (draftKeyRef.current && draftKeyRef.current !== draftKey) clearDraft(draftKeyRef.current);
@@ -778,6 +792,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     draftKeyRef.current = draftKey;
     setValue(draft?.value ?? "");
     setAtQuery(null);
+    setSlashMatch(null);
     setHistoryMenuOpen(false);
     setAttachedImages((prev) => {
       prev.forEach(revokeImagePreview);
@@ -796,6 +811,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       setAttachedImages((prev) => [...prev, ...draftImagesToAttachedImages(images)]);
     }
     setAtQuery(null);
+    setSlashMatch(null);
     setHistoryMenuOpen(false);
     requestAnimationFrame(() => {
       if (draftKeyRef.current !== key) return;
@@ -967,9 +983,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [isRecording, isPaused, isReviewing, isTranscribing, transcribeError, cancelDictation, retryDictation, confirmTranscribeDictation, stopDictation]);
 
-  const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
-    ? value.slice(1).toLowerCase()
-    : null;
+  const slashQuery = slashMatch?.query ?? null;
+  const isMidPromptSkillLookup = slashMatch?.mode === "mid-prompt";
   const historyFlip = useDropdownFlip(historyMenuOpen && inputHistory.length > 0, historyMenuRef, 0.44, 360);
   const slashFlip = useDropdownFlip(slashMenuOpen && slashQuery !== null, slashMenuRef, 0.56, 460);
   const atFlip = useDropdownFlip(atMenuOpen && atQuery !== null, atMenuRef, 0.48, 400);
@@ -1021,7 +1036,29 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   );
 
   const filteredSlashCommands = (() => {
-    if (slashQuery === null) return [];
+    if (slashQuery === null || slashMatch === null) return [];
+    if (isMidPromptSkillLookup) {
+      return externalSlashCommands
+        .filter((command) => {
+          const isSkill = command.source === "skill" || command.name.startsWith("skill:");
+          if (!isSkill) return false;
+          const cleanName = command.name.replace(/^skill:/i, "").toLowerCase();
+          const fullName = command.name.toLowerCase();
+          const description = command.description?.toLowerCase() ?? "";
+          return cleanName.includes(slashQuery) || fullName.includes(slashQuery) || description.includes(slashQuery);
+        })
+        .sort((a, b) => {
+          const cleanA = a.name.replace(/^skill:/i, "");
+          const cleanB = b.name.replace(/^skill:/i, "");
+          const rankA = slashMatchRank({ ...a, name: cleanA }, slashQuery);
+          const rankB = slashMatchRank({ ...b, name: cleanB }, slashQuery);
+          const rankDelta = rankA - rankB;
+          if (rankDelta !== 0) return rankDelta;
+          const dormancyDelta = Number(isDormantSkillCommand(a, dormantSkillNames)) - Number(isDormantSkillCommand(b, dormantSkillNames));
+          if (dormancyDelta !== 0) return dormancyDelta;
+          return modelCollator.compare(a.name, b.name);
+        });
+    }
     const commands = [...(isStreaming ? [] : builtinSlashCommands), ...externalSlashCommands];
     return [...commands]
       .filter((command) => {
@@ -1249,19 +1286,46 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   }, []);
 
   const applySlashCommand = useCallback((command: SlashCommandPaletteItem) => {
-    const nextValue = `/${command.name} `;
-    setValue(nextValue);
+    const ta = textareaRef.current;
+    const cursor = ta?.selectionStart ?? value.length;
+
+    if (!slashMatch) {
+      const nextValue = `/${command.name} `;
+      setValue(nextValue);
+      setSlashMatch(null);
+      setSlashMenuOpen(false);
+      setSlashActiveIndex(0);
+      requestAnimationFrame(() => {
+        const el = textareaRef.current;
+        if (!el) return;
+        el.focus();
+        el.setSelectionRange(nextValue.length, nextValue.length);
+        el.style.height = "auto";
+        el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+      });
+      return;
+    }
+
+    const before = value.slice(0, slashMatch.start);
+    const after = value.slice(cursor);
+    const insertText = buildSlashInsertText(command.name, slashMatch.mode);
+    const newValue = before + insertText + after;
+    const newPos = before.length + insertText.length;
+
+    setValue(newValue);
+    setSlashMatch(null);
     setSlashMenuOpen(false);
     setSlashActiveIndex(0);
+
     requestAnimationFrame(() => {
-      const ta = textareaRef.current;
-      if (!ta) return;
-      ta.focus();
-      ta.setSelectionRange(nextValue.length, nextValue.length);
-      ta.style.height = "auto";
-      ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(newPos, newPos);
+      el.style.height = "auto";
+      el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
     });
-  }, []);
+  }, [slashMatch, value]);
 
   const sendQueued = useCallback((mode: "steer" | "followup", overrideText?: string) => {
     const raw = overrideText ?? value;
@@ -2683,6 +2747,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               setValue(e.target.value);
               setHistoryMenuOpen(false);
               updateAtQuery(e.target.value, e.target.selectionStart);
+              updateSlashQuery(e.target.value, e.target.selectionStart);
               // Half-composed IME text is not a word yet; compositionend reports the result.
               if (!isComposingRef.current) {
                 wordPrediction.update(e.target.value, e.target.selectionStart, e.target.selectionEnd);
@@ -2691,6 +2756,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             onSelect={(e) => {
               const el = e.currentTarget;
               updateAtQuery(el.value, el.selectionStart);
+              updateSlashQuery(el.value, el.selectionStart);
               if (!isComposingRef.current) wordPrediction.update(el.value, el.selectionStart, el.selectionEnd);
             }}
             onScroll={(e) => {
@@ -2705,6 +2771,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               lastCompositionEndAtRef.current = Date.now();
               const el = e.currentTarget;
               updateAtQuery(el.value, el.selectionStart);
+              updateSlashQuery(el.value, el.selectionStart);
               wordPrediction.update(el.value, el.selectionStart, el.selectionEnd);
             }}
             onPaste={handlePaste}

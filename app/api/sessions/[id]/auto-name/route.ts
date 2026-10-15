@@ -72,18 +72,15 @@ export async function POST(
       );
     }
 
-    // A live process owns the file; save through it so its next flush keeps the
-    // title instead of clobbering ours.
-    let saved = false;
+    // Save title both to disk and through the live process so it persists immediately.
+    setSessionTitle(filePath, derived, "auto");
     if (rpc?.isAlive?.()) {
       try {
         await rpc.send({ type: "set_session_name", name: derived });
-        saved = true;
       } catch {
-        // Fall back to the on-disk title slot.
+        // Saved on disk; ignore RPC sync failure.
       }
     }
-    if (!saved) setSessionTitle(filePath, derived, "auto");
     invalidateSessionCaches(filePath);
     return NextResponse.json({ title: derived, generated: false, usage: null });
   } catch (error) {
