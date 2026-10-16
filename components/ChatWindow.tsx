@@ -44,6 +44,8 @@ interface Props {
   newSessionCwd: string | null;
   newSessionWorkspace?: ReactNode;
   toolCallsDefaultCollapsed?: boolean;
+  /** UI `hideToolActivity`: fold a running turn's tool calls into one row. */
+  hideToolActivity?: boolean;
   /** "Expand thinking blocks by default": open each thinking block on mount. */
   expandThinkingByDefault?: boolean;
   /** omp `hideThinkingBlock`: omit thinking from the transcript. */
@@ -259,7 +261,8 @@ interface CommittedTranscriptProps {
   sessionBusy: boolean;
   /** A run started outside this UI looks active from the transcript tail (see
    *  `looksLikeRunningTurn`). Without it the newest turn of a session driven by
-   *  another `omp` process would always render folded into Process details. */
+   *  another `omp` process would never get a live tail; the transcript-tail
+   *  heuristic supplies that missing case. */
   externalRunActive: boolean;
   isNew: boolean;
   forkingEntryId: string | null;
@@ -271,6 +274,8 @@ interface CommittedTranscriptProps {
   onOpenFile?: (filePath: string) => void;
   sessionId: string | undefined;
   toolCallsDefaultCollapsed: boolean;
+  /** Fold a running turn's tool calls; off restores the flat live tail. */
+  hideToolActivity: boolean;
   expandThinkingByDefault: boolean;
   hideThinkingBlock: boolean;
   visibleCount: number;
@@ -292,7 +297,7 @@ interface CommittedTranscriptProps {
 const CommittedTranscript = memo(function CommittedTranscript({
   messages, entryIds, conversationMeta, messageRefs, isStreaming, sessionBusy, externalRunActive, isNew, forkingEntryId,
   handleFork, handleNavigate, handleEditContent, modelNames, messageCwd, onOpenFile, sessionId,
-  toolCallsDefaultCollapsed, expandThinkingByDefault, hideThinkingBlock, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
+  toolCallsDefaultCollapsed, hideToolActivity, expandThinkingByDefault, hideThinkingBlock, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
 }: CommittedTranscriptProps) {
   const { t } = useI18n();
   const { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage } = conversationMeta;
@@ -368,6 +373,9 @@ const CommittedTranscript = memo(function CommittedTranscript({
   // the whole transcript.
   const rows = useMemo<TranscriptRow[]>(() => planTranscriptRows(messages, { hideThinking: hideThinkingBlock }), [messages, hideThinkingBlock]);
   const isLiveTail = (row: TranscriptRow): boolean => {
+    // With "Hide tool activity while working" on (the default) the running turn
+    // folds like a finished one; off restores the flat tail.
+    if (hideToolActivity) return false;
     if (row.kind !== "group") return false;
     // `sessionBusy` only goes true for a run omp-web owns, so a session driven
     // by another `omp` process would never get a live tail; the transcript-tail
@@ -463,7 +471,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
   );
 });
 
-export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCallsDefaultCollapsed = true, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders }: Props) {
   const { t, tn } = useI18n();
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -1305,6 +1313,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
               onOpenFile={onOpenFile}
               sessionId={session?.id ?? sessionIdRef.current ?? undefined}
               toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
+              hideToolActivity={hideToolActivity}
               expandThinkingByDefault={expandThinkingByDefault}
               hideThinkingBlock={hideThinkingBlock}
               visibleCount={visibleCount}

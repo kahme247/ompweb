@@ -4,6 +4,14 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ---
 
+## Unreleased
+
+### Fixes & Improvements
+
+- Fold tool activity while the agent works, the same way a finished turn folds it: the transcript shows one **Process details** row per turn instead of a row per tool call, and expanding it shows every call as it streamed. Assistant replies keep streaming in view, and the composer keeps naming the running tool. Turn off **Hide tool activity while working** in Settings → Interface & Behavior for the previous row-per-call view.
+
+---
+
 ## [v0.5.2] - 2026-10-15
 
 ### Breaking changes

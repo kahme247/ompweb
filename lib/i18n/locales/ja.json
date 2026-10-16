@@ -1262,6 +1262,8 @@
   "settingsConfig.interfaceBehaviorDesc": "Controls interface presentation, notification sounds, and execution submission mode.",
   "settingsConfig.keepToolCallsCollapsed": "Keep tool calls collapsed",
   "settingsConfig.keepToolCallsCollapsedDesc": "Show only compact headers while tools execute.",
+  "settingsConfig.hideToolActivity": "作業中のツール実行を隠す",
+  "settingsConfig.hideToolActivityDesc": "実行中のターンのツール呼び出しを、完了したターンと同じように 1 つの「プロセス詳細」行にまとめます。行を展開すると各呼び出しとその結果を確認できます。",
   "settingsConfig.expandThinkingByDefault": "思考ブロックを既定で展開",
   "settingsConfig.expandThinkingByDefaultDesc": "各思考ブロックを表示された時点で展開します（ストリーミング中も含む）。1つずつクリックせずに推論を読めます。手動での折りたたみも引き続き可能です。",
   "settingsConfig.openUrlAutomatically": "エージェントのリンクを確認せずに開く",

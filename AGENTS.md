@@ -256,6 +256,12 @@ wait for that commit:
   collapsed" setting is off — that is what that setting means. `AppShell` must
   pass `toolCallsDefaultCollapsed` into `ChatWindow`; without it the setting is
   inert (the chat then always collapses).
+- `CommittedTranscript` renders the newest turn flat only while the UI "Hide
+  tool activity while working" setting is off; with it on (the default) the
+  running turn folds into one **Process details** row per activity run, like a
+  finished turn. `AppShell` must pass `hideToolActivity` into `ChatWindow` for
+  the switch to do anything. The fold row is the expand affordance, so a hidden
+  tool call is one click away rather than gone.
 - `tool_execution_update` is coalesced per tool call at display rate in
   `lib/message-update-coalescer.ts` (chatty commands emit ~10-100+ frames/s).
   `message_end` drops the pending `message_update` (the committed message
