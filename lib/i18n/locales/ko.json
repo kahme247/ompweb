@@ -1744,7 +1744,7 @@
   "tableChart.title": "표 그래프",
   "tableChart.measure": "그래프에 표시할 항목",
   "tableChart.saveSvg": "SVG 저장",
-  "tableChart.note": "기록된 표의 값을 시각화합니다. 약(~) 표시는 추정값입니다.",
+  "tableChart.note": "기록된 표의 값입니다. ~는 추정값, 빗금은 범위, 화살표는 상한·하한을 나타냅니다.",
   "tableChart.skipped": "숫자로 읽을 수 없는 행 {count}개 제외",
   "mcpConfig.statusConfigured": "활성화됨 · 연결 상태 미확인",
   "mcpConfig.statusInactive": "비활성 상태",
