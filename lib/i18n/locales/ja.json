@@ -818,6 +818,11 @@
   "imagePreview.viewerLabel": "画像プレビュー",
   "imagePreview.zoomIn": "拡大",
   "imagePreview.zoomOut": "縮小",
+  "tableChart.title": "表のグラフ",
+  "tableChart.measure": "表示する指標",
+  "tableChart.saveSvg": "SVGを保存",
+  "tableChart.note": "記録された表の値を表示します。約（~）の値は推定値です。",
+  "tableChart.skipped": "数値でない {count} 行を除外",
   "messageView.collapse": "折りたたむ",
   "messageView.compactionDescription": "この時点より前の会話履歴は、次の要約に圧縮されました:",
   "messageView.compactionLabel": "コンパクション",
@@ -1660,10 +1665,5 @@
   "modelsConfig.accountApiKey": "APIキー",
   "modelsConfig.disconnectAccount": "{label} を切断",
   "modelsConfig.disconnectAccountTitle": "アカウントを切断しますか？",
-  "modelsConfig.disconnectAccountBody": "omp は {label} の保存済み資格情報を削除します。このプロバイダーの他のアカウントは接続されたままです。",
-  "tableChart.title": "表のグラフ",
-  "tableChart.measure": "表示する指標",
-  "tableChart.saveSvg": "SVGを保存",
-  "tableChart.note": "記録された表の値を表示します。約（~）の値は推定値です。",
-  "tableChart.skipped": "数値でない {count} 行を除外"
+  "modelsConfig.disconnectAccountBody": "omp は {label} の保存済み資格情報を削除します。このプロバイダーの他のアカウントは接続されたままです。"
 }

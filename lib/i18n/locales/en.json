@@ -853,6 +853,11 @@
   "imagePreview.viewerLabel": "Image preview",
   "imagePreview.zoomIn": "Zoom in",
   "imagePreview.zoomOut": "Zoom out",
+  "tableChart.title": "Table chart",
+  "tableChart.measure": "Measure to plot",
+  "tableChart.saveSvg": "Save SVG",
+  "tableChart.note": "Visualized from the recorded table. Approximate values (~) remain estimates.",
+  "tableChart.skipped": "{count} nonnumeric rows excluded",
   "messageView.collapse": "Collapse",
   "messageView.compactionDescription": "The conversation history before this point was compacted into the following summary:",
   "messageView.compactionLabel": "compaction",
@@ -1697,10 +1702,5 @@
   "modelsConfig.accountApiKey": "API key",
   "modelsConfig.disconnectAccount": "Disconnect {label}",
   "modelsConfig.disconnectAccountTitle": "Disconnect account?",
-  "modelsConfig.disconnectAccountBody": "omp will delete the stored credential for {label}. Other accounts for this provider stay connected.",
-  "tableChart.title": "Table chart",
-  "tableChart.measure": "Measure to plot",
-  "tableChart.saveSvg": "Save SVG",
-  "tableChart.note": "Visualized from the recorded table. Approximate values (~) remain estimates.",
-  "tableChart.skipped": "{count} nonnumeric rows excluded"
+  "modelsConfig.disconnectAccountBody": "omp will delete the stored credential for {label}. Other accounts for this provider stay connected."
 }
