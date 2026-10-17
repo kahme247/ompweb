@@ -1,7 +1,5 @@
 "use client";
 
-import { translate as uiText } from "@/lib/i18n";
-
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useTransition, cloneElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { getSubmitDuringRunBehavior, getWordCompletionMode, setSubmitDuringRunBehavior, setWordCompletionMode, type SubmitDuringRunBehavior, type WordCompletionMode } from "@/lib/composer-prefs";
 import dynamic from "next/dynamic";
@@ -11,7 +9,7 @@ import { formatAgentEnvText, parseAgentEnvText, type AgentEnvErrorLabels } from 
 import { isRecord } from "@/lib/type-guards";
 import { Alert } from "@/components/ui/field";
 import { toast } from "@/components/ui/toast";
-import { useI18n } from "@/lib/i18n";
+import { useI18n, translate as uiText } from "@/lib/i18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { SettingsTabs, type SettingsTab, SETTINGS_CATEGORIES, getNormalizedActive } from "./SettingsTabs";
 import { copyText } from "@/lib/clipboard";
