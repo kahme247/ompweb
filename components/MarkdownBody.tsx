@@ -9,6 +9,7 @@ import { GithubRepoContext, remarkGithubRefs } from "../lib/github-refs";
 import { normalizeDisplayMath, useMarkdownPlugins, type MarkdownPlugins } from "../lib/markdown";
 import { markdownCodeRenderer } from "./MarkdownCode";
 import { ClickableImage } from "./ImageLightbox";
+import { TableChart } from "./TableChart";
 
 interface MarkdownBodyProps {
   children: string;
@@ -17,9 +18,10 @@ interface MarkdownBodyProps {
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
   suppressImages?: boolean;
+  autoCharts?: boolean;
 }
 
-export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile, suppressImages = false }: MarkdownBodyProps) {
+export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile, suppressImages = false, autoCharts = false }: MarkdownBodyProps) {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
   const { remarkPlugins: baseRemarkPlugins, rehypePlugins } = useMarkdownPlugins(normalizedMarkdown);
   const githubRepo = useContext(GithubRepoContext);
@@ -142,15 +144,17 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
       return imageParts.length > 0 ? <>{anchor}{imageParts}</> : anchor;
     },
     img: imgComponent,
-    table({ children }) {
+    table({ children, node }) {
       return (
+        <TableChart node={node} enabled={autoCharts && !isStreaming}>
         <div className="markdown-table-wrap">
           <table>{children}</table>
         </div>
+        </TableChart>
       );
     },
     };
-  }, [isStreaming, cwd, onOpenFile, suppressImages, openAgentLink]);
+  }, [isStreaming, cwd, onOpenFile, suppressImages, openAgentLink, autoCharts]);
 
   return (
     <div className={["markdown-body", className].filter(Boolean).join(" ")}>

@@ -1660,5 +1660,10 @@
   "modelsConfig.accountApiKey": "API 密钥",
   "modelsConfig.disconnectAccount": "断开 {label}",
   "modelsConfig.disconnectAccountTitle": "断开账户？",
-  "modelsConfig.disconnectAccountBody": "omp 将删除 {label} 的已存储凭据。此提供商的其他账户保持连接。"
+  "modelsConfig.disconnectAccountBody": "omp 将删除 {label} 的已存储凭据。此提供商的其他账户保持连接。",
+  "tableChart.title": "表格图表",
+  "tableChart.measure": "绘制的指标",
+  "tableChart.saveSvg": "保存SVG",
+  "tableChart.note": "根据已记录的表格绘图。约数（~）仍为估计值。",
+  "tableChart.skipped": "已排除 {count} 个非数值行"
 }
