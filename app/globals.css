@@ -2,6 +2,35 @@
    on Windows, where a parent user-profile package can make the scanner walk
    protected junctions such as "My Documents" during production builds. */
 @import "tailwindcss" source(none);
+
+/* Table charts use native text, not a scaled terminal bitmap. */
+.table-auto-chart { margin: 12px 0 20px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--bg-panel); container: tablechart / inline-size; }
+.table-auto-chart-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-size: 12px; }
+.table-auto-chart-toolbar button { display: inline-flex; align-items: center; gap: 5px; border: 0; background: transparent; color: var(--text-muted); padding: 4px; cursor: pointer; }
+.table-auto-chart-toolbar button:first-child { color: var(--text); font-weight: 600; }
+.table-auto-chart-toolbar button:last-child { margin-left: auto; }
+.table-auto-chart-toolbar select { min-width: 0; max-width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-control); padding: 4px 6px; }
+.table-auto-chart-measure { overflow-wrap: anywhere; color: var(--text-muted); }
+.table-auto-chart-note { margin: 8px 0 12px !important; font-size: 11px; line-height: 1.6; color: var(--text-muted); }
+.table-auto-chart-rows { display: grid; gap: 10px; list-style: none !important; padding: 0 !important; margin: 0 !important; }
+.table-auto-chart-rows li { display: grid; grid-template-columns: minmax(0, 1fr) minmax(60px, 1.5fr) minmax(65px, auto); align-items: center; gap: 10px; margin: 0 !important; padding: 0; line-height: 1.5; font-size: 13px; }
+.table-auto-chart-label { overflow-wrap: anywhere; color: var(--text); font-weight: 500; }
+.table-auto-chart-value { color: var(--text); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.table-auto-chart-track { height: 28px; position: relative; background: repeating-linear-gradient(to right, var(--border) 0 1px, transparent 1px 25%); }
+.table-auto-chart-zero { position: absolute; width: 1px; top: 0; bottom: 0; background: var(--text-dim); }
+.table-auto-chart-bar { position: absolute; top: 5px; height: 18px; border-radius: 3px; background: var(--accent); }
+.table-auto-chart-bar.is-approximate { border: 1px dashed var(--text); }
+.table-auto-chart-axis { display: flex; justify-content: space-between; gap: 8px; margin: 9px 75px 0 29%; color: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+@container tablechart (max-width: 520px) {
+  .table-auto-chart-rows li { grid-template-columns: minmax(0, 1fr) minmax(65px, auto); gap: 4px 10px; }
+  .table-auto-chart-label { grid-column: 1 / -1; }
+  .table-auto-chart-axis { margin-left: 0; }
+}
+
+.table-auto-chart-bar.is-range { border: 1px dashed var(--text-muted); background: repeating-linear-gradient(135deg, var(--accent) 0 2px, var(--bg-subtle) 2px 6px); }
+.table-auto-chart-limit { position: absolute; top: 3px; height: 23px; line-height: 23px; color: var(--text); font-size: 18px; font-weight: 600; }
+.table-auto-chart-limit.is-upper { transform: translateX(-100%); border-right: 1px dashed var(--text-muted); padding-right: 2px; }
+.table-auto-chart-limit.is-lower { border-left: 1px dashed var(--text-muted); padding-left: 2px; }
 @source inline("data-font-size");
 @source inline("data-ui-scale");
 @source inline("data-touch-targets");
