@@ -119,7 +119,7 @@ export function transcriptToMarkdown(messages: AgentMessage[], meta: TranscriptM
         }
         if (message.errorMessage) {
           const isInterrupted = message.stopReason === "aborted" || /^interrupted(\s+by\s+user)?/i.test(message.errorMessage);
-          body.push(isInterrupted ? "_Generation stopped by user_" : `**Error:** ${message.errorMessage}`);
+          body.push(isInterrupted ? "_Generation interrupted_" : `**Error:** ${message.errorMessage}`);
         }
         if (body.length > 0) sections.push(`${header}\n\n${body.join("\n\n")}`);
         break;

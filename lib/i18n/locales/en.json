@@ -892,7 +892,7 @@
   "messageView.noMessage": "(no message)",
   "messageView.noOutput": "(no output)",
   "messageView.noSummary": "(no summary)",
-  "messageView.interruptedByUser": "Generation stopped by user",
+  "messageView.interruptedByUser": "Generation interrupted",
   "messageView.readFiles": "Read files",
   "messageView.responseError": "Response error",
   "messageView.showDetails": "Show details",
@@ -1697,5 +1697,6 @@
   "modelsConfig.accountApiKey": "API key",
   "modelsConfig.disconnectAccount": "Disconnect {label}",
   "modelsConfig.disconnectAccountTitle": "Disconnect account?",
-  "modelsConfig.disconnectAccountBody": "omp will delete the stored credential for {label}. Other accounts for this provider stay connected."
+  "modelsConfig.disconnectAccountBody": "omp will delete the stored credential for {label}. Other accounts for this provider stay connected.",
+  "errors.session_state_timeout": "OMP status query timed out. The session was kept running. Try again shortly."
 }

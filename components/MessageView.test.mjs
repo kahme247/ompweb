@@ -837,7 +837,7 @@ test("interrupted assistant message renders user-friendly status badge without r
   }));
 
   assert.match(html, /role="status"/);
-  assert.match(html, /Generation stopped by user/);
+  assert.match(html, /Generation interrupted/);
   assert.doesNotMatch(html, /messageView\.responseError/);
   assert.doesNotMatch(html, /Response error/);
   assert.doesNotMatch(html, /role="alert"/);
@@ -872,7 +872,7 @@ test("interrupted message with partial content renders content before interrupte
   }));
 
   const contentIdx = html.indexOf("Partial generated response text");
-  const statusIdx = html.indexOf("Generation stopped by user");
+  const statusIdx = html.indexOf("Generation interrupted");
   assert.ok(contentIdx !== -1, "partial content must be rendered");
   assert.ok(statusIdx !== -1, "status badge must be rendered");
   assert.ok(contentIdx < statusIdx, "content must precede the interrupted status badge");

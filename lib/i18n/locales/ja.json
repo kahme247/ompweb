@@ -856,7 +856,7 @@
   "messageView.noMessage": "（メッセージなし）",
   "messageView.noOutput": "（出力なし）",
   "messageView.noSummary": "（要約なし）",
-  "messageView.interruptedByUser": "ユーザーによって停止されました",
+  "messageView.interruptedByUser": "生成が中断されました",
   "messageView.readFiles": "読み取ったファイル",
   "messageView.responseError": "応答エラー",
   "messageView.showDetails": "詳細を表示",
@@ -1660,5 +1660,6 @@
   "modelsConfig.accountApiKey": "APIキー",
   "modelsConfig.disconnectAccount": "{label} を切断",
   "modelsConfig.disconnectAccountTitle": "アカウントを切断しますか？",
-  "modelsConfig.disconnectAccountBody": "omp は {label} の保存済み資格情報を削除します。このプロバイダーの他のアカウントは接続されたままです。"
+  "modelsConfig.disconnectAccountBody": "omp は {label} の保存済み資格情報を削除します。このプロバイダーの他のアカウントは接続されたままです。",
+  "errors.session_state_timeout": "OMPの状態取得がタイムアウトしました。セッションは停止せず維持しています。しばらくしてから再試行してください。"
 }
