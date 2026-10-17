@@ -650,6 +650,7 @@
   "directoryPicker.cloneSucceeded": "已克隆到 {path}",
   "directoryPicker.cloneInterrupted": "克隆数据流意外结束",
   "directoryPicker.cloneOutputLabel": "git clone 输出",
+  "errors.session_state_timeout": "OMP 状态查询超时。会话仍在运行，未被停止。请稍后重试。",
   "errors.access_denied": "访问被拒绝",
   "errors.action_required": "需要指定操作",
   "errors.api_key_remove_unsupported": "omp-web 无法移除已存储的 API 密钥。请在终端运行 `omp` 并使用 /logout，或编辑 ~/.omp/agent/models.yml 中的提供商配置。",
@@ -1660,6 +1661,5 @@
   "modelsConfig.accountApiKey": "API 密钥",
   "modelsConfig.disconnectAccount": "断开 {label}",
   "modelsConfig.disconnectAccountTitle": "断开账户？",
-  "modelsConfig.disconnectAccountBody": "omp 将删除 {label} 的已存储凭据。此提供商的其他账户保持连接。",
-  "errors.session_state_timeout": "OMP 状态查询超时。会话仍在运行，未被停止。请稍后重试。"
+  "modelsConfig.disconnectAccountBody": "omp 将删除 {label} 的已存储凭据。此提供商的其他账户保持连接。"
 }

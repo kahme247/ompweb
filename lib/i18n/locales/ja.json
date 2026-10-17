@@ -650,6 +650,7 @@
   "directoryPicker.cloneSucceeded": "{path} にクローンしました",
   "directoryPicker.cloneInterrupted": "クローンのストリームが予期せず終了しました",
   "directoryPicker.cloneOutputLabel": "git clone の出力",
+  "errors.session_state_timeout": "OMPの状態取得がタイムアウトしました。セッションは停止せず維持しています。しばらくしてから再試行してください。",
   "errors.access_denied": "アクセスが拒否されました",
   "errors.action_required": "操作が必要です",
   "errors.api_key_remove_unsupported": "omp-web では保存済みのAPIキーを削除できません。ターミナルで `omp` を実行して /logout を使うか、~/.omp/agent/models.yml のプロバイダー設定を編集してください。",
@@ -1660,6 +1661,5 @@
   "modelsConfig.accountApiKey": "APIキー",
   "modelsConfig.disconnectAccount": "{label} を切断",
   "modelsConfig.disconnectAccountTitle": "アカウントを切断しますか？",
-  "modelsConfig.disconnectAccountBody": "omp は {label} の保存済み資格情報を削除します。このプロバイダーの他のアカウントは接続されたままです。",
-  "errors.session_state_timeout": "OMPの状態取得がタイムアウトしました。セッションは停止せず維持しています。しばらくしてから再試行してください。"
+  "modelsConfig.disconnectAccountBody": "omp は {label} の保存済み資格情報を削除します。このプロバイダーの他のアカウントは接続されたままです。"
 }

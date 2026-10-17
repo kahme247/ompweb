@@ -663,6 +663,7 @@
   "directoryPicker.cloneSucceeded": "Cloned into {path}",
   "directoryPicker.cloneInterrupted": "The clone stream ended unexpectedly",
   "directoryPicker.cloneOutputLabel": "git clone output",
+  "errors.session_state_timeout": "OMP status query timed out. The session was kept running. Try again shortly.",
   "errors.access_denied": "Access denied",
   "errors.action_required": "An action is required",
   "errors.api_key_remove_unsupported": "omp-web cannot remove stored API keys. Run `omp` in a terminal and use /logout, or edit the provider config in ~/.omp/agent/models.yml.",
@@ -1697,6 +1698,5 @@
   "modelsConfig.accountApiKey": "API key",
   "modelsConfig.disconnectAccount": "Disconnect {label}",
   "modelsConfig.disconnectAccountTitle": "Disconnect account?",
-  "modelsConfig.disconnectAccountBody": "omp will delete the stored credential for {label}. Other accounts for this provider stay connected.",
-  "errors.session_state_timeout": "OMP status query timed out. The session was kept running. Try again shortly."
+  "modelsConfig.disconnectAccountBody": "omp will delete the stored credential for {label}. Other accounts for this provider stay connected."
 }
