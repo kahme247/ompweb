@@ -1,11 +1,11 @@
 /** Browser-side table charts. Read recorded table values, never infer missing data. */
-export interface ChartValue { value: number; unit: string; raw: string; approximate: boolean }
+export interface ChartValue { value: number; unit: string; raw: string; approximate: boolean; kind: "point" | "range" | "upper" | "lower"; end?: number; inclusive?: boolean }
 export interface TableSeries { column: number; header: string; unit: string; rows: Array<ChartValue & { label: string }>; skipped: number }
 interface Node { type?: string; tagName?: string; value?: string; children?: Node[] }
 
-export function parseChartValue(raw: string): ChartValue | null {
+function parseScalar(raw: string): ChartValue | null {
   const text = raw.trim().replace(/\u2212/g, "-");
-  // Ranges, bounds, IDs and numbers embedded in prose are not point estimates.
+  // Only a complete scalar is accepted here; intervals are parsed separately.
   const match = text.match(/^([~≈≃]|약\s*)?\s*([$₩€£¥])?\s*([+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)\s*(.*?)$/u);
   if (!match) return null;
   let value = Number(match[3].replaceAll(",", ""));
@@ -19,7 +19,42 @@ export function parseChartValue(raw: string): ChartValue | null {
   if (!(rest in units) || !Number.isFinite(value)) return null;
   const currency = ({ "$": "USD", "₩": "KRW", "€": "EUR", "£": "GBP", "¥": "JPY" } as Record<string, string>)[match[2]];
   if (currency && rest && currency !== units[rest]) return null;
-  return { value, unit: currency || units[rest], raw, approximate: Boolean(match[1]) };
+  return { value, unit: currency || units[rest], raw, approximate: Boolean(match[1]), kind: "point" };
+}
+
+/** Preserve ranges and one-sided limits as such, never as invented midpoints. */
+export function parseChartValue(raw: string): ChartValue | null {
+  const text = raw.trim().replace(/\u2212/g, "-");
+  const prefix = text.match(/^([~≈≃]|약\s*)?\s*(.*)$/u)!;
+  const body = prefix[2].trim();
+  const limit = body.match(/^(<=|>=|<|>|≤|≥)\s*(.+)$/u);
+  if (limit) {
+    const point = parseScalar(limit[2]);
+    return point ? { ...point, raw, kind: /^(?:<|≤)/.test(limit[1]) ? "upper" : "lower", inclusive: /[=≤≥]/.test(limit[1]), approximate: Boolean(prefix[1]) || point.approximate } : null;
+  }
+  const number = "[+-]?(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d+)?";
+  const interval = body.match(new RegExp(`^([$₩€£¥]?)(${number})(.*?)\\s*(?:[–—~-]|to)\\s*([$₩€£¥]?)(${number})(.*?)$`, "u"));
+  if (interval) {
+    const [, lc, ln, lu, rc, rn, ru] = interval;
+    const left = parseScalar(`${lc || rc}${ln}${lu.trim() || ru}`);
+    const right = parseScalar(`${rc || lc}${rn}${ru.trim() || lu}`);
+    if (!left || !right || left.unit !== right.unit || left.value > right.value) return null;
+    return { ...left, raw, kind: "range", end: right.value, approximate: Boolean(prefix[1]) };
+  }
+  return parseScalar(raw);
+}
+
+/** Geometry shared by HTML and SVG; bounds get an arrow, not a value bar. */
+export function chartGeometry(row: ChartValue, domain: { min: number; max: number; zero: number }) {
+  const at = (value: number) => (value - domain.min) / (domain.max - domain.min) * 100;
+  const span = (a: number, b: number) => ({ left: Math.min(at(a), at(b)), width: Math.abs(at(b) - at(a)) });
+  if (row.kind === "upper" || row.kind === "lower") return { bar: null, interval: null, limit: { at: at(row.value), direction: row.kind } };
+  if (row.kind === "range") {
+    const end = row.end!;
+    const nearZero = row.value > 0 ? row.value : end < 0 ? end : 0;
+    return { bar: span(0, nearZero), interval: span(row.value, end), limit: null };
+  }
+  return { bar: span(0, row.value), interval: null, limit: null };
 }
 
 function textOf(node: Node): string {
@@ -60,9 +95,12 @@ export function chartSeriesFromHast(input: unknown): TableSeries[] {
 }
 
 export function chartDomain(series: TableSeries): { min: number; max: number; zero: number } {
-  const min = Math.min(0, ...series.rows.map((row) => row.value));
-  const maxValue = Math.max(0, ...series.rows.map((row) => row.value));
-  const max = min === maxValue ? maxValue + 1 : maxValue;
+  let min = Math.min(0, ...series.rows.flatMap((row) => row.end === undefined ? [row.value] : [row.value, row.end]));
+  const maxValue = Math.max(0, ...series.rows.flatMap((row) => row.end === undefined ? [row.value] : [row.value, row.end]));
+  let max = min === maxValue ? maxValue + 1 : maxValue;
+  const padding = (max - min) * 0.06;
+  if (series.rows.some(row => row.kind === "upper" && row.value === min)) min -= padding;
+  if (series.rows.some(row => row.kind === "lower" && row.value === max)) max += padding;
   return { min, max, zero: (0 - min) / (max - min) * 100 };
 }
 
@@ -81,8 +119,11 @@ export function tableChartSvg(series: TableSeries): string {
   const elements = series.rows.map((row) => {
     const lines = wrap(row.label); const height = Math.max(44, lines.length * 18 + 12); const middle = y + height / 2;
     const label = lines.map((line, i) => `<text x="16" y="${y + 20 + i * 18}">${escapeXml(line)}</text>`).join("");
-    const bar = `<rect x="${Math.min(x(0), x(row.value))}" y="${middle - 10}" width="${Math.abs(x(row.value) - x(0))}" height="20" rx="3" fill="#137bba"${row.approximate ? ' stroke="#075b8b" stroke-dasharray="5 3"' : ""}/><text x="830" y="${middle + 5}">${escapeXml(row.raw)}</text>`;
+    const geometry = chartGeometry(row, domain);
+    const rect = (span: { left: number; width: number }, interval = false) => `<rect x="${370 + span.left / 100 * 440}" y="${middle - 10}" width="${span.width / 100 * 440}" height="20" rx="3" fill="${interval ? "url(#interval-hatch)" : "#137bba"}"${row.approximate || interval ? ' stroke="#075b8b" stroke-dasharray="5 3"' : ""}/>`;
+    const limit = geometry.limit ? `<line x1="${x(row.value)}" x2="${x(row.value)}" y1="${middle - 12}" y2="${middle + 12}" stroke="#075b8b"/><text x="${x(row.value) + (row.kind === "upper" ? -4 : 4)}" y="${middle + 5}" text-anchor="${row.kind === "upper" ? "end" : "start"}">${row.kind === "upper" ? "←" : "→"}</text>` : "";
+    const bar = (geometry.bar ? rect(geometry.bar) : "") + (geometry.interval ? rect(geometry.interval, true) : "") + limit + `<text x="830" y="${middle + 5}">${escapeXml(row.raw)}</text>`;
     y += height; return label + bar;
   }).join("");
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="${y + 30}" viewBox="0 0 1040 ${y + 30}" role="img"><title>${escapeXml(series.header)}</title><rect width="100%" height="100%" fill="#fff"/><g fill="#17232c" font-size="14" font-family="Malgun Gothic,Apple SD Gothic Neo,Noto Sans KR,Arial,sans-serif"><text x="16" y="28" font-size="18" font-weight="600">${escapeXml(series.header)}</text>${elements}<line x1="${x(0)}" x2="${x(0)}" y1="46" y2="${y}" stroke="#94a3b8"/></g></svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="${y + 30}" viewBox="0 0 1040 ${y + 30}" role="img"><title>${escapeXml(series.header)}</title><defs><pattern id="interval-hatch" width="6" height="6" patternUnits="userSpaceOnUse"><rect width="6" height="6" fill="#dcecf6"/><path d="M0 6L6 0" stroke="#137bba"/></pattern></defs><rect width="100%" height="100%" fill="#fff"/><g fill="#17232c" font-size="14" font-family="Malgun Gothic,Apple SD Gothic Neo,Noto Sans KR,Arial,sans-serif"><text x="16" y="28" font-size="18" font-weight="600">${escapeXml(series.header)}</text>${elements}<line x1="${x(0)}" x2="${x(0)}" y1="46" y2="${y}" stroke="#94a3b8"/></g></svg>`;
 }

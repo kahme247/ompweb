@@ -2,7 +2,7 @@
 
 import { useMemo, useState, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, Download } from "lucide-react";
-import { chartDomain, chartSeriesFromHast, tableChartSvg } from "@/lib/table-chart";
+import { chartDomain, chartGeometry, chartSeriesFromHast, tableChartSvg } from "@/lib/table-chart";
 import { useI18n } from "@/lib/i18n";
 
 /** Keep the source table visible; charts are a view of it, not new message data. */
@@ -36,12 +36,14 @@ export function TableChart({ node, children, enabled }: { node: unknown; childre
         <p className="table-auto-chart-note">{t("tableChart.note")}{selected.skipped > 0 ? ` · ${t("tableChart.skipped", { count: selected.skipped })}` : ""}</p>
         <ul className="table-auto-chart-rows" aria-label={selected.header}>
           {selected.rows.map((row, i) => {
-            const at = (row.value - domain.min) / (domain.max - domain.min) * 100;
-            return <li key={i}>
+            const geometry = chartGeometry(row, domain);
+            return <li key={i} data-value-kind={row.kind}>
               <span className="table-auto-chart-label">{row.label}</span>
               <div className="table-auto-chart-track" aria-hidden="true">
                 <span className="table-auto-chart-zero" style={{ left: `${domain.zero}%` }} />
-                <span className={row.approximate ? "table-auto-chart-bar is-approximate" : "table-auto-chart-bar"} style={{ left: `${Math.min(at, domain.zero)}%`, width: `${Math.abs(at - domain.zero)}%` }} />
+                {geometry.bar && <span className={row.approximate ? "table-auto-chart-bar is-approximate" : "table-auto-chart-bar"} style={{ left: `${geometry.bar.left}%`, width: `${geometry.bar.width}%` }} />}
+                {geometry.interval && <span className="table-auto-chart-bar is-range" style={{ left: `${geometry.interval.left}%`, width: `${geometry.interval.width}%` }} />}
+                {geometry.limit && <span className={`table-auto-chart-limit is-${row.kind}`} style={{ left: `${geometry.limit.at}%` }}>{row.kind === "upper" ? "←" : "→"}</span>}
               </div>
               <span className="table-auto-chart-value">{row.raw}</span>
             </li>;

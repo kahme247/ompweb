@@ -821,7 +821,7 @@
   "tableChart.title": "表のグラフ",
   "tableChart.measure": "表示する指標",
   "tableChart.saveSvg": "SVGを保存",
-  "tableChart.note": "記録された表の値を表示します。約（~）の値は推定値です。",
+  "tableChart.note": "記録された表の値です。~は推定値、斜線は範囲、矢印は上限・下限を示します。",
   "tableChart.skipped": "数値でない {count} 行を除外",
   "messageView.collapse": "折りたたむ",
   "messageView.compactionDescription": "この時点より前の会話履歴は、次の要約に圧縮されました:",

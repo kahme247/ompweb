@@ -27,6 +27,10 @@
   .table-auto-chart-axis { margin-left: 0; }
 }
 
+.table-auto-chart-bar.is-range { border: 1px dashed var(--text-muted); background: repeating-linear-gradient(135deg, var(--accent) 0 2px, var(--bg-subtle) 2px 6px); }
+.table-auto-chart-limit { position: absolute; top: 3px; height: 23px; line-height: 23px; color: var(--text); font-size: 18px; font-weight: 600; }
+.table-auto-chart-limit.is-upper { transform: translateX(-100%); border-right: 1px dashed var(--text-muted); padding-right: 2px; }
+.table-auto-chart-limit.is-lower { border-left: 1px dashed var(--text-muted); padding-left: 2px; }
 @source inline("data-font-size");
 @source inline("data-ui-scale");
 @source inline("data-touch-targets");
