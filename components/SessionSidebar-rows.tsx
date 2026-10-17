@@ -1,5 +1,7 @@
 "use client";
 
+import { translate as uiText } from "@/lib/i18n";
+
 import { memo, useCallback, useRef, useState } from "react";
 import type { AgentMessage, ExitedRpcSession, ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
 import { formatExitedSessionNotice, useI18n } from "@/lib/i18n";
@@ -218,7 +220,7 @@ function ProjectRow({
                 <span style={{ display: "grid", gap: 3, maxWidth: 360, whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontFamily: "var(--font-mono)", fontSize: 11 }}>
                   <strong style={{ fontFamily: "inherit", fontSize: 11 }}>{t("sessionSidebar.launchConfigDirectory")}</strong>
                   <span>{project.path}</span>
-                  {project.launchConfig?.profile && <span>profile: {project.launchConfig.profile}</span>}
+                  {project.launchConfig?.profile && <span>{uiText("sessionSidebar.profilePrefix")}{project.launchConfig.profile}</span>}
                   {project.launchConfig?.advisor && <span>--advisor</span>}
                   {project.launchConfig?.extraArgs?.map((arg, index) => <span key={`${arg}-${index}`}>{arg}</span>)}
                 </span>

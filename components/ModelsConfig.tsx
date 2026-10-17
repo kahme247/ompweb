@@ -1,5 +1,7 @@
 "use client";
 
+import { translate as uiText } from "@/lib/i18n";
+
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/lib/i18n";
@@ -161,8 +163,7 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
         {/* {t("modelsConfig.quickEndpointPresets")} */}
         <div style={{ borderTop: "1px solid var(--border)", paddingTop: 10, marginTop: 4 }}>
           <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>
-            Quick Endpoint Presets
-          </div>
+            {uiText("modelsConfig.quickEndpointPresets")}</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             {ENDPOINT_PRESETS.map((preset) => (
               <button
@@ -1374,7 +1375,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
             const providerSomeVisible = models.some((model) => visibleModelKeys === null || visibleModelKeys.has(`${model.provider}:${model.id}`));
             return <section key={provider} style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden", background: "var(--bg-panel)", boxShadow: "var(--shadow-card)" }}>
               <label style={{ display: "flex", alignItems: "center", gap: 9, padding: "10px 12px", background: "var(--bg)", borderBottom: "1px solid var(--border)", color: "var(--text)", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
-                <input type="checkbox" checked={providerVisible} ref={(input) => { if (input) input.indeterminate = providerSomeVisible && !providerVisible; }} onChange={(event) => setComposerProviderVisible(provider, event.target.checked)} aria-label={`Show all ${provider} models in composer`} />
+                <input type="checkbox" checked={providerVisible} ref={(input) => { if (input) input.indeterminate = providerSomeVisible && !providerVisible; }} onChange={(event) => setComposerProviderVisible(provider, event.target.checked)} aria-label={uiText("modelsConfig.showProviderAria", { provider })} />
                 <ProviderIcon id={provider} size={15} />
                 <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{provider}</span>
                 <span style={{ color: "var(--text-dim)", fontSize: 11, fontWeight: 500, padding: "2px 7px", borderRadius: 10, background: "var(--bg-subtle)", border: "1px solid var(--border)" }}>{models.length}</span>
@@ -1382,7 +1383,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
               <div style={{ display: "flex", flexDirection: "column" }}>
                 {models.map((model) => (
                   <label key={`${model.provider}:${model.id}`} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", color: "var(--text)", cursor: "pointer", borderTop: "1px solid var(--border)", background: visibleModelKeys !== null && !visibleModelKeys.has(`${model.provider}:${model.id}`) ? "var(--bg)" : "var(--bg-panel)" }}>
-                    <input type="checkbox" checked={visibleModelKeys === null || visibleModelKeys.has(`${model.provider}:${model.id}`)} onChange={(event) => setComposerModelVisible(model, event.target.checked)} aria-label={`Show ${model.provider}/${model.id} in composer`} />
+                    <input type="checkbox" checked={visibleModelKeys === null || visibleModelKeys.has(`${model.provider}:${model.id}`)} onChange={(event) => setComposerModelVisible(model, event.target.checked)} aria-label={uiText("modelsConfig.showModelAria", { model: `${model.provider}/${model.id}` })} />
                     <span style={{ minWidth: 0, flex: 1, fontSize: 12, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{model.name || model.id}</span>
                     <code style={{ color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 220 }}>{model.provider}/{model.id}</code>
                   </label>
@@ -1521,7 +1522,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                     style={{ alignSelf: "flex-start", marginBottom: 4 }}
                   >
                     <ArrowLeft size={14} aria-hidden="true" />
-                    <span>Back to connected accounts</span>
+                    <span>{uiText("modelsConfig.backConnected")}</span>
                   </button>
                   {detailContent}
                 </div>
@@ -1530,7 +1531,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                   {/* Active OAuth Accounts */}
                   {activeOAuth.length > 0 && (
                     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                      <div className="settings-group-label" style={{ padding: "8px 2px 2px" }}>Active OAuth Accounts ({activeOAuth.length})</div>
+                      <div className="settings-group-label" style={{ padding: "8px 2px 2px" }}>{uiText("modelsConfig.activeOauthHeading")}{activeOAuth.length})</div>
                       <div className="provider-grid">
                         {activeOAuth.map((p) => {
                           const models = runtimeModelsByProvider[p.id] ?? [];
@@ -1559,14 +1560,12 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                                     ))}
                                     {models.length > 3 && (
                                       <span style={{ fontSize: 10, color: "var(--text-dim)", padding: "2px 4px", alignSelf: "center" }}>
-                                        +{models.length - 3} more
-                                      </span>
+                                        +{models.length - 3} {uiText("modelsConfig.moreSuffix")}</span>
                                     )}
                                   </div>
                                 ) : (
                                   <div style={{ fontSize: 11.5, color: "var(--text-dim)", marginTop: 10 }}>
-                                    OAuth authenticated
-                                  </div>
+                                    {uiText("modelsConfig.oauthAuthenticated")}</div>
                                 )}
                               </div>
 
@@ -1580,8 +1579,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                                   className="settings-back"
                                   style={{ padding: "4px 10px", fontSize: 11.5, border: "1px solid var(--border)", background: "var(--bg)" }}
                                 >
-                                  Configure
-                                </button>
+                                  {uiText("modelsConfig.configure")}</button>
                               </div>
                             </div>
                           );
@@ -1593,7 +1591,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                   {/* Active API Key Providers */}
                   {activeApiKey.length > 0 && (
                     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                      <div className="settings-group-label" style={{ padding: "8px 2px 2px" }}>Configured API Keys ({activeApiKey.length})</div>
+                      <div className="settings-group-label" style={{ padding: "8px 2px 2px" }}>{uiText("modelsConfig.configuredKeysHeading")}{activeApiKey.length})</div>
                       <div className="provider-grid">
                         {activeApiKey.map((p) => {
                           const models = runtimeModelsByProvider[p.id] ?? [];
@@ -1609,8 +1607,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                                     </div>
                                   </div>
                                   <span className="settings-badge ok" style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 8px", fontSize: "var(--text-xs)" }}>
-                                    <CheckIcon size={11} aria-hidden="true" /> Key configured
-                                  </span>
+                                    <CheckIcon size={11} aria-hidden="true" /> {uiText("modelsConfig.keyConfigured")}</span>
                                 </div>
 
                                 {models.length > 0 ? (
@@ -1622,14 +1619,12 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                                     ))}
                                     {models.length > 3 && (
                                       <span style={{ fontSize: "var(--text-2xs)", color: "var(--text-dim)", padding: "2px 4px", alignSelf: "center" }}>
-                                        +{models.length - 3} more
-                                      </span>
+                                        +{models.length - 3} {uiText("modelsConfig.moreSuffix")}</span>
                                     )}
                                   </div>
                                 ) : (
                                   <div style={{ fontSize: "var(--text-body)", color: "var(--text-dim)", marginTop: 10 }}>
-                                    System key configured
-                                  </div>
+                                    {uiText("modelsConfig.systemKeyConfigured")}</div>
                                 )}
                               </div>
 
@@ -1643,8 +1638,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                                   className="settings-back"
                                   style={{ padding: "4px var(--control-padding-inline)", fontSize: "var(--text-body)", border: "1px solid var(--border)", background: "var(--bg)" }}
                                 >
-                                  Manage
-                                </button>
+                                  {uiText("modelsConfig.manage")}</button>
                               </div>
                             </div>
                           );
@@ -1671,14 +1665,14 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                   {/* Connect other providers */}
                   <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 8 }}>
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-                      <div className="settings-group-label" style={{ padding: 0 }}>Add Provider Integration</div>
+                      <div className="settings-group-label" style={{ padding: 0 }}>{uiText("modelsConfig.addIntegration")}</div>
                       <div style={{ position: "relative", width: "100%", maxWidth: 320 }}>
                         <Search size={13} aria-hidden="true" style={{ position: "absolute", left: 9, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)", pointerEvents: "none" }} />
                         <input
                           type="text"
                           value={connectSearch}
                           onChange={(e) => setConnectSearch(e.target.value)}
-                          placeholder="Search providers to connect..."
+                          placeholder={uiText("modelsConfig.searchToConnect")}
                           style={{ width: "100%", height: "var(--control-height-sm)", padding: "0 24px 0 28px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", fontSize: "var(--text-sm)", outline: "none" }}
                         />
                         {connectSearch && (
@@ -1722,8 +1716,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                                   className="settings-back"
                                   style={{ padding: "4px 12px", fontSize: "var(--text-sm)", border: "1px solid var(--border)", background: "var(--bg)" }}
                                 >
-                                  Sign in
-                                </button>
+                                  {uiText("modelsConfig.signIn")}</button>
                               </div>
                             </div>
                           ))}
@@ -1734,7 +1727,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                                   <ProviderIcon id={p.id} size={24} />
                                   <div>
                                     <div style={{ fontSize: "var(--text-md)", fontWeight: 600, color: "var(--text)" }}>{p.displayName}</div>
-                                    <div style={{ fontSize: "var(--text-xs)", color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>API Key</div>
+                                    <div style={{ fontSize: "var(--text-xs)", color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>{uiText("modelsConfig.apiKey")}</div>
                                   </div>
                                 </div>
                                 <button
@@ -1743,8 +1736,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                                   className="settings-back"
                                   style={{ padding: "4px 12px", fontSize: "var(--text-sm)", border: "1px solid var(--border)", background: "var(--bg)" }}
                                 >
-                                  Set Key
-                                </button>
+                                  {uiText("modelsConfig.setKey")}</button>
                               </div>
                             </div>
                           ))}
@@ -1757,8 +1749,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                             >
                               <Plus size={14} style={{ color: "var(--accent)" }} />
                               <span style={{ fontSize: "var(--text-body)", fontWeight: 500, color: "var(--text-muted)" }}>
-                                Browse all {unlinkedOAuth.length + unconfiguredApiKey.length} providers…
-                              </span>
+                                {uiText("modelsConfig.browseAll")}{unlinkedOAuth.length + unconfiguredApiKey.length} {uiText("modelsConfig.providersSuffix")}</span>
                             </button>
                           )}
                         </div>
@@ -1779,7 +1770,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                     style={{ alignSelf: "flex-start", marginBottom: 4 }}
                   >
                     <ArrowLeft size={14} aria-hidden="true" />
-                    <span>Back to custom providers</span>
+                    <span>{uiText("modelsConfig.backCustom")}</span>
                   </button>
                   {detailContent}
                 </div>
@@ -1789,7 +1780,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                     <div style={{ flex: "1 1 220px", minWidth: 0, overflowWrap: "anywhere" }}>
                       <div style={{ fontSize: "var(--text-md)", fontWeight: 600, color: "var(--text)" }}>{t("modelsConfig.customProviders")}</div>
                       <div style={{ fontSize: "var(--text-body)", color: "var(--text-muted)", marginTop: 3 }}>
-                        Custom endpoints, local Ollama / vLLM models, or reverse proxies defined in <code style={{ fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)" }}>~/.omp/agent/models.yml</code>.
+                        {uiText("modelsConfig.customEndpointsDescription")}<code style={{ fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)" }}>~/.omp/agent/models.yml</code>.
                       </div>
                     </div>
                     <button
@@ -1798,8 +1789,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                       className="settings-back"
                       style={{ background: "var(--accent-strong)", color: "var(--on-accent)", border: "1px solid var(--accent-strong)", fontWeight: 600, padding: "6px 14px", flexShrink: 0 }}
                     >
-                      <Plus size={14} aria-hidden="true" /> Add Provider
-                    </button>
+                      <Plus size={14} aria-hidden="true" /> {uiText("modelsConfig.addProvider")}</button>
                   </div>
 
                   {providers.length === 0 ? (
@@ -1822,16 +1812,14 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                           className="settings-back"
                           style={{ border: "1px solid var(--border)", background: "var(--bg-panel)", padding: "6px 12px" }}
                         >
-                          Add Ollama (localhost:11434)
-                        </button>
+                          {uiText("modelsConfig.addOllama")}</button>
                         <button
                           type="button"
                           onClick={addCustomProvider}
                           className="settings-back"
                           style={{ background: "var(--accent-strong)", color: "var(--on-accent)", border: "1px solid var(--accent-strong)", fontWeight: 600, padding: "6px 12px" }}
                         >
-                          <Plus size={14} aria-hidden="true" /> Add Custom Endpoint
-                        </button>
+                          <Plus size={14} aria-hidden="true" /> {uiText("modelsConfig.addCustomEndpoint")}</button>
                       </div>
                     </div>
                   ) : (
@@ -1855,24 +1843,21 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                                   className="settings-back"
                                   style={{ padding: "4px 8px", fontSize: "var(--text-xs)", border: "1px solid var(--border)", background: "var(--bg)" }}
                                 >
-                                  <Plus size={12} aria-hidden="true" /> Add Model
-                                </button>
+                                  <Plus size={12} aria-hidden="true" /> {uiText("modelsConfig.addModel")}</button>
                                 <button
                                   type="button"
                                   onClick={() => setCatalogPicker(pName)}
                                   className="settings-back"
                                   style={{ padding: "4px 8px", fontSize: "var(--text-xs)", border: "1px solid var(--border)", background: "var(--bg)" }}
                                 >
-                                  <BookOpen size={12} aria-hidden="true" /> Catalog
-                                </button>
+                                  <BookOpen size={12} aria-hidden="true" /> {uiText("modelsConfig.catalog")}</button>
                                 <button
                                   type="button"
                                   onClick={() => setSelection({ type: "provider", name: pName })}
                                   className="settings-back"
                                   style={{ padding: "4px 8px", fontSize: "var(--text-xs)", border: "1px solid var(--border)", background: "var(--bg)" }}
                                 >
-                                  Edit
-                                </button>
+                                  {uiText("modelsConfig.edit")}</button>
                                 <button
                                   type="button"
                                   onClick={() => deleteProvider(pName)}
@@ -1906,8 +1891,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                               </div>
                             ) : (
                               <div style={{ fontSize: 11.5, color: "var(--text-dim)", paddingTop: 4, borderTop: "1px solid var(--border)" }}>
-                                No models defined yet. Click &quot;Add Model&quot; or &quot;Catalog&quot; above to configure models.
-                              </div>
+                                {uiText("modelsConfig.noModelsDefined")}</div>
                             )}
                           </div>
                         );

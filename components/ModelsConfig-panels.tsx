@@ -1,5 +1,7 @@
 "use client";
 
+import { translate as uiText } from "@/lib/i18n";
+
 import { useState, useEffect, useRef, type CSSProperties } from "react";
 import { useI18n } from "@/lib/i18n";
 import {
@@ -153,9 +155,9 @@ export function RetryFallbackDetail({ models }: { models: RuntimeModelEntry[] })
             <div key={selector} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", color: "var(--text-muted)", fontSize: 12 }}>
               <span style={{ width: 18, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>{index + 1}</span>
               <code style={{ flex: 1 }}>{selector}</code>
-              <button type="button" aria-label={`Move ${selector} up`} title={`Move ${selector} up`} disabled={index === 0} onClick={() => { const next = [...chain]; const previous = next[index - 1]; next[index - 1] = next[index]; next[index] = previous; updateChain(next); }} className="ui-focus-ring" style={{ width: 24, height: 24, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", border: "none", borderRadius: 4, background: "transparent", color: "var(--text-muted)", cursor: index === 0 ? "default" : "pointer" }}><ArrowUp size={14} /></button>
-              <button type="button" aria-label={`Move ${selector} down`} title={`Move ${selector} down`} disabled={index === chain.length - 1} onClick={() => { const next = [...chain]; const following = next[index + 1]; next[index + 1] = next[index]; next[index] = following; updateChain(next); }} className="ui-focus-ring" style={{ width: 24, height: 24, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", border: "none", borderRadius: 4, background: "transparent", color: "var(--text-muted)", cursor: index === chain.length - 1 ? "default" : "pointer" }}><ArrowDown size={14} /></button>
-              <button type="button" aria-label={`Remove ${selector} from chain`} title={`Remove ${selector}`} onClick={() => updateChain(chain.filter((value) => value !== selector))} className="ui-focus-ring" style={{ width: 24, height: 24, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", border: "none", borderRadius: 4, background: "transparent", color: "var(--text-muted)", cursor: "pointer" }}><Trash2 size={14} /></button>
+              <button type="button" aria-label={uiText("modelsConfig.moveChainUp", { model: selector })} title={uiText("modelsConfig.moveChainUp", { model: selector })} disabled={index === 0} onClick={() => { const next = [...chain]; const previous = next[index - 1]; next[index - 1] = next[index]; next[index] = previous; updateChain(next); }} className="ui-focus-ring" style={{ width: 24, height: 24, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", border: "none", borderRadius: 4, background: "transparent", color: "var(--text-muted)", cursor: index === 0 ? "default" : "pointer" }}><ArrowUp size={14} /></button>
+              <button type="button" aria-label={uiText("modelsConfig.moveChainDown", { model: selector })} title={uiText("modelsConfig.moveChainDown", { model: selector })} disabled={index === chain.length - 1} onClick={() => { const next = [...chain]; const following = next[index + 1]; next[index + 1] = next[index]; next[index] = following; updateChain(next); }} className="ui-focus-ring" style={{ width: 24, height: 24, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", border: "none", borderRadius: 4, background: "transparent", color: "var(--text-muted)", cursor: index === chain.length - 1 ? "default" : "pointer" }}><ArrowDown size={14} /></button>
+              <button type="button" aria-label={uiText("modelsConfig.removeChain", { model: selector })} title={uiText("modelsConfig.removeItem", { model: selector })} onClick={() => updateChain(chain.filter((value) => value !== selector))} className="ui-focus-ring" style={{ width: 24, height: 24, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", border: "none", borderRadius: 4, background: "transparent", color: "var(--text-muted)", cursor: "pointer" }}><Trash2 size={14} /></button>
             </div>
           ))}
         </div>
@@ -307,12 +309,12 @@ export function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
           const model = models.find((item) => `${item.provider}/${item.id}` === selectedModel);
           const modelKnown = !selectedModel || Boolean(model);
           return <>
-            <select aria-label={`Model override for ${role}`} value={selectedModel} onChange={(event) => updateRoleModel(role, event.target.value)} style={{ minWidth: 0, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12 }}>
+            <select aria-label={uiText("modelsConfig.roleModelAria", { role })} value={selectedModel} onChange={(event) => updateRoleModel(role, event.target.value)} style={{ minWidth: 0, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12 }}>
               <option value="">{t("modelsConfig.noOverride")}</option>
-              {!modelKnown && <option value={selectedModel}>{selectedModel} (not currently available)</option>}
+              {!modelKnown && <option value={selectedModel}>{selectedModel} {uiText("modelsConfig.notCurrentlyAvailable")}</option>}
               {models.map((item) => <option key={`${item.provider}:${item.id}`} value={`${item.provider}/${item.id}`}>{item.name || item.id} ({item.provider}/{item.id})</option>)}
             </select>
-            <select aria-label={`Thinking level for ${role}`} value={selectedThinking} disabled={!model} onChange={(event) => updateRoleThinking(role, event.target.value)} style={{ minWidth: 0, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12, opacity: model ? 1 : 0.55 }}>
+            <select aria-label={uiText("modelsConfig.roleThinkingAria", { role })} value={selectedThinking} disabled={!model} onChange={(event) => updateRoleThinking(role, event.target.value)} style={{ minWidth: 0, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12, opacity: model ? 1 : 0.55 }}>
               <option value="">{t("modelsConfig.modelDefault")}</option>
               {(model?.thinkingLevels ?? []).filter((level) => level !== "off").map((level) => <option key={level} value={level}>{level}</option>)}
             </select>

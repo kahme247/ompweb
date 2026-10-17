@@ -2837,7 +2837,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                       >
                         <Wrench size={12} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden="true" />
                         <span style={{ flex: 1 }}>{t("chatInput.toolPresetLabel")}</span>
-                        <span style={{ color: "var(--text-dim)", textTransform: "capitalize" }}>{toolPreset ?? "full"}</span>
+                        <span style={{ color: "var(--text-dim)" }}>{toolPreset ?? "full"}</span>
                         <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7, transform: plusExpanded === "tools" ? "rotate(180deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }} aria-hidden="true" />
                       </button>
                       {plusExpanded === "tools" && TOOL_PRESET_OPTIONS.map((opt) => {
@@ -2857,7 +2857,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                             <span className="picker-check">
                               {isActive && <svg width="11" height="11" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>}
                             </span>
-                            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textTransform: "capitalize" }}>{opt.value}</span>
+                            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{opt.value}</span>
                           </button>
                         );
                       })}
@@ -3040,7 +3040,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                       name (label hidden by CSS on narrow toolbars) and the
                       label always stays in title/aria. */}
                   <ThinkingGlyph level={thinkingLevel ?? "auto"} />
-                  <span className="composer-thinking-label" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textTransform: "capitalize" }}>{thinkingDisplayLabel}</span>
+                  <span className="composer-thinking-label" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{thinkingDisplayLabel}</span>
                   <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7, transform: thinkingDropdownOpen ? "rotate(180deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }} aria-hidden="true" />
                 </button>
                 {thinkingDropdownOpen && (
@@ -3089,14 +3089,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                               {isActive && <svg width="11" height="11" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>}
                             </span>
                             <ThinkingGlyph level={lvl} />
-                            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textTransform: "capitalize" }}>{displayLabel}</span>
+                            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{displayLabel}</span>
                           </button>
                         );
                       })}
                     </div>
                     <div className="picker-panel-footer">
                       <span>{t("chatInput.appliesNextPrompt")}</span>
-                      <span style={{ fontWeight: 600, color: "var(--text-muted)", textTransform: "capitalize" }}>{thinkingDisplayLabel}</span>
+                      <span style={{ fontWeight: 600, color: "var(--text-muted)" }}>{thinkingDisplayLabel}</span>
                     </div>
                   </div>
                 )}
@@ -3113,7 +3113,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 className="composer-fast-control"
                 onClick={() => { if (isStreaming) return; onFastModeChange(!fastModeEnabled); }}
                 disabled={isStreaming}
-                title={fastModeEnabled && fastModeActive === false ? "Fast mode is enabled but inactive for this model" : `Turn OMP Fast mode ${fastModeEnabled ? "off" : "on"} for this model`}
+                title={fastModeEnabled && fastModeActive === false ? t("chatInput.fastInactive") : t(fastModeEnabled ? "chatInput.fastDisable" : "chatInput.fastEnable")}
                 aria-label={t("chatInput.fastLabel")}
                 aria-pressed={fastModeEnabled}
                 style={{

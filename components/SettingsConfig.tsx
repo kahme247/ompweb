@@ -9,7 +9,7 @@ import { formatAgentEnvText, parseAgentEnvText, type AgentEnvErrorLabels } from 
 import { isRecord } from "@/lib/type-guards";
 import { Alert } from "@/components/ui/field";
 import { toast } from "@/components/ui/toast";
-import { useI18n } from "@/lib/i18n";
+import { useI18n, translate as uiText } from "@/lib/i18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { SettingsTabs, type SettingsTab, SETTINGS_CATEGORIES, getNormalizedActive } from "./SettingsTabs";
 import { copyText } from "@/lib/clipboard";
@@ -1190,7 +1190,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                 type="button"
                 onClick={() => { setSearchQuery(""); setHighlightId(null); }}
                 style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", padding: 2, display: "flex", alignItems: "center", justifyContent: "center" }}
-                aria-label="Clear search"
+                aria-label={uiText("fileExplorer.clearSearch")}
               >
                 <X size={12} aria-hidden="true" />
               </button>

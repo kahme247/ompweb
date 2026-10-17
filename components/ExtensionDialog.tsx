@@ -430,7 +430,7 @@ export function ExtensionDialog({
           {request.method === "input" && (
             <input
               autoFocus
-              aria-label={request.title || request.placeholder || "Input value"}
+              aria-label={request.title || request.placeholder || t("chatWindow.inputValue")}
               value={value}
               placeholder={request.placeholder}
               onChange={(e) => setValue(e.target.value)}
@@ -453,7 +453,7 @@ export function ExtensionDialog({
           {request.method === "editor" && (
             <textarea
               autoFocus
-              aria-label={request.title || "Input value"}
+              aria-label={request.title || t("chatWindow.inputValue")}
               value={value}
               onChange={(e) => setValue(e.target.value)}
               onKeyDown={(e) => {
