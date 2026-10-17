@@ -5,11 +5,13 @@ import type { ExitedRpcSession } from "@/lib/types";
 import en from "./locales/en.json";
 import ja from "./locales/ja.json";
 import zhCN from "./locales/zh-CN.json";
+import ko from "./locales/ko.json";
 
-export type Locale = "en" | "zh-CN" | "ja";
+export type Locale = "en" | "zh-CN" | "ja" | "ko";
 
 export const LOCALES: Array<{ value: Locale; label: string }> = [
   { value: "en", label: "EN" },
+  { value: "ko", label: "한국어" },
   { value: "zh-CN", label: "中文" },
   { value: "ja", label: "日本語" },
 ];
@@ -18,6 +20,7 @@ const STORAGE_KEY = "omp-lang";
 
 const dictionaries: Record<Locale, Record<string, string>> = {
   en: en as Record<string, string>,
+  ko: ko as Record<string, string>,
   "zh-CN": zhCN as Record<string, string>,
   ja: ja as Record<string, string>,
 };
@@ -46,7 +49,7 @@ function detectLocale(): Locale {
   try {
     if (typeof window !== "undefined" && typeof localStorage !== "undefined") {
       const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored === "en" || stored === "zh-CN" || stored === "ja") return stored;
+      if (stored === "en" || stored === "zh-CN" || stored === "ja" || stored === "ko") return stored;
     }
   } catch {
     // storage unavailable (private mode etc.)
@@ -55,6 +58,7 @@ function detectLocale(): Locale {
     const lang = navigator.language.toLowerCase();
     if (lang.startsWith("zh")) return "zh-CN";
     if (lang.startsWith("ja")) return "ja";
+    if (lang.startsWith("ko")) return "ko";
   }
   return "en";
 }

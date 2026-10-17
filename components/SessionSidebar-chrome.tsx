@@ -302,6 +302,7 @@ function useScramble(target: string, running: boolean, reducedMotion: boolean): 
   return display;
 }
 function OmpWebTitle() {
+  const { t } = useI18n();
   const [showVersion, setShowVersion] = useState(false);
   const [scrambling, setScrambling] = useState(false);
   const revertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -348,7 +349,7 @@ function OmpWebTitle() {
         alignItems: "center",
         gap: 7,
       }}
-      title={showVersion ? "Show ompweb name" : "Show ompweb version"}
+      title={showVersion ? t("sessionSidebar.showAppName") : t("sessionSidebar.showAppVersion")}
     >
       <OmpWebLogo size={20} />
       {!scrambling && !showVersion ? (

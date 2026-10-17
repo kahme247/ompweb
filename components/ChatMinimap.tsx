@@ -1,5 +1,7 @@
 "use client";
 
+import { translate as uiText, useI18n } from "@/lib/i18n";
+
 import { memo, useEffect, useRef, useState, useCallback, useMemo, type RefObject } from "react";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import type { AgentMessage, TextContent } from "@/lib/types";
@@ -86,6 +88,7 @@ export function getBarWidth(text: string, isActive: boolean, isHovered: boolean)
 const ROW_HEIGHT = 18;
 
 export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer, messageRefs }: Props) {
+  useI18n();
   const [activeIndex, setActiveIndex] = useState(0);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [isRailHovered, setIsRailHovered] = useState(false);
@@ -366,7 +369,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
       <div
         ref={railRef}
         role="navigation"
-        aria-label="Chat context navigation"
+        aria-label={uiText("chatWindow.minimapNavigation")}
         onMouseEnter={() => setIsRailHovered(true)}
         onMouseLeave={() => {
           setIsRailHovered(false);
@@ -411,7 +414,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
               data-index={i}
               role="button"
               tabIndex={0}
-              aria-label={`Jump to: ${node.text}`}
+              aria-label={uiText("chatWindow.jumpToMessage", { message: node.text })}
               onMouseEnter={() => setHoveredIndex(i)}
               onMouseLeave={() => setHoveredIndex((cur) => (cur === i ? null : cur))}
               onClick={(e) => {

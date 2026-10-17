@@ -1,5 +1,7 @@
 "use client";
 
+import { translate as uiText } from "@/lib/i18n";
+
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useTransition, cloneElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { getSubmitDuringRunBehavior, getWordCompletionMode, setSubmitDuringRunBehavior, setWordCompletionMode, type SubmitDuringRunBehavior, type WordCompletionMode } from "@/lib/composer-prefs";
 import dynamic from "next/dynamic";
@@ -1190,7 +1192,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                 type="button"
                 onClick={() => { setSearchQuery(""); setHighlightId(null); }}
                 style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", padding: 2, display: "flex", alignItems: "center", justifyContent: "center" }}
-                aria-label="Clear search"
+                aria-label={uiText("fileExplorer.clearSearch")}
               >
                 <X size={12} aria-hidden="true" />
               </button>

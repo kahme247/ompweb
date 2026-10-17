@@ -1,4 +1,6 @@
 "use client";
+
+import { translate as uiText } from "@/lib/i18n";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
@@ -1611,7 +1613,7 @@ function NoticeShelf({ notices, onDismiss, floating = false, align = "left" }: {
               <button
                 type="button"
                 onClick={() => onDismiss(notice.id)}
-                aria-label="Dismiss"
+                aria-label={uiText("common.dismiss")}
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
