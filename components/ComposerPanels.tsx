@@ -175,7 +175,7 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
         className="ui-focus-ring"
         onClick={() => onSelectSubagent(subagent)}
         aria-label={label}
-        title={`${label}${subagent.detached ? " (async)" : ""}`}
+        title={`${label}${subagent.detached ? t("chatWindow.asyncSuffix") : ""}`}
         style={{
           display: "inline-flex", flexDirection: "column", alignItems: "flex-start", gap: 1,
           maxWidth: "min(320px, 100%)", padding: "5px 9px",

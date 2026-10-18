@@ -1,5 +1,7 @@
 "use client";
 
+import { translate as uiText } from "@/lib/i18n";
+
 import { useState } from "react";
 import { useI18n } from "@/lib/i18n";
 import type { ProjectLaunchConfig } from "@/lib/types";
@@ -55,7 +57,7 @@ export function ProjectLaunchConfigDialog({ projectPath, initialConfig, onClose,
         </div>
         <div style={{ display: "grid", gap: 12, padding: 18 }}>
           <label style={{ display: "grid", gap: 5, color: "var(--text-muted)", fontSize: 12 }}>
-            <span>OMP Profile</span>
+            <span>{uiText("projectLaunchConfig.profileLabel")}</span>
             <input value={profile} onChange={(event) => setProfile(event.target.value)} placeholder={t("projectLaunchConfig.profilePlaceholder")} disabled={saving} style={{ height: 34, padding: "0 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 12, outline: "none" }} />
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--text-muted)", fontSize: 12 }}>

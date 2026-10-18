@@ -1,5 +1,7 @@
 "use client";
 
+import { translate as uiText, useI18n } from "@/lib/i18n";
+
 /**
  * Warm-paper form field primitives + confirmation dialog.
  *
@@ -118,6 +120,7 @@ export function Alert({
   onDismiss?: () => void;
   style?: CSSProperties;
 }) {
+  useI18n();
   const isError = variant === "error";
   const isWarning = variant === "warning";
   const Icon = isError ? AlertCircle : variant === "success" ? CheckIcon : isWarning ? TriangleAlert : Info;
@@ -156,7 +159,7 @@ export function Alert({
         <button
           type="button"
           onClick={onDismiss}
-          aria-label="Dismiss"
+          aria-label={uiText("common.dismiss")}
           style={{
             display: "inline-flex",
             alignItems: "center",

@@ -769,7 +769,7 @@ export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProp
                               marginTop: 2,
                             }}
                           >
-                            <span>{archive.messageCount} msgs</span>
+                            <span>{t("chatWindow.messageCount.other", { count: archive.messageCount })}</span>
                             <span>•</span>
                             <span>{formatArchiveSize(archive.size)}</span>
                             {archive.status && (

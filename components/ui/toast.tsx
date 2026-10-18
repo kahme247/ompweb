@@ -1,5 +1,7 @@
 "use client";
 
+import { translate as uiText, useI18n } from "@/lib/i18n";
+
 /**
  * Warm-paper toast system on @base-ui/react Toast.
  *
@@ -118,7 +120,7 @@ export function ClampedDescription({ children }: { children: React.ReactNode }) 
     <span
       onClick={() => setExpanded((v) => !v)}
       aria-expanded={expanded}
-      title={expanded ? undefined : "Click to expand"}
+      title={expanded ? undefined : uiText("common.clickToExpand")}
       style={clampDescriptionStyle(expanded)}
     >
       {children}
@@ -196,6 +198,7 @@ export function createSwipeTracker(startX: number): SwipeTracker {
 }
 
 function Toaster() {
+  useI18n();
   const { toasts } = Toast.useToastManager<ToastData>();
   const isMobile = useIsMobile();
   const clickGuard = useDragClickGuard();
@@ -210,6 +213,7 @@ function Toaster() {
   return (
     <Toast.Portal>
       <Toast.Viewport
+        aria-label={uiText("notifications.title")}
         style={{
           position: "fixed",
           top: topOffset,
@@ -310,7 +314,7 @@ function Toaster() {
             </Toast.Content>
             <Toast.Close
               className="toast-close-button"
-              aria-label="Dismiss"
+              aria-label={uiText("common.dismiss")}
               style={dismissButtonStyle}
             >
               <X size={12} strokeWidth={2} aria-hidden />
