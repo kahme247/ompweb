@@ -161,6 +161,7 @@ export class RpcProcess {
         frame = decoded;
       } catch (error) {
         this.stderrTail = (this.stderrTail + `\nRPC protocol error: ${error instanceof Error ? error.message : String(error)}`).slice(-STDERR_TAIL_LIMIT);
+        console.warn("[omp-web] rpc-protocol-dispose", JSON.stringify({ pid: this.child.pid, protocolVersion: this.protocolVersion, errorType: error instanceof Error ? error.name : typeof error, at: new Date().toISOString() }));
         void this.dispose(0);
         return;
       }

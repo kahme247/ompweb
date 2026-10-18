@@ -401,7 +401,10 @@ export class AgentSessionWrapper {
   }
 
   isRunning(): boolean {
-    return this.isAlive() && (this.promptRunning || this.streaming || this.compacting || this.bashRunning);
+    // A human/host response can outlive the current streaming turn. Reaping it
+    // closes stdin and OMP records "Request was aborted", even without a Stop.
+    return this.isAlive() && (this.promptRunning || this.streaming || this.compacting || this.bashRunning
+      || this.pendingUiRequests.size > 0 || this.pendingHostTools.size > 0 || this.pendingHostUris.size > 0);
   }
 
   /** A web UI (SSE stream) is currently attached to this session. */
@@ -453,6 +456,9 @@ export class AgentSessionWrapper {
   private reapIfDisconnected(): void {
     if (!this.isAlive() || this.hasSubscribers() || this.isRunning()
       || this.handshaking || this.pendingCommands > 0) {
+      // A paused human dialog produces no frames. Do not spin a zero-delay
+      // timer once the old deadline has passed while protected work remains.
+      this.reapDeadline = Math.max(this.reapDeadline, Date.now() + this.disconnectDestroyMs);
       this.armReap();
       return;
     }
@@ -461,7 +467,8 @@ export class AgentSessionWrapper {
       this.armReap();
       return;
     }
-    this.destroy();
+    console.info("[omp-web] automatic-session-cleanup", JSON.stringify({ sessionId: this._sessionId, reason: "disconnected-idle", at: new Date().toISOString() }));
+    this.destroy("disconnected-idle");
   }
 
   /** NDJSON messages are fresh snapshots; copy containers, not token payloads. */
@@ -1144,11 +1151,12 @@ export class AgentSessionWrapper {
     this.lastIdleReset = now;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => {
-      if (this.isRunning()) {
+      if (this.isRunning() || this.handshaking || this.pendingCommands > 0) {
         this.resetIdleTimer(true);
         return;
       }
-      this.destroy();
+      console.info("[omp-web] automatic-session-cleanup", JSON.stringify({ sessionId: this._sessionId, reason: "idle-timeout", at: new Date().toISOString() }));
+      this.destroy("idle-timeout");
     }, IDLE_DESTROY_MS);
     // A cleanup deadline must not keep the process alive; the registry's
     // process-exit handler disposes every child anyway.
@@ -1470,6 +1478,9 @@ export class AgentSessionWrapper {
   async send(command: Record<string, unknown>): Promise<unknown> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     if (!this.isAlive()) throw new Error("Session is no longer running");
+    if (typeof command.type === "string" && command.type.startsWith("abort")) {
+      console.info("[omp-web] cancellation-command", JSON.stringify({ sessionId: this._sessionId, type: command.type, at: new Date().toISOString() }));
+    }
     this.resetIdleTimer();
     // Covers the whole command, including the awaits inside it: a route that
     // has an unwatched session in mid-command (predict_word on a keystroke, an
@@ -1546,9 +1557,8 @@ export class AgentSessionWrapper {
           notifyRunningChange();
           if (error instanceof RpcCommandTimeoutError) {
             // The child took the frame but never acked it, so nothing will ever
-            // report this run: recycle it exactly like the get_state timeout
-            // path so the next request spawns a fresh child instead of talking
-            // to a wedged one.
+            // report this run: recycle the unacknowledged prompt. A read-only
+            // get_state timeout deliberately does not take this destructive path.
             await this.destroyAndWait();
             throw new WebRpcError("The OMP session stopped responding and was reset.", "session_unresponsive");
           }
@@ -1614,8 +1624,10 @@ export class AgentSessionWrapper {
           return this.buildWebState(state);
         } catch (error) {
           if (error instanceof RpcCommandTimeoutError) {
-            await this.destroyAndWait();
-            throw new WebRpcError("The OMP session stopped responding and was reset.", "session_unresponsive");
+            // This is only an observer poll. A busy event loop or delayed RPC
+            // response is not authority to stop generation or a pending tool.
+            console.warn("[omp-web] status-query-timeout", JSON.stringify({ sessionId: this._sessionId, timeoutMs: GET_STATE_TIMEOUT_MS, running: this.isRunning(), action: "preserved", at: new Date().toISOString() }));
+            throw new WebRpcError("The OMP status query timed out. The session was left running; retry shortly.", "session_state_timeout");
           }
           throw error;
         }
@@ -1856,18 +1868,19 @@ export class AgentSessionWrapper {
     return { queued: true, queue: "followUp", reason: "shellRunning" };
   }
 
-  destroy(): void {
-    void this.destroyAndWait();
+  destroy(reason = "unspecified"): void {
+    void this.destroyAndWait(reason);
   }
 
   /** Destroy and resolve only after the omp child has fully exited. Callers
    * that delete the session file afterwards must await this — omp flushes
    * session state on shutdown and would otherwise recreate the file. */
-  async destroyAndWait(): Promise<void> {
+  async destroyAndWait(reason = "unspecified"): Promise<void> {
     // Re-entrant calls join the in-flight dispose; without this a new spawn
     // can overlap the old child's shutdown (see startRpcSession).
     if (this.destroyPromise) return this.destroyPromise;
     if (!this._alive) return;
+    console.info("[omp-web] session-dispose", JSON.stringify({ sessionId: this._sessionId, reason, running: this.isRunning(), pendingDialogs: this.pendingUiRequests.size, at: new Date().toISOString(), caller: new Error().stack?.split("\n").slice(2, 5).map((line) => line.trim()) }));
     this._alive = false;
     this.streaming = false;
     this.promptRunning = false;
