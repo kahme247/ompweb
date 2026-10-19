@@ -21,9 +21,9 @@ import {
   removeActiveFromCompleted,
   saveRecentRuns,
   seedRecentRuns,
-  MAX_RECENT_COMPLETED_RUNS,
   type RecentRunEntry,
 } from "@/lib/recent-runs";
+import { useRecentRunsLimit } from "@/hooks/useRecentRunsLimit";
 import {
   EMPTY_PROJECT_SET,
   INITIAL_RESTORE_MAX_ATTEMPTS,
@@ -134,6 +134,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const [runningSessionCwds, setRunningSessionCwds] = useState<Record<string, string>>({});
   const [exitedSessions, setExitedSessions] = useState<Map<string, ExitedRpcSession>>(() => new Map());
   const knownRunningCwdsRef = useRef<Map<string, string>>(new Map());
+  const { limit: recentRunsLimit } = useRecentRunsLimit();
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
   const [recentCompletedRuns, setRecentCompletedRuns] = useState<RecentRunEntry[]>(() => loadRecentRuns());
   const effectiveRecentCompletedSet = useMemo(() => {
@@ -158,13 +159,13 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       }
     }
 
-    // Sort by latest timestamp descending, pick top 10
+    // Sort by latest timestamp descending, pick top dynamic limit
     const sorted = [...timestampMap.entries()]
       .sort((a, b) => b[1] - a[1])
-      .slice(0, MAX_RECENT_COMPLETED_RUNS);
+      .slice(0, recentRunsLimit);
 
     return new Set(sorted.map(([id]) => id));
-  }, [recentCompletedRuns, allSessions, runningSessionIds]);
+  }, [recentCompletedRuns, allSessions, runningSessionIds, recentRunsLimit]);
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
   // Relative session times must age while the sidebar stays open; one shared
   // minute clock avoids a timer per session row.
@@ -292,13 +293,13 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     saveUnreadSessionIds(unreadSessionIds);
   }, [unreadSessionIds]);
   useEffect(() => {
-    saveRecentRuns(recentCompletedRuns);
-  }, [recentCompletedRuns]);
+    saveRecentRuns(recentCompletedRuns, undefined, recentRunsLimit);
+  }, [recentCompletedRuns, recentRunsLimit]);
 
   useEffect(() => {
     if (allSessions.length === 0) return;
     setRecentCompletedRuns((prev) => {
-      const seeded = seedRecentRuns(allSessions, MAX_RECENT_COMPLETED_RUNS);
+      const seeded = seedRecentRuns(allSessions, recentRunsLimit);
       if (prev.length === 0) return seeded;
       const newestPrev = Math.max(...prev.map((p) => p.completedAt), 0);
       const newestSeeded = Math.max(...seeded.map((s) => s.completedAt), 0);
@@ -307,7 +308,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       }
       return prev;
     });
-  }, [allSessions]);
+  }, [allSessions, recentRunsLimit]);
 
 
   // Debounce refresh bursts (agent_start + session_info_update + file-appear signal can fire within 250ms)
@@ -405,7 +406,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
           updated = removeActiveFromCompleted(updated, runningSessionIds);
         }
         for (const id of allCompleted) {
-          updated = recordCompletedRun(updated, id);
+          updated = recordCompletedRun(updated, id, undefined, recentRunsLimit);
         }
         return updated;
       });
@@ -429,7 +430,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     }
 
     previousRunningSessionIdsRef.current = runningSessionIds;
-  }, [runningSessionIds, selectedSessionId, loadSessions]);
+  }, [runningSessionIds, selectedSessionId, loadSessions, recentRunsLimit]);
 
   useEffect(() => {
     if (!selectedSessionId) return;
@@ -1346,7 +1347,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
         </SidebarIconButton>
         <SidebarIconButton
           label={t("sessionSidebar.filterRunning")}
-          title={t("sessionSidebar.filterRunningTitle")}
+          title={t("sessionSidebar.filterRunningTitle", { count: recentRunsLimit })}
           active={runningOnly}
           onClick={() => setRunningOnly((v) => !v)}
         >
