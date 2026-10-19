@@ -16,9 +16,12 @@ import { Archive, ArrowLeft, ArrowRight, Check, ChevronRight, FileUp, Plus, Refr
 import { publishSessionsChanged } from "@/lib/session-change-bus";
 import { openEventStream } from "@/lib/event-stream";
 import {
-  extractRecentCompletedSet,
+  loadRecentRuns,
   recordCompletedRun,
   removeActiveFromCompleted,
+  saveRecentRuns,
+  seedRecentRuns,
+  MAX_RECENT_COMPLETED_RUNS,
   type RecentRunEntry,
 } from "@/lib/recent-runs";
 import {
@@ -132,8 +135,20 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const [exitedSessions, setExitedSessions] = useState<Map<string, ExitedRpcSession>>(() => new Map());
   const knownRunningCwdsRef = useRef<Map<string, string>>(new Map());
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
-  const [recentCompletedRuns, setRecentCompletedRuns] = useState<RecentRunEntry[]>([]);
-  const recentCompletedSet = useMemo(() => extractRecentCompletedSet(recentCompletedRuns), [recentCompletedRuns]);
+  const [recentCompletedRuns, setRecentCompletedRuns] = useState<RecentRunEntry[]>(() => loadRecentRuns());
+  const effectiveRecentCompletedSet = useMemo(() => {
+    const set = new Set(recentCompletedRuns.map((r) => r.sessionId));
+    if (set.size < MAX_RECENT_COMPLETED_RUNS) {
+      const candidates = [...allSessions]
+        .filter((s) => s.messageCount > 0 && !runningSessionIds.has(s.id))
+        .sort((a, b) => new Date(b.modified).getTime() - new Date(a.modified).getTime());
+      for (const c of candidates) {
+        set.add(c.id);
+        if (set.size >= MAX_RECENT_COMPLETED_RUNS) break;
+      }
+    }
+    return set;
+  }, [recentCompletedRuns, allSessions, runningSessionIds]);
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
   // Relative session times must age while the sidebar stays open; one shared
   // minute clock avoids a timer per session row.
@@ -260,6 +275,18 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   useEffect(() => {
     saveUnreadSessionIds(unreadSessionIds);
   }, [unreadSessionIds]);
+  useEffect(() => {
+    saveRecentRuns(recentCompletedRuns);
+  }, [recentCompletedRuns]);
+
+  useEffect(() => {
+    if (allSessions.length === 0) return;
+    setRecentCompletedRuns((prev) => {
+      if (prev.length > 0) return prev;
+      return seedRecentRuns(allSessions, MAX_RECENT_COMPLETED_RUNS);
+    });
+  }, [allSessions]);
+
 
   // Debounce refresh bursts (agent_start + session_info_update + file-appear signal can fire within 250ms)
   const pendingRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -705,7 +732,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     const entries: { project: ManagedProject; sessions: SessionInfo[] }[] = [];
     for (const project of sortedProjects) {
       let list = sessionsByProject.get(project.path) ?? [];
-      if (runningOnly) list = list.filter((s) => runningSessionIds.has(s.id) || recentCompletedSet.has(s.id));
+      if (runningOnly) list = list.filter((s) => runningSessionIds.has(s.id) || effectiveRecentCompletedSet.has(s.id));
       if (q) {
         list = list.filter((s) => (s.name ?? "").toLowerCase().includes(q) || s.firstMessage.toLowerCase().includes(q));
       }
@@ -715,7 +742,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       entries.push({ project, sessions: list });
     }
     return entries;
-  }, [sortedProjects, sessionsByProject, runningOnly, deferredSearchQuery, runningSessionIds, recentCompletedSet]);
+  }, [sortedProjects, sessionsByProject, runningOnly, deferredSearchQuery, runningSessionIds, effectiveRecentCompletedSet]);
 
   const treesByProject = useMemo(() => {
     const m = new Map<string, ReturnType<typeof buildSessionTree>>();
@@ -1409,7 +1436,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                 runningSessionIds={runningSessionIds}
                 unreadSessionIds={unreadSessionIds}
                 exitedSessions={exitedSessions}
-                recentlyCompletedIds={recentCompletedSet}
+                recentlyCompletedIds={effectiveRecentCompletedSet}
                 relativeTimeNow={relativeTimeNow}
                 onActivate={activateProject}
                 onToggleExpand={toggleProjectExpanded}

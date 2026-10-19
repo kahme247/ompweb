@@ -4,6 +4,54 @@ export interface RecentRunEntry {
 }
 
 export const MAX_RECENT_COMPLETED_RUNS = 10;
+export const RECENT_RUNS_STORAGE_KEY = "ompweb.recent-completed-runs";
+
+export function loadRecentRuns(storage?: Storage): RecentRunEntry[] {
+  try {
+    const s = storage ?? (typeof window !== "undefined" ? window.localStorage : undefined);
+    if (!s) return [];
+    const raw = s.getItem(RECENT_RUNS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (item): item is RecentRunEntry =>
+          typeof item === "object" &&
+          item !== null &&
+          typeof (item as RecentRunEntry).sessionId === "string" &&
+          typeof (item as RecentRunEntry).completedAt === "number",
+      )
+      .slice(0, MAX_RECENT_COMPLETED_RUNS);
+  } catch {
+    return [];
+  }
+}
+
+export function saveRecentRuns(entries: RecentRunEntry[], storage?: Storage): void {
+  try {
+    const s = storage ?? (typeof window !== "undefined" ? window.localStorage : undefined);
+    if (!s) return;
+    s.setItem(RECENT_RUNS_STORAGE_KEY, JSON.stringify(entries.slice(0, MAX_RECENT_COMPLETED_RUNS)));
+  } catch {
+    // quota exceeded or private browsing
+  }
+}
+
+export function seedRecentRuns(
+  allSessions: Array<{ id: string; modified: string; messageCount: number }>,
+  limit = MAX_RECENT_COMPLETED_RUNS,
+): RecentRunEntry[] {
+  return [...allSessions]
+    .filter((s) => s.messageCount > 0)
+    .sort((a, b) => new Date(b.modified).getTime() - new Date(a.modified).getTime())
+    .slice(0, limit)
+    .map((s) => ({
+      sessionId: s.id,
+      completedAt: new Date(s.modified).getTime() || Date.now(),
+    }));
+}
+
 
 export function recordCompletedRun(
   current: RecentRunEntry[],
