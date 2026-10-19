@@ -4,7 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProp
 import { createPortal } from "react-dom";
 import { useI18n } from "@/lib/i18n";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, Check } from "lucide-react";
 import OmpWebLogo from "./OmpWebLogo";
 /**
  * Path label that ellipsizes on the LEFT, keeping the (most relevant) trailing
@@ -407,6 +407,27 @@ function ExitedSessionIndicator({ title, size = 14 }: { title: string; size?: nu
     </span>
   );
 }
+function RecentlyCompletedIndicator({ size = 12 }: { size?: number }) {
+  const { t } = useI18n();
+  return (
+    <span
+      title={t("sessionSidebar.recentlyCompleted")}
+      aria-label={t("sessionSidebar.recentlyCompleted")}
+      style={{
+        width: size,
+        height: size,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flexShrink: 0,
+        color: "var(--status-success)",
+      }}
+    >
+      <Check size={size} strokeWidth={2.4} aria-hidden="true" />
+    </span>
+  );
+}
+
 
 function UnreadSessionIndicator({ size = 14 }: { size?: number }) {
   const { t } = useI18n();
@@ -442,6 +463,7 @@ export {
   PathLabel,
   ExitedSessionIndicator,
   RunningSessionIndicator,
+  RecentlyCompletedIndicator,
   SIDEBAR_BUTTON_TRANSITION,
   SidebarIconButton,
   SidebarPortalMenu,

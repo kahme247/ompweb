@@ -16,6 +16,12 @@ import { Archive, ArrowLeft, ArrowRight, Check, ChevronRight, FileUp, Plus, Refr
 import { publishSessionsChanged } from "@/lib/session-change-bus";
 import { openEventStream } from "@/lib/event-stream";
 import {
+  extractRecentCompletedSet,
+  recordCompletedRun,
+  removeActiveFromCompleted,
+  type RecentRunEntry,
+} from "@/lib/recent-runs";
+import {
   EMPTY_PROJECT_SET,
   INITIAL_RESTORE_MAX_ATTEMPTS,
   INITIAL_RESTORE_RETRY_MS,
@@ -126,6 +132,8 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const [exitedSessions, setExitedSessions] = useState<Map<string, ExitedRpcSession>>(() => new Map());
   const knownRunningCwdsRef = useRef<Map<string, string>>(new Map());
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
+  const [recentCompletedRuns, setRecentCompletedRuns] = useState<RecentRunEntry[]>([]);
+  const recentCompletedSet = useMemo(() => extractRecentCompletedSet(recentCompletedRuns), [recentCompletedRuns]);
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
   // Relative session times must age while the sidebar stays open; one shared
   // minute clock avoids a timer per session row.
@@ -337,8 +345,22 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
 
   useEffect(() => {
     const previous = previousRunningSessionIdsRef.current;
-    const completedInBackground = [...previous].filter((id) => !runningSessionIds.has(id) && id !== selectedSessionId);
+    const allCompleted = [...previous].filter((id) => !runningSessionIds.has(id));
+    const completedInBackground = allCompleted.filter((id) => id !== selectedSessionId);
     const newlyRunning = [...runningSessionIds].filter((id) => !previous.has(id));
+
+    if (allCompleted.length > 0 || newlyRunning.length > 0) {
+      setRecentCompletedRuns((prev) => {
+        let updated = prev;
+        if (newlyRunning.length > 0) {
+          updated = removeActiveFromCompleted(updated, runningSessionIds);
+        }
+        for (const id of allCompleted) {
+          updated = recordCompletedRun(updated, id);
+        }
+        return updated;
+      });
+    }
 
     if (completedInBackground.length > 0 || newlyRunning.length > 0) {
       setUnreadSessionIds((prev) => {
@@ -683,7 +705,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     const entries: { project: ManagedProject; sessions: SessionInfo[] }[] = [];
     for (const project of sortedProjects) {
       let list = sessionsByProject.get(project.path) ?? [];
-      if (runningOnly) list = list.filter((s) => runningSessionIds.has(s.id));
+      if (runningOnly) list = list.filter((s) => runningSessionIds.has(s.id) || recentCompletedSet.has(s.id));
       if (q) {
         list = list.filter((s) => (s.name ?? "").toLowerCase().includes(q) || s.firstMessage.toLowerCase().includes(q));
       }
@@ -693,7 +715,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       entries.push({ project, sessions: list });
     }
     return entries;
-  }, [sortedProjects, sessionsByProject, runningOnly, deferredSearchQuery, runningSessionIds]);
+  }, [sortedProjects, sessionsByProject, runningOnly, deferredSearchQuery, runningSessionIds, recentCompletedSet]);
 
   const treesByProject = useMemo(() => {
     const m = new Map<string, ReturnType<typeof buildSessionTree>>();
@@ -1387,6 +1409,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                 runningSessionIds={runningSessionIds}
                 unreadSessionIds={unreadSessionIds}
                 exitedSessions={exitedSessions}
+                recentlyCompletedIds={recentCompletedSet}
                 relativeTimeNow={relativeTimeNow}
                 onActivate={activateProject}
                 onToggleExpand={toggleProjectExpanded}
