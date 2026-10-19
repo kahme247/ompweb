@@ -39,11 +39,11 @@ export function saveRecentRuns(entries: RecentRunEntry[], storage?: Storage): vo
 }
 
 export function seedRecentRuns(
-  allSessions: Array<{ id: string; modified: string; messageCount: number }>,
+  allSessions: Array<{ id: string; modified: string; messageCount?: number; firstMessage?: string; name?: string }>,
   limit = MAX_RECENT_COMPLETED_RUNS,
 ): RecentRunEntry[] {
   return [...allSessions]
-    .filter((s) => s.messageCount > 0)
+    .filter((s) => (s.firstMessage && s.firstMessage !== "(no messages)") || (s.messageCount ?? 0) > 0 || Boolean(s.name))
     .sort((a, b) => new Date(b.modified).getTime() - new Date(a.modified).getTime())
     .slice(0, limit)
     .map((s) => ({

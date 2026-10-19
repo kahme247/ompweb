@@ -137,17 +137,33 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
   const [recentCompletedRuns, setRecentCompletedRuns] = useState<RecentRunEntry[]>(() => loadRecentRuns());
   const effectiveRecentCompletedSet = useMemo(() => {
-    const set = new Set(recentCompletedRuns.map((r) => r.sessionId));
-    if (set.size < MAX_RECENT_COMPLETED_RUNS) {
-      const candidates = [...allSessions]
-        .filter((s) => s.messageCount > 0 && !runningSessionIds.has(s.id))
-        .sort((a, b) => new Date(b.modified).getTime() - new Date(a.modified).getTime());
-      for (const c of candidates) {
-        set.add(c.id);
-        if (set.size >= MAX_RECENT_COMPLETED_RUNS) break;
+    const timestampMap = new Map<string, number>();
+
+    // 1. Live and persisted recent completed runs
+    for (const r of recentCompletedRuns) {
+      if (!runningSessionIds.has(r.sessionId)) {
+        timestampMap.set(r.sessionId, r.completedAt);
       }
     }
-    return set;
+
+    // 2. On-disk active sessions (fallback & recency backfill)
+    for (const s of allSessions) {
+      if (runningSessionIds.has(s.id)) continue;
+      const isValid = (s.firstMessage && s.firstMessage !== "(no messages)") || s.messageCount > 0 || Boolean(s.name);
+      if (!isValid) continue;
+      const ts = new Date(s.modified).getTime();
+      const existing = timestampMap.get(s.id);
+      if (existing === undefined || ts > existing) {
+        timestampMap.set(s.id, ts);
+      }
+    }
+
+    // Sort by latest timestamp descending, pick top 10
+    const sorted = [...timestampMap.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, MAX_RECENT_COMPLETED_RUNS);
+
+    return new Set(sorted.map(([id]) => id));
   }, [recentCompletedRuns, allSessions, runningSessionIds]);
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
   // Relative session times must age while the sidebar stays open; one shared
@@ -282,8 +298,14 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   useEffect(() => {
     if (allSessions.length === 0) return;
     setRecentCompletedRuns((prev) => {
-      if (prev.length > 0) return prev;
-      return seedRecentRuns(allSessions, MAX_RECENT_COMPLETED_RUNS);
+      const seeded = seedRecentRuns(allSessions, MAX_RECENT_COMPLETED_RUNS);
+      if (prev.length === 0) return seeded;
+      const newestPrev = Math.max(...prev.map((p) => p.completedAt), 0);
+      const newestSeeded = Math.max(...seeded.map((s) => s.completedAt), 0);
+      if (newestSeeded > newestPrev) {
+        return seeded;
+      }
+      return prev;
     });
   }, [allSessions]);
 
