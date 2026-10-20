@@ -2140,10 +2140,12 @@ export function AppShell({ appName }: { appName: string }) {
                 </button>
               </>
             )}
+              </div>
           {activeTopPanel === "system" && (
             <div data-top-panel className="dropdown-surface" style={{
               position: "absolute",
-              top: "calc(100% + 4px)",
+              // Compact: below the 48px tools bar, which clips its overflow (it scrolls sideways).
+              top: isMobile || compactTopbar ? "calc(100% + 56px)" : "calc(100% + 4px)",
               left: isMobile ? 4 : 8,
               right: "auto",
               width: "auto",
@@ -2187,7 +2189,6 @@ export function AppShell({ appName }: { appName: string }) {
               )}
             </div>
           )}
-              </div>
             </details>
           </div>
 

@@ -3611,10 +3611,6 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
     border-color: transparent;
     background: transparent;
   }
-  .shell-topbar-overflow[data-compact="true"] > .shell-topbar-overflow-content {
-    left: 48px;
-    right: 48px;
-  }
   .shell-topbar-overflow[data-compact="pending"] {
     display: block;
   }
@@ -3644,7 +3640,8 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
   position: absolute;
   top: calc(100% + 4px);
   left: 4px;
-  right: 4px;
+  /* Size to the buttons; scroll sideways only when they do not fit. */
+  max-width: calc(100% - 8px);
   height: 48px;
   gap: 4px;
   padding: 4px;
