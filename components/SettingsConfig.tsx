@@ -17,6 +17,7 @@ import type { AppUpdateInfo } from "./AppUpdateDialog";
 import { useFontSize, type FontSizePreference } from "@/hooks/useFontSize";
 import { useUiScale, type UiScalePreference } from "@/hooks/useUiScale";
 import { useTouchTargets, type TouchTargetsPreference } from "@/hooks/useTouchTargets";
+import { useRecentRunsLimit, type RecentRunsLimitPreset } from "@/hooks/useRecentRunsLimit";
 import { useSpeechSynthesis } from "@/hooks/useSpeechSynthesis";
 import { useNotificationPrefs } from "@/hooks/useNotifications";
 import { NOTIFICATION_TYPES, renderNotification, type NotificationType } from "@/lib/notification-events";
@@ -808,6 +809,12 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   const { uiScale, setUiScale } = useUiScale();
   const { touchTargets, setTouchTargets } = useTouchTargets();
   const {
+    preset: recentRunsPreset,
+    customValue: recentRunsCustomValue,
+    setPreset: setRecentRunsPreset,
+    setCustomValue: setRecentRunsCustomValue,
+  } = useRecentRunsLimit();
+  const {
     isSupported: ttsSupported,
     autoPlayEnabled: ttsAutoPlay,
     setAutoPlay: setTtsAutoPlay,
@@ -1326,6 +1333,40 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                       <option value="lg" style={nativeOptionStyle}>{t("settingsConfig.fontSizeLarge")}</option>
                       <option value="xl" style={nativeOptionStyle}>{t("settingsConfig.fontSizeXLarge")}</option>
                     </select>
+                  </NativeSetting>
+                  <NativeSetting searchId="recent-runs-limit" label={t("settingsConfig.recentRunsLimit")} description={t("settingsConfig.recentRunsLimitDesc")} scope="UI">
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <select
+                        style={nativeSelectStyle}
+                        value={recentRunsPreset}
+                        onChange={(e) => setRecentRunsPreset(e.target.value as RecentRunsLimitPreset)}
+                      >
+                        <option value="10" style={nativeOptionStyle}>{t("settingsConfig.recentRunsOption10")}</option>
+                        <option value="15" style={nativeOptionStyle}>{t("settingsConfig.recentRunsOption15")}</option>
+                        <option value="20" style={nativeOptionStyle}>{t("settingsConfig.recentRunsOption20")}</option>
+                        <option value="custom" style={nativeOptionStyle}>{t("settingsConfig.recentRunsOptionCustom")}</option>
+                      </select>
+                      {recentRunsPreset === "custom" && (
+                        <input
+                          type="number"
+                          min={1}
+                          max={100}
+                          value={recentRunsCustomValue}
+                          onChange={(e) => setRecentRunsCustomValue(Number(e.target.value))}
+                          style={{
+                            width: 80,
+                            height: "var(--control-height)",
+                            padding: "0 10px",
+                            border: "1px solid var(--border)",
+                            borderRadius: "var(--radius-control)",
+                            background: "var(--bg)",
+                            color: "var(--text)",
+                            fontSize: "var(--text-sm)",
+                          }}
+                          placeholder={t("settingsConfig.recentRunsCustomPlaceholder")}
+                        />
+                      )}
+                    </div>
                   </NativeSetting>
                   <NativeSetting searchId="ui-scale" label={t("settingsConfig.uiScale")} description={t("settingsConfig.uiScaleDesc")} scope="UI">
                     <select
