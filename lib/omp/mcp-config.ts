@@ -21,7 +21,7 @@ export type McpUserConfig = {
 };
 
 export type McpLiveStatus = "connected" | "connecting" | "not_connected" | "inactive" | "disabled" | "configured";
-export type McpLiveServer = { name: string; source: string; status: McpLiveStatus; type?: string };
+export type McpLiveServer = { name: string; source: string; status: McpLiveStatus; type?: string; sourcePath?: string };
 
 /** Browser-facing project config must never expose environment variables or HTTP headers. */
 export function redactMcpServer(server: McpServer): McpServer {
@@ -97,7 +97,7 @@ function readTomlMcpServers(path: string, source: string, disabledNames: Set<str
       const name = section[1] ?? section[2];
       if (!name || disabledNames.has(name)) return [];
       const body = text.slice((section.index ?? 0) + section[0].length, sections[index + 1]?.index);
-      return [{ name, source, status: /^\s*enabled\s*=\s*false\s*$/m.test(body) ? "disabled" as const : "configured" as const, type: /^\s*url\s*=/m.test(body) ? "http" : "stdio" }];
+      return [{ name, source, sourcePath: path, status: /^\s*enabled\s*=\s*false\s*$/m.test(body) ? "disabled" as const : "configured" as const, type: /^\s*url\s*=/m.test(body) ? "http" : "stdio" }];
     });
   } catch {
     return [];
@@ -127,7 +127,7 @@ export function readDiscoveredMcpServers(cwd?: string, disabled = [] as string[]
       if (seen.has(key)) continue;
       seen.add(key);
       const type = typeof server.config.type === "string" ? server.config.type : typeof server.config.url === "string" ? "http" : "stdio";
-      servers.push({ name: server.name, source, status: server.config.enabled === false ? "disabled" : "configured", type });
+      servers.push({ name: server.name, source, sourcePath: path, status: server.config.enabled === false ? "disabled" : "configured", type });
     }
   }
   return servers;

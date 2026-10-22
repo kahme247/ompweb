@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { Check, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Check, ChevronRight, Info, LoaderCircle, Plus, RefreshCw, RotateCw, Server, Trash2 } from "lucide-react";
+import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
 import { Alert } from "@/components/ui/field";
 import { toast } from "@/components/ui/toast";
 import { useI18n } from "@/lib/i18n";
@@ -12,7 +13,7 @@ type McpServer = { name: string; config: Record<string, unknown> };
 // server-side from the config.
 type McpUserConfig = { path: string; servers: Array<{ name: string; status: string; type: string; enabled: boolean; valid: boolean }>; disabledServers: string[]; error?: string };
 type McpLiveStatus = "connected" | "connecting" | "not_connected" | "inactive" | "disabled" | "configured";
-type McpLiveServer = { name: string; source: string; status: McpLiveStatus; type?: string };
+type McpLiveServer = { name: string; source: string; status: McpLiveStatus; type?: string; sourcePath?: string };
 type McpResponse = { servers?: McpServer[]; user?: McpUserConfig; inventory?: McpLiveServer[]; liveServers?: McpLiveServer[]; liveError?: string; path?: string; error?: string };
 
 const inputStyle = { width: "100%", padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", font: "12px var(--font-mono)" } as const;
@@ -48,8 +49,11 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const loadGeneration = useRef(0);
+  const [changing, setChanging] = useState<string | null>(null);
 
   const load = useCallback(async () => {
+    const generation = ++loadGeneration.current;
     setLoading(true);
     setMessage(null);
     setLiveError(null);
@@ -78,6 +82,7 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
       };
 
       const data = await read(false);
+      if (generation !== loadGeneration.current) return;
       setServers(data.servers ?? []);
       setUserConfig(data.user ?? null);
       setLiveServers(Array.isArray(data.liveServers) ? data.liveServers : null);
@@ -90,22 +95,39 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
       // Keep it off the initial paint path; the static inventory is already
       // useful and the live result can replace it when the command responds.
       if (sessionId) {
-        void read(true).then((liveData) => {
+        await read(true).then((liveData) => {
+          if (generation !== loadGeneration.current) return;
           setLiveServers(Array.isArray(liveData.liveServers) ? liveData.liveServers : null);
           setLiveError(liveData.liveError ?? null);
         }).catch((error) => {
+          if (generation !== loadGeneration.current) return;
           setLiveError(error instanceof Error ? error.message : String(error));
         });
       }
     } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      setMessage(detail);
+      if (generation === loadGeneration.current) setMessage(error instanceof Error ? error.message : String(error));
     } finally {
-      setLoading(false);
+      if (generation === loadGeneration.current) setLoading(false);
     }
   }, [cwd, sessionId]);
 
-  useEffect(() => { void load(); }, [load]);
+  const invalidateLoad = useCallback(() => { loadGeneration.current++; }, []);
+  useEffect(() => { void load(); return invalidateLoad; }, [load, invalidateLoad]);
+
+  const change = async (action: "enable" | "disable" | "reload", name?: string) => {
+    if (!sessionId || changing) return;
+    setChanging(name ?? "reload");
+    setMessage(null);
+    try {
+      const response = await fetch("/api/mcp", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sessionId, action, name }) });
+      const data = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      toast.success(t("mcpConfig.applied"));
+      await load();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally { setChanging(null); }
+  };
 
   const choose = (server: McpServer) => {
     setSelected(server.name);
@@ -185,67 +207,67 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
     }
   };
 
-  const displayedServers = liveServers ?? inventory;
+  const displayedServers = liveServers ?? inventory ?? [];
+  const groups = Array.from(new Set(displayedServers.map((server) => server.source))).map((source) => ({
+    source,
+    title: source === "User level" ? t("mcpConfig.sourceUser") : source === "Project level" ? t("mcpConfig.sourceProject") : source === "Disabled" ? t("mcpConfig.sourceDisabled") : source,
+    servers: displayedServers.filter((server) => server.source === source),
+    managed: ["User level", "Project level", "Disabled"].includes(source),
+  }));
+  const managedCount = groups.filter((group) => group.managed).reduce((sum, group) => sum + group.servers.length, 0);
+  const otherGroups = groups.filter((group) => !group.managed);
+  const groupView = (group: { source: string; title: string; servers: McpLiveServer[]; managed: boolean }) => {
+    const paths = Array.from(new Set(group.servers.flatMap((server) => server.sourcePath ? [server.sourcePath] : [])));
+    return <section className="settings-card mcp-source-card" key={group.source} aria-label={group.title}>
+      <header className="mcp-source-header">
+        <div className="mcp-source-title"><Server size={15} aria-hidden="true" /><h4>{group.title}</h4><span className="mcp-chip">{group.servers.length}</span></div>
+        {paths.map((sourcePath) => <code key={sourcePath} className="mcp-source-path" title={sourcePath}>{sourcePath}</code>)}
+      </header>
+      <ul className="mcp-server-list">
+        {group.servers.map((server) => {
+          const shadowed = group.source === "User level" && displayedServers.some((other) => other.source === "Project level" && other.name === server.name);
+          const manageable = group.managed && !shadowed;
+          const statusKey = server.status === "configured" ? "enabled" : server.status === "connected" ? "statusConnected" : server.status === "connecting" ? "statusConnecting" : server.status === "disabled" ? "statusDisabled" : server.status === "inactive" ? "statusInactive" : "statusNotConnected";
+          return <li className="mcp-server-row" key={server.name} aria-busy={changing === server.name}>
+            <div className="mcp-server-info">
+              <div className="mcp-server-title"><span className="mcp-server-name">{server.name}</span>{server.type && <span className="mcp-chip mcp-transport">{server.type}</span>}</div>
+              <span className="mcp-server-status" data-status={server.status}><span aria-hidden="true" />{changing === server.name ? t("mcpConfig.applying") : t(`mcpConfig.${statusKey}`)}</span>
+            </div>
+            {manageable ? <div className="mcp-server-control">
+              {changing === server.name && <LoaderCircle size={14} className="mcp-spin" aria-hidden="true" />}
+              <ToggleSwitch checked={server.status !== "disabled"} disabled={!sessionId || loading || !!changing || saving} aria-label={t("mcpConfig.serverToggle", { name: server.name })} onChange={(enabled) => void change(enabled ? "enable" : "disable", server.name)} />
+            </div> : <span className="mcp-readonly">{t(shadowed ? "mcpConfig.shadowed" : "mcpConfig.readOnly")}</span>}
+          </li>;
+        })}
+      </ul>
+    </section>;
+  };
 
   return <>
-    <section style={{ marginTop: 12, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "visible", background: "var(--bg-panel)" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderBottom: "1px solid var(--border)" }}>
-        <strong style={{ fontSize: 12, color: "var(--text)" }}>{t("mcpConfig.configuredServers")}</strong>
-        <button className="mcp-refresh-button ui-focus-ring" type="button" title={t("mcpConfig.refreshLiveStatus")} aria-label={t("mcpConfig.refreshLiveStatus")} onClick={() => void load()} disabled={loading} style={{ marginLeft: "auto", width: 24, height: 24, padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", border: "none", borderRadius: 4, background: "transparent", color: "var(--text-muted)", cursor: loading ? "wait" : "pointer" }}>
-          <RefreshCw size={14} />
-        </button>
-      </div>
-      <div style={{ padding: 12, display: "grid", gap: 12 }}>
-        {displayedServers !== null ? (
-          <div style={{ display: "grid", gap: 10 }}>
-            {Array.from(new Set(displayedServers.map((server) => server.source))).map((sourceName) => (
-              <div key={sourceName} style={{ display: "grid", gap: 4 }}>
-                <div style={{ color: "var(--text-muted)", fontSize: 11 }}>{sourceName}</div>
-                {displayedServers.filter((server) => server.source === sourceName).map((server) => {
-                  const active = server.status === "connected";
-                  const muted = server.status === "not_connected" || server.status === "connecting";
-                  return (
-                    <div key={`${sourceName}:${server.name}`} style={{ display: "flex", alignItems: "center", gap: 6, color: muted ? "var(--text-muted)" : server.status === "disabled" ? "var(--text-dim)" : "var(--text)", fontSize: 11 }}>
-                      <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: active ? "var(--accent)" : "var(--border)" }} />
-                      <code style={{ color: active ? "var(--text)" : "inherit" }}>{server.name}</code>
-                      <span>{server.status === "connected" ? t("mcpConfig.statusConnected") : server.status === "connecting" ? t("mcpConfig.statusConnecting") : server.status === "disabled" ? t("mcpConfig.statusDisabled") : t("mcpConfig.statusNotConnected")}{server.type ? ` [${server.type}]` : ""}</span>
-                    </div>
-                  );
-                })}
-              </div>
-            ))}
-            {!loading && displayedServers.length === 0 && <div style={{ color: "var(--text-dim)", fontSize: 11 }}>{t("mcpConfig.noMcpServers")}</div>}
-          </div>
-        ) : (
-          <>
-            <div style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("mcpConfig.userLevel", { path: userConfig?.path ?? "Loading..." })}</div>
-            {liveError && <div role="status" style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("mcpConfig.liveStatusUnavailable", { error: liveError })}</div>}
-            {userConfig?.error ? (
-              <div role="alert" style={{ color: "var(--status-error)", fontSize: 11 }}>{userConfig.error}</div>
-            ) : (
-              <div style={{ display: "grid", gap: 4 }}>
-                {(userConfig?.servers ?? []).map((server) => (
-                  <div key={server.name} style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--text-muted)", fontSize: 11 }}>
-                    <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: server.valid && server.enabled ? "var(--accent)" : "var(--border)" }} />
-                    <code style={{ color: "var(--text)" }}>{server.name}</code>
-                    <span>{server.enabled ? t("mcpConfig.enabled") : t("mcpConfig.disabled")} [{server.type}]</span>
-                  </div>
-                ))}
-                {(userConfig?.disabledServers ?? []).map((name) => (
-                  <div key={name} style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--text-dim)", fontSize: 11 }}>
-                    <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--border)" }} />
-                    <code>{name}</code>
-                    <span>{t("mcpConfig.disabled")}</span>
-                  </div>
-                ))}
-                {!loading && (userConfig?.servers.length ?? 0) === 0 && (userConfig?.disabledServers.length ?? 0) === 0 && <div style={{ color: "var(--text-dim)", fontSize: 11 }}>{t("mcpConfig.noOmpServers")}</div>}
-              </div>
-            )}
-          </>
-        )}
-      </div>
+    <section className="mcp-management" aria-label={t("mcpConfig.configuredServers")}>
+      <header className="mcp-management-header">
+        <div className="mcp-management-title"><h3>{t("mcpConfig.configuredServers")}</h3><span className="mcp-chip">{managedCount}</span></div>
+        <div className="mcp-toolbar">
+          <button className="mcp-toolbar-button ui-focus-ring" type="button" onClick={() => void change("reload")} disabled={!sessionId || loading || !!changing || saving}>
+            {changing === "reload" ? <LoaderCircle size={15} className="mcp-spin" aria-hidden="true" /> : <RotateCw size={15} aria-hidden="true" />}{t(changing === "reload" ? "mcpConfig.applying" : "mcpConfig.reload")}
+          </button>
+          <button className="mcp-toolbar-button mcp-icon-button ui-focus-ring" type="button" title={t("mcpConfig.refreshLiveStatus")} aria-label={t("mcpConfig.refreshLiveStatus")} onClick={() => void load()} disabled={loading || !!changing || saving}><RefreshCw size={15} className={loading ? "mcp-spin" : undefined} aria-hidden="true" /></button>
+        </div>
+      </header>
+      <p className="mcp-management-description">{t(sessionId ? "mcpConfig.applyHint" : "mcpConfig.selectSessionHint")}</p>
+      <div className="mcp-management-note"><Info size={14} aria-hidden="true" /><span>{t("mcpConfig.connectionHint")}</span></div>
+      {liveError && <Alert description={t("mcpConfig.liveStatusUnavailable", { error: liveError })} />}
+      {userConfig?.error && <Alert variant="error" description={userConfig.error} />}
+      {message && <Alert description={message} onDismiss={() => setMessage(null)} />}
+      {groups.filter((group) => group.managed).map(groupView)}
+      {loading && displayedServers.length === 0 && <div className="mcp-empty" role="status"><LoaderCircle size={16} className="mcp-spin" aria-hidden="true" />{t("appShell.loading")}</div>}
+      {!loading && managedCount === 0 && <div className="mcp-empty">{t("mcpConfig.noOmpServers")}</div>}
+      {otherGroups.length > 0 && <details className="settings-card mcp-other-configs">
+        <summary className="ui-focus-ring"><ChevronRight size={15} className="mcp-details-chevron" aria-hidden="true" /><span>{t("mcpConfig.otherSources")}</span><span className="mcp-chip">{otherGroups.reduce((sum, group) => sum + group.servers.length, 0)}</span></summary>
+        <div className="mcp-other-content"><p className="mcp-management-description">{t("mcpConfig.otherSourcesHint")}</p>{otherGroups.map(groupView)}</div>
+      </details>}
     </section>
-    {cwd && <div style={{ marginTop: 12, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "visible", background: "var(--bg-panel)" }}>
+    {cwd && <div className="settings-card mcp-editor-card" style={{ marginTop: 20, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "visible", background: "var(--bg-panel)" }}>
     <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderBottom: "1px solid var(--border)" }}>
       <strong style={{ fontSize: 12, color: "var(--text)", flexShrink: 0 }}>{t("mcpConfig.projectServers")}</strong>
       <code style={{ flex: 1, minWidth: 0, color: "var(--text-dim)", fontSize: 10, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{path ?? "Loading..."}</code>
@@ -293,7 +315,6 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
             </button>
           )}
         </div>
-        {message && <Alert variant={message.toLowerCase().includes("fail") || message.toLowerCase().includes("error") || message.toLowerCase().includes("invalid") ? "error" : "info"} description={message} onDismiss={() => setMessage(null)} />}
       </div>
     </div>
     </div>}
