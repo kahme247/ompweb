@@ -79,6 +79,9 @@ export interface RpcSessionState {
   autoRetryEnabled?: boolean;
   messageCount: number;
   queuedMessageCount: number;
+  /** Includes admitted submissions, scheduled turns and background deliveries; absent on older OMP. */
+  isSettled?: boolean;
+  hasPendingAsyncWork?: boolean;
   /** Displayable queue-chip texts (omp ≥ 18.4.4); mirrored live by `queue_update`. */
   queuedMessages?: QueuedMessages;
   todoPhases: TodoPhase[];

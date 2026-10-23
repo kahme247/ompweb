@@ -37,7 +37,7 @@ import {
   restoreScrollTop,
   VISIBLE_PAGE_SIZE,
 } from "@/lib/chat-lazy-load";
-import { getDraftSummary } from "@/lib/draft-store";
+import { getDraftSummary, type ChatDraft } from "@/lib/draft-store";
 
 interface Props {
   session: SessionInfo | null;
@@ -53,6 +53,7 @@ interface Props {
   onAgentEnd?: () => void;
   onSessionCreated?: (session: SessionInfo) => void;
   onSessionForked?: (newSessionId: string) => void;
+  onSessionMoved?: (oldId: string, newId: string) => void;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
   sessionInfoContainer?: HTMLDivElement | null;
@@ -259,6 +260,7 @@ interface CommittedTranscriptProps {
   messageRefs: React.RefObject<(HTMLDivElement | null)[]>;
   isStreaming: boolean;
   sessionBusy: boolean;
+  isCompacting: boolean;
   /** A run started outside this UI looks active from the transcript tail (see
    *  `looksLikeRunningTurn`). Without it the newest turn of a session driven by
    *  another `omp` process would never get a live tail; the transcript-tail
@@ -266,9 +268,9 @@ interface CommittedTranscriptProps {
   externalRunActive: boolean;
   isNew: boolean;
   forkingEntryId: string | null;
+  editingEntryId: string | null;
   handleFork: (entryId: string, editPrompt: boolean) => void;
-  handleNavigate: (entryId: string) => boolean | Promise<boolean>;
-  handleEditContent: (content: string) => void;
+  handleEdit: (entryId: string, content: string) => Promise<boolean>;
   modelNames: Record<string, string>;
   messageCwd: string | undefined;
   onOpenFile?: (filePath: string) => void;
@@ -295,8 +297,8 @@ interface CommittedTranscriptProps {
  * grouping/splitting work at display-frame cadence.
  */
 const CommittedTranscript = memo(function CommittedTranscript({
-  messages, entryIds, conversationMeta, messageRefs, isStreaming, sessionBusy, externalRunActive, isNew, forkingEntryId,
-  handleFork, handleNavigate, handleEditContent, modelNames, messageCwd, onOpenFile, sessionId,
+  messages, entryIds, conversationMeta, messageRefs, isStreaming, sessionBusy, isCompacting, externalRunActive, isNew, forkingEntryId, editingEntryId,
+  handleFork, handleEdit, modelNames, messageCwd, onOpenFile, sessionId,
   toolCallsDefaultCollapsed, hideToolActivity, expandThinkingByDefault, hideThinkingBlock, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
 }: CommittedTranscriptProps) {
   const { t } = useI18n();
@@ -310,10 +312,6 @@ const CommittedTranscript = memo(function CommittedTranscript({
 
   const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[] } = {}): ReactNode => {
     const msg = options.messageOverride ?? messages[idx];
-    const prevAssistantEntryId =
-      msg.role === "user" && idx > 0 && messages[idx - 1].role === "assistant"
-        ? entryIds[idx - 1]
-        : undefined;
     const isVisible = msg.role === "user" || msg.role === "assistant";
     const currentRefIdx = visibleRefIndexByMessage.get(idx);
     const keyPrefix = options.keyPrefix ?? "message";
@@ -333,6 +331,8 @@ const CommittedTranscript = memo(function CommittedTranscript({
     if (options.showTimestamp !== undefined) showTimestamp = options.showTimestamp;
     const forkTarget = forkTargets[idx];
     const canOfferFork = !sessionBusy && !isNew && !!forkTarget;
+    const canOfferEdit = !sessionBusy && !isCompacting && !isNew && msg.role === "user" && !msg.branchSummary && !!entryIds[idx];
+    const historyMutationPending = forkingEntryId !== null || editingEntryId !== null;
     const view = (
       <MessageView
         key={`${keyPrefix}-view-${idx}`}
@@ -346,10 +346,10 @@ const CommittedTranscript = memo(function CommittedTranscript({
         forkEditsPrompt={forkTarget?.editPrompt}
         onFork={canOfferFork ? handleFork : undefined}
         forking={forkingEntryId === forkTarget?.entryId}
-        forkDisabled={forkingEntryId !== null}
-        onNavigate={sessionBusy ? undefined : handleNavigate}
-        prevAssistantEntryId={sessionBusy ? undefined : prevAssistantEntryId}
-        onEditContent={handleEditContent}
+        forkDisabled={historyMutationPending}
+        onEdit={canOfferEdit ? handleEdit : undefined}
+        editing={editingEntryId === entryIds[idx]}
+        editDisabled={historyMutationPending}
         showTimestamp={showTimestamp}
         prevTimestamp={idx > 0 ? (messages[idx - 1] as AgentMessage & { timestamp?: number }).timestamp : undefined}
         sessionId={sessionId}
@@ -471,10 +471,22 @@ const CommittedTranscript = memo(function CommittedTranscript({
   );
 });
 
-export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders }: Props) {
   const { t, tn } = useI18n();
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
+  const internalChatInputRef = useRef<ChatInputHandle | null>(null);
+  const composerRef = chatInputRef ?? internalChatInputRef;
+  const [composerIdentityMove, setComposerIdentityMove] = useState<{ from: string; to: string; sourceDraft?: ChatDraft }>();
+  const handleSessionMoved = useCallback((oldId: string, newId: string, sourceDraft?: ChatDraft) => {
+    if (!onSessionMoved) return;
+    // A confirmed Edit changes this conversation's owner, not its composer.
+    // Keep pending reads, capture and transcription alive while rekeying drafts.
+    // Queue HTTP responses can settle before React commits the new draft key.
+    composerRef.current?.retargetPendingRecovery(oldId, newId);
+    setComposerIdentityMove({ from: oldId, to: newId, sourceDraft });
+    onSessionMoved(oldId, newId);
+  }, [composerRef, onSessionMoved]);
 
   // Wrap onAgentEnd to play the completion sound. This is more reliable than
   // wrapping handleAgentEventRef because useAgentSession overwrites that ref
@@ -498,10 +510,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     if (ttsRef.current.autoPlayEnabled) autoplayPendingRef.current = true;
     onAgentEnd?.();
   }, [onAgentEnd]);
-  // Stabilize the onEditContent ref; pairs with React.memo to avoid re-rendering history messages
-  const handleEditContent = useCallback((content: string) => {
-    chatInputRef?.current?.insertIfEmpty(content);
-  }, [chatInputRef]);
 
   const {
     loading, error, messages, entryIds, showPreCompactionHistory, streamState,
@@ -509,7 +517,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     externalRunActive,
     toolPreset,
     liveModelMeta,
-    retryInfo, contextUsage, forkingEntryId,
+    retryInfo, contextUsage, forkingEntryId, editingEntryId,
     isCompacting, compactResult, tokensPerSecond, displayModel: displayModelValue, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages, advisorActive, advisorEnabled, handleAdvisorChange,
     notices, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
@@ -520,7 +528,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
     isNew,
     sessionIdRef, messagesEndRef, scrollContainerRef,
-    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, retrySession,
+    handleSend, handleAbort, handleFork, handleEdit, handleModelChange, retrySession,
     handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction, handleCompact,
     removeQueuedMessage, promoteQueuedToSteer,
     handleBuiltinSlashCommand, togglePreCompactionHistory,
@@ -528,8 +536,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     handleToolPresetChange,
     btw, askBtw,
   } = useAgentSession({
-    session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked,
-    modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsPanelOpen,
+    session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked, onSessionMoved: handleSessionMoved,
+    modelsRefreshKey, chatInputRef: composerRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsPanelOpen,
     onOpenFile, onOpenUrl,
   });
   useEffect(() => {
@@ -836,8 +844,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
 
 
   const onDrop = useCallback((files: File[]) => {
-    chatInputRef?.current?.addFiles(files);
-  }, [chatInputRef]);
+    composerRef.current?.addFiles(files);
+  }, [composerRef]);
 
   const { isDragOver, handleDragEnter, handleDragOver, handleDragLeave, handleDrop } = useDragDrop(onDrop);
 
@@ -1009,8 +1017,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
   const handleExpand = useCallback(() => {
     setComposerMinimized(false);
     /* Focus the textarea after React commits the visibility change */
-    requestAnimationFrame(() => chatInputRef?.current?.focus());
-  }, [chatInputRef]);
+    requestAnimationFrame(() => composerRef.current?.focus());
+  }, [composerRef]);
   const composerStatusText = useMemo(() => {
     if (bashRunning && !pendingBash) {
       return t("chatWindow.runningCommand");
@@ -1043,7 +1051,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
   }, [askOpen]);
   const chatInputElement = (
     <ChatInput
-      ref={chatInputRef}
+      draftIdentityMove={composerIdentityMove}
+      ref={composerRef}
       sessionInfoContainer={sessionInfoContainer}
       onSend={handleSend}
       onPredictWord={handlePredictWord}
@@ -1053,6 +1062,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       onFollowUp={agentRunning ? handleFollowUp : undefined}
       onPromptWithStreamingBehavior={agentRunning ? handlePromptWithStreamingBehavior : undefined}
       isStreaming={sessionBusy}
+      submissionBlocked={editingEntryId !== null}
       model={displayModelValue}
       isAutoModelSelection={isAutoModelSelection}
       modelNames={modelNames}
@@ -1286,6 +1296,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
                 <button
                   type="button"
                   onClick={togglePreCompactionHistory}
+                  disabled={editingEntryId !== null}
                   style={{
                     flexShrink: 0, padding: "4px 8px", borderRadius: 6, border: "1px solid var(--border)",
                     background: "var(--bg)", color: "var(--text)", cursor: "pointer", fontSize: 12,
@@ -1302,12 +1313,13 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
               messageRefs={messageRefs}
               isStreaming={streamState.isStreaming}
               sessionBusy={sessionBusy}
+              isCompacting={isCompacting}
               externalRunActive={externalRunActive}
               isNew={isNew}
               forkingEntryId={forkingEntryId}
+              editingEntryId={editingEntryId}
               handleFork={handleFork}
-              handleNavigate={handleNavigate}
-              handleEditContent={handleEditContent}
+              handleEdit={handleEdit}
               modelNames={modelNames}
               messageCwd={messageCwd}
               onOpenFile={onOpenFile}

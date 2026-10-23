@@ -7,6 +7,7 @@ import { invalidateModelsCache } from "./models-cache";
 import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame } from "./omp/rpc-process";
 import { readNativeSettings } from "./omp/settings-config";
 import { getAgentEnvOverrides } from "./omp/agent-env";
+import { editSessionHistory, isSessionEditReply, SESSION_EDIT_COMMAND, SESSION_EDIT_EXTENSION_PATH, SessionEditAgentInvocationError, type SessionEditResult } from "./omp/session-edit";
 import {
   cacheSessionPath,
   invalidateSessionEntriesCache,
@@ -164,6 +165,19 @@ const PREDICT_WORD_TIMEOUT_MS = 125_000;
 // payload reaches omp — a client is free to POST any of them directly.
 const IMAGE_BEARING_COMMANDS = new Set(["prompt", "steer", "follow_up", "abort_and_prompt"]);
 
+// These commands can append to, replace, or resume the active history. Edits
+// fence them across every attached client, including mutations already awaiting
+// a native acknowledgement when an edit arrives. Read-only queries and dialog
+// replies remain available while a navigation hook is running.
+const HISTORY_MUTATING_COMMANDS = new Set([
+  "edit_message", "prompt", "steer", "follow_up", "abort", "abort_and_prompt",
+  "abort_and_restore_queue", "remove_queued_message", "promote_queued_message",
+  "fork", "new_session", "switch_session", "compact", "abort_compaction",
+  "reload", "bash", "abort_bash", "handoff", "set_todos", "set_session_name",
+  "set_model", "cycle_model", "set_thinking_level", "cycle_thinking_level",
+  "set_fast_mode", "set_slow_mode", "set_auto_compaction", "set_auto_retry", "abort_retry",
+]);
+
 // pi-web commands with no omp RPC equivalent. The UI tolerates these failing.
 const UNSUPPORTED_COMMANDS: Record<string, string> = {
   navigate_tree: "Branch navigation is not supported over the omp RPC protocol",
@@ -297,6 +311,8 @@ export class AgentSessionWrapper {
   private extensionWidgets = new Map<string, ExtensionWidgetItem>();
   private promptRunning = false;
   private promptDispatchPendingCount = 0;
+  private historyMutationPendingCount = 0;
+  private historyEditInFlight = false;
   private awaitingAgentStart = false;
   private awaitingAgentStartDeadline = 0;
   private continuationGraceUntil = 0;
@@ -402,6 +418,11 @@ export class AgentSessionWrapper {
 
   isRunning(): boolean {
     return this.isAlive() && (this.promptRunning || this.streaming || this.compacting || this.bashRunning);
+  }
+
+  /** Local history navigation is busy control work, not an interruptible model turn. */
+  isEditingHistory(): boolean {
+    return this.historyEditInFlight;
   }
 
   /** A web UI (SSE stream) is currently attached to this session. */
@@ -593,6 +614,16 @@ export class AgentSessionWrapper {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     if (!this.isAlive()) throw new Error("Session is no longer running");
 
+    if (this.historyEditInFlight) throw new WebRpcError("Wait for the history edit to finish", "session_busy");
+    this.historyMutationPendingCount += 1;
+    try {
+      return await this.generateSessionTitle();
+    } finally {
+      this.historyMutationPendingCount -= 1;
+    }
+  }
+
+  private async generateSessionTitle(): Promise<string | null> {
     if (!this.generateTitleUnsupported) {
       try {
         const result = await this.proc.sendCommand<unknown>({ type: "generate_title" }, GENERATE_TITLE_TIMEOUT_MS);
@@ -683,8 +714,14 @@ export class AgentSessionWrapper {
   }
 
   private handleFrame(frame: RpcFrame): void {
+    // The helper has its own process listener. Its correlated control replies
+    // must never become browser notices, replayed dialogs, or notifications,
+    // even when they arrive after a failed/timed-out edit.
+    if (isSessionEditReply(frame)) return;
     this.resetIdleTimer();
-    const event = frame;
+    const event = frame.type === "available_commands_update" && Array.isArray(frame.commands)
+      ? { ...frame, commands: (frame.commands as RpcAvailableSlashCommand[]).filter((command) => command.name !== SESSION_EDIT_COMMAND) }
+      : frame;
     let refreshSessionList = false;
 
     switch (event.type) {
@@ -1205,7 +1242,7 @@ export class AgentSessionWrapper {
   async getMcpList(): Promise<string> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     if (!this.isAlive()) throw new Error("Session is no longer running");
-    if (this.isRunning()) throw new WebRpcError("Wait for the current run to finish", "session_busy");
+    if (this.isRunning() || this.historyEditInFlight) throw new WebRpcError("Wait for the current operation to finish", "session_busy");
     if (this.mcpListWaiter || this.mcpListInFlight) throw new WebRpcError("MCP list is already loading", "mcp_list_loading");
 
     // Dedicated synchronous mutex: promptRunning alone is not atomic — two
@@ -1213,6 +1250,7 @@ export class AgentSessionWrapper {
     // would steal the waiter so the first hangs to timeout (or receives the
     // other's output). This flag is checked+set before any await.
     this.mcpListInFlight = true;
+    this.historyMutationPendingCount += 1;
 
     this.promptRunning = true;
     notifyRunningChange();
@@ -1275,6 +1313,7 @@ export class AgentSessionWrapper {
         this.mcpListWaiter = null;
       }
       this.mcpListInFlight = false;
+      this.historyMutationPendingCount -= 1;
       this.promptRunning = false;
       notifyRunningChange();
     }
@@ -1289,6 +1328,7 @@ export class AgentSessionWrapper {
     const awaitingExpired = !this.awaitingAgentStart || Date.now() >= this.awaitingAgentStartDeadline;
     const hasPendingWork =
       this.promptDispatchPendingCount > 0 ||
+      this.historyEditInFlight ||
       (this.awaitingAgentStart && !awaitingExpired) ||
       this.mcpListWaiter !== null ||
       this.pendingUiRequests.size > 0 ||
@@ -1386,6 +1426,91 @@ export class AgentSessionWrapper {
     return this._sessionId;
   }
 
+  private async editMessage(entryId: unknown): Promise<SessionEditResult> {
+    if (typeof entryId !== "string" || !entryId.trim()) {
+      throw new WebRpcError("The edit target must be a user message", "invalid_edit_target");
+    }
+    if (this.isRunning() || this.historyMutationPendingCount > 1) {
+      throw new WebRpcError("Wait for the current operation to finish before editing", "session_busy");
+    }
+
+    // Set synchronously, before the first native query: a second tab must not
+    // send a prompt, fork, or switch the process during either preflight await.
+    this.historyEditInFlight = true;
+    const proc = this.proc;
+    const sessionId = this._sessionId;
+    const sessionFile = this._sessionFile;
+    let persistenceError: Error | null = null;
+    // Keep observing through the authoritative post-edit state query as well
+    // as the helper's reply/ack exchange. The ordinary notice path still emits
+    // the native error to every observer.
+    const unsubscribe = proc.onFrame((frame) => {
+      if (frame.type === "notice" && frame.source === "session-persistence" && frame.level === "error") {
+        persistenceError ??= new Error(typeof frame.message === "string" ? frame.message : "OMP could not persist the history edit");
+      }
+    });
+    notifyRunningChange();
+    try {
+      const before = await this.getStateWithTimeout();
+      if (persistenceError) throw persistenceError;
+      if (before.sessionId !== sessionId || before.sessionFile !== sessionFile
+        || this._sessionId !== sessionId || this._sessionFile !== sessionFile) {
+        throw new WebRpcError("The session changed before the history edit", "session_changed");
+      }
+      if (typeof before.isSettled !== "boolean") {
+        throw new WebRpcError("Editing history requires a newer OMP that reports full session settlement", "session_edit_unsupported");
+      }
+      if (!before.isSettled || before.hasPendingAsyncWork === true
+        || before.isStreaming || before.isCompacting || before.queuedMessageCount > 0
+        || this.promptRunning || this.streaming || this.compacting || this.bashRunning) {
+        throw new WebRpcError("Wait for the current run to finish before editing", "session_busy");
+      }
+
+      const result = await editSessionHistory(proc, entryId, sessionId);
+      const after = await this.getStateWithTimeout();
+      if (persistenceError) throw persistenceError;
+      const unchanged = after.sessionId === sessionId && after.sessionFile === sessionFile;
+      // Only applyIdentity's native move path can retain the originating id.
+      // A reply naming a different conversation is never sufficient evidence.
+      const moved = this.movedFromIds.includes(sessionId) && after.sessionId !== sessionId;
+      if (!this.isAlive() || this.proc !== proc || result.sessionId !== after.sessionId
+        || (!unchanged && !moved) || this._sessionId !== after.sessionId || this._sessionFile !== after.sessionFile) {
+        throw new WebRpcError("The session changed during the history edit", "session_changed");
+      }
+      if (result.cancelled) return result;
+
+      this.clearLiveSnapshots();
+      this.responseObserved = false;
+      this.responseRunActive = false;
+      this.awaitingAgentStart = false;
+      this.awaitingAgentStartDeadline = 0;
+      this.continuationGraceUntil = 0;
+      // Invalidate the confirmed edited conversation, not its preserved source.
+      this.invalidateSessionLists();
+      this.emit({ type: "session_history_changed", leafId: result.leafId });
+      notifyRunningChange({ refreshSessionList: true });
+      return result;
+    } catch (error) {
+      if (error instanceof RpcCommandTimeoutError) {
+        // A timed-out navigation may still be running in a hook. Do not let a
+        // later mutation race it once the web-side fence is released.
+        await this.destroyAndWait();
+        if (persistenceError) throw persistenceError;
+        throw new WebRpcError("The OMP session stopped responding and was reset.", "session_unresponsive");
+      }
+      if (error instanceof SessionEditAgentInvocationError && !error.agentStarted) {
+        // Native /retry can acknowledge before its deferred agent_start. There
+        // is no observed run to own that gap: stop it before releasing Edit.
+        await this.destroyAndWait();
+      }
+      throw persistenceError ?? error;
+    } finally {
+      unsubscribe();
+      this.historyEditInFlight = false;
+      notifyRunningChange();
+    }
+  }
+
   /** Full restart of the child process against the same session file. This is
    * omp-web's `reload`: extensions, skills, prompts, and tools are rediscovered
    * on boot, matching a fresh CLI launch. */
@@ -1427,7 +1552,7 @@ export class AgentSessionWrapper {
         // Re-read per spawn so a restart picks up environment values the user
         // added in Settings after this session was created (#104).
         env: getAgentEnvOverrides(),
-        extraArgs: buildSessionSpawnArgs(resumable ? sessionFile : "", undefined, this.advisorSpawned, launchConfigForCwd(this.cwd)),
+        extraArgs: [...buildSessionSpawnArgs(resumable ? sessionFile : "", undefined, this.advisorSpawned, launchConfigForCwd(this.cwd)), "--extension", SESSION_EDIT_EXTENSION_PATH],
         onExit: (info) => {
           if (this.proc === proc) this.handleProcessExit(info, proc);
         },
@@ -1470,6 +1595,11 @@ export class AgentSessionWrapper {
   async send(command: Record<string, unknown>): Promise<unknown> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     if (!this.isAlive()) throw new Error("Session is no longer running");
+    const mutatesHistory = HISTORY_MUTATING_COMMANDS.has(command.type as string);
+    if (mutatesHistory && this.historyEditInFlight) {
+      throw new WebRpcError("Wait for the history edit to finish", "session_busy");
+    }
+    if (mutatesHistory) this.historyMutationPendingCount += 1;
     this.resetIdleTimer();
     // Covers the whole command, including the awaits inside it: a route that
     // has an unwatched session in mid-command (predict_word on a keystroke, an
@@ -1479,6 +1609,7 @@ export class AgentSessionWrapper {
       return await this.dispatchCommand(command);
     } finally {
       this.pendingCommands = Math.max(0, this.pendingCommands - 1);
+      if (mutatesHistory) this.historyMutationPendingCount -= 1;
     }
   }
 
@@ -1658,6 +1789,9 @@ export class AgentSessionWrapper {
         return { enabled: result?.enabled ?? enabled };
       }
 
+      case "edit_message":
+        return this.editMessage(command.entryId);
+
       case "fork": {
         // omp's `branch` is pi-web's fork: it creates a branched session file
         // and switches this live process onto it (entryId must be a user
@@ -1737,7 +1871,7 @@ export class AgentSessionWrapper {
         const data = await this.proc.sendCommand<{ commands: RpcAvailableSlashCommand[] }>({
           type: "get_available_commands",
         });
-        return data;
+        return { ...data, commands: data.commands.filter((command) => command.name !== SESSION_EDIT_COMMAND) };
       }
 
       case "reload": {
@@ -2144,7 +2278,7 @@ export async function startRpcSession(
     // children are kept (a mid-run swap would drop in-flight work) and pick
     // the new flag up at the next natural respawn; callers that pass no
     // advisor opinion (undefined) simply reuse whatever is running.
-    if (advisor === undefined || existing.advisorSpawned === effectiveAdvisor || existing.isRunning()) {
+    if (advisor === undefined || existing.advisorSpawned === effectiveAdvisor || existing.isRunning() || existing.isEditingHistory()) {
       return { session: existing, realSessionId: sessionId };
     }
     await existing.destroyAndWait();
@@ -2177,7 +2311,7 @@ export async function startRpcSession(
       cwd,
       // User-configured variables for MCP servers and generated configs (#104).
       env: getAgentEnvOverrides(),
-      extraArgs: buildSessionSpawnArgs(sessionFile, toolNames, advisor === true, launchConfig),
+      extraArgs: [...buildSessionSpawnArgs(sessionFile, toolNames, advisor === true, launchConfig), "--extension", SESSION_EDIT_EXTENSION_PATH],
       onExit: (info) => holder.wrapper?.handleProcessExit(info, proc),
     });
     const created = new AgentSessionWrapper(

@@ -72,6 +72,11 @@ export async function POST(
       );
     }
 
+    // Title generation/path resolution yielded; Edit may now own this session.
+    if (getRpcSession(id)?.isEditingHistory()) {
+      return NextResponse.json({ error: "Wait for the history edit to finish", code: "session_busy" }, { status: 409 });
+    }
+
     // Save title both to disk and through the live process so it persists immediately.
     setSessionTitle(filePath, derived, "auto");
     if (rpc?.isAlive?.()) {

@@ -15,7 +15,7 @@ const { setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
 test("provider-defined reasoning levels appear once in the trigger", () => {
   for (const thinkingLevel of ["ultra", "ultrathink-extended", "constructor"]) {
     const html = renderToStaticMarkup(React.createElement(ChatInput, {
-      onSend() {},
+      async onSend() { return { status: "accepted" }; },
       onThinkingLevelChange() {},
       thinkingLevel,
       isStreaming: false,
@@ -37,7 +37,7 @@ test("shows Queue instead of Stop for typed text during a run", () => {
   try {
     const html = renderToStaticMarkup(
       React.createElement(ChatInput, {
-        onSend() {},
+        async onSend() { return { status: "accepted" }; },
         onAbort() {},
         onFollowUp() {},
         isStreaming: true,
@@ -75,7 +75,7 @@ test("formats structured Claude low-priority state in the browser locale", () =>
   const time = new Date(resetsAtSec * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const html = renderToStaticMarkup(
     React.createElement(ChatInput, {
-      onSend() {},
+      async onSend() { return { status: "accepted" }; },
       isStreaming: false,
       usageLimit: { stage: "low_priority", resetsAtSec, allowanceLeftPercent: 62 },
     }),
@@ -98,7 +98,7 @@ test("formats every Claude usage-limit stage", () => {
   ];
   for (const [usageLimit, label] of rows) {
     const html = renderToStaticMarkup(
-      React.createElement(ChatInput, { onSend() {}, isStreaming: false, usageLimit }),
+      React.createElement(ChatInput, { async onSend() { return { status: "accepted" }; }, isStreaming: false, usageLimit }),
     );
     assert.ok(html.includes(label), `${JSON.stringify(usageLimit)} should render ${label}`);
   }
@@ -119,7 +119,7 @@ test("never renders a null percentage, an invalid date, or a past reset clock", 
   ];
   for (const usageLimit of rows) {
     const html = renderToStaticMarkup(
-      React.createElement(ChatInput, { onSend() {}, isStreaming: false, usageLimit }),
+      React.createElement(ChatInput, { async onSend() { return { status: "accepted" }; }, isStreaming: false, usageLimit }),
     );
     const label = `${JSON.stringify(usageLimit)} -> ${html}`;
     // "null" / "NaN" / "Invalid Date" reaching the label is the bug this pins:
@@ -137,7 +137,7 @@ test("never renders a null percentage, an invalid date, or a past reset clock", 
   assert.match(
     renderToStaticMarkup(
       React.createElement(ChatInput, {
-        onSend() {},
+        async onSend() { return { status: "accepted" }; },
         isStreaming: false,
         usageLimit: { stage: "low_priority", resetsAtSec: null, allowanceLeftPercent: 62 },
       }),
@@ -148,7 +148,7 @@ test("never renders a null percentage, an invalid date, or a past reset clock", 
   assert.match(
     renderToStaticMarkup(
       React.createElement(ChatInput, {
-        onSend() {},
+        async onSend() { return { status: "accepted" }; },
         isStreaming: false,
         usageLimit: { stage: "low_priority", resetsAtSec: null },
       }),
@@ -159,7 +159,7 @@ test("never renders a null percentage, an invalid date, or a past reset clock", 
 
 test("shows the Slow toggle only when omp reports /slow applies, pressed when enabled", () => {
   const render = (props) => renderToStaticMarkup(
-    React.createElement(ChatInput, { onSend() {}, isStreaming: false, onSlowModeChange() {}, ...props }),
+    React.createElement(ChatInput, { async onSend() { return { status: "accepted" }; }, isStreaming: false, onSlowModeChange() {}, ...props }),
   );
   // Older omp omits the field; an unsupported model reports false.
   for (const props of [{}, { slowModeSupported: false, slowModeEnabled: true }]) {
@@ -174,7 +174,7 @@ test("shows the Slow toggle only when omp reports /slow applies, pressed when en
 test("keeps the model selector visible when a model error leaves no options", () => {
   const html = renderToStaticMarkup(
     React.createElement(ChatInput, {
-      onSend() {},
+      async onSend() { return { status: "accepted" }; },
       onAbort() {},
       onModelChange() {},
       isStreaming: false,
@@ -192,7 +192,7 @@ test("keeps the model selector visible when a model error leaves no options", ()
 test("renders goal, planning, and advisor indicators at the composer", () => {
   const html = renderToStaticMarkup(
     React.createElement(ChatInput, {
-      onSend() {},
+      async onSend() { return { status: "accepted" }; },
       onAbort() {},
       onModelChange() {},
       isStreaming: false,
@@ -217,7 +217,7 @@ test("renders goal, planning, and advisor indicators at the composer", () => {
 test("shows the advisor thunder indicator with the reviewing model and reasoning", () => {
   const html = renderToStaticMarkup(
     React.createElement(ChatInput, {
-      onSend() {},
+      async onSend() { return { status: "accepted" }; },
       onAbort() {},
       isStreaming: true,
       advisorActive: true,
@@ -243,7 +243,7 @@ test("filters model options by display name, identifier, and provider", () => {
 test("renders single queued prompt in compact bar", () => {
   const html = renderToStaticMarkup(
     React.createElement(ChatInput, {
-      onSend() {},
+      async onSend() { return { status: "accepted" }; },
       onAbort() {},
       isStreaming: true,
       queuedMessages: {
@@ -262,7 +262,7 @@ test("renders single queued prompt in compact bar", () => {
 test("keeps editing and deletion but hides Steer for a single queued steer", () => {
   const html = renderToStaticMarkup(
     React.createElement(ChatInput, {
-      onSend() {},
+      async onSend() { return { status: "accepted" }; },
       onAbort() {},
       onPromoteQueuedToSteer() {},
       isStreaming: true,
@@ -282,7 +282,7 @@ test("keeps editing and deletion but hides Steer for a single queued steer", () 
 test("renders multiple queued prompts with count and expand action", () => {
   const html = renderToStaticMarkup(
     React.createElement(ChatInput, {
-      onSend() {},
+      async onSend() { return { status: "accepted" }; },
       onAbort() {},
       isStreaming: true,
       queuedMessages: {
@@ -350,7 +350,7 @@ test("model picker panel renders providers rail, models pane, and Add Providers"
 test("exposes tool presets through the plus menu when a handler is provided", () => {
   const html = renderToStaticMarkup(
     React.createElement(ChatInput, {
-      onSend() {},
+      async onSend() { return { status: "accepted" }; },
       onAbort() {},
       isStreaming: false,
       toolPreset: "full",
@@ -367,7 +367,7 @@ test("exposes tool presets through the plus menu when a handler is provided", ()
 test("plus trigger renders without change handlers", () => {
   const html = renderToStaticMarkup(
     React.createElement(ChatInput, {
-      onSend() {},
+      async onSend() { return { status: "accepted" }; },
       onAbort() {},
       isStreaming: false,
     }),
@@ -380,7 +380,7 @@ test("plus trigger renders without change handlers", () => {
 test("renders live status bar attached to the composer top edge when statusText is provided", () => {
   const html = renderToStaticMarkup(
     React.createElement(ChatInput, {
-      onSend() {},
+      async onSend() { return { status: "accepted" }; },
       onAbort() {},
       isStreaming: true,
       statusText: "Waiting for model...",
@@ -395,7 +395,7 @@ test("renders live status bar attached to the composer top edge when statusText 
 test("omits live status bar when statusText is absent or null", () => {
   const html = renderToStaticMarkup(
     React.createElement(ChatInput, {
-      onSend() {},
+      async onSend() { return { status: "accepted" }; },
       onAbort() {},
       isStreaming: false,
       statusText: null,
@@ -409,7 +409,7 @@ test("omits live status bar when statusText is absent or null", () => {
 test("renders both queued prompts and attached status bar together", () => {
   const html = renderToStaticMarkup(
     React.createElement(ChatInput, {
-      onSend() {},
+      async onSend() { return { status: "accepted" }; },
       onAbort() {},
       isStreaming: true,
       statusText: "Waiting for model...",

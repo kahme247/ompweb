@@ -1369,7 +1369,7 @@ export function AppShell({ appName }: { appName: string }) {
       .then((d) => {
         const full = d?.sessions.find((s) => s.id === sessionId);
         if (!full) return;
-        setSelectedSession((prev) => (prev && prev.id === sessionId && !prev.projectRoot ? full : prev));
+        setSelectedSession((prev) => (prev && prev.id === sessionId && (!prev.projectRoot || prev.path === "") ? full : prev));
       })
       .catch(() => {});
   }, []);
@@ -1381,6 +1381,17 @@ export function AppShell({ appName }: { appName: string }) {
     setRefreshKey((k) => k + 1);
     hydrateSelectedSession(session.id);
     router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
+  }, [router, hydrateSelectedSession]);
+
+  const handleSessionMoved = useCallback((oldId: string, newId: string) => {
+    if (activeSessionIdRef.current !== oldId) return;
+    activeSessionIdRef.current = newId;
+    setSelectedSession((current) => current?.id === oldId ? { ...current, id: newId, path: "" } : current);
+    setRefreshKey((key) => key + 1);
+    hydrateSelectedSession(newId);
+    // This is the same conversation. Preserve ChatWindow's run/edit fences
+    // and its mounted composer, including unfinished attachments and audio.
+    router.replace(`?session=${encodeURIComponent(newId)}`, { scroll: false });
   }, [router, hydrateSelectedSession]);
 
   const handleAgentEnd = useCallback(() => {
@@ -2511,6 +2522,7 @@ export function AppShell({ appName }: { appName: string }) {
               onAgentEnd={handleAgentEnd}
               onSessionCreated={handleSessionCreated}
               onSessionForked={handleSessionForked}
+              onSessionMoved={handleSessionMoved}
               modelsRefreshKey={modelsRefreshKey}
               chatInputRef={chatInputRef}
               onOpenFile={handleOpenLinkedFile}
