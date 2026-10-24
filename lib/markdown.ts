@@ -48,6 +48,17 @@ export function containsMathSyntax(markdown: string): boolean {
   return markdown.includes("$") || markdown.includes("\\(") || markdown.includes("\\[");
 }
 
+const RAW_CODE_CLOSE_PATTERNS: Record<string, RegExp> = {
+  code: /<\/code\s*>/i,
+  pre: /<\/pre\s*>/i,
+  script: /<\/script\s*>/i,
+  style: /<\/style\s*>/i,
+};
+
+function getRawCodeClosePattern(tag: string): RegExp {
+  return RAW_CODE_CLOSE_PATTERNS[tag] ?? new RegExp(`</${tag}\\s*>`, "i");
+}
+
 /** Loads remark-math + rehype-katex + the KaTeX CSS once, caching module-level. */
 export function loadMathMarkdownPlugins(): Promise<MarkdownPlugins> {
   if (!mathMarkdownPluginsPromise) {
@@ -103,6 +114,7 @@ export function useMarkdownPlugins(markdown: string): MarkdownPlugins {
 }
 
 export function normalizeDisplayMath(markdown: string): string {
+  if (!containsMathSyntax(markdown)) return markdown;
   const lineBreak = markdown.includes("\r\n") ? "\r\n" : "\n";
   const lines = markdown.split(/\r?\n/);
   const normalized: string[] = [];
@@ -116,7 +128,7 @@ export function normalizeDisplayMath(markdown: string): string {
 
     if (rawCodeTag) {
       normalized.push(line);
-      if (new RegExp(`</${rawCodeTag}\\s*>`, "i").test(line)) rawCodeTag = null;
+      if (getRawCodeClosePattern(rawCodeTag).test(line)) rawCodeTag = null;
       continue;
     }
 
@@ -140,7 +152,7 @@ export function normalizeDisplayMath(markdown: string): string {
     if (rawCodeOpen) {
       const tag = rawCodeOpen[1].toLowerCase();
       const remainder = line.slice((rawCodeOpen.index ?? 0) + rawCodeOpen[0].length);
-      if (!new RegExp(`</${tag}\\s*>`, "i").test(remainder)) rawCodeTag = tag;
+      if (!getRawCodeClosePattern(tag).test(remainder)) rawCodeTag = tag;
       inlineCodeMarkerSize = 0;
       normalized.push(line);
       continue;
