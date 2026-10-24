@@ -10,6 +10,7 @@ import {
   TITLE_WEIGHT,
   type SearchField,
 } from "./session-search";
+export const MAX_CONTENT_CACHE_ENTRIES = 200;
 
 interface ContentCacheEntry {
   version: string;
@@ -25,28 +26,44 @@ const PARSE_CONCURRENCY = 4;
 /** User and assistant text only: tool output and thinking would drown real matches. */
 async function extractTranscriptText(filePath: string): Promise<string> {
   const parts: string[] = [];
-  const lines = createInterface({ input: createReadStream(filePath, { encoding: "utf8" }), crlfDelay: Infinity });
-  for await (const line of lines) {
-    // The role sits near the line start; skip tool results (often MBs) unparsed.
-    const head = line.slice(0, 400);
-    if (!head.includes('"type":"message"') || !(head.includes('"role":"user"') || head.includes('"role":"assistant"'))) continue;
-    let content: unknown;
-    try {
-      content = JSON.parse(line)?.message?.content;
-    } catch {
-      continue;
+  const stream = createReadStream(filePath, { encoding: "utf8" });
+  const lines = createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      // The role sits near the line start; skip tool results (often MBs) unparsed.
+      const head = line.slice(0, 400);
+      if (!head.includes('"type":"message"') || !(head.includes('"role":"user"') || head.includes('"role":"assistant"'))) continue;
+      let content: unknown;
+      try {
+        content = JSON.parse(line)?.message?.content;
+      } catch {
+        continue;
+      }
+      if (typeof content === "string") parts.push(content);
+      else if (Array.isArray(content)) {
+        for (const block of content) if (block?.type === "text" && typeof block.text === "string") parts.push(block.text);
+      }
     }
-    if (typeof content === "string") parts.push(content);
-    else if (Array.isArray(content)) {
-      for (const block of content) if (block?.type === "text" && typeof block.text === "string") parts.push(block.text);
-    }
+  } finally {
+    lines.close();
+    stream.destroy();
   }
   return parts.join("\n");
 }
 
+function touchCacheEntry(cache: Map<string, ContentCacheEntry>, key: string, entry: ContentCacheEntry): void {
+  cache.delete(key);
+  cache.set(key, entry);
+  while (cache.size > MAX_CONTENT_CACHE_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    if (oldest !== undefined) cache.delete(oldest);
+    else break;
+  }
+}
+
 // shortcut: holds every session's extracted text in memory (~1% of file size) and
 // re-reads a whole file when it changes; move to an on-disk index if installs outgrow that.
-async function transcriptField(filePath: string, cache: Map<string, ContentCacheEntry>): Promise<SearchField | null> {
+export async function transcriptField(filePath: string, cache: Map<string, ContentCacheEntry>): Promise<SearchField | null> {
   let stat;
   try {
     stat = await fs.stat(filePath);
@@ -56,12 +73,14 @@ async function transcriptField(filePath: string, cache: Map<string, ContentCache
   }
   const version = `${stat.size}:${stat.mtimeMs}`;
   let entry = cache.get(filePath);
-  if (entry?.version !== version) {
-    entry = { version, field: extractTranscriptText(filePath).then((text) => searchField(text, CONTENT_WEIGHT)) };
-    cache.set(filePath, entry);
-    // A failed read must not stay cached.
-    entry.field.catch(() => { if (cache.get(filePath) === entry) cache.delete(filePath); });
+  if (entry?.version === version) {
+    touchCacheEntry(cache, filePath, entry);
+    return entry.field.catch(() => null);
   }
+  entry = { version, field: extractTranscriptText(filePath).then((text) => searchField(text, CONTENT_WEIGHT)) };
+  touchCacheEntry(cache, filePath, entry);
+  // A failed read must not stay cached.
+  entry.field.catch(() => { if (cache.get(filePath) === entry) cache.delete(filePath); });
   return entry.field.catch(() => null);
 }
 

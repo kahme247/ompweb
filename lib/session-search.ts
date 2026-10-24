@@ -34,18 +34,35 @@ export function searchField(text: string, weight: number): SearchField {
   return { text: normalized, words: [...new Set(normalized.match(WORD_RE) ?? [])], weight };
 }
 
+let prevRow = new Uint16Array(64);
+let curRow = new Uint16Array(64);
+
+function ensureScratchCapacity(needed: number): void {
+  if (prevRow.length < needed) {
+    let cap = prevRow.length;
+    while (cap < needed) cap *= 2;
+    prevRow = new Uint16Array(cap);
+    curRow = new Uint16Array(cap);
+  }
+}
+
 function editDistance(a: string, b: string, max: number): number {
   if (Math.abs(a.length - b.length) > max) return max + 1;
-  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  ensureScratchCapacity(b.length + 1);
+  let prev = prevRow;
+  let cur = curRow;
+  for (let j = 0; j <= b.length; j++) prev[j] = j;
   for (let i = 1; i <= a.length; i++) {
-    const cur = [i];
+    cur[0] = i;
     let rowMin = i;
     for (let j = 1; j <= b.length; j++) {
       cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
       rowMin = Math.min(rowMin, cur[j]);
     }
     if (rowMin > max) return max + 1;
+    const tmp = prev;
     prev = cur;
+    cur = tmp;
   }
   return prev[b.length];
 }
@@ -58,7 +75,11 @@ function termQuality(term: string, word: string): number {
   const maxTypos = term.length >= 8 ? 2 : term.length >= 5 ? 1 : 0;
   if (maxTypos === 0) return 0;
   // The prefix comparison tolerates a typo in a word still being typed.
-  const distance = Math.min(editDistance(term, word, maxTypos), editDistance(term, word.slice(0, term.length), maxTypos));
+  const fullDistance = editDistance(term, word, maxTypos);
+  const distance =
+    word.length <= term.length || fullDistance <= 1
+      ? fullDistance
+      : Math.min(fullDistance, editDistance(term, word.slice(0, term.length), maxTypos));
   // editDistance reports "too far" as maxTypos + 1, which must not read as a typo count.
   if (distance > maxTypos) return 0;
   return distance === 1 ? 0.45 : 0.3;
