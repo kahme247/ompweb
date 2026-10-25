@@ -3115,6 +3115,26 @@ test("a held file snapshot cannot roll back a newer RPC model choice", async () 
   assert.equal(w.latest.thinkingLevel, "high");
 });
 
+test("a failed model switch is shown as a notice instead of failing silently (#277)", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  Object.assign(world.sessions.get("s1"), { model: { provider: "test", modelId: "old-model" }, thinkingLevel: "low" });
+  const w = await mountSession("s1");
+  assert.equal(w.latest.displayModel.modelId, "old-model");
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "set_model",
+    produce: async () => ({
+      status: 500,
+      value: { error: "omp exited (code 1, signal none): error: Could not restore model test/old-model" },
+    }),
+  });
+  await act(async () => { await w.latest.handleModelChange("test", "chosen-model"); });
+  await settle();
+  assert.equal(w.latest.displayModel.modelId, "old-model", "a failed switch must not claim the new model");
+  assert.equal(w.latest.notices.at(-1)?.type, "error");
+  assert.match(w.latest.notices.at(-1)?.message ?? "", /Could not restore model/);
+});
+
 test("idle catch-up cannot overwrite a pending thinking command", async () => {
   resetWorld();
   primeSession("s1", [userMsg("u0", "q")]);

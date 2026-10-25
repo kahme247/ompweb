@@ -193,13 +193,21 @@ export function mapPresetToolNames(toolNames: string[]): string[] {
 const FULL_PRESET_KEY = [...PRESET_FULL].map((n) => n.toLowerCase()).sort().join(",");
 
 /** Extra CLI args for spawning `omp --mode rpc-ui` for a session. */
-export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[], advisor = false, launchConfig?: ProjectLaunchConfig): string[] {
+export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[], advisor = false, launchConfig?: ProjectLaunchConfig, modelOverride?: string): string[] {
   const args: string[] = [];
   if (sessionFile) {
     // An absolute path (or anything containing "/") resolves deterministically:
     // omp's createSessionManager opens it directly via SessionManager.open
     // without any interactive resume/fork prompts (main.ts resume handling).
     args.push("--resume", sessionFile);
+    // An explicitly chosen model replaces the saved model and skips its
+    // restore check (omp's --model at startup). Without this, resuming a
+    // session whose saved model can no longer be restored dies before any
+    // set_model RPC can run (#277). Args are passed as an argv array, never
+    // through a shell, so only whitespace / flag-smuggled values are kept out.
+    if (modelOverride && !modelOverride.startsWith("-") && !/\s/.test(modelOverride)) {
+      args.push("--model", modelOverride);
+    }
   } else if (toolNames !== undefined) {
     const presetKey = toolNames.map((n) => n.toLowerCase()).sort().join(",");
     if (toolNames.length === 0) {
@@ -2126,6 +2134,16 @@ export async function startRpcSession(
    * fallback (recorded dir gone) and warn the user. Omit for new sessions. */
   recordedCwd?: string | null,
   launchConfig?: ProjectLaunchConfig,
+  /** Model to bind at spawn time as `provider/modelId` (--model). Only used
+   * when resuming: it replaces the saved model and skips its restore check,
+   * so a cold set_model can recover a session whose saved model is gone
+   * (#277). Ignored when a live child is reused; the caller's set_model RPC
+   * then runs against that child as before. The spawn alone does not rewrite
+   * the session file, so a later spawn without an override still hits the
+   * old saved model until omp records a new one (a successful set_model RPC
+   * or a completed turn); the picker path re-binds on each cold switch, so
+   * the user is never stuck on the unrestorable model. */
+  spawnModel?: string,
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
@@ -2177,7 +2195,7 @@ export async function startRpcSession(
       cwd,
       // User-configured variables for MCP servers and generated configs (#104).
       env: getAgentEnvOverrides(),
-      extraArgs: buildSessionSpawnArgs(sessionFile, toolNames, advisor === true, launchConfig),
+      extraArgs: buildSessionSpawnArgs(sessionFile, toolNames, advisor === true, launchConfig, spawnModel),
       onExit: (info) => holder.wrapper?.handleProcessExit(info, proc),
     });
     const created = new AgentSessionWrapper(
