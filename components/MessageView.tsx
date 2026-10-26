@@ -305,7 +305,7 @@ function ForkSessionButton({ entryId, editPrompt, onFork, forking, forkDisabled 
       description={t("messageView.forkConfirmBody")}
       confirmLabel={t("messageView.newSession")}
       cancelLabel={t("chatInput.cancel")}
-      onConfirm={() => { setConfirming(false); onFork(entryId, editPrompt); }}
+      onConfirm={() => { setConfirming(false); if (!blocked) onFork(entryId, editPrompt); }}
     />
     <Tooltip content={forking ? t("messageView.creatingSession") : t("messageView.newSessionTitle")}>
       <button
