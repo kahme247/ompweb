@@ -1,11 +1,11 @@
 "use client";
 
-import { BellOff, X } from "lucide-react";
+import { BellOff, CheckCheck, Trash2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useI18n } from "@/lib/i18n";
 import { OPEN_SESSION_EVENT } from "@/lib/notification-client";
 import { renderNotification, type NotificationHistoryEntry } from "@/lib/notification-events";
-import { notificationHistory, useNotificationHistory } from "@/lib/notification-history";
+import { notificationHistory, useNotificationHistory, useUnreadNotificationCount } from "@/lib/notification-history";
 import { ClampedDescription, createSwipeTracker, descriptionBaseStyle, dismissButtonStyle, DRAG_SLOP_PX, KindIcon, useDragClickGuard, type SwipeTracker } from "./ui/toast";
 
 /** Sideways travel that dismisses on release, the same distance as base-ui's toast swipe. */
@@ -13,7 +13,45 @@ const SWIPE_DISMISS_PX = 40;
 /** Outlasts the 150ms exit transition; a timer, because a hidden panel cancels transitionend. */
 const EXIT_MS = 200;
 
-/** Notifications tab of the right panel: the persisted notification history, newest first. */
+const actionButtonStyle = { display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, padding: 0, background: "none", border: "none", borderRadius: "var(--radius-control)", color: "var(--text-dim)" } as const;
+
+/** Mark-all-read and clear: the toolbar of the Notifications tab and of the bell popover. */
+export function NotificationActions() {
+  const { t } = useI18n();
+  const unread = useUnreadNotificationCount();
+  return (
+    <div style={{ display: "flex", alignItems: "center", flexShrink: 0, padding: "0 2px" }} role="toolbar" aria-label={t("appShell.notifications")}>
+      {/* aria-disabled (not disabled) keeps the button focusable after use. */}
+      <button
+        type="button"
+        onClick={notificationHistory.markAllRead}
+        aria-disabled={unread === 0}
+        title={t("appShell.notificationsMarkRead")}
+        aria-label={t("appShell.notificationsMarkRead")}
+        className="ui-focus-ring"
+        style={{ ...actionButtonStyle, cursor: unread === 0 ? "default" : "pointer", opacity: unread === 0 ? 0.5 : 1 }}
+        onMouseEnter={(e) => { if (unread === 0) return; e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
+      >
+        <CheckCheck size={13} strokeWidth={2} aria-hidden="true" />
+      </button>
+      <button
+        type="button"
+        onClick={notificationHistory.clear}
+        title={t("appShell.notificationsClear")}
+        aria-label={t("appShell.notificationsClear")}
+        className="ui-focus-ring"
+        style={{ ...actionButtonStyle, cursor: "pointer" }}
+        onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+        onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
+      >
+        <Trash2 size={13} strokeWidth={2} aria-hidden="true" />
+      </button>
+    </div>
+  );
+}
+
+/** The persisted notification history, newest first: the mobile Notifications tab and the desktop bell popover. */
 export function NotificationList() {
   const { t } = useI18n();
   const entries = useNotificationHistory();
@@ -156,8 +194,8 @@ function NotificationRow({ entry }: { entry: NotificationHistoryEntry }) {
         type="button"
         onClick={(event) => {
           // Dismissing unmounts this button (and the list, if it was the
-          // last entry); keep keyboard focus in the always-mounted tab panel.
-          const panel = event.currentTarget.closest<HTMLElement>('[role="tabpanel"]');
+          // last entry); keep keyboard focus in the tab panel or bell popover.
+          const panel = event.currentTarget.closest<HTMLElement>('[role="tabpanel"], [role="dialog"]');
           notificationHistory.remove(entry.id);
           panel?.focus();
         }}

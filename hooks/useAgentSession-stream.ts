@@ -10,6 +10,7 @@ import type {
   ExtensionWidgetItem,
   SessionTreeNode,
 } from "@/lib/types";
+import type { EventStream } from "@/lib/event-stream";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
 import type { QueuedMessages, RpcAvailableSlashCommand, SlowModeScope, TodoPhase, UsageLimitState } from "@/lib/pi-types";
 import type {
@@ -280,8 +281,8 @@ export const EXTERNAL_RUN_STALE_MS = 60_000;
 export const EVENT_STREAM_CONNECT_TIMEOUT_MS = 60_000;
 // Tell the user something is happening if the stream is still connecting.
 export const EVENT_STREAM_SLOW_CONNECT_MS = 4_000;
-// Manual reconnect backoff for a CLOSED event stream (fatal per EventSource,
-// so the browser will not retry on its own). Doubles per consecutive failure,
+// Manual reconnect backoff for a CLOSED event stream (fatal, so the stream
+// will not retry on its own). Doubles per consecutive failure,
 // caps at the max; reset on any successful open. Without this, an idle
 // session whose stream died (server hiccup, wrapper respawn) stays dead
 // silently until a full page reload.
@@ -296,7 +297,7 @@ export type EventStreamConnectionStatus = "connected" | "timeout" | "closed";
 
 export type EventStreamConnectionResult = {
   status: EventStreamConnectionStatus;
-  source: EventSource;
+  source: EventStream;
 };
 
 export class EventStreamConnectionError extends Error {

@@ -19,6 +19,7 @@ import { ChatWindow } from "./ChatWindow";
 import { type Tab } from "./TabBar";
 import { type FileExplorerHandle } from "./FileExplorer";
 import type { RightPanelView } from "./RightPanel";
+import { NotificationBell } from "./NotificationBell";
 import { BranchNavigator } from "./BranchNavigator";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { CommandPaletteMount } from "./CommandPaletteMount";
@@ -70,6 +71,7 @@ import {
 import type { CrossSessionHostToolCall, ManagedProject, SessionInfo, SessionTreeNode } from "@/lib/types";
 import { runHostTool } from "@/hooks/useAgentSession-stream";
 import { sendAgentCommand } from "@/lib/agent-client";
+import { openEventStream } from "@/lib/event-stream";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo, GenerationSpeedInfo } from "@/lib/pi-types";
 import type { SettingsTab } from "./SettingsTabs";
@@ -94,6 +96,7 @@ const RightPanel = dynamic(() => import("./RightPanel").then((m) => m.RightPanel
 });
 
 const TOOL_CALLS_COLLAPSED_STORAGE_KEY = "omp-web:tool-calls-collapsed";
+const HIDE_TOOL_ACTIVITY_STORAGE_KEY = "omp-web:hide-tool-activity";
 // Off by default, so the transcript keeps collapsing reasoning until asked.
 const EXPAND_THINKING_STORAGE_KEY = "omp-web:expand-thinking";
 const PROVIDER_USAGE_VISIBLE_STORAGE_KEY = "omp-web:provider-usage-visible";
@@ -138,6 +141,7 @@ export function AppShell({ appName }: { appName: string }) {
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState<number>(SIDEBAR_DEFAULT_WIDTH);
   const [toolCallsDefaultCollapsed, setToolCallsDefaultCollapsed] = useState(true);
+  const [hideToolActivity, setHideToolActivity] = useState(true);
   // "Expand thinking blocks by default" — like the tool-call preference, a
   // UI-only behavior, so it lives in localStorage rather than omp's config.
   const [expandThinkingByDefault, setExpandThinkingByDefault] = useState(false);
@@ -171,6 +175,7 @@ export function AppShell({ appName }: { appName: string }) {
     setSidebarWidth(loadSidebarWidth());
     try {
       setToolCallsDefaultCollapsed(window.localStorage.getItem(TOOL_CALLS_COLLAPSED_STORAGE_KEY) !== "false");
+      setHideToolActivity(window.localStorage.getItem(HIDE_TOOL_ACTIVITY_STORAGE_KEY) !== "false");
       setExpandThinkingByDefault(window.localStorage.getItem(EXPAND_THINKING_STORAGE_KEY) === "true");
       setProviderUsageVisible(window.localStorage.getItem(PROVIDER_USAGE_VISIBLE_STORAGE_KEY) !== "false");
       setScopeNativeSelectAll(window.localStorage.getItem(NATIVE_SELECT_ALL_STORAGE_KEY) === "true");
@@ -183,6 +188,14 @@ export function AppShell({ appName }: { appName: string }) {
     setToolCallsDefaultCollapsed(collapsed);
     try {
       window.localStorage.setItem(TOOL_CALLS_COLLAPSED_STORAGE_KEY, String(collapsed));
+    } catch {
+      // The preference still applies for this page load.
+    }
+  }, []);
+  const handleHideToolActivityChange = useCallback((hide: boolean) => {
+    setHideToolActivity(hide);
+    try {
+      window.localStorage.setItem(HIDE_TOOL_ACTIVITY_STORAGE_KEY, String(hide));
     } catch {
       // The preference still applies for this page load.
     }
@@ -1000,15 +1013,25 @@ export function AppShell({ appName }: { appName: string }) {
   const [rightPanelHasOpened, setRightPanelHasOpened] = useState(false);
   const [rightView, setRightView] = useState<RightPanelView>("explorer");
   const unreadNotifications = useUnreadNotificationCount();
-  // Unread entries stay highlighted while the Notifications tab is shown and
-  // become read once the user leaves it (switches tab or closes the panel).
-  const viewingNotifications = rightPanelOpen && rightView === "notifications" && !settingsTab;
-  const wasViewingNotificationsRef = useRef(false);
+  // Desktop shows the history in the top-bar bell's popover; mobile in the right panel's tab.
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
   useEffect(() => {
+    if (!isMobile) setRightView((view) => view === "notifications" ? "explorer" : view);
+  }, [isMobile]);
+  // Settings replaces the top bar; the popover must not reopen on the way back.
+  useEffect(() => {
+    if (isMobile || settingsTab) setNotificationsOpen(false);
+  }, [isMobile, settingsTab]);
+  // Unread entries stay highlighted while the notifications are shown and
+  // become read once the user leaves them (switches tab, closes the panel or popover).
+  const viewingNotifications = (notificationsOpen || (rightPanelOpen && rightView === "notifications")) && !settingsTab;
+  const wasViewingNotificationsRef = useRef(false);
+  // Layout effect: marks read before a notification arriving after the close can join the list.
+  useLayoutEffect(() => {
     if (wasViewingNotificationsRef.current && !viewingNotifications) notificationHistory.markAllRead();
     wasViewingNotificationsRef.current = viewingNotifications;
   }, [viewingNotifications]);
-  const opensNotifications = unreadNotifications > 0 && !viewingNotifications;
+  const opensNotifications = isMobile && unreadNotifications > 0 && !viewingNotifications;
   const panelOpenerLabel = opensNotifications
     ? t("appShell.showNotifications", { count: unreadNotifications })
     : rightPanelOpen ? t("appShell.hideFilePanel") : t("appShell.showFilePanel");
@@ -1346,7 +1369,7 @@ export function AppShell({ appName }: { appName: string }) {
       .then((d) => {
         const full = d?.sessions.find((s) => s.id === sessionId);
         if (!full) return;
-        setSelectedSession((prev) => (prev && prev.id === sessionId && !prev.projectRoot ? full : prev));
+        setSelectedSession((prev) => (prev && prev.id === sessionId && (!prev.projectRoot || prev.path === "") ? full : prev));
       })
       .catch(() => {});
   }, []);
@@ -1358,6 +1381,17 @@ export function AppShell({ appName }: { appName: string }) {
     setRefreshKey((k) => k + 1);
     hydrateSelectedSession(session.id);
     router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
+  }, [router, hydrateSelectedSession]);
+
+  const handleSessionMoved = useCallback((oldId: string, newId: string) => {
+    if (activeSessionIdRef.current !== oldId) return;
+    activeSessionIdRef.current = newId;
+    setSelectedSession((current) => current?.id === oldId ? { ...current, id: newId, path: "" } : current);
+    setRefreshKey((key) => key + 1);
+    hydrateSelectedSession(newId);
+    // This is the same conversation. Preserve ChatWindow's run/edit fences
+    // and its mounted composer, including unfinished attachments and audio.
+    router.replace(`?session=${encodeURIComponent(newId)}`, { scroll: false });
   }, [router, hydrateSelectedSession]);
 
   const handleAgentEnd = useCallback(() => {
@@ -1591,7 +1625,7 @@ export function AppShell({ appName }: { appName: string }) {
   useEffect(() => {
     // Mounted with the shell (not the sidebar) so it keeps listening on the
     // full-page Settings view too.
-    const source = new EventSource("/api/agent/host-tools/events");
+    const source = openEventStream({ kind: "host-tools" });
     source.onmessage = (e) => {
       try {
         const call = JSON.parse(e.data) as CrossSessionHostToolCall & { type?: string };
@@ -1998,6 +2032,8 @@ export function AppShell({ appName }: { appName: string }) {
             activeTab={settingsTab}
             toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
             onToolCallsDefaultCollapsedChange={handleToolCallsDefaultCollapsedChange}
+            hideToolActivity={hideToolActivity}
+            onHideToolActivityChange={handleHideToolActivityChange}
             expandThinkingByDefault={expandThinkingByDefault}
             onExpandThinkingByDefaultChange={handleExpandThinkingByDefaultChange}
             onHideThinkingBlockChange={setHideThinkingBlock}
@@ -2115,16 +2151,18 @@ export function AppShell({ appName }: { appName: string }) {
                 </button>
               </>
             )}
+              </div>
           {activeTopPanel === "system" && (
             <div data-top-panel className="dropdown-surface" style={{
               position: "absolute",
-              top: "calc(100% + 4px)",
+              // Compact: below the 48px tools bar, which clips its overflow (it scrolls sideways).
+              top: isMobile || compactTopbar ? "calc(100% + 56px)" : "calc(100% + 4px)",
               left: isMobile ? 4 : 8,
               right: "auto",
               width: "auto",
               minWidth: isMobile ? undefined : 420,
               maxWidth: "min(680px, calc(100vw - 24px))",
-              maxHeight: "min(70vh, calc(100dvh - 56px))",
+              maxHeight: isMobile || compactTopbar ? "min(70vh, calc(100dvh - 108px))" : "min(70vh, calc(100dvh - 56px))",
               overflowY: "auto",
               overflowX: "hidden",
               zIndex: 500,
@@ -2162,7 +2200,6 @@ export function AppShell({ appName }: { appName: string }) {
               )}
             </div>
           )}
-              </div>
             </details>
           </div>
 
@@ -2377,6 +2414,7 @@ export function AppShell({ appName }: { appName: string }) {
                 style={{ display: "flex", height: 44, flexShrink: 0, alignSelf: "flex-start" }}
               />
             )}
+            {!isMobile && <NotificationBell open={notificationsOpen} onOpenChange={setNotificationsOpen} />}
             <button
               type="button"
               className="shell-toolbar-btn shell-panel-opener ui-focus-ring"
@@ -2396,7 +2434,7 @@ export function AppShell({ appName }: { appName: string }) {
               aria-label={panelOpenerLabel}
             >
               <PanelRight size={16} strokeWidth={1.8} aria-hidden="true" />
-              {unreadNotifications > 0 && (
+              {isMobile && unreadNotifications > 0 && (
                 <span aria-hidden="true" className="panel-opener-badge">
                   {unreadNotifications > 99 ? "99+" : unreadNotifications}
                 </span>
@@ -2484,6 +2522,7 @@ export function AppShell({ appName }: { appName: string }) {
               onAgentEnd={handleAgentEnd}
               onSessionCreated={handleSessionCreated}
               onSessionForked={handleSessionForked}
+              onSessionMoved={handleSessionMoved}
               modelsRefreshKey={modelsRefreshKey}
               chatInputRef={chatInputRef}
               onOpenFile={handleOpenLinkedFile}
@@ -2497,6 +2536,7 @@ export function AppShell({ appName }: { appName: string }) {
               onGenerationSpeedChange={handleGenerationSpeedChange}
               onOpenProviders={() => setSettingsTab("providers")}
               toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
+              hideToolActivity={hideToolActivity}
               expandThinkingByDefault={expandThinkingByDefault}
               hideThinkingBlock={hideThinkingBlock}
             />

@@ -65,8 +65,40 @@ type UsageGroup = {
   priority: number;
   modelId?: string;
   tier?: string;
+  bucket?: string;
   limits: Map<ProviderUsageWindowId, UsageLimit>;
 };
+
+/**
+ * Bucket name for an Antigravity limit, if omp distinguishes one.
+ *
+ * Antigravity quotas split by backend counter, not by model/tier, and omp
+ * reports that split only in the limit's label/id — never in scope. The
+ * quota-summary path labels a bucket "Gemini" or "Claude & GPT (shared)"
+ * (the latter is one shared third-party quota, duplicated by omp into
+ * anthropic/openai counter ids, so it must stay one bucket, not two);
+ * the model-based path labels it "Usage (Google)" / "Usage (Anthropic)" /
+ * "Usage (OpenAI)". A bare id counter is used only as a fallback, and
+ * never for a shared limit, so the shared bucket is never invented twice.
+ * Other providers return undefined: Anthropic's Fable bucket already
+ * arrives as scope.tier, and no other provider's labels are bucket names.
+ */
+function antigravityBucket(rawLimit: Record<string, unknown>, scope: Record<string, unknown>): string | undefined {
+  const label = nonEmptyString(rawLimit.label);
+  if (label === "Gemini" || label === "Claude & GPT (shared)") return label;
+  const usageMatch = label ? /^Usage \((.+)\)$/.exec(label) : null;
+  // The model-based path names the Google counter "Google"; the quota
+  // summary path names the same counter "Gemini". Unify on "Gemini" so
+  // the two fetch paths never split one counter into two rows.
+  if (usageMatch) return usageMatch[1] === "Google" ? "Gemini" : usageMatch[1];
+  if (scope.shared === true) return undefined;
+  const id = nonEmptyString(rawLimit.id);
+  const counter = id ? id.split(":")[1] : undefined;
+  if (counter === "google") return "Gemini";
+  if (counter === "anthropic") return "Anthropic";
+  if (counter === "openai") return "OpenAI";
+  return undefined;
+}
 
 function normalizeReport(
   rawReport: Record<string, unknown>,
@@ -94,11 +126,17 @@ function normalizeReport(
     const tier = nonEmptyString(scope.tier);
     const normalizedModelId = modelId?.toLowerCase();
     const normalizedTier = tier?.toLowerCase();
-    const groupKey = `${normalizedModelId ?? ""}\0${normalizedTier ?? ""}`;
+    // Antigravity buckets must not merge: without a bucket in the key, a
+    // Gemini weekly limit and a Claude & GPT weekly limit collapse into
+    // one group and only the larger fraction survives (#284).
+    const bucket = provider === "google-antigravity" || provider === "antigravity"
+      ? antigravityBucket(rawLimit, scope)
+      : undefined;
+    const groupKey = `${normalizedModelId ?? ""}\0${normalizedTier ?? ""}\0${bucket ?? ""}`;
     const priority = modelId ? (normalizedTier ? 0 : 1) : normalizedTier ? 2 : 3;
     let group = groups.get(groupKey);
     if (!group) {
-      group = { priority, modelId, tier, limits: new Map() };
+      group = { priority, modelId, tier, bucket, limits: new Map() };
       groups.set(groupKey, group);
     }
     const candidate = { id: windowId, fraction, window };
@@ -108,8 +146,13 @@ function normalizeReport(
 
   const selectedGroups = [...groups.values()];
   if (activeModelId && selectedGroups.length > 0) {
-    const selected = selectedGroups.reduce((best, group) => group.priority < best.priority ? group : best);
-    selectedGroups.splice(0, selectedGroups.length, selected);
+    // Keep every group tied at the best priority, not just the first:
+    // Antigravity's Gemini and shared buckets share priority (no modelId,
+    // no tier) and differ only by bucket, so picking one would drop a
+    // quota bucket from a model-filtered query (#284, CodeRabbit).
+    const bestPriority = Math.min(...selectedGroups.map((group) => group.priority));
+    const kept = selectedGroups.filter((group) => group.priority === bestPriority);
+    selectedGroups.splice(0, selectedGroups.length, ...kept);
   }
   const metadata = isRecord(rawReport.metadata) ? rawReport.metadata : undefined;
   // Email only: unredacted account ids are opaque UUIDs, so those accounts
@@ -133,6 +176,7 @@ function normalizeReport(
       ...(plan ? { plan } : {}),
       ...(group.modelId ? { modelId: group.modelId } : {}),
       ...(group.tier ? { tier: group.tier } : {}),
+      ...(group.bucket ? { bucket: group.bucket } : {}),
     };
     for (const candidate of group.limits.values()) {
       const normalized = usageWindow(candidate.id, candidate.fraction, candidate.window, now);

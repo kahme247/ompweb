@@ -50,6 +50,6 @@ test("runCli with --status returns status object", async () => {
   if (process.platform === "linux") {
     assert.equal(res.status.isLinux, true);
   } else {
-    assert.equal(res.status.isWindows, true);
+    assert.equal(res.status.isWindows, process.platform === "win32");
   }
 });

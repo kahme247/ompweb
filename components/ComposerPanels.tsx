@@ -147,11 +147,14 @@ function SubagentActivityLine({ subagent }: { subagent: SubagentInfo }) {
   );
 }
 
-function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }: {
+function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false, liveStatus = null }: {
   subagents: SubagentInfo[];
   onSelectSubagent: (subagent: SubagentInfo) => void;
   /** Initial expansion (default: collapsed — the header still shows the live summary). */
   defaultExpanded?: boolean;
+  /** Transient live-agent status merged into this header row when no todo
+   * row exists to host it (#245). See TodoList's liveStatus. */
+  liveStatus?: string | null;
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(() => loadCollapsed(SUBAGENTS_COLLAPSED_STORAGE_KEY, defaultExpanded));
@@ -236,8 +239,19 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
       >
         <Network size={14} strokeWidth={1.8} aria-hidden />
         <strong className="font-medium text-text">{t("chatWindow.subagentsPanel")}</strong>
+        {liveStatus ? (
+          <span
+            role="status"
+            aria-live="polite"
+            title={liveStatus}
+            style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "inline-flex", alignItems: "center", gap: 6, color: "var(--text-muted)" }}
+          >
+            <span aria-hidden className="live-status-dot live-pulse inline-block h-2 w-2 shrink-0 rounded-full bg-accent" />
+            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{liveStatus}</span>
+          </span>
+        ) : null}
         <span
-          className="ml-auto inline-flex items-center gap-1.5"
+          className={`${liveStatus ? "" : "ml-auto "}inline-flex items-center gap-1.5`}
           aria-label={t("chatWindow.subagentSummary", { running: runningCount, total: subagents.length })}
           title={t("chatWindow.subagentSummary", { running: runningCount, total: subagents.length })}
         >
@@ -299,27 +313,35 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
  * via its header row (`chevron`); todo/subagents start collapsed (headers
  * always show live progress / running-summary), a new side question starts
  * expanded. Rendered pinned above the chat input. */
-export function ComposerPanels({ todoPhases, subagents, onSelectSubagent, btw = null, defaultExpanded = false }: {
+export function ComposerPanels({ todoPhases, subagents, onSelectSubagent, btw = null, defaultExpanded = false, liveStatus = null }: {
   todoPhases: TodoPhase[];
   subagents: SubagentInfo[];
   onSelectSubagent: (subagent: SubagentInfo) => void;
   btw?: BtwPanelProps | null;
   /** Initial expansion of both panels (default: collapsed). */
   defaultExpanded?: boolean;
+  /** Transient live-agent status (the ChatInput status bar's text) to merge
+   * into an existing panel header row instead of mounting as its own line
+   * (#245). Hosted by the todo row when one exists, else by the subagent
+   * row; when neither exists the caller keeps the standalone bar so the
+   * status is never hidden. */
+  liveStatus?: string | null;
 }) {
   const [todoCollapsed, setTodoCollapsed] = useState(() => loadCollapsed(TODO_COLLAPSED_STORAGE_KEY, defaultExpanded));
   if (todoPhases.length === 0 && subagents.length === 0 && !btw) return null;
+  const todoHostsLiveStatus = todoPhases.length > 0;
   return (
     <div style={{ display: "grid", gap: 6, marginBottom: 8 }}>
       {btw && <BtwPanel key={btw.record.id} {...btw} />}
       <TodoList
         phases={todoPhases}
+        liveStatus={todoHostsLiveStatus ? liveStatus : null}
         collapsible
         defaultExpanded={defaultExpanded}
         collapsed={todoCollapsed}
         onCollapsedChange={(collapsed) => { saveCollapsed(TODO_COLLAPSED_STORAGE_KEY, collapsed); setTodoCollapsed(collapsed); }}
       />
-      <SubagentsPanel subagents={subagents} onSelectSubagent={onSelectSubagent} defaultExpanded={defaultExpanded} />
+      <SubagentsPanel subagents={subagents} onSelectSubagent={onSelectSubagent} defaultExpanded={defaultExpanded} liveStatus={todoHostsLiveStatus ? null : liveStatus} />
     </div>
   );
 }

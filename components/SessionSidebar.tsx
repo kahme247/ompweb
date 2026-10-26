@@ -10,11 +10,21 @@ import { ProviderUsageBar } from "./ProviderUsageBar";
 import { Tooltip } from "./ui/primitives";
 import { toast } from "./ui/toast";
 import { clearLastOpenSession, setLastOpenSession, workspaceKeyOf } from "@/lib/workspace-memory";
-import { groupSessionsByProject, projectActivityCounts, sortManagedProjects } from "@/lib/project-ordering";
+import { groupSessionsByProject, nextPinOrder, orderProjects, projectActivityCounts, type ProjectSortMode } from "@/lib/project-ordering";
 import { comparableProjectPath } from "@/lib/comparable-path";
-import { Archive, ArrowLeft, ArrowRight, Check, ChevronRight, FileUp, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, X } from "lucide-react";
+import { compileSearchQuery, FIRST_MESSAGE_WEIGHT, scoreSearchFields, searchField, TITLE_WEIGHT } from "@/lib/session-search";
+import { Archive, ArrowDownUp, ArrowLeft, ArrowRight, Check, ChevronRight, FileUp, Loader2, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, X } from "lucide-react";
 import { publishSessionsChanged } from "@/lib/session-change-bus";
-import { NOTIFICATION_MESSAGE_EVENT, notificationClientId } from "@/lib/notification-client";
+import { openEventStream } from "@/lib/event-stream";
+import {
+  loadRecentRuns,
+  recordCompletedRun,
+  removeActiveFromCompleted,
+  saveRecentRuns,
+  seedRecentRuns,
+  type RecentRunEntry,
+} from "@/lib/recent-runs";
+import { useRecentRunsLimit } from "@/hooks/useRecentRunsLimit";
 import {
   EMPTY_PROJECT_SET,
   INITIAL_RESTORE_MAX_ATTEMPTS,
@@ -22,21 +32,25 @@ import {
   MAX_PROJECT_SESSIONS,
   buildSessionTree,
   loadExpandedProjects,
+  loadProjectSortMode,
   loadUnreadSessionIds,
   normalizeProjectKey,
   projectLabel,
   saveExpandedProjects,
+  saveProjectSortMode,
   saveUnreadSessionIds,
   type WorktreeContext,
   type WorktreeEntry,
   type WorktreeState,
 } from "./SessionSidebar-helpers";
-import { OmpWebTitle, SIDEBAR_BUTTON_TRANSITION, SidebarIconButton } from "./SessionSidebar-chrome";
+import { OmpWebTitle, SIDEBAR_BUTTON_TRANSITION, SidebarIconButton, SidebarPortalMenu } from "./SessionSidebar-chrome";
 import { ProjectRow } from "./SessionSidebar-rows";
 
 /** Deadline for one /api/sessions fetch. A wedged-but-listening server never
  * answers; without this the initial spinner would pend forever. */
 const SESSIONS_FETCH_TIMEOUT_MS = 15_000;
+/** Stable empty list: sort modes that ignore sessions keep their memo inputs fixed. */
+const NO_SESSIONS: SessionInfo[] = [];
 
 declare global {
   interface Window {
@@ -125,7 +139,38 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const [runningSessionCwds, setRunningSessionCwds] = useState<Record<string, string>>({});
   const [exitedSessions, setExitedSessions] = useState<Map<string, ExitedRpcSession>>(() => new Map());
   const knownRunningCwdsRef = useRef<Map<string, string>>(new Map());
+  const { limit: recentRunsLimit } = useRecentRunsLimit();
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
+  const [recentCompletedRuns, setRecentCompletedRuns] = useState<RecentRunEntry[]>(() => loadRecentRuns());
+  const effectiveRecentCompletedSet = useMemo(() => {
+    const timestampMap = new Map<string, number>();
+
+    // 1. Live and persisted recent completed runs
+    for (const r of recentCompletedRuns) {
+      if (!runningSessionIds.has(r.sessionId)) {
+        timestampMap.set(r.sessionId, r.completedAt);
+      }
+    }
+
+    // 2. On-disk active sessions (fallback & recency backfill)
+    for (const s of allSessions) {
+      if (runningSessionIds.has(s.id)) continue;
+      const isValid = (s.firstMessage && s.firstMessage !== "(no messages)") || s.messageCount > 0 || Boolean(s.name);
+      if (!isValid) continue;
+      const ts = new Date(s.modified).getTime();
+      const existing = timestampMap.get(s.id);
+      if (existing === undefined || ts > existing) {
+        timestampMap.set(s.id, ts);
+      }
+    }
+
+    // Sort by latest timestamp descending, pick top dynamic limit
+    const sorted = [...timestampMap.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, recentRunsLimit);
+
+    return new Set(sorted.map(([id]) => id));
+  }, [recentCompletedRuns, allSessions, runningSessionIds, recentRunsLimit]);
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
   // Relative session times must age while the sidebar stays open; one shared
   // minute clock avoids a timer per session row.
@@ -135,6 +180,14 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const [searchQuery, setSearchQuery] = useState("");
   const [runningOnly, setRunningOnly] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  // Workspace sort (per browser). Pins apply only while a sort is active.
+  // The sidebar is server-rendered: start at "none" and read storage after mount.
+  const [projectSortMode, setProjectSortMode] = useState<ProjectSortMode>("none");
+  useEffect(() => setProjectSortMode(loadProjectSortMode()), []);
+  const [sortMenuOpen, setSortMenuOpen] = useState(false);
+  const sortButtonRef = useRef<HTMLButtonElement>(null);
+  const closeSortMenu = useCallback(() => setSortMenuOpen(false), []);
+  const pinsActive = projectSortMode !== "none";
 
   // Once the SSE stream has delivered a frame it is the source of truth for
   // running state; late /api/sessions responses must not overwrite it.
@@ -252,6 +305,24 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   useEffect(() => {
     saveUnreadSessionIds(unreadSessionIds);
   }, [unreadSessionIds]);
+  useEffect(() => {
+    saveRecentRuns(recentCompletedRuns, undefined, recentRunsLimit);
+  }, [recentCompletedRuns, recentRunsLimit]);
+
+  useEffect(() => {
+    if (allSessions.length === 0) return;
+    setRecentCompletedRuns((prev) => {
+      const seeded = seedRecentRuns(allSessions, recentRunsLimit);
+      if (prev.length === 0) return seeded;
+      const newestPrev = Math.max(...prev.map((p) => p.completedAt), 0);
+      const newestSeeded = Math.max(...seeded.map((s) => s.completedAt), 0);
+      if (newestSeeded > newestPrev) {
+        return seeded;
+      }
+      return prev;
+    });
+  }, [allSessions, recentRunsLimit]);
+
 
   // Debounce refresh bursts (agent_start + session_info_update + file-appear signal can fire within 250ms)
   const pendingRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -270,10 +341,9 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   }, []);
 
   useEffect(() => {
-    // Live running status and session-list invalidations arrive via SSE; the
-    // sidebar never has to poll while an agent is working. The same stream
-    // delivers this tab's notifications (handled by useNotifications).
-    const source = new EventSource(`/api/agent/running/events?clientId=${encodeURIComponent(notificationClientId)}`);
+    // Live running status and session-list invalidations arrive on the shared
+    // event stream; the sidebar never has to poll while an agent is working.
+    const source = openEventStream({ kind: "running" });
 
     source.onmessage = (e) => {
       try {
@@ -303,8 +373,6 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
         } else if (data.type === "sessions-changed") {
           if (data.refreshSessionList) scheduleRefresh();
           publishSessionsChanged(data.sessionIds ?? []);
-        } else if (data.type === "notification") {
-          window.dispatchEvent(new CustomEvent(NOTIFICATION_MESSAGE_EVENT, { detail: data }));
         }
       } catch {
         // ignore malformed frames
@@ -312,11 +380,10 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     };
 
     source.onerror = () => {
-      // EventSource auto-reconnects; until a fresh frame arrives, let the
+      // The stream reconnects on its own; until a fresh frame arrives, let the
       // polled /api/sessions fallback own running state again.
       sseAuthoritativeRef.current = false;
     };
-    // On error EventSource auto-reconnects; keep the last known state meanwhile.
     return () => {
       if (pendingRefreshRef.current) clearTimeout(pendingRefreshRef.current);
       source.close();
@@ -341,8 +408,22 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
 
   useEffect(() => {
     const previous = previousRunningSessionIdsRef.current;
-    const completedInBackground = [...previous].filter((id) => !runningSessionIds.has(id) && id !== selectedSessionId);
+    const allCompleted = [...previous].filter((id) => !runningSessionIds.has(id));
+    const completedInBackground = allCompleted.filter((id) => id !== selectedSessionId);
     const newlyRunning = [...runningSessionIds].filter((id) => !previous.has(id));
+
+    if (allCompleted.length > 0 || newlyRunning.length > 0) {
+      setRecentCompletedRuns((prev) => {
+        let updated = prev;
+        if (newlyRunning.length > 0) {
+          updated = removeActiveFromCompleted(updated, runningSessionIds);
+        }
+        for (const id of allCompleted) {
+          updated = recordCompletedRun(updated, id, undefined, recentRunsLimit);
+        }
+        return updated;
+      });
+    }
 
     if (completedInBackground.length > 0 || newlyRunning.length > 0) {
       setUnreadSessionIds((prev) => {
@@ -362,7 +443,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     }
 
     previousRunningSessionIdsRef.current = runningSessionIds;
-  }, [runningSessionIds, selectedSessionId, loadSessions]);
+  }, [runningSessionIds, selectedSessionId, loadSessions, recentRunsLimit]);
 
   useEffect(() => {
     if (!selectedSessionId) return;
@@ -644,24 +725,42 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const selectedProject = useMemo(() => projectRootFor(selectedCwd), [projectRootFor, selectedCwd]);
   // While a fresh optimistic/placeholder is pending (JSONL not yet on disk),
   // freeze ordering so the new project row does not flicker optimistic ->
-  // confirmed position. New projects are allowed to append at the end.
+  // confirmed position. New projects are allowed to append at the end. A
+  // user ordering action (sort mode, pin, manual order) ends the freeze, and
+  // frozen rows still show the fresh project data.
   const hasPendingNewSession = Boolean(
     optimisticSession
     || [...runningSessionIds, ...exitedSessions.keys()].some((id) => !allSessions.some((session) => session.id === id)),
   );
-  const sortedProjectsBase = useMemo(() => sortManagedProjects(visibleProjects), [visibleProjects]);
-  const sortedProjectsRef = useRef<ManagedProject[] | null>(null);
+  // Only "Last updated" reads sessions; other modes must not re-sort on every session refresh.
+  const orderingSessions = projectSortMode === "updated" ? visibleSessions : NO_SESSIONS;
+  const sortedProjectsBase = useMemo(
+    () => orderProjects(visibleProjects, projectSortMode, orderingSessions, (project) => project.alias ?? projectLabel(project.path)),
+    [visibleProjects, projectSortMode, orderingSessions],
+  );
+  const orderingKey = useMemo(
+    () => [projectSortMode, ...projects.map((p) => `${p.path}\t${p.sortOrder ?? ""}\t${p.pinOrder ?? ""}`)].join("\n"),
+    [projectSortMode, projects],
+  );
+  const sortedProjectsRef = useRef<{ key: string; list: ManagedProject[] } | null>(null);
   const sortedProjects = useMemo(() => {
-    if (hasPendingNewSession && sortedProjectsRef.current) {
-      const prev = sortedProjectsRef.current;
-      const prevKeys = new Set(prev.map((p) => comparableProjectPath(p.path)));
-      const next = [...prev];
+    const prev = sortedProjectsRef.current;
+    if (hasPendingNewSession && prev && prev.key === orderingKey) {
+      const fresh = new Map(sortedProjectsBase.map((p) => [comparableProjectPath(p.path), p]));
+      const next = prev.list.map((p) => fresh.get(comparableProjectPath(p.path)) ?? p);
+      const prevKeys = new Set(prev.list.map((p) => comparableProjectPath(p.path)));
       for (const p of sortedProjectsBase) if (!prevKeys.has(comparableProjectPath(p.path))) next.push(p);
       return next;
     }
-    sortedProjectsRef.current = sortedProjectsBase;
     return sortedProjectsBase;
-  }, [sortedProjectsBase, hasPendingNewSession]);
+  }, [sortedProjectsBase, hasPendingNewSession, orderingKey]);
+  // Snapshot only committed orders; render work React discards must not leak into the freeze.
+  useEffect(() => {
+    const prev = sortedProjectsRef.current;
+    if (!hasPendingNewSession || !prev || prev.key !== orderingKey) {
+      sortedProjectsRef.current = { key: orderingKey, list: sortedProjectsBase };
+    }
+  }, [hasPendingNewSession, orderingKey, sortedProjectsBase]);
   useEffect(() => {
     onWorkspaceOptionsChange?.(sortedProjects, selectedProject, selectedCwd);
   }, [onWorkspaceOptionsChange, sortedProjects, selectedProject, selectedCwd]);
@@ -681,27 +780,102 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   // visibleProjectEntries filter runs at lower priority. Combines with the 200ms ETag loadSessions
   // debounce already in place — keystrokes never block the main thread on large session lists.
   const deferredSearchQuery = useDeferredValue(searchQuery);
-  const filtersActive = searchOpen || runningOnly || deferredSearchQuery.trim().length > 0;
+  const trimmedSearchQuery = deferredSearchQuery.trim();
+  const filtersActive = searchOpen || runningOnly || trimmedSearchQuery.length > 0;
+  // Transcript matches stream from the server; title matches are scored locally
+  // so results appear on the first keystroke and never wait on a full scan.
+  // Stop (or a new query) aborts the stream; hits found so far stay.
+  const [transcriptSearch, setTranscriptSearch] = useState<{ query: string; scores: Record<string, number>; status: "running" | "done" | "stopped" } | null>(null);
+  const transcriptSearchAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => {
+    if (!trimmedSearchQuery) return;
+    const query = trimmedSearchQuery;
+    const controller = new AbortController();
+    transcriptSearchAbortRef.current = controller;
+    // A newer query (or closing the search) aborts too, but is not a user Stop.
+    let superseded = false;
+    const timer = setTimeout(async () => {
+      setTranscriptSearch({ query, scores: {}, status: "running" });
+      let status: "done" | "stopped" = "stopped";
+      // Each merge re-ranks every session; merge streamed batches at most every 200ms.
+      let pending: Record<string, number> = {};
+      let lastFlush = 0;
+      const flush = () => {
+        if (Object.keys(pending).length === 0) return;
+        const batch = pending;
+        pending = {};
+        lastFlush = Date.now();
+        setTranscriptSearch((prev) => (prev?.query === query ? { ...prev, scores: { ...prev.scores, ...batch } } : prev));
+      };
+      try {
+        const res = await fetch(`/api/sessions/search?q=${encodeURIComponent(query)}`, { signal: controller.signal });
+        if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffered = "";
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffered += decoder.decode(value, { stream: true });
+          const lines = buffered.split("\n");
+          buffered = lines.pop() ?? "";
+          for (const line of lines) {
+            const parsed: unknown = line ? JSON.parse(line) : null;
+            if (!parsed || typeof parsed !== "object" || !("scores" in parsed) || !parsed.scores || typeof parsed.scores !== "object") continue;
+            for (const [id, score] of Object.entries(parsed.scores)) if (typeof score === "number") pending[id] = score;
+          }
+          if (Date.now() - lastFlush >= 200) flush();
+        }
+        status = "done";
+      } catch {
+        // Stopped, superseded or failed: the title matches and hits so far stay.
+      }
+      if (superseded) return;
+      flush();
+      setTranscriptSearch((prev) => (prev?.query === query ? { ...prev, status } : prev));
+    }, 250);
+    return () => {
+      superseded = true;
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [trimmedSearchQuery]);
+  const currentTranscriptSearch = transcriptSearch?.query === trimmedSearchQuery ? transcriptSearch : null;
   const visibleProjectEntries = useMemo(() => {
-    const q = deferredSearchQuery.trim().toLowerCase();
-    const entries: { project: ManagedProject; sessions: SessionInfo[] }[] = [];
+    const query = compileSearchQuery(trimmedSearchQuery);
+    const serverScores = currentTranscriptSearch?.scores;
+    const entries: { project: ManagedProject; sessions: SessionInfo[]; scores?: Map<string, number>; rank: number }[] = [];
     for (const project of sortedProjects) {
       let list = sessionsByProject.get(project.path) ?? [];
-      if (runningOnly) list = list.filter((s) => runningSessionIds.has(s.id));
-      if (q) {
-        list = list.filter((s) => (s.name ?? "").toLowerCase().includes(q) || s.firstMessage.toLowerCase().includes(q));
+      if (runningOnly) list = list.filter((s) => runningSessionIds.has(s.id) || effectiveRecentCompletedSet.has(s.id));
+      if (!query) {
+        if (list.length === 0 && runningOnly) continue;
+        entries.push({ project, sessions: list, rank: 0 });
+        continue;
       }
+      const scores = new Map<string, number>();
+      for (const s of list) {
+        // Server scores cover the same title fields plus the transcript; a
+        // session newer than the server's answer falls back to its title.
+        const score = serverScores?.[s.id]
+          ?? scoreSearchFields([searchField(s.name ?? "", TITLE_WEIGHT), searchField(s.firstMessage, FIRST_MESSAGE_WEIGHT)], query);
+        if (score !== null) scores.set(s.id, score);
+      }
+      list = list.filter((s) => scores.has(s.id));
       // Label/alias-only matches surface as empty workspaces; without this
-      // clause a custom workspace name would be unfindable by search.
-      if (list.length === 0 && (runningOnly || (q && !projectLabel(project.path).toLowerCase().includes(q) && !(project.alias ?? "").toLowerCase().includes(q)))) continue;
-      entries.push({ project, sessions: list });
+      // a custom workspace name would be unfindable by search.
+      const labelScore = scoreSearchFields([searchField(projectLabel(project.path), TITLE_WEIGHT), searchField(project.alias ?? "", TITLE_WEIGHT)], query);
+      if (list.length === 0 && (runningOnly || labelScore === null)) continue;
+      entries.push({ project, sessions: list, scores, rank: Math.max(labelScore ?? 0, ...scores.values()) });
     }
+    // Best match first; ties keep the workspace order (stable sort).
+    if (query) entries.sort((a, b) => b.rank - a.rank);
     return entries;
-  }, [sortedProjects, sessionsByProject, runningOnly, deferredSearchQuery, runningSessionIds]);
+  }, [sortedProjects, sessionsByProject, runningOnly, trimmedSearchQuery, currentTranscriptSearch, runningSessionIds, effectiveRecentCompletedSet]);
 
   const treesByProject = useMemo(() => {
     const m = new Map<string, ReturnType<typeof buildSessionTree>>();
-    for (const { project, sessions } of visibleProjectEntries) m.set(project.path, buildSessionTree(sessions));
+    for (const { project, sessions, scores } of visibleProjectEntries) m.set(project.path, buildSessionTree(sessions, scores));
     return m;
   }, [visibleProjectEntries]);
 
@@ -826,7 +1000,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     }
   }, [addProjectBusy, loadProjects, expandProject, setAddProjectOpen]);
 
-  const handleUpdateProjectPresentation = useCallback(async (projectPath: string, updates: { alias?: string | null; sortOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }) => {
+  const handleUpdateProjectPresentation = useCallback(async (projectPath: string, updates: { alias?: string | null; sortOrder?: number | null; pinOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }) => {
     try {
       const response = await fetch("/api/projects", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cwd: projectPath, ...updates }) });
       if (!response.ok) throw new Error(t("projects.updateFailed"));
@@ -837,8 +1011,21 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     }
   }, [loadProjects, t]);
 
+  /** Projects Move up/down and drag can reorder: all of them in manual mode,
+   *  only the pinned ones while a sort is active (the rest follow the sort). */
+  const reorderableProjects = useMemo(
+    () => (pinsActive ? sortedProjects.filter((project) => project.pinOrder !== undefined) : sortedProjects),
+    [pinsActive, sortedProjects],
+  );
+
+  // One ordering write (reorder or pin) at a time: each computes its payload
+  // from the list on screen, which is stale until the previous write reloads it.
+  const orderWriteBusyRef = useRef(false);
+
   /** Persist one whole-list order as a single atomic batched PATCH. */
   const persistProjectOrder = useCallback(async (next: ManagedProject[]) => {
+    if (orderWriteBusyRef.current) return;
+    orderWriteBusyRef.current = true;
     try {
       // One batched request: the server applies every entry in a single
       // atomic registry save, so per-project writes can't interleave and lose
@@ -846,20 +1033,22 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       const response = await fetch("/api/projects", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ updates: next.map((project, index) => ({ cwd: project.path, sortOrder: index })) }),
+        body: JSON.stringify({ updates: next.map((project, index) => ({ cwd: project.path, ...(pinsActive ? { pinOrder: index } : { sortOrder: index }) })) }),
       });
       if (!response.ok) throw new Error(t("projects.reorderFailed"));
       await loadProjects();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      orderWriteBusyRef.current = false;
     }
-  }, [loadProjects, t]);
+  }, [loadProjects, pinsActive, t]);
 
   const handleProjectDrop = useCallback(async (targetPath: string) => {
     const sourcePath = draggedProjectPath;
     setDraggedProjectPath(null);
     if (!sourcePath || sourcePath === targetPath) return;
-    const next = [...sortedProjects];
+    const next = [...reorderableProjects];
     const from = next.findIndex((project) => project.path === sourcePath);
     const to = next.findIndex((project) => project.path === targetPath);
     if (from < 0 || to < 0) return;
@@ -867,11 +1056,11 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     if (!moved) return;
     next.splice(to, 0, moved);
     await persistProjectOrder(next);
-  }, [draggedProjectPath, sortedProjects, persistProjectOrder]);
+  }, [draggedProjectPath, reorderableProjects, persistProjectOrder]);
 
   /** Keyboard-accessible reorder: move one project up/down the list. */
   const handleMoveProject = useCallback(async (projectPath: string, delta: -1 | 1) => {
-    const next = [...sortedProjects];
+    const next = [...reorderableProjects];
     const index = next.findIndex((project) => project.path === projectPath);
     const target = index + delta;
     if (index < 0 || target < 0 || target >= next.length) return;
@@ -879,7 +1068,27 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     if (!moved) return;
     next.splice(target, 0, moved);
     await persistProjectOrder(next);
-  }, [sortedProjects, persistProjectOrder]);
+  }, [reorderableProjects, persistProjectOrder]);
+
+  /** Pin to the end of the pinned group, or unpin. */
+  const handleTogglePin = useCallback(async (project: ManagedProject) => {
+    if (orderWriteBusyRef.current) return;
+    orderWriteBusyRef.current = true;
+    const pinOrder = project.pinOrder !== undefined ? null : nextPinOrder(sortedProjects);
+    try {
+      await handleUpdateProjectPresentation(project.path, { pinOrder });
+    } catch {
+      // handleUpdateProjectPresentation already toasted the failure.
+    } finally {
+      orderWriteBusyRef.current = false;
+    }
+  }, [sortedProjects, handleUpdateProjectPresentation]);
+
+  // The menu closes itself on a menu item click and returns focus to the trigger.
+  const chooseProjectSortMode = useCallback((mode: ProjectSortMode) => {
+    setProjectSortMode(mode);
+    saveProjectSortMode(mode);
+  }, []);
 
   const handleRemoveProject = useCallback(async (projectPath: string) => {
     if (removeProjectPath) return;
@@ -1250,7 +1459,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
         </button>
       </div>
 
-      {/* Workspaces section header: label + search / filter / add */}
+      {/* Workspaces section header: label + search / sort / filter / add */}
       <div style={{ flexShrink: 0, padding: "4px 10px 2px", display: "flex", alignItems: "center", gap: 2 }}>
         <span
           style={{
@@ -1278,8 +1487,37 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
           <Search size={15} strokeWidth={1.9} aria-hidden="true" />
         </SidebarIconButton>
         <SidebarIconButton
+          ref={sortButtonRef}
+          label={t("projects.sort")}
+          active={pinsActive || sortMenuOpen}
+          menuExpanded={sortMenuOpen}
+          onClick={() => setSortMenuOpen((open) => !open)}
+        >
+          <ArrowDownUp size={15} strokeWidth={1.9} aria-hidden="true" />
+        </SidebarIconButton>
+        <SidebarPortalMenu anchor={sortButtonRef} open={sortMenuOpen} onClose={closeSortMenu} placement="below" minWidth={150}>
+          {([
+            ["none", t("projects.sortNone")],
+            ["alphabetical", t("projects.sortAlphabetical")],
+            ["updated", t("projects.sortUpdated")],
+          ] as const).map(([mode, label]) => (
+            <button
+              key={mode}
+              type="button"
+              role="menuitemradio"
+              aria-checked={projectSortMode === mode}
+              className="sidebar-menu-item"
+              onClick={() => chooseProjectSortMode(mode)}
+              style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}
+            >
+              <Check size={12} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0, visibility: projectSortMode === mode ? "visible" : "hidden" }} />
+              {label}
+            </button>
+          ))}
+        </SidebarPortalMenu>
+        <SidebarIconButton
           label={t("sessionSidebar.filterRunning")}
-          title={t("sessionSidebar.filterRunningTitle")}
+          title={t("sessionSidebar.filterRunningTitle", { count: recentRunsLimit })}
           active={runningOnly}
           onClick={() => setRunningOnly((v) => !v)}
         >
@@ -1302,6 +1540,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
             className="sidebar-session-search"
             ref={searchInputRef}
             value={searchQuery}
+            maxLength={500}
             onChange={(e) => setSearchQuery(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Escape") {
@@ -1327,6 +1566,23 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
             onFocus={(e) => { e.currentTarget.style.borderColor = "var(--accent)"; }}
             onBlur={(e) => { e.currentTarget.style.borderColor = "var(--border)"; }}
           />
+          {currentTranscriptSearch && currentTranscriptSearch.status !== "done" && (
+            <div role="status" aria-live="polite" style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 5, color: "var(--text-dim)", fontSize: 11, lineHeight: 1.35 }}>
+              {currentTranscriptSearch.status === "running" && <Loader2 size={11} strokeWidth={2} className="animate-spin" style={{ flexShrink: 0 }} aria-hidden="true" />}
+              <span style={{ flex: 1, minWidth: 0 }}>
+                {t(currentTranscriptSearch.status === "running" ? "sessionSidebar.searchingTranscripts" : "sessionSidebar.searchStopped")}
+              </span>
+              {currentTranscriptSearch.status === "running" && (
+                <button
+                  type="button"
+                  onClick={() => transcriptSearchAbortRef.current?.abort()}
+                  style={{ flexShrink: 0, padding: "1px 6px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}
+                >
+                  {t("sessionSidebar.stopSearch")}
+                </button>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -1391,6 +1647,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                 runningSessionIds={runningSessionIds}
                 unreadSessionIds={unreadSessionIds}
                 exitedSessions={exitedSessions}
+                recentlyCompletedIds={effectiveRecentCompletedSet}
                 relativeTimeNow={relativeTimeNow}
                 onActivate={activateProject}
                 onToggleExpand={toggleProjectExpanded}
@@ -1400,7 +1657,9 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                 onDragPathChange={setDraggedProjectPath}
                 onDropProject={(path) => void handleProjectDrop(path)}
                 onMoveProject={(path, delta) => void handleMoveProject(path, delta)}
-                isDragTarget={draggedProjectPath !== null && draggedProjectPath !== project.path}
+                pinnable={pinsActive}
+                onTogglePin={handleTogglePin}
+                isDragTarget={draggedProjectPath !== null && draggedProjectPath !== project.path && (!pinsActive || project.pinOrder !== undefined)}
                 removeBusy={removeProjectPath === project.path}
                 onSelectSession={handleSelectSessionFromList}
                 onRenamed={loadSessions}

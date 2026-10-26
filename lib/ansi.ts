@@ -4,7 +4,7 @@ import type { CSSProperties } from "react";
 // matches `]`. OSC content excludes ESC so an unterminated sequence cannot
 // make every later `ESC ]` rescan to the end of the string.
 const ANSI_ESCAPE_RE = /\x1B(?:\][^\x07\x1B]*(?:\x07|\x1B\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])/g;
-const ANSI_ESCAPE_AT_START_RE = /^\x1B(?:\][^\x07\x1B]*(?:\x07|\x1B\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])/;
+const ANSI_ESCAPE_STICKY_RE = /\x1B(?:\][^\x07\x1B]*(?:\x07|\x1B\\)|\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])/y;
 const ANSI_SGR_RE = /\x1B\[([0-9;]*)m/g;
 const TUI_CURSOR_MARKER_RE = /\x1B_pi:c\x07/g;
 
@@ -44,9 +44,9 @@ function visibleCharPositions(text: string): Array<{ start: number; end: number;
   let i = 0;
   while (i < text.length) {
     if (text.charCodeAt(i) === 0x1b) {
-      const match = text.slice(i).match(ANSI_ESCAPE_AT_START_RE);
-      if (match) {
-        i += match[0].length;
+      ANSI_ESCAPE_STICKY_RE.lastIndex = i;
+      if (ANSI_ESCAPE_STICKY_RE.test(text)) {
+        i = ANSI_ESCAPE_STICKY_RE.lastIndex;
         continue;
       }
     }
@@ -59,33 +59,27 @@ function visibleCharPositions(text: string): Array<{ start: number; end: number;
   return positions;
 }
 
-function removeVisibleCharAt(text: string, index: number): string {
-  const positions = visibleCharPositions(text);
-  const pos = positions[index];
-  if (!pos) return text;
-  return text.slice(0, pos.start) + text.slice(pos.end);
-}
-
-function firstVisibleChar(text: string): string | undefined {
-  return visibleCharPositions(text)[0]?.char;
-}
-
-function lastNonSpaceVisibleCharIndex(text: string): number {
-  const positions = visibleCharPositions(text);
-  for (let i = positions.length - 1; i >= 0; i--) {
-    if (positions[i].char.trim() !== "") return i;
+function stripDroppedVisibleChars(
+  text: string,
+  positions: Array<{ start: number; end: number; char: string }>,
+  firstIdx: number,
+  lastIdx: number,
+): string {
+  if (firstIdx === 0 && lastIdx === positions.length - 1) return text;
+  let out = "";
+  let cursor = 0;
+  for (let i = 0; i < firstIdx; i++) {
+    const pos = positions[i];
+    if (pos.start > cursor) out += text.slice(cursor, pos.start);
+    cursor = pos.end;
   }
-  return -1;
-}
-
-function trimEndVisibleSpaces(text: string): string {
-  let next = text;
-  while (true) {
-    const positions = visibleCharPositions(next);
-    const last = positions[positions.length - 1];
-    if (!last || last.char.trim() !== "") return next;
-    next = next.slice(0, last.start) + next.slice(last.end);
+  for (let i = Math.max(firstIdx, lastIdx + 1); i < positions.length; i++) {
+    const pos = positions[i];
+    if (pos.start > cursor) out += text.slice(cursor, pos.start);
+    cursor = pos.end;
   }
+  if (cursor < text.length) out += text.slice(cursor);
+  return out;
 }
 
 export function normalizeCustomPanelLines(lines: string[]): string[] {
@@ -97,22 +91,26 @@ export function normalizeCustomPanelLines(lines: string[]): string[] {
     const plain = stripAnsi(lineWithoutCursor).trimEnd();
     if (horizontalFrameLine.test(plain)) continue;
 
-    let line = lineWithoutCursor;
-    const first = firstVisibleChar(line);
+    const positions = visibleCharPositions(lineWithoutCursor);
+    let firstIdx = 0;
+    const first = positions[0]?.char;
     if (first === "│" || first === "┃") {
-      line = removeVisibleCharAt(line, 0);
-      if (firstVisibleChar(line) === " ") line = removeVisibleCharAt(line, 0);
+      firstIdx = positions[1]?.char === " " ? 2 : 1;
     }
 
-    const rightBorderIndex = lastNonSpaceVisibleCharIndex(line);
-    const rightBorder = rightBorderIndex >= 0 ? visibleCharPositions(line)[rightBorderIndex]?.char : undefined;
-    if (rightBorder === "│" || rightBorder === "┃") {
-      line = removeVisibleCharAt(line, rightBorderIndex);
+    let lastIdx = positions.length - 1;
+    while (lastIdx >= firstIdx && positions[lastIdx].char.trim() === "") {
+      lastIdx--;
+    }
+    if (lastIdx >= firstIdx && (positions[lastIdx].char === "│" || positions[lastIdx].char === "┃")) {
+      lastIdx--;
+      while (lastIdx >= firstIdx && positions[lastIdx].char.trim() === "") {
+        lastIdx--;
+      }
     }
 
-    normalized.push(trimEndVisibleSpaces(line));
+    normalized.push(stripDroppedVisibleChars(lineWithoutCursor, positions, firstIdx, lastIdx));
   }
-
   while (normalized.length > 0 && stripAnsi(normalized[0]).trim() === "") normalized.shift();
   while (normalized.length > 0 && stripAnsi(normalized[normalized.length - 1]).trim() === "") normalized.pop();
   return normalized.length ? normalized : lines;

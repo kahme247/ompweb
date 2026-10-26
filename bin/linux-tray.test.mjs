@@ -5,6 +5,8 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 const {
@@ -17,6 +19,7 @@ const {
   buildTrayIconPixels,
   dialogCandidates,
   dialogPrompt,
+  ensureDbusInstalled,
   itemById,
   itemProperties,
   probeServer,
@@ -285,4 +288,43 @@ test("dialogPrompt returns null on cancel and text on success", async () => {
   assert.equal(await dialogPrompt({ tool, title: "t", text: "port", value: "1" }, fakeRun), "30178");
   assert.equal(await dialogPrompt({ tool, title: "t", text: "pw", password: true }, fakeRun), null);
   assert.equal(await dialogPrompt({ tool: null, title: "t", text: "x" }, fakeRun), null);
+});
+
+// dbus-next is no longer a dependency (#268), so in this repo's install
+// it is absent and the tray must fail gracefully instead of crashing on
+// require. These tests only apply in that configuration; skip them if a
+// dbus-next happens to be resolvable (e.g. a manual install).
+function dbusIsInstalled() {
+  try {
+    require("dbus-next");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test("ensureDbusInstalled reports failure without throwing when the installer fails (#268)", { skip: dbusIsInstalled() }, () => {
+  let calls = 0;
+  const ok = ensureDbusInstalled({ runInstall: () => { calls += 1; return false; } });
+  assert.equal(ok, false);
+  assert.equal(calls, 1);
+});
+
+test("tray --start fails gracefully with an install hint when dbus-next is absent (#268)", { skip: dbusIsInstalled() || process.platform !== "linux" }, () => {
+  const home = mkdtempSync(path.join(tmpdir(), "ompweb-tray-nodbus-"));
+  try {
+    const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "linux-tray.js");
+    const res = spawnSync(process.execPath, [script, "--start"], {
+      env: { ...process.env, HOME: home },
+      encoding: "utf8",
+      timeout: 15000,
+    });
+    const output = `${res.stdout || ""}\n${res.stderr || ""}`;
+    assert.equal(res.status, 1);
+    assert.match(output, /dbus-next/);
+    assert.match(output, /npm install dbus-next/);
+    assert.doesNotMatch(output, /MODULE_NOT_FOUND|Cannot find module/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });

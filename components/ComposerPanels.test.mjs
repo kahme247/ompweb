@@ -246,3 +246,38 @@ test("a side question keeps Copy for the earlier answer when its follow-up ended
   assert.match(html, /Cancelled/);
   assert.match(html, />Copy answer</);
 });
+
+test("merges live status into the todo header row when tasks exist (#245)", () => {
+  const html = renderToStaticMarkup(React.createElement(ComposerPanels, {
+    todoPhases: [{ name: "Implementation", tasks: [{ content: "Wire panels", status: "in_progress" }] }],
+    subagents: [{ id: "s1", agent: "scout", status: "started", task: "Map the surface", index: 0 }],
+    onSelectSubagent: noop,
+    liveStatus: "Waiting for model...",
+  }));
+  // Hosted exactly once: by the todo row, not duplicated in the subagent row.
+  // (The string itself appears twice in markup — text plus title — so count
+  // the role="status" host elements instead.)
+  assert.equal((html.match(/role="status"/g) || []).length, 1);
+  assert.match(html, /Tasks/);
+});
+
+test("merges live status into the subagent header row when no tasks exist (#245)", () => {
+  const html = renderToStaticMarkup(React.createElement(ComposerPanels, {
+    todoPhases: [],
+    subagents: [{ id: "s1", agent: "scout", status: "started", task: "Map the surface", index: 0 }],
+    onSelectSubagent: noop,
+    liveStatus: "Waiting for model...",
+  }));
+  assert.match(html, /Waiting for model\.\.\./);
+  assert.match(html, /Subagents/);
+});
+
+test("keeps panels unchanged when no live status is present (#245)", () => {
+  const html = renderToStaticMarkup(React.createElement(ComposerPanels, {
+    todoPhases: [{ name: "Implementation", tasks: [{ content: "Wire panels", status: "in_progress" }] }],
+    subagents: [],
+    onSelectSubagent: noop,
+  }));
+  assert.match(html, /Tasks/);
+  assert.doesNotMatch(html, /Waiting for model/);
+});

@@ -51,6 +51,19 @@ function pathDepth(p: string): number {
   return depth;
 }
 
+const entryMetaCache = new WeakMap<FileIndexEntry, { lowerPath: string; depth: number }>();
+
+function getEntryMeta(entry: FileIndexEntry): { lowerPath: string; depth: number } {
+  let meta = entryMetaCache.get(entry);
+  if (!meta) {
+    meta = {
+      lowerPath: entry.path.toLowerCase(),
+      depth: pathDepth(entry.path),
+    };
+    entryMetaCache.set(entry, meta);
+  }
+  return meta;
+}
 /**
  * Build the entry list from the server's flat file list, deriving directory
  * entries from file paths (the index API only returns files). Base order is
@@ -71,11 +84,12 @@ export function buildEntriesFromFiles(files: string[]): FileIndexEntry[] {
     if (!f) continue;
     entries.push({ path: f, isDir: false });
   }
-  entries.sort((a, b) => pathDepth(a.path) - pathDepth(b.path) || a.path.localeCompare(b.path));
+  entries.sort((a, b) => getEntryMeta(a).depth - getEntryMeta(b).depth || a.path.localeCompare(b.path));
   return entries;
 }
 
 function isSubsequence(needle: string, haystack: string): boolean {
+  if (needle.length > haystack.length) return false;
   if (!needle) return true;
   let i = 0;
   for (let j = 0; j < haystack.length && i < needle.length; j++) {
@@ -95,7 +109,7 @@ function isSubsequence(needle: string, haystack: string): boolean {
  * src directory itself, since "src" does not start with "src/").
  */
 function scoreEntry(entry: FileIndexEntry, lowerQuery: string): number {
-  const lowerPath = entry.path.toLowerCase();
+  const { lowerPath } = getEntryMeta(entry);
   let score = 0;
   if (lowerQuery.includes("/")) {
     if (lowerPath === lowerQuery) score = 100;
@@ -146,7 +160,7 @@ export function filterFileEntries(
   }
   scored.sort((a, b) =>
     b.score - a.score
-    || pathDepth(a.entry.path) - pathDepth(b.entry.path)
+    || getEntryMeta(a.entry).depth - getEntryMeta(b.entry).depth
     || a.entry.path.localeCompare(b.entry.path));
   return scored.slice(0, limit).map((s) => s.entry);
 }

@@ -86,6 +86,14 @@ test("does not normalize LaTeX delimiters inside raw HTML code", () => {
   assert.equal(normalizeDisplayMath(markdown), markdown);
 });
 
+test("returns exact input reference when no math syntax is present and preserves pre blocks with math-like text", () => {
+  const plain = "Hello world\nThis has no math syntax at all.\n";
+  assert.strictEqual(normalizeDisplayMath(plain), plain);
+
+  const preWithMathLike = "<pre>\n$$x = y$$\n\\[z = w\\]\n\\(a = b\\)\n</pre>";
+  assert.equal(normalizeDisplayMath(preWithMathLike), preWithMathLike);
+});
+
 test("does not normalize escaped delimiters or link destinations", () => {
   const escaped = String.raw`Literal: \\(x+y\\).`;
   const link = String.raw`[docs](https://example.com/\(manual\))`;

@@ -16,6 +16,11 @@ function TodoStatusIcon({ status }: { status: TodoItem["status"] }) {
 
 interface TodoListProps {
   phases?: TodoPhase[];
+  /** Transient live-agent status (e.g. "Waiting for model...") merged into
+   * this header row instead of mounting as a separate line above the
+   * composer (#245). The row already exists whenever phases exist, so the
+   * status text changes in place rather than popping a line in and out. */
+  liveStatus?: string | null;
   /** Render as a composer-attached panel: the header row becomes a
    * collapse/expand toggle and the section margin is dropped. */
   collapsible?: boolean;
@@ -35,7 +40,7 @@ function previewTaskOrder(status: TodoItem["status"]): number {
   return 2;
 }
 
-export function TodoList({ phases = [], collapsible = false, defaultExpanded = false, collapsed: collapsedProp, onCollapsedChange }: TodoListProps) {
+export function TodoList({ phases = [], liveStatus = null, collapsible = false, defaultExpanded = false, collapsed: collapsedProp, onCollapsedChange }: TodoListProps) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const [collapsedState, setCollapsedState] = useState(collapsible ? !defaultExpanded : false);
@@ -65,6 +70,20 @@ export function TodoList({ phases = [], collapsible = false, defaultExpanded = f
   const headerRowClass = "flex items-center gap-2 px-3 py-2 text-xs text-text-muted";
   const headerBorderClass = collapsed ? "" : "border-b border-border";
   const progress = t("chatWindow.todoProgress", { done, total: tasks.length });
+  // Merged live status (#245): sits in this already-present header row so
+  // it changes in place instead of mounting a separate line above the
+  // composer. role="status" keeps the live announcement the old bar had.
+  const liveStatusNode = liveStatus ? (
+    <span
+      role="status"
+      aria-live="polite"
+      title={liveStatus}
+      style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "inline-flex", alignItems: "center", gap: 6, color: "var(--text-muted)" }}
+    >
+      <span aria-hidden className="live-status-dot live-pulse inline-block h-2 w-2 shrink-0 rounded-full bg-accent" />
+      <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{liveStatus}</span>
+    </span>
+  ) : null;
 
   return (
     <section
@@ -83,7 +102,8 @@ export function TodoList({ phases = [], collapsible = false, defaultExpanded = f
         >
           <ListChecks size={15} strokeWidth={1.8} aria-hidden />
           <strong className="font-medium text-text">{t("chatWindow.todoList")}</strong>
-          <span className="ml-auto">{progress}</span>
+          {liveStatusNode}
+          <span className={liveStatus ? "shrink-0" : "ml-auto"}>{progress}</span>
           <ChevronDown
             size={14}
             strokeWidth={1.8}
@@ -99,7 +119,8 @@ export function TodoList({ phases = [], collapsible = false, defaultExpanded = f
         <div className={`${headerRowClass} ${headerBorderClass}`}>
           <ListChecks size={15} strokeWidth={1.8} aria-hidden />
           <strong className="font-medium text-text">{t("chatWindow.todoList")}</strong>
-          <span className="ml-auto">{progress}</span>
+          {liveStatusNode}
+          <span className={liveStatus ? "shrink-0" : "ml-auto"}>{progress}</span>
         </div>
       )}
       {!collapsed && (

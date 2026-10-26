@@ -5,7 +5,10 @@ export function normalizeFilePathSlashes(filePath: string): string {
   return filePath;
 }
 
-export function encodeFilePathForApi(filePath: string): string {
+/** The decoded catch-all segments `/api/files/[...path]` receives for a path.
+ * The live file-watch channel sends the raw path instead of a URL, and the
+ * server rebuilds it from these same segments so both resolve identically. */
+export function filePathApiSegments(filePath: string): string[] {
   const normalized = normalizeFilePathSlashes(filePath);
   const isUnc = normalized.startsWith("//");
   const segments = normalized.split("/").filter(Boolean);
@@ -16,7 +19,11 @@ export function encodeFilePathForApi(filePath: string): string {
     // browsing/reading UNC-rooted workspaces keeps working.
     segments[0] = `//${segments[0]}`;
   }
-  return segments.map(encodeURIComponent).join("/");
+  return segments;
+}
+
+export function encodeFilePathForApi(filePath: string): string {
+  return filePathApiSegments(filePath).map(encodeURIComponent).join("/");
 }
 
 export function getFileName(filePath: string): string {

@@ -441,6 +441,8 @@ export interface SessionInfo {
   name?: string;
   created: string;
   modified: string;
+  /** ISO time of the last message entry (absent when the tail scan found none). */
+  lastMessageAt?: string;
   messageCount: number;
   firstMessage: string;
   parentSessionId?: string; // set if this session was forked from another
@@ -489,6 +491,9 @@ export interface ManagedProject {
   alias?: string;
   /** Explicit sidebar position for registered projects. */
   sortOrder?: number;
+  /** Set when pinned: position among pinned workspaces (lower first). Pins
+   *  only apply while the sidebar sorts by name or activity. */
+  pinOrder?: number;
   /** Workspace-level omp launch configuration. */
   launchConfig?: ProjectLaunchConfig;
 }

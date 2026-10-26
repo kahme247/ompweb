@@ -1614,16 +1614,18 @@ html[data-touch-targets="accessible"] :is(.image-lightbox-stepper button, .image
   height: 24px;
 }
 .sidebar-project-actions {
-  /* Match the session status column after reserving timestamp + menu space. */
-  width: 46px;
+  /* Match the session status column after reserving timestamp + menu space;
+     grows when the pin toggle sits beside the menu. */
+  min-width: 46px;
   display: flex;
   justify-content: flex-end;
+  gap: 2px;
 }
 
 /* Touch rows keep the compact timestamp immediately beside a full-size menu target. */
 @media (hover: none), (pointer: coarse) {
   .sidebar-project-actions {
-    width: 56px;
+    min-width: 56px;
   }
   .sidebar-icon-button,
   .sidebar-project-action,
@@ -3420,7 +3422,8 @@ html[data-touch-targets="accessible"] .message-overflow-toggle {
   cursor: default;
   opacity: 0.5;
 }
-.shell-toolbar-btn[aria-pressed="true"] {
+.shell-toolbar-btn[aria-pressed="true"],
+.shell-toolbar-btn[data-popup-open] {
   background: var(--bg-selected);
   color: var(--text);
 }
@@ -3431,8 +3434,9 @@ html[data-touch-targets="accessible"] .message-overflow-toggle {
 .shell-toolbar-btn:active:not(:disabled) {
   transform: scale(0.96);
 }
-/* Unread-notification count on the right-panel toggle. */
-.shell-panel-opener {
+/* Unread-notification count on the right-panel toggle (mobile) and the bell (desktop). */
+.shell-panel-opener,
+.shell-notification-bell {
   position: relative;
 }
 .panel-opener-badge {
@@ -3609,10 +3613,6 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
     border-color: transparent;
     background: transparent;
   }
-  .shell-topbar-overflow[data-compact="true"] > .shell-topbar-overflow-content {
-    left: 48px;
-    right: 48px;
-  }
   .shell-topbar-overflow[data-compact="pending"] {
     display: block;
   }
@@ -3642,7 +3642,8 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
   position: absolute;
   top: calc(100% + 4px);
   left: 4px;
-  right: 4px;
+  /* Size to the buttons; scroll sideways only when they do not fit. */
+  max-width: calc(100% - 8px);
   height: 48px;
   gap: 4px;
   padding: 4px;

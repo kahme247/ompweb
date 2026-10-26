@@ -43,7 +43,7 @@ test("no-key composer text survives minimization and warns on document exit unti
     return React.createElement(React.Fragment, null,
       React.createElement(Guard),
       React.createElement("div", { style: { display: minimized ? "none" : undefined } },
-        React.createElement(ChatInput, { onSend: (text) => sent.push(text), onAbort() {}, isStreaming: false })),
+        React.createElement(ChatInput, { onSend: async (text) => { sent.push(text); return { status: "accepted" }; }, onAbort() {}, isStreaming: false })),
     );
   }
   const { rerender } = render(React.createElement(Shell));
@@ -67,7 +67,7 @@ test("attachment-only drafts stay protected across live draft-key changes and re
   function Shell({ session }) {
     return React.createElement(React.Fragment, null,
       React.createElement(Guard),
-      React.createElement(ChatInput, { draftKey: session, ref, onSend: (text) => sent.push(text), onAbort() {}, isStreaming: false }),
+      React.createElement(ChatInput, { draftKey: session, ref, onSend: async (text) => { sent.push(text); return { status: "accepted" }; }, onAbort() {}, isStreaming: false }),
     );
   }
   const { rerender } = render(React.createElement(Shell, { session: "draft-a" }));
@@ -100,7 +100,7 @@ for (const navigation of ["draft-key change", "unmount"]) {
     const queuedMessages = { steering: [], followUp: ["queued question"] };
     const chat = (draftKey) => React.createElement(ChatInput, {
       ref, draftKey, queuedMessages, isStreaming: true,
-      onSend() {}, onAbort() {}, onRemoveQueuedMessage: () => cancellation,
+      async onSend() { return { status: "accepted" }; }, onAbort() {}, onRemoveQueuedMessage: () => cancellation,
     });
     let view = render(chat(oldKey));
     try {
@@ -154,7 +154,7 @@ for (const navigation of ["original composer", "same-key remount"]) {
     const cancellation = new Promise((resolve) => { release = resolve; });
     const chat = () => React.createElement(ChatInput, {
       ref, draftKey, queuedMessages: { steering: [], followUp: ["queued question"] }, isStreaming: true,
-      onSend() {}, onAbort() {}, onRemoveQueuedMessage: () => cancellation,
+      async onSend() { return { status: "accepted" }; }, onAbort() {}, onRemoveQueuedMessage: () => cancellation,
     });
     let view = render(chat());
     try {

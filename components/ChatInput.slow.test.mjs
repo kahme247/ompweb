@@ -23,7 +23,7 @@ afterEach(() => {
 function renderSlow(props) {
   const changes = [];
   render(React.createElement(ChatInput, {
-    onSend() {},
+    async onSend() { return { status: "accepted" }; },
     onAbort() {},
     isStreaming: false,
     slowModeSupported: true,

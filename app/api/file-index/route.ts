@@ -110,13 +110,14 @@ async function listWithGit(cwd: string): Promise<FileListing | null> {
 
 function listWithWalk(cwd: string): FileListing {
   const files: string[] = [];
+  const readDirectorySync = Reflect.get(fs, "readdirSync") as typeof fs.readdirSync;
   // BFS so shallow files win when the cap truncates the listing.
   const queue: Array<{ abs: string; rel: string; depth: number }> = [{ abs: cwd, rel: "", depth: 0 }];
-  while (queue.length > 0) {
-    const { abs, rel, depth } = queue.shift()!;
+  let head = 0;
+  while (head < queue.length) {
+    const { abs, rel, depth } = queue[head++]!;
     let dirents: fs.Dirent[];
     try {
-      const readDirectorySync = Reflect.get(fs, "readdirSync") as typeof fs.readdirSync;
       dirents = readDirectorySync(abs, { withFileTypes: true });
     } catch {
       continue;

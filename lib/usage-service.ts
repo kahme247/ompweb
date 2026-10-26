@@ -216,6 +216,7 @@ export function parseSessionUsage(
   try {
     forEachFileLineSync(filePath, (rawLine) => {
       if (!rawLine || rawLine.length < 5) return;
+      if (!rawLine.includes('"usage"') && !rawLine.includes('"session"') && !rawLine.includes('"model_change"')) return;
       let parsed: Record<string, unknown>;
       try {
         parsed = JSON.parse(rawLine);

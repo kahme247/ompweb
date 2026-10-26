@@ -1,10 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type Ref, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { useI18n } from "@/lib/i18n";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, Check } from "lucide-react";
 import OmpWebLogo from "./OmpWebLogo";
 /**
  * Path label that ellipsizes on the LEFT, keeping the (most relevant) trailing
@@ -36,32 +36,40 @@ const SIDEBAR_BUTTON_TRANSITION = "background var(--dur-fast) var(--ease-out-war
 
 /** Quiet square icon button used across the sidebar chrome (header, section
  *  headers, footer). Stays visually subdued; the accent appears on hover and
- *  when active (e.g. an applied filter). */
+ *  when active (e.g. an applied filter). `menuExpanded` makes it a menu
+ *  trigger (aria-haspopup/aria-expanded instead of aria-pressed). */
 function SidebarIconButton({
+  ref,
   label,
   title,
   onClick,
   active = false,
+  menuExpanded,
   disabled = false,
   children,
 }: {
+  ref?: Ref<HTMLButtonElement>;
   label: string;
   title?: string;
   onClick: () => void;
   active?: boolean;
+  menuExpanded?: boolean;
   disabled?: boolean;
   children: ReactNode;
 }) {
   const [hovered, setHovered] = useState(false);
   return (
     <button
+      ref={ref}
       type="button"
       className="sidebar-icon-button"
       aria-label={label}
       title={title ?? label}
       onClick={onClick}
       disabled={disabled}
-      aria-pressed={active}
+      {...(menuExpanded === undefined
+        ? { "aria-pressed": active }
+        : { "aria-haspopup": "menu" as const, "aria-expanded": menuExpanded })}
       style={{
         display: "flex", alignItems: "center", justifyContent: "center",
         width: 26, height: 26, padding: 0, flexShrink: 0, lineHeight: 0,
@@ -184,8 +192,10 @@ function SidebarPortalMenu({
   useEffect(() => {
     if (!open) return;
     const timer = setTimeout(() => {
-      const firstBtn = menuRef.current?.querySelector<HTMLButtonElement>("button:not([disabled])");
-      firstBtn?.focus();
+      // A radio menu opens on its checked item.
+      const menu = menuRef.current;
+      (menu?.querySelector<HTMLButtonElement>('button[aria-checked="true"]:not([disabled])')
+        ?? menu?.querySelector<HTMLButtonElement>("button:not([disabled])"))?.focus();
     }, 0);
     const onPointerDown = (e: MouseEvent | TouchEvent) => {
       const target = e.target as Node;
@@ -231,7 +241,7 @@ function SidebarPortalMenu({
       // before the item's own onClick runs, and React then drops that click.
       onClick={(event) => {
         const target = event.target;
-        if (target instanceof Element && target.closest('[role="menuitem"]')) closeAndRestore();
+        if (target instanceof Element && target.closest('[role^="menuitem"]')) closeAndRestore();
       }}
       role="menu"
       style={{
@@ -407,6 +417,27 @@ function ExitedSessionIndicator({ title, size = 14 }: { title: string; size?: nu
     </span>
   );
 }
+function RecentlyCompletedIndicator({ size = 12 }: { size?: number }) {
+  const { t } = useI18n();
+  return (
+    <span
+      title={t("sessionSidebar.recentlyCompleted")}
+      aria-label={t("sessionSidebar.recentlyCompleted")}
+      style={{
+        width: size,
+        height: size,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flexShrink: 0,
+        color: "var(--status-success)",
+      }}
+    >
+      <Check size={size} strokeWidth={2.4} aria-hidden="true" />
+    </span>
+  );
+}
+
 
 function UnreadSessionIndicator({ size = 14 }: { size?: number }) {
   const { t } = useI18n();
@@ -442,6 +473,7 @@ export {
   PathLabel,
   ExitedSessionIndicator,
   RunningSessionIndicator,
+  RecentlyCompletedIndicator,
   SIDEBAR_BUTTON_TRANSITION,
   SidebarIconButton,
   SidebarPortalMenu,
