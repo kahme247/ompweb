@@ -5,7 +5,17 @@ import { createJiti } from "jiti";
 import { act, cleanup, renderHook } from "@testing-library/react/pure.js";
 
 const jiti = createJiti(import.meta.url, { tryNative: false, tsconfigPaths: true });
-const { useProviderUsage } = await jiti.import("./AppShell-provider-usage.ts");
+const { useProviderUsage, usageBucketLabel } = await jiti.import("./AppShell-provider-usage.ts");
+
+test("usageBucketLabel distinguishes Anthropic tiers and Antigravity buckets (#284)", () => {
+  assert.equal(usageBucketLabel({ provider: "anthropic", tier: "fable" }), "Fable");
+  assert.equal(usageBucketLabel({ provider: "anthropic" }), undefined);
+  assert.equal(usageBucketLabel({ provider: "google-antigravity", bucket: "Gemini" }), "Gemini");
+  assert.equal(usageBucketLabel({ provider: "google-antigravity", bucket: "Claude & GPT (shared)" }), "Claude & GPT (shared)");
+  assert.equal(usageBucketLabel({ provider: "google-antigravity", bucket: "Gemini", tier: "pro" }), "Gemini");
+  // Other providers' tiers are quota tiers, not bucket names.
+  assert.equal(usageBucketLabel({ provider: "openai-codex", tier: "pro" }), undefined);
+});
 const snapshot = (percent) => ({ reports: [{ provider: "provider", fiveHour: { percent } }] });
 
 test("manual refresh gets fresh limits on older browsers while automatic polling stays silent", async () => {

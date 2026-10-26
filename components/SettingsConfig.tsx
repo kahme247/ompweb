@@ -211,6 +211,7 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { id: "model-breakdown", tab: "usage", sectionKey: "settingsTabs.usage.label", labelKey: "usageConfig.breakdown", descKey: "usageConfig.model", fallbackSection: "Usage", fallbackLabel: "Model Breakdown", fallbackDesc: "Historical token usage and cost per model, day, and project", scope: "UI" },
   // Windows Background Service & System Tray
   { id: "auto-resume-sessions", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.autoResumeSessions", descKey: "settingsConfig.autoResumeSessionsDesc", fallbackSection: "System & Updates", fallbackLabel: "Resume running sessions after a restart", fallbackDesc: "When omp-web restarts while agents are working, restart those sessions and tell each agent: \"Session interrupted and resumed. Continue as you would have done without the interruption.\" Work in progress at the moment of the restart, such as a running command, is lost." },
+  { id: "agent-tools-cross-session", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.agentTools", descKey: "settingsConfig.agentToolsDesc", fallbackSection: "System & Updates", fallbackLabel: "Agent tools (cross-session)", fallbackDesc: "Allow agents to call list_sessions, new_session and send_to_session to reach other omp-web sessions, even with no browser tab open. Delivered messages are prefixed with the sending session's ID." },
   { id: "agent-env", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.agentEnv", descKey: "settingsConfig.agentEnvDesc", fallbackSection: "System & Updates", fallbackLabel: "Agent environment variables", fallbackDesc: "Extra environment variables passed to the omp process, one KEY=VALUE per line. Applied to sessions started after saving.", scope: "UI" },
   { id: "windows-service-autostart", tab: "system", sectionKey: "settingsConfig.windowsServiceTitle", labelKey: "settingsConfig.windowsServiceAutostart", descKey: "settingsConfig.windowsServiceAutostartDesc", fallbackSection: "Windows Background Service & System Tray", fallbackLabel: "Start with Windows", fallbackDesc: "Launch background service quietly in system tray when logging into Windows.", scope: "UI" },
   { id: "windows-service-shortcuts", tab: "system", sectionKey: "settingsConfig.windowsServiceTitle", labelKey: "settingsConfig.windowsServiceInstallBtn", descKey: "settingsConfig.windowsServiceDesc", fallbackSection: "Windows Background Service & System Tray", fallbackLabel: "Install Service & Shortcuts", fallbackDesc: "Manage background service execution, system tray monitor, Windows logon autostart, and Desktop shortcuts.", scope: "UI" },
@@ -378,6 +379,41 @@ function AutoResumeSessionsSetting() {
   };
   return (
     <NativeSetting searchId="auto-resume-sessions" label={t("settingsConfig.autoResumeSessions")} description={t("settingsConfig.autoResumeSessionsDesc")}>
+      <ToggleSwitch checked={enabled === true} disabled={enabled === null} onChange={(next) => void change(next)} />
+    </NativeSetting>
+  );
+}
+
+/** Server-side omp-web setting (issue #275): cross-session agent tools.
+ * Off by default; mirrors AutoResumeSessionsSetting above. */
+function AgentToolsSetting() {
+  const { t } = useI18n();
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/web-settings")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { agentToolsEnabled?: boolean } | null) => { if (alive) setEnabled(data?.agentToolsEnabled === true); })
+      .catch(() => { if (alive) setEnabled(false); });
+    return () => { alive = false; };
+  }, []);
+  const change = async (next: boolean) => {
+    const previous = enabled;
+    setEnabled(next);
+    try {
+      const res = await fetch("/api/web-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentToolsEnabled: next }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch (error) {
+      setEnabled(previous);
+      toast.error(t("settingsConfig.agentToolsSaveFailed"), error instanceof Error ? error.message : String(error));
+    }
+  };
+  return (
+    <NativeSetting searchId="agent-tools-cross-session" label={t("settingsConfig.agentTools")} description={t("settingsConfig.agentToolsDesc")}>
       <ToggleSwitch checked={enabled === true} disabled={enabled === null} onChange={(next) => void change(next)} />
     </NativeSetting>
   );
@@ -1799,6 +1835,8 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                 </div>
 
                 <AutoResumeSessionsSetting />
+
+                <AgentToolsSetting />
 
                 <AgentEnvSetting />
 

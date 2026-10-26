@@ -61,6 +61,7 @@ Shared foundations in `lib/omp/`:
 ```
 app/api/
   sessions/route.ts               GET  list all sessions
+  sessions/search/route.ts        GET ?q= — NDJSON { scores } batches (titles + transcripts); closing the request stops the scan
   sessions/[id]/route.ts          GET/PATCH/DELETE session
   sessions/[id]/context/route.ts  GET ?leafId= — context for a specific leaf
   sessions/[id]/export/route.ts   GET exported HTML for a session
@@ -124,6 +125,8 @@ lib/
   notification-client.ts  browser: device id, prefs store, service worker + push subscription
   rpc-manager.ts       session registry + startRpcSession over RpcProcess
   session-reader.ts    session .jsonl parsing + path cache + buildSessionContext
+  session-search.ts    shared fuzzy/phrase query scorer for sidebar search (title weights ≫ transcript)
+  session-content-search.ts  server: per-file transcript text cache (size+mtime) + searchSessions()
   session-resume.ts    running-session list for auto-resume after a restart
   web-auth.ts          password-hash check + session cookie signing
   web-auth-secret.ts   per-installation session-signing key (~/.omp/agent/omp-web/web-auth-secret.json)
@@ -150,7 +153,8 @@ components/
   CommandPalette.tsx  ⌘K/Ctrl+K palette (cmdk): session switch, new session, theme
   ImageLightbox.tsx   click-to-preview lightbox for chat images (ClickableImage)
   BranchNavigator.tsx in-session branch switcher
-  NotificationList.tsx right-panel Notifications tab: the persisted notification history (`lib/notification-history.ts`)
+  NotificationList.tsx notification history list + Mark all read/Clear actions (mobile right-panel tab, desktop bell popover)
+  NotificationBell.tsx desktop top-bar bell: unread badge + floating NotificationList popover
   ChatMinimap.tsx     scroll minimap alongside the message list
   MarkdownBody.tsx    markdown renderer
   ModelsConfig.tsx    modal for models/auth configuration
@@ -513,10 +517,16 @@ during the wait.
 - `GET /api/projects` re-authorizes registered roots with `allowFileRoot()` —
   the in-memory browse allowlist does not survive restarts, and empty managed
   projects derive no root from sessions.
-- The client sorts the merged list by most-recently-added (registration
-  order), then by path for session-discovered projects
-  (`lib/project-ordering.ts`); the order deliberately does NOT depend on
-  session activity, so project rows never jump around while sessions refresh.
+- By default (sort "None") the client orders the merged list manually
+  (`sortOrder`, set by drag/Move up/down), then most-recently-added, then by
+  path (`lib/project-ordering.ts`), so rows never jump while sessions refresh.
+  The header sort button (`omp-web:project-sort` in `localStorage`, per
+  browser) switches to Alphabetical (label A→Z) or Last updated (newest last
+  message first: `lastMessageAt` from the session tail scan, else the file
+  mtime) — the latter deliberately reorders on activity. While a
+  sort is active, rows get a pin toggle: pinned projects (`pinOrder` in the
+  registry, pinned to the end of the group) lead in their own manual order and
+  alone keep Move up/down and drag; pins are ignored under "None".
   Expanded project paths live
   in `localStorage` (`omp-web:expanded-projects`), defaulting to only the
   active/restored project expanded, and stale keys are pruned against the
@@ -811,7 +821,9 @@ motion: --dur-fast (150ms) --dur-med (220ms) --dur-slow (320ms) --ease-out-warm
 `components/ui/` holds the shared primitives (built on `@base-ui/react`):
 `primitives.tsx` (Dialog/Tooltip/Collapsible), `field.tsx` (form fields +
 ConfirmDialog), `toast.tsx` (`toast.success/error/info`, mounted in AppShell).
-Toasts are not stored. The right panel's Notifications tab lists the server's
+Toasts are not stored. The notification list (`NotificationList`: the desktop
+top-bar bell's popover, `NotificationBell`; the right panel's Notifications tab
+on mobile only, `isMobile`) lists the server's
 notification history (`lib/notification-history.ts`, a mirror of
 `/api/notifications/history`): `publishNotification` records every
 notification type some device has turned on (completed, input, error, model
@@ -823,8 +835,11 @@ tab receives over SSE without a refetch, and reloads when the service worker
 reports a push it showed. Entries store the `NotificationEvent` and render in
 the viewer's language; clicking one, or Enter, marks it read and opens its
 session (`OPEN_SESSION_EVENT`).
-Unread entries badge the right-panel toggle, which then opens the Notifications
-tab; entries become read when the user leaves that tab (only the entries it
+On desktop the bell carries the unread badge and its popover (base-ui Popover,
+380px wide, at most 480px tall, the list scrolls) closes when a notification
+opens a session. On mobile unread entries badge the right-panel toggle, which
+then opens the Notifications tab. Entries become read when the user closes the
+popover or leaves that tab (only the entries it
 showed), uses Mark all as read, or opens the notification from its toast or
 row, and a reused id (`<sessionId>:<type>`) is unread again. Mark-read, remove
 and clear update the list at once, then the server; a failed request reloads

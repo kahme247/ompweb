@@ -12,9 +12,20 @@ import {
   invalidateSessionEntriesCache,
   invalidateSessionListCache,
   invalidateSessionListMeta,
+  listAllSessions,
   readSessionHeader,
   resolveSessionPath,
 } from "./session-reader";
+import { allowFileRoot } from "./file-access";
+import { loadWebServerSettings } from "./web-settings";
+import {
+  AGENT_TOOL_DEFINITIONS,
+  AGENT_TOOL_NAMES,
+  AgentToolGuard,
+  executeAgentTool,
+  type AgentToolDeliverResult,
+  type AgentToolSessionOps,
+} from "./agent-tools";
 import { markShuttingDown, recordRunningSessions, RESUME_PROMPT, takeInterruptedSessions } from "./session-resume";
 import { PRESET_FULL } from "./tool-presets";
 import { comparableProjectPath } from "./comparable-path";
@@ -90,6 +101,11 @@ const PROMPT_ACK_TIMEOUT_MS = 30_000;
 const GENERATE_TITLE_TIMEOUT_MS = 60_000;
 const RENAME_POLL_INTERVAL_MS = 500;
 const RENAME_POLL_TIMEOUT_MS = 20_000;
+/** Background title requests per session. omp declines low-signal openers
+ * (a bare greeting), so a later turn of the same session retries. */
+const AUTO_TITLE_MAX_ATTEMPTS = 3;
+/** command_output lines printed by omp's argument-less `/rename`. */
+const RENAME_OUTPUT_RE = /^(Session renamed to |Could not generate a session title|Session name not changed|Rename failed:)/;
 const NON_TERMINAL_CONTINUATION_GRACE_MS = 2_000;
 const AWAITING_AGENT_START_TIMEOUT_MS = 10_000;
 const RESTARTING_MESSAGE = "This session is restarting — retry in a moment.";
@@ -193,13 +209,21 @@ export function mapPresetToolNames(toolNames: string[]): string[] {
 const FULL_PRESET_KEY = [...PRESET_FULL].map((n) => n.toLowerCase()).sort().join(",");
 
 /** Extra CLI args for spawning `omp --mode rpc-ui` for a session. */
-export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[], advisor = false, launchConfig?: ProjectLaunchConfig): string[] {
+export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[], advisor = false, launchConfig?: ProjectLaunchConfig, modelOverride?: string): string[] {
   const args: string[] = [];
   if (sessionFile) {
     // An absolute path (or anything containing "/") resolves deterministically:
     // omp's createSessionManager opens it directly via SessionManager.open
     // without any interactive resume/fork prompts (main.ts resume handling).
     args.push("--resume", sessionFile);
+    // An explicitly chosen model replaces the saved model and skips its
+    // restore check (omp's --model at startup). Without this, resuming a
+    // session whose saved model can no longer be restored dies before any
+    // set_model RPC can run (#277). Args are passed as an argv array, never
+    // through a shell, so only whitespace / flag-smuggled values are kept out.
+    if (modelOverride && !modelOverride.startsWith("-") && !/\s/.test(modelOverride)) {
+      args.push("--model", modelOverride);
+    }
   } else if (toolNames !== undefined) {
     const presetKey = toolNames.map((n) => n.toLowerCase()).sort().join(",");
     if (toolNames.length === 0) {
@@ -581,15 +605,22 @@ export class AgentSessionWrapper {
 
   /** Whether omp answered `generate_title` with "Unknown command" (cached per child). */
   private generateTitleUnsupported = false;
+  /** Background title requests made per session id (see autoTitle). */
+  private autoTitleAttempts = new Map<string, number>();
+  private autoTitleInFlight = false;
+  /** Until this time, drop the chat output of a background `/rename`. */
+  private quietRenameUntil = 0;
 
   /**
    * Ask omp to generate a title for this session with its own title generator.
    * Prefers the native `generate_title` RPC command and falls back to the
    * argument-less `/rename` slash command. Returns null when omp cannot do
    * either right now (older omp, or the session is mid-run, where `/rename`
-   * would be queued as a prompt).
+   * would be queued as a prompt). With `quiet`, the `/rename` fallback skips
+   * the prompt bookkeeping (the UI never sees a run) and its output stays out
+   * of the chat.
    */
-  async generateTitle(): Promise<string | null> {
+  async generateTitle({ quiet = false }: { quiet?: boolean } = {}): Promise<string | null> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     if (!this.isAlive()) throw new Error("Session is no longer running");
 
@@ -609,7 +640,14 @@ export class AgentSessionWrapper {
     // prompt, so it must never be sent while a run is in flight.
     if (this.isRunning()) return null;
     const before = (await this.readSessionName()) ?? "";
-    await this.send({ type: "prompt", message: "/rename" });
+    if (quiet) {
+      // omp saves the title before it prints the result, so the poll below can
+      // finish first: the window closes on that output or on expiry instead.
+      this.quietRenameUntil = Date.now() + GENERATE_TITLE_TIMEOUT_MS;
+      await this.proc.sendCommand({ type: "prompt", message: "/rename" }, PROMPT_ACK_TIMEOUT_MS);
+    } else {
+      await this.send({ type: "prompt", message: "/rename" });
+    }
     const deadline = Date.now() + RENAME_POLL_TIMEOUT_MS;
     let title = await this.readSessionName();
     while (!(title && title !== before) && Date.now() < deadline && this.isAlive()) {
@@ -618,6 +656,29 @@ export class AgentSessionWrapper {
     }
     if (title) this.adoptSessionName(title);
     return title;
+  }
+
+  /**
+   * omp does not title sessions on its own in RPC mode
+   * (can1357/oh-my-pi#14616), so once a turn finishes, ask its title generator
+   * to name an untitled session, as omp's terminal UI does.
+   */
+  private autoTitle(): void {
+    const sessionId = this._sessionId;
+    if (!sessionId || this._sessionName || this.autoTitleInFlight) return;
+    // omp writes the session file once the history holds an assistant message.
+    if (!this._sessionFile || !existsSync(this._sessionFile)) return;
+    const attempts = this.autoTitleAttempts.get(sessionId) ?? 0;
+    if (attempts >= AUTO_TITLE_MAX_ATTEMPTS) return;
+    this.autoTitleAttempts.set(sessionId, attempts + 1);
+    this.autoTitleInFlight = true;
+    this.generateTitle({ quiet: true })
+      .catch((error) => {
+        console.warn(`[omp-web] could not title session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
+      })
+      .finally(() => {
+        this.autoTitleInFlight = false;
+      });
   }
 
   private async readSessionName(): Promise<string | null> {
@@ -699,6 +760,11 @@ export class AgentSessionWrapper {
           notifyRunningChange();
           return;
         }
+        // The output of a background `/rename` (see autoTitle) is not chat content.
+        if (Date.now() < this.quietRenameUntil && typeof event.text === "string" && RENAME_OUTPUT_RE.test(event.text)) {
+          this.quietRenameUntil = 0;
+          return;
+        }
         break;
       }
       case "agent_start":
@@ -731,6 +797,7 @@ export class AgentSessionWrapper {
           this.awaitingAgentStartDeadline = 0;
           this.continuationGraceUntil = 0;
           this.invalidateSessionLists();
+          this.autoTitle();
         } else {
           this.continuationGraceUntil = Date.now() + NON_TERMINAL_CONTINUATION_GRACE_MS;
         }
@@ -810,6 +877,28 @@ export class AgentSessionWrapper {
       case "host_tool_call": {
         const id = typeof event.id === "string" ? event.id : "";
         const toolName = typeof event.toolName === "string" ? event.toolName : "";
+        // Server-side agent tools (#275) are answered here, before any
+        // browser routing, so they work with no tab open. A disabled gate
+        // is an explicit error, not a silent hang and not a browser call.
+        if (id && toolName && AGENT_TOOL_NAMES.has(toolName)) {
+          if (loadWebServerSettings().agentToolsEnabled) {
+            void this.answerServerAgentTool(event);
+          } else {
+            this.proc.sendFrame({
+              type: "host_tool_result",
+              id,
+              isError: true,
+              result: {
+                content: [{
+                  type: "text",
+                  text: "Agent tools are disabled. Enable \"Agent tools\" in omp-web Settings (System & Updates) first.",
+                }],
+              },
+            });
+            this.emit({ type: "notice", level: "warning", message: `Rejected disabled agent tool: ${toolName}` });
+          }
+          return;
+        }
         // Route REGISTERED host tools to an attached UI (the browser answers
         // via host_tool_result). With no tab on this session, hand the call to
         // any open omp-web tab (the user switched sessions mid-run). Otherwise
@@ -1186,6 +1275,73 @@ export class AgentSessionWrapper {
 
   onDestroy(cb: () => void): void {
     this.onDestroyCallback = cb;
+  }
+
+  /**
+   * Wait for the next `terminalEndsNeeded` terminal turn ends after this
+   * call (terminal agent_end, prompt_result, or prompt_error). The caller
+   * registers the waiter BEFORE sending the prompt/steer/follow_up, so a
+   * fast turn cannot end before the waiter exists. Rejects on timeout;
+   * the target is left running (never aborted by a waiter timeout).
+   * A follow_up sent to a running target needs two ends: the running
+   * turn ends first, then the queued message's own turn ends.
+   */
+  waitForTurnEnd(timeoutMs: number, terminalEndsNeeded = 1): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      let done = false;
+      let endsSeen = 0;
+      const timer = setTimeout(() => finish(new Error("Timed out waiting for the target session's response.")), timeoutMs);
+      timer.unref?.();
+      const detach = this.onEvent((event) => {
+        if (event.type === "agent_end" && event.isTerminal === false) return;
+        if (event.type === "agent_end" || event.type === "prompt_result") {
+          endsSeen += 1;
+          if (endsSeen >= terminalEndsNeeded) finish(null);
+        } else if (event.type === "prompt_error") {
+          finish(new Error(typeof event.errorMessage === "string" ? event.errorMessage : "Target session turn failed."));
+        }
+      });
+      const finish = (error: Error | null) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        detach();
+        if (error) reject(error);
+        else resolve();
+      };
+    });
+  }
+
+  /**
+   * Answer a server-side agent tool call (#275) from this wrapper's child.
+   * Runs on the server, with no browser involved, and answers directly
+   * with host_tool_result — never via pendingHostTools, so a later tab
+   * disconnect cannot settle it as a UI call.
+   */
+  private async answerServerAgentTool(event: UnsequencedAgentEvent): Promise<void> {
+    const id = typeof event.id === "string" ? event.id : "";
+    const toolName = typeof event.toolName === "string" ? event.toolName : "";
+    if (!id) return;
+    const sendResult = (text: string, isError = false) => {
+      this.proc.sendFrame({
+        type: "host_tool_result",
+        id,
+        isError,
+        result: { content: [{ type: "text", text }] },
+      });
+    };
+    try {
+      const args = event.arguments && typeof event.arguments === "object" ? event.arguments as Record<string, unknown> : {};
+      const result = await executeAgentTool(toolName, args, createAgentToolOps(), {
+        sourceSessionId: this.sessionId,
+        sourceCwd: this.cwd,
+        enabled: loadWebServerSettings().agentToolsEnabled,
+        guard: getAgentToolGuard(),
+      });
+      sendResult(typeof result === "string" ? result : JSON.stringify(result));
+    } catch (error) {
+      sendResult(error instanceof Error ? error.message : String(error), true);
+    }
   }
 
   /** Called when a session-changing command re-keyed this wrapper (branch/new_session/switch_session). */
@@ -1787,8 +1943,16 @@ export class AgentSessionWrapper {
       case "set_host_tools": {
         const tools = Array.isArray(command.tools) ? command.tools as Array<{ name?: unknown; [key: string]: unknown }> : [];
         const valid = tools.filter((t) => typeof t.name === "string" && t.name);
-        this.hostToolNames = new Set(valid.map((t) => t.name as string));
-        await this.proc.sendCommand({ type: "set_host_tools", tools: valid });
+        // Merge the server agent tools (#275) into every registration when
+        // the gate is on, so a later UI registration cannot drop them and
+        // a no-tab session keeps them after its startup registration.
+        // With the gate off the registration is exactly what the caller
+        // asked for, so existing behavior and tests are unchanged.
+        const merged = loadWebServerSettings().agentToolsEnabled
+          ? [...valid, ...AGENT_TOOL_DEFINITIONS.filter((t) => !valid.some((v) => v.name === t.name))]
+          : valid;
+        this.hostToolNames = new Set(merged.map((t) => t.name as string));
+        await this.proc.sendCommand({ type: "set_host_tools", tools: merged });
         return null;
       }
 
@@ -2114,6 +2278,94 @@ function launchConfigForCwd(cwd: string): ProjectLaunchConfig | undefined {
  * Pass toolNames to pre-configure the builtin toolset of a NEW session
  * (empty array = all tools disabled); ignored when resuming.
  */
+declare global {
+  var __ompAgentToolGuard: AgentToolGuard | undefined;
+}
+
+/** Process-wide loop/spam guard for server agent tools (#275). Stored on
+ * globalThis like the session registry so a hot reload does not silently
+ * reset the chain depths mid-loop. */
+function getAgentToolGuard(): AgentToolGuard {
+  if (!globalThis.__ompAgentToolGuard) globalThis.__ompAgentToolGuard = new AgentToolGuard();
+  return globalThis.__ompAgentToolGuard;
+}
+
+/**
+ * Real session operations behind lib/agent-tools executeAgentTool.
+ * Reuses the existing spawn/resume and message-send paths (startRpcSession,
+ * wrapper.send) instead of a second session engine. Delivery rules, kept
+ * explicit because omp's commands do not all make sense in every state:
+ * - prompt: only when the target is idle (starts a new turn);
+ * - steer: only when the target is running (steers that turn);
+ * - followUp: any state (queues behind a running turn, or starts one
+ *   when idle — omp owns the queue, as with the UI's follow-ups).
+ * A waited delivery registers its turn-end waiter BEFORE sending, then
+ * reads the turn's final text with get_last_assistant_text.
+ */
+function createAgentToolOps(): AgentToolSessionOps {
+  return {
+    async listSessions() {
+      const running = new Set(getRunningRpcSessionIds());
+      const sessions = await listAllSessions();
+      return sessions.map((s) => ({ id: s.id, name: s.name, cwd: s.cwd, running: running.has(s.id) }));
+    },
+
+    async createSession(input) {
+      if (!existsSync(input.cwd)) throw new Error(`Directory does not exist: ${input.cwd}`);
+      const tempKey = `__new__${randomUUID()}`;
+      const { session, realSessionId } = await startRpcSession(tempKey, "", input.cwd, undefined, undefined);
+      allowFileRoot(input.cwd);
+      invalidateSessionListCache();
+      try {
+        if (input.provider && input.modelId) {
+          await session.send({ type: "set_model", provider: input.provider, modelId: input.modelId });
+        }
+        if (input.name) await session.send({ type: "set_session_name", name: input.name });
+        if (input.prompt) await session.send({ type: "prompt", message: input.prompt });
+      } catch (error) {
+        await session.destroyAndWait();
+        throw error;
+      }
+      return { sessionId: realSessionId };
+    },
+
+    async deliver(input): Promise<AgentToolDeliverResult> {
+      const live = getRpcSession(input.sessionId);
+      let wrapper = live?.isAlive() ? live : undefined;
+      if (!wrapper) {
+        const filePath = await resolveSessionPath(input.sessionId);
+        if (!filePath) throw new Error(`Session not found: ${input.sessionId}`);
+        const header = readSessionHeader(filePath);
+        const { cwd } = resolveSpawnCwdResult(header?.cwd);
+        const started = await startRpcSession(input.sessionId, filePath, cwd, undefined, undefined, header?.cwd);
+        wrapper = started.session;
+      }
+      const wasRunning = wrapper.isRunning();
+      if (input.delivery === "prompt" && wasRunning) {
+        throw new Error("Target session is running; use delivery \"steer\" or \"followUp\" for a running target.");
+      }
+      if (input.delivery === "steer" && !wasRunning) {
+        throw new Error("Target session is not running; use delivery \"prompt\" to start a turn.");
+      }
+      const terminalEndsNeeded = input.delivery === "followUp" && wasRunning ? 2 : 1;
+      const waiter = input.wait ? wrapper.waitForTurnEnd(input.waitTimeoutMs, terminalEndsNeeded) : null;
+      await wrapper.send({ type: input.delivery, message: input.message });
+      if (!input.wait || !waiter) {
+        return { accepted: true, targetSessionId: input.sessionId, delivery: input.delivery, waited: false, responseText: null };
+      }
+      await waiter;
+      const last = (await wrapper.send({ type: "get_last_assistant_text" })) as { text?: unknown } | null;
+      return {
+        accepted: true,
+        targetSessionId: input.sessionId,
+        delivery: input.delivery,
+        waited: true,
+        responseText: typeof last?.text === "string" ? last.text : null,
+      };
+    },
+  };
+}
+
 export async function startRpcSession(
   sessionId: string,
   sessionFile: string,
@@ -2126,6 +2378,16 @@ export async function startRpcSession(
    * fallback (recorded dir gone) and warn the user. Omit for new sessions. */
   recordedCwd?: string | null,
   launchConfig?: ProjectLaunchConfig,
+  /** Model to bind at spawn time as `provider/modelId` (--model). Only used
+   * when resuming: it replaces the saved model and skips its restore check,
+   * so a cold set_model can recover a session whose saved model is gone
+   * (#277). Ignored when a live child is reused; the caller's set_model RPC
+   * then runs against that child as before. The spawn alone does not rewrite
+   * the session file, so a later spawn without an override still hits the
+   * old saved model until omp records a new one (a successful set_model RPC
+   * or a completed turn); the picker path re-binds on each cold switch, so
+   * the user is never stuck on the unrestorable model. */
+  spawnModel?: string,
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
@@ -2177,7 +2439,7 @@ export async function startRpcSession(
       cwd,
       // User-configured variables for MCP servers and generated configs (#104).
       env: getAgentEnvOverrides(),
-      extraArgs: buildSessionSpawnArgs(sessionFile, toolNames, advisor === true, launchConfig),
+      extraArgs: buildSessionSpawnArgs(sessionFile, toolNames, advisor === true, launchConfig, spawnModel),
       onExit: (info) => holder.wrapper?.handleProcessExit(info, proc),
     });
     const created = new AgentSessionWrapper(
@@ -2200,6 +2462,15 @@ export async function startRpcSession(
       // first message), so this never fires for a real new session.
       if (!sessionFile && created.sessionFile && existsSync(created.sessionFile)) {
         await created.send({ type: "new_session" });
+      }
+      // Register server agent tools (#275) at startup when the gate is on,
+      // so a session works for agent-to-agent calls even when no browser
+      // tab ever registers host tools for it. send() merges these with any
+      // later UI registration, so this never drops the UI tools. Older omp
+      // builds without host tools simply reject the registration; ignore
+      // that the way the UI registration does.
+      if (loadWebServerSettings().agentToolsEnabled) {
+        await created.send({ type: "set_host_tools", tools: AGENT_TOOL_DEFINITIONS }).catch(() => {});
       }
     } catch (error) {
       // Await the child's full exit before the `finally` releases the startup

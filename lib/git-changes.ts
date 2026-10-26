@@ -74,7 +74,7 @@ async function readCollapseReasons(repositoryRoot: string, relativePaths: string
       ["check-attr", "-z", "--stdin", ...GIT_REVIEW_ATTRIBUTES],
       // One record per queried attribute per path, so scale with the list.
       GIT_STATUS_MAX_BUFFER * GIT_REVIEW_ATTRIBUTES.length,
-      relativePaths.map((p) => `${p}\0`).join(""),
+      `${relativePaths.join("\0")}\0`,
     );
     return parseGitCollapseReasons(output);
   } catch {

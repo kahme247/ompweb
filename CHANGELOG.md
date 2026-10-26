@@ -6,9 +6,21 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ## Unreleased
 
+### Added
+
+- New sessions get a title on their own. omp does not name sessions in RPC mode ([can1357/oh-my-pi#14616](https://github.com/can1357/oh-my-pi/issues/14616)), so they stayed untitled until **Generate title** was clicked. After a reply finishes, omp-web now asks omp's title generator to name an untitled session, the way omp's terminal UI does. omp skips a bare greeting, so a later reply in the same session tries again, up to three times. The request runs in the background: the chat shows no run and none of `/rename`'s output, and a title you set yourself is never replaced.
+
 ### Fixes & Improvements
 
+- Fix test fixtures on macOS and paths containing spaces: report the actual tray platform, launch the transcription gateway stub with the exact quoted Node executable, and separate deterministic known-path cache invalidation from native filesystem-watch delivery without weakening authorization or content assertions.
 - Fold tool activity while the agent works, the same way a finished turn folds it: the transcript shows one **Process details** row per turn instead of a row per tool call, and expanding it shows every call as it streamed. Assistant replies keep streaming in view, and the composer keeps naming the running tool. Turn off **Hide tool activity while working** in Settings → Interface & Behavior for the previous row-per-call view.
+- **On desktop, notifications open from a bell in the top bar**, left of the right-panel toggle. The bell shows the unread count and opens a floating panel with the notification history, **Mark all as read** and **Clear**; the list scrolls inside a panel of limited width and height. Opening a notification closes the panel, and closing it marks the shown notifications as read. The right panel's Notifications tab and the right-panel toggle's unread count remain on phones only.
+- On phones and narrow windows, the top bar's tools menu is only as wide as its buttons instead of spanning the screen, and its **System** button opens the system prompt again. The prompt panel used to open inside the menu's sideways-scrolling strip, which clipped it out of view.
+- **Search looks inside sessions and ranks by relevance.** The workspace search now also matches the text of your messages and the assistant's replies, not only titles. Each word is matched on its own, in any order and with small typos tolerated; results matching your word order, and matches in titles, rank first. Put text in "quotes" to require that exact phrase. Title matches show at once; transcript matches stream in while a spinner shows the search is running, and **Stop** ends it, keeping the results found so far.
+
+### Sidebar
+
+- **Sort and pin workspaces.** A sort button next to the workspace search switches between None (your manual order), Alphabetical and Last updated (the workspace whose session got the newest message first). While a sort is active, each workspace has a pin button: pinned workspaces stay at the top in the order you give them with Move up, Move down or dragging, and newly pinned ones join the end of that group. Unpinned workspaces follow the sort and cannot be moved by hand. The sort is remembered per browser; pins are stored with the workspace list. (#271)
 
 ---
 

@@ -116,6 +116,20 @@ test("attachments alone turn Stop into Queue, which queues them as a follow-up",
   assertQueuedWithAttachments(calls[0], "Attached file:");
 });
 
+test("a stored Steer preference turns the primary button into Steer, which steers like Enter", async () => {
+  localStorage.setItem("omp-web:submit-during-run", "steer");
+  const user = userEvent.setup();
+  const calls = await renderRunningWithAttachments();
+  await user.type(screen.getByRole("textbox"), "look at this");
+  assert.equal(Boolean(screen.queryByRole("button", { name: /^queue$/i })), false, "the button no longer claims to queue");
+  const steer = screen.getByRole("button", { name: /^steer$/i });
+  assert.equal(steer.title, "Interrupt the current run and inject this message now");
+  fireEvent.click(steer);
+  await waitFor(() => assert.equal(calls.length, 1));
+  assert.equal(calls[0].name, "onSteer", "touch devices without Enter can steer");
+  assertQueuedWithAttachments(calls[0], "look at this");
+});
+
 test("a queued web slash command is expanded and keeps the attachments", async () => {
   const { expandWebSlashCommand } = await jiti.import("@/lib/web-slash-commands");
   window.HTMLElement.prototype.scrollIntoView = () => {};

@@ -3,7 +3,7 @@
 import { memo, useCallback, useRef, useState } from "react";
 import type { AgentMessage, ExitedRpcSession, ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
 import { formatExitedSessionNotice, useI18n } from "@/lib/i18n";
-import { ChevronDown, ChevronRight, Folder, GitBranch, MoreHorizontal } from "lucide-react";
+import { ChevronDown, ChevronRight, Folder, GitBranch, MoreHorizontal, Pin } from "lucide-react";
 import { Tooltip } from "./ui/primitives";
 import { ConfirmDialog } from "./ui/field";
 import { copyText } from "@/lib/clipboard";
@@ -55,6 +55,9 @@ interface ProjectRowProps {
   onDragPathChange: (path: string | null) => void;
   onDropProject: (path: string) => void;
   onMoveProject: (path: string, delta: -1 | 1) => void;
+  /** A sort is active: show the pin toggle; only pinned rows reorder by hand. */
+  pinnable: boolean;
+  onTogglePin: (project: ManagedProject) => Promise<void>;
   isDragTarget: boolean;
   removeBusy: boolean;
   onSelectSession: (s: SessionInfo) => void;
@@ -86,6 +89,8 @@ function ProjectRow({
   onDragPathChange,
   onDropProject,
   onMoveProject,
+  pinnable,
+  onTogglePin,
   isDragTarget,
   removeBusy,
   onSelectSession,
@@ -121,6 +126,8 @@ function ProjectRow({
     void onUpdatePresentation(project.path, { alias });
   }, [aliasValue, project.alias, project.path, onUpdatePresentation]);
   const label = project.alias ?? projectLabel(project.path);
+  const pinned = pinnable && project.pinOrder !== undefined;
+  const canReorder = !pinnable || pinned;
   const hasActivity = Boolean(activity && (activity.running > 0 || activity.unread > 0 || activity.exited > 0));
   const visibleRoots = hiddenCount > 0 && !showAllSessions
     ? tree.slice(0, MAX_PROJECT_SESSIONS)
@@ -145,7 +152,7 @@ function ProjectRow({
       />
       <div
         className="sidebar-project-header"
-        draggable={!aliasEditing}
+        draggable={!aliasEditing && canReorder}
         onDragStart={(event) => { event.dataTransfer.setData("text/plain", project.path); event.dataTransfer.effectAllowed = "move"; onDragPathChange(project.path); }}
         onDragOver={(event) => { if (isDragTarget) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }}
         onDrop={(event) => { event.preventDefault(); onDropProject(project.path); }}
@@ -299,6 +306,19 @@ function ProjectRow({
             flexShrink: 0,
           }}
         >
+          {pinnable && (
+            <button
+              type="button"
+              className="sidebar-project-action"
+              onClick={() => void onTogglePin(project)}
+              aria-label={t("projects.pin", { name: label })}
+              title={pinned ? t("projects.unpin", { name: label }) : t("projects.pin", { name: label })}
+              aria-pressed={pinned}
+              style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 24, height: 24, padding: 0, border: "none", borderRadius: "var(--radius-control)", background: "transparent", color: pinned ? "var(--accent)" : "var(--text-dim)", cursor: "pointer", lineHeight: 0, transition: SIDEBAR_BUTTON_TRANSITION }}
+            >
+              <Pin size={13} strokeWidth={2} fill={pinned ? "currentColor" : "none"} aria-hidden="true" />
+            </button>
+          )}
           <button
             type="button"
             ref={actionButtonRef}
@@ -326,12 +346,16 @@ function ProjectRow({
             <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { onEditLaunchConfig(project); setActionMenuOpen(false); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
               {project.launchConfig ? t("sessionSidebar.editLaunchConfig") : t("sessionSidebar.configureLaunchConfig")}
             </button>
-            <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { setActionMenuOpen(false); void onMoveProject(project.path, -1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
-              {t("projects.moveUp")}
-            </button>
-            <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { setActionMenuOpen(false); void onMoveProject(project.path, 1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
-              {t("projects.moveDown")}
-            </button>
+            {canReorder && (
+              <>
+                <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { setActionMenuOpen(false); void onMoveProject(project.path, -1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
+                  {t("projects.moveUp")}
+                </button>
+                <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { setActionMenuOpen(false); void onMoveProject(project.path, 1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
+                  {t("projects.moveDown")}
+                </button>
+              </>
+            )}
             <button type="button" role="menuitem" className="sidebar-menu-item" disabled={removeBusy} onClick={() => { setActionMenuOpen(false); setConfirmRemove(true); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--status-error)", cursor: removeBusy ? "default" : "pointer", textAlign: "left", fontSize: 11 }}>
               {t("projects.remove", { name: label })}
             </button>

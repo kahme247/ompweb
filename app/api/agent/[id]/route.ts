@@ -90,7 +90,48 @@ export async function POST(
     const header = readSessionHeader(filePath);
     const { cwd } = resolveSpawnCwdResult(header?.cwd);
 
-    const { session } = await startRpcSession(id, filePath, cwd, undefined, advisor, header?.cwd);
+    // A cold set_model must reach omp before the saved model is restored:
+    // spawning with only --resume lets omp exit on an unrestorable saved
+    // model before the RPC below ever runs (#277). Binding the requested
+    // model at spawn time skips that restore check. Live children never
+    // reach this path (they take the fast path above), and any other command
+    // keeps the previous spawn behavior.
+    const spawnModel =
+      body.type === "set_model" &&
+      typeof body.provider === "string" &&
+      typeof body.modelId === "string" &&
+      body.provider.trim() &&
+      body.modelId.trim() &&
+      !body.provider.startsWith("-") &&
+      !body.modelId.startsWith("-") &&
+      !/\s/.test(body.provider) &&
+      !/\s/.test(body.modelId)
+        ? `${body.provider}/${body.modelId}`
+        : undefined;
+
+    const { session } = await startRpcSession(id, filePath, cwd, undefined, advisor, header?.cwd, undefined, spawnModel);
+    if (spawnModel) {
+      // Try the normal RPC first: when it succeeds it also records the new
+      // model in the session, so later spawns restore it without an override.
+      // But in omp 18.12.6 set_model can fail spuriously with "Model not
+      // found" for a catalog model whose provider has no credentials
+      // configured, even though the spawn already bound it. In that case the
+      // switch itself succeeded — verify from live state and report success
+      // rather than a false failure. A mismatch (e.g. an omp without --model
+      // precedence) rethrows the RPC error, so a real failure still surfaces.
+      try {
+        const result = await session.send(body);
+        return NextResponse.json({ success: true, data: result });
+      } catch (error) {
+        const state = (await session.send({ type: "get_state" })) as {
+          model?: { id?: unknown; provider?: unknown };
+        } | null;
+        if (state?.model?.provider === body.provider && state?.model?.id === body.modelId) {
+          return NextResponse.json({ success: true, data: { id: body.modelId, provider: body.provider } });
+        }
+        throw error;
+      }
+    }
     const result = await session.send(body);
 
     return NextResponse.json({ success: true, data: result });

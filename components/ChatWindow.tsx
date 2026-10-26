@@ -1041,6 +1041,12 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     const active = document.activeElement;
     if (askOpen && active instanceof HTMLElement && hiddenComposerRef.current?.contains(active)) active.blur();
   }, [askOpen]);
+  // The live status is merged into a ComposerPanels header row (#245)
+  // whenever one exists (todo or subagent row); only then is the
+  // standalone ChatInput status bar suppressed. With no host row, or in
+  // the minimized pill bar (which keeps composerStatusText below), the
+  // bar stays so the status is never hidden.
+  const hasStatusHostRow = todoPhases.length > 0 || subagents.length > 0;
   const chatInputElement = (
     <ChatInput
       ref={chatInputRef}
@@ -1107,7 +1113,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
          accept Escape-to-minimize in the fresh-chat branch where there is
          nothing to collapse. */
       onMinimize={isEmptyNew ? undefined : handleMinimize}
-      statusText={composerStatusText}
+      statusText={hasStatusHostRow ? null : composerStatusText}
       onOpenProviders={onOpenProviders}
     />
   );
@@ -1464,6 +1470,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
               subagents={subagents}
               onSelectSubagent={setSelectedSubagent}
               btw={btwPanel}
+              liveStatus={composerStatusText}
             />
             <ExtensionWidgets widgets={belowEditorWidgets} />
           </div>

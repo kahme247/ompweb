@@ -3133,11 +3133,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setCurrentModelOverride({ provider, modelId });
       await refreshLiveModelState(sid);
     } catch (e) {
+      // Previously this was console-only, so a cold-start failure (e.g. an
+      // unrestorable saved model, #277) left the composer showing the old
+      // model with no explanation. The override above is only set on success,
+      // so the displayed model stays honest; the notice explains why.
       console.error("Failed to set model:", e);
+      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
     } finally {
       modelCommandPendingRef.current -= 1;
     }
-  }, [isNew, setNewSessionModel, refreshLiveModelState]);
+  }, [isNew, setNewSessionModel, refreshLiveModelState, addNotice]);
 
   const handleFastModeChange = useCallback(async (enabled: boolean) => {
     // A brand-new session has no runtime yet: the model picker updates local

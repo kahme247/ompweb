@@ -14,6 +14,23 @@ export function formatUsageReset(value: number, unit: "minutes" | "hours"): stri
   return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
 }
 
+/**
+ * Label that distinguishes one usage row from another row for the same
+ * provider and account, or undefined when the row needs none.
+ * Antigravity rows carry their bucket ("Gemini", "Claude & GPT (shared)");
+ * Anthropic rows carry their tier, capitalised ("Fable", "Opus", "Sonnet")
+ * — the shared account-wide row has no tier and stays plain "Anthropic".
+ * Other providers' tiers are quota tiers, not bucket names, so they are
+ * not promoted to a label here.
+ */
+export function usageBucketLabel(report: ProviderUsageReport): string | undefined {
+  if (report.bucket) return report.bucket;
+  if (report.provider === "anthropic" && report.tier) {
+    return report.tier.charAt(0).toUpperCase() + report.tier.slice(1);
+  }
+  return undefined;
+}
+
 export function usageTone(percent: number): string {
   if (percent >= 80) return "var(--status-error)";
   if (percent >= 50) return "var(--status-warning)";

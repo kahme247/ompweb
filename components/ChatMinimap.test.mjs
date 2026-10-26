@@ -8,7 +8,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { ChatMinimap, extractPreviewText, getBarWidth } = await jiti.import("./ChatMinimap.tsx");
+const { ChatMinimap, extractPreviewText, getBarWidth, getTooltipTopPx, railIndexForPointer, railOverflows } = await jiti.import("./ChatMinimap.tsx");
 
 test("extractPreviewText extracts clean text from user string content", () => {
   const preview = extractPreviewText({
@@ -103,4 +103,58 @@ test("falls back to assistant messages when no user prompts exist", () => {
 
   assert.match(html, /aria-label="Jump to: Welcome to the agent"/);
   assert.match(html, /aria-label="Jump to: Ready for tasks"/);
+});
+
+test("tooltip stays aligned with its row when the rail has scrolled (#251)", () => {
+  // Unscrolled: the reporter's row 0 center (6px padding + half of 18px).
+  assert.equal(getTooltipTopPx(0, 0), 15);
+  assert.equal(getTooltipTopPx(20, 0), 375);
+  // Scrolled: a row whose unclipped center would be 1095px (outside the
+  // 520px rail, as in the report for tick 60) is pulled back into the
+  // viewport by exactly the rail's scroll offset.
+  assert.equal(getTooltipTopPx(60, 594), 501);
+  assert.equal(getTooltipTopPx(60, 0), 1095);
+});
+
+test("rail rows do not shrink below the row height (#251)", () => {
+  const messages = Array.from({ length: 86 }, (_, i) => ({ role: "user", content: `prompt ${i}` }));
+  const html = renderToStaticMarkup(
+    React.createElement(ChatMinimap, {
+      messages,
+      scrollContainer: { current: null },
+      messageRefs: { current: [] },
+    })
+  );
+  assert.match(html, /flex-shrink:0/);
+  assert.match(html, /min-height:18px/);
+});
+
+test("drag scrubber maps a pointer to the row actually under it when scrolled (#251 follow-up)", () => {
+  // Unscrolled: pointer at the center of row 20 (6 + 20*18 + 9 = 375).
+  assert.equal(railIndexForPointer(375, 0, 86), 20);
+  // Scrolled by 594px: a viewport offset of 15px lands at content
+  // 609, i.e. row 33 ((609 - 6) / 18 = 33.5, floored).
+  assert.equal(railIndexForPointer(15, 594, 86), 33);
+  // Clamped at both ends.
+  assert.equal(railIndexForPointer(-10, 0, 86), 0);
+  assert.equal(railIndexForPointer(9999, 0, 86), 85);
+});
+
+test("rail is always scrollable, even with few rows on a short viewport (#251 follow-up)", () => {
+  const messages = [{ role: "user", content: "only prompt" }];
+  const html = renderToStaticMarkup(
+    React.createElement(ChatMinimap, {
+      messages,
+      scrollContainer: { current: null },
+      messageRefs: { current: [] },
+    })
+  );
+  assert.match(html, /overflow-y:auto/);
+});
+
+test("active-row scroll is gated on actual rail overflow, not row count (#251 follow-up)", () => {
+  // 15 rows on a short viewport: content 282px > 250px viewport cap.
+  assert.equal(railOverflows(282, 250), true);
+  assert.equal(railOverflows(282, 282), false);
+  assert.equal(railOverflows(200, 520), false);
 });

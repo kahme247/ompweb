@@ -3,7 +3,6 @@
 import { memo, useEffect, useState, type Ref, type RefObject } from "react";
 import {
   AtSign,
-  CheckCheck,
   ChevronsDownUp,
   Copy,
   Download,
@@ -14,7 +13,6 @@ import {
   LocateFixed,
   RefreshCw,
   Search,
-  Trash2,
   Upload,
   X,
 } from "lucide-react";
@@ -22,8 +20,8 @@ import { TabBar, type Tab } from "./TabBar";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { GitChangesPanel } from "./GitChangesPanel";
 import { FileViewer } from "./FileViewer";
-import { NotificationList } from "./NotificationList";
-import { notificationHistory, useUnreadNotificationCount } from "@/lib/notification-history";
+import { NotificationActions, NotificationList } from "./NotificationList";
+import { useUnreadNotificationCount } from "@/lib/notification-history";
 import { WorktreesPanel } from "./WorktreesPanel";
 import type { WorktreeContext } from "./SessionSidebar-helpers";
 import { useI18n } from "@/lib/i18n";
@@ -207,7 +205,7 @@ export const RightPanel = memo(function RightPanel({
               onSelectGit={() => onSelectView("git")}
               gitBadge={gitBadge}
               notificationsSelected={rightView === "notifications"}
-              onSelectNotifications={() => onSelectView("notifications")}
+              onSelectNotifications={isMobile ? () => onSelectView("notifications") : undefined}
               notificationsBadge={unreadNotifications}
               worktreesSelected={rightView === "worktrees"}
               onSelectWorktrees={() => onSelectView("worktrees")}
@@ -277,32 +275,7 @@ export const RightPanel = memo(function RightPanel({
             </div>
             )
           ) : rightView === "notifications" ? (
-            <div style={{ display: "flex", alignItems: "center", flexShrink: 0, padding: "0 2px" }} role="toolbar" aria-label={t("appShell.notifications")}>
-              {/* aria-disabled (not disabled) keeps the button focusable after use. */}
-              <button
-                onClick={notificationHistory.markAllRead}
-                aria-disabled={unreadNotifications === 0}
-                title={t("appShell.notificationsMarkRead")}
-                aria-label={t("appShell.notificationsMarkRead")}
-                className="ui-focus-ring"
-                style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, padding: 0, background: "none", border: "none", borderRadius: "var(--radius-control)", color: "var(--text-dim)", cursor: unreadNotifications === 0 ? "default" : "pointer", opacity: unreadNotifications === 0 ? 0.5 : 1 }}
-                onMouseEnter={(e) => { if (unreadNotifications === 0) return; e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
-              >
-                <CheckCheck size={13} strokeWidth={2} aria-hidden="true" />
-              </button>
-              <button
-                onClick={notificationHistory.clear}
-                title={t("appShell.notificationsClear")}
-                aria-label={t("appShell.notificationsClear")}
-                className="ui-focus-ring"
-                style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, padding: 0, background: "none", border: "none", borderRadius: "var(--radius-control)", color: "var(--text-dim)", cursor: "pointer" }}
-                onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
-              >
-                <Trash2 size={13} strokeWidth={2} aria-hidden="true" />
-              </button>
-            </div>
+            <NotificationActions />
           ) : rightView === "file" && activeFileTab && (
             <div style={{ display: "flex", alignItems: "center", flexShrink: 0, padding: "0 2px" }} role="toolbar" aria-label={activeFileTab.filePath}>
               <button
@@ -467,8 +440,8 @@ export const RightPanel = memo(function RightPanel({
             </div>
           ))}
         </div>
-        <div id="workspace-file-panel-notifications" role="tabpanel" tabIndex={-1} aria-label={t("appShell.notifications")} style={{ display: rightView === "notifications" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden", outline: "none" }}>
-          {visitedViews.has("notifications") && <NotificationList />}
+        <div id="workspace-file-panel-notifications" role="tabpanel" tabIndex={-1} aria-label={t("appShell.notifications")} className="ui-focus-ring" style={{ display: rightView === "notifications" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden", outline: "none" }}>
+          {isMobile && visitedViews.has("notifications") && <NotificationList />}
         </div>
         <div id="workspace-file-panel-worktrees" role="tabpanel" aria-label={t("tabBar.worktrees")} style={{ display: rightView === "worktrees" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>
           {/* Keyed by repository so a draft branch or pending confirmation never carries over to another repo. */}

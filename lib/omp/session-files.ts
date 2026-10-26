@@ -643,6 +643,8 @@ export interface OmpSessionInfo {
   size: number;
   firstMessage: string;
   status?: SessionStatus;
+  /** Timestamp of the last message entry in the tail window (when scanned with status). */
+  lastMessageAt?: Date;
 }
 
 const SESSION_LIST_PREFIX_BYTES = 4096;
@@ -808,26 +810,27 @@ function statusFromTailMessage(message: TailMessage): SessionStatus {
   }
 }
 
-/** Derive the lifecycle status from the tail window's last message entry. */
-function deriveSessionStatus(suffix: string): SessionStatus {
-  if (!suffix) return "unknown";
+/** The tail window's last message entry: lifecycle status plus its timestamp. */
+function scanTailMessage(suffix: string): { status: SessionStatus; lastMessageAt?: Date } {
+  if (!suffix) return { status: "unknown" };
   const lines = suffix.split("\n");
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
     // Every persisted entry starts with "{" — cheaply skips blank lines and
     // the leading partial fragment of the tail window.
     if (line.charCodeAt(0) !== 123) continue;
-    let entry: { type?: string; message?: TailMessage };
+    let entry: { type?: string; timestamp?: unknown; message?: TailMessage };
     try {
       entry = JSON.parse(line);
     } catch {
       continue;
     }
     if (entry.type === "message" && entry.message) {
-      return statusFromTailMessage(entry.message);
+      const at = typeof entry.timestamp === "string" ? new Date(entry.timestamp) : undefined;
+      return { status: statusFromTailMessage(entry.message), lastMessageAt: at && !Number.isNaN(at.getTime()) ? at : undefined };
     }
   }
-  return "unknown";
+  return { status: "unknown" };
 }
 
 interface SessionListHeader {
@@ -901,8 +904,13 @@ function parseSessionListHeader(
   return undefined;
 }
 
-function readTextSlices(filePath: string, prefixBytes: number, suffixBytes: number): [string, string, number, Date] {
-  const stat = statSync(filePath);
+function readTextSlices(
+  filePath: string,
+  prefixBytes: number,
+  suffixBytes: number,
+  knownStat?: { size: number; mtime: Date },
+): [string, string, number, Date] {
+  const stat = knownStat ?? statSync(filePath);
   const fd = openSync(filePath, "r");
   try {
     const prefixLength = Math.min(prefixBytes, stat.size);
@@ -928,12 +936,17 @@ function readTextSlices(filePath: string, prefixBytes: number, suffixBytes: numb
  * window (plus a 32 KiB tail window when `withStatus` is set). Faithful port
  * of omp's scanSessionFile — messageCount is a prefix-derived lower bound.
  */
-export function scanSessionInfo(filePath: string, withStatus = true): OmpSessionInfo | undefined {
+export function scanSessionInfo(
+  filePath: string,
+  withStatus = true,
+  knownStat?: { size: number; mtime: Date },
+): OmpSessionInfo | undefined {
   try {
     const [content, suffix, size, mtime] = readTextSlices(
       filePath,
       SESSION_LIST_PREFIX_BYTES,
       withStatus ? SESSION_LIST_SUFFIX_BYTES : 0,
+      knownStat,
     );
     const entries = parseJsonlLenient<Record<string, unknown>>(content);
     const header = parseSessionListHeader(content, entries);
@@ -962,6 +975,7 @@ export function scanSessionInfo(filePath: string, withStatus = true): OmpSession
     }
     firstMessage ||= extractFirstDisplayMessageFromPrefix(content) ?? "";
     const messageCount = Math.max(parsedMessageCount, countMessageMarkers(content));
+    const tail = withStatus ? scanTailMessage(suffix) : undefined;
     return {
       path: filePath,
       id: header.id,
@@ -973,7 +987,8 @@ export function scanSessionInfo(filePath: string, withStatus = true): OmpSession
       messageCount,
       size,
       firstMessage: firstMessage || "(no messages)",
-      status: withStatus ? deriveSessionStatus(suffix) : undefined,
+      status: tail?.status,
+      lastMessageAt: tail?.lastMessageAt,
     };
   } catch {
     return undefined;
@@ -1031,7 +1046,7 @@ export function invalidateAllSessionScanCaches(): void {
 /** scanSessionInfo memoized on (path, size, mtimeMs). Callers must treat the
  * returned info as immutable — cache hits share one object. */
 function scanSessionInfoCached(filePath: string): OmpSessionInfo | undefined {
-  let stat: { size: number; mtimeMs: number };
+  let stat: { size: number; mtime: Date; mtimeMs: number };
   try {
     stat = statSync(filePath);
   } catch {
@@ -1046,7 +1061,7 @@ function scanSessionInfoCached(filePath: string): OmpSessionInfo | undefined {
     return cached.info;
   }
   if (cached) cache.delete(key);
-  const info = scanSessionInfo(filePath, true);
+  const info = scanSessionInfo(filePath, true, stat);
   // Failed scans are not negatively cached: a transient read error must not
   // hide a session until its next mtime bump.
   if (info) {

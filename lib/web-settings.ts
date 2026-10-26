@@ -8,6 +8,14 @@ export interface WebServerSettings {
   /** Resume sessions that were mid-run when omp-web stopped. */
   autoResumeSessions: boolean;
   /**
+   * Server-side agent tools (issue #275: list_sessions / new_session /
+   * send_to_session). OFF by default: when on, any agent session may call
+   * them to reach other sessions, with no browser tab required. Sessions
+   * pick the tools up on their next host-tool registration (session start
+   * or SSE reconnect).
+   */
+  agentToolsEnabled: boolean;
+  /**
    * Environment variables merged into the `omp` child process (issue #104).
    * Stored as a validated record; lib/omp/agent-env.ts owns the policy and
    * re-checks every name before handing it to a spawn.
@@ -15,7 +23,7 @@ export interface WebServerSettings {
   agentEnv: Record<string, string>;
 }
 
-const DEFAULTS: WebServerSettings = { autoResumeSessions: false, agentEnv: {} };
+const DEFAULTS: WebServerSettings = { autoResumeSessions: false, agentToolsEnabled: false, agentEnv: {} };
 
 /** String-valued entries only — the allow-list lives in lib/omp/agent-env.ts. */
 function readAgentEnvRecord(value: unknown): Record<string, string> {
@@ -47,6 +55,7 @@ export function loadWebServerSettings(): WebServerSettings {
       if (isRecord(raw)) {
         settings = {
           autoResumeSessions: raw.autoResumeSessions === true,
+          agentToolsEnabled: raw.agentToolsEnabled === true,
           agentEnv: readAgentEnvRecord(raw.agentEnv),
         };
       }

@@ -2,7 +2,7 @@
 
 import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, ClipboardPaste, ListChecks, Loader2, Mic, Paperclip, Plus, RotateCw, Shrink, Snail, Sparkles, Wrench, X, Zap } from "lucide-react";
+import { ChevronDown, ClipboardPaste, CornerDownRight, ListChecks, Loader2, Mic, Paperclip, Plus, RotateCw, Shrink, Snail, Sparkles, Wrench, X, Zap } from "lucide-react";
 import { getSubmitDuringRunBehavior, isWordCompletionEnabled } from "@/lib/composer-prefs";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
@@ -1397,6 +1397,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     isStreaming
     && (Boolean(value.trim()) || attachedImages.length > 0 || attachedTextFiles.length > 0 || dictationCapturing)
     && Boolean(onFollowUp);
+  // The button follows the same Settings choice as Enter: soft keyboards have no
+  // Enter to submit with, so this button is how touch devices steer.
+  const primaryActionMode = primaryActionQueuesMessage && onSteer && getSubmitDuringRunBehavior() === "steer" ? "steer" : "followup";
 
   // ── Queued follow-up bar ────────────────────────────────────────────────
   // Texts are mirrored locally; mutations wait for native acknowledgement.
@@ -3436,21 +3439,17 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 <Mic size={14} strokeWidth={1.8} aria-hidden="true" />
               </button>
             )}
-            {/* Primary action: Send (idle) / Queue (typed while running) / Stop (running) */}
+            {/* Primary action: Send (idle) / Steer or Queue (typed while running, per Settings) / Stop (running) */}
             {primaryActionQueuesMessage ? (
               <button
                 type="button"
                 className="composer-primary-action"
                 onClick={() => {
-                  if (dictationCapturing) {
-                    const behavior = getSubmitDuringRunBehavior();
-                    stopAndFinishDictation(behavior === "steer" && onSteer ? "steer" : "followup");
-                  } else {
-                    sendQueued("followup");
-                  }
+                  if (dictationCapturing) stopAndFinishDictation(primaryActionMode);
+                  else sendQueued(primaryActionMode);
                 }}
                 disabled={isTranscribing}
-                title={t("chatInput.queueMessage")}
+                title={t(primaryActionMode === "steer" ? "chatInput.steerNowTitle" : "chatInput.queueMessage")}
                 style={{
                   display: "flex", alignItems: "center", gap: 6,
                   background: "var(--accent-strong)",
@@ -3463,8 +3462,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   transition: "background var(--dur-fast) var(--ease-out-warm)",
                 }}
               >
-                <ListChecks size={13} strokeWidth={2} aria-hidden="true" />
-                {t("chatInput.queue")}
+                {primaryActionMode === "steer"
+                  ? <CornerDownRight size={13} strokeWidth={2} aria-hidden="true" />
+                  : <ListChecks size={13} strokeWidth={2} aria-hidden="true" />}
+                {t(primaryActionMode === "steer" ? "chatInput.steer" : "chatInput.queue")}
               </button>
             ) : isStreaming ? (
               <button
