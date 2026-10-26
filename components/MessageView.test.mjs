@@ -894,6 +894,11 @@ test("agent replies offer copy and fork at their resolved target", async (t) => 
   }));
   assert.ok(view.getByRole("button", { name: "Copy message" }));
   await act(async () => { fireEvent.click(view.getByRole("button", { name: FORK_LABEL })); });
+  assert.deepEqual(forked, [], "the fork button only asks for confirmation");
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "Cancel" })); });
+  assert.deepEqual(forked, []);
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: FORK_LABEL })); });
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "Fork" })); });
   assert.deepEqual(forked, [["user-1", true]]);
   view.unmount();
 });
@@ -942,6 +947,8 @@ test("user messages fork at their own entry and edit the prompt", async (t) => {
     onFork: (entryId, editPrompt) => forked.push([entryId, editPrompt]),
   }));
   await act(async () => { fireEvent.click(view.getByRole("button", { name: FORK_LABEL })); });
+  assert.deepEqual(forked, []);
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "Fork" })); });
   assert.deepEqual(forked, [["user-7", true]]);
   view.unmount();
 });

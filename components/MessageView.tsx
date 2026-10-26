@@ -12,6 +12,7 @@ import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { isEmptyThinkingBlock } from "@/lib/message-display";
 import { isPassiveToolContext } from "@/lib/chat-transcript-plan";
 import { Tooltip, Collapsible, CollapsibleTrigger } from "./ui/primitives";
+import { ConfirmDialog } from "./ui/field";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { formatCompactNumber } from "@/lib/format";
 import { TaskResultPanel } from "./MessageView-task-panel";
@@ -293,11 +294,22 @@ function ForkSessionButton({ entryId, editPrompt, onFork, forking, forkDisabled 
   forkDisabled?: boolean;
 }) {
   const { t } = useI18n();
+  const [confirming, setConfirming] = useState(false);
   const blocked = forkDisabled || forking;
   return (
+    <>
+    <ConfirmDialog
+      open={confirming}
+      onOpenChange={setConfirming}
+      title={t("messageView.forkConfirmTitle")}
+      description={t("messageView.forkConfirmBody")}
+      confirmLabel={t("messageView.newSession")}
+      cancelLabel={t("chatInput.cancel")}
+      onConfirm={() => { setConfirming(false); onFork(entryId, editPrompt); }}
+    />
     <Tooltip content={forking ? t("messageView.creatingSession") : t("messageView.newSessionTitle")}>
       <button
-        onClick={() => { onFork(entryId, editPrompt); }}
+        onClick={() => { setConfirming(true); }}
         disabled={blocked}
         aria-label={forking ? t("messageView.creatingSession") : t("messageView.newSessionTitle")}
         style={{
@@ -318,6 +330,7 @@ function ForkSessionButton({ entryId, editPrompt, onFork, forking, forkDisabled 
         {forking ? t("messageView.creating") : t("messageView.newSession")}
       </button>
     </Tooltip>
+    </>
   );
 }
 function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, forkDisabled, onEdit, editing, editDisabled }: {

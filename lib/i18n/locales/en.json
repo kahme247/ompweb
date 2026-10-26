@@ -881,6 +881,8 @@
   "messageView.largeMessageReveal": "Large message ({size}). Show as plain text",
   "messageView.creating": "Creating...",
   "messageView.creatingSession": "Creating session...",
+  "messageView.forkConfirmTitle": "Fork a new session?",
+  "messageView.forkConfirmBody": "This creates a new session holding the conversation up to this point. The current session stays unchanged.",
   "messageView.diffAfter": "After",
   "messageView.diffBefore": "Before",
   "messageView.downloadFullOutput": "download full output",
