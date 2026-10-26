@@ -7,13 +7,12 @@ import { workspaceKeyOf } from "./workspace-memory";
 // All keys are canonical projectRoot paths (worktrees collapse into their main
 // repo via resolveProject), so worktree sessions group under their project.
 //
-// The project list is ordered by when each project was added (addedAt desc =
-// most recently added first), NOT by session activity: activity changes on
-// every session refresh (agent runs, message edits, unread transitions) and
-// would make project rows jump around constantly. Registration order is
-// stable — it only changes when the user explicitly adds a project.
-// Session-discovered projects (no addedAt) follow the registered ones in
-// path order, which is also stable.
+// With sort "none" (the default) the project list is ordered manually, then by
+// when each project was added (addedAt desc = most recently added first), NOT
+// by session activity: activity changes on every session refresh and would
+// make project rows jump around. Session-discovered projects (no addedAt)
+// follow the registered ones in path order, which is also stable. Only the
+// opt-in "updated" sort follows activity (see orderProjects).
 // ============================================================================
 
 /** Sort projects by most-recently-added (addedAt desc), then by path for a
@@ -35,6 +34,46 @@ export function sortManagedProjects(projects: ManagedProject[]): ManagedProject[
     }
     return a.path.localeCompare(b.path);
   });
+}
+
+/** Sidebar workspace sort: "none" is the manual/registration order above. */
+export type ProjectSortMode = "none" | "alphabetical" | "updated";
+
+/** Order projects for a sort mode. In "none", pins are ignored and the manual
+ *  order applies. Otherwise pinned projects come first in their pinOrder, then
+ *  the rest by label (A→Z, case-insensitive, digits numerically) or by their
+ *  newest session's last message time (`lastMessageAt`, else the file's
+ *  `modified`; most recent first, projects without sessions last). Ties keep
+ *  the manual order. */
+export function orderProjects(
+  projects: ManagedProject[],
+  mode: ProjectSortMode,
+  sessions: SessionInfo[],
+  labelOf: (project: ManagedProject) => string,
+): ManagedProject[] {
+  const manual = sortManagedProjects(projects);
+  if (mode === "none") return manual;
+  const pinned = manual.filter((p) => p.pinOrder !== undefined).sort((a, b) => a.pinOrder! - b.pinOrder!);
+  const rest = manual.filter((p) => p.pinOrder === undefined);
+  if (mode === "alphabetical") {
+    rest.sort((a, b) => labelOf(a).localeCompare(labelOf(b), undefined, { sensitivity: "base", numeric: true }));
+  } else {
+    const updated = new Map<string, number>();
+    for (const session of sessions) {
+      const key = workspaceKeyOf(session);
+      if (!key) continue;
+      const folded = comparableProjectPath(key);
+      const time = Date.parse(session.lastMessageAt ?? session.modified);
+      if (time > (updated.get(folded) ?? 0)) updated.set(folded, time);
+    }
+    rest.sort((a, b) => (updated.get(comparableProjectPath(b.path)) ?? 0) - (updated.get(comparableProjectPath(a.path)) ?? 0));
+  }
+  return [...pinned, ...rest];
+}
+
+/** pinOrder that places a newly pinned project last among the pinned ones. */
+export function nextPinOrder(projects: ManagedProject[]): number {
+  return Math.max(-1, ...projects.map((p) => p.pinOrder ?? -1)) + 1;
 }
 
 /** Running/unread/exit session counts per project, for the activity indicators

@@ -26,7 +26,7 @@ afterEach(() => {
 /** Every way the composer can hand text to the agent, recorded by name. */
 function renderComposer(props) {
   const calls = [];
-  const record = (name) => (...args) => { calls.push([name, args[0]]); };
+  const record = (name) => async (...args) => { calls.push([name, args[0]]); return name === "onSend" ? { status: "accepted" } : true; };
   const ref = React.createRef();
   render(React.createElement(ChatInput, {
     ref,

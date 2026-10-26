@@ -195,9 +195,6 @@ async function subscribeForPush(): Promise<boolean> {
 /** Window event (detail: session id) asking the app to open a notification's session. */
 export const OPEN_SESSION_EVENT = "omp-open-session";
 
-/** Window event (detail: `{kind, event}` from the server) for a notification delivered to this tab. */
-export const NOTIFICATION_MESSAGE_EVENT = "omp-notification";
-
 /**
  * Show a system notification the same way the service worker shows pushes.
  * Returns false when the browser does not allow it, so the caller can fall back.

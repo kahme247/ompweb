@@ -166,9 +166,9 @@ interface Props {
   onFork?: (entryId: string, editPrompt: boolean) => void;
   forking?: boolean;
   forkDisabled?: boolean;
-  onNavigate?: (entryId: string) => boolean | Promise<boolean>;
-  prevAssistantEntryId?: string;
-  onEditContent?: (content: string) => void;
+  onEdit?: (entryId: string, content: string) => Promise<boolean>;
+  editing?: boolean;
+  editDisabled?: boolean;
   showTimestamp?: boolean;
   prevTimestamp?: number;
   sessionId?: string;
@@ -210,9 +210,9 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, forkEntryId, forkEditsPrompt, onFork, forking, forkDisabled, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, expandThinkingByDefault = false, hideThinking = false, sourceBlockIndices, liveTokensPerSecond }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, forkEntryId, forkEditsPrompt, onFork, forking, forkDisabled, onEdit, editing, editDisabled, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, expandThinkingByDefault = false, hideThinking = false, sourceBlockIndices, liveTokensPerSecond }: Props) {
   if (message.role === "user") {
-    return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} forkDisabled={forkDisabled} onNavigate={onNavigate} prevAssistantEntryId={prevAssistantEntryId} onEditContent={onEditContent} />;
+    return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} forkDisabled={forkDisabled} onEdit={onEdit} editing={editing} editDisabled={editDisabled} />;
   }
   if (message.role === "assistant") {
     return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} forkEntryId={forkEntryId} forkEditsPrompt={forkEditsPrompt} onFork={onFork} forking={forking} forkDisabled={forkDisabled} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} expandThinkingByDefault={expandThinkingByDefault} hideThinking={hideThinking} sourceBlockIndices={sourceBlockIndices} liveTokensPerSecond={liveTokensPerSecond} />;
@@ -251,9 +251,9 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.onFork === next.onFork
     && prev.forking === next.forking
     && prev.forkDisabled === next.forkDisabled
-    && prev.onNavigate === next.onNavigate
-    && prev.prevAssistantEntryId === next.prevAssistantEntryId
-    && prev.onEditContent === next.onEditContent
+    && prev.onEdit === next.onEdit
+    && prev.editing === next.editing
+    && prev.editDisabled === next.editDisabled
     && prev.showTimestamp === next.showTimestamp
     && prev.prevTimestamp === next.prevTimestamp
     && prev.sessionId === next.sessionId
@@ -320,16 +320,17 @@ function ForkSessionButton({ entryId, editPrompt, onFork, forking, forkDisabled 
     </Tooltip>
   );
 }
-function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, forkDisabled, onNavigate, prevAssistantEntryId, onEditContent }: {  message: UserMessage;
+function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, forkDisabled, onEdit, editing, editDisabled }: {
+  message: UserMessage;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
   entryId?: string;
   onFork?: (entryId: string, editPrompt: boolean) => void;
   forking?: boolean;
   forkDisabled?: boolean;
-  onNavigate?: (entryId: string) => boolean | Promise<boolean>;
-  prevAssistantEntryId?: string;
-  onEditContent?: (content: string) => void;
+  onEdit?: (entryId: string, content: string) => Promise<boolean>;
+  editing?: boolean;
+  editDisabled?: boolean;
 }) {
   const { t, locale } = useI18n();
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -365,7 +366,8 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
 
   const time = formatTime(message.timestamp, locale);
   const canFork = !!entryId && !!onFork;
-  const canNavigate = !!prevAssistantEntryId && !!onNavigate;
+  const canEdit = !!entryId && !!onEdit && !message.branchSummary;
+  const editBlocked = editing || editDisabled || forking || forkDisabled;
 
   return (
     <div
@@ -439,39 +441,38 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
             gap: 6, marginTop: 3, width: "100%",
           }}>
           <MessageCopyActions texts={[content]} bodyRef={bodyRef} />
-          {(canFork || canNavigate) && (
+          {(canEdit || canFork) && (
             <div
               style={{
                 display: "flex", flexWrap: "wrap", justifyContent: "flex-end", gap: 3,
               }}
             >
-              {canNavigate && (
-                <Tooltip content={t("messageView.editFromHereTitle")}>
-                  <button
-                    onClick={async () => { if (!(await onNavigate!(prevAssistantEntryId!))) return; onEditContent?.(content); }}
-                    aria-label={t("messageView.editFromHereTitle")}
-                    style={{
-                      display: "flex", alignItems: "center", gap: 4,
-                      padding: "3px 8px", height: 24, minHeight: 24,
-                      background: "none", border: "none",
-                      borderRadius: 5,
-                      color: "var(--text-dim)",
-                      cursor: "pointer",
-                      fontSize: 11, fontWeight: 400,
-                      whiteSpace: "nowrap",
-                      transition: "color var(--dur-fast) var(--ease-out-warm)",
-                    }}
-                    onMouseEnter={(e) => { e.currentTarget.style.color = "var(--accent)"; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; }}
-                  >
-                    <CornerUpLeft size={11} strokeWidth={1.8} />
-                    {t("messageView.editFromHere")}
-                  </button>
-                </Tooltip>
-              )}
-              {canFork && (
-                <ForkSessionButton entryId={entryId!} editPrompt onFork={onFork!} forking={forking} forkDisabled={forkDisabled} />
-              )}
+              {canEdit && <Tooltip content={t("messageView.editFromHereTitle")}>
+                <button
+                  onClick={() => { void onEdit!(entryId!, content); }}
+                  disabled={editBlocked}
+                  aria-busy={editing || undefined}
+                  aria-label={t("messageView.editFromHereTitle")}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 4,
+                    padding: "3px 8px", height: 24, minHeight: 24,
+                    background: "none", border: "none",
+                    borderRadius: 5,
+                    color: "var(--text-dim)",
+                    cursor: editBlocked ? "not-allowed" : "pointer",
+                    opacity: editBlocked ? 0.4 : 1,
+                    fontSize: 11, fontWeight: 400,
+                    whiteSpace: "nowrap",
+                    transition: "color var(--dur-fast) var(--ease-out-warm)",
+                  }}
+                  onMouseEnter={(e) => { if (!editBlocked) e.currentTarget.style.color = "var(--accent)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; }}
+                >
+                  <CornerUpLeft size={11} strokeWidth={1.8} />
+                  {t("messageView.editFromHere")}
+                </button>
+              </Tooltip>}
+              {canFork && <ForkSessionButton entryId={entryId!} editPrompt onFork={onFork!} forking={forking} forkDisabled={forkDisabled || editing || editDisabled} />}
             </div>
           )}
           {time && <span style={{ fontSize: 10, color: "var(--text-dim)" }}>{time}</span>}

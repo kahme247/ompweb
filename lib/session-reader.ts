@@ -87,6 +87,7 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
         ? s.created.toISOString()
         : s.modified.toISOString(),
       modified: s.modified.toISOString(),
+      ...(s.lastMessageAt ? { lastMessageAt: s.lastMessageAt.toISOString() } : {}),
       messageCount: s.messageCount,
       firstMessage: s.firstMessage || "(no messages)",
       parentSessionId: s.parentSessionPath

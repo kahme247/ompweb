@@ -1,4 +1,5 @@
 import type { SessionInfo } from "@/lib/types";
+import type { ProjectSortMode } from "@/lib/project-ordering";
 import { comparableProjectPath } from "@/lib/comparable-path";
 interface WorktreeEntry {
   path: string;
@@ -102,6 +103,27 @@ function saveExpandedProjects(paths: Set<string>): void {
     // ignore storage quota / privacy-mode errors
   }
 }
+const PROJECT_SORT_STORAGE_KEY = "omp-web:project-sort";
+
+function loadProjectSortMode(): ProjectSortMode {
+  if (typeof window === "undefined") return "none";
+  try {
+    const raw = window.localStorage.getItem(PROJECT_SORT_STORAGE_KEY);
+    return raw === "alphabetical" || raw === "updated" ? raw : "none";
+  } catch {
+    return "none";
+  }
+}
+
+function saveProjectSortMode(mode: ProjectSortMode): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (mode === "none") window.localStorage.removeItem(PROJECT_SORT_STORAGE_KEY);
+    else window.localStorage.setItem(PROJECT_SORT_STORAGE_KEY, mode);
+  } catch {
+    // ignore storage quota / privacy-mode errors
+  }
+}
 /** Substitute the home dir prefix with ~ (no path truncation — see PathLabel) */
 function displayCwd(cwd: string, homeDir?: string): string {
   return (homeDir && cwd.startsWith(homeDir)) ? "~" + cwd.slice(homeDir.length) : cwd;
@@ -136,7 +158,7 @@ interface SessionTreeNode {
   children: SessionTreeNode[];
 }
 
-function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
+function buildSessionTree(sessions: SessionInfo[], scores?: Map<string, number>): SessionTreeNode[] {
   const byId = new Map<string, SessionTreeNode>();
   for (const s of sessions) {
     byId.set(s.id, { session: s, children: [] });
@@ -171,9 +193,9 @@ function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
     }
   }
 
-  // Sort each level by modified desc
+  // Sort each level by search score (when searching), then modified desc
   const sort = (nodes: SessionTreeNode[]) => {
-    nodes.sort((a, b) => b.session.modified.localeCompare(a.session.modified));
+    nodes.sort((a, b) => ((scores?.get(b.session.id) ?? 0) - (scores?.get(a.session.id) ?? 0)) || b.session.modified.localeCompare(a.session.modified));
     nodes.forEach((n) => sort(n.children));
   };
   sort(roots);
@@ -191,10 +213,12 @@ export {
   displayCwd,
   formatRelativeTime,
   loadExpandedProjects,
+  loadProjectSortMode,
   loadUnreadSessionIds,
   normalizeProjectKey,
   projectLabel,
   saveExpandedProjects,
+  saveProjectSortMode,
   saveUnreadSessionIds,
   type SessionTreeNode,
   type WorktreeContext,

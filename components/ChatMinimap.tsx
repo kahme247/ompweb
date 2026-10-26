@@ -85,10 +85,52 @@ export function getBarWidth(text: string, isActive: boolean, isHovered: boolean)
 
 const ROW_HEIGHT = 18;
 
+/**
+ * Vertical center of a rail row's tooltip, in the unclipped outer
+ * container's coordinates. The rail is a flex column whose rows used to
+ * shrink below ROW_HEIGHT once the list exceeded the rail's max-height,
+ * so a tooltip positioned purely from the index drifted below its row
+ * and eventually out of view (#251). Rows are now non-shrinking (see the
+ * row style below), so the rail scrolls instead of compressing; the only
+ * correction left is the rail's own scroll offset, which is 0 while the
+ * rail fits and otherwise moves the visible row up by exactly that much.
+ */
+export function getTooltipTopPx(displayIndex: number, railScrollTop = 0): number {
+  return 6 + displayIndex * ROW_HEIGHT + ROW_HEIGHT / 2 - railScrollTop;
+}
+
+/**
+ * Row index under a drag pointer, in a rail whose rows are fixed-height
+ * and may be scrolled (#251 follow-up). The pointer's viewport offset
+ * inside the rail plus the rail's scroll offset gives its position in
+ * the rail's content, where row i starts at 6 + i * ROW_HEIGHT (6px
+ * top padding). The old ratio-over-visible-height mapping only worked
+ * while every row was visible at once, which fixed-height rows no
+ * longer guarantee.
+ */
+/**
+ * Whether the rail actually overflows, so the active row only gets
+ * scrolled into view when it could sit outside the visible rail
+ * (#251 follow-up). A row-count guard misses short viewports: 15
+ * fixed-height rows already need 282px, more than a <376px viewport's
+ * 75vh cap, so the rail can overflow with far fewer than 16 rows.
+ */
+export function railOverflows(scrollHeight: number, clientHeight: number): boolean {
+  return scrollHeight > clientHeight;
+}
+
+export function railIndexForPointer(relY: number, railScrollTop: number, nodeCount: number): number {
+  if (nodeCount <= 0) return 0;
+  const contentY = railScrollTop + relY;
+  const index = Math.floor((contentY - 6) / ROW_HEIGHT);
+  return Math.max(0, Math.min(nodeCount - 1, index));
+}
+
 export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer, messageRefs }: Props) {
   const [activeIndex, setActiveIndex] = useState(0);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [isRailHovered, setIsRailHovered] = useState(false);
+  const [railScrollTop, setRailScrollTop] = useState(0);
   const railRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
   const scrollRafRef = useRef<number | null>(null);
@@ -254,9 +296,9 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
     return () => ro.disconnect();
   }, [scrollContainer]);
 
-  // Keep active row visible within the rail when node count overflows
+  // Keep active row visible within the rail when the rail overflows
   useEffect(() => {
-    if (railRef.current && nodes.length > 15) {
+    if (railRef.current && railOverflows(railRef.current.scrollHeight, railRef.current.clientHeight)) {
       const activeRow = railRef.current.querySelector(`[data-index="${activeIndex}"]`) as HTMLElement | null;
       activeRow?.scrollIntoView({ block: "nearest", behavior: reducedMotion ? "auto" : "smooth" });
     }
@@ -272,8 +314,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
       if (!railEl) return;
       const rect = railEl.getBoundingClientRect();
       const relY = clientY - rect.top;
-      const ratio = Math.max(0, Math.min(1, relY / rect.height));
-      const targetIdx = Math.min(nodes.length - 1, Math.floor(ratio * nodes.length));
+      const targetIdx = railIndexForPointer(relY, railEl.scrollTop, nodes.length);
       if (nodes[targetIdx]) {
         scrollToNodeRef.current(nodes[targetIdx], false);
         setActiveIndex(targetIdx);
@@ -313,7 +354,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
   const displayTooltipIndex = hoveredIndex !== null ? hoveredIndex : (isRailHovered ? activeIndex : null);
   const tooltipNode = displayTooltipIndex !== null ? nodes[displayTooltipIndex] : null;
   // Calculate unclipped vertical center position for the tooltip
-  const tooltipTopPx = displayTooltipIndex !== null ? 6 + displayTooltipIndex * ROW_HEIGHT + ROW_HEIGHT / 2 : 0;
+  const tooltipTopPx = displayTooltipIndex !== null ? getTooltipTopPx(displayTooltipIndex, railScrollTop) : 0;
 
   return (
     <div
@@ -372,6 +413,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
           setIsRailHovered(false);
           setHoveredIndex(null);
         }}
+        onScroll={(e) => setRailScrollTop(e.currentTarget.scrollTop)}
         onMouseDown={handleMouseDown}
         style={{
           position: "relative",
@@ -380,7 +422,11 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
           alignItems: "flex-start",
           padding: "6px 6px 6px 8px",
           maxHeight: "min(75vh, 520px)",
-          overflowY: nodes.length > 25 ? "auto" : "visible",
+          // Always scrollable: with fixed-height rows, even 25 or fewer
+          // rows can exceed a short viewport's 75vh cap, and "visible"
+          // would then spill them out of the rail with no way to reach
+          // them (#251 follow-up). scrollbarWidth none keeps it clean.
+          overflowY: "auto",
           scrollbarWidth: "none",
           cursor: "pointer",
         }}
@@ -431,6 +477,12 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
                 display: "flex",
                 alignItems: "center",
                 height: ROW_HEIGHT,
+                // Rows must not shrink: with maxHeight + overflowY auto the
+                // rail is meant to scroll past ~25 entries, but the flex
+                // default (flexShrink 1) compressed every row to ~520/N
+                // instead, which is what broke tooltip alignment (#251).
+                flexShrink: 0,
+                minHeight: ROW_HEIGHT,
                 paddingLeft: 6,
                 paddingRight: 8,
                 cursor: "pointer",

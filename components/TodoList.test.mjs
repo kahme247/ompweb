@@ -135,3 +135,14 @@ test("the scroll area is reachable by keyboard and named", () => {
   assert.match(html, /<section[^>]*aria-label="Tasks"/);
   assert.doesNotMatch(html, /role="group"[^>]*aria-label="Tasks"/);
 });
+
+test("merges live status into the tasks header row instead of a separate line (#245)", () => {
+  const html = renderToStaticMarkup(React.createElement(TodoList, {
+    phases: [{ name: "Implementation", tasks: [{ content: "Wire panels", status: "in_progress" }] }],
+    collapsible: true,
+    liveStatus: "Waiting for model...",
+  }));
+  assert.match(html, /Waiting for model\.\.\./);
+  assert.match(html, /0\/1 complete/);
+  assert.match(html, /role="status"/);
+});

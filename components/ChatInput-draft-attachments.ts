@@ -1,8 +1,5 @@
 import type { ChatDraftFile, ChatDraftImage } from "@/lib/draft-store";
-import {
-  selectTextAttachments,
-  type AttachedTextFileData,
-} from "@/lib/chat-attachments";
+import type { AttachedTextFileData } from "@/lib/chat-attachments";
 import { isBase64ImageWithinLimits } from "@/lib/image-attachments";
 
 export interface AttachedImage {
@@ -36,12 +33,16 @@ export function textFileToDraftFile(file: AttachedTextFile): ChatDraftFile {
   return { name: file.name, mimeType: file.mimeType, content: file.content, size: file.size };
 }
 
+/** Recovery and Edit relocation can merge individually valid drafts past picker
+ *  budgets. Keep every well-formed file; sending validates the composed request,
+ *  not the picker file-count or text-byte limits. */
 export function draftFilesToAttachedFiles(files: ChatDraftFile[] | undefined): AttachedTextFile[] {
-  const shaped = (files ?? []).filter((file) => typeof file.name === "string"
+  return (files ?? []).filter((file) => file !== null && typeof file === "object"
+    && typeof file.name === "string"
     && typeof file.mimeType === "string"
     && typeof file.content === "string"
-    && Number.isFinite(file.size));
-  return selectTextAttachments(shaped, { usedBytes: 0, usedSlots: 0 }).accepted;
+    && Number.isFinite(file.size)
+    && file.size >= 0);
 }
 
 export function revokeImagePreview(image: AttachedImage): void {

@@ -230,6 +230,7 @@ export function syncSessionFilesToDb(
   `);
 
   const deleteRecordsStmt = db.prepare("DELETE FROM usage_records WHERE file_path = ?");
+  const deleteSyncedFileStmt = db.prepare("DELETE FROM synced_files WHERE file_path = ?");
   const upsertSyncedFileStmt = db.prepare(`
     INSERT OR REPLACE INTO synced_files (file_path, mtime_ms, file_size, records_count, synced_at, parser_version)
     VALUES (?, ?, ?, ?, ?, ?)
@@ -240,33 +241,41 @@ export function syncSessionFilesToDb(
     [sessionFile, ...listSessionArtifactTranscripts(sessionFile)].map((filePath) => ({ filePath, sessionFile })),
   );
 
-  // 2. Incremental sync for new / modified files
-  for (const { filePath, sessionFile } of transcripts) {
-    let stats;
-    try {
-      stats = statSync(filePath);
-      if (!stats.isFile() || stats.size === 0) continue;
-    } catch {
-      continue;
+  let filesDeleted = 0;
+  let inTransaction = false;
+  const ensureTransaction = () => {
+    if (!inTransaction) {
+      db.exec("BEGIN TRANSACTION;");
+      inTransaction = true;
     }
-    currentFilesSet.add(filePath);
-    const existing = syncedMap.get(filePath);
-    if (
-      existing &&
-      existing.mtime_ms === stats.mtimeMs &&
-      existing.file_size === stats.size &&
-      existing.parser_version === USAGE_PARSER_VERSION
-    ) {
-      // File has not changed since it was last synced by these rules
-      continue;
-    }
+  };
 
-    // Parse records from disk
-    const records: UsageRecord[] = parseSessionUsage(filePath, customModelsConfig, sessionFile);
+  try {
+    // 2. Incremental sync for new / modified files
+    for (const { filePath, sessionFile } of transcripts) {
+      let stats;
+      try {
+        stats = statSync(filePath);
+        if (!stats.isFile() || stats.size === 0) continue;
+      } catch {
+        continue;
+      }
+      currentFilesSet.add(filePath);
+      const existing = syncedMap.get(filePath);
+      if (
+        existing &&
+        existing.mtime_ms === stats.mtimeMs &&
+        existing.file_size === stats.size &&
+        existing.parser_version === USAGE_PARSER_VERSION
+      ) {
+        // File has not changed since it was last synced by these rules
+        continue;
+      }
 
-    // Save in transaction
-    db.exec("BEGIN TRANSACTION;");
-    try {
+      // Parse records from disk
+      const records: UsageRecord[] = parseSessionUsage(filePath, customModelsConfig, sessionFile);
+
+      ensureTransaction();
       deleteRecordsStmt.run(filePath);
 
       for (const r of records) {
@@ -294,31 +303,23 @@ export function syncSessionFilesToDb(
       }
 
       upsertSyncedFileStmt.run(filePath, stats.mtimeMs, stats.size, records.length, now, USAGE_PARSER_VERSION);
-      db.exec("COMMIT;");
       filesUpdated++;
-    } catch (err) {
-      db.exec("ROLLBACK;");
-      throw err;
     }
-  }
 
-  // 3. Purge deleted session files
-  let filesDeleted = 0;
-  const deleteSyncedFileStmt = db.prepare("DELETE FROM synced_files WHERE file_path = ?");
-
-  for (const filePath of syncedMap.keys()) {
-    if (!currentFilesSet.has(filePath) || !existsSync(filePath)) {
-      db.exec("BEGIN TRANSACTION;");
-      try {
+    // 3. Purge deleted session files
+    for (const filePath of syncedMap.keys()) {
+      if (!currentFilesSet.has(filePath) || !existsSync(filePath)) {
+        ensureTransaction();
         deleteRecordsStmt.run(filePath);
         deleteSyncedFileStmt.run(filePath);
-        db.exec("COMMIT;");
         filesDeleted++;
-      } catch (err) {
-        db.exec("ROLLBACK;");
-        throw err;
       }
     }
+
+    if (inTransaction) db.exec("COMMIT;");
+  } catch (err) {
+    if (inTransaction) db.exec("ROLLBACK;");
+    throw err;
   }
 
   return {

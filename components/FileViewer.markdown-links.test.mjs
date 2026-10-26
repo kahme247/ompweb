@@ -9,13 +9,13 @@ const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconf
 const { FileViewer } = await jiti.import("./FileViewer.tsx");
 
 const originalFetch = globalThis.fetch;
-const originalEventSource = globalThis.EventSource;
+const originalWorker = globalThis.Worker;
 afterEach(async () => {
   // The viewer's lazy chunks resolve after the assertions; let them land before jsdom closes.
   await new Promise((resolve) => setTimeout(resolve, 50));
   cleanup();
   globalThis.fetch = originalFetch;
-  globalThis.EventSource = originalEventSource;
+  globalThis.Worker = originalWorker;
   delete window.matchMedia;
 });
 
@@ -32,7 +32,8 @@ async function renderPreview(filePath, opened) {
     const body = String(url).startsWith("/api/git/") ? { supported: false } : { content: GUIDE, language: "markdown", size: GUIDE.length };
     return { ok: true, json: async () => body };
   };
-  globalThis.EventSource = class { addEventListener() {} close() {} };
+  // The file watch rides the shared event-stream worker; a silent one keeps it idle.
+  globalThis.Worker = class { onmessage = null; onerror = null; postMessage() {} };
   // jsdom ships no matchMedia; the viewer reads the color scheme at mount.
   window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
   const view = render(React.createElement(FileViewer, {

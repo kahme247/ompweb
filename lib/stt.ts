@@ -19,18 +19,16 @@ function cleanEnvVar(val?: string): string | undefined {
 }
 
 export interface SttConfig {
-  endpoint: string;
+  /** Unset: transcribe with `model` (an omp model selector) through omp's auth gateway. */
+  endpoint: string | undefined;
   apiKey: string | undefined;
   model: string | undefined;
 }
 
-/** STT settings from OMP_WEB_STT_*; null when no endpoint is configured. */
+/** STT settings from OMP_WEB_STT_*; null when neither an endpoint nor a model is configured. */
 export function readSttConfig(): SttConfig | null {
   const endpoint = cleanEnvVar(process.env.OMP_WEB_STT_ENDPOINT);
-  if (!endpoint) return null;
-  return {
-    endpoint,
-    apiKey: cleanEnvVar(process.env.OMP_WEB_STT_KEY),
-    model: cleanEnvVar(process.env.OMP_WEB_STT_MODEL),
-  };
+  const model = cleanEnvVar(process.env.OMP_WEB_STT_MODEL);
+  if (!endpoint && !model) return null;
+  return { endpoint, apiKey: cleanEnvVar(process.env.OMP_WEB_STT_KEY), model };
 }

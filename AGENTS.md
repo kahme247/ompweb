@@ -26,15 +26,16 @@ Browser                Next.js Server                    omp child process
   │                        │                                    │
   ├─ GET /api/sessions ────▶ reads ~/.omp/agent/sessions/       │
   ├─ GET /api/sessions/[id] reads .jsonl file directly          │
-  ├─ GET /api/agent/running/events ───▶ running id SSE          │
+  ├─ SharedWorker ── GET /api/events ──▶ ONE multiplexed SSE per browser │
+  │   (all tabs)     POST /api/events ─▶ subscribe running/session/file  │
   │                        │                                    │
   ├─ send message ─────────▶ POST /api/agent/[id]               │
   │                        │   startRpcSession() ── spawn ─────▶│ omp --mode rpc-ui
   │                        │   sendCommand({type:"prompt"}) ───▶│ (NDJSON stdio)
   │                        │                                    │
-  ├─ SSE connect ──────────▶ GET /api/agent/[id]/events         │
+  ├─ session subscription ─▶ event-stream-hub onEvent()            │
   │                        │   onFrame() ◀── event frames ──────│
-  │◀── data: {...} ─────────│                                    │
+  │◀── event: s<n> data: {...} ──│                               │
 ```
 
 **Session browsing** (read-only): pure-Node parsing of omp session `.jsonl`
@@ -50,6 +51,8 @@ Shared foundations in `lib/omp/`:
 - `omp-cli.ts` — locate/probe the installed `omp` binary (`resolveOmpBin`,
   `getOmpVersion`).
 - `rpc-process.ts` — process + NDJSON protocol layer (`RpcProcess`).
+- `auth-gateway.ts` — shared, idle-killed `omp auth-gateway stdio` child:
+  omp's own credentials and models behind JSON-line gateway requests.
 
 ---
 
@@ -58,13 +61,13 @@ Shared foundations in `lib/omp/`:
 ```
 app/api/
   sessions/route.ts               GET  list all sessions
+  sessions/search/route.ts        GET ?q= — NDJSON { scores } batches (titles + transcripts); closing the request stops the scan
   sessions/[id]/route.ts          GET/PATCH/DELETE session
   sessions/[id]/context/route.ts  GET ?leafId= — context for a specific leaf
   sessions/[id]/export/route.ts   GET exported HTML for a session
   agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? }
   agent/[id]/route.ts             GET state | POST any RPC command
-  agent/[id]/events/route.ts      GET SSE stream
-  agent/running/events/route.ts   GET SSE stream of currently-running session ids (+ this tab's notifications)
+  events/route.ts                 GET multiplexed SSE | POST subscribe/unsubscribe channels
   notifications/devices/route.ts  GET VAPID key + subscribed | PUT { deviceId, prefs, subscription? }
   notifications/presence/route.ts POST { clientId, deviceId, visible, sessionId, seq }
   notifications/test/route.ts     POST { deviceId } send a test push (502 on push-service refusal)
@@ -99,7 +102,11 @@ lib/
   agent-client.ts      typed fetch helper for /api/agent commands
   btw.ts               /btw side-question records + pure frame/snapshot merge (order-safe)
   draft-store.ts       local draft persistence helpers
+  event-stream.ts      tab-side EventSource-shaped streams over the shared worker
+  event-stream-hub.ts  server connections + running/session/file channels for /api/events
+  event-stream-protocol.ts  wire contract shared by hub, route, and facade
   file-access.ts       allowed file roots for /api/files and worktrees
+  file-authorization.ts  single allow-list gate for /api/files and the file channel
   media-cache.ts       tool-result images → /api/media URLs; media copies + thumbnails
   file-paths.ts        client/server path encoding helpers
   github-refs.ts       remark plugin linking #N / owner/repo#N + GithubRepoContext
@@ -118,6 +125,8 @@ lib/
   notification-client.ts  browser: device id, prefs store, service worker + push subscription
   rpc-manager.ts       session registry + startRpcSession over RpcProcess
   session-reader.ts    session .jsonl parsing + path cache + buildSessionContext
+  session-search.ts    shared fuzzy/phrase query scorer for sidebar search (title weights ≫ transcript)
+  session-content-search.ts  server: per-file transcript text cache (size+mtime) + searchSessions()
   session-resume.ts    running-session list for auto-resume after a restart
   web-auth.ts          password-hash check + session cookie signing
   web-auth-secret.ts   per-installation session-signing key (~/.omp/agent/omp-web/web-auth-secret.json)
@@ -144,7 +153,8 @@ components/
   CommandPalette.tsx  ⌘K/Ctrl+K palette (cmdk): session switch, new session, theme
   ImageLightbox.tsx   click-to-preview lightbox for chat images (ClickableImage)
   BranchNavigator.tsx in-session branch switcher
-  NotificationList.tsx right-panel Notifications tab: the persisted notification history (`lib/notification-history.ts`)
+  NotificationList.tsx notification history list + Mark all read/Clear actions (mobile right-panel tab, desktop bell popover)
+  NotificationBell.tsx desktop top-bar bell: unread badge + floating NotificationList popover
   ChatMinimap.tsx     scroll minimap alongside the message list
   MarkdownBody.tsx    markdown renderer
   ModelsConfig.tsx    modal for models/auth configuration
@@ -233,9 +243,21 @@ Client code (`components/`, `hooks/`) must not call `AbortSignal.timeout`,
 the whole tree shows the "unexpected error" screen. Use `AbortController` + timers and
 executor-style promises instead. Server code may use them freely.
 
-### Two kinds of branching — don't confuse them
+### Editing and branching — don't confuse them
 - **Fork** ("Fork a new session from this point" button, `messageView.newSessionTitle`, on user and assistant messages; only offered while the session is idle — ChatWindow gates it on `!sessionBusy && !isNew`): creates a new independent `.jsonl` file via omp's `branch` RPC. Shown as a child in the sidebar tree via `parentSession` header field. `branch` only takes a user entry and keeps the history *before* it, so `lib/chat-fork.ts` maps rows: a user prompt forks at itself and its returned text prefills the fork's composer (edit-and-resend, text only — attached images are not restored); an assistant reply forks at the next user prompt so the reply is kept; the newest reply falls back to its own prompt with the prefill. Rows that would edit the very first prompt (an empty fork) offer no fork.
-- **In-session branch** (Continue button / BranchNavigator): navigates the entry tree within the same file. Multiple entries share the same `parentId`. Switching between them calls `/api/sessions/[id]/context?leafId=`.
+- **Edit** (`edit_message`, user-message button): moves the live conversation's history to before that user entry; it is not a read-only historical view or an explicit Fork. `lib/omp/session-edit-extension.mjs`, explicitly loaded on spawn/restart, calls omp's public `ctx.navigateTree(entryId, { summarize: false })` and appends a non-message `omp-web-history-navigation` entry. Node never imports the Bun-only SDK or rewrites the JSONL.
+  - Require authoritative `get_state.isSettled === true` and reject pending background work; runtimes without settlement reporting fail explicitly. Preserve run/edit fencing, including rename and automatic-title fallbacks, and do not report success after an observed edit-time native persistence error.
+  - `SessionEditResult` remains `{ sessionId: string, cancelled: boolean, leafId: string | null }`. The returned ID identifies the confirmed post-edit conversation. Single-owner Edit keeps ID/file; a non-owner's native copy-on-write relocation is expected. Server persistence notices feed `applyIdentity` and registry aliases; the HTTP result drives client identity adoption (there is no public identity-change frame). Reload the confirmed target before text prefill, reject unrelated switches, and preserve the original file and old branches.
+  - The private `/omp-web-edit` transport uses `prompt`, so installed input hooks must pass the internal command through unchanged. OMP v18.12.6 invokes input hooks before command dispatch; registration checks alone do not bypass them. A temporary-hook probe confirmed consumption can intercept the command without an agent run. No input-handler registrations were found in the 20 official hook/extension TypeScript examples examined, and the official RPC fixture matches `consume:`, `transform:` and `slow:` rather than slash commands. Conflict probability is unmeasured and no known shipped third-party conflict is established. This is an explicit compatibility boundary, not a promise of arbitrary plugin support or a requirement for universal hook-free upstream RPC.
+  - Preserve ordinary native storage/error semantics: appends commonly reach the OS page cache synchronously, persistence failures latch and emit `source: "session-persistence"`, `level: "error"` notices, and native `flush()` throws latched errors. An append returning alone does not prove error-free persistence; surface observed edit-time write failures rather than claim success. Edit does not introduce a stronger fsync guarantee or require a new global durability API.
+  - A native `prompt` acknowledgement may have no data; only the request-correlated extension result confirms Edit. An observed persistence-error notice is not handler completion: keep the operation fence until the handler completes, or await child teardown on uncertain completion before unlocking. If an input hook invokes an agent, an observed run must retain run ownership; an acknowledged but not-yet-started agent cannot leave an unfenced startup gap and requires awaited teardown.
+  - Prefill only the selected message's text, not its original images. Preserve existing drafts, newer typing and composer attachments through pending edits, cancellation, errors and genuine navigation. `submissionBlocked` keeps asynchronous dictation from submitting or clearing the composer without disabling recording pause/resume/discard. `session_history_changed` carries the leaf marker; the initiating tab deduplicates its own delayed echo without resetting a newer view or run. Editing does not undo filesystem/tool side effects.
+  - Legal identity moves keep the hook and composer mounted. Transfer drafts capacity-neutrally and carry the exact source snapshot so input completed in the same React batch is merged, not overwritten or duplicated. Pending attachment reads, recordings and recovery operations retain their owner across the move; genuine navigation remains isolated. Draft text survives full-page reload via sessionStorage; attachment payloads remain memory-only.
+  - The confirmed-move callback synchronously calls `ChatInputHandle.retargetPendingRecovery(from, to)` before state updates or parent callbacks. This advances only captured queue-recovery ownership, closing the acknowledgement-to-commit gap; layout hydration still owns the live composer key/state. Do not turn this pre-commit ownership handoff into eager draft hydration.
+  - Pending transcription keeps its original server scope/job/claim ownership. Confirmed moves record a tab-local recovery association so the target can rediscover that job after navigation/remount; other clients' drafts and server scopes are not migrated. A hard reload before an upload acknowledgement can leave multiple possible source jobs; retain recovery and report ambiguity rather than guess or reupload.
+  - Event connections own their readiness waits: replacement and unmount settle the old wait as closed, clear its timers/coalesced work and close its observer. Late continuations must not attach streams to an unmounted hook or let a stale connection authorize a new operation. Keep lifetime cleanup separate from the mount-load latch so StrictMode setup/cleanup replay still cleans up observers attached afterward.
+  Ordinary `ChatInput.onSend` returns `Promise<PromptSubmissionResult>` (`accepted` / `rejected` / `superseded`). Only rejection restores composed text/file contents and images through `recoverDraft`; its receipt supplies the promoted real-session draft key when a new chat became a session, otherwise the composer uses the originating key captured before submission. Superseded failures must not reinsert a processed turn or reset a newer run. The composer owns recovery; `useAgentSession.handleSend` must not separately insert failed-send text and duplicate it.
+- **In-session branch** (Continue button / BranchNavigator): reads a historical view of the entry tree within the same file; it does not change the live agent's context. Multiple entries share the same `parentId`. Switching between them calls `/api/sessions/[id]/context?leafId=` through `handleLeafChange`; never use that read-only path to implement Edit.
 
 ### ToolCall field normalization
 Sessions store toolCall blocks as `{type:"toolCall", id, name, arguments}` but `ToolCallContent` uses `{toolCallId, toolName, input}`. `normalizeToolCalls()` in `lib/normalize.ts` handles this — called in both `session-reader.ts` (file load) and streaming event handling.
@@ -256,6 +278,12 @@ wait for that commit:
   collapsed" setting is off — that is what that setting means. `AppShell` must
   pass `toolCallsDefaultCollapsed` into `ChatWindow`; without it the setting is
   inert (the chat then always collapses).
+- `CommittedTranscript` renders the newest turn flat only while the UI "Hide
+  tool activity while working" setting is off; with it on (the default) the
+  running turn folds into one **Process details** row per activity run, like a
+  finished turn. `AppShell` must pass `hideToolActivity` into `ChatWindow` for
+  the switch to do anything. The fold row is the expand affordance, so a hidden
+  tool call is one click away rather than gone.
 - `tool_execution_update` is coalesced per tool call at display rate in
   `lib/message-update-coalescer.ts` (chatty commands emit ~10-100+ frames/s).
   `message_end` drops the pending `message_update` (the committed message
@@ -338,9 +366,38 @@ during the wait.
   reason:"shellRunning"}`), which the hook surfaces as a notice while rolling
   the phantom optimistic turn back. The chip still comes from omp's snapshot.
 
-### Running state SSE + reconciliation
-- The sidebar listens to `/api/agent/running/events`, backed by `subscribeRunningSessions()` in `lib/rpc-manager.ts`, so running badges update without polling.
-- `useAgentSession` still treats per-session SSE as primary for chat events, but while a run is active it periodically calls `GET /api/agent/[id]` and also reconciles on `visibilitychange`/`online`. This fixes missed `agent_end` events from background tabs or half-open connections.
+### Live event stream: one socket per browser (`/api/events`)
+- Browsers cap HTTP/1.1 at **6 connections per host across all tabs**, and an
+  SSE response pins one for its lifetime. Per-stream SSE (sidebar + host
+  tools + chat + file watch per tab) froze everything after ~2 tabs, so
+  **never add a new `EventSource`** for live data: add a channel instead.
+- `public/event-stream-worker.js` (plain script, SharedWorker; dedicated
+  Worker where SharedWorker is missing) holds the only `/api/events`
+  EventSource and multiplexes every tab's subscriptions: frames arrive as
+  `event: <subId>`, control frames as `event: mux` (`hello`/`open`/`end`).
+  Subscriptions are attached with `POST /api/events`. Its URL carries a
+  content hash (`next.config.ts`) so a changed worker never serves stale tabs.
+- Tabs use `openEventStream(channel)` (`lib/event-stream.ts`), which keeps
+  EventSource semantics: `onerror` + CONNECTING = reconnecting on its own,
+  CLOSED = fatal (e.g. 409 for a wrapper-less session; the chat hook then
+  retries with backoff). Dead tabs are detected with a lifetime Web Lock —
+  MessagePort has no close event.
+- Channels (`lib/event-stream-hub.ts`): `running` (sidebar badges +
+  session-list hints), `notifications` (one tab's toasts and in-page system
+  notifications, keyed by its `clientId`), `host-tools` (cross-session
+  `open_url`/`notify`/`open_file` calls), `session` (observer-only, never
+  spawns omp; keeps the latest-wins `message_update` coalescing under
+  backpressure), `file` (viewer watch, same allow-list as `/api/files`). A
+  failing frame ends only its own subscription, never the shared socket.
+- Split channels by consumer, lifetime, key and access check, not by which
+  stream happens to be open: a subscription costs one `POST`, not a socket, so
+  never piggyback a frame type on another consumer's channel. `notifications`
+  and `host-tools` are subscribed from `AppShell`, so they outlive the sidebar
+  (which unmounts while Settings is open).
+
+### Running state + reconciliation
+- The sidebar subscribes to the `running` channel, backed by `subscribeRunningSessions()` in `lib/rpc-manager.ts`, so running badges update without polling.
+- `useAgentSession` still treats its `session` channel as primary for chat events, but while a run is active it periodically calls `GET /api/agent/[id]` and also reconciles on `visibilitychange`/`online`. This fixes missed `agent_end` events from background tabs or half-open connections.
 - Prompt runs use a monotonic run id; late SSE or slow reconciliation responses from an old run must be ignored so they cannot resurrect stale streaming bubbles.
 
 ### Composer-attached panels (`components/ComposerPanels.tsx`)
@@ -472,10 +529,16 @@ during the wait.
 - `GET /api/projects` re-authorizes registered roots with `allowFileRoot()` —
   the in-memory browse allowlist does not survive restarts, and empty managed
   projects derive no root from sessions.
-- The client sorts the merged list by most-recently-added (registration
-  order), then by path for session-discovered projects
-  (`lib/project-ordering.ts`); the order deliberately does NOT depend on
-  session activity, so project rows never jump around while sessions refresh.
+- By default (sort "None") the client orders the merged list manually
+  (`sortOrder`, set by drag/Move up/down), then most-recently-added, then by
+  path (`lib/project-ordering.ts`), so rows never jump while sessions refresh.
+  The header sort button (`omp-web:project-sort` in `localStorage`, per
+  browser) switches to Alphabetical (label A→Z) or Last updated (newest last
+  message first: `lastMessageAt` from the session tail scan, else the file
+  mtime) — the latter deliberately reorders on activity. While a
+  sort is active, rows get a pin toggle: pinned projects (`pinOrder` in the
+  registry, pinned to the end of the group) lead in their own manual order and
+  alone keep Move up/down and drag; pins are ignored under "None".
   Expanded project paths live
   in `localStorage` (`omp-web:expanded-projects`), defaulting to only the
   active/restored project expanded, and stale keys are pruned against the
@@ -629,10 +692,10 @@ during the wait.
   unfinished job is a no-op; a `DELETE` without `claim` discards and aborts
   the upstream request.
 - Two tokens, never merged. The tab token (sessionStorage) identifies the
-  job owner: it survives the composer remounting (`AppShell` keys
-  `ChatWindow` by session), gets the 15s first claim, and alone gets the
-  send/queue choice back. A duplicated tab copies it, so exclusivity comes
-  from the claim token, which is per hook instance.
+  job owner: it survives genuine-navigation composer remounts (a confirmed
+  Edit identity move keeps the composer mounted), gets the 15s first claim,
+  and alone gets the send/queue choice back. A duplicated tab copies it, so
+  exclusivity comes from the claim token, which is per hook instance.
 - The send/queue choice (`after`: send | steer | followup) is uploaded with
   the recording, kept on the job, and returned with the owner's claim. Never
   keep it only in component state: a session switch remounts the composer and
@@ -641,6 +704,10 @@ during the wait.
 - Store is per process (`globalThis` map) with caps (4 pending, 20 live) and
   TTLs; a server restart loses jobs, and the hook then re-uploads its local
   copy if it has one.
+- Without `OMP_WEB_STT_ENDPOINT`, `OMP_WEB_STT_MODEL` names an omp STT model
+  (e.g. `openai-codex/codex-transcribe`, the ChatGPT subscription) and jobs
+  go through `lib/omp/auth-gateway.ts` as base64 JSON — so the gateway's 25MB
+  body cap limits audio to 18MB there. omp-web never reads omp credentials.
 
 ### Completion sound
 - `hooks/useAudio.ts` stores the toggle in `localStorage` and reuses one `AudioContext`.
@@ -677,11 +744,10 @@ during the wait.
   devices) or in-page `showNotification` (tabs with an open stream).
 - The server decides before pushing: iOS revokes push permission for pushes
   that display nothing, so `public/sw.js` always shows what it receives.
-- Notifications ride the sidebar's `/api/agent/running/events?clientId=` stream,
-  not a new SSE connection: browsers allow six HTTP/1.1 connections per host.
-  `SessionSidebar` re-dispatches them as a window event. The sidebar unmounts
-  while Settings is open, so that tab gets no toasts then; it also stops
-  counting as active, so other devices are not silenced.
+- Notifications have their own `notifications` channel (`clientId` = the
+  tab's notification client id), opened by `useNotifications` in `AppShell`,
+  so a tab stays reachable on every view, Settings included. A tab on
+  Settings is visible, so it also counts as active.
 - Prefs and push subscriptions are per device, in `localStorage` and mirrored to
   the SQLite notification store in omp-web's data dir
   (`lib/notification-store.ts`, server-only; mode 0600 because it also holds
@@ -767,7 +833,9 @@ motion: --dur-fast (150ms) --dur-med (220ms) --dur-slow (320ms) --ease-out-warm
 `components/ui/` holds the shared primitives (built on `@base-ui/react`):
 `primitives.tsx` (Dialog/Tooltip/Collapsible), `field.tsx` (form fields +
 ConfirmDialog), `toast.tsx` (`toast.success/error/info`, mounted in AppShell).
-Toasts are not stored. The right panel's Notifications tab lists the server's
+Toasts are not stored. The notification list (`NotificationList`: the desktop
+top-bar bell's popover, `NotificationBell`; the right panel's Notifications tab
+on mobile only, `isMobile`) lists the server's
 notification history (`lib/notification-history.ts`, a mirror of
 `/api/notifications/history`): `publishNotification` records every
 notification type some device has turned on (completed, input, error, model
@@ -779,8 +847,11 @@ tab receives over SSE without a refetch, and reloads when the service worker
 reports a push it showed. Entries store the `NotificationEvent` and render in
 the viewer's language; clicking one, or Enter, marks it read and opens its
 session (`OPEN_SESSION_EVENT`).
-Unread entries badge the right-panel toggle, which then opens the Notifications
-tab; entries become read when the user leaves that tab (only the entries it
+On desktop the bell carries the unread badge and its popover (base-ui Popover,
+380px wide, at most 480px tall, the list scrolls) closes when a notification
+opens a session. On mobile unread entries badge the right-panel toggle, which
+then opens the Notifications tab. Entries become read when the user closes the
+popover or leaves that tab (only the entries it
 showed), uses Mark all as read, or opens the notification from its toast or
 row, and a reused id (`<sessionId>:<type>`) is unread again. Mark-read, remove
 and clear update the list at once, then the server; a failed request reloads

@@ -3,7 +3,7 @@
 import { memo, useCallback, useRef, useState } from "react";
 import type { AgentMessage, ExitedRpcSession, ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
 import { formatExitedSessionNotice, useI18n } from "@/lib/i18n";
-import { ChevronDown, ChevronRight, Folder, GitBranch, MoreHorizontal } from "lucide-react";
+import { ChevronDown, ChevronRight, Folder, GitBranch, MoreHorizontal, Pin } from "lucide-react";
 import { Tooltip } from "./ui/primitives";
 import { ConfirmDialog } from "./ui/field";
 import { copyText } from "@/lib/clipboard";
@@ -17,6 +17,7 @@ import {
 } from "./SessionSidebar-helpers";
 import {
   ExitedSessionIndicator,
+  RecentlyCompletedIndicator,
   RunningSessionIndicator,
   SIDEBAR_BUTTON_TRANSITION,
   SidebarPortalMenu,
@@ -43,6 +44,7 @@ interface ProjectRowProps {
   selectedSessionId: string | null;
   runningSessionIds: Set<string>;
   unreadSessionIds: Set<string>;
+  recentlyCompletedIds?: Set<string>;
   exitedSessions: Map<string, ExitedRpcSession>;
   relativeTimeNow: number;
   onActivate: (path: string) => void;
@@ -53,6 +55,9 @@ interface ProjectRowProps {
   onDragPathChange: (path: string | null) => void;
   onDropProject: (path: string) => void;
   onMoveProject: (path: string, delta: -1 | 1) => void;
+  /** A sort is active: show the pin toggle; only pinned rows reorder by hand. */
+  pinnable: boolean;
+  onTogglePin: (project: ManagedProject) => Promise<void>;
   isDragTarget: boolean;
   removeBusy: boolean;
   onSelectSession: (s: SessionInfo) => void;
@@ -73,6 +78,7 @@ function ProjectRow({
   selectedSessionId,
   runningSessionIds,
   unreadSessionIds,
+  recentlyCompletedIds,
   exitedSessions,
   relativeTimeNow,
   onActivate,
@@ -83,6 +89,8 @@ function ProjectRow({
   onDragPathChange,
   onDropProject,
   onMoveProject,
+  pinnable,
+  onTogglePin,
   isDragTarget,
   removeBusy,
   onSelectSession,
@@ -118,6 +126,8 @@ function ProjectRow({
     void onUpdatePresentation(project.path, { alias });
   }, [aliasValue, project.alias, project.path, onUpdatePresentation]);
   const label = project.alias ?? projectLabel(project.path);
+  const pinned = pinnable && project.pinOrder !== undefined;
+  const canReorder = !pinnable || pinned;
   const hasActivity = Boolean(activity && (activity.running > 0 || activity.unread > 0 || activity.exited > 0));
   const visibleRoots = hiddenCount > 0 && !showAllSessions
     ? tree.slice(0, MAX_PROJECT_SESSIONS)
@@ -142,7 +152,7 @@ function ProjectRow({
       />
       <div
         className="sidebar-project-header"
-        draggable={!aliasEditing}
+        draggable={!aliasEditing && canReorder}
         onDragStart={(event) => { event.dataTransfer.setData("text/plain", project.path); event.dataTransfer.effectAllowed = "move"; onDragPathChange(project.path); }}
         onDragOver={(event) => { if (isDragTarget) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }}
         onDrop={(event) => { event.preventDefault(); onDropProject(project.path); }}
@@ -296,6 +306,19 @@ function ProjectRow({
             flexShrink: 0,
           }}
         >
+          {pinnable && (
+            <button
+              type="button"
+              className="sidebar-project-action"
+              onClick={() => void onTogglePin(project)}
+              aria-label={t("projects.pin", { name: label })}
+              title={pinned ? t("projects.unpin", { name: label }) : t("projects.pin", { name: label })}
+              aria-pressed={pinned}
+              style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 24, height: 24, padding: 0, border: "none", borderRadius: "var(--radius-control)", background: "transparent", color: pinned ? "var(--accent)" : "var(--text-dim)", cursor: "pointer", lineHeight: 0, transition: SIDEBAR_BUTTON_TRANSITION }}
+            >
+              <Pin size={13} strokeWidth={2} fill={pinned ? "currentColor" : "none"} aria-hidden="true" />
+            </button>
+          )}
           <button
             type="button"
             ref={actionButtonRef}
@@ -323,12 +346,16 @@ function ProjectRow({
             <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { onEditLaunchConfig(project); setActionMenuOpen(false); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
               {project.launchConfig ? t("sessionSidebar.editLaunchConfig") : t("sessionSidebar.configureLaunchConfig")}
             </button>
-            <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { setActionMenuOpen(false); void onMoveProject(project.path, -1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
-              {t("projects.moveUp")}
-            </button>
-            <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { setActionMenuOpen(false); void onMoveProject(project.path, 1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
-              {t("projects.moveDown")}
-            </button>
+            {canReorder && (
+              <>
+                <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { setActionMenuOpen(false); void onMoveProject(project.path, -1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
+                  {t("projects.moveUp")}
+                </button>
+                <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { setActionMenuOpen(false); void onMoveProject(project.path, 1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
+                  {t("projects.moveDown")}
+                </button>
+              </>
+            )}
             <button type="button" role="menuitem" className="sidebar-menu-item" disabled={removeBusy} onClick={() => { setActionMenuOpen(false); setConfirmRemove(true); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--status-error)", cursor: removeBusy ? "default" : "pointer", textAlign: "left", fontSize: 11 }}>
               {t("projects.remove", { name: label })}
             </button>
@@ -374,6 +401,7 @@ function ProjectRow({
                   runningSessionIds={runningSessionIds}
                   unreadSessionIds={unreadSessionIds}
                   exitedSessions={exitedSessions}
+                  recentlyCompletedIds={recentlyCompletedIds}
                   relativeTimeNow={relativeTimeNow}
                   onSelectSession={onSelectSession}
                   onRenamed={onRenamed}
@@ -424,6 +452,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
   runningSessionIds,
   unreadSessionIds,
   exitedSessions,
+  recentlyCompletedIds,
   relativeTimeNow,
   onSelectSession,
   onRenamed,
@@ -435,6 +464,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
   runningSessionIds: Set<string>;
   unreadSessionIds: Set<string>;
   exitedSessions: Map<string, ExitedRpcSession>;
+  recentlyCompletedIds?: Set<string>;
   relativeTimeNow: number;
   onSelectSession: (s: SessionInfo) => void;
   onRenamed?: () => void;
@@ -450,6 +480,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
   const isSelected = sessionId === selectedSessionId;
   const isRunning = runningSessionIds.has(sessionId);
   const isUnread = unreadSessionIds.has(sessionId);
+  const isRecentlyCompleted = !isRunning && (recentlyCompletedIds?.has(sessionId) ?? false);
   const exited = exitedSessions.get(sessionId);
 
   // Stable callbacks: depend only on primitives / stable parent callbacks so
@@ -484,6 +515,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
           isRunning={isRunning}
           isUnread={isUnread}
           exited={exited}
+          isRecentlyCompleted={isRecentlyCompleted}
           relativeTimeNow={relativeTimeNow}
           onClick={handleClick}
           onRenamed={onRenamed}
@@ -504,6 +536,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
               runningSessionIds={runningSessionIds}
               unreadSessionIds={unreadSessionIds}
               exitedSessions={exitedSessions}
+              recentlyCompletedIds={recentlyCompletedIds}
               relativeTimeNow={relativeTimeNow}
               onSelectSession={onSelectSession}
               onRenamed={onRenamed}
@@ -527,6 +560,10 @@ const SessionTreeItem = memo(function SessionTreeItem({
     const id = prev.node.session.id;
     if (prev.runningSessionIds.has(id) !== next.runningSessionIds.has(id)) return false;
   }
+  if (prev.recentlyCompletedIds !== next.recentlyCompletedIds) {
+    const id = prev.node.session.id;
+    if ((prev.recentlyCompletedIds?.has(id) ?? false) !== (next.recentlyCompletedIds?.has(id) ?? false)) return false;
+  }
   if (prev.unreadSessionIds !== next.unreadSessionIds) {
     const id = prev.node.session.id;
     if (prev.unreadSessionIds.has(id) !== next.unreadSessionIds.has(id)) return false;
@@ -544,6 +581,7 @@ const SessionItem = memo(function SessionItem({
   isRunning,
   isUnread,
   exited,
+  isRecentlyCompleted,
   onClick,
   onRenamed,
   onDeleted,
@@ -558,6 +596,7 @@ const SessionItem = memo(function SessionItem({
   isRunning?: boolean;
   isUnread?: boolean;
   exited?: ExitedRpcSession;
+  isRecentlyCompleted?: boolean;
   onClick: () => void;
   onRenamed?: () => void;
   onDeleted?: (id: string) => void;
@@ -719,13 +758,15 @@ const SessionItem = memo(function SessionItem({
           {session.worktreeBranch && <span title={t("sessionSidebar.worktreeTitle", { path: session.cwd })} style={{ display: "flex", alignItems: "center", gap: 3, maxWidth: 56, minWidth: 0, overflow: "hidden", color: "var(--text-dim)", fontSize: 10, flexShrink: 1 }}><GitBranch size={10} strokeWidth={2.4} aria-hidden="true" /><span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.worktreeBranch}</span></span>}
           {hasChildren && <button className="session-item-icon-button" onClick={(event) => { event.stopPropagation(); onToggleCollapse?.(); }} title={collapsed ? t("sessionSidebar.expandForks") : t("sessionSidebar.collapseForks")} aria-label={collapsed ? t("sessionSidebar.expandForks") : t("sessionSidebar.collapseForks")} aria-expanded={!collapsed} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 24, height: 24, padding: 0, flexShrink: 0, border: "none", background: "none", color: "var(--text-dim)", cursor: "pointer", transform: collapsed ? "rotate(-90deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }}><ChevronDown size={12} strokeWidth={1.8} aria-hidden="true" /></button>}
           <div style={{ display: "flex", alignItems: "center", gap: SIDEBAR_STATUS_GAP, flexShrink: 0 }}>
-            {(isRunning || exited || isUnread) && (
+            {(isRunning || exited || isRecentlyCompleted || isUnread) && (
               <span style={{ display: "flex", alignItems: "center", justifyContent: "center", width: SIDEBAR_STATUS_SLOT, height: SIDEBAR_STATUS_SLOT, flexShrink: 0 }}>
                 {isRunning
                   ? <RunningSessionIndicator size={12} />
                   : exited
                     ? <ExitedSessionIndicator title={exitTitle} size={12} />
-                    : <UnreadSessionIndicator size={11} />}
+                    : isRecentlyCompleted
+                      ? <RecentlyCompletedIndicator size={12} />
+                      : <UnreadSessionIndicator size={11} />}
               </span>
             )}
             <div className="session-item-trailing" style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", flexShrink: 0 }}>

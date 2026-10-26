@@ -301,6 +301,8 @@ export function extractSubagentHistory(sessionFilePath: string): SubagentHistory
 
 /** Bytes read from a transcript's head to find its model entries. */
 const TRANSCRIPT_HEAD_BYTES = 8 * 1024;
+const MAX_TRANSCRIPT_MODEL_CACHE = 500;
+const transcriptModelCache = new Map<string, { mtimeMs: number; size: number; model: string | undefined }>();
 
 /**
  * `provider/model:thinking` from the `model_change` / `thinking_level_change`
@@ -310,11 +312,21 @@ const TRANSCRIPT_HEAD_BYTES = 8 * 1024;
  * whole file if subagents start switching models.
  */
 function transcriptModel(file: string): string | undefined {
+  let stats;
+  try {
+    stats = statSync(file);
+  } catch {
+    return undefined;
+  }
+  const cached = transcriptModelCache.get(file);
+  if (cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) {
+    return cached.model;
+  }
   let head: string;
   try {
     const fd = openSync(file, "r");
     try {
-      const buffer = Buffer.alloc(TRANSCRIPT_HEAD_BYTES);
+      const buffer = Buffer.allocUnsafe(Math.min(TRANSCRIPT_HEAD_BYTES, Math.max(stats.size, 0)));
       head = buffer.subarray(0, readSync(fd, buffer, 0, buffer.length, 0)).toString("utf8");
     } finally {
       closeSync(fd);
@@ -328,7 +340,13 @@ function transcriptModel(file: string): string | undefined {
     if (entry.type === "model_change") model = asString(entry.model) ?? model;
     else if (entry.type === "thinking_level_change") thinking = asString(entry.thinkingLevel) ?? thinking;
   }
-  return model && (thinking ? `${model}:${thinking}` : model);
+  const resolved = model && (thinking ? `${model}:${thinking}` : model);
+  if (transcriptModelCache.size >= MAX_TRANSCRIPT_MODEL_CACHE && !transcriptModelCache.has(file)) {
+    const oldestKey = transcriptModelCache.keys().next().value;
+    if (oldestKey !== undefined) transcriptModelCache.delete(oldestKey);
+  }
+  transcriptModelCache.set(file, { mtimeMs: stats.mtimeMs, size: stats.size, model: resolved });
+  return resolved;
 }
 
 /** Cap on transcript bytes materialized for the dialog (files are small). */

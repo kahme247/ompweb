@@ -124,7 +124,7 @@ async function pasteFromClipboard(
 function renderComposer() {
   return render(
     React.createElement(ChatInput, {
-      onSend() {},
+      async onSend() { return { status: "accepted" }; },
       onAbort() {},
       onFollowUp() {},
       isStreaming: false,
@@ -227,7 +227,7 @@ test("keeps one oversized clipboard image from displacing an in-range one", asyn
 test("revokes pasted image previews on unmount", async () => {
   setClipboard({ read: async () => [clipboardImage("image/png", 8)] });
   const view = render(
-    React.createElement(ChatInput, { onSend() {}, onAbort() {}, onFollowUp() {}, isStreaming: false }),
+    React.createElement(ChatInput, { async onSend() { return { status: "accepted" }; }, onAbort() {}, onFollowUp() {}, isStreaming: false }),
   );
   await pasteFromClipboard(view.container);
   assert.equal(objectUrls.created.length, 1);

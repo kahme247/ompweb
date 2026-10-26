@@ -25,7 +25,7 @@ export async function GET(_req: Request, { params }: Params) {
 export async function POST(req: Request, { params }: Params) {
   const config = readSttConfig();
   if (!config) {
-    return NextResponse.json({ error: "STT not configured. Set OMP_WEB_STT_ENDPOINT." }, { status: 501 });
+    return NextResponse.json({ error: "STT not configured. Set OMP_WEB_STT_ENDPOINT or OMP_WEB_STT_MODEL." }, { status: 501 });
   }
   const owner = new URL(req.url).searchParams.get("owner")?.slice(0, 128) || undefined;
   const job = retrySttJob(config, (await params).jobId, owner);

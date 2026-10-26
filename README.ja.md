@@ -126,9 +126,9 @@ Linux トレイ、Windows サービス）はインストール時に `OMP_WEB_PA
 | `OMP_WEB_NAME` | ブラウザのタブとインストールしたアプリに表示する名前。`url`・`host`・`domain`（大文字小文字を区別しない）を指定すると、ブラウザが接続したホスト名（ポートなし）を使用します（localhost と IP アドレスは `omp web` のまま）。それ以外の値はそのまま使用します（変更後は再起動） | `omp web` |
 | `OMP_WEB_OMP_BIN` | `omp` の絶対パス（PATH 未登録時） | _自動検出_ |
 | `PI_CODING_AGENT_DIR` | カスタム omp エージェントディレクトリ | `~/.omp/agent` |
-| `OMP_WEB_STT_ENDPOINT` | OpenAI 互換の音声認識エンドポイント URL | _なし（無効）_ |
+| `OMP_WEB_STT_ENDPOINT` | OpenAI 互換の音声認識エンドポイント URL。未設定の場合は `OMP_WEB_STT_MODEL` を omp 自身の認証情報で使って文字起こしします | _なし_ |
 | `OMP_WEB_STT_KEY` | STT エンドポイント用の API キー | _なし_ |
-| `OMP_WEB_STT_MODEL` | STT エンドポイント用のモデル名 | _なし_ |
+| `OMP_WEB_STT_MODEL` | STT エンドポイント用のモデル名。エンドポイント未設定時は、omp のログインで実行する omp の音声認識モデル（例: `openai-codex/codex-transcribe`。ChatGPT サブスクリプション、このモデルを含む omp バージョンが必要） | _なし（エンドポイント未設定時は無効）_ |
 
 **`OMP_WEB_NAME` とインストールしたアプリ。** インストールしたアプリ（PWA）の名前は、通常インストール元のページの名前になります。あとで `OMP_WEB_NAME` を変更した場合や、`OMP_WEB_NAME` が `url`・`host`・`domain` のときに別のアドレスで omp-web にアクセスした場合、OS がインストール済みアプリの名前も変更することがあります。`OMP_WEB_NAME` は空のままにするか、どのドメイン名やアドレスでアクセスしてもこの omp-web サーバーを識別できる名前を設定することをおすすめします。
 

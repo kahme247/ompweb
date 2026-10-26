@@ -27,11 +27,14 @@ import {
 import { resolveSessionPathOr404 } from "@/lib/api-utils";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { sessionPathKey } from "@/lib/paths";
-import { clearExitedRpcSession, getRpcSession } from "@/lib/rpc-manager";
+import { clearExitedRpcSession, getRpcSession, WebRpcError } from "@/lib/rpc-manager";
 
 /** Stable, client-safe error body for catch-all handlers: details go to the
  *  server log only, never to the browser. */
 function sessionsErrorResponse(error: unknown): NextResponse {
+  if (error instanceof WebRpcError && error.code === "session_busy") {
+    return NextResponse.json({ error: error.message, code: error.code }, { status: 409 });
+  }
   if (error instanceof SessionFileTooLargeError) {
     return NextResponse.json(
       { error: "Session file is too large to open in omp-web", code: "session_file_too_large" },
@@ -281,7 +284,8 @@ export async function PATCH(
       try {
         await rpc.send({ type: "set_session_name", name: name.trim() });
         renamed = true;
-      } catch {
+      } catch (error) {
+        if (error instanceof WebRpcError && error.code === "session_busy") throw error;
         // Fall back to the on-disk title slot below.
       }
     }
@@ -289,6 +293,11 @@ export async function PATCH(
       const resolved = await resolveSessionPathOr404(id);
       if ("response" in resolved) return resolved.response;
       const filePath = resolved.filePath;
+      // Resolution awaited: an Edit may have started on the current wrapper
+      // since the failed native rename. Never bypass its fence with a file write.
+      if (getRpcSession(id)?.isEditingHistory()) {
+        throw new WebRpcError("Wait for the history edit to finish", "session_busy");
+      }
       setSessionTitle(filePath, name.trim(), "user");
       invalidateSessionCaches(filePath);
       return NextResponse.json({ ok: true });

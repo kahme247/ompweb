@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { SttAfter, SttConfig } from "@/lib/stt";
+import { authGatewayRequest } from "@/lib/omp/auth-gateway";
 
 /**
  * Server-owned transcription jobs. POST /api/stt starts one and returns its id
@@ -100,28 +101,48 @@ function extractUpstreamErrorMessage(data: unknown, rawText: string, status: num
   return `Transcription failed (upstream ${status})`;
 }
 
-async function transcribe({ endpoint, apiKey, model }: SttConfig, audio: File, signal: AbortSignal): Promise<Pick<SttJob, "status" | "text" | "error">> {
+const MAX_GATEWAY_AUDIO_BYTES = 18 * 1024 * 1024;
+
+/** One upstream round trip: the configured endpoint, or omp's auth gateway when only a model is set. */
+async function requestTranscription({ endpoint, apiKey, model }: SttConfig, audio: File, signal: AbortSignal): Promise<{ ok: boolean; status: number; rawText: string }> {
+  signal = AbortSignal.any([signal, AbortSignal.timeout(STT_UPSTREAM_TIMEOUT_MS)]);
+  if (!endpoint) {
+    // The gateway caps its JSON body at 25MB and base64 grows audio by 4/3.
+    if (audio.size > MAX_GATEWAY_AUDIO_BYTES) {
+      return { ok: false, status: 413, rawText: "Recording too large for omp's transcription gateway (max 18MB)" };
+    }
+    const ext = audio.name.match(/\.([a-z0-9]+)$/i)?.[1] ?? "webm";
+    const data = Buffer.from(await audio.arrayBuffer()).toString("base64");
+    const res = await authGatewayRequest("/v1/audio/transcriptions", { model, input_audio: { data, format: ext } }, signal);
+    const rawText = typeof res.body === "string" ? res.body : JSON.stringify(res.body ?? {});
+    return { ok: res.status >= 200 && res.status < 300, status: res.status, rawText };
+  }
+  const formData = new FormData();
+  formData.append("file", audio, audio.name);
+  if (model) formData.append("model", model);
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+    body: formData,
+    signal,
+  });
+  return { ok: res.ok, status: res.status, rawText: await res.text() };
+}
+
+async function transcribe(config: SttConfig, audio: File, signal: AbortSignal): Promise<Pick<SttJob, "status" | "text" | "error">> {
+  const { apiKey } = config;
   // Everything, including building the request, stays inside the try: a
   // rejection here would leave the job pending forever with no expiry timer.
   try {
-    const formData = new FormData();
-    formData.append("file", audio, audio.name);
-    if (model) formData.append("model", model);
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
-      body: formData,
-      signal: AbortSignal.any([signal, AbortSignal.timeout(STT_UPSTREAM_TIMEOUT_MS)]),
-    });
-    const rawText = await res.text();
+    const { ok, status, rawText } = await requestTranscription(config, audio, signal);
     let data: unknown = null;
     try {
       data = rawText ? JSON.parse(rawText) : {};
     } catch {
       data = null;
     }
-    if (!res.ok) {
-      return { status: "error", error: extractUpstreamErrorMessage(data, rawText, res.status) };
+    if (!ok) {
+      return { status: "error", error: extractUpstreamErrorMessage(data, rawText, status) };
     }
     // Plain-text upstreams (response_format=text) return the transcript as the body.
     const text = data === null

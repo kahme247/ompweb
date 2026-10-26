@@ -19,6 +19,7 @@ import type { AppUpdateInfo } from "./AppUpdateDialog";
 import { useFontSize, type FontSizePreference } from "@/hooks/useFontSize";
 import { useUiScale, type UiScalePreference } from "@/hooks/useUiScale";
 import { useTouchTargets, type TouchTargetsPreference } from "@/hooks/useTouchTargets";
+import { useRecentRunsLimit, type RecentRunsLimitPreset } from "@/hooks/useRecentRunsLimit";
 import { useSpeechSynthesis } from "@/hooks/useSpeechSynthesis";
 import { useNotificationPrefs } from "@/hooks/useNotifications";
 import { NOTIFICATION_TYPES, renderNotification, type NotificationType } from "@/lib/notification-events";
@@ -159,6 +160,7 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { id: "completion-sound", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.completionSound", descKey: "settingsConfig.completionSoundDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Completion sound", fallbackDesc: "Play a tone when the agent completes a run.", scope: "UI" },
   { id: "keep-tool-calls-collapsed", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.keepToolCallsCollapsed", descKey: "settingsConfig.keepToolCallsCollapsedDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Keep tool calls collapsed", fallbackDesc: "Show only compact headers while tools execute.", scope: "UI" },
   { id: "expand-thinking-by-default", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.expandThinkingByDefault", descKey: "settingsConfig.expandThinkingByDefaultDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Expand thinking blocks by default", fallbackDesc: "Open every thinking block as it appears, including while it streams, so reasoning is readable without clicking each one. Collapsing a block by hand still works.", scope: "UI" },
+  { id: "hide-tool-activity", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.hideToolActivity", descKey: "settingsConfig.hideToolActivityDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Hide tool activity while working", fallbackDesc: "Fold a running turn's tool calls into one Process details row, the same way a finished turn folds them. Expand the row to see each call and its result.", scope: "UI" },
   { id: "open-url-automatically", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.openUrlAutomatically", descKey: "settingsConfig.openUrlAutomaticallyDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Open agent links without asking", fallbackDesc: "Links the agent opens from the session you are viewing open in a new tab right away. Links from other sessions always ask first. Your browser may still block pop-ups.", scope: "UI" },
   { id: "scope-native-select-all", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.scopeNativeSelectAll", descKey: "settingsConfig.scopeNativeSelectAllDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Scope native Select All (experimental)", fallbackDesc: "Limit whole-page selections from browser or touch menus to the active message, chat, or file. May also narrow deliberate whole-page selections. Turn off if selection handles or menus misbehave. Keyboard shortcuts are unaffected.", scope: "UI" },
   { id: "tts-autoplay", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.ttsAutoplay", descKey: "settingsConfig.ttsAutoplayDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Auto-read assistant responses", fallbackDesc: "Automatically read aloud new assistant replies when completed.", scope: "UI" },
@@ -211,6 +213,7 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { id: "model-breakdown", tab: "usage", sectionKey: "settingsTabs.usage.label", labelKey: "usageConfig.breakdown", descKey: "usageConfig.model", fallbackSection: "Usage", fallbackLabel: "Model Breakdown", fallbackDesc: "Historical token usage and cost per model, day, and project", scope: "UI" },
   // Windows Background Service & System Tray
   { id: "auto-resume-sessions", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.autoResumeSessions", descKey: "settingsConfig.autoResumeSessionsDesc", fallbackSection: "System & Updates", fallbackLabel: "Resume running sessions after a restart", fallbackDesc: "When omp-web restarts while agents are working, restart those sessions and tell each agent: \"Session interrupted and resumed. Continue as you would have done without the interruption.\" Work in progress at the moment of the restart, such as a running command, is lost." },
+  { id: "agent-tools-cross-session", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.agentTools", descKey: "settingsConfig.agentToolsDesc", fallbackSection: "System & Updates", fallbackLabel: "Agent tools (cross-session)", fallbackDesc: "Allow agents to call list_sessions, new_session and send_to_session to reach other omp-web sessions, even with no browser tab open. Delivered messages are prefixed with the sending session's ID." },
   { id: "agent-env", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.agentEnv", descKey: "settingsConfig.agentEnvDesc", fallbackSection: "System & Updates", fallbackLabel: "Agent environment variables", fallbackDesc: "Extra environment variables passed to the omp process, one KEY=VALUE per line. Applied to sessions started after saving.", scope: "UI" },
   { id: "windows-service-autostart", tab: "system", sectionKey: "settingsConfig.windowsServiceTitle", labelKey: "settingsConfig.windowsServiceAutostart", descKey: "settingsConfig.windowsServiceAutostartDesc", fallbackSection: "Windows Background Service & System Tray", fallbackLabel: "Start with Windows", fallbackDesc: "Launch background service quietly in system tray when logging into Windows.", scope: "UI" },
   { id: "windows-service-shortcuts", tab: "system", sectionKey: "settingsConfig.windowsServiceTitle", labelKey: "settingsConfig.windowsServiceInstallBtn", descKey: "settingsConfig.windowsServiceDesc", fallbackSection: "Windows Background Service & System Tray", fallbackLabel: "Install Service & Shortcuts", fallbackDesc: "Manage background service execution, system tray monitor, Windows logon autostart, and Desktop shortcuts.", scope: "UI" },
@@ -306,6 +309,41 @@ function AutoResumeSessionsSetting() {
   };
   return (
     <NativeSetting searchId="auto-resume-sessions" label={t("settingsConfig.autoResumeSessions")} description={t("settingsConfig.autoResumeSessionsDesc")}>
+      <ToggleSwitch checked={enabled === true} disabled={enabled === null} onChange={(next) => void change(next)} />
+    </NativeSetting>
+  );
+}
+
+/** Server-side omp-web setting (issue #275): cross-session agent tools.
+ * Off by default; mirrors AutoResumeSessionsSetting above. */
+function AgentToolsSetting() {
+  const { t } = useI18n();
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/web-settings")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { agentToolsEnabled?: boolean } | null) => { if (alive) setEnabled(data?.agentToolsEnabled === true); })
+      .catch(() => { if (alive) setEnabled(false); });
+    return () => { alive = false; };
+  }, []);
+  const change = async (next: boolean) => {
+    const previous = enabled;
+    setEnabled(next);
+    try {
+      const res = await fetch("/api/web-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentToolsEnabled: next }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch (error) {
+      setEnabled(previous);
+      toast.error(t("settingsConfig.agentToolsSaveFailed"), error instanceof Error ? error.message : String(error));
+    }
+  };
+  return (
+    <NativeSetting searchId="agent-tools-cross-session" label={t("settingsConfig.agentTools")} description={t("settingsConfig.agentToolsDesc")}>
       <ToggleSwitch checked={enabled === true} disabled={enabled === null} onChange={(next) => void change(next)} />
     </NativeSetting>
   );
@@ -702,10 +740,12 @@ function CompactionMethodOrder({ value, onChange, ...aria }: { value: readonly C
   );
 }
 
-export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, expandThinkingByDefault, onExpandThinkingByDefaultChange, onHideThinkingBlockChange, providerUsageVisible, onProviderUsageVisibleChange, scopeNativeSelectAll, onScopeNativeSelectAllChange, openUrlAutomatically, onOpenUrlAutomaticallyChange, cwd, sessionId, onModelsSaved, onPluginsReloaded, appUpdate, ompUpdateAvailable, ompUpdatesDisabled, onRefreshAppUpdate, onOmpUpdateAvailabilityChange, onRequestAppUpdate, onSelectTab, onClose }: {
+export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, hideToolActivity, onHideToolActivityChange, expandThinkingByDefault, onExpandThinkingByDefaultChange, onHideThinkingBlockChange, providerUsageVisible, onProviderUsageVisibleChange, scopeNativeSelectAll, onScopeNativeSelectAllChange, openUrlAutomatically, onOpenUrlAutomaticallyChange, cwd, sessionId, onModelsSaved, onPluginsReloaded, appUpdate, ompUpdateAvailable, ompUpdatesDisabled, onRefreshAppUpdate, onOmpUpdateAvailabilityChange, onRequestAppUpdate, onSelectTab, onClose }: {
   activeTab: SettingsTab;
   toolCallsDefaultCollapsed: boolean;
   onToolCallsDefaultCollapsedChange: (collapsed: boolean) => void;
+  hideToolActivity: boolean;
+  onHideToolActivityChange: (hide: boolean) => void;
   expandThinkingByDefault: boolean;
   onExpandThinkingByDefaultChange: (expand: boolean) => void;
   onHideThinkingBlockChange?: (hide: boolean) => void;
@@ -734,6 +774,12 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   const { fontSize, setFontSize } = useFontSize();
   const { uiScale, setUiScale } = useUiScale();
   const { touchTargets, setTouchTargets } = useTouchTargets();
+  const {
+    preset: recentRunsPreset,
+    customValue: recentRunsCustomValue,
+    setPreset: setRecentRunsPreset,
+    setCustomValue: setRecentRunsCustomValue,
+  } = useRecentRunsLimit();
   const {
     isSupported: ttsSupported,
     autoPlayEnabled: ttsAutoPlay,
@@ -1185,6 +1231,9 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <NativeSetting searchId="expand-thinking-by-default" label={t("settingsConfig.expandThinkingByDefault")} description={t("settingsConfig.expandThinkingByDefaultDesc")} scope="UI">
                     <ToggleSwitch checked={expandThinkingByDefault} onChange={onExpandThinkingByDefaultChange} />
                   </NativeSetting>
+                  <NativeSetting searchId="hide-tool-activity" label={t("settingsConfig.hideToolActivity")} description={t("settingsConfig.hideToolActivityDesc")} scope="UI">
+                    <ToggleSwitch checked={hideToolActivity} onChange={onHideToolActivityChange} />
+                  </NativeSetting>
                   <NativeSetting searchId="scope-native-select-all" label={t("settingsConfig.scopeNativeSelectAll")} description={t("settingsConfig.scopeNativeSelectAllDesc")} scope="UI">
                     <ToggleSwitch checked={scopeNativeSelectAll} onChange={onScopeNativeSelectAllChange} />
                   </NativeSetting>
@@ -1250,6 +1299,40 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                       <option value="lg" style={nativeOptionStyle}>{t("settingsConfig.fontSizeLarge")}</option>
                       <option value="xl" style={nativeOptionStyle}>{t("settingsConfig.fontSizeXLarge")}</option>
                     </select>
+                  </NativeSetting>
+                  <NativeSetting searchId="recent-runs-limit" label={t("settingsConfig.recentRunsLimit")} description={t("settingsConfig.recentRunsLimitDesc")} scope="UI">
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <select
+                        style={nativeSelectStyle}
+                        value={recentRunsPreset}
+                        onChange={(e) => setRecentRunsPreset(e.target.value as RecentRunsLimitPreset)}
+                      >
+                        <option value="10" style={nativeOptionStyle}>{t("settingsConfig.recentRunsOption10")}</option>
+                        <option value="15" style={nativeOptionStyle}>{t("settingsConfig.recentRunsOption15")}</option>
+                        <option value="20" style={nativeOptionStyle}>{t("settingsConfig.recentRunsOption20")}</option>
+                        <option value="custom" style={nativeOptionStyle}>{t("settingsConfig.recentRunsOptionCustom")}</option>
+                      </select>
+                      {recentRunsPreset === "custom" && (
+                        <input
+                          type="number"
+                          min={1}
+                          max={100}
+                          value={recentRunsCustomValue}
+                          onChange={(e) => setRecentRunsCustomValue(Number(e.target.value))}
+                          style={{
+                            width: 80,
+                            height: "var(--control-height)",
+                            padding: "0 10px",
+                            border: "1px solid var(--border)",
+                            borderRadius: "var(--radius-control)",
+                            background: "var(--bg)",
+                            color: "var(--text)",
+                            fontSize: "var(--text-sm)",
+                          }}
+                          placeholder={t("settingsConfig.recentRunsCustomPlaceholder")}
+                        />
+                      )}
+                    </div>
                   </NativeSetting>
                   <NativeSetting searchId="ui-scale" label={t("settingsConfig.uiScale")} description={t("settingsConfig.uiScaleDesc")} scope="UI">
                     <select
@@ -1682,6 +1765,8 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                 </div>
 
                 <AutoResumeSessionsSetting />
+
+                <AgentToolsSetting />
 
                 <AgentEnvSetting />
 
