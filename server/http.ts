@@ -136,7 +136,7 @@ export function renderIndex(html: string, request: Request): string {
 }
 
 /**
- * Bun moves the entry stylesheet to the end of <head>, after the pre-paint scripts. The theme script reads --bg from
+ * Bun moves the entry stylesheet to the end of <head>, after the pre-paint scripts. The theme script reads --bg-panel from
  * it for theme-color, and a stylesheet only blocks the scripts that follow it, so put it before them.
  */
 export function stylesheetFirst(html: string): string {

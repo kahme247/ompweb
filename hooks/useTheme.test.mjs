@@ -88,6 +88,7 @@ test("browser chrome follows the selected theme and only follows OS changes in s
     assert.equal(root.getAttribute("data-theme"), theme);
     assert.deepEqual([...root.classList].sort(), ["keep-layout", ...classes].sort());
     assert.equal(meta.getAttribute("content"), color);
+    assert.match(document.cookie, new RegExp(`(^|; )omp-theme-color=${color.slice(1)}(;|$)`));
     assert.equal(localStorage.getItem("omp-theme"), preference);
   };
   const changeOS = async (dark) => {
@@ -97,25 +98,25 @@ test("browser chrome follows the selected theme and only follows OS changes in s
     });
   };
 
-  assertTheme("dracula", "#282A36", true, ["dark", "theme-dracula"]);
+  assertTheme("dracula", "#21222C", true, ["dark", "theme-dracula"]);
   await changeOS(true);
-  assertTheme("dracula", "#282A36", true, ["dark", "theme-dracula"]);
+  assertTheme("dracula", "#21222C", true, ["dark", "theme-dracula"]);
   await act(() => hook.result.current.setTheme("catppuccin-latte"));
-  assertTheme("catppuccin-latte", "#EFF1F5", false, ["theme-catppuccin-latte"]);
+  assertTheme("catppuccin-latte", "#E6E9EF", false, ["theme-catppuccin-latte"]);
   await act(() => hook.result.current.setTheme("system"));
-  assertTheme("dark", "#1B1916", true, ["dark", "theme-dark"], "system");
+  assertTheme("dark", "#231F1B", true, ["dark", "theme-dark"], "system");
   await changeOS(false);
-  assertTheme("light", "#FAF9F6", false, ["theme-light"], "system");
+  assertTheme("light", "#F2F0EA", false, ["theme-light"], "system");
   await act(() => hook.result.current.setTheme("omp"));
   await changeOS(true);
-  assertTheme("omp", "#000000", true, ["omp"]);
+  assertTheme("omp", "#0A0A0C", true, ["omp"]);
 
   await act(() => hook.result.current.setTheme("system"));
-  assertTheme("dark", "#1B1916", true, ["dark", "theme-dark"], "system");
+  assertTheme("dark", "#231F1B", true, ["dark", "theme-dark"], "system");
   hook.unmount();
   await changeOS(false);
   assert.equal(root.getAttribute("data-theme"), "dark", "unmounted consumers no longer update browser chrome");
-  assert.equal(meta.getAttribute("content"), "#1B1916");
+  assert.equal(meta.getAttribute("content"), "#231F1B");
   hook = renderHook(() => useTheme());
-  assertTheme("light", "#FAF9F6", false, ["theme-light"], "system");
+  assertTheme("light", "#F2F0EA", false, ["theme-light"], "system");
 });

@@ -49,6 +49,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 - **An update whose worker died is reported as failed.** A running update whose worker process is gone, or whose lease has expired, now becomes a failed attempt the dialog can show and clean up, instead of waiting forever.
 - **Upgrade ompweb before its hosts.** The web server links a host daemon one link protocol version older than its own, so a host keeps running sessions until its `ompweb` is updated. After a web restart the server adopts that daemon's live runs, as it does a current daemon's, without resuming them; only a large message from such a host still arrives whole instead of in pieces, which can stall that host's link on a slow connection. A daemon older than that, or newer than the web server, is still asked to upgrade.
 - **The Provider Usage header stays put while its list scrolls.** Scrolling a long provider list in the sidebar also scrolled the section header (title, window toggle, refresh) out of view, on desktop and mobile. Only the list scrolls now.
+- **Android system bars match the theme's top bar.** The browser theme color, which tints the Android status bar, now uses the top bar's color instead of the page background, so a light theme no longer shows a white status bar above a tinted top bar. An installed app also reports the current theme's color in its manifest, so Chrome 153 and later color the navigation bar to match the next time Chrome checks the installed app for manifest updates.
 
 ---
 
