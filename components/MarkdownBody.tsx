@@ -11,7 +11,8 @@ import { markdownCodeRenderer } from "./MarkdownCode";
 import { ClickableImage } from "./ImageLightbox";
 import { TableChart } from "./TableChart";
 
-interface MarkdownBodyProps {
+/** Props accepted by `MarkdownBody`. */
+export interface MarkdownBodyProps {
   children: string;
   className?: string;
   isStreaming?: boolean;
@@ -21,7 +22,17 @@ interface MarkdownBodyProps {
   autoCharts?: boolean;
 }
 
-export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile, suppressImages = false, autoCharts = false }: MarkdownBodyProps) {
+/** Everything `MarkdownBody` hands to `ReactMarkdown`: source text, plugins, element renderers and URL transform. */
+export interface MarkdownBodyRendering {
+  markdown: string;
+  remarkPlugins: MarkdownPlugins["remarkPlugins"];
+  rehypePlugins: MarkdownPlugins["rehypePlugins"];
+  components: Components;
+  urlTransform: typeof agentAwareUrlTransform;
+}
+
+/** Builds omp-web's markdown rendering setup (links, images, tables, code) so any renderer can reuse it. */
+export function useMarkdownBodyRendering({ children, isStreaming, cwd, onOpenFile, suppressImages = false, autoCharts = false }: Omit<MarkdownBodyProps, "className">): MarkdownBodyRendering {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
   const { remarkPlugins: baseRemarkPlugins, rehypePlugins } = useMarkdownPlugins(normalizedMarkdown);
   const githubRepo = useContext(GithubRepoContext);
@@ -156,15 +167,22 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
     };
   }, [isStreaming, cwd, onOpenFile, suppressImages, openAgentLink, autoCharts]);
 
+  return { markdown: normalizedMarkdown, remarkPlugins, rehypePlugins, components, urlTransform: agentAwareUrlTransform };
+}
+
+/** Render agent markdown with `useMarkdownBodyRendering`'s setup. */
+export function MarkdownBody({ className, ...props }: MarkdownBodyProps) {
+  const { markdown, remarkPlugins, rehypePlugins, components, urlTransform } = useMarkdownBodyRendering(props);
+
   return (
     <div className={["markdown-body", className].filter(Boolean).join(" ")}>
       <ReactMarkdown
         remarkPlugins={remarkPlugins}
         rehypePlugins={rehypePlugins}
         components={components}
-        urlTransform={agentAwareUrlTransform}
+        urlTransform={urlTransform}
       >
-        {normalizedMarkdown}
+        {markdown}
       </ReactMarkdown>
     </div>
   );
