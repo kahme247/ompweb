@@ -56,6 +56,10 @@ interface Props {
   toolCallsDefaultCollapsed?: boolean;
   /** UI `hideToolActivity`: fold a running turn's tool calls into one row. */
   hideToolActivity?: boolean;
+  /** UI `neverFoldActivity`: render every turn flat, no Process details rows. */
+  neverFoldActivity?: boolean;
+  /** UI `showToolCallsUnfolded`: tool call rows stay out of Process details. */
+  showToolCallsUnfolded?: boolean;
   /** "Expand thinking blocks by default": open each thinking block on mount. */
   expandThinkingByDefault?: boolean;
   /** omp `hideThinkingBlock`: omit thinking from the transcript. */
@@ -252,7 +256,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messag
   );
 }
 
-type RenderMessage = (idx: number, options?: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[] }) => ReactNode;
+type RenderMessage = (idx: number, options?: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[]; offerFork?: boolean }) => ReactNode;
 
 /** Render a folded activity run exactly as it streamed: one entry per piece, never merged across messages. */
 export function renderActivityPieces(messages: AgentMessage[], pieces: ActivityPiece[], renderMessage: RenderMessage): ReactNode[] {
@@ -294,6 +298,8 @@ interface CommittedTranscriptProps {
   toolCallsDefaultCollapsed: boolean;
   /** Fold a running turn's tool calls; off restores the flat live tail. */
   hideToolActivity: boolean;
+  neverFoldActivity: boolean;
+  showToolCallsUnfolded: boolean;
   expandThinkingByDefault: boolean;
   hideThinkingBlock: boolean;
   visibleCount: number;
@@ -315,7 +321,7 @@ interface CommittedTranscriptProps {
 const CommittedTranscript = memo(function CommittedTranscript({
   messages, entryIds, conversationMeta, messageRefs, isStreaming, sessionBusy, isCompacting, externalRunActive, isNew, forkingEntryId, editingEntryId,
   handleFork, handleEdit, modelNames, messageCwd, onOpenFile, sessionId,
-  toolCallsDefaultCollapsed, hideToolActivity, expandThinkingByDefault, hideThinkingBlock, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
+  toolCallsDefaultCollapsed, hideToolActivity, neverFoldActivity, showToolCallsUnfolded, expandThinkingByDefault, hideThinkingBlock, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
 }: CommittedTranscriptProps) {
   const { t } = useI18n();
   const { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage } = conversationMeta;
@@ -326,7 +332,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
     messageRefs.current[refIndex] = el;
   };
 
-  const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[] } = {}): ReactNode => {
+  const renderMessage: RenderMessage = (idx, options = {}) => {
     const msg = options.messageOverride ?? messages[idx];
     const isVisible = msg.role === "user" || msg.role === "assistant";
     const currentRefIdx = visibleRefIndexByMessage.get(idx);
@@ -346,7 +352,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
     }
     if (options.showTimestamp !== undefined) showTimestamp = options.showTimestamp;
     const forkTarget = forkTargets[idx];
-    const canOfferFork = !sessionBusy && !isNew && !!forkTarget;
+    const canOfferFork = !sessionBusy && !isNew && !!forkTarget && options.offerFork !== false;
     const canOfferEdit = !sessionBusy && !isCompacting && !isNew && msg.role === "user" && !msg.branchSummary && !!entryIds[idx];
     const historyMutationPending = forkingEntryId !== null || editingEntryId !== null;
     const view = (
@@ -387,12 +393,18 @@ const CommittedTranscript = memo(function CommittedTranscript({
   // visible window. Invisible history never allocates React elements, so long
   // sessions pay element cost proportional to the visible window instead of
   // the whole transcript.
-  const rows = useMemo<TranscriptRow[]>(() => planTranscriptRows(messages, { hideThinking: hideThinkingBlock }), [messages, hideThinkingBlock]);
-  const isLiveTail = (row: TranscriptRow): boolean => {
+  // Expanded-by-default thinking, and tool calls when asked, stay out of the
+  // fold: folding on commit would hide the block the preference just opened.
+  const rows = useMemo<TranscriptRow[]>(
+    () => planTranscriptRows(messages, { hideThinking: hideThinkingBlock, showThinking: expandThinkingByDefault, showToolCalls: showToolCallsUnfolded }),
+    [messages, hideThinkingBlock, expandThinkingByDefault, showToolCallsUnfolded],
+  );
+  const rendersFlat = (row: TranscriptRow): boolean => {
+    if (row.kind !== "group") return false;
+    if (neverFoldActivity) return true;
     // With "Hide tool activity while working" on (the default) the running turn
     // folds like a finished one; off restores the flat tail.
     if (hideToolActivity) return false;
-    if (row.kind !== "group") return false;
     // `sessionBusy` only goes true for a run omp-web owns, so a session driven
     // by another `omp` process would never get a live tail; the transcript-tail
     // heuristic supplies that missing case.
@@ -427,9 +439,9 @@ const CommittedTranscript = memo(function CommittedTranscript({
     }
     const { userIndex: userIdx, endIndex: endIdx, segments } = row;
 
-    if (isLiveTail(row)) {
-      // Live tail: render the running turn flat so streaming updates and tool
-      // progress stay in view; it folds once the run ends.
+    if (rendersFlat(row)) {
+      // Flat: "Never fold tool activity", or the live tail, which stays flat so
+      // streaming updates and tool progress stay in view and folds once the run ends.
       for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
         rendered.push(renderMessage(renderIdx));
       }
@@ -449,6 +461,10 @@ const CommittedTranscript = memo(function CommittedTranscript({
           keyPrefix: `text-${segmentIdx}`,
           messageOverride: override,
           ...(segment.last ? {} : { showTimestamp: false }),
+          // Thinking can ride in a text segment; deferred text loads by source index.
+          sourceBlockIndices: segment.blocks.map((block) => msg.content.indexOf(block)),
+          // Fork from reply text (or the error row), not from each unfolded thinking/tool step.
+          offerFork: segment.blocks.length === 0 || segment.blocks.some((block) => block.type === "text" || block.type === "image"),
         }));
         attached.add(segment.index);
         return;
@@ -487,7 +503,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
   );
 });
 
-export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatus: channelHostStatus, hostLabel, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders, searchQuery = "", searchTarget = null, onSearchTargetHandled }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatus: channelHostStatus, hostLabel, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, neverFoldActivity = false, showToolCallsUnfolded = false, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders, searchQuery = "", searchTarget = null, onSearchTargetHandled }: Props) {
   const { t, tn } = useI18n();
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -711,13 +727,13 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
   // Widen the lazy render window until it includes the message's transcript row.
   const revealMessage = useCallback((messageIndex: number) => {
-    const rows = planTranscriptRows(messages, { hideThinking: hideThinkingBlock });
+    const rows = planTranscriptRows(messages, { hideThinking: hideThinkingBlock, showThinking: expandThinkingByDefault, showToolCalls: showToolCallsUnfolded });
     const rowIndex = rows.findIndex((row) => (row.kind === "message" ? row.index === messageIndex : messageIndex >= row.userIndex && messageIndex < row.endIndex));
     const needed = rows.length - Math.max(0, rowIndex);
     if (needed <= visibleCount) return true;
     setVisibleCount(needed);
     return false;
-  }, [messages, hideThinkingBlock, visibleCount]);
+  }, [messages, hideThinkingBlock, expandThinkingByDefault, showToolCallsUnfolded, visibleCount]);
   useChatSearchHighlights({
     container: scrollContainerRef,
     query: searchQuery,
@@ -1377,6 +1393,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
               sessionId={session?.id ?? sessionIdRef.current ?? undefined}
               toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
               hideToolActivity={hideToolActivity}
+              neverFoldActivity={neverFoldActivity}
+              showToolCallsUnfolded={showToolCallsUnfolded}
               expandThinkingByDefault={expandThinkingByDefault}
               hideThinkingBlock={hideThinkingBlock}
               visibleCount={visibleCount}

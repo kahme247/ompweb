@@ -34,6 +34,10 @@ export type TranscriptRow =
 export interface PlanOptions {
   /** Mirrors omp's `hideThinkingBlock`: drop thinking blocks entirely. */
   hideThinking?: boolean;
+  /** "Expand thinking blocks by default": thinking stays visible like text instead of folding. */
+  showThinking?: boolean;
+  /** "Show tool calls outside Process details": tool call rows stay visible like text. */
+  showToolCalls?: boolean;
 }
 
 // A user message normally anchors a turn. When compaction fires mid-turn, pi
@@ -97,7 +101,12 @@ export function planTurnSegments(
       other = [];
     };
     for (const block of blocks) {
-      if (block.type === "image" || (block.type === "text" && block.text.trim().length > 0)) {
+      if (
+        block.type === "image"
+        || (block.type === "text" && block.text.trim().length > 0)
+        || (block.type === "thinking" && options.showThinking)
+        || (block.type === "toolCall" && options.showToolCalls)
+      ) {
         flushOther();
         text.push(block);
       } else if (block.type !== "text") {
