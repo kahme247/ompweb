@@ -1,5 +1,5 @@
 import { stripAnsi } from "./ansi";
-import { getDisplayableAssistantBlocks } from "./message-display";
+import { getDisplayableAssistantBlocks, isReplyBlock } from "./message-display";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, CustomMessage, ToolResultMessage } from "./types";
 
 /**
@@ -101,12 +101,7 @@ export function planTurnSegments(
       other = [];
     };
     for (const block of blocks) {
-      if (
-        block.type === "image"
-        || (block.type === "text" && block.text.trim().length > 0)
-        || (block.type === "thinking" && options.showThinking)
-        || (block.type === "toolCall" && options.showToolCalls)
-      ) {
+      if (isReplyBlock(block) || (block.type === "thinking" && options.showThinking) || (block.type === "toolCall" && options.showToolCalls)) {
         flushOther();
         text.push(block);
       } else if (block.type !== "text") {

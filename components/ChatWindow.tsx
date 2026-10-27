@@ -6,6 +6,7 @@ import { ArrowDown, ChevronDown, ChevronUp, Layers, Paperclip, Square } from "lu
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
 import { collectToolResults, isGroupAnchor, planTranscriptRows, type ActivityPiece, type TranscriptRow } from "@/lib/chat-transcript-plan";
+import { isReplyBlock } from "@/lib/message-display";
 import { resolveForkTargets } from "@/lib/chat-fork";
 import { MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
@@ -256,7 +257,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messag
   );
 }
 
-type RenderMessage = (idx: number, options?: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[]; offerFork?: boolean }) => ReactNode;
+type RenderMessage = (idx: number, options?: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[] }) => ReactNode;
 
 /** Render a folded activity run exactly as it streamed: one entry per piece, never merged across messages. */
 export function renderActivityPieces(messages: AgentMessage[], pieces: ActivityPiece[], renderMessage: RenderMessage): ReactNode[] {
@@ -352,7 +353,10 @@ const CommittedTranscript = memo(function CommittedTranscript({
     }
     if (options.showTimestamp !== undefined) showTimestamp = options.showTimestamp;
     const forkTarget = forkTargets[idx];
-    const canOfferFork = !sessionBusy && !isNew && !!forkTarget && options.offerFork !== false;
+    // Assistant rows fork from reply text or a visible error, not from each thinking/tool step:
+    // every row of a turn forks at the same prompt, so the extra buttons were only clutter.
+    const forkableRow = msg.role !== "assistant" || !!msg.errorMessage?.trim() || (Array.isArray(msg.content) && msg.content.some(isReplyBlock));
+    const canOfferFork = !sessionBusy && !isNew && !!forkTarget && forkableRow;
     const canOfferEdit = !sessionBusy && !isCompacting && !isNew && msg.role === "user" && !msg.branchSummary && !!entryIds[idx];
     const historyMutationPending = forkingEntryId !== null || editingEntryId !== null;
     const view = (
@@ -463,8 +467,6 @@ const CommittedTranscript = memo(function CommittedTranscript({
           ...(segment.last ? {} : { showTimestamp: false }),
           // Thinking can ride in a text segment; deferred text loads by source index.
           sourceBlockIndices: segment.blocks.map((block) => msg.content.indexOf(block)),
-          // Fork from reply text (or the error row), not from each unfolded thinking/tool step.
-          offerFork: segment.blocks.length === 0 || segment.blocks.some((block) => block.type === "text" || block.type === "image"),
         }));
         attached.add(segment.index);
         return;
