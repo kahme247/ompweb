@@ -126,9 +126,15 @@ export function applyDomTheme(theme: Theme): void {
   const color = ALL_THEMES.find((definition) => definition.id === theme)?.panel;
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta && color) meta.setAttribute("content", color);
+  if (!color) return;
   // An installed Android app colors its navigation bar from the manifest's
   // theme_color, read when Chrome refreshes the app; /api/manifest reads this.
-  if (color) document.cookie = `omp-theme-color=${color.slice(1)}; path=/; max-age=31536000; SameSite=Lax`;
+  document.cookie = `omp-theme-color=${color.slice(1)}; path=/; max-age=31536000; SameSite=Lax`;
+  // Chrome caches the parsed manifest per page until the link changes; a
+  // per-color URL makes it refetch. The server ignores the query.
+  const manifest = document.querySelector('link[rel="manifest"]');
+  const href = `/api/manifest?theme=${color.slice(1)}`;
+  if (manifest && manifest.getAttribute("href") !== href) manifest.setAttribute("href", href);
 }
 
 function applyTheme(preference: ThemePreference): void {

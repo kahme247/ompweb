@@ -71,6 +71,10 @@ test("browser chrome follows the selected theme and only follows OS changes in s
   meta.name = "theme-color";
   meta.content = "#000000";
   document.head.append(meta);
+  const manifest = document.createElement("link");
+  manifest.rel = "manifest";
+  manifest.href = "/api/manifest";
+  document.head.append(manifest);
   root.className = "keep-layout dark theme-nord";
   localStorage.setItem("omp-theme", "dracula");
 
@@ -83,6 +87,7 @@ test("browser chrome follows the selected theme and only follows OS changes in s
   t.after(() => {
     cleanup();
     meta.remove();
+    manifest.remove();
     for (const [attribute, value] of [["class", originalClass], ["data-theme", originalTheme]]) {
       if (value === null) root.removeAttribute(attribute);
       else root.setAttribute(attribute, value);
@@ -102,6 +107,8 @@ test("browser chrome follows the selected theme and only follows OS changes in s
     assert.deepEqual([...root.classList].sort(), ["keep-layout", ...classes].sort());
     assert.equal(meta.getAttribute("content"), color);
     assert.match(document.cookie, new RegExp(`(^|; )omp-theme-color=${color.slice(1)}(;|$)`));
+    // A new href makes Chrome drop its cached manifest and refetch the new color.
+    assert.equal(manifest.getAttribute("href"), `/api/manifest?theme=${color.slice(1)}`);
     assert.equal(localStorage.getItem("omp-theme"), preference);
   };
   const changeOS = async (dark) => {
