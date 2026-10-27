@@ -25,10 +25,12 @@ const manifest = {
 // Authentication is enforced by the existing /api/ web-password proxy guard.
 export function GET(request: Request) {
   const name = getInstallName(request.headers);
-  // Set by applyDomTheme: the installed app's Android navigation bar uses theme_color.
+  // Set by applyDomTheme. theme_color colors the installed app's system bars;
+  // background_color is its window background, which shows through the
+  // navigation bar on edge-to-edge Android (and on the splash screen).
   const themeColor = new Bun.CookieMap(request.headers.get("cookie") ?? "").get("omp-theme-color");
-  const theme_color = themeColor && /^[0-9a-f]{6}$/i.test(themeColor) ? `#${themeColor}` : manifest.theme_color;
-  return Response.json({ ...manifest, theme_color, name, short_name: name }, {
+  const color = themeColor && /^[0-9a-f]{6}$/i.test(themeColor) ? `#${themeColor}` : manifest.theme_color;
+  return Response.json({ ...manifest, theme_color: color, background_color: color, name, short_name: name }, {
     headers: {
       "Content-Type": "application/manifest+json",
       "Cache-Control": "private, no-cache, max-age=0, must-revalidate",
