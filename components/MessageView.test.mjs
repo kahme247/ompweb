@@ -983,3 +983,36 @@ test("user-message Edit only runs after confirmation, and not once blocked", asy
   assert.equal(view.queryByRole("button", { name: "Edit" }), null, "confirming closes the dialog");
   view.unmount();
 });
+
+test("an open confirmation closes when the row starts showing another message", async (t) => {
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+  t.after(() => {
+    if (originalMatchMedia) window.matchMedia = originalMatchMedia;
+    else delete window.matchMedia;
+  });
+  const calls = [];
+  const row = (entryId, content) => React.createElement(MessageView, {
+    message: { role: "user", content },
+    entryId,
+    onEdit: async (id, text) => { calls.push(["edit", id, text]); return true; },
+    onFork: (id) => calls.push(["fork", id]),
+  });
+  // ChatWindow keys rows by index, so a history swap reuses this component for another entry.
+  const view = render(row("user-1", "Selected."));
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "Jump back here and edit this message" })); });
+  view.rerender(row("user-2", "Someone else."));
+  assert.equal(view.queryByRole("button", { name: "Edit" }), null, "the Edit dialog closes");
+
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: FORK_LABEL })); });
+  view.rerender(row("user-3", "Another one."));
+  assert.equal(view.queryByRole("button", { name: "Fork" }), null, "the Fork dialog closes");
+
+  view.rerender(row("user-1", "Selected."));
+  assert.equal(view.queryByRole("button", { name: "Edit" }), null, "returning to the entry does not reopen its Edit dialog");
+  view.rerender(row("user-2", "Someone else."));
+  view.rerender(row("user-3", "Another one."));
+  assert.equal(view.queryByRole("button", { name: "Fork" }), null, "returning to the entry does not reopen its Fork dialog");
+  assert.deepEqual(calls, []);
+  view.unmount();
+});

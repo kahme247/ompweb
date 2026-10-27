@@ -294,22 +294,25 @@ function ForkSessionButton({ entryId, editPrompt, onFork, forking, forkDisabled 
   forkDisabled?: boolean;
 }) {
   const { t } = useI18n();
-  const [confirming, setConfirming] = useState(false);
+  // Rows are keyed by index, so bind the dialog to the entry it was opened for.
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  if (confirmingId !== null && confirmingId !== entryId) setConfirmingId(null);
+  const confirming = confirmingId === entryId;
   const blocked = forkDisabled || forking;
   return (
     <>
     <ConfirmDialog
       open={confirming}
-      onOpenChange={setConfirming}
+      onOpenChange={(open) => { setConfirmingId(open ? entryId : null); }}
       title={t("messageView.forkConfirmTitle")}
       description={t(editPrompt ? "messageView.forkConfirmEditBody" : "messageView.forkConfirmBody")}
       confirmLabel={t("messageView.newSession")}
       cancelLabel={t("chatInput.cancel")}
-      onConfirm={() => { setConfirming(false); if (!blocked) onFork(entryId, editPrompt); }}
+      onConfirm={() => { setConfirmingId(null); if (!blocked) onFork(entryId, editPrompt); }}
     />
     <Tooltip content={forking ? t("messageView.creatingSession") : t("messageView.newSessionTitle")}>
       <button
-        onClick={() => { setConfirming(true); }}
+        onClick={() => { setConfirmingId(entryId); }}
         disabled={blocked}
         aria-label={forking ? t("messageView.creatingSession") : t("messageView.newSessionTitle")}
         style={{
@@ -349,7 +352,10 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
   const bodyRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(false);
   const [hasOverflow, setHasOverflow] = useState(false);
-  const [confirmingEdit, setConfirmingEdit] = useState(false);
+  // Rows are keyed by index, so bind the dialog to the entry it was opened for.
+  const [confirmingEditId, setConfirmingEditId] = useState<string | null>(null);
+  if (confirmingEditId !== null && confirmingEditId !== entryId) setConfirmingEditId(null);
+  const confirmingEdit = !!entryId && confirmingEditId === entryId;
 
   const content =
     typeof message.content === "string"
@@ -464,16 +470,16 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
               {canEdit && <>
               <ConfirmDialog
                 open={confirmingEdit}
-                onOpenChange={setConfirmingEdit}
+                onOpenChange={(open) => { setConfirmingEditId(open ? entryId! : null); }}
                 title={t("messageView.editConfirmTitle")}
                 description={t("messageView.editConfirmBody")}
                 confirmLabel={t("messageView.editFromHere")}
                 cancelLabel={t("chatInput.cancel")}
-                onConfirm={() => { setConfirmingEdit(false); if (!editBlocked) void onEdit!(entryId!, content); }}
+                onConfirm={() => { setConfirmingEditId(null); if (!editBlocked) void onEdit!(entryId!, content); }}
               />
               <Tooltip content={t("messageView.editFromHereTitle")}>
                 <button
-                  onClick={() => { setConfirmingEdit(true); }}
+                  onClick={() => { setConfirmingEditId(entryId!); }}
                   disabled={editBlocked}
                   aria-busy={editing || undefined}
                   aria-label={t("messageView.editFromHereTitle")}
