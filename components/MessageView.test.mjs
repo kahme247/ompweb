@@ -883,7 +883,7 @@ test("agent replies offer copy and fork at their resolved target", async (t) => 
     else delete window.matchMedia;
   });
   const forked = [];
-  const view = render(React.createElement(MessageView, {
+  const props = {
     message: { role: "assistant", model: "test", provider: "test", content: [{ type: "text", text: "Done." }] },
     entryId: "assistant-1",
     // Resolved by resolveForkTargets: the newest reply falls back to its own
@@ -891,7 +891,8 @@ test("agent replies offer copy and fork at their resolved target", async (t) => 
     forkEntryId: "user-1",
     forkEditsPrompt: true,
     onFork: (entryId, editPrompt) => forked.push([entryId, editPrompt]),
-  }));
+  };
+  const view = render(React.createElement(MessageView, props));
   assert.ok(view.getByRole("button", { name: "Copy message" }));
   await act(async () => { fireEvent.click(view.getByRole("button", { name: FORK_LABEL })); });
   assert.deepEqual(forked, [], "the fork button only asks for confirmation");
@@ -900,6 +901,11 @@ test("agent replies offer copy and fork at their resolved target", async (t) => 
   await act(async () => { fireEvent.click(view.getByRole("button", { name: FORK_LABEL })); });
   await act(async () => { fireEvent.click(view.getByRole("button", { name: "Fork" })); });
   assert.deepEqual(forked, [["user-1", true]]);
+
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: FORK_LABEL })); });
+  view.rerender(React.createElement(MessageView, { ...props, forkDisabled: true }));
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "Fork" })); });
+  assert.deepEqual(forked, [["user-1", true]], "a row blocked while the dialog was open does not fork");
   view.unmount();
 });
 
@@ -1013,6 +1019,12 @@ test("an open confirmation closes when the row starts showing another message", 
   view.rerender(row("user-2", "Someone else."));
   view.rerender(row("user-3", "Another one."));
   assert.equal(view.queryByRole("button", { name: "Fork" }), null, "returning to the entry does not reopen its Fork dialog");
+
+  // Edit can drop out (onEdit withdrawn) while its dialog is open; it must not come back by itself.
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "Jump back here and edit this message" })); });
+  view.rerender(React.createElement(MessageView, { message: { role: "user", content: "Another one." }, entryId: "user-3" }));
+  view.rerender(row("user-3", "Another one."));
+  assert.equal(view.queryByRole("button", { name: "Edit" }), null, "Edit returning does not reopen its dialog");
   assert.deepEqual(calls, []);
   view.unmount();
 });

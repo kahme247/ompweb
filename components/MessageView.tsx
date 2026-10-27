@@ -354,8 +354,6 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
   const [hasOverflow, setHasOverflow] = useState(false);
   // Rows are keyed by index, so bind the dialog to the entry it was opened for.
   const [confirmingEditId, setConfirmingEditId] = useState<string | null>(null);
-  if (confirmingEditId !== null && confirmingEditId !== entryId) setConfirmingEditId(null);
-  const confirmingEdit = !!entryId && confirmingEditId === entryId;
 
   const content =
     typeof message.content === "string"
@@ -387,6 +385,8 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
   const time = formatTime(message.timestamp, locale);
   const canFork = !!entryId && !!onFork;
   const canEdit = !!entryId && !!onEdit && !message.branchSummary;
+  if (confirmingEditId !== null && (!canEdit || confirmingEditId !== entryId)) setConfirmingEditId(null);
+  const confirmingEdit = canEdit && confirmingEditId === entryId;
   const editBlocked = editing || editDisabled || forking || forkDisabled;
 
   return (
