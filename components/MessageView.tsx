@@ -349,6 +349,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
   const bodyRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(false);
   const [hasOverflow, setHasOverflow] = useState(false);
+  const [confirmingEdit, setConfirmingEdit] = useState(false);
 
   const content =
     typeof message.content === "string"
@@ -460,9 +461,19 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
                 display: "flex", flexWrap: "wrap", justifyContent: "flex-end", gap: 3,
               }}
             >
-              {canEdit && <Tooltip content={t("messageView.editFromHereTitle")}>
+              {canEdit && <>
+              <ConfirmDialog
+                open={confirmingEdit}
+                onOpenChange={setConfirmingEdit}
+                title={t("messageView.editConfirmTitle")}
+                description={t("messageView.editConfirmBody")}
+                confirmLabel={t("messageView.editFromHere")}
+                cancelLabel={t("chatInput.cancel")}
+                onConfirm={() => { setConfirmingEdit(false); if (!editBlocked) void onEdit!(entryId!, content); }}
+              />
+              <Tooltip content={t("messageView.editFromHereTitle")}>
                 <button
-                  onClick={() => { void onEdit!(entryId!, content); }}
+                  onClick={() => { setConfirmingEdit(true); }}
                   disabled={editBlocked}
                   aria-busy={editing || undefined}
                   aria-label={t("messageView.editFromHereTitle")}
@@ -484,7 +495,8 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
                   <CornerUpLeft size={11} strokeWidth={1.8} />
                   {t("messageView.editFromHere")}
                 </button>
-              </Tooltip>}
+              </Tooltip>
+              </>}
               {canFork && <ForkSessionButton entryId={entryId!} editPrompt onFork={onFork!} forking={forking} forkDisabled={forkDisabled || editing || editDisabled} />}
             </div>
           )}

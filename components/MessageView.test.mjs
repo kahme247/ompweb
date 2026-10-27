@@ -952,3 +952,34 @@ test("user messages fork at their own entry and edit the prompt", async (t) => {
   assert.deepEqual(forked, [["user-7", true]]);
   view.unmount();
 });
+
+test("user-message Edit only runs after confirmation, and not once blocked", async (t) => {
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+  t.after(() => {
+    if (originalMatchMedia) window.matchMedia = originalMatchMedia;
+    else delete window.matchMedia;
+  });
+  const edited = [];
+  const props = {
+    message: { role: "user", content: "Rewind to here." },
+    entryId: "user-9",
+    onEdit: async (entryId, content) => { edited.push([entryId, content]); return true; },
+  };
+  const view = render(React.createElement(MessageView, props));
+  const editButton = view.getByRole("button", { name: "Jump back here and edit this message" });
+  await act(async () => { fireEvent.click(editButton); });
+  assert.deepEqual(edited, [], "the Edit button only asks for confirmation");
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "Cancel" })); });
+  assert.deepEqual(edited, []);
+  await act(async () => { fireEvent.click(editButton); });
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "Edit" })); });
+  assert.deepEqual(edited, [["user-9", "Rewind to here."]]);
+
+  await act(async () => { fireEvent.click(editButton); });
+  view.rerender(React.createElement(MessageView, { ...props, editDisabled: true }));
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "Edit" })); });
+  assert.deepEqual(edited, [["user-9", "Rewind to here."]], "a row blocked while the dialog was open does not edit");
+  assert.equal(view.queryByRole("button", { name: "Edit" }), null, "confirming closes the dialog");
+  view.unmount();
+});
