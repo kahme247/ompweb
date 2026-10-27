@@ -1,9 +1,10 @@
 import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test, { afterEach } from "node:test";
 const { act, cleanup, renderHook } = await import("@testing-library/react/pure.js");
 
-const { nextThemePreference, resolveTheme, isDarkTheme, LIGHT_THEMES, DARK_THEMES, useTheme } = await import("./useTheme.ts");
+const { nextThemePreference, resolveTheme, isDarkTheme, LIGHT_THEMES, DARK_THEMES, ALL_THEMES, useTheme } = await import("./useTheme.ts");
 
 afterEach(cleanup);
 
@@ -46,6 +47,18 @@ test("nextThemePreference toggles custom dark themes to light and custom light t
   assert.equal(nextThemePreference("tokyo-night"), "light");
   assert.equal(nextThemePreference("catppuccin-latte"), "dark");
   assert.equal(nextThemePreference("one-light"), "dark");
+});
+
+test("each theme's browser chrome color is its CSS --bg-panel, the top bar's color", async () => {
+  // The pre-paint script reads the CSS and the hook reads the table: a mismatch
+  // flickers the status bar after hydration and sends a stale manifest color.
+  const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+  for (const { id, panel } of ALL_THEMES) {
+    const selector = id === "light" ? ":root" : id === "omp" ? "html.omp" : `html.theme-${id}`;
+    // The first `:root` block holds the self-hosted font variables; take the one that sets --bg-panel.
+    const match = css.match(new RegExp(`(^|, )${selector.replace(".", "\\.")} \\{[^}]*--bg-panel:\\s*(#[0-9A-Fa-f]{6})`, "m"));
+    assert.equal(match?.[2].toUpperCase(), panel, id);
+  }
 });
 
 test("browser chrome follows the selected theme and only follows OS changes in system mode", async (t) => {

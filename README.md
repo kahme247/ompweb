@@ -42,7 +42,10 @@ The single manifest link requests `/api/manifest` with credentials; that endpoin
 uses the existing web-password guard and private, revalidating caching. Its
 192×192 and 512×512 PNG icons are embedded from the packaged assets because
 Android's native installer fetches ordinary icon URLs without authentication
-cookies. The app still launches at `/` with scope `/`.
+cookies. The app still launches at `/` with scope `/`. Its `theme_color` comes
+from the `omp-theme-color` cookie the browser sets for the selected theme, so
+Chrome 153 and later color an installed app's Android navigation bar to match
+the top bar after Chrome next checks the app for manifest updates.
 
 Keep Cloudflare Access and application authentication enabled; no public
 manifest exception or Access bypass rule is needed. This does not add offline
