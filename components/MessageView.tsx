@@ -302,7 +302,7 @@ function ForkSessionButton({ entryId, editPrompt, onFork, forking, forkDisabled 
       open={confirming}
       onOpenChange={setConfirming}
       title={t("messageView.forkConfirmTitle")}
-      description={t("messageView.forkConfirmBody")}
+      description={t(editPrompt ? "messageView.forkConfirmEditBody" : "messageView.forkConfirmBody")}
       confirmLabel={t("messageView.newSession")}
       cancelLabel={t("chatInput.cancel")}
       onConfirm={() => { setConfirming(false); if (!blocked) onFork(entryId, editPrompt); }}

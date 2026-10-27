@@ -843,6 +843,7 @@
   "messageView.creatingSession": "セッションを作成中...",
   "messageView.forkConfirmTitle": "新しいセッションをフォークしますか？",
   "messageView.forkConfirmBody": "この時点までの会話を含む新しいセッションを作成します。現在のセッションは変更されません。",
+  "messageView.forkConfirmEditBody": "このターンのプロンプトより前の会話を含む新しいセッションを作成し、そのプロンプトを編集・再送信できるよう入力欄に入れます。現在のセッションは変更されません。",
   "messageView.diffAfter": "変更後",
   "messageView.diffBefore": "変更前",
   "messageView.downloadFullOutput": "完全な出力をダウンロード",

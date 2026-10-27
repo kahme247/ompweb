@@ -883,6 +883,7 @@
   "messageView.creatingSession": "Creating session...",
   "messageView.forkConfirmTitle": "Fork a new session?",
   "messageView.forkConfirmBody": "This creates a new session holding the conversation up to this point. The current session stays unchanged.",
+  "messageView.forkConfirmEditBody": "This creates a new session holding the conversation before this turn's prompt, and puts that prompt in the composer to edit and resend. The current session stays unchanged.",
   "messageView.diffAfter": "After",
   "messageView.diffBefore": "Before",
   "messageView.downloadFullOutput": "download full output",
