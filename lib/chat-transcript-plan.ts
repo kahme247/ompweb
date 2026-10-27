@@ -258,7 +258,10 @@ export function planTranscriptRows(messages: AgentMessage[], options: PlanOption
       rows.push({ kind: "group", userIndex: userIdx, endIndex: endIdx, segments });
     } else {
       // Nothing to fold: render the anchor and the rest as standalone messages.
-      for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) rows.push({ kind: "message", index: renderIdx });
+      // Tool results render under their tool call, as in the fold, so they get no row.
+      for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
+        if (messages[renderIdx].role !== "toolResult") rows.push({ kind: "message", index: renderIdx });
+      }
     }
     idx = endIdx;
   }
