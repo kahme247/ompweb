@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import "../tests/setup-dom.mjs";
 import test from "node:test";
 
-const { renderActivityPieces } = await import("./ChatWindow.tsx");
+const { renderActivityPieces } = await import("./ChatWindow-transcript-group-row.tsx");
 
 const call = (id, name = "bash") => ({ type: "toolCall", toolCallId: id, toolName: name, input: { command: id } });
 const assistant = (content) => ({ role: "assistant", provider: "p", model: "m", content });
