@@ -4558,11 +4558,11 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
   border-radius: var(--radius-control);
   background: var(--bg-panel);
   color: var(--text);
-  box-shadow: var(--shadow-pop);
+  /* Shadow only while shown: parked above the viewport, its blur spilled onto the top bar. */
   transform: translateY(-150%);
   transition: transform var(--dur-fast) var(--ease-out-warm);
 }
-.skip-link:focus { transform: translateY(0); }
+.skip-link:focus { transform: translateY(0); box-shadow: var(--shadow-pop); }
 
 /* Touch target density options (Settings -> Touch Targets). */
 html[data-touch-targets="accessible"] :is(
