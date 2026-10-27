@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { manifestHref, THEME_COLOR_COOKIE } from "@/lib/manifest-theme";
 
 export type LightTheme = "light" | "one-light" | "catppuccin-latte" | "rose-pine-dawn";
 export type DarkTheme =
@@ -127,13 +128,12 @@ export function applyDomTheme(theme: Theme): void {
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta && color) meta.setAttribute("content", color);
   if (!color) return;
-  // An installed Android app colors its navigation bar from the manifest's
-  // theme_color, read when Chrome refreshes the app; /api/manifest reads this.
-  document.cookie = `omp-theme-color=${color.slice(1)}; path=/; max-age=31536000; SameSite=Lax`;
-  // Chrome caches the parsed manifest per page until the link changes; a
-  // per-color URL makes it refetch. The server ignores the query.
+  // The installed app's system bars use the manifest's color (lib/manifest-theme.ts):
+  // the cookie lets the server render it into the link on the next load, and a
+  // new href makes Chrome drop the manifest it cached for this page.
+  document.cookie = `${THEME_COLOR_COOKIE}=${color.slice(1)}; path=/; max-age=31536000; SameSite=Lax`;
   const manifest = document.querySelector('link[rel="manifest"]');
-  const href = `/api/manifest?theme=${color.slice(1)}`;
+  const href = manifestHref(color.slice(1));
   if (manifest && manifest.getAttribute("href") !== href) manifest.setAttribute("href", href);
 }
 
