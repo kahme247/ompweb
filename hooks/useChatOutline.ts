@@ -157,13 +157,21 @@ export function useChatOutline({
       const refEl = messageRefs.current?.[node.refIndex];
       if (refEl && refEl.isConnected) targetEl = refEl;
     }
+    if (!targetEl && onEnsureVisible) {
+      onEnsureVisible(node.messageIndex);
+      return;
+    }
     if (!targetEl && node.text) {
       const cards = scrollEl.querySelectorAll(".chat-message-card");
       const sample = node.text.slice(0, 20);
       for (const card of Array.from(cards)) {
         if (card.textContent?.includes(sample)) {
-          targetEl = (card.closest("[data-message-index]") || card.parentElement || card) as HTMLDivElement;
-          break;
+          const candidate = (card.closest("[data-message-index]") || card.parentElement || card) as HTMLDivElement;
+          const candidateIdx = candidate.getAttribute("data-message-index");
+          if (candidateIdx === null || candidateIdx === String(node.messageIndex)) {
+            targetEl = candidate;
+            break;
+          }
         }
       }
     }

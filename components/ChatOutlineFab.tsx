@@ -1,9 +1,10 @@
 "use client";
 
-import { memo, useEffect, useRef, useState, useCallback, type RefObject } from "react";
+import { memo, useEffect, useRef, useState, type RefObject } from "react";
 import { ListTree, X } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
-import { useChatOutline, type NavNode } from "@/hooks/useChatOutline";
+import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
+import { useChatOutline } from "@/hooks/useChatOutline";
 import type { AgentMessage } from "@/lib/types";
 
 interface Props {
@@ -24,6 +25,7 @@ export const ChatOutlineFab = memo(function ChatOutlineFab({
   onEnsureVisible,
 }: Props) {
   const { t } = useI18n();
+  const reducedMotion = usePrefersReducedMotion();
   const [open, setOpen] = useState(false);
   const popupRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -50,7 +52,7 @@ export const ChatOutlineFab = memo(function ChatOutlineFab({
       }
     };
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
+      if (e.key === "Escape" && !e.isComposing && e.keyCode !== 229) {
         setOpen(false);
         buttonRef.current?.focus();
       }
@@ -70,9 +72,9 @@ export const ChatOutlineFab = memo(function ChatOutlineFab({
   useEffect(() => {
     if (open && popupRef.current) {
       const activeEl = popupRef.current.querySelector(`[data-outline-index="${activeIndex}"]`) as HTMLElement | null;
-      activeEl?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      activeEl?.scrollIntoView({ block: "nearest", behavior: reducedMotion ? "auto" : "smooth" });
     }
-  }, [open, activeIndex]);
+  }, [open, activeIndex, reducedMotion]);
 
   // If no turns exist yet, do not render FAB
   if (nodes.length === 0) {
@@ -175,7 +177,10 @@ export const ChatOutlineFab = memo(function ChatOutlineFab({
             </div>
             <button
               type="button"
-              onClick={() => setOpen(false)}
+              onClick={() => {
+                setOpen(false);
+                buttonRef.current?.focus();
+              }}
               aria-label={t("chatOutline.close") || "Close outline"}
               style={{
                 display: "flex",
@@ -214,7 +219,7 @@ export const ChatOutlineFab = memo(function ChatOutlineFab({
                   data-outline-index={i}
                   role="button"
                   tabIndex={0}
-                  aria-label={`Jump to: ${node.text}`}
+                  aria-label={`${t("chatOutline.jumpTo") || "Jump to:"} ${node.text}`}
                   onClick={() => {
                     scrollToNode(node);
                     setOpen(false);

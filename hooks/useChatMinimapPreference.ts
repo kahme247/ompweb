@@ -118,7 +118,7 @@ export function useChatMinimapPreference(): {
       }
     };
     const handleStorage = (e: StorageEvent) => {
-      if (e.key === STORAGE_KEY_DESKTOP || e.key === STORAGE_KEY_MOBILE_FAB) {
+      if (e.key === null || e.key === STORAGE_KEY_DESKTOP || e.key === STORAGE_KEY_MOBILE_FAB) {
         notifyListeners();
       }
     };
