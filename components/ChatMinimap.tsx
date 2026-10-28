@@ -128,7 +128,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
 
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
-  }, [nodes]);
+  }, [nodes, setActiveIndex]);
 
   // Interrupted drag cleanup on unmount
   useEffect(() => {

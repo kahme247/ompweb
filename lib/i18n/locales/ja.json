@@ -1317,6 +1317,7 @@
   "chatOutline.title": "アウトライン",
   "chatOutline.toggleTitle": "会話のアウトライン",
   "chatOutline.close": "アウトラインを閉じる",
+  "chatOutline.jumpTo": "ここへ移動:",
   "chatOutline.empty": "アウトライン項目がまだありません",
   "settingsConfig.uiScale": "インターフェース倍率",
   "settingsConfig.uiScaleDesc": "サイドバー、ダイアログ、ツールバーなど全体のUI拡大率と表示密度を調整します。",

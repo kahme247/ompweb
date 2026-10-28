@@ -839,7 +839,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       const containerRect = container.getBoundingClientRect();
       const elRect = targetEl.getBoundingClientRect();
       const targetScroll = Math.max(0, container.scrollTop + (elRect.top - containerRect.top) - 16);
-      container.scrollTo({ top: targetScroll, behavior: "smooth" });
+      const reduceMotion = typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      container.scrollTo({ top: targetScroll, behavior: reduceMotion ? "auto" : "smooth" });
     }
   }, [transcriptRows, visibleCount, scrollContainerRef]);
 
@@ -856,10 +857,11 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
         const containerRect = container.getBoundingClientRect();
         const elRect = targetEl.getBoundingClientRect();
         const targetScroll = Math.max(0, container.scrollTop + (elRect.top - containerRect.top) - 16);
-        container.scrollTo({ top: targetScroll, behavior: "smooth" });
+        const reduceMotion = typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        container.scrollTo({ top: targetScroll, behavior: reduceMotion ? "auto" : "smooth" });
       }
     });
-  }, [visibleCount]);
+  }, [visibleCount, scrollContainerRef]);
 
   const generationSpeedKey = generationSpeed
     ? `${generationSpeed.current ?? "null"}|${generationSpeed.average ?? "null"}`

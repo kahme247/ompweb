@@ -1317,6 +1317,7 @@
   "chatOutline.title": "大纲",
   "chatOutline.toggleTitle": "会话大纲",
   "chatOutline.close": "关闭大纲",
+  "chatOutline.jumpTo": "跳转到:",
   "chatOutline.empty": "暂无大纲条目",
   "settingsConfig.uiScale": "界面缩放",
   "settingsConfig.uiScaleDesc": "调整侧边栏、对话框与工具栏等整体界面的缩放比例与显示密度。",
