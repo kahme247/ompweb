@@ -21,6 +21,7 @@ import { useUiScale, type UiScalePreference } from "@/hooks/useUiScale";
 import { useTouchTargets, type TouchTargetsPreference } from "@/hooks/useTouchTargets";
 import { useRecentRunsLimit, type RecentRunsLimitPreset } from "@/hooks/useRecentRunsLimit";
 import { useSpeechSynthesis } from "@/hooks/useSpeechSynthesis";
+import { useChatMinimapPreference, type DesktopMinimapMode } from "@/hooks/useChatMinimapPreference";
 import { useNotificationPrefs } from "@/hooks/useNotifications";
 import { NOTIFICATION_TYPES, renderNotification, type NotificationType } from "@/lib/notification-events";
 import {
@@ -171,6 +172,8 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { id: "touch-targets", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.touchTargets", descKey: "settingsConfig.touchTargetsDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Touch Targets", fallbackDesc: "Adjust interactive target sizes for buttons and toolbar controls.", scope: "UI" },
   { id: "message-during-active-run", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.messageDuringActiveRun", descKey: "settingsConfig.messageDuringActiveRunDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Message during active run", fallbackDesc: "What composer does on submit while agent runs. Steer interrupts; Queue follow-up delivers after finish.", scope: "UI" },
   { id: "word-completion", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.wordCompletion", descKey: "settingsConfig.wordCompletionDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Word completion", fallbackDesc: "Ghost text from omp's word prediction; Tab or → accepts. Auto enables it only with a mouse or trackpad (not on touch keyboards).", scope: "UI" },
+  { id: "chat-outline-desktop", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.chatOutlineDesktop", descKey: "settingsConfig.chatOutlineDesktopDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Desktop Chat Outline", fallbackDesc: "Choose how the conversation outline appears on desktop displays.", scope: "UI" },
+  { id: "chat-outline-mobile", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.chatOutlineMobile", descKey: "settingsConfig.chatOutlineMobileDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Mobile Chat Outline Button", fallbackDesc: "Show a floating action button on mobile to view the prompt outline and jump between turns.", scope: "UI" },
   // Tool Safety & Approvals
   { id: "approval-mode", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.approvalMode", descKey: "settingsConfig.approvalModeDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Approval Mode", fallbackDesc: "Choose when OMP asks before tool calls.", scope: "Native OMP" },
   { id: "bash-override", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.bashOverride", descKey: "settingsConfig.bashOverrideDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Bash Override", fallbackDesc: "Override default approval policy specifically for terminal commands.", scope: "Native OMP" },
@@ -788,6 +791,12 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
     selectedVoiceURI: ttsVoiceURI,
     setSelectedVoiceURI: setTtsVoiceURI,
   } = useSpeechSynthesis();
+  const {
+    desktopMode: minimapDesktopMode,
+    mobileFab: minimapMobileFab,
+    setDesktopMode: setMinimapDesktopMode,
+    setMobileFab: setMinimapMobileFab,
+  } = useChatMinimapPreference();
   const [searchQuery, setSearchQuery] = useState("");
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const [submitBehavior, setSubmitBehavior] = useState<SubmitDuringRunBehavior>(() => getSubmitDuringRunBehavior());
@@ -1333,6 +1342,20 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                         />
                       )}
                     </div>
+                  </NativeSetting>
+                  <NativeSetting searchId="chat-outline-desktop" label={t("settingsConfig.chatOutlineDesktop")} description={t("settingsConfig.chatOutlineDesktopDesc")} scope="UI">
+                    <select
+                      style={nativeSelectStyle}
+                      value={minimapDesktopMode}
+                      onChange={(e) => setMinimapDesktopMode(e.target.value as DesktopMinimapMode)}
+                    >
+                      <option value="rail" style={nativeOptionStyle}>{t("settingsConfig.chatOutlineDesktopRail")}</option>
+                      <option value="fab" style={nativeOptionStyle}>{t("settingsConfig.chatOutlineDesktopFab")}</option>
+                      <option value="off" style={nativeOptionStyle}>{t("settingsConfig.chatOutlineDesktopOff")}</option>
+                    </select>
+                  </NativeSetting>
+                  <NativeSetting searchId="chat-outline-mobile" label={t("settingsConfig.chatOutlineMobile")} description={t("settingsConfig.chatOutlineMobileDesc")} scope="UI">
+                    <ToggleSwitch checked={minimapMobileFab} onChange={setMinimapMobileFab} />
                   </NativeSetting>
                   <NativeSetting searchId="ui-scale" label={t("settingsConfig.uiScale")} description={t("settingsConfig.uiScaleDesc")} scope="UI">
                     <select
