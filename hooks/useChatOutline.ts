@@ -89,7 +89,7 @@ export function useChatOutline({
   messages: AgentMessage[];
   scrollContainer: RefObject<HTMLDivElement | null>;
   messageRefs: RefObject<(HTMLDivElement | null)[]>;
-  onEnsureVisible?: (messageIndex: number) => void;
+  onEnsureVisible?: (messageIndex: number, smooth?: boolean) => void;
 }) {
   const [activeIndex, setActiveIndex] = useState(0);
   const scrollRafRef = useRef<number | null>(null);
@@ -158,7 +158,7 @@ export function useChatOutline({
       if (refEl && refEl.isConnected) targetEl = refEl;
     }
     if (!targetEl && onEnsureVisible) {
-      onEnsureVisible(node.messageIndex);
+      onEnsureVisible(node.messageIndex, smooth);
       return;
     }
     if (!targetEl && node.text) {
@@ -183,7 +183,7 @@ export function useChatOutline({
       const targetScroll = Math.max(0, scrollEl.scrollTop + (elRect.top - containerRect.top) - 16);
       scrollEl.scrollTo({ top: targetScroll, behavior });
     } else if (onEnsureVisible) {
-      onEnsureVisible(node.messageIndex);
+      onEnsureVisible(node.messageIndex, smooth);
     } else {
       const maxScroll = scrollEl.scrollHeight - scrollEl.clientHeight;
       if (maxScroll > 0) {

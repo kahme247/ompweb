@@ -13,7 +13,7 @@ interface Props {
   messageRefs: RefObject<(HTMLDivElement | null)[]>;
   nearBottom: boolean;
   isMobile: boolean;
-  onEnsureVisible?: (messageIndex: number) => void;
+  onEnsureVisible?: (messageIndex: number, smooth?: boolean) => void;
 }
 
 export const ChatOutlineFab = memo(function ChatOutlineFab({
