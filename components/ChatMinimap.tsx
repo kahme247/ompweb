@@ -11,7 +11,7 @@ interface Props {
   messages: AgentMessage[];
   scrollContainer: RefObject<HTMLDivElement | null>;
   messageRefs: RefObject<(HTMLDivElement | null)[]>;
-  onEnsureVisible?: (messageIndex: number) => void;
+  onEnsureVisible?: (messageIndex: number, smooth?: boolean) => void;
 }
 
 /**

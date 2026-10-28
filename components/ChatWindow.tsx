@@ -814,9 +814,9 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     [messages, hideThinkingBlock]
   );
 
-  const pendingScrollTargetRef = useRef<number | null>(null);
+  const pendingScrollTargetRef = useRef<{ index: number; smooth: boolean } | null>(null);
 
-  const handleEnsureMessageVisible = useCallback((messageIndex: number) => {
+  const handleEnsureMessageVisible = useCallback((messageIndex: number, smooth = true) => {
     const targetRowIdx = transcriptRows.findIndex((row) =>
       row.kind === "message"
         ? row.index === messageIndex
@@ -826,7 +826,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     if (targetRowIdx >= 0) {
       const neededFromEnd = transcriptRows.length - targetRowIdx + 15;
       if (neededFromEnd > visibleCount) {
-        pendingScrollTargetRef.current = messageIndex;
+        pendingScrollTargetRef.current = { index: messageIndex, smooth };
         setVisibleCount(neededFromEnd);
         return;
       }
@@ -840,13 +840,14 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       const elRect = targetEl.getBoundingClientRect();
       const targetScroll = Math.max(0, container.scrollTop + (elRect.top - containerRect.top) - 16);
       const reduceMotion = typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      container.scrollTo({ top: targetScroll, behavior: reduceMotion ? "auto" : "smooth" });
+      container.scrollTo({ top: targetScroll, behavior: smooth && !reduceMotion ? "smooth" : "auto" });
     }
   }, [transcriptRows, visibleCount, scrollContainerRef]);
 
   useEffect(() => {
-    if (pendingScrollTargetRef.current === null) return;
-    const targetIdx = pendingScrollTargetRef.current;
+    const pending = pendingScrollTargetRef.current;
+    if (pending === null) return;
+    const { index: targetIdx, smooth } = pending;
     const container = scrollContainerRef.current;
     if (!container) return;
 
@@ -858,7 +859,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
         const elRect = targetEl.getBoundingClientRect();
         const targetScroll = Math.max(0, container.scrollTop + (elRect.top - containerRect.top) - 16);
         const reduceMotion = typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-        container.scrollTo({ top: targetScroll, behavior: reduceMotion ? "auto" : "smooth" });
+        container.scrollTo({ top: targetScroll, behavior: smooth && !reduceMotion ? "smooth" : "auto" });
       }
     });
   }, [visibleCount, scrollContainerRef]);
