@@ -238,6 +238,9 @@ interface Props {
   onMinimize?: () => void;
   /** Active status label attached to the composer's top edge (e.g. "Waiting for model..."). */
   statusText?: string | null;
+  /** Live tokens-per-second for the status row. Rendered outside the live
+   * region (aria-hidden) so it is visible but never announced per tick. */
+  statusSpeed?: string | null;
   /** Open Settings → API Keys & Providers from the model picker footer. */
   onOpenProviders?: () => void;
 }
@@ -359,6 +362,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   onAdvisorChange,
   onMinimize,
   statusText,
+  statusSpeed,
   onOpenProviders,
 }: Props, ref) {
   const isMobile = useIsMobile();
@@ -2788,7 +2792,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           </div>
         )}
         {/* Live agent status bar — attached to composer's top edge */}
-        {statusText && (
+        {statusText || statusSpeed ? (
           <div
             role="status"
             aria-live="polite"
@@ -2809,9 +2813,22 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               aria-hidden
               className="live-status-dot live-pulse inline-block h-2 w-2 shrink-0 rounded-full bg-accent"
             />
-            <span>{statusText}</span>
+            {statusText && <span>{statusText}</span>}
+            {statusSpeed && (
+              <span
+                aria-hidden="true"
+                style={{
+                  color: "var(--text-dim)",
+                  fontFamily: "var(--font-mono)",
+                  fontVariantNumeric: "tabular-nums",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {statusText ? " · " : ""}{statusSpeed}
+              </span>
+            )}
           </div>
-        )}
+        ) : null}
           <div
             className="chat-input-shell"
             style={{
@@ -2819,7 +2836,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               flexDirection: "column",
               background: "var(--bg)",
               border: `1px solid ${bashMode ? "var(--tool-bg)" : "color-mix(in srgb, var(--border) 70%, transparent)"}`,
-              borderRadius: (queuedCount > 0 || Boolean(statusText)) ? "0 0 var(--radius-card) var(--radius-card)" : "var(--radius-card)",
+              borderRadius: (queuedCount > 0 || Boolean(statusText) || Boolean(statusSpeed)) ? "0 0 var(--radius-card) var(--radius-card)" : "var(--radius-card)",
               padding: "12px 12px 10px",
               boxShadow: "var(--shadow-card)",
             } as React.CSSProperties}

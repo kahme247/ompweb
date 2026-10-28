@@ -424,3 +424,30 @@ test("renders both queued prompts and attached status bar together", () => {
   assert.match(html, /Waiting for model\.\.\./);
   assert.match(html, /live-status-dot/);
 });
+
+test("renders the live rate next to the status text and hides it from the live region", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ChatInput, {
+      async onSend() { return { status: "accepted" }; },
+      onAbort() {},
+      isStreaming: true,
+      statusText: "Thinking...",
+      statusSpeed: "42.1 t/s",
+    }),
+  );
+
+  assert.match(html, /Thinking\.\.\./);
+  assert.match(html, /42\.1 t\/s/);
+
+  const dom = new JSDOM(html);
+  try {
+    const status = dom.window.document.querySelector('[role="status"][aria-live="polite"]');
+    assert.ok(status, "status row is the live region owner");
+    const speed = [...status.querySelectorAll('[aria-hidden="true"]')]
+      .find((node) => node.textContent.includes("42.1 t/s"));
+    assert.ok(speed, "speed span carries aria-hidden inside the live region");
+    assert.equal(speed.textContent, " · 42.1 t/s");
+  } finally {
+    dom.window.close();
+  }
+});

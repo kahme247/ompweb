@@ -9,6 +9,7 @@ import { useSpeechContext } from "@/hooks/useSpeechSynthesis";
 import { ClickableImage } from "./ImageLightbox";
 import { translate, useI18n, type Locale } from "@/lib/i18n";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
+import { messageSpeed } from "@/lib/generation-speed";
 import { isEmptyThinkingBlock } from "@/lib/message-display";
 import { isPassiveToolContext } from "@/lib/chat-transcript-plan";
 import { Tooltip, Collapsible, CollapsibleTrigger } from "./ui/primitives";
@@ -561,6 +562,10 @@ function AssistantMessageView({
   const hasActivityBlocks = blocks.some((block) => block.type === "thinking" || block.type === "toolCall");
   const errorMessage = message.errorMessage?.trim() || null;
   const isInterrupted = isInterruptedMessage(errorMessage, message.stopReason);
+  // Final rate from omp's own fields; tool-only replies keep the actions row
+  // but no badge (there is no visible text to time).
+  const speed = isStreaming ? null : messageSpeed(message);
+  const hasVisibleText = texts.some((text) => text.trim().length > 0);
   const blockItemsRef = useRef(blockItems);
   blockItemsRef.current = blockItems;
 
@@ -761,7 +766,7 @@ function AssistantMessageView({
         )}
       </div>
 
-      {!isStreaming && (texts.some((text) => text.trim()) || time || canFork || (ttsSupported && speakableText.trim().length > 0)) && (
+      {!isStreaming && (hasVisibleText || time || canFork || speed != null || (ttsSupported && speakableText.trim().length > 0)) && (
         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 6, marginTop: 3 }}>
           <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 3 }}>
             <MessageCopyActions texts={texts} bodyRef={bodyRef} />
@@ -780,6 +785,21 @@ function AssistantMessageView({
               </Tooltip>
             )}
             {canFork && <ForkSessionButton entryId={forkEntryId!} editPrompt={forkEditsPrompt} onFork={onFork!} forking={forking} forkDisabled={forkDisabled} />}
+            {speed && hasVisibleText && (() => {
+              const title = t("messageView.tokensPerSecondTitle", {
+                tokens: speed.outputTokens,
+                seconds: (speed.spanMs / 1000).toFixed(1),
+              });
+              return (
+                <span
+                  title={title}
+                  aria-label={title}
+                  style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums" }}
+                >
+                  {t("messageView.tokensPerSecond", { tps: speed.tokensPerSecond.toFixed(1) })}
+                </span>
+              );
+            })()}
           </div>
           {time && <span style={{ fontSize: 10, color: "var(--text-dim)", marginLeft: "auto" }}>{time}</span>}
         </div>

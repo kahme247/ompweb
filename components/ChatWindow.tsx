@@ -20,6 +20,8 @@ import { CHAT_COLUMN_MAX_WIDTH, MINIMAP_WIDTH } from "@/lib/chat-layout";
 import { WorkspaceState } from "./AppShell-layout";
 import { useAgentSession, type AgentPhase, type NoticeItem, type SubagentInfo } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
+import { useStreamRate } from "@/hooks/useStreamRate";
+import { messageSpeed } from "@/lib/generation-speed";
 import { useSpeechSynthesis, SpeechSynthesisProvider } from "@/hooks/useSpeechSynthesis";
 import { GithubRepoContext } from "@/lib/github-refs";
 import { useDragDrop } from "@/hooks/useDragDrop";
@@ -568,7 +570,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     onProviderUsageContextChange?.(providerUsageContext);
     return () => onProviderUsageContextChange?.(null);
   }, [onProviderUsageContextChange, providerUsageContext]);
-  const [generationSpeed, setGenerationSpeed] = useState<GenerationSpeedInfo | null>(null);
+  const [ompGenerationSpeed, setOmpGenerationSpeed] = useState<GenerationSpeedInfo | null>(null);
   const speedSamplesRef = useRef<number[]>([]);
   // Source of truth is omp's own get_state.tokensPerSecond (polled by the
   // session hook), not a client-side char-count estimate. Distinct reported
@@ -579,7 +581,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       // Clear the live value; the session average remains visible.
       if (lastPublishedSpeedRef.current !== null) {
         lastPublishedSpeedRef.current = null;
-        setGenerationSpeed((previous) => previous ? { ...previous, current: null } : previous);
+        setOmpGenerationSpeed((previous) => previous ? { ...previous, current: null } : previous);
       }
       return;
     }
@@ -588,7 +590,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     lastPublishedSpeedRef.current = quantized;
     const samples = [...speedSamplesRef.current, quantized].slice(-32);
     speedSamplesRef.current = samples;
-    setGenerationSpeed({
+    setOmpGenerationSpeed({
       current: quantized,
       average: samples.reduce((sum, sample) => sum + sample, 0) / samples.length,
     });
@@ -629,11 +631,33 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     if (samples.length === 0) return;
     const recent = samples.slice(-32);
     speedSamplesRef.current = recent;
-    setGenerationSpeed((previous) => ({
+    setOmpGenerationSpeed((previous) => ({
       current: previous?.current ?? null,
       average: recent.reduce((sum, sample) => sum + sample, 0) / recent.length,
     }));
   }, [messages, sessionBusy, session?.id, newSessionCwd]);
+
+  // Live rate of the streaming assistant snapshot (client estimate — omp's
+  // RPC has no live meter). The per-message badge is exact from usage.output.
+  const liveStreamRate = useStreamRate(streamState.streamingMessage, streamState.isStreaming);
+  // Newest assistant message's final rate; the topbar keeps showing it while
+  // a run is live and no live estimate is available yet.
+  const lastAssistantSpeed = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const candidate = messages[i];
+      if (candidate.role !== "assistant") continue;
+      return messageSpeed(candidate)?.tokensPerSecond ?? null;
+    }
+    return null;
+  }, [messages]);
+  // One displayed rate for every surface: live estimate, else the last final
+  // rate during a run, else omp's reported sample. The average stays omp's.
+  const displayGenerationSpeed = useMemo<GenerationSpeedInfo | null>(() => {
+    const current = liveStreamRate ?? (agentRunning ? lastAssistantSpeed : null) ?? ompGenerationSpeed?.current ?? null;
+    const average = ompGenerationSpeed?.average ?? null;
+    if (current === null && average === null) return null;
+    return { current, average };
+  }, [liveStreamRate, agentRunning, lastAssistantSpeed, ompGenerationSpeed]);
 
 
   // Register the abort handler for the global Esc shortcut. The cleanup
@@ -805,11 +829,11 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     setVisibleCount((prev) => getNextVisibleCount(prev));
   }, [scrollContainerRef]);
 
-  const generationSpeedKey = generationSpeed
-    ? `${generationSpeed.current ?? "null"}|${generationSpeed.average ?? "null"}`
+  const generationSpeedKey = displayGenerationSpeed
+    ? `${displayGenerationSpeed.current ?? "null"}|${displayGenerationSpeed.average ?? "null"}`
     : null;
-  const generationSpeedRef = useRef(generationSpeed);
-  generationSpeedRef.current = generationSpeed;
+  const generationSpeedRef = useRef(displayGenerationSpeed);
+  generationSpeedRef.current = displayGenerationSpeed;
   useEffect(() => {
     onGenerationSpeedChange?.(generationSpeedRef.current);
   }, [generationSpeedKey, onGenerationSpeedChange]);
@@ -1039,6 +1063,11 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     }
     return null;
   }, [bashRunning, pendingBash, isCompacting, agentRunning, streamState.streamingMessage, pendingToolHeaders.length, agentPhase, activeSubagentCount, currentTodoPhase, t, tn]);
+  // The rate rides next to the phase as a separate, aria-hidden span: a live
+  // region must not read "42.1 t/s" twice a second.
+  const composerSpeedText = liveStreamRate != null
+    ? t("chatWindow.tokensPerSecond", { tps: liveStreamRate.toFixed(1) })
+    : null;
 
   const askOpen = extensionDialog?.method === "ask";
   const hiddenComposerRef = useRef<HTMLDivElement>(null);
@@ -1109,7 +1138,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       contextUsage={contextUsage}
       sessionStats={sessionStats}
       modelCapacity={modelCapacity}
-      generationSpeed={generationSpeed}
+      generationSpeed={displayGenerationSpeed}
       onRemoveQueuedMessage={removeQueuedMessage}
       onPromoteQueuedToSteer={promoteQueuedToSteer}
       slashCommands={slashCommands}
@@ -1124,6 +1153,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
          nothing to collapse. */
       onMinimize={isEmptyNew ? undefined : handleMinimize}
       statusText={hasStatusHostRow ? null : composerStatusText}
+      statusSpeed={hasStatusHostRow ? null : composerSpeedText}
       onOpenProviders={onOpenProviders}
     />
   );
@@ -1345,6 +1375,11 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
               <MessageView
                 key={streamState.streamingMessage.timestamp ?? "stream"}
                 message={streamState.streamingMessage as AgentMessage}
+                // The live bubble needs the streaming state: the tokens/s
+                // badge and the hidden action row are gated on it. The
+                // per-message key keeps the state from leaking into the next
+                // message.
+                isStreaming={streamState.isStreaming}
                 modelNames={modelNames}
                 cwd={messageCwd}
                 onOpenFile={onOpenFile}
@@ -1352,7 +1387,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
                 toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
                 expandThinkingByDefault={expandThinkingByDefault}
                 hideThinking={hideThinkingBlock}
-                liveTokensPerSecond={streamState.isStreaming ? tokensPerSecond : undefined}
+                liveTokensPerSecond={streamState.isStreaming ? liveStreamRate : undefined}
               />
             )}
 
@@ -1422,6 +1457,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
           isStreaming={sessionBusy}
           isCompacting={isCompacting}
           statusText={composerStatusText}
+          statusSpeed={composerSpeedText}
           expandRef={minimizedExpandRef}
           onExpand={handleExpand}
           onAbort={handleAbort}
@@ -1483,6 +1519,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
               onSelectSubagent={setSelectedSubagent}
               btw={btwPanel}
               liveStatus={composerStatusText}
+              liveSpeed={composerSpeedText}
             />
             <ExtensionWidgets widgets={belowEditorWidgets} />
           </div>
@@ -1821,11 +1858,13 @@ function ExtensionCustomPanel({
 }
 
 /** Slim pill bar replacing the full composer when minimized. */
-const MinimizedComposerBar = memo(function MinimizedComposerBar({ draftKey, isStreaming, isCompacting, statusText, expandRef, onExpand, onAbort, onAbortCompaction }: {
+const MinimizedComposerBar = memo(function MinimizedComposerBar({ draftKey, isStreaming, isCompacting, statusText, statusSpeed, expandRef, onExpand, onAbort, onAbortCompaction }: {
   draftKey?: string;
   isStreaming: boolean;
   isCompacting?: boolean;
   statusText?: string | null;
+  /** Live tokens-per-second, rendered outside the live region (aria-hidden). */
+  statusSpeed?: string | null;
   expandRef?: Ref<HTMLButtonElement>;
   onExpand: () => void;
   onAbort: () => void;
@@ -1878,7 +1917,7 @@ const MinimizedComposerBar = memo(function MinimizedComposerBar({ draftKey, isSt
             {hasAttachments && (
               <Paperclip size={13} strokeWidth={1.8} style={{ flexShrink: 0, color: "var(--text-muted)" }} />
             )}
-            {statusText ? (
+            {statusText || statusSpeed ? (
               <span style={{
                 display: "inline-flex",
                 alignItems: "center",
@@ -1892,6 +1931,11 @@ const MinimizedComposerBar = memo(function MinimizedComposerBar({ draftKey, isSt
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {statusText}
                 </span>
+                {statusSpeed && (
+                  <span aria-hidden="true" style={{ flexShrink: 0, color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums" }}>
+                    {statusText ? " · " : ""}{statusSpeed}
+                  </span>
+                )}
               </span>
             ) : (
               <span style={{

@@ -10,6 +10,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 - **In-app updates work when ompweb runs as a systemd service.** The update worker ran inside the service's cgroup, so stopping the server killed the worker too: nothing was installed, the service could stay down (`Restart=on-failure` does not restart a clean SIGTERM exit), and every page load reopened the update dialog at "Stop ompweb-managed sessions". The worker now runs in its own transient scope (`systemd-run --scope`) and stops, updates and starts the unit through `systemctl`, starting it again if the install fails.
 - **An update whose worker died is reported as failed.** A running update whose worker process is gone, or whose lease has expired, now becomes a failed attempt the dialog can show and clean up, instead of waiting forever.
+- **The composer and every answer show how fast the model is writing.** While a reply streams the live rate is estimated from the streaming snapshot (smoothed chars per interval); once it finishes, the exact rate from `usage.output` over the response's own `duration` (time to first token excluded) takes over, so the badge does not flip between two numbers. omp's `get_state.tokensPerSecond` sample stays the fallback while a run has no live estimate yet. The rate sits next to the phase in the composer status line, the minimized bar and the tasks header, and as a badge on the answer - outside the live region, so a screen reader does not announce "42.1 t/s" twice a second.
 
 ---
 

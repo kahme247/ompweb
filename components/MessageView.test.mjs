@@ -950,3 +950,58 @@ test("user messages fork at their own entry and edit the prompt", async (t) => {
   assert.deepEqual(forked, [["user-7", true]]);
   view.unmount();
 });
+
+function assistantUsage(output) {
+  return { input: 0, output, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+}
+
+test("a finished reply shows its final tokens-per-second rate", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    message: {
+      role: "assistant", model: "test", provider: "test",
+      content: [{ type: "text", text: "Done." }],
+      usage: assistantUsage(4210),
+      duration: 100_000,
+      ttft: 0,
+    },
+  }));
+  assert.match(html, /42\.1 t\/s/);
+  assert.match(html, /4210 output tokens in 100\.0s/);
+});
+
+test("a streaming reply shows the live rate in place of the final one", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    message: { role: "assistant", model: "test", provider: "test", content: [{ type: "text", text: "Streaming" }] },
+    isStreaming: true,
+    liveTokensPerSecond: 133.3,
+  }));
+  assert.match(html, /data-live="true"/);
+  assert.match(html, /133\.3 t\/s/);
+  // The streaming bubble keeps no action row, so no final-rate title either.
+  assert.doesNotMatch(html, /output tokens in/);
+});
+
+test("no final rate without usable omp fields, while streaming, or for tool-only replies", () => {
+  const base = {
+    role: "assistant", model: "test", provider: "test",
+    content: [{ type: "text", text: "Done." }],
+    usage: assistantUsage(4210),
+    duration: 100_000,
+    ttft: 0,
+  };
+  const noUsage = renderToStaticMarkup(React.createElement(MessageView, {
+    message: { ...base, usage: undefined, duration: undefined, ttft: undefined },
+  }));
+  assert.doesNotMatch(noUsage, /t\/s/);
+
+  const streaming = renderToStaticMarkup(React.createElement(MessageView, { message: base, isStreaming: true }));
+  assert.doesNotMatch(streaming, /t\/s/);
+
+  const toolOnly = renderToStaticMarkup(React.createElement(MessageView, {
+    message: {
+      ...base,
+      content: [{ type: "toolCall", toolCallId: "tool-1", toolName: "read", input: { path: "a.ts" } }],
+    },
+  }));
+  assert.doesNotMatch(toolOnly, /t\/s/);
+});

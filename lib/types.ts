@@ -85,6 +85,12 @@ export interface AssistantMessage {
   stopReason?: string;
   errorMessage?: string;
   timestamp?: number;
+  /** Wall-clock generation time of the whole response in ms (omp `duration`). */
+  duration?: number;
+  /** Time to first token in ms (omp `ttft`), excluded from the generation rate. */
+  ttft?: number;
+  /** Epoch ms at which the message finished; the fallback span when `duration` is absent. */
+  completedAt?: number;
   usage?: {
     input: number;
     output: number;

@@ -146,3 +146,26 @@ test("merges live status into the tasks header row instead of a separate line (#
   assert.match(html, /0\/1 complete/);
   assert.match(html, /role="status"/);
 });
+
+test("shows the live rate in the tasks header without announcing it", () => {
+  const html = renderToStaticMarkup(React.createElement(TodoList, {
+    phases: [{ name: "Implementation", tasks: [{ content: "Wire panels", status: "in_progress" }] }],
+    collapsible: true,
+    liveStatus: "Thinking...",
+    liveSpeed: "8.4 t/s",
+  }));
+  assert.match(html, /Thinking\.\.\./);
+  assert.match(html, /8\.4 t\/s/);
+  assert.match(html, /role="status"[\s\S]*aria-hidden="true"[\s\S]*8\.4 t\/s/);
+
+  // The row must also appear when only the rate is known, so a long run never
+  // loses the reading behind a hidden status bar.
+  const speedOnly = renderToStaticMarkup(React.createElement(TodoList, {
+    phases: [{ name: "Implementation", tasks: [{ content: "Wire panels", status: "in_progress" }] }],
+    collapsible: true,
+    liveSpeed: "8.4 t/s",
+  }));
+  assert.match(speedOnly, /8\.4 t\/s/);
+  assert.match(speedOnly, /role="status"/);
+  assert.doesNotMatch(speedOnly, / · 8\.4/);
+});

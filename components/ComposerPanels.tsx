@@ -147,7 +147,7 @@ function SubagentActivityLine({ subagent }: { subagent: SubagentInfo }) {
   );
 }
 
-function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false, liveStatus = null }: {
+function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false, liveStatus = null, liveSpeed = null }: {
   subagents: SubagentInfo[];
   onSelectSubagent: (subagent: SubagentInfo) => void;
   /** Initial expansion (default: collapsed — the header still shows the live summary). */
@@ -155,6 +155,8 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false, 
   /** Transient live-agent status merged into this header row when no todo
    * row exists to host it (#245). See TodoList's liveStatus. */
   liveStatus?: string | null;
+  /** Live tokens-per-second; aria-hidden, never announced. */
+  liveSpeed?: string | null;
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(() => loadCollapsed(SUBAGENTS_COLLAPSED_STORAGE_KEY, defaultExpanded));
@@ -239,19 +241,27 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false, 
       >
         <Network size={14} strokeWidth={1.8} aria-hidden />
         <strong className="font-medium text-text">{t("chatWindow.subagentsPanel")}</strong>
-        {liveStatus ? (
+        {liveStatus || liveSpeed ? (
           <span
             role="status"
             aria-live="polite"
-            title={liveStatus}
+            title={[liveStatus, liveSpeed].filter(Boolean).join(" · ")}
             style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", display: "inline-flex", alignItems: "center", gap: 6, color: "var(--text-muted)" }}
           >
             <span aria-hidden className="live-status-dot live-pulse inline-block h-2 w-2 shrink-0 rounded-full bg-accent" />
-            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{liveStatus}</span>
+            {liveStatus && <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{liveStatus}</span>}
+            {liveSpeed && (
+              <span
+                aria-hidden="true"
+                style={{ flexShrink: 0, color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontVariantNumeric: "tabular-nums" }}
+              >
+                {liveStatus ? " · " : ""}{liveSpeed}
+              </span>
+            )}
           </span>
         ) : null}
         <span
-          className={`${liveStatus ? "" : "ml-auto "}inline-flex items-center gap-1.5`}
+          className={`${liveStatus || liveSpeed ? "" : "ml-auto "}inline-flex items-center gap-1.5`}
           aria-label={t("chatWindow.subagentSummary", { running: runningCount, total: subagents.length })}
           title={t("chatWindow.subagentSummary", { running: runningCount, total: subagents.length })}
         >
@@ -313,7 +323,7 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false, 
  * via its header row (`chevron`); todo/subagents start collapsed (headers
  * always show live progress / running-summary), a new side question starts
  * expanded. Rendered pinned above the chat input. */
-export function ComposerPanels({ todoPhases, subagents, onSelectSubagent, btw = null, defaultExpanded = false, liveStatus = null }: {
+export function ComposerPanels({ todoPhases, subagents, onSelectSubagent, btw = null, defaultExpanded = false, liveStatus = null, liveSpeed = null }: {
   todoPhases: TodoPhase[];
   subagents: SubagentInfo[];
   onSelectSubagent: (subagent: SubagentInfo) => void;
@@ -326,6 +336,9 @@ export function ComposerPanels({ todoPhases, subagents, onSelectSubagent, btw = 
    * row; when neither exists the caller keeps the standalone bar so the
    * status is never hidden. */
   liveStatus?: string | null;
+  /** Live tokens-per-second for the same host row (aria-hidden). It is a
+   * separate prop because it is not part of the announced live region. */
+  liveSpeed?: string | null;
 }) {
   const [todoCollapsed, setTodoCollapsed] = useState(() => loadCollapsed(TODO_COLLAPSED_STORAGE_KEY, defaultExpanded));
   if (todoPhases.length === 0 && subagents.length === 0 && !btw) return null;
@@ -336,12 +349,13 @@ export function ComposerPanels({ todoPhases, subagents, onSelectSubagent, btw = 
       <TodoList
         phases={todoPhases}
         liveStatus={todoHostsLiveStatus ? liveStatus : null}
+        liveSpeed={todoHostsLiveStatus ? liveSpeed : null}
         collapsible
         defaultExpanded={defaultExpanded}
         collapsed={todoCollapsed}
         onCollapsedChange={(collapsed) => { saveCollapsed(TODO_COLLAPSED_STORAGE_KEY, collapsed); setTodoCollapsed(collapsed); }}
       />
-      <SubagentsPanel subagents={subagents} onSelectSubagent={onSelectSubagent} defaultExpanded={defaultExpanded} liveStatus={todoHostsLiveStatus ? null : liveStatus} />
+      <SubagentsPanel subagents={subagents} onSelectSubagent={onSelectSubagent} defaultExpanded={defaultExpanded} liveStatus={todoHostsLiveStatus ? null : liveStatus} liveSpeed={todoHostsLiveStatus ? null : liveSpeed} />
     </div>
   );
 }
