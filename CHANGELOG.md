@@ -10,6 +10,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 - **In-app updates work when ompweb runs as a systemd service.** The update worker ran inside the service's cgroup, so stopping the server killed the worker too: nothing was installed, the service could stay down (`Restart=on-failure` does not restart a clean SIGTERM exit), and every page load reopened the update dialog at "Stop ompweb-managed sessions". The worker now runs in its own transient scope (`systemd-run --scope`) and stops, updates and starts the unit through `systemctl`, starting it again if the install fails.
 - **An update whose worker died is reported as failed.** A running update whose worker process is gone, or whose lease has expired, now becomes a failed attempt the dialog can show and clean up, instead of waiting forever.
+- **A failed run no longer shows its error three times.** A terminal error (provider failure, interrupt) used to appear simultaneously as a top-right "Request failed" toast, a shelf notice above the composer, and the assistant bubble's inline banner, all with the same text. For a run that produced a reply, the inline banner — stamped live, or carried by the transcript reload — is now the single rendering; the shelf notice remains the in-chat message for silent stops, and the duplicate toast is gone.
 
 ---
 

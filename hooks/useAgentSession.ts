@@ -1640,12 +1640,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!recoveryLoaded && !hadContent && !runError && !quotaMessage && !allowEmptyResponse) return;
       if (!agentRunningRef.current) return;
       if (runError) {
+        // The shelf notice is the in-chat record here; no duplicate toast.
         addNotice({ type: "error", message: runError });
-        if (!isQuotaLikeError(runError)) {
-          toast.error("Request failed", runError, { timeout: 12000 });
-        } else {
-          surfaceQuotaOnStream(runError);
-        }
+        if (isQuotaLikeError(runError)) surfaceQuotaOnStream(runError);
       } else if (quotaMessage && isQuotaLikeError(quotaMessage) && !hadContent) {
         // Silent stop: no assistant bubble to stamp — the shelf notice is the
         // in-chat message. Mid-run quota already toasted via the notice path.
@@ -1657,7 +1654,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // an assistant message, hence allowEmptyResponse above.
         const message = translate("agentSession.responseFailed");
         addNotice({ type: "error", message });
-        toast.error("Request failed", message, { timeout: 10000 });
       }
       catchUp.invalidate();
       eventCoalescer.reset();
@@ -2068,14 +2064,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const errorMessage = terminalError
           ?? (!hadContent && quotaMessage && isQuotaLikeError(quotaMessage) ? quotaMessage : null);
         if (errorMessage) {
-          addNotice({ type: "error", message: errorMessage });
           if (isQuotaLikeError(errorMessage)) {
             // Inline chat banner on the live bubble when still streaming;
             // otherwise the shelf notice is the in-chat message. No toast —
             // quota must read as a chat message, not a transient popup.
             surfaceQuotaOnStream(errorMessage);
-          } else {
-            toast.error("Request failed", errorMessage, { timeout: 12000 });
+            addNotice({ type: "error", message: errorMessage });
+          } else if (!hadContent) {
+            // A content-producing run renders the error on its assistant
+            // bubble (stamped live, or carried by the transcript the reload
+            // below brings in) — a notice or toast on top would duplicate it.
+            // Without one, the shelf notice is the in-chat message.
+            addNotice({ type: "error", message: errorMessage });
           }
         }
         // async, and a next prompt (or session switch) that starts while it is
