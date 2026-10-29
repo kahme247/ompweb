@@ -1286,6 +1286,8 @@
   "settingsConfig.hideToolActivityDesc": "把进行中的一轮工具调用像已结束的一轮那样折叠为一行「过程详情」。展开该行即可查看每次调用及其结果。",
   "settingsConfig.expandThinkingByDefault": "默认展开思考块",
   "settingsConfig.expandThinkingByDefaultDesc": "每个思考块一出现就展开（包括流式输出过程中），无需逐条点击即可阅读推理内容。仍可手动折叠单个思考块。",
+  "settingsConfig.expandProcessDetails": "默认展开过程详情",
+  "settingsConfig.expandProcessDetailsDesc": "每一轮的「过程详情」默认展开，无需点击即可看到思考、中间回复和工具调用。仍可手动折叠单个过程详情。",
   "settingsConfig.openUrlAutomatically": "无需确认即可打开智能体链接",
   "settingsConfig.openUrlAutomaticallyDesc": "当前查看的会话中智能体打开的链接会立即在新标签页中打开。来自其他会话的链接始终会先询问。浏览器仍可能拦截弹出窗口。",
   "settingsConfig.scopeNativeSelectAll": "限制原生“全选”范围（实验性）",

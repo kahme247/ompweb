@@ -99,6 +99,8 @@ const TOOL_CALLS_COLLAPSED_STORAGE_KEY = "omp-web:tool-calls-collapsed";
 const HIDE_TOOL_ACTIVITY_STORAGE_KEY = "omp-web:hide-tool-activity";
 // Off by default, so the transcript keeps collapsing reasoning until asked.
 const EXPAND_THINKING_STORAGE_KEY = "omp-web:expand-thinking";
+// Off by default: the "Process details" fold starts collapsed until asked.
+const EXPAND_PROCESS_DETAILS_STORAGE_KEY = "omp-web:expand-process-details";
 const PROVIDER_USAGE_VISIBLE_STORAGE_KEY = "omp-web:provider-usage-visible";
 const NATIVE_SELECT_ALL_STORAGE_KEY = "omp-web:scope-native-select-all";
 const OPEN_URL_AUTOMATICALLY_STORAGE_KEY = "omp-web:open-url-automatically";
@@ -145,6 +147,7 @@ export function AppShell({ appName }: { appName: string }) {
   // "Expand thinking blocks by default" — like the tool-call preference, a
   // UI-only behavior, so it lives in localStorage rather than omp's config.
   const [expandThinkingByDefault, setExpandThinkingByDefault] = useState(false);
+  const [expandProcessDetails, setExpandProcessDetails] = useState(false);
   const [hideThinkingBlock, setHideThinkingBlock] = useState(false);
   useEffect(() => {
     // omp's own setting, so the transcript hides thinking when the TUI does.
@@ -177,6 +180,7 @@ export function AppShell({ appName }: { appName: string }) {
       setToolCallsDefaultCollapsed(window.localStorage.getItem(TOOL_CALLS_COLLAPSED_STORAGE_KEY) !== "false");
       setHideToolActivity(window.localStorage.getItem(HIDE_TOOL_ACTIVITY_STORAGE_KEY) !== "false");
       setExpandThinkingByDefault(window.localStorage.getItem(EXPAND_THINKING_STORAGE_KEY) === "true");
+      setExpandProcessDetails(window.localStorage.getItem(EXPAND_PROCESS_DETAILS_STORAGE_KEY) === "true");
       setProviderUsageVisible(window.localStorage.getItem(PROVIDER_USAGE_VISIBLE_STORAGE_KEY) !== "false");
       setScopeNativeSelectAll(window.localStorage.getItem(NATIVE_SELECT_ALL_STORAGE_KEY) === "true");
       setOpenUrlAutomatically(window.localStorage.getItem(OPEN_URL_AUTOMATICALLY_STORAGE_KEY) === "true");
@@ -204,6 +208,14 @@ export function AppShell({ appName }: { appName: string }) {
     setExpandThinkingByDefault(expand);
     try {
       window.localStorage.setItem(EXPAND_THINKING_STORAGE_KEY, String(expand));
+    } catch {
+      // The preference still applies for this page load.
+    }
+  }, []);
+  const handleExpandProcessDetailsChange = useCallback((expand: boolean) => {
+    setExpandProcessDetails(expand);
+    try {
+      window.localStorage.setItem(EXPAND_PROCESS_DETAILS_STORAGE_KEY, String(expand));
     } catch {
       // The preference still applies for this page load.
     }
@@ -2036,6 +2048,8 @@ export function AppShell({ appName }: { appName: string }) {
             onHideToolActivityChange={handleHideToolActivityChange}
             expandThinkingByDefault={expandThinkingByDefault}
             onExpandThinkingByDefaultChange={handleExpandThinkingByDefaultChange}
+            expandProcessDetails={expandProcessDetails}
+            onExpandProcessDetailsChange={handleExpandProcessDetailsChange}
             onHideThinkingBlockChange={setHideThinkingBlock}
             providerUsageVisible={providerUsageVisible}
             onProviderUsageVisibleChange={handleProviderUsageVisibleChange}
@@ -2538,6 +2552,7 @@ export function AppShell({ appName }: { appName: string }) {
               toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
               hideToolActivity={hideToolActivity}
               expandThinkingByDefault={expandThinkingByDefault}
+              expandProcessDetails={expandProcessDetails}
               hideThinkingBlock={hideThinkingBlock}
             />
           ) : initialCwdStatus === "validating" ? (

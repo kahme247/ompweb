@@ -41,3 +41,30 @@ test("every locale carries the expand-thinking setting copy", async () => {
     assert.ok(messages["settingsConfig.expandThinkingByDefaultDesc"], `${locale} description`);
   }
 });
+
+test("the expand-process-details preference reaches the Process details fold, off unless stored", async () => {
+  const appShell = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
+  const settings = await readFile(new URL("./SettingsConfig.tsx", import.meta.url), "utf8");
+  const chatWindow = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
+
+  assert.match(appShell, /EXPAND_PROCESS_DETAILS_STORAGE_KEY = "omp-web:expand-process-details"/);
+  assert.match(appShell, /setExpandProcessDetails\(window\.localStorage\.getItem\(EXPAND_PROCESS_DETAILS_STORAGE_KEY\) === "true"\)/);
+  assert.match(appShell, /window\.localStorage\.setItem\(EXPAND_PROCESS_DETAILS_STORAGE_KEY, String\(expand\)\)/);
+  // Both hosts need the prop, otherwise the setting is inert.
+  assert.match(appShell, /expandProcessDetails=\{expandProcessDetails\}/g);
+  assert.equal(appShell.match(/expandProcessDetails=\{expandProcessDetails\}/g)?.length, 2);
+  assert.match(appShell, /onExpandProcessDetailsChange=\{handleExpandProcessDetailsChange\}/);
+  // ChatWindow seeds the fold's initial state from it.
+  assert.match(chatWindow, /useState\(defaultExpanded\)/);
+  assert.match(chatWindow, /defaultExpanded=\{expandProcessDetails\}/);
+  assert.match(settings, /id: "expand-process-details", tab: "general"/);
+  assert.match(settings, /<ToggleSwitch checked=\{expandProcessDetails\} onChange=\{onExpandProcessDetailsChange\} \/>/);
+});
+
+test("every locale carries the expand-process-details setting copy", async () => {
+  for (const locale of ["en", "zh-CN", "ja"]) {
+    const messages = JSON.parse(await readFile(new URL(`../lib/i18n/locales/${locale}.json`, import.meta.url), "utf8"));
+    assert.ok(messages["settingsConfig.expandProcessDetails"], `${locale} label`);
+    assert.ok(messages["settingsConfig.expandProcessDetailsDesc"], `${locale} description`);
+  }
+});
