@@ -46,8 +46,11 @@ ompweb (web service)  ──link over 127.0.0.1──▶  ompweb host (daemon se
   it; the registry keeps "" for the default), and is listed first. It cannot be
   revoked, and its `allowAgentStart` is fixed.
 - **Session file operations** (`session-ops.ts`) run in the daemon, as they do
-  for remote hosts. The web server keeps no direct session-file reads for
-  `local`, so the two paths cannot drift.
+  for remote hosts: the session and project routes and the sidebar list reach
+  this machine's sessions through it. A few main-side readers still read this
+  machine's files directly because both share the machine (transcript search,
+  the session file watcher, archive and import, usage, bash-output and
+  subagent-history; listed in `AGENTS.md`).
 - **Local link bootstrap.** On start, the web server makes sure a host record
   `local` exists with a token, and writes the daemon's
   `<agent dir>/omp-web/host.json` (`{url, token}`, mode 0600) with its own
@@ -57,12 +60,15 @@ ompweb (web service)  ──link over 127.0.0.1──▶  ompweb host (daemon se
 
 ## Adopting live children
 
-On `hello`, for each listed `{ch, sessionId}` that has no wrapper on the web
-server:
+On `hello`, for each listed `{ch, sessionId, cwd, pending}` that has no wrapper
+on the web server:
 
-1. Look up `sessionId` in that host's session list to get the file and cwd. A
-   child whose session is unknown (never written, or deleted) is killed, as
-   today.
+1. Take the spawn cwd from the `hello` entry. There is no session-list lookup:
+   the child's own `get_state` (step 4) names its session, so a new session
+   whose file is not written yet is adoptable. The daemon lists each child's
+   current session id (the session file's header at spawn, then the last
+   successful `get_state`). A child with no session id, or whose open requests
+   exceeded the cap, is killed, as today.
 2. Create an `AgentSessionWrapper` on the existing channel with `adopted: true`.
    It skips spawn, the `ready` wait and the initial protocol negotiation.
 3. Re-sync the protocol: send `negotiate_protocol` again; drop partial chunked
@@ -86,7 +92,7 @@ keeps, per channel, the raw lines of each blocking request still open:
 - closed by the matching `host_tool_result` / `extension_ui_response` written to
   stdin, or a `host_tool_cancel` / UI cancel from omp.
 
-`hello` carries them per channel (`channels[{ch, sessionId, pending: string[]}]`,
+`hello` carries them per channel (`channels[{ch, sessionId, cwd, pending: string[]}]`,
 capped at 1 MB per channel; over the cap the channel is not adoptable and takes
 the kill-and-resume path). The adopted wrapper feeds them through its normal
 frame handling, so dialogs reappear, input-needed notifications fire, and browser
@@ -99,8 +105,11 @@ drops `rpc_chunk` records until the first record of a new frame, and sends
 `negotiate_protocol` again.
 
 **Adoption failure** (any of the re-sync commands time out after
-`GET_STATE_TIMEOUT_MS`): the child is killed and resumed once through the
-existing orphan path, so no session ends up with two writers.
+`GET_STATE_TIMEOUT_MS`, the child exits or its held output overflows, or its
+real session, as `get_state` names it, is already started on this server): the
+child is killed and resumed once through the existing orphan path, so no
+session ends up with two writers. A web server that is itself shutting down
+leaves the child to the next one.
 
 Auto-resume remains for children that really died: a daemon restart, a crash,
 or an adoption failure.
@@ -141,8 +150,12 @@ from the same release:
 
 - It restarts `ompweb-api` with the existing probes and rollback.
 - It restarts `ompweb-host` only when the release's `LINK_PROTOCOL_VERSION`
-  differs from the running daemon's (read from `GET /api/hosts`).
-- Rollback restores the previous release for both units.
+  differs from the running daemon's. The script reads the daemon's from the
+  release its process was started from (`/proc/<MainPID>/cmdline`);
+  `GET /api/hosts` (local row, `hostVersion`) says the same but sits behind
+  the web password.
+- Rollback restores the previous release for both units, and restarts the
+  daemon only if the cutover did.
 
 ## Dev mode
 
