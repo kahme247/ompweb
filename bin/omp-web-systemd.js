@@ -51,7 +51,7 @@ Commands:
   uninstall    Stop both services and remove their unit files
   start        Start both services
   stop         Stop both services
-  restart      Restart both services
+  restart      Restart the web service (the host daemon keeps running)
   status       Show both services' status (default when no command is given)
   open         Open the web service in the default browser
   help         Show this help
@@ -365,8 +365,11 @@ function install(options = {}) {
   }, envPath);
 
   const wasActive = Object.fromEntries(UNITS.map((unit) => [unit, systemdQuery(["is-active", "--quiet", unit]).ok]));
+  // Restarting the daemon ends every omp run on this machine: only do it when its unit changed.
+  const hostUnitText = buildHostUnit(unitOptions);
+  const hostUnitChanged = readFileOrNull(HOST_UNIT_PATH) !== hostUnitText;
   fs.mkdirSync(UNIT_DIR, { recursive: true });
-  for (const [unitPath, text] of [[UNIT_PATH, buildUnit(unitOptions)], [HOST_UNIT_PATH, buildHostUnit(unitOptions)]]) {
+  for (const [unitPath, text] of [[UNIT_PATH, buildUnit(unitOptions)], [HOST_UNIT_PATH, hostUnitText]]) {
     fs.writeFileSync(unitPath, text, { mode: 0o600 });
     fs.chmodSync(unitPath, 0o600);
   }
@@ -374,7 +377,8 @@ function install(options = {}) {
   systemctl(["daemon-reload"]);
   if (options.autostart !== false) systemctl(["enable", "--now", ...UNITS]);
   else systemctl(["start", ...UNITS], { ignoreFailure: true });
-  for (const unit of UNITS) if (wasActive[unit]) systemctl(["restart", unit]);
+  if (wasActive[UNIT]) systemctl(["restart", UNIT]);
+  if (wasActive[HOST_UNIT] && hostUnitChanged) systemctl(["restart", HOST_UNIT]);
 
   console.log(`installed: ${UNIT_PATH}`);
   console.log(`installed: ${HOST_UNIT_PATH}`);
@@ -402,19 +406,37 @@ function uninstall(options = {}) {
   console.log(`uninstalled: ${UNIT_NAME}, ${HOST_UNIT_NAME}`);
 }
 
+function readFileOrNull(file) {
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+// Installs from before the daemon existed have no host unit: leave it out then.
+function installedUnits() {
+  return UNITS.filter((unit) => unit === UNIT || fs.existsSync(HOST_UNIT_PATH));
+}
+
+const unitNames = (units) => units.map((unit) => unit.replace(/\.service$/, "")).join(", ");
+
 function start() {
-  systemctl(["start", ...UNITS]);
-  console.log(`started: ${UNIT_NAME}, ${HOST_UNIT_NAME}`);
+  const units = installedUnits();
+  systemctl(["start", ...units]);
+  console.log(`started: ${unitNames(units)}`);
 }
 
 function stop() {
-  systemctl(["stop", ...UNITS]);
-  console.log(`stopped: ${UNIT_NAME}, ${HOST_UNIT_NAME}`);
+  const units = installedUnits();
+  systemctl(["stop", ...units]);
+  console.log(`stopped: ${unitNames(units)}`);
 }
 
+// Web unit only: restarting the daemon would end every omp run on this machine.
 function restart() {
-  systemctl(["restart", ...UNITS]);
-  console.log(`restarted: ${UNIT_NAME}, ${HOST_UNIT_NAME}`);
+  systemctl(["restart", UNIT]);
+  console.log(`restarted: ${UNIT_NAME}`);
 }
 
 function readUnitStatus(unit, unitPath) {

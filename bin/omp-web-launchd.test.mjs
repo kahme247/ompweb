@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import test from "node:test";
 
 const require = createRequire(import.meta.url);
-const { HOST_LABEL, LABEL, buildPlist } = require("./omp-web-launchd.js");
+const { HOST_LABEL, LABEL, buildHostEnv, buildPlist } = require("./omp-web-launchd.js");
 
 const env = { PATH: "/usr/bin", PI_CODING_AGENT_DIR: "/Users/u/agent" };
 
@@ -30,4 +30,10 @@ test("the web plist keeps its arguments and has no throttle", () => {
   assert.match(plist, /<key>KeepAlive<\/key><true\/>/);
   assert.doesNotMatch(plist, /ThrottleInterval/);
   assert.doesNotMatch(plist, /<string>host<\/string>/);
+});
+
+test("the host env carries PATH, the omp binary and the agent dir, but no web settings", () => {
+  const all = buildHostEnv({ svcPath: "/usr/bin", ompBin: "/opt/omp/bin/omp", agentDir: "/Users/u/agent" });
+  assert.deepEqual(all, { PATH: "/usr/bin", OMP_WEB_OMP_BIN: "/opt/omp/bin/omp", PI_CODING_AGENT_DIR: "/Users/u/agent" });
+  assert.deepEqual(buildHostEnv({ svcPath: "/usr/bin" }), { PATH: "/usr/bin" });
 });

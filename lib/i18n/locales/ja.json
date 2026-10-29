@@ -201,7 +201,7 @@
   "settingsConfig.windowsServiceReinstallBtn": "ショートカットを再インストール / 修復",
   "settingsConfig.windowsServiceUninstallBtn": "サービスをアンインストール",
   "settingsConfig.windowsServiceStartBtn": "トレイマネージャーを起動",
-  "settingsConfig.windowsServiceStopBtn": "サービスを停止",
+  "settingsConfig.windowsServiceStopBtn": "サービスを停止（omp の実行は継続）",
   "settingsConfig.windowsServiceRestartBtn": "サービスを再起動",
   "settingsConfig.windowsServiceDesktopShortcut": "デスクトップショートカット: {status}",
   "settingsConfig.windowsServiceStartupShortcut": "スタートアップショートカット: {status}",

@@ -93,6 +93,15 @@ ${envXml}
 `;
 }
 
+// The daemon needs the web agent's PATH, omp binary and agent dir (host.json), not its password.
+function buildHostEnv({ svcPath, ompBin, agentDir }) {
+  return {
+    PATH: svcPath,
+    ...(ompBin ? { OMP_WEB_OMP_BIN: ompBin } : {}),
+    ...(agentDir ? { PI_CODING_AGENT_DIR: agentDir } : {}),
+  };
+}
+
 function install(pkgArg) {
   const nodeBin = process.execPath;
   const siblingNpx = path.join(path.dirname(nodeBin), "npx");
@@ -151,12 +160,10 @@ function install(pkgArg) {
     ...(agentDir ? { PI_CODING_AGENT_DIR: agentDir } : {}),
   };
   const web = buildPlist({ label: LABEL, args: [npxBin, "--yes", pkg], env, logName: "ompweb" });
-  // The daemon needs the same agent dir (host.json) and PATH, not the web password.
-  const hostEnv = { PATH: svcPath, ...(agentDir ? { PI_CODING_AGENT_DIR: agentDir } : {}) };
   const host = buildPlist({
     label: HOST_LABEL,
     args: [npxBin, "--yes", pkg, "host"],
-    env: hostEnv,
+    env: buildHostEnv({ svcPath, ompBin, agentDir }),
     logName: "ompweb-host",
     // host.json does not exist until the web server first starts; the daemon exits until then.
     throttleInterval: 10,
@@ -165,6 +172,9 @@ function install(pkgArg) {
   fs.mkdirSync(LOG_DIR, { recursive: true });
   fs.mkdirSync(path.dirname(PLIST), { recursive: true });
   for (const [file, xml, label] of [[PLIST, web, LABEL], [HOST_PLIST, host, HOST_LABEL]]) {
+    // Reloading the daemon ends every omp run on this machine: leave it alone when nothing changed.
+    const unchanged = label === HOST_LABEL && fs.existsSync(file) && fs.readFileSync(file, "utf8") === xml;
+    if (unchanged && spawnSync("launchctl", ["print", `${DOMAIN}/${label}`], { stdio: "ignore" }).status === 0) continue;
     fs.writeFileSync(file, xml, { mode: 0o600 });
     fs.chmodSync(file, 0o600);
     launchctl(["bootout", `${DOMAIN}/${label}`], { ignoreFailure: true });
@@ -218,4 +228,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { HOST_LABEL, LABEL, buildPlist };
+module.exports = { HOST_LABEL, LABEL, buildHostEnv, buildPlist };
