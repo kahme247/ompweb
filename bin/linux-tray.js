@@ -461,7 +461,7 @@ function buildMenuItems({ running, version, autostart, hasService, exposed, hasD
     { id: 4, label: "Open in Browser", action: "open" },
     { id: 5, label: "Copy Web URL", action: "copy" },
     { id: 6, separator: true },
-    { id: 7, label: running ? "Stop Server" : "Start Server", action: "toggle", enabled: hasService },
+    { id: 7, label: running ? "Stop Server (omp runs keep going)" : "Start Server", action: "toggle", enabled: hasService },
     { id: 8, label: "Restart Server", action: "restart", enabled: hasService },
     { id: 9, separator: true },
     { id: 10, label: "View Logs", action: "logs" },

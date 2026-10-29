@@ -469,7 +469,7 @@ $contextMenu.Items.Add($script:MenuItemRestart) | Out-Null
 
 # Item 6: Toggle Start/Stop Server
 $script:MenuItemToggle = New-Object System.Windows.Forms.ToolStripMenuItem
-$script:MenuItemToggle.Text = "Stop Server"
+$script:MenuItemToggle.Text = "Stop Server (omp runs keep going)"
 $script:MenuItemToggle.add_Click({
     if ($script:State -eq "Running" -or $script:State -eq "Starting") {
         Stop-WebServer
@@ -548,13 +548,17 @@ $script:NotifyIcon.add_DoubleClick({
     try { [System.Diagnostics.Process]::Start($ServerUrl) | Out-Null } catch { }
 })
 
-# "Not installed" when the omp-web-host task is absent, else Running/Stopped by its supervisor process.
+# The supervisor (omp-web-host.ps1) holds a named mutex while it runs: opening it is an in-process
+# check. Only when it is not held do we shell out to schtasks to tell "Stopped" from "Not installed".
 function Get-HostDaemonState {
     try {
+        $held = $null
+        if ([System.Threading.Mutex]::TryOpenExisting("Local\OmpWebHostDaemon_Instance_Mutex", [ref]$held)) {
+            $held.Dispose()
+            return "Running"
+        }
         schtasks.exe /query /tn "omp-web-host" 2>$null | Out-Null
         if ($LASTEXITCODE -ne 0) { return "Not installed" }
-        $procs = Get-CimInstance Win32_Process -Filter "Name LIKE '%powershell%' OR Name LIKE '%pwsh%'" -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*omp-web-host.ps1*' }
-        if (($procs | Measure-Object).Count -gt 0) { return "Running" }
         return "Stopped"
     } catch { return "Unknown" }
 }
@@ -579,7 +583,7 @@ function Update-TrayUI {
     $script:NotifyIcon.Text = $tipText
 
     if ($script:State -eq "Running" -or $script:State -eq "Starting") {
-        $script:MenuItemToggle.Text = "Stop Server"
+        $script:MenuItemToggle.Text = "Stop Server (omp runs keep going)"
         $script:MenuItemRestart.Enabled = $true
     } else {
         $script:MenuItemToggle.Text = "Start Server"
@@ -597,10 +601,13 @@ $script:Timer.Interval = 3000
 $script:Timer.add_Tick({
     if ($script:IsExiting) { return }
 
-    # The daemon query shells out to schtasks and WMI: every 5th tick (15 s) is enough.
+    # Every 5th tick (15 s) is enough for the daemon state.
     if ($script:DaemonTicks % 5 -eq 0) {
-        $script:DaemonState = Get-HostDaemonState
-        $script:MenuItemDaemon.Text = "  Daemon: $($script:DaemonState)"
+        $newDaemonState = Get-HostDaemonState
+        if ($newDaemonState -ne $script:DaemonState) {
+            $script:DaemonState = $newDaemonState
+            Update-TrayUI
+        }
     }
     $script:DaemonTicks++
 

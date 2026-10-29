@@ -86,7 +86,7 @@ test("readTrayConfig falls back to defaults without a config file", () => {
 test("buildMenuItems reflects running state and service availability", () => {
   const running = buildMenuItems({ running: true, version: "0.4.2", autostart: true, hasService: true, exposed: false, hasDialogTool: true });
   assert.equal(itemById(running, 2).label, "  Status: Running");
-  assert.equal(itemById(running, 7).label, "Stop Server");
+  assert.equal(itemById(running, 7).label, "Stop Server (omp runs keep going)");
   assert.equal(itemById(running, 12).label, "Expose to Network");
   assert.equal(itemById(running, 12).state, 0);
   assert.equal(itemById(running, 16).label, "Start with Plasma");

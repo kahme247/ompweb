@@ -204,7 +204,7 @@
   "settingsConfig.windowsServiceReinstallBtn": "Reinstall / Repair Shortcuts",
   "settingsConfig.windowsServiceUninstallBtn": "Uninstall Service",
   "settingsConfig.windowsServiceStartBtn": "Start Tray Manager",
-  "settingsConfig.windowsServiceStopBtn": "Stop Service",
+  "settingsConfig.windowsServiceStopBtn": "Stop Service (omp runs keep going)",
   "settingsConfig.windowsServiceRestartBtn": "Restart Service",
   "settingsConfig.windowsServiceDesktopShortcut": "Desktop Shortcut: {status}",
   "settingsConfig.windowsServiceStartupShortcut": "Startup Shortcut: {status}",

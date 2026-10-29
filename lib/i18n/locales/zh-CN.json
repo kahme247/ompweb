@@ -201,7 +201,7 @@
   "settingsConfig.windowsServiceReinstallBtn": "重新安装 / 修复快捷方式",
   "settingsConfig.windowsServiceUninstallBtn": "卸载服务",
   "settingsConfig.windowsServiceStartBtn": "启动托盘管理器",
-  "settingsConfig.windowsServiceStopBtn": "停止服务",
+  "settingsConfig.windowsServiceStopBtn": "停止服务（omp 运行将继续）",
   "settingsConfig.windowsServiceRestartBtn": "重启服务",
   "settingsConfig.windowsServiceDesktopShortcut": "桌面快捷方式：{status}",
   "settingsConfig.windowsServiceStartupShortcut": "自启快捷方式：{status}",
