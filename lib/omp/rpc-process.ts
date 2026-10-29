@@ -77,7 +77,7 @@ export interface RpcProcessOptions {
   transport?: RpcTransport;
   /** A child that outlived the server that spawned it (see adoptRpcSession): no
    * ready wait, the decoder starts at this version and drops `rpc_chunk`
-   * records until a frame starts, and frames are held until `replay`. */
+   * records until a frame starts, and frames are held until `release` (after `replay`). */
   adopted?: { protocolVersion: 2 };
   /** Injectable process boundary for deterministic transport tests. */
   dependencies?: {
@@ -125,10 +125,10 @@ export class RpcProcess {
   private readonly frameListeners = new Set<(frame: RpcFrame) => void>();
   private readyPromise: Promise<RpcFrame>;
   private readonly resolveReady: (frame: RpcFrame) => void;
-  /** An adopted child's frames, held until `replay` (see RpcProcessOptions.adopted), and the bytes of its lines since. */
+  /** An adopted child's frames, held until `release` (see RpcProcessOptions.adopted), and the bytes of its lines since. */
   private heldFrames: RpcFrame[] | null = null;
   private heldBytes = 0;
-  /** Set once an adopted child's output outgrew the cap before `replay`: the adoption fails. */
+  /** Set once an adopted child's output outgrew the cap before `release`: the adoption fails. */
   private heldOverflow: Error | null = null;
   private nextId = 1;
   private stderrTail = "";
@@ -233,24 +233,29 @@ export class RpcProcess {
   }
 
   /** Adopted child: feeds the daemon's raw lines of its still-open requests as
-   * if just read (they are older than anything live), then the frames held since. */
+   * if just read. They are older than anything held, which `release` delivers next. */
   replay(lines: string[]): void {
     if (this.heldOverflow) throw this.heldOverflow;
-    const held = this.heldFrames ?? [];
-    this.heldFrames = null;
     // Its own decoder: a live chunk sequence may be half-read.
     const decoder = new RpcFrameDecoder();
     for (const line of lines) {
       const parsed = parseLine(line);
-      if (parsed !== undefined) this.receive(parsed, decoder);
+      if (parsed !== undefined) this.receive(parsed, decoder, true);
     }
+  }
+
+  /** Adopted child, after `replay`: delivers the frames held since and stops holding. */
+  release(): void {
+    if (this.heldOverflow) throw this.heldOverflow;
+    const held = this.heldFrames ?? [];
+    this.heldFrames = null;
     for (const frame of held) this.dispatch(frame);
   }
 
   /**
-   * Counts an adopted child's output until `replay`, up to LINK_LIMITS.channelBufferBytes
+   * Counts an adopted child's output until `release`, up to LINK_LIMITS.channelBufferBytes
    * as RemoteRpcTransport holds it. Past that the adoption fails: its commands
-   * reject, `replay` throws, and the output is dropped while the wrapper kills it.
+   * reject, `replay` and `release` throw, and the output is dropped while the wrapper kills it.
    */
   private holdable(line: string): boolean {
     if (this.heldOverflow) return false;
@@ -267,7 +272,8 @@ export class RpcProcess {
     return false;
   }
 
-  private receive(parsed: unknown, decoder: RpcFrameDecoder): void {
+  /** `replayed`: a daemon line (see `replay`), delivered past the frames still held. */
+  private receive(parsed: unknown, decoder: RpcFrameDecoder, replayed = false): void {
     let frame: RpcFrameRecord;
     try {
       if (isRecord(parsed) && parsed.type === "rpc_chunk" && this.protocolVersion !== 2) {
@@ -290,11 +296,11 @@ export class RpcProcess {
       this.handleResponse(frame as unknown as RpcResponseFrame);
       return;
     }
-    this.dispatch(frame);
+    this.dispatch(frame, replayed);
   }
 
-  private dispatch(frame: RpcFrame): void {
-    if (this.heldFrames) {
+  private dispatch(frame: RpcFrame, replayed = false): void {
+    if (this.heldFrames && !replayed) {
       this.heldFrames.push(frame);
       return;
     }
