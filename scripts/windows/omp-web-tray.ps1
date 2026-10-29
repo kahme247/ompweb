@@ -431,6 +431,12 @@ $script:MenuItemStatus.Text = "  Status: Starting (Port $EffectivePort)"
 $script:MenuItemStatus.Enabled = $false
 $contextMenu.Items.Add($script:MenuItemStatus) | Out-Null
 
+# Item 2b: Host daemon indicator (`ompweb host`, registered as the omp-web-host task)
+$script:MenuItemDaemon = New-Object System.Windows.Forms.ToolStripMenuItem
+$script:MenuItemDaemon.Text = "  Daemon: Checking..."
+$script:MenuItemDaemon.Enabled = $false
+$contextMenu.Items.Add($script:MenuItemDaemon) | Out-Null
+
 $contextMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
 
 # Item 3: Open in Browser
@@ -542,6 +548,19 @@ $script:NotifyIcon.add_DoubleClick({
     try { [System.Diagnostics.Process]::Start($ServerUrl) | Out-Null } catch { }
 })
 
+# "Not installed" when the omp-web-host task is absent, else Running/Stopped by its supervisor process.
+function Get-HostDaemonState {
+    try {
+        schtasks.exe /query /tn "omp-web-host" 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) { return "Not installed" }
+        $procs = Get-CimInstance Win32_Process -Filter "Name LIKE '%powershell%' OR Name LIKE '%pwsh%'" -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*omp-web-host.ps1*' }
+        if (($procs | Measure-Object).Count -gt 0) { return "Running" }
+        return "Stopped"
+    } catch { return "Unknown" }
+}
+$script:DaemonTicks = 0
+$script:DaemonState = "Checking..."
+
 function Update-TrayUI {
     $statusText = switch ($script:State) {
         "Running"  { "Running ($EffectivePort)" }
@@ -552,6 +571,7 @@ function Update-TrayUI {
     }
 
     $script:MenuItemStatus.Text = "  Status: $statusText"
+    $script:MenuItemDaemon.Text = "  Daemon: $($script:DaemonState)"
 
     # Limit tooltip text length (Windows NotifyIcon.Text max 63 characters)
     $tipText = "omp-web ($statusText)"
@@ -576,6 +596,13 @@ $script:Timer.Interval = 3000
 
 $script:Timer.add_Tick({
     if ($script:IsExiting) { return }
+
+    # The daemon query shells out to schtasks and WMI: every 5th tick (15 s) is enough.
+    if ($script:DaemonTicks % 5 -eq 0) {
+        $script:DaemonState = Get-HostDaemonState
+        $script:MenuItemDaemon.Text = "  Daemon: $($script:DaemonState)"
+    }
+    $script:DaemonTicks++
 
     # Check child process state
     if ($script:ChildProcess -and $script:ChildProcess.HasExited) {

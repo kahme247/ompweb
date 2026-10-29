@@ -108,6 +108,13 @@ test("buildMenuItems reflects running state and service availability", () => {
   assert.equal(itemById(noDialog, 13).enabled, false);
   assert.equal(itemById(noDialog, 14).enabled, false);
 
+  // The ompweb-host daemon state sits under the web status.
+  assert.equal(itemById(running, 19).label, "  Daemon: Not installed");
+  assert.equal(itemById(running, 19).enabled, false);
+  const withDaemon = buildMenuItems({ running: true, version: "0.4.2", autostart: false, hasService: true, exposed: false, hasDialogTool: true, daemon: "running" });
+  assert.equal(itemById(withDaemon, 19).label, "  Daemon: Running");
+  assert.equal(withDaemon.findIndex((item) => item.id === 19), withDaemon.findIndex((item) => item.id === 2) + 1);
+
   // Inert rows and separators.
   assert.equal(itemById(running, 1).enabled, false);
   assert.ok(itemById(running, 3).separator);

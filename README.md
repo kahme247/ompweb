@@ -122,7 +122,7 @@ ompweb --no-open                           # Don't auto-open the browser
 ompweb --install-tray                      # Install Windows System Tray service & Desktop shortcuts
 ompweb --uninstall-tray                    # Uninstall Windows System Tray service & shortcuts
 ompweb --tray                              # Start background System Tray manager
-ompweb systemd install                     # Install Linux systemd user service
+ompweb systemd install                     # Install Linux systemd user services (web + ompweb-host daemon)
 ompweb --help                              # Show help
 ompweb --version                           # Show version
 ```
