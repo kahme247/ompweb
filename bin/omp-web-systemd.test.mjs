@@ -8,6 +8,7 @@ import test from "node:test";
 
 const require = createRequire(import.meta.url);
 const {
+  buildHostUnit,
   buildUnit,
   escapeUnitPath,
   escapeUnitValue,
@@ -77,6 +78,26 @@ test("buildUnit points at the generated env file and keeps runtime settings out 
   if (process.platform === "linux") {
     assert.match(unit, /"PATH=\/home\/u\/\.bun\/bin:\/usr\/local\/bin:.*\/usr\/bin:\/bin"/);
   }
+});
+
+test("buildHostUnit runs `ompweb host` with the web unit's env file and never gives up restarting", () => {
+  const options = {
+    ompwebBin: "/usr/local/bin/ompweb",
+    env: { OMP_WEB_OMP_BIN: "/home/u/.bun/bin/omp" },
+    home: "/home/u",
+    envPath: "/home/u/.omp/agent/web-service.env",
+  };
+  const unit = buildHostUnit(options);
+
+  assert.match(unit, /^ExecStart=\/usr\/local\/bin\/ompweb host$/m);
+  assert.match(unit, /EnvironmentFile=\/home\/u\/\.omp\/agent\/web-service\.env/);
+  assert.match(unit, /^Restart=always$/m);
+  assert.match(unit, /^RestartSec=10$/m);
+  // No host.json on first install makes the daemon exit; the start limit must not turn that into a permanent failure.
+  assert.match(unit, /^StartLimitIntervalSec=0$/m);
+  assert.doesNotMatch(unit, /StartLimitBurst/);
+  assert.match(unit, /WantedBy=default\.target/);
+  assert.equal(buildHostUnit({ ...options, ompwebBin: "/opt/my tools/ompweb" }).match(/^ExecStart=(.*)$/m)[1], '"/opt/my tools/ompweb" host');
 });
 
 test("buildUnit adds the launcher interpreter dir for Bun/npm installs of omp", () => {
@@ -197,6 +218,9 @@ test("install creates the env file and unit with LAN settings", { skip: process.
       OMP_WEB_TRUSTED_HEADER_SHA256: "a".repeat(64),
     });
     assert.match(readFileSync(unitPath, "utf8"), /EnvironmentFile=.*web-service\.env/);
+    const hostUnit = readFileSync(path.join(path.dirname(unitPath), "ompweb-host.service"), "utf8");
+    assert.match(hostUnit, /^ExecStart=.*\/ompweb host$/m);
+    assert.match(hostUnit, /EnvironmentFile=.*web-service\.env/);
     assert.match(result.stdout, /config:.*web-service\.env/);
   } finally {
     rmSync(dir, { recursive: true, force: true });

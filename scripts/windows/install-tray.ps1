@@ -267,6 +267,27 @@ if (!$NoAutostart -and (Test-Path $ServicePs1)) {
     try { schtasks /delete /tn "omp-web" /f 2>$null | Out-Null } catch { }
 }
 
+# The host daemon (`ompweb host`) runs next to the web service. It starts at logon like the web
+# service; with -NoAutostart it is still registered and started, but not at logon.
+$HostPs1 = Join-Path $RepoRoot "scripts\windows\omp-web-host.ps1"
+if (Test-Path $HostPs1) {
+    try {
+        $hostArg = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$HostPs1`""
+        $hostAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $hostArg
+        $hostTrigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+        $hostPrincipal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+        # omp-web-host.ps1 restarts the daemon itself; the scheduler only has to survive battery and a missed logon.
+        $hostSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)
+        $hostTask = @{ TaskName = "omp-web-host"; Action = $hostAction; Principal = $hostPrincipal; Settings = $hostSettings; Force = $true; ErrorAction = "Stop" }
+        if (!$NoAutostart) { $hostTask.Trigger = $hostTrigger }
+        Register-ScheduledTask @hostTask | Out-Null
+        Log-Message "  [OK] Scheduled Task created: omp-web-host"
+        schtasks.exe /run /tn "omp-web-host" 2>$null | Out-Null
+    } catch {
+        Log-Message "  [WARN] Failed to create the omp-web-host Scheduled Task: $($_.Exception.Message)"
+    }
+}
+
 # -----------------------------------------------------------------------------
 # 4. Optional Immediate Launch
 # -----------------------------------------------------------------------------
