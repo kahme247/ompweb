@@ -34,7 +34,7 @@ import type {
 } from "./pi-types";
 import type { AgentMessage, CrossSessionHostToolCall, ExitedRpcSession, ExtensionWidgetItem } from "./types";
 import { isLinkUp, type Host, type HostStatus } from "./hosts/host";
-import { getHost, lastUplinkAt, listHosts, orphanExit } from "./hosts/hub";
+import { freezeHostLinks, getHost, lastUplinkAt, listHosts, orphanExit } from "./hosts/hub";
 import { localHost } from "./hosts/local-host";
 import type { OpResult } from "./hosts/session-ops";
 import { hostForSessionId, invalidateHostSessionList, listSessionsAllHosts, sessionSpawnTarget } from "./hosts/session-index";
@@ -2491,9 +2491,10 @@ function getRegistry(): Map<string, AgentSessionWrapper> {
     const cleanup = () => {
       // Children dying from here on are the shutdown, not finished runs.
       markShuttingDown();
-      // Only this process's own children. A linked host's children run on: its daemon
-      // keeps them when the link drops, and the next server adopts them (a kill sent
-      // here could still reach the daemon over a downlink that outlives this handler).
+      // A linked host's children run on: nothing more reaches its daemon (no kill, no
+      // host tool rejection as tabs close on the way out), and the next server adopts them.
+      freezeHostLinks();
+      // Only this process's own children are stopped.
       globalThis.__ompSessions?.forEach((s) => {
         if (s.host === localHost) s.destroy();
       });
