@@ -31,6 +31,7 @@ import {
   type UpMessage,
 } from "./link-protocol";
 import { localHost, resolveSpawnCwdResult } from "./local-host";
+import { PendingRequests } from "./pending-requests";
 import { sessionOps } from "./session-ops";
 
 const FIRST_RETRY_MS = 1_000;
@@ -46,6 +47,8 @@ interface Channel {
   sessionId: string | null;
   /** Bytes of this child's output waiting for an uplink ack. */
   buffered: number;
+  /** Open blocking requests, replayed in the next hello. */
+  pending: PendingRequests;
 }
 
 interface Queued {
@@ -328,9 +331,12 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     // Resent after a reconnect but already applied.
     if (!down.applied(message.seq)) return;
     switch (message.type) {
-      case "stdin":
-        channels.get(message.ch)?.transport.write(message.line, () => {});
+      case "stdin": {
+        const channel = channels.get(message.ch);
+        channel?.pending.noteStdin(message.line);
+        channel?.transport.write(message.line, () => {});
         return;
+      }
       case "kill":
         channels.get(message.ch)?.transport.killTree(message.force);
         return;
@@ -454,8 +460,12 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       transport.killTree(true);
       throw new HostOpError(503, "host_stopping", "ompweb host is stopping");
     }
-    channels.set(ch, { transport, sessionId: file ? readSessionHeaderSync(file)?.id ?? null : null, buffered: 0 });
-    transport.onLine((line) => output(ch, { type: "stdout", ch, line }));
+    const pending = new PendingRequests(LINK_LIMITS.pendingBytes);
+    channels.set(ch, { transport, sessionId: file ? readSessionHeaderSync(file)?.id ?? null : null, buffered: 0, pending });
+    transport.onLine((line) => {
+      pending.noteStdout(line);
+      output(ch, { type: "stdout", ch, line });
+    });
     transport.onStderr((chunk) => output(ch, { type: "stderr", ch, chunk }));
     transport.onExit((code, signal) => {
       channels.delete(ch);
@@ -475,15 +485,24 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         watchdog = setTimeout(() => abort.abort(new Error("no traffic from the server")), LINK_LIMITS.offlineMs);
       };
       try {
-        const hello = encodeLine({
+        const ompVersion = await getOmpVersion();
+        const encodeHello = (replay: boolean) => encodeLine({
           type: "hello",
           v: LINK_PROTOCOL_VERSION,
-          ompVersion: await getOmpVersion(),
+          ompVersion,
           platform: process.platform,
           home: homedir(),
           ack: down.acked,
-          channels: [...channels].map(([ch, channel]) => ({ ch, sessionId: channel.sessionId })),
+          channels: [...channels].map(([ch, channel]) => ({ ch, sessionId: channel.sessionId, pending: replay ? channel.pending.lines() : null })),
         });
+        let hello: string;
+        try {
+          hello = encodeHello(true);
+        } catch (error) {
+          if (!(error instanceof LinkLimitError)) throw error;
+          // Too many channels near the pending cap for one line: none replays (all take the kill-and-resume path) rather than never relinking.
+          hello = encodeHello(false);
+        }
         alive();
         const signal = AbortSignal.any([stopSignal.signal, abort.signal]);
         // The hello goes in a POST body: as a GET header, proxy header buffers (nginx: 8 KB) capped the channels it lists.

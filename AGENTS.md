@@ -114,6 +114,7 @@ lib/
     link-protocol.ts   link messages, codec, size limits, `HOST_OP_NAMES`, `SeqWindow`/`Outbox`
     hub.ts             main side: link GET/POST/blob handlers, `RemoteHost`, `getHost`, `listHosts`, orphans, `hosts` change events
     daemon.ts          remote side: `loginHost`, `readHostLogin`, `runHostDaemon` (reconnect, buffering, op dispatch)
+    pending-requests.ts daemon side: `PendingRequests`, a channel's still-open blocking requests for the hello
     registry.ts        `<agent dir>/omp-web/hosts.json`: create/update/revoke, token hashing and lookup
     session-index.ts   sessions and projects across hosts, cached per host; `hostForSessionId`, `sessionSpawnTarget`
   provider-accounts.ts distinct omp accounts per provider from `omp usage` reports (Models → provider detail)
@@ -266,7 +267,10 @@ bin/
   buffers would cap the channels it lists): a POST with `x-omp-web-hello: 1`
   carries it and answers `{helloId}`, and the downlink GET names that id in
   `x-omp-web-hello`; main takes the hello at that GET, so it opens one
-  downlink once. A v1 daemon's header hello gets 426. Each side keeps unacked
+  downlink once. A v1 daemon's header hello gets 426. Each `hello.channels`
+  entry carries `pending` (link v3): the raw stdout lines of that child's
+  still-open `host_tool_call`s and blocking `extension_ui_request`s
+  (`PendingRequests`), or null past `LINK_LIMITS.pendingBytes`. Each side keeps unacked
   lines, resends after a reconnect and drops any `seq` it already applied.
   Main decodes a whole POST before applying any of it. `hello.ack === 0`
   means a fresh daemon: main restarts that host's uplink window. Wire shapes

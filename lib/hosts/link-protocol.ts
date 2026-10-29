@@ -2,8 +2,9 @@
 // Pure: no I/O and no Next or `@/` imports, so both sides share it.
 import type { SessionOps } from "./session-ops";
 
-/** 2: the hello moved from a GET header into a POST body (a v1 daemon gets 426). */
-export const LINK_PROTOCOL_VERSION = 2;
+/** 2: the hello moved from a GET header into a POST body (a v1 daemon gets 426).
+ * 3: hello channels carry `pending`, the raw lines of their open blocking requests. */
+export const LINK_PROTOCOL_VERSION = 3;
 
 export const LINK_LIMITS = {
   pingMs: 15_000,
@@ -19,6 +20,8 @@ export const LINK_LIMITS = {
   inlineResultBytes: 1024 * 1024,
   opTimeoutMs: 30_000,
   maxLineBytes: 8 * 1024 * 1024,
+  /** Per channel: open blocking requests past this are not replayed (the channel is not adoptable). */
+  pendingBytes: 1024 * 1024,
 };
 
 /** A POST carrying this header (value `1`) is the daemon's `hello`, in its body;
@@ -79,6 +82,9 @@ export type DownMessage =
   | { type: "ping" }
   | { type: "pong" };
 
+/** `pending`: raw stdout lines of the child's open blocking requests, or null when over `pendingBytes`. */
+export type HelloChannel = { ch: string; sessionId: string | null; pending: string[] | null };
+
 export type UpMessage =
   | {
       type: "hello";
@@ -87,7 +93,7 @@ export type UpMessage =
       platform: string;
       home: string;
       ack: number;
-      channels: { ch: string; sessionId: string | null }[];
+      channels: HelloChannel[];
     }
   | { type: "stdout"; seq: number; ch: string; line: string }
   | { type: "stderr"; seq: number; ch: string; chunk: string }
@@ -154,6 +160,12 @@ function nullable<T>(o: Obj, key: string, read: (o: Obj, key: string) => T): T |
   return o[key] === null ? null : read(o, key);
 }
 
+function strings(o: Obj, key: string): string[] {
+  const v = o[key];
+  if (!Array.isArray(v) || !v.every((s) => typeof s === "string")) fail(`${key} must be an array of strings`);
+  return v;
+}
+
 function isHostOp(name: string): name is HostOpName {
   return (HOST_OP_NAMES as readonly string[]).includes(name);
 }
@@ -198,12 +210,12 @@ export function decodeDown(line: string): DownMessage {
   }
 }
 
-function channels(o: Obj): { ch: string; sessionId: string | null }[] {
+function channels(o: Obj): HelloChannel[] {
   const list = o.channels;
   if (!Array.isArray(list)) fail("channels must be an array");
   return list.map((c: unknown) => {
     if (!isObj(c)) fail("channel must be an object");
-    return { ch: str(c, "ch"), sessionId: nullable(c, "sessionId", str) };
+    return { ch: str(c, "ch"), sessionId: nullable(c, "sessionId", str), pending: nullable(c, "pending", strings) };
   });
 }
 
