@@ -76,7 +76,9 @@ These names have no omp slash equivalent and are dispatched by
 - `copy` — copy the last assistant text.
 
 They are listed in `CLIENT_ONLY_COMMAND_NAMES`
-(`components/ChatInput-slash-commands.ts`).
+(`components/ChatInput-slash-commands.ts`). They cannot carry attachments: the
+composer refuses the command with a notice and keeps the draft and files,
+rather than silently dropping them.
 
 ### 4.3 Web-only prompt expansions
 
@@ -96,9 +98,11 @@ Precedence rules:
 
 - All sources are shown; `builtin` is no longer filtered out.
 - `input.hint` becomes the argument hint.
-- Client-owned names are dropped from the external list so each command appears
-  once.
+- Client-owned names are dropped from the external list unless omp reports the
+  same name, so each command appears once and the catalog still wins.
 - Web prompt expansions are dropped when `ompCommandNames` contains the name.
+- `ompCommandNames` includes primary names and aliases, so an alias that
+  matches a web name still routes to omp.
 - While a run is streaming, client-owned commands are hidden from the palette
   but still work when typed; the streaming path intercepts them before the
   prompt queue.
@@ -117,7 +121,8 @@ Precedence rules:
 
 This is what makes `/goal` work during a run: the goal RPC is sent while the
 current turn continues, and omp decides continuation at the next terminal
-`agent_end`.
+`agent_end`. A client-owned command with attachments is refused before any of
+these steps, so a queued `/goal` cannot clear an attached file.
 
 ## 5. Native goal mode
 
@@ -187,7 +192,11 @@ A present-but-malformed goal is rejected rather than treated as "no goal".
 `lib/rpc-manager.ts`:
 
 - Adds `"goal"` to `PASSTHROUGH_COMMANDS`.
-- Maps `state.goal` into `WebSessionState` when omp reports it.
+- Validates `state.goal` with `readGoalModeState` before mapping it into
+  `WebSessionState`: a valid `null` clears, a malformed snapshot is omitted
+  rather than forwarded.
+- Fences goal `create` / `resume` / `pause` / `drop` against a history edit,
+  while the read-only `get` op stays available.
 - Forwards `goal_updated` through the existing default event path.
 
 `hooks/useAgentSession-stream.ts` adds `goal` to `AgentStateResponse`.
@@ -203,7 +212,8 @@ A present-but-malformed goal is rejected rather than treated as "no goal".
   overwriting a newer goal.
 - `loadSession`, `refreshAgentSnapshots`, and `reconcileAgentState` all feed the
   goal snapshot.
-- `goal_updated` publishes the event state.
+- `goal_updated` publishes the event state; a malformed payload is skipped
+  instead of being treated as a clear.
 
 Session switching:
 
@@ -235,6 +245,11 @@ Session switching:
 - Sends `{ type: "goal", op: "create", objective }`.
 - Never sends a prompt and never inserts the old
   "Work toward this goal…" message.
+- Requires a returned goal before publishing state, promoting the session, or
+  announcing success; an empty or data-less success reply is an error and
+  keeps the existing goal.
+- Fences the reply to the session that sent it: a late reply after a switch or
+  unmount is ignored.
 - Promotes a new chat to the real session id after success.
 - Shows omp's error and keeps the existing goal when create fails.
 
@@ -246,6 +261,9 @@ publishes the response state.
 - `/compact` is now omp's builtin, so `soft`, `remote`, `snapcompact`, and focus
   text work. `manual_compaction_start` / `manual_compaction_end` update
   `isCompacting`, `compactResult`, and `compactError`, then reload the session.
+  The server patches `manual_compaction_end.result` with
+  `patchEstimatedTokensAfter` before forwarding it, so a result without
+  `estimatedTokensAfter` does not show the full pre-compaction count as saved.
   The composer/top-bar compact button still uses the `compact` RPC.
 - `/session` is now omp's builtin (`info`, `delete`, `pin`). The web stats panel
   is still available from the context ring; the old `/session` panel shortcut
