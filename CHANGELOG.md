@@ -8,6 +8,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Fixes & Improvements
 
+- **The chat transcript is quieter by default, closer to DSH.** A finished turn now shows your prompt, one collapsed "Process details" row, and the final answer. The row holds the thinking, tool calls, notices and the agent's intermediate text. A turn whose intermediate message carries a provider error stays unfolded so the error remains visible. A new setting, **Expand process details by default** (Settings → Interface & Behavior, off by default), opens that row as it appears. The per-message action buttons (copy, Markdown, read aloud, edit, fork) are hidden until the pointer is over the message or focus is inside it; touch screens always show them.
 - **In-app updates work when ompweb runs as a systemd service.** The update worker ran inside the service's cgroup, so stopping the server killed the worker too: nothing was installed, the service could stay down (`Restart=on-failure` does not restart a clean SIGTERM exit), and every page load reopened the update dialog at "Stop ompweb-managed sessions". The worker now runs in its own transient scope (`systemd-run --scope`) and stops, updates and starts the unit through `systemctl`, starting it again if the install fails.
 - **An update whose worker died is reported as failed.** A running update whose worker process is gone, or whose lease has expired, now becomes a failed attempt the dialog can show and clean up, instead of waiting forever.
 
