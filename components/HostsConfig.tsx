@@ -10,7 +10,7 @@ import { copyText } from "@/lib/clipboard";
 import type { HostRow } from "@/lib/hosts/hub";
 import { useI18n } from "@/lib/i18n";
 import { useHostRows } from "@/hooks/useHostRows";
-import { HOST_STATUS_COLOR, hostName, hostStatusText, localInstallCommand } from "./host-status";
+import { HOST_STATUS_COLOR, hostName, hostStatusText, isLocalRow, localInstallCommand } from "./host-status";
 
 type Dialogs = { kind: "add" } | { kind: "rename"; host: HostRow } | null;
 
@@ -27,7 +27,7 @@ async function call(method: string, url: string, body?: unknown): Promise<Record
 
 const failure = (error: unknown) => toast.error(error instanceof Error ? error.message : String(error));
 
-function CopyField({ label, value }: { label: string; value: string }) {
+export function CopyField({ label, value }: { label: string; value: string }) {
   const { t } = useI18n();
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -129,8 +129,11 @@ function HostCard({ host, onRename, onRevoke }: { host: HostRow; onRename: () =>
           <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{hostStatusText(t, host)}</span>
         </div>
         {details && <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)", overflowWrap: "anywhere" }}>{details}</div>}
-        {"serverPlatform" in host && host.status === "offline" && (
-          <div style={{ marginTop: 4, fontSize: 12, color: "var(--text-muted)", overflowWrap: "anywhere" }}>{t("hostsConfig.localOfflineHint", { command: localInstallCommand(host.serverPlatform) })}</div>
+        {isLocalRow(host) && host.daemonManaged && host.status === "offline" && (
+          <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6, fontSize: 12, color: "var(--text-muted)" }}>
+            {t("hostsConfig.localOfflineHint")}
+            <CopyField label={t("hostsConfig.command")} value={localInstallCommand(host.serverPlatform)} />
+          </div>
         )}
       </div>
       <div className="settings-card-control" style={{ display: "flex", alignItems: "center", gap: 6 }}>

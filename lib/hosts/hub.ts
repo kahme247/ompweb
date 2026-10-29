@@ -923,6 +923,8 @@ export interface LocalHostRow {
   serverVersion: number;
   /** `process.platform` of this server: picks the daemon install command while no daemon has linked. */
   serverPlatform: string;
+  /** False in `next dev`, where this machine runs sessions in-process and is offline by design: no install hints. */
+  daemonManaged: boolean;
 }
 
 export type HostRow = LocalHostRow | LinkedHostRow;
@@ -940,6 +942,7 @@ export function hostsSnapshot(): { hosts: HostRow[] } {
     hostVersion: link?.hostVersion ?? null,
     serverVersion: LINK_PROTOCOL_VERSION,
     serverPlatform: process.platform,
+    daemonManaged: process.env.NODE_ENV !== "development",
   };
   return { hosts: [local, ...listHosts()] };
 }

@@ -1,4 +1,4 @@
-import type { HostRow } from "@/lib/hosts/hub";
+import type { HostRow, LocalHostRow } from "@/lib/hosts/hub";
 
 type Translate = (key: string, vars?: Record<string, string | number>) => string;
 
@@ -8,6 +8,8 @@ export const HOST_STATUS_COLOR = { online: "var(--status-success)", offline: "va
 export function hostName(t: Translate, host: Pick<HostRow, "id" | "label">): string {
   return host.id === "local" && !host.label ? t("hostsConfig.thisMachine") : host.label;
 }
+
+export const isLocalRow = (host: HostRow): host is LocalHostRow => host.id === "local";
 
 /** The command that installs the ompweb-host service on the server's platform (`LocalHostRow.serverPlatform`). */
 export function localInstallCommand(platform: string): string {
