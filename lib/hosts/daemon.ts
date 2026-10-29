@@ -61,6 +61,7 @@ interface Queued {
 }
 
 const loginFile = () => join(getAgentDir(), "omp-web", "host.json");
+const trimUrl = (url: string) => url.replace(/\/+$/, "");
 const reason = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const log = (message: string) => console.error(`[ompweb host] ${message}`);
 // 1 s doubling to 60 s; each wait varies ±20% so many hosts do not redial in step.
@@ -122,7 +123,7 @@ function sessionsPath(value: unknown): string {
   return target;
 }
 
-const isLoopbackHost = (hostname: string) => hostname === "localhost" || hostname === "[::1]" || /^127(\.\d{1,3}){3}$/.test(hostname);
+export const isLoopbackHost = (hostname: string) => hostname === "localhost" || hostname === "[::1]" || /^127(\.\d{1,3}){3}$/.test(hostname);
 
 async function* readLines(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
   const reader = body.getReader();
@@ -293,7 +294,8 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     // A 401 for a token another request already replaced needs nothing more.
     if (status === 401 && sent === authorization) {
       const saved = readHostLogin();
-      if (saved && `Bearer ${saved.token}` !== sent) {
+      // Only a host.json for this same server counts: one that names another server is not this daemon's link.
+      if (saved && trimUrl(saved.url) === trimUrl(options.url) && `Bearer ${saved.token}` !== sent) {
         authorization = `Bearer ${saved.token}`;
         log("the server rejected this host's token; using the new one from host.json");
       } else {
@@ -424,6 +426,8 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         signal,
       });
       if (fatal(response.status, sent)) throw new HostOpError(503, "host_stopping", "ompweb host is stopping");
+      // The token was just replaced (or this request carried a replaced one): upload again with the current one.
+      if (response.status === 401) continue;
       if (response.status === 409) {
         if (nonce === used) forgetLink();
         continue;

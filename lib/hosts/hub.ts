@@ -5,7 +5,6 @@
 import { randomUUID } from "node:crypto";
 import { readBodyWithinLimit, RequestBodyTooLargeError } from "../bounded-form-data";
 import type { RpcTransport } from "../omp/rpc-transport";
-import { getOmpVersion } from "../omp/omp-cli";
 import type { ProjectRegistryEntry } from "../project-registry";
 import { isValidSessionId } from "../session-file-references-core";
 import { isRecord } from "../type-guards";
@@ -875,12 +874,14 @@ export class RemoteHost implements Host {
   }
 }
 
-/** "local" is this machine: the daemon linked as `local` when one is up, else the direct host (until the direct path is removed); other ids must be registered hosts. */
+/** "local" is this machine; other ids must be registered hosts. Until the direct path is removed, "local" is always the direct host, even while a daemon is linked: see `getLinkedHost`. */
 export function getHost(id: string): Host | null {
-  if (id === LOCAL_HOST_ID) {
-    const link = hub().links.get(id);
-    return link && isLinkUp(link.status) ? link.host : localHost;
-  }
+  if (id === localHost.id) return localHost;
+  return getLinkedHost(id);
+}
+
+/** The host reached over its link, for any registered id including the reserved `local`; null when no such record exists. */
+export function getLinkedHost(id: string): Host | null {
   return loadHosts().some((h) => h.id === id) ? linkFor(id).host : null;
 }
 
@@ -917,23 +918,28 @@ export function listHosts(): LinkedHostRow[] {
 export interface LocalHostRow {
   id: "local";
   label: string;
-  status: "online";
+  status: HostStatus;
   ompVersion: string | null;
-  platform: string;
+  platform: string | null;
   lastSeenAt: null;
+  hostVersion: number | null;
+  serverVersion: number;
 }
 
 export type HostRow = LocalHostRow | LinkedHostRow;
 
-/** Settings → Hosts payload (`GET /api/hosts` and the `hosts` channel): this machine first, then linked hosts. */
-export async function hostsSnapshot(): Promise<{ hosts: HostRow[] }> {
+/** Settings → Hosts payload (`GET /api/hosts` and the `hosts` channel): this machine first, then linked hosts. This machine's status is its daemon link's. */
+export function hostsSnapshot(): { hosts: HostRow[] } {
+  const link = hub().links.get(LOCAL_HOST_ID);
   const local: LocalHostRow = {
     id: "local",
-    label: "This machine",
-    status: "online",
-    ompVersion: await getOmpVersion(),
-    platform: process.platform,
+    label: loadHosts().find((record) => record.id === LOCAL_HOST_ID)?.label ?? "This machine",
+    status: link?.status ?? "offline",
+    ompVersion: link?.ompVersion ?? null,
+    platform: link?.platform ?? null,
     lastSeenAt: null,
+    hostVersion: link?.hostVersion ?? null,
+    serverVersion: LINK_PROTOCOL_VERSION,
   };
   return { hosts: [local, ...listHosts()] };
 }

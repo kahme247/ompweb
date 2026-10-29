@@ -49,8 +49,8 @@ function requestOrigin(req: Request): string {
   }
 }
 
-export async function GET() {
-  return NextResponse.json(await hostsSnapshot(), { headers: noStore });
+export function GET() {
+  return NextResponse.json(hostsSnapshot(), { headers: noStore });
 }
 
 export async function POST(req: Request) {
