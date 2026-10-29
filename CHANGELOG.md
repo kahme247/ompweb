@@ -10,6 +10,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 - **In-app updates work when ompweb runs as a systemd service.** The update worker ran inside the service's cgroup, so stopping the server killed the worker too: nothing was installed, the service could stay down (`Restart=on-failure` does not restart a clean SIGTERM exit), and every page load reopened the update dialog at "Stop ompweb-managed sessions". The worker now runs in its own transient scope (`systemd-run --scope`) and stops, updates and starts the unit through `systemctl`, starting it again if the install fails.
 - **An update whose worker died is reported as failed.** A running update whose worker process is gone, or whose lease has expired, now becomes a failed attempt the dialog can show and clean up, instead of waiting forever.
+- **Finished background tool calls no longer pile up as "Running bash…" rows.** omp keeps sending output updates for a bash call or task after it has been backgrounded and has already returned its result. Each late update put the call back into the session's live tool list, so a long-running session collected empty pulsing "bash"/"task" status rows above the composer after every reload or tab switch. Late updates now only refresh a tool that is still running.
 
 ---
 

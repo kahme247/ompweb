@@ -290,6 +290,13 @@ wait for that commit:
   supersedes it) but must NOT drop buffered tool updates.
 - Live entries are cleared on `agent_start`, terminal `agent_end`, prompt
   send/settlement failure — a tool must never leak into the next run.
+- The server replay snapshot (`AgentSessionWrapper.liveToolEvents`, returned
+  as `getStreamSnapshot().toolEvents` and replayed as `tool_execution_start`
+  by every resyncing tab) is created only by `tool_execution_start`. An update
+  refreshes an existing entry and never creates one: omp keeps emitting
+  `tool_execution_update` for a call detached into a background job (bash
+  auto-background, async task) after its `_end`/toolResult. Such late frames
+  still reach live tabs, where the committed toolResult wins the merge.
 
 ### Reasoning display ("Expand thinking blocks by default")
 - `ThinkingBlock` (`components/MessageView.tsx`) seeds `expanded` from

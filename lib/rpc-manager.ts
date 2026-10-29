@@ -1199,8 +1199,15 @@ export class AgentSessionWrapper {
       case "tool_execution_start":
       case "tool_execution_update":
         if (typeof event.toolCallId === "string") {
+          const current = this.liveToolEvents.get(event.toolCallId);
+          // An update only refines a tool this process saw start and not yet
+          // settle. omp keeps emitting tool_execution_update for a call after
+          // its end/toolResult once the call is detached into a background job
+          // (detached tool updates); re-creating the entry would make every
+          // resyncing tab replay that long-finished call as a running tool.
+          if (event.type === "tool_execution_update" && !current) break;
           this.liveToolEvents.set(event.toolCallId, {
-            ...this.liveToolEvents.get(event.toolCallId),
+            ...current,
             ...event,
             type: event.type,
             toolCallId: event.toolCallId,
