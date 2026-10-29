@@ -21,9 +21,10 @@ restart still kills them as orphans.
   service), installed next to the web service.
 - **Restarts adopt live children.** A restarted web server takes over the omp
   children the daemon still runs instead of killing them.
-- **Dev mode links to the same daemon.** `npm run dev` links to the local
-  daemon and takes the link over while it runs (one link per host); production
-  gets it back when dev stops.
+- **Dev mode does not take the local daemon.** Only the production web server
+  writes the daemon's `host.json`; a dev server shows "This machine" offline.
+  (The daemon dials out, so a takeover would need it to follow every rewrite of
+  `host.json`, and production and dev would then pull it back and forth.)
 
 ## Non-goals
 
@@ -110,7 +111,7 @@ or an adoption failure.
 | Web server restarts, daemon fine | Runs continue; adopted on `hello`; no resume prompt. |
 | Daemon restarts or upgrades | Children end; sessions that were running resume once (existing auto-resume). |
 | Web and daemon on different link protocol versions | 426; "This machine" shows "needs upgrade"; new sessions there are disabled until the daemon is restarted on the new version. |
-| Dev server takes the link | Production's local wrappers see the link down (offline banner). When dev stops, production redials, gets the link back and adopts every live channel, including ones dev started. |
+| Dev server running | It never writes `host.json`, so the daemon stays linked to production; dev shows "This machine" offline. |
 | Daemon not installed or not running | "This machine" shows offline with "start the ompweb-host service"; new local sessions are disabled. |
 | `host.json` token stale (web regenerated it) | Daemon gets 401, re-reads `host.json`, redials. It exits only if the file still holds the rejected token. |
 
@@ -142,9 +143,8 @@ from the same release:
 
 ## Dev mode
 
-`npm run dev` uses the same agent dir and the same `host.json` as production,
-so it links to the production daemon and takes the link over. It does nothing
-special: the takeover and the return are the one-link-per-host rule.
+When `NODE_ENV` is `development`, the web server skips `ensureLocalHostLink`:
+the daemon stays linked to production, and dev shows "This machine" offline.
 
 ## Testing
 
