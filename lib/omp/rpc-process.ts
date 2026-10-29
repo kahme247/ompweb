@@ -4,6 +4,7 @@ import { isRecord } from "../type-guards";
 import { resolveOmpBin } from "./omp-cli";
 import { type RpcTransport, spawnLocalRpcTransport } from "./rpc-transport";
 import { encodeRpcCommand, RpcFrameDecoder, type RpcFrameRecord, type RpcProtocolVersion } from "./rpc-frame";
+import { LINK_LIMITS } from "../hosts/link-protocol";
 
 /**
  * Process + protocol layer for `omp --mode rpc-ui` (NDJSON over stdio).
@@ -74,6 +75,10 @@ export interface RpcProcessOptions {
   onExit?: (info: { code: number | null; signal: NodeJS.Signals | null; stderrTail: string }) => void;
   /** Byte transport to run over. Omitted → spawn the installed omp (see spawnLocalRpcTransport). */
   transport?: RpcTransport;
+  /** A child that outlived the server that spawned it (see adoptRpcSession): no
+   * ready wait, the decoder starts at this version and drops `rpc_chunk`
+   * records until a frame starts, and frames are held until `replay`. */
+  adopted?: { protocolVersion: 2 };
   /** Injectable process boundary for deterministic transport tests. */
   dependencies?: {
     resolveOmpBin?: typeof resolveOmpBin;
@@ -82,6 +87,17 @@ export interface RpcProcessOptions {
 }
 
 const STDERR_TAIL_LIMIT = 8 * 1024;
+
+/** A stdout line as JSON; undefined when blank or not JSON (omp guards stdout in RPC mode, but never let a stray line kill the reader). */
+function parseLine(line: string): unknown {
+  const trimmed = line.trim();
+  if (!trimmed) return undefined;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return undefined;
+  }
+}
 
 /** Spawns the installed omp in RPC mode with the sanitized child environment. */
 export function spawnOmpTransport(options: RpcProcessOptions): RpcTransport {
@@ -108,6 +124,9 @@ export class RpcProcess {
   private readonly pending = new Map<string, PendingCommand>();
   private readonly frameListeners = new Set<(frame: RpcFrame) => void>();
   private readyPromise: Promise<RpcFrame>;
+  private readonly resolveReady: (frame: RpcFrame) => void;
+  /** An adopted child's frames, held until `replay` (see RpcProcessOptions.adopted). */
+  private heldFrames: RpcFrame[] | null = null;
   private nextId = 1;
   private stderrTail = "";
   private exited = false;
@@ -122,66 +141,35 @@ export class RpcProcess {
     this.cwd = options.cwd;
     if (options.onFrame) this.frameListeners.add(options.onFrame);
 
-    let resolveReady: (frame: RpcFrame) => void;
-    let rejectReady: (error: Error) => void;
-    this.readyPromise = new Promise<RpcFrame>((resolve, reject) => {
-      resolveReady = resolve;
-      rejectReady = reject;
-    });
+    const ready = Promise.withResolvers<RpcFrame>();
+    this.readyPromise = ready.promise;
+    this.resolveReady = ready.resolve;
     // waitReady() is optional for callers; avoid unhandled-rejection noise when
     // the process dies before anyone awaited readiness.
     this.readyPromise.catch(() => {});
     const exitDeferred = Promise.withResolvers<void>();
     this.exitedPromise = exitDeferred.promise;
+    if (options.adopted) {
+      // It announced readiness and negotiated this version with the server that spawned it.
+      this.protocolVersion = options.adopted.protocolVersion;
+      this.heldFrames = [];
+      ready.resolve({ type: "ready", supportedProtocolVersions: [options.adopted.protocolVersion] });
+    }
 
     let decoder = new RpcFrameDecoder();
-    // A linked host dropped lines (resync): the half-read sequence is gone, and the next lines may be another's tail.
-    let midSequence = false;
+    // An adopted child's output can resume mid chunk sequence, and a linked host's resync drops lines
+    // (the half-read sequence is gone): skip to the next frame's start.
+    let midSequence = options.adopted !== undefined;
     this.transport.onResync?.(() => {
       decoder = new RpcFrameDecoder();
       midSequence = true;
     });
     this.transport.onLine((line) => {
-      const trimmed = line.trim();
-      if (!trimmed) return;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(trimmed);
-      } catch {
-        // omp guards stdout in RPC mode, but never let a stray line kill the reader.
-        return;
-      }
+      const parsed = parseLine(line);
+      if (parsed === undefined) return;
       if (midSequence && isRecord(parsed) && parsed.type === "rpc_chunk" && parsed.index !== 0) return;
       midSequence = false;
-      let frame: RpcFrameRecord;
-      try {
-        if (parsed && typeof parsed === "object" && (parsed as { type?: unknown }).type === "rpc_chunk" && this.protocolVersion !== 2) {
-          throw new Error("RPC chunk received before protocol negotiation");
-        }
-        const decoded = decoder.push(parsed);
-        if (!decoded) return;
-        frame = decoded;
-      } catch (error) {
-        this.stderrTail = (this.stderrTail + `\nRPC protocol error: ${error instanceof Error ? error.message : String(error)}`).slice(-STDERR_TAIL_LIMIT);
-        console.warn("[omp-web] rpc-protocol-dispose", JSON.stringify({ transport: this.transport.id, protocolVersion: this.protocolVersion, errorType: error instanceof Error ? error.name : typeof error, at: new Date().toISOString() }));
-        void this.dispose(0);
-        return;
-      }
-      if (frame.type === "ready") {
-        resolveReady(frame);
-        return;
-      }
-      if (frame.type === "response") {
-        this.handleResponse(frame as unknown as RpcResponseFrame);
-        return;
-      }
-      for (const listener of this.frameListeners) {
-        try {
-          listener(frame);
-        } catch {
-          // Listener bugs must not break the protocol reader.
-        }
-      }
+      this.receive(parsed, decoder);
     });
 
     this.transport.onStderr((chunk) => {
@@ -195,7 +183,7 @@ export class RpcProcess {
       const exitError = new Error(
         `omp exited (code ${code ?? "null"}, signal ${signal ?? "none"})${this.stderrTail ? `: ${this.stderrTail.slice(-500)}` : ""}`,
       );
-      rejectReady(exitError);
+      ready.reject(exitError);
       for (const [, entry] of this.pending) {
         if (entry.timer) clearTimeout(entry.timer);
         entry.reject(exitError);
@@ -226,10 +214,10 @@ export class RpcProcess {
   }
 
   /** Enables bounded protocol-v2 framing when the ready frame advertises it. */
-  async negotiateProtocol(ready: RpcFrame): Promise<RpcProtocolVersion> {
+  async negotiateProtocol(ready: RpcFrame, timeoutMs?: number): Promise<RpcProtocolVersion> {
     const supported = Array.isArray(ready.supportedProtocolVersions) ? ready.supportedProtocolVersions : [];
     if (!supported.includes(2)) return this.protocolVersion;
-    const response = await this.sendCommand<{ protocolVersion?: unknown }>({ type: "negotiate_protocol", protocolVersion: 2 });
+    const response = await this.sendCommand<{ protocolVersion?: unknown }>({ type: "negotiate_protocol", protocolVersion: 2 }, timeoutMs);
     if (response?.protocolVersion !== 2) throw new Error("OMP rejected RPC protocol v2 negotiation");
     this.protocolVersion = 2;
     return this.protocolVersion;
@@ -238,6 +226,60 @@ export class RpcProcess {
   onFrame(listener: (frame: RpcFrame) => void): () => void {
     this.frameListeners.add(listener);
     return () => this.frameListeners.delete(listener);
+  }
+
+  /** Adopted child: feeds the daemon's raw lines of its still-open requests as
+   * if just read (they are older than anything live), then the frames held since. */
+  replay(lines: string[]): void {
+    const held = this.heldFrames ?? [];
+    this.heldFrames = null;
+    // Its own decoder: a live chunk sequence may be half-read.
+    const decoder = new RpcFrameDecoder();
+    for (const line of lines) {
+      const parsed = parseLine(line);
+      if (parsed !== undefined) this.receive(parsed, decoder);
+    }
+    for (const frame of held) this.dispatch(frame);
+  }
+
+  private receive(parsed: unknown, decoder: RpcFrameDecoder): void {
+    let frame: RpcFrameRecord;
+    try {
+      if (isRecord(parsed) && parsed.type === "rpc_chunk" && this.protocolVersion !== 2) {
+        throw new Error("RPC chunk received before protocol negotiation");
+      }
+      const decoded = decoder.push(parsed);
+      if (!decoded) return;
+      frame = decoded;
+    } catch (error) {
+      this.stderrTail = (this.stderrTail + `\nRPC protocol error: ${error instanceof Error ? error.message : String(error)}`).slice(-STDERR_TAIL_LIMIT);
+      console.warn("[omp-web] rpc-protocol-dispose", JSON.stringify({ transport: this.transport.id, protocolVersion: this.protocolVersion, errorType: error instanceof Error ? error.name : typeof error, at: new Date().toISOString() }));
+      void this.dispose(0);
+      return;
+    }
+    if (frame.type === "ready") {
+      this.resolveReady(frame);
+      return;
+    }
+    if (frame.type === "response") {
+      this.handleResponse(frame as unknown as RpcResponseFrame);
+      return;
+    }
+    this.dispatch(frame);
+  }
+
+  private dispatch(frame: RpcFrame): void {
+    if (this.heldFrames) {
+      this.heldFrames.push(frame);
+      return;
+    }
+    for (const listener of this.frameListeners) {
+      try {
+        listener(frame);
+      } catch {
+        // Listener bugs must not break the protocol reader.
+      }
+    }
   }
 
   /** Send a command and await its response `data`. A failed response rejects
@@ -323,11 +365,7 @@ export class RpcProcess {
     if (!entry || !id) {
       // Unsolicited response (or a command we already timed out) — surface to
       // frame listeners so nothing is silently dropped.
-      for (const listener of this.frameListeners) {
-        try {
-          listener(response as unknown as RpcFrame);
-        } catch {}
-      }
+      this.dispatch(response as unknown as RpcFrame);
       return;
     }
     this.pending.delete(id);
