@@ -72,14 +72,29 @@ server:
 5. Register the wrapper under its session id and publish it on the `running`
    channel; browsers reopening the session attach as on any stream reopen.
 
-**Gaps and fallbacks.** Each is checked against omp's RPC while planning; the
-fallback applies when omp cannot provide what adoption needs:
+**Pending requests are replayed by the daemon.** omp (checked at oh-my-pi
+`3e3c488a58`) has no command that lists pending `extension_ui_request`s or
+`host_tool_call`s, and neither ever times out, so a request the web server
+missed would block the run forever. The daemon already sees every line, so it
+keeps, per channel, the raw lines of each blocking request still open:
 
-| Lost at restart | Needed from omp | Fallback |
-|---|---|---|
-| A pending `extension_ui_request` (ask/confirm/select/input) | a way to list or re-send pending UI requests | send `abort` and post a notice: "A question was lost when ompweb restarted; the run was stopped." |
-| A pending `host_tool_call` | accepting a late `host_tool_result` by id | answer each pending call with an error result so the agent continues |
-| Protocol v2 framing mid-chunk | re-negotiation on a live process | if refused, treat the child as unrecoverable: kill and resume once |
+- opened by a `host_tool_call` or an `extension_ui_request` whose method is in
+  `BLOCKING_UI_METHODS` (decoded with `RpcFrameDecoder`, so chunked frames are
+  kept whole);
+- closed by the matching `host_tool_result` / `extension_ui_response` written to
+  stdin, or a `host_tool_cancel` / UI cancel from omp.
+
+`hello` carries them per channel (`channels[{ch, sessionId, pending: string[]}]`,
+capped at 1 MB per channel; over the cap the channel is not adoptable and takes
+the kill-and-resume path). The adopted wrapper feeds them through its normal
+frame handling, so dialogs reappear, input-needed notifications fire, and browser
+tool calls reach a tab again. This changes the hello shape, so
+`LINK_PROTOCOL_VERSION` becomes 3.
+
+**Framing.** omp answers `negotiate_protocol` every time, and every ompweb child
+is already on protocol v2, so the adopted wrapper starts its decoder at v2,
+drops `rpc_chunk` records until the first record of a new frame, and sends
+`negotiate_protocol` again.
 
 **Adoption failure** (any of the re-sync commands time out after
 `GET_STATE_TIMEOUT_MS`): the child is killed and resumed once through the
