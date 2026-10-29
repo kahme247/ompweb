@@ -4,7 +4,7 @@
 // `ompweb host`: link this machine to a main omp-web so sessions can run here
 // (lib/hosts/daemon.ts).
 //   ompweb host login --url <url>   reads the host token from stdin
-//   ompweb host [--allow-http]      dials the saved server and keeps the link up
+//   ompweb host [--allow-http]      dials the saved server and keeps the link up (http:// is accepted without the flag for loopback)
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 require("./node-version").exitIfUnsupportedNode();
@@ -59,7 +59,7 @@ async function main(argv) {
   }
   const login = readHostLogin();
   if (!login) {
-    console.error("This machine is not linked yet. Run `ompweb host login --url <server url>` first.");
+    console.error("This machine is not linked yet. Start ompweb on this machine (it writes the link), or run `ompweb host login --url <server url>`.");
     return 1;
   }
   const daemon = runHostDaemon({ ...login, allowHttp: argv.includes("--allow-http") });

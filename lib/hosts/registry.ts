@@ -17,6 +17,9 @@ interface HostsFile {
   hosts: HostRecord[];
 }
 
+/** "This machine": the one record the web server itself creates (local-bootstrap.ts). */
+export const LOCAL_HOST_ID = "local";
+
 function normalizeLabel(label: string): string {
   const trimmed = label.trim();
   if (!trimmed) throw new Error("Host label is required");
@@ -110,7 +113,16 @@ export class UnknownHostError extends Error {
   }
 }
 
+/** `local` is created and keyed by the web server only; it cannot be renamed or revoked. */
+export class ReservedHostError extends Error {
+  readonly name = "ReservedHostError";
+  constructor() {
+    super("This machine cannot be changed");
+  }
+}
+
 export function updateHost(id: string, updates: { label?: string; allowAgentStart?: boolean }): HostRecord {
+  if (id === LOCAL_HOST_ID) throw new ReservedHostError();
   const hosts = readHosts();
   const host = hosts.find((h) => h.id === id);
   if (!host) throw new UnknownHostError();
@@ -120,7 +132,25 @@ export function updateHost(id: string, updates: { label?: string; allowAgentStar
   return host;
 }
 
+/** Create the `local` record, or give the existing one a new token; the old token stops matching. */
+export function rotateLocalHostToken(): string {
+  const hosts = readHosts();
+  const existing = hosts.find((h) => h.id === LOCAL_HOST_ID);
+  const token = randomBytes(32).toString("base64url");
+  const record: HostRecord = {
+    id: LOCAL_HOST_ID,
+    label: "This machine",
+    tokenHash: sha256Hex(token),
+    createdAt: existing?.createdAt || new Date().toISOString(),
+    lastSeenAt: existing?.lastSeenAt ?? null,
+    allowAgentStart: true,
+  };
+  saveHosts([...hosts.filter((h) => h.id !== LOCAL_HOST_ID), record]);
+  return token;
+}
+
 export function revokeHost(id: string): boolean {
+  if (id === LOCAL_HOST_ID) throw new ReservedHostError();
   const hosts = readHosts();
   const remaining = hosts.filter((h) => h.id !== id);
   if (remaining.length === hosts.length) return false;

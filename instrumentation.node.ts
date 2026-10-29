@@ -57,6 +57,19 @@ export async function register(): Promise<void> {
     }
   })();
 
+  // Point the local `ompweb host` daemon at this server (production only: a dev
+  // server must not take the daemon from the running production one).
+  if (process.env.NODE_ENV !== "development") {
+    try {
+      const { ensureLocalHostLink, localLinkUrl } = await import("@/lib/hosts/local-bootstrap");
+      const url = localLinkUrl();
+      if (url) ensureLocalHostLink({ url });
+      else console.warn("[omp-web] local daemon link skipped: OMP_WEB_PORT is not set (start through the ompweb launcher)");
+    } catch (error) {
+      console.warn(`[omp-web] local daemon link not prepared: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   // Resume sessions that were mid-run when omp-web last stopped (opt-in
   // setting). Fire-and-forget: resuming must not block boot.
   void (async () => {

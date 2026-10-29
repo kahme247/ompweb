@@ -156,7 +156,8 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   }
   const fetchLink = options.fetch ?? fetch;
   const linkUrl = `${options.url.replace(/\/+$/, "")}/api/hosts/link`;
-  const authorization = `Bearer ${options.token}`;
+  // Replaced when a 401 finds a newer token in host.json (the web server re-keyed this host).
+  let authorization = `Bearer ${options.token}`;
 
   const channels = new Map<string, Channel>();
   // Uplink messages stay here until main acks them; a failed POST resends them.
@@ -236,6 +237,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     flushTimer = undefined;
     if (posting || stopped || !nonce) return;
     const used = nonce;
+    const sent = authorization;
     const batch: string[] = [];
     let size = pongOwed ? PONG_LINE.length : 0;
     for (const item of outbox.pending()) {
@@ -251,11 +253,11 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     try {
       const response = await fetchLink(linkUrl, {
         method: "POST",
-        headers: { authorization, "content-type": "application/x-ndjson", [LINK_ACK_HEADER]: String(down.acked), [LINK_NONCE_HEADER]: used },
+        headers: { authorization: sent, "content-type": "application/x-ndjson", [LINK_ACK_HEADER]: String(down.acked), [LINK_NONCE_HEADER]: used },
         body,
         signal: AbortSignal.any([stopSignal.signal, AbortSignal.timeout(LINK_LIMITS.offlineMs)]),
       });
-      if (fatal(response.status)) return;
+      if (fatal(response.status, sent)) return;
       if (response.status === 409) {
         // Sent on a link main has replaced: resend on the current one, now if
         // its welcome already arrived, else when it does.
@@ -285,12 +287,21 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     }
   }
 
-  /** 401 (revoked) and 426 (outdated) end the daemon; true when it is stopping. */
-  function fatal(status: number): boolean {
-    if (status === 401) {
-      log("the server rejected this host's token (revoked?); stopping its omp sessions");
-      void shutdown(1);
-    } else if (status === 426) {
+  /** 426 (outdated) ends the daemon. So does 401 (revoked) unless host.json already holds a newer token, which the daemon then dials with.
+   * `sent` is the authorization the request carried; true when the daemon is stopping. */
+  function fatal(status: number, sent: string): boolean {
+    // A 401 for a token another request already replaced needs nothing more.
+    if (status === 401 && sent === authorization) {
+      const saved = readHostLogin();
+      if (saved && `Bearer ${saved.token}` !== sent) {
+        authorization = `Bearer ${saved.token}`;
+        log("the server rejected this host's token; using the new one from host.json");
+      } else {
+        log("the server rejected this host's token (revoked?); stopping its omp sessions");
+        void shutdown(1);
+      }
+    }
+    if (status === 426) {
       log("the server speaks a different link protocol: upgrade omp-web on this host");
       void shutdown(1);
     }
@@ -405,13 +416,14 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         await Promise.race([welcome.promise, aborted]);
       }
       const used = nonce;
+      const sent = authorization;
       const response = await fetchLink(`${linkUrl}/blob/${encodeURIComponent(id)}`, {
         method: "POST",
-        headers: { authorization, "content-type": "application/octet-stream", [LINK_NONCE_HEADER]: used },
+        headers: { authorization: sent, "content-type": "application/octet-stream", [LINK_NONCE_HEADER]: used },
         body: bytes as Uint8Array<ArrayBuffer>,
         signal,
       });
-      if (fatal(response.status)) throw new HostOpError(503, "host_stopping", "ompweb host is stopping");
+      if (fatal(response.status, sent)) throw new HostOpError(503, "host_stopping", "ompweb host is stopping");
       if (response.status === 409) {
         if (nonce === used) forgetLink();
         continue;
@@ -505,15 +517,16 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
           hello = encodeHello(false);
         }
         alive();
+        const sent = authorization;
         const signal = AbortSignal.any([stopSignal.signal, abort.signal]);
         // The hello goes in a POST body: as a GET header, proxy header buffers (nginx: 8 KB) capped the channels it lists.
         const offered = await fetchLink(linkUrl, {
           method: "POST",
-          headers: { authorization, "content-type": "application/x-ndjson", [LINK_HELLO_HEADER]: "1" },
+          headers: { authorization: sent, "content-type": "application/x-ndjson", [LINK_HELLO_HEADER]: "1" },
           body: hello,
           signal,
         });
-        if (fatal(offered.status)) return;
+        if (fatal(offered.status, sent)) return;
         const { helloId } = (offered.ok ? await offered.json().catch(() => ({})) : {}) as { helloId?: unknown };
         if (typeof helloId !== "string" || !helloId) {
           // A v1 main answers a nonce-less POST 409 and has no hello leg: redialing would loop forever.
@@ -524,8 +537,8 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
           }
           throw new Error(`the server answered the hello with ${offered.status}`);
         }
-        const response = await fetchLink(linkUrl, { headers: { authorization, [LINK_HELLO_HEADER]: helloId }, signal });
-        if (fatal(response.status)) return;
+        const response = await fetchLink(linkUrl, { headers: { authorization: sent, [LINK_HELLO_HEADER]: helloId }, signal });
+        if (fatal(response.status, sent)) return;
         if (!response.ok || !response.body) throw new Error(`the server answered ${response.status}`);
         for await (const line of readLines(response.body)) {
           alive();

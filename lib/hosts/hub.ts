@@ -30,7 +30,7 @@ import {
   type UpMessage,
 } from "./link-protocol";
 import { localHost } from "./local-host";
-import { HostRegistryUnreadableError, hostForToken, loadHosts, touchHost, type HostRecord } from "./registry";
+import { HostRegistryUnreadableError, hostForToken, LOCAL_HOST_ID, loadHosts, touchHost, type HostRecord } from "./registry";
 import type { SessionOps } from "./session-ops";
 
 /** Liveness and op timeouts from LINK_LIMITS; tests shorten them. */
@@ -875,9 +875,12 @@ export class RemoteHost implements Host {
   }
 }
 
-/** "local" is this machine; other ids must be registered hosts. */
+/** "local" is this machine: the daemon linked as `local` when one is up, else the direct host (until the direct path is removed); other ids must be registered hosts. */
 export function getHost(id: string): Host | null {
-  if (id === localHost.id) return localHost;
+  if (id === LOCAL_HOST_ID) {
+    const link = hub().links.get(id);
+    return link && isLinkUp(link.status) ? link.host : localHost;
+  }
   return loadHosts().some((h) => h.id === id) ? linkFor(id).host : null;
 }
 
@@ -895,7 +898,7 @@ export interface LinkedHostRow {
 }
 
 export function listHosts(): LinkedHostRow[] {
-  return loadHosts().map((record) => {
+  return loadHosts().filter((record) => record.id !== LOCAL_HOST_ID).map((record) => {
     const link = hub().links.get(record.id);
     return {
       id: record.id,
