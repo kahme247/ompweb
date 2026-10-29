@@ -5,6 +5,7 @@ import { join } from "path";
 import { addWorktree, findCurrentWorktreePath, listWorktrees, removeWorktree, resolveProject } from "@/lib/worktree";
 import { allowFileRoot, getAllowedFileRoots, isExistingFilePathAllowed, isFilePathAllowed } from "@/lib/file-access";
 import { projectIdentityKey } from "@/lib/paths";
+import { invalidateLocalSessionLists } from "@/lib/hosts/session-index";
 import { invalidateSessionListCache } from "@/lib/session-reader";
 
 /** Same gate as /api/files: only session cwds / project roots / explicitly
@@ -87,6 +88,7 @@ export async function POST(req: Request) {
 
     const result = await addWorktree(body.cwd, body.branch);
     invalidateSessionListCache();
+    invalidateLocalSessionLists();
     return NextResponse.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -109,6 +111,7 @@ export async function DELETE(req: Request) {
 
     await removeWorktree(body.cwd, body.path, body.force === true);
     invalidateSessionListCache();
+    invalidateLocalSessionLists();
     return NextResponse.json({ success: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

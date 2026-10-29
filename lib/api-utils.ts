@@ -2,9 +2,9 @@ import { NextResponse } from "next/server";
 import { isLinkUp, type Host } from "./hosts/host";
 import { getHost } from "./hosts/hub";
 import { HostOpError } from "./hosts/link-protocol";
-import { localHost } from "./hosts/local-host";
 import type { OpResult } from "./hosts/session-ops";
 import { hostForSessionId } from "./hosts/session-index";
+import { LOCAL_HOST_ID } from "./hosts/registry";
 import { WebRpcError } from "./rpc-manager";
 
 const SESSION_NOT_FOUND = { error: "Session not found", code: "session_not_found" } as const;
@@ -25,7 +25,7 @@ export function hostOfflineResponse(host: Host): NextResponse | null {
 
 /** The host a request names (`hostId`, this machine when absent): 404 when unknown, 503 while offline. */
 export function resolveHostOrError(hostId: unknown): { host: Host } | { response: NextResponse } {
-  const host = hostId === undefined ? localHost : typeof hostId === "string" ? getHost(hostId) : null;
+  const host = hostId === undefined ? getHost(LOCAL_HOST_ID) : typeof hostId === "string" ? getHost(hostId) : null;
   if (!host) return { response: NextResponse.json({ error: "Host not found", code: "host_not_found" }, { status: 404 }) };
   const offline = hostOfflineResponse(host);
   return offline ? { response: offline } : { host };

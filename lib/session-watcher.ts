@@ -8,6 +8,7 @@ import {
   listAllSessions,
   resolveSessionIdByPath,
 } from "./session-reader";
+import { invalidateLocalSessionLists } from "./hosts/session-index";
 
 // omp owns the writes to a session's JSONL. ompweb streams RPC events only for
 // the sessions it spawned itself, so a session started outside the web UI — by
@@ -40,6 +41,7 @@ function flush(): void {
     // filename was null — fs.watch coalesced the event or overflowed. We
     // don't know which file changed, so fall back to the full invalidation.
     invalidateSessionListCache();
+    invalidateLocalSessionLists();
     void rescanAndNotify();
     return;
   }
@@ -48,7 +50,11 @@ function flush(): void {
   // list's mtimes and message counts are stale) and invalidate ONLY the
   // changed sessions' parse caches, leaving unrelated sessions cached.
   invalidateSessionListMeta();
-  for (const path of paths) invalidateSessionEntriesCache(path);
+  // The sidebar lists this machine's sessions through its daemon: its caches go stale the same way.
+  for (const path of paths) {
+    invalidateSessionEntriesCache(path);
+    invalidateLocalSessionLists(path);
+  }
 
   void Promise.all(paths.map((path) => resolveSessionIdByPath(path).catch(() => undefined)))
     .then((ids) => {

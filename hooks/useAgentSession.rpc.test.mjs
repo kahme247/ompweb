@@ -283,6 +283,8 @@ const { useAgentSession } = await jiti.import("../hooks/useAgentSession.ts");
 const { selectSessionHistory } = await jiti.import("@/lib/session-sync");
 const { publishSessionsChanged } = await jiti.import("@/lib/session-change-bus");
 const { AgentSessionWrapper } = await jiti.import("@/lib/rpc-manager");
+// Wrappers built directly need an online host; the daemon's machine host is one.
+const { localHost } = await jiti.import("@/lib/hosts/local-host");
 const { isUnknownSlashCommand, slashCommandName, runHostTool } = await jiti.import("@/hooks/useAgentSession-stream");
 const { toastCalls } = await jiti.import("@/components/ui/toast");
 const { MessageView } = await jiti.import("@/components/MessageView");
@@ -2123,7 +2125,7 @@ function attachNativeWrapper(t, sid) {
     },
     sendFrame() {},
     async dispose() {},
-  }, process.cwd());
+  }, process.cwd(), null, false, "", undefined, localHost);
   wrapper.start();
   world.wrappers.set(sid, wrapper);
   t.after(() => wrapper.destroyAndWait());
@@ -2742,7 +2744,7 @@ async function attachEditableWrapper(t, native, { holdHistory = false } = {}) {
     },
     sendFrame() {},
     async dispose() { listeners.clear(); },
-  }, process.cwd());
+  }, process.cwd(), null, false, "", undefined, localHost);
   t.after(() => wrapper.destroyAndWait());
   native.onMove = () => emitNative({ type: "notice", source: "session-persistence", level: "warning", message: "Session moved to a sibling file because another process owns the original" });
   wrapper.onIdentityChange((oldId, newId, options) => {

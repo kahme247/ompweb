@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { apiErrorResponse, opErrorResponse, resolveHostOrError } from "@/lib/api-utils";
 import { allowFileRoot } from "@/lib/file-access";
-import { localHost } from "@/lib/hosts/local-host";
+import { LOCAL_HOST_ID } from "@/lib/hosts/registry";
 import { projectIdentityKey } from "@/lib/paths";
 
 // POST /api/cwd/validate  body: { cwd: string; hostId?: string }
@@ -20,7 +20,7 @@ export async function POST(req: Request) {
     const result = await target.host.sessionOps.validateCwd(cwd);
     if (!result.ok) return opErrorResponse(result);
     // Browsable only on this machine: another host's paths do not exist here.
-    if (target.host === localHost) allowFileRoot(result.value.cwd);
+    if (target.host.id === LOCAL_HOST_ID) allowFileRoot(result.value.cwd);
     return NextResponse.json({
       success: true,
       cwd: result.value.cwd,

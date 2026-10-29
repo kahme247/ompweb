@@ -28,7 +28,6 @@ import {
   type HostOpName,
   type UpMessage,
 } from "./link-protocol";
-import { localHost } from "./local-host";
 import { HostRegistryUnreadableError, hostForToken, LOCAL_HOST_ID, loadHosts, touchHost, type HostRecord } from "./registry";
 import type { SessionOps } from "./session-ops";
 
@@ -131,7 +130,7 @@ function linkFor(id: string): Link {
 }
 
 function labelOf(id: string): string {
-  return loadHosts().find((h) => h.id === id)?.label ?? id;
+  return loadHosts().find((h) => h.id === id)?.label ?? (id === LOCAL_HOST_ID ? "This machine" : id);
 }
 
 function notify<A extends unknown[]>(listeners: Iterable<(...args: A) => void>, ...args: A): void {
@@ -874,15 +873,11 @@ export class RemoteHost implements Host {
   }
 }
 
-/** "local" is this machine; other ids must be registered hosts. Until the direct path is removed, "local" is always the direct host, even while a daemon is linked: see `getLinkedHost`. */
+/** `local` is this machine, reached through its daemon link (offline while none is linked); other ids must be registered hosts. */
+export function getHost(id: typeof LOCAL_HOST_ID): Host;
+export function getHost(id: string): Host | null;
 export function getHost(id: string): Host | null {
-  if (id === localHost.id) return localHost;
-  return getLinkedHost(id);
-}
-
-/** The host reached over its link, for any registered id including the reserved `local`; null when no such record exists. */
-export function getLinkedHost(id: string): Host | null {
-  return loadHosts().some((h) => h.id === id) ? linkFor(id).host : null;
+  return id === LOCAL_HOST_ID || loadHosts().some((h) => h.id === id) ? linkFor(id).host : null;
 }
 
 export interface LinkedHostRow {
@@ -933,7 +928,7 @@ export function hostsSnapshot(): { hosts: HostRow[] } {
   const link = hub().links.get(LOCAL_HOST_ID);
   const local: LocalHostRow = {
     id: "local",
-    label: loadHosts().find((record) => record.id === LOCAL_HOST_ID)?.label ?? "This machine",
+    label: labelOf(LOCAL_HOST_ID),
     status: link?.status ?? "offline",
     ompVersion: link?.ompVersion ?? null,
     platform: link?.platform ?? null,
