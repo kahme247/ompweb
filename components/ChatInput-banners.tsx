@@ -1,9 +1,10 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { ListChecks, Target } from "lucide-react";
-import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
-import { formatGoalElapsed } from "@/lib/web-mode-state";
+import { ListChecks, Pause, Play, Target, Trash2 } from "lucide-react";
+import type { GoalModeState } from "@/lib/pi-types";
+import type { ActivePlan } from "@/lib/web-mode-state";
+import { formatGoalDuration, goalElapsedSeconds, isGoalControllable } from "@/lib/goal-state";
 import { useI18n } from "@/lib/i18n";
 
 /** Compact action button for the queued follow-up bar. */
@@ -99,46 +100,112 @@ export function ModelErrorBanner({ error }: { error?: string | null }) {
   );
 }
 
-export function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; plan?: ActivePlan | null }) {
-  const { t } = useI18n();
+export function ComposerModeStatus({
+  goal,
+  plan,
+  onGoalAction,
+}: {
+  goal?: GoalModeState | null;
+  plan?: ActivePlan | null;
+  onGoalAction?: (op: "pause" | "resume" | "drop") => void | Promise<void>;
+}) {
+  const { t, locale } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const [now, setNow] = useState(() => Date.now());
+  const [pendingAction, setPendingAction] = useState<"pause" | "resume" | "drop" | null>(null);
+  const goalInfo = goal?.goal ?? null;
+  const goalStatus = goalInfo?.status;
+  const goalId = goalInfo?.id ?? null;
+  const active = goalStatus === "active";
+  const controllable = isGoalControllable(goal);
 
   useEffect(() => {
-    if (!goal) return;
+    if (!goalId) return;
     setExpanded(false);
     setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
-    return () => window.clearInterval(timer);
-  }, [goal]);
+  }, [goalId]);
 
-  if (!goal && !plan) return null;
+  // omp streams updated timeUsedSeconds, but a live tick keeps the banner
+  // moving between frames. Display only — omp remains the state source.
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [active]);
+
+  if (!goalInfo && !plan) return null;
+
+  const statusLabel = goalStatus === "active"
+    ? t("chatInput.goalActive")
+    : goalStatus === "paused"
+      ? t("chatInput.goalPaused")
+      : goalStatus === "completed"
+        ? t("chatInput.goalCompleted")
+        : goalStatus === "dropped"
+          ? t("chatInput.goalDropped")
+          : goalStatus ?? t("chatInput.goalActive");
+  const runAction = (op: "pause" | "resume" | "drop") => {
+    if (!onGoalAction || pendingAction) return;
+    setPendingAction(op);
+    void Promise.resolve(onGoalAction(op)).finally(() => setPendingAction(null));
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
-      {goal && (
-        <button
-          type="button"
-          aria-expanded={expanded}
-          onClick={() => setExpanded((value) => !value)}
-          title={expanded ? t("chatInput.collapseGoal") : t("chatInput.expandGoal")}
+      {goalInfo && (
+        <div
           style={{
-            display: "flex", alignItems: expanded ? "flex-start" : "center", gap: 8,
-            width: "100%", padding: "6px 9px",
+            display: "flex", flexDirection: "column", gap: 6,
             border: "1px solid color-mix(in srgb, var(--accent) 32%, var(--border))",
             borderRadius: "var(--radius-control)",
             background: "color-mix(in srgb, var(--accent) 7%, var(--bg-panel))",
-            color: "var(--text)", cursor: "pointer", textAlign: "left",
-            transition: "background var(--dur-fast) var(--ease-out-warm), border-color var(--dur-fast) var(--ease-out-warm)",
           }}
         >
-          <Target size={14} strokeWidth={2} style={{ flexShrink: 0, marginTop: expanded ? 1 : 0, color: "var(--accent)" }} aria-hidden="true" />
-          <span style={{ flexShrink: 0, color: "var(--text-dim)", fontSize: 10, fontFamily: "var(--font-mono)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
-            {t("chatInput.goalActive")} · {formatGoalElapsed(now - goal.startedAt)}
-          </span>
-          <span style={{ minWidth: 0, flex: 1, overflow: expanded ? "visible" : "hidden", textOverflow: expanded ? undefined : "ellipsis", whiteSpace: expanded ? "pre-wrap" : "nowrap", fontSize: 12, lineHeight: 1.4 }}>
-            {goal.objective}
-          </span>
-        </button>
+          <button
+            type="button"
+            aria-expanded={expanded}
+            onClick={() => setExpanded((value) => !value)}
+            title={expanded ? t("chatInput.collapseGoal") : t("chatInput.expandGoal")}
+            style={{
+              display: "flex", alignItems: expanded ? "flex-start" : "center", gap: 8,
+              width: "100%", padding: "6px 9px",
+              border: "none", borderRadius: "var(--radius-control)",
+              background: "none",
+              color: "var(--text)", cursor: "pointer", textAlign: "left",
+            }}
+          >
+            <Target size={14} strokeWidth={2} style={{ flexShrink: 0, marginTop: expanded ? 1 : 0, color: "var(--accent)" }} aria-hidden="true" />
+            <span style={{ flexShrink: 0, color: "var(--text-dim)", fontSize: 10, fontFamily: "var(--font-mono)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+              {statusLabel} · {formatGoalDuration(goalElapsedSeconds(goal, now))}
+            </span>
+            <span style={{ minWidth: 0, flex: 1, overflow: expanded ? "visible" : "hidden", textOverflow: expanded ? undefined : "ellipsis", whiteSpace: expanded ? "pre-wrap" : "nowrap", fontSize: 12, lineHeight: 1.4 }}>
+              {goalInfo.objective}
+            </span>
+          </button>
+          {expanded && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", padding: "0 9px 7px" }}>
+              <span style={{ color: "var(--text-dim)", fontSize: 11 }}>
+                {t("chatInput.goalTokens", { count: new Intl.NumberFormat(locale).format(goalInfo.tokensUsed) })}
+              </span>
+              {controllable && onGoalAction && (
+                <div style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
+                  {goalStatus === "active" ? (
+                    <QueuedActionButton onClick={() => runAction("pause")} title={t("chatInput.pauseGoal")} disabled={pendingAction !== null}>
+                      <Pause size={11} aria-hidden="true" /> {t("chatInput.pauseGoal")}
+                    </QueuedActionButton>
+                  ) : (
+                    <QueuedActionButton onClick={() => runAction("resume")} title={t("chatInput.resumeGoal")} disabled={pendingAction !== null}>
+                      <Play size={11} aria-hidden="true" /> {t("chatInput.resumeGoal")}
+                    </QueuedActionButton>
+                  )}
+                  <QueuedActionButton onClick={() => runAction("drop")} title={t("chatInput.dropGoal")} disabled={pendingAction !== null}>
+                    <Trash2 size={11} aria-hidden="true" /> {t("chatInput.dropGoal")}
+                  </QueuedActionButton>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       )}
       {plan && (
         <div role="status" aria-live="polite" style={{ display: "flex", alignItems: "center", gap: 7, padding: "5px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text-muted)", fontSize: 12 }}>

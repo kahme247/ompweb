@@ -81,7 +81,6 @@ interface Props {
   onSystemPromptChange?: (prompt: string | null) => void;
   onSystemPromptLoaderChange?: (loader: (() => Promise<void>) | null) => void;
   onSessionStatsChange?: (stats: SessionStatsInfo | null) => void;
-  onSessionStatsPanelOpen?: () => void;
   onProviderUsageContextChange?: (context: ProviderUsageContext | null) => void;
   onOpenFile?: (filePath: string, name: string, source: WorkspaceFileSource) => void;
   /** Handles the open_url host tool; returns the result text for the agent. */
@@ -393,7 +392,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
   );
 });
 
-export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatus: channelHostStatus, hostLabel, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, neverFoldActivity = false, showToolCallsUnfolded = false, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile: onOpenWorkspaceFile, onOpenUrl, onOpenProviders, searchQuery = "", searchTarget = null, onSearchTargetHandled }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatus: channelHostStatus, hostLabel, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, neverFoldActivity = false, showToolCallsUnfolded = false, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile: onOpenWorkspaceFile, onOpenUrl, onOpenProviders, searchQuery = "", searchTarget = null, onSearchTargetHandled }: Props) {
   const { t, tn } = useI18n();
   const fileSource = useMemo<WorkspaceFileSource>(() => ({
     hostId: session?.hostId ?? newSessionHostId ?? "local",
@@ -452,13 +451,13 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
     notices, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     skillDiagnostics, setSkillStartupDiagnostics,
     isAutoModelSelection,
-    agentPhase, activeGoal, activePlan,
+    agentPhase, goalState, activePlan,
     liveToolResults,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
     isNew, hostStatus: frameHostStatus,
     sessionIdRef, messagesEndRef, scrollContainerRef, holdScrollPosition,
     handleSend, handleAbort, handleFork, handleEdit, handleModelChange, retrySession,
-    handleSteer, handleFollowUp, handleAbortCompaction, handleCompact,
+    handleSteer, handleFollowUp, handleAbortCompaction, handleCompact, handleGoalAction,
     heldMessages, deleteHeldMessage,
     removeQueuedMessage, promoteQueuedToSteer,
     handleBuiltinSlashCommand, togglePreCompactionHistory,
@@ -467,7 +466,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
     btw, askBtw,
   } = useAgentSession({
     session, newSessionCwd, newSessionHostId, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked, onSessionMoved: handleSessionMoved,
-    modelsRefreshKey, chatInputRef: composerRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsPanelOpen,
+    modelsRefreshKey, chatInputRef: composerRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange,
     onOpenFile: onOpenWorkspaceFile, onOpenUrl,
   });
   useEffect(() => {
@@ -1050,7 +1049,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
       thinkingLevelMap={currentThinkingLevelMap}
       modelNameOverride={liveModelMeta?.name ?? null}
       retryInfo={retryInfo}
-      activeGoal={activeGoal}
+      goalState={goalState}
+      onGoalAction={handleGoalAction}
       activePlan={activePlan}
       advisorEnabled={advisorEnabled}
       onAdvisorChange={handleAdvisorChange}
