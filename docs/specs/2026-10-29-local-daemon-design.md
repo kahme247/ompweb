@@ -1,0 +1,149 @@
+# Local daemon: omp runs survive web-server restarts
+
+## Goal
+
+Restarting or redeploying the ompweb web server never interrupts an omp run, on
+this machine or any linked host. That frees the web server to change and restart
+often.
+
+Today the web server owns the local omp children (`LocalHost` spawns them over
+stdio), so every restart kills them, and auto-resume restarts them with a
+resume prompt. Remote hosts (`docs/specs/2026-10-28-remote-hosts-design.md`)
+already keep their children alive while the link is down, but a web-server
+restart still kills them as orphans.
+
+## Decisions
+
+- **The local daemon is required.** This machine is reached only through a
+  local `ompweb host` daemon, linked over loopback. `LocalHost`'s direct spawn
+  path is removed; there is one code path for every host.
+- **The daemon is its own service** (systemd unit / launchd agent / Windows
+  service), installed next to the web service.
+- **Restarts adopt live children.** A restarted web server takes over the omp
+  children the daemon still runs instead of killing them.
+- **Dev mode links to the same daemon.** `npm run dev` links to the local
+  daemon and takes the link over while it runs (one link per host); production
+  gets it back when dev stops.
+
+## Non-goals
+
+- Changing omp. Gaps in omp's RPC that block a clean adoption are handled with
+  the fallbacks below and reported upstream separately.
+- Keeping runs alive across a daemon restart. The daemon owns the children;
+  restarting it ends them, and auto-resume handles that as today.
+- Multiple web servers sharing one daemon at the same time.
+
+## Process layout
+
+```
+ompweb (web service)  ──link over 127.0.0.1──▶  ompweb host (daemon service) ──▶ omp children
+          └──link over https/tailnet──▶  ompweb host on the Mac ──▶ omp children
+```
+
+- **"This machine" is a linked host with the fixed id `local`.** It is shown as
+  "This machine", listed first, and cannot be revoked or renamed in Settings →
+  Hosts.
+- **Session file operations** (`session-ops.ts`) run in the daemon, as they do
+  for remote hosts. The web server keeps no direct session-file reads for
+  `local`, so the two paths cannot drift.
+- **Local link bootstrap.** On start, the web server makes sure a host record
+  `local` exists with a token, and writes the daemon's
+  `<agent dir>/omp-web/host.json` (`{url, token}`, mode 0600) with its own
+  loopback URL. The daemon re-reads `host.json` when its link gets 401, so a
+  web server that regenerated the token is picked up without restarting the
+  daemon. Loopback links use `http://` without `--allow-http`.
+
+## Adopting live children
+
+On `hello`, for each listed `{ch, sessionId}` that has no wrapper on the web
+server:
+
+1. Look up `sessionId` in that host's session list to get the file and cwd. A
+   child whose session is unknown (never written, or deleted) is killed, as
+   today.
+2. Create an `AgentSessionWrapper` on the existing channel with `adopted: true`.
+   It skips spawn, the `ready` wait and the initial protocol negotiation.
+3. Re-sync the protocol: send `negotiate_protocol` again; drop partial chunked
+   frames until the next complete one.
+4. Rebuild state: `get_state` (identity, model, streaming/compacting, queue),
+   `get_subagents`, `get_btw_history`. If omp reports a run in progress, mark
+   the wrapper running; the next frames continue it, and the committed message
+   shows anything streamed before the restart.
+5. Register the wrapper under its session id and publish it on the `running`
+   channel; browsers reopening the session attach as on any stream reopen.
+
+**Gaps and fallbacks.** Each is checked against omp's RPC while planning; the
+fallback applies when omp cannot provide what adoption needs:
+
+| Lost at restart | Needed from omp | Fallback |
+|---|---|---|
+| A pending `extension_ui_request` (ask/confirm/select/input) | a way to list or re-send pending UI requests | send `abort` and post a notice: "A question was lost when ompweb restarted; the run was stopped." |
+| A pending `host_tool_call` | accepting a late `host_tool_result` by id | answer each pending call with an error result so the agent continues |
+| Protocol v2 framing mid-chunk | re-negotiation on a live process | if refused, treat the child as unrecoverable: kill and resume once |
+
+**Adoption failure** (any of the re-sync commands time out after
+`GET_STATE_TIMEOUT_MS`): the child is killed and resumed once through the
+existing orphan path, so no session ends up with two writers.
+
+Auto-resume remains for children that really died: a daemon restart, a crash,
+or an adoption failure.
+
+## Failure cases
+
+| Case | Behavior |
+|---|---|
+| Web server restarts, daemon fine | Runs continue; adopted on `hello`; no resume prompt. |
+| Daemon restarts or upgrades | Children end; sessions that were running resume once (existing auto-resume). |
+| Web and daemon on different link protocol versions | 426; "This machine" shows "needs upgrade"; new sessions there are disabled until the daemon is restarted on the new version. |
+| Dev server takes the link | Production's local wrappers see the link down (offline banner). When dev stops, production redials, gets the link back and adopts every live channel, including ones dev started. |
+| Daemon not installed or not running | "This machine" shows offline with "start the ompweb-host service"; new local sessions are disabled. |
+| `host.json` token stale (web regenerated it) | Daemon gets 401, re-reads `host.json`, redials. It exits only if the file still holds the rejected token. |
+
+## Installing and upgrading
+
+- `ompweb systemd install` and `ompweb launchd install` install two units: the
+  existing web unit and `ompweb-host` (`ompweb host`), both restarting on
+  failure. Uninstall removes both.
+- Windows (`lib/windows-service.ts`, tray): the same split, a second service
+  for the daemon. The tray shows both states.
+- **Existing installs:** on first start after the upgrade, if no local daemon
+  links within 10 s, the web server shows a one-time banner with the exact
+  command to install the daemon service (it does not install services itself).
+  Until then "This machine" is offline as above.
+- **Upgrades:** an upgrade replaces the package for both. The web unit restarts
+  as today. The daemon unit restarts only when `LINK_PROTOCOL_VERSION`
+  changed; otherwise the old daemon keeps running the live children and new
+  code takes effect at its next restart.
+
+### This machine's deployment
+
+`/opt/omp-deployment/bin/ompweb-deploy` gains a daemon unit (`ompweb-host`)
+from the same release:
+
+- It restarts `ompweb-api` with the existing probes and rollback.
+- It restarts `ompweb-host` only when the release's `LINK_PROTOCOL_VERSION`
+  differs from the running daemon's (read from `GET /api/hosts`).
+- Rollback restores the previous release for both units.
+
+## Dev mode
+
+`npm run dev` uses the same agent dir and the same `host.json` as production,
+so it links to the production daemon and takes the link over. It does nothing
+special: the takeover and the return are the one-link-per-host rule.
+
+## Testing
+
+- **Unit:** adoption builds a wrapper from `hello` without spawning; the
+  re-sync order; each fallback in the gaps table; adoption failure kills and
+  resumes once; local bootstrap writes `host.json` and re-reads on 401.
+- **Integration:** a real web server and a real daemon (fake omp). Start a run,
+  restart only the web side; the same omp pid keeps streaming, no resume prompt,
+  no duplicated or lost frames. Restart the daemon; the run resumes once.
+- **Deploy smoke:** deploy a web-only change on this VM during a run; the run
+  continues.
+
+## Documentation
+
+AGENTS.md (process layout, adoption, the required daemon), README (two services,
+install commands, dev mode note), DESIGN.md (the host seam no longer has a
+direct path), CHANGELOG.
