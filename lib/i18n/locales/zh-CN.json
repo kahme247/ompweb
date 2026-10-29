@@ -48,6 +48,7 @@
   "agentSession.goalStarted": "目标已开始：{objective}",
   "agentSession.goalUsage": "用法：/goal <目标>",
   "agentSession.goalCreateFailed": "OMP 未返回目标，已保留原目标。",
+  "agentSession.goalStartFailed": "目标已创建，但首条消息发送失败。",
   "agentSession.noSessionToName": "没有可命名的活动会话",
   "agentSession.noSessionToReload": "没有可重新加载的活动会话",
   "agentSession.openInBrowser": "请在浏览器中打开：{url}",

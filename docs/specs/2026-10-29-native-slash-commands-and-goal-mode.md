@@ -243,8 +243,10 @@ Session switching:
 
 - Requires a non-empty objective.
 - Sends `{ type: "goal", op: "create", objective }`.
-- Never sends a prompt and never inserts the old
-  "Work toward this goal…" message.
+- When idle, also submits the objective as the first prompt, matching the
+  TUI's `/goal <objective>` (`handleGoalModeCommand` → `session.prompt(objective)`).
+  During a run it only creates the goal; the objective joins the next turn.
+- Never inserts the old "Work toward this goal…" message.
 - Requires a returned goal before publishing state, promoting the session, or
   announcing success; an empty or data-less success reply is an error and
   keeps the existing goal.
@@ -422,9 +424,8 @@ omp-web automatically defers to it:
   `lib/project-registry.test.mjs` was caused by a broken `node` shim on the
   test machine; re-running that file with a correct `PATH` passes 15/15.
 - Headed-browser smoke test against a live omp child:
-  - `/goal ship the export feature` sent only
-    `{"type":"goal","op":"create","objective":"ship the export feature"}` and
-    showed an active goal banner.
+  - `/goal ship the export feature` created the goal and, when idle, sent the
+    objective as the first prompt; the active goal banner showed.
   - Pause, resume, and drop sent only the matching `goal` op; the banner
     tracked each state.
   - A goal created while the agent was streaming sent the goal RPC and did not

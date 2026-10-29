@@ -48,6 +48,7 @@
   "agentSession.goalStarted": "Goal started: {objective}",
   "agentSession.goalUsage": "Usage: /goal <objective>",
   "agentSession.goalCreateFailed": "OMP did not return a goal. The existing goal was kept.",
+  "agentSession.goalStartFailed": "Goal created, but the first prompt could not be sent.",
   "agentSession.noSessionToName": "No active session to name",
   "agentSession.noSessionToReload": "No active session to reload",
   "agentSession.openInBrowser": "Open in your browser: {url}",

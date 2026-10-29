@@ -48,6 +48,7 @@
   "agentSession.goalStarted": "目標を開始しました: {objective}",
   "agentSession.goalUsage": "使用法: /goal <目標>",
   "agentSession.goalCreateFailed": "OMP が目標を返しませんでした。既存の目標を保持しました。",
+  "agentSession.goalStartFailed": "目標は作成されましたが、最初のプロンプトを送信できませんでした。",
   "agentSession.noSessionToName": "名前を付けられるアクティブなセッションがありません",
   "agentSession.noSessionToReload": "再読み込みできるアクティブなセッションがありません",
   "agentSession.openInBrowser": "ブラウザで開いてください: {url}",

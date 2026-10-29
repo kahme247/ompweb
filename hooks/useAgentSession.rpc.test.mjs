@@ -1038,7 +1038,7 @@ const GOAL = {
 };
 const goalState = (goal = GOAL) => ({ enabled: goal.status === "active", mode: "active", goal });
 
-test("GOAL /goal sends the native goal RPC and never a prompt", async () => {
+test("GOAL /goal creates the goal and sends the objective as the first prompt", async () => {
   resetWorld();
   primeSession("goal-create", [userMsg("u0", "loaded question")]);
   const w = await mountSession("goal-create");
@@ -1047,11 +1047,21 @@ test("GOAL /goal sends the native goal RPC and never a prompt", async () => {
     produce: () => ({ value: { success: true, data: { goal: GOAL, state: goalState() } } }),
   });
 
-  const result = await act(async () => w.latest.handleBuiltinSlashCommand("/goal ship the export"));
+  let command;
+  await act(async () => {
+    command = w.latest.handleBuiltinSlashCommand("/goal ship the export");
+    await sleep(30);
+  });
+  let result;
+  await act(async () => {
+    lastEs().open();
+    result = await command;
+  });
   assert.equal(result.handled, true);
   const goalCalls = world.calls.filter((call) => call.body?.type === "goal");
   assert.deepEqual(goalCalls.map((call) => call.body), [{ type: "goal", op: "create", objective: "ship the export" }]);
-  assert.equal(world.calls.some((call) => call.body?.type === "prompt"), false, "no prompt is sent");
+  const promptCalls = world.calls.filter((call) => call.body?.type === "prompt");
+  assert.deepEqual(promptCalls.map((call) => call.body), [{ type: "prompt", message: "ship the export" }]);
   assert.equal(w.latest.goalState?.goal?.id, "g1");
 });
 

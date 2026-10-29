@@ -345,7 +345,9 @@ Full behavior and rationale: `docs/specs/2026-10-29-native-slash-commands-and-go
   remain the web entry points for those panels.
 - `/goal` is native goal mode: `{type:"goal",op:"create",objective}` plus
   `goal_updated`/`get_state.goal`; pause/resume/drop send the matching op. No
-  `sessionStorage` goal state. Goal snapshots are sequenced so a slow
+  `sessionStorage` goal state. When idle, `/goal <objective>` also sends the
+  objective as the first prompt (TUI parity); while a run is active it only
+  creates the goal. Goal snapshots are sequenced so a slow
   `get_state` cannot overwrite a newer `goal_updated` (same idea as the queue).
 - TUI-only builtins (`guided-goal`, `vibe`, `budget`, and `/plan`/`/loop` when
   absent from the catalog) have no RPC handler. `/plan`'s spec has only

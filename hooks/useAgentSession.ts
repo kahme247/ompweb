@@ -3682,6 +3682,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // A goal created on the empty new-chat screen must adopt the real
           // session so a reload opens it instead of a fresh composer.
           promoteNewSession();
+          // The TUI's `/goal <objective>` both enters goal mode and submits
+          // the objective as the first prompt. `goal create` alone does not
+          // start a turn, so do the same here when idle. During a run the
+          // goal is created only; the objective joins the next turn.
+          if (!agentRunningRef.current) {
+            const sent = await handleSend(objective);
+            if (sent.status !== "accepted") {
+              return complete({ handled: true, error: translate("agentSession.goalStartFailed") });
+            }
+          }
           return complete({ handled: true, message: translate("agentSession.goalStarted", { objective }) });
         }
 
