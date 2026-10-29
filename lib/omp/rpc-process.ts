@@ -125,8 +125,11 @@ export class RpcProcess {
   private readonly frameListeners = new Set<(frame: RpcFrame) => void>();
   private readyPromise: Promise<RpcFrame>;
   private readonly resolveReady: (frame: RpcFrame) => void;
-  /** An adopted child's frames, held until `replay` (see RpcProcessOptions.adopted). */
+  /** An adopted child's frames, held until `replay` (see RpcProcessOptions.adopted), and the bytes of its lines since. */
   private heldFrames: RpcFrame[] | null = null;
+  private heldBytes = 0;
+  /** Set once an adopted child's output outgrew the cap before `replay`: the adoption fails. */
+  private heldOverflow: Error | null = null;
   private nextId = 1;
   private stderrTail = "";
   private exited = false;
@@ -165,6 +168,7 @@ export class RpcProcess {
       midSequence = true;
     });
     this.transport.onLine((line) => {
+      if (this.heldFrames && !this.holdable(line)) return;
       const parsed = parseLine(line);
       if (parsed === undefined) return;
       if (midSequence && isRecord(parsed) && parsed.type === "rpc_chunk" && parsed.index !== 0) return;
@@ -231,6 +235,7 @@ export class RpcProcess {
   /** Adopted child: feeds the daemon's raw lines of its still-open requests as
    * if just read (they are older than anything live), then the frames held since. */
   replay(lines: string[]): void {
+    if (this.heldOverflow) throw this.heldOverflow;
     const held = this.heldFrames ?? [];
     this.heldFrames = null;
     // Its own decoder: a live chunk sequence may be half-read.
@@ -240,6 +245,26 @@ export class RpcProcess {
       if (parsed !== undefined) this.receive(parsed, decoder);
     }
     for (const frame of held) this.dispatch(frame);
+  }
+
+  /**
+   * Counts an adopted child's output until `replay`, up to LINK_LIMITS.channelBufferBytes
+   * as RemoteRpcTransport holds it. Past that the adoption fails: its commands
+   * reject, `replay` throws, and the output is dropped while the wrapper kills it.
+   */
+  private holdable(line: string): boolean {
+    if (this.heldOverflow) return false;
+    this.heldBytes += Buffer.byteLength(line);
+    if (this.heldBytes <= LINK_LIMITS.channelBufferBytes) return true;
+    const overflow = new Error(`omp's output during adoption exceeded ${LINK_LIMITS.channelBufferBytes} bytes`);
+    this.heldOverflow = overflow;
+    this.heldFrames = [];
+    for (const [, entry] of this.pending) {
+      clearTimeout(entry.timer);
+      entry.reject(overflow);
+    }
+    this.pending.clear();
+    return false;
   }
 
   private receive(parsed: unknown, decoder: RpcFrameDecoder): void {
@@ -292,6 +317,7 @@ export class RpcProcess {
     if (this.exited) {
       return Promise.reject(new Error("omp RPC process has exited"));
     }
+    if (this.heldOverflow) return Promise.reject(this.heldOverflow);
     const dispatchedAt = Date.now();
     const id = `w${this.nextId++}`;
     return new Promise<T>((resolve, reject) => {
