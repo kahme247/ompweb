@@ -198,7 +198,7 @@ export function takeInterruptedSessions(): InterruptibleSession[] {
 }
 
 /**
- * Resume remote entries once their host links, once only. startRpcSession
+ * Resume entries (this machine's too) once their host links, once only. startRpcSession
  * waits for any orphan child of the session the host still runs (spec Rules
  * → Reattach). A child the server adopts on that hello runs on: its entry is
  * dropped. A host already linked in this run said hello before this ran; a

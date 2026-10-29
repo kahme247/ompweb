@@ -1,12 +1,11 @@
 import { randomUUID } from "crypto";
-import { existsSync } from "fs";
 import { validateAgentImages } from "./image-attachments";
 import { hasVisibleAssistantContent } from "./assistant-response";
 import { invalidateModelsCache } from "./models-cache";
 import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame } from "./omp/rpc-process";
 import type { RpcTransport } from "./omp/rpc-transport";
 import { editSessionHistory, isSessionEditReply, SESSION_EDIT_COMMAND, SessionEditAgentInvocationError, type SessionEditResult } from "./omp/session-edit";
-import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
+import { cacheSessionPath } from "./session-reader";
 import { allowFileRoot } from "./file-access";
 import { loadWebServerSettings } from "./web-settings";
 import {
@@ -35,7 +34,7 @@ import type {
 import type { AgentMessage, CrossSessionHostToolCall, ExitedRpcSession, ExtensionWidgetItem } from "./types";
 import { isLinkUp, type Host, type HostStatus } from "./hosts/host";
 import { freezeHostLinks, getHost, lastUplinkAt, listHosts, orphanExit } from "./hosts/hub";
-import { localHost } from "./hosts/local-host";
+import { LOCAL_HOST_ID } from "./hosts/registry";
 import type { OpResult } from "./hosts/session-ops";
 import { hostForSessionId, invalidateHostSessionList, listSessionsAllHosts, sessionSpawnTarget } from "./hosts/session-index";
 import type { SessionLiveSnapshot, SessionLiveToolEvent, SessionStreamCursor } from "./session-sync";
@@ -353,7 +352,7 @@ export class AgentSessionWrapper {
     /** Test seam: the real value is DISCONNECT_DESTROY_MS (120s), far too long
      *  for a unit test. 0 disables reaping for that wrapper. */
     disconnectDestroyMs: number = DISCONNECT_DESTROY_MS,
-    host: Host = localHost,
+    host: Host = getHost(LOCAL_HOST_ID),
     launchAdvisor = false,
     fellBack = false,
   ) {
@@ -654,8 +653,8 @@ export class AgentSessionWrapper {
     this.streaming = state.isStreaming;
     this.compacting = state.isCompacting;
     this.fastModeEnabled = state.fastModeEnabled ?? state.fastMode ?? this.fastModeEnabled;
-    // The local path cache resolves ids to files on this machine only.
-    if (this._sessionFile && this.host === localHost) cacheSessionPath(this._sessionId, this._sessionFile);
+    // The path cache resolves ids to files on this machine only (file authorization).
+    if (this._sessionFile && this.host.id === LOCAL_HOST_ID) cacheSessionPath(this._sessionId, this._sessionFile);
     if (moved) {
       this.sessionMovePending = false;
       if (oldId !== this._sessionId) {
@@ -804,7 +803,7 @@ export class AgentSessionWrapper {
       : null;
     // Recorded before destroy(): its running-change broadcast must carry the
     // record so sidebars that missed the notice below still see the exit.
-    if (this._sessionId) getExitedMap().set(this._sessionId, { id: this._sessionId, cwd: this.cwd, ...(this.host.id === localHost.id ? {} : { hostId: this.host.id }), at: Date.now(), code, signal, detail });
+    if (this._sessionId) getExitedMap().set(this._sessionId, { id: this._sessionId, cwd: this.cwd, ...(this.host.id === LOCAL_HOST_ID ? {} : { hostId: this.host.id }), at: Date.now(), code, signal, detail });
     this.emit({
       type: "notice",
       level: "error",
@@ -2491,13 +2490,9 @@ function getRegistry(): Map<string, AgentSessionWrapper> {
     const cleanup = () => {
       // Children dying from here on are the shutdown, not finished runs.
       markShuttingDown();
-      // A linked host's children run on: nothing more reaches its daemon (no kill, no
+      // Every child runs under a host daemon: nothing more reaches it (no kill, no
       // host tool rejection as tabs close on the way out), and the next server adopts them.
       freezeHostLinks();
-      // Only this process's own children are stopped.
-      globalThis.__ompSessions?.forEach((s) => {
-        if (s.host === localHost) s.destroy();
-      });
     };
     process.once("exit", cleanup);
     process.once("SIGINT", cleanup);
@@ -2520,7 +2515,7 @@ export function getRunningRpcSessions(): RunningRpcSession[] {
   for (const [sessionId, session] of getRegistry()) {
     if (session.isRunning()) {
       const id = session.sessionId || sessionId;
-      map.set(id, { id, cwd: session.cwd, ...(session.host.id === localHost.id ? {} : { hostId: session.host.id }) });
+      map.set(id, { id, cwd: session.cwd, ...(session.host.id === LOCAL_HOST_ID ? {} : { hostId: session.host.id }) });
     }
   }
   return [...map.values()];
@@ -2539,7 +2534,7 @@ export function getLiveRpcSessionIds(): string[] {
  * reconnect sessions on demand and start them with the updated executable. */
 export async function restartAllRpcSessions(): Promise<number> {
   // An update changes this machine's omp only; remote runs keep going.
-  const sessions = [...new Set(getRegistry().values())].filter((session) => session.host.id === localHost.id);
+  const sessions = [...new Set(getRegistry().values())].filter((session) => session.host.id === LOCAL_HOST_ID);
   await Promise.all(sessions.map((session) => session.destroyAndWait()));
   return sessions.length;
 }
@@ -2624,13 +2619,12 @@ export function syncInterruptibleSessions(): void {
 
 /**
  * Restart the sessions that were mid-run when omp-web last stopped and ask
- * each to continue. Only runs when the auto-resume setting is on. A remote
- * session waits for its host's next hello and its orphan child's exit.
+ * each to continue. Only runs when the auto-resume setting is on. Each session,
+ * this machine's included, waits for its host's hello: a child its daemon still
+ * runs is adopted there, and only a dead one resumes, after its orphan's exit.
  */
 export async function resumeInterruptedSessions(): Promise<void> {
-  const sessions = takeInterruptedSessions();
-  resumeOnHostLink(sessions.filter((session) => session.hostId !== localHost.id), resumeSession);
-  await Promise.all(sessions.filter((session) => session.hostId === localHost.id).map(resumeSession));
+  resumeOnHostLink(takeInterruptedSessions(), resumeSession);
 }
 
 /** Start an interrupted session again on its host and ask it to continue. Never rejects. */
@@ -2682,12 +2676,13 @@ function createAgentToolOps(): AgentToolSessionOps {
     async listSessions() {
       const running = new Set(getRunningRpcSessionIds());
       const sessions = await listSessionsAllHosts();
-      return sessions.map((s) => ({ id: s.id, name: s.name, cwd: s.cwd, running: running.has(s.id), hostId: s.hostId ?? localHost.id }));
+      return sessions.map((s) => ({ id: s.id, name: s.name, cwd: s.cwd, running: running.has(s.id), hostId: s.hostId ?? LOCAL_HOST_ID }));
     },
 
     listHosts() {
+      const local = getHost(LOCAL_HOST_ID);
       return [
-        { id: localHost.id, label: localHost.label, online: true, allowAgentStart: true },
+        { id: local.id, label: local.label, online: isLinkUp(local.status()), allowAgentStart: true },
         ...listHosts().map((h) => ({ id: h.id, label: h.label, online: isLinkUp(h.status), allowAgentStart: h.allowAgentStart })),
       ];
     },
@@ -2756,8 +2751,8 @@ function createAgentToolOps(): AgentToolSessionOps {
 
 /**
  * Spawn a brand-new session on `host` in `cwd`, checked where it lives: the
- * host answers with the path it will use. Registers the cwd with this
- * machine's file routes, or refreshes the host's session list.
+ * host answers with the path it will use. Registers this machine's cwd with
+ * its file routes, and refreshes the host's session list.
  */
 export async function startNewRpcSession(
   host: Host,
@@ -2765,25 +2760,16 @@ export async function startNewRpcSession(
   toolNames?: string[],
   advisor?: boolean,
 ): Promise<OpResult<{ session: AgentSessionWrapper; realSessionId: string }>> {
-  let spawnCwd = cwd;
-  if (host === localHost) {
-    if (!existsSync(cwd)) return { ok: false, status: 400, code: "directory_not_found", error: `Directory does not exist: ${cwd}` };
-  } else {
-    const validated = await host.sessionOps.validateCwd(cwd);
-    if (!validated.ok) return validated;
-    spawnCwd = validated.value.cwd;
-  }
+  const validated = await host.sessionOps.validateCwd(cwd);
+  if (!validated.ok) return validated;
+  const spawnCwd = validated.value.cwd;
   // Unique per call: startRpcSession coalesces concurrent callers that share a key onto one session.
   const tempKey = `__new__${randomUUID()}`;
   const started = await startRpcSession(tempKey, "", spawnCwd, toolNames, advisor, undefined, undefined, host);
-  if (host === localHost) {
-    // Without this a file request under a brand-new cwd would 403 for up to the allowed-roots cache TTL.
-    // Never for another host: its paths do not exist on this machine.
-    allowFileRoot(spawnCwd);
-    invalidateSessionListCache();
-  } else {
-    invalidateHostSessionList(host.id);
-  }
+  // Without this a file request under a brand-new cwd would 403 for up to the allowed-roots cache TTL.
+  // Never for another host: its paths do not exist on this machine.
+  if (host.id === LOCAL_HOST_ID) allowFileRoot(spawnCwd);
+  invalidateHostSessionList(host.id);
   return { ok: true, value: started };
 }
 
@@ -2808,7 +2794,7 @@ export async function startRpcSession(
    * or a completed turn); the picker path re-binds on each cold switch, so
    * the user is never stuck on the unrestorable model. */
   spawnModel?: string,
-  host: Host = localHost,
+  host: Host = getHost(LOCAL_HOST_ID),
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
@@ -2817,7 +2803,7 @@ export async function startRpcSession(
   // server is being adopted or killed. Waiting here, before the registry and
   // the lock, lets a start join an adopted child; a killed one must exit first:
   // two children must never write one session file. A live wrapper is past that.
-  if (sessionFile && host !== localHost && !registry.get(sessionId)?.isAlive()) await orphanExit(host.id, sessionId);
+  if (sessionFile && !registry.get(sessionId)?.isAlive()) await orphanExit(host.id, sessionId);
 
   const existing = registry.get(sessionId);
   // Union semantics, matching the spawn below and the wrapper identity:
