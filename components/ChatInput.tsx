@@ -5,12 +5,12 @@ import { createPortal } from "react-dom";
 import { ChevronDown, ClipboardPaste, CornerDownRight, ListChecks, Loader2, Mic, Paperclip, Plus, RotateCw, Shrink, Snail, Sparkles, Wrench, X, Zap } from "lucide-react";
 import { getSubmitDuringRunBehavior, isWordCompletionEnabled } from "@/lib/composer-prefs";
 import type { BuiltinSlashCommandResult, CompactResultInfo, PromptSubmissionResult, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
-import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
+import type { ActivePlan } from "@/lib/web-mode-state";
 import { toast } from "@/components/ui/toast";
 import { ConfirmDialog } from "@/components/ui/field";
 import { useDictation } from "@/hooks/useDictation";
 import { toastBtwError } from "@/hooks/useBtw";
-import type { GenerationSpeedInfo, SessionStatsInfo, SlowModeScope, UsageLimitState } from "@/lib/pi-types";
+import type { GenerationSpeedInfo, GoalModeState, SessionStatsInfo, SlowModeScope, UsageLimitState } from "@/lib/pi-types";
 import type { SttAfter } from "@/lib/stt";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { ContextDetailPanel } from "./ComposerPanels";
@@ -41,7 +41,7 @@ import { MAX_UPLOAD_BYTES, MAX_UPLOADS_PER_MESSAGE } from "@/lib/upload-limits";
 import { LOCAL_HOST_ID } from "@/lib/project-ordering";
 import {
   BUILTIN_SLASH_COMMAND_DEFS,
-  CLIENT_BUILTIN_COMMAND_NAMES,
+  CLIENT_ONLY_COMMAND_NAMES,
   SLASH_SOURCE_GROUP_LABEL_KEYS,
   SLASH_SOURCE_ORDER,
   SLASH_SOURCES,
@@ -256,7 +256,10 @@ interface Props {
   draftIdentityMove?: { from: string; to: string; sourceDraft?: ChatDraft };
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
-  activeGoal?: ActiveGoal | null;
+  /** omp-owned goal mode snapshot (null = no goal, undefined = not reported yet). */
+  goalState?: GoalModeState | null;
+  /** Pause/resume/drop the omp-owned goal. */
+  onGoalAction?: (op: "pause" | "resume" | "drop") => void | Promise<void>;
   activePlan?: ActivePlan | null;
   advisorEnabled?: boolean;
   /** Toggle the per-chat advisor (composer icon + /advisor command). */
@@ -381,7 +384,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   uploadHostId = LOCAL_HOST_ID,
   draftIdentityMove,
   cwd,
-  activeGoal,
+  goalState,
+  onGoalAction,
   activePlan,
   advisorEnabled,
   onAdvisorChange,
@@ -420,6 +424,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     items[next]?.focus();
   }, []);
   const { t, tn, locale } = useI18n();
+  // Names omp's catalog reports. A web prompt expansion of the same name must
+  // yield to omp's own command (extension/custom/skill/builtin).
+  const ompCommandNames = React.useMemo(
+    () => new Set((slashCommands ?? []).map((command) => command.name)),
+    [slashCommands],
+  );
   const usageLimitLabel = usageLimit
     ? formatUsageLimitLabel(usageLimit, t)
     : undefined;
@@ -602,9 +612,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     insertText: insertTextAtCursor,
     addFiles(files: File[]) {
       processFiles(files);
-    },
-    openContextPanel() {
-      setContextOpen(true);
     },
     retargetPendingRecovery(from, to) {
       const identity = draftRecoveryIdentityRef.current;
@@ -1156,7 +1163,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (rejectsPendingUploads()) return;
     const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFilesRef.current);
     if (!attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length && msg.startsWith("/") && onBuiltinCommand) {
-      const expansion = expandWebSlashCommand(msg);
+      const commandName = msg.slice(1).split(/\s+/)[0];
+      const expansion = ompCommandNames.has(commandName)
+        ? { kind: "not-web" as const }
+        : expandWebSlashCommand(msg);
       if (expansion.kind === "expand" && rejectsOversizedPrompt(expansion.prompt, attachedImagesRef.current)) return;
       if (await runBuiltinCommand(msg, overrideText)) return;
     }
@@ -1177,7 +1187,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (key) recoverDraft(key, recovery);
       throw error;
     }
-  }, [value, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, rejectsOversizedPrompt, rejectsPendingUploads, runBuiltinCommand, sendSideQuestion]);
+  }, [value, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, ompCommandNames, rejectsOversizedPrompt, rejectsPendingUploads, runBuiltinCommand, sendSideQuestion]);
   const {
     isRecording,
     isPaused,
@@ -1293,30 +1303,29 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const builtinSlashCommands: SlashCommandPaletteItem[] = React.useMemo(
     () => BUILTIN_SLASH_COMMAND_DEFS
-      // The /advisor command is linked to Settings → Enable Advisor: hidden
-      // from the palette while the advisor is disabled.
-      .filter((def) => def.name !== "advisor" || advisorEnabled)
+      // Client-only actions always stay; web prompt expansions yield to an
+      // omp command with the same name.
+      .filter((def) => CLIENT_ONLY_COMMAND_NAMES[def.name] === true || !ompCommandNames.has(def.name))
       .map((def) => ({
         name: def.name,
         description: t(def.descriptionKey),
         ...(def.argumentHintKey ? { argumentHint: t(def.argumentHintKey) } : {}),
         source: "builtin" as const,
       })),
-    [t, advisorEnabled],
+    [t, ompCommandNames],
   );
 
-  // Externally reported commands (extension/prompt/skill/ompBuiltin) group
-  // below the client built-ins; any name the web UI intercepts itself —
-  // whether an omp builtin or a user extension — is dropped so each command
-  // appears exactly once and the client interception behavior is unchanged.
+  // Externally reported commands group below the client built-ins. A name the
+  // client always dispatches itself is dropped so it appears exactly once.
   const externalSlashCommands: SlashCommandPaletteItem[] = React.useMemo(
     () => (slashCommands ?? []).flatMap((command): SlashCommandPaletteItem[] => {
-      const source = command.source as string;
-      if (CLIENT_BUILTIN_COMMAND_NAMES.has(command.name)) return [];
-      if (source === "builtin" || source === "ompBuiltin") {
-        return [{ name: command.name, description: command.description, source: "ompBuiltin" }];
-      }
-      return [command];
+      if (CLIENT_ONLY_COMMAND_NAMES[command.name] === true) return [];
+      return [{
+        name: command.name,
+        description: command.description,
+        ...(command.argumentHint ? { argumentHint: command.argumentHint } : {}),
+        source: command.source === "builtin" ? "ompBuiltin" : command.source,
+      }];
     }),
     [slashCommands],
   );
@@ -1643,38 +1652,44 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const files = attachedTextFilesRef.current;
     onAudioUnlock?.();
     const streamingBehavior = mode === "steer" ? "steer" : "followUp";
-    if (msg.startsWith("/") && onPromptWithStreamingBehavior) {
+    if (msg.startsWith("/")) {
       const commandName = msg.slice(1).split(/\s+/)[0];
-      // Same gate as the direct path (useAgentSession refuses /advisor while
-      // disabled): queueing must not become a bypass around the toggle.
-      if (commandName === "advisor" && !advisorEnabled) {
-        toast.error(t("agentSession.advisorDisabled"));
+      // Client-dispatched commands (/goal uses the native goal RPC, /btw is a
+      // side question) must not enter the prompt queue: omp would treat the
+      // text as an ordinary message. Run them now, mid-run included.
+      if (CLIENT_ONLY_COMMAND_NAMES[commandName] === true) {
+        if (onBuiltinCommand) void runBuiltinCommand(msg, overrideText);
         return;
       }
-      // Web commands must be expanded even when queued: the raw slash text
-      // would otherwise reach omp as a literal message (its /goal //plan are
-      // TUI-only). Action commands (compact/...) keep the raw text so omp's
-      // own ACP handlers can run them.
-      const expansion = expandWebSlashCommand(msg);
-      if (expansion.kind === "expand") {
-        const prompt = composeMessageWithTextAttachments(expansion.prompt, files);
+      if (onPromptWithStreamingBehavior) {
+        // Web-only prompt expansions (/plan, /fix, ...) must be expanded even
+        // when queued. A name omp's catalog owns is never expanded: omp runs
+        // the original command line (extension/custom/skill/builtin) on
+        // delivery.
+        const expansion = ompCommandNames.has(commandName)
+          ? { kind: "not-web" as const }
+          : expandWebSlashCommand(msg);
+        if (expansion.kind === "expand") {
+          const prompt = composeMessageWithTextAttachments(expansion.prompt, files);
+          if (rejectsOversizedPrompt(prompt, attachedImagesRef.current)) return;
+          recoverOnFailure(onPromptWithStreamingBehavior(prompt, streamingBehavior, images), prompt);
+          clearInput();
+          return;
+        }
+        if (expansion.kind === "usage-error") {
+          toast.error(t("chatInput.commandUsageTitle"), t("agentSession.commandRequiresArgs", {
+            command: expansion.command,
+            usage: t(expansion.argumentHintKey),
+          }));
+          return;
+        }
+        const prompt = composeMessageWithTextAttachments(msg, files);
         if (rejectsOversizedPrompt(prompt, attachedImagesRef.current)) return;
         trackSend(onPromptWithStreamingBehavior(prompt, streamingBehavior, images, ...uploads), prompt);
         clearInput();
         return;
       }
-      if (expansion.kind === "usage-error") {
-        toast.error(t("chatInput.commandUsageTitle"), t("agentSession.commandRequiresArgs", {
-          command: expansion.command,
-          usage: t(expansion.argumentHintKey),
-        }));
-        return;
-      }
-      const prompt = composeMessageWithTextAttachments(msg, files);
-      if (rejectsOversizedPrompt(prompt, attachedImagesRef.current)) return;
-      trackSend(onPromptWithStreamingBehavior(prompt, streamingBehavior, images, ...uploads), prompt);
-      clearInput();
-      return;
+
     }
     const composedMessage = composeMessageWithTextAttachments(msg, files);
     if (rejectsOversizedPrompt(composedMessage, attachedImagesRef.current)) return;
@@ -1684,7 +1699,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       trackSend(onFollowUp(composedMessage, images, ...uploads), composedMessage);
     }
     clearInput();
-  }, [value, handleSend, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, t, advisorEnabled, rejectsOversizedPrompt, rejectsPendingUploads, sendSideQuestion]);
+  }, [value, handleSend, onPromptWithStreamingBehavior, onBuiltinCommand, onSteer, onFollowUp, clearInput, onAudioUnlock, t, ompCommandNames, rejectsOversizedPrompt, rejectsPendingUploads, runBuiltinCommand, sendSideQuestion]);
   // A typed message or attachment during a run is a queued follow-up — and so
   // is a dictation in progress: the primary button must take the same state it
   // would have if the composer already held text. Keep Stop as the action
@@ -2266,7 +2281,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       />
       <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
         <ModelErrorBanner error={modelError} />
-        <ComposerModeStatus goal={activeGoal} plan={activePlan} />
+        <ComposerModeStatus goal={goalState} plan={activePlan} onGoalAction={onGoalAction} />
         {/* Retry banner */}
         {retryInfo && (() => {
           const remainingSec = (retryInfo.delayMs !== undefined && retryInfo.startedAt !== undefined)

@@ -63,6 +63,34 @@ export interface QueuedMessages {
   followUp: string[];
 }
 
+/**
+ * omp goal mode (RPC `goal` command and `goal_updated` event).
+ * Unknown statuses are preserved: a newer omp may add lifecycle states.
+ */
+export type GoalStatus = "active" | "paused" | "completed" | "dropped" | (string & {});
+
+export interface Goal {
+  id: string;
+  objective: string;
+  status: GoalStatus;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface GoalModeState {
+  enabled: boolean;
+  mode: string;
+  goal: Goal | null;
+}
+
+/** `goal` command response; drop may answer `state: null` while the event still carries `dropped`. */
+export interface GoalCommandResponse {
+  goal: Goal | null;
+  state: GoalModeState | null;
+}
+
 /** Mirror of omp's RpcSessionState (the raw `get_state` payload). */
 export interface RpcSessionState {
   model?: OmpModel;
@@ -102,6 +130,8 @@ export interface RpcSessionState {
   tokensPerSecond?: number | null;
   /** Structured skill resolution diagnostics; absent on older OMP builds. */
   skillDiagnostics?: SkillDiagnosticsSnapshot;
+  /** Goal mode snapshot; absent on OMP builds without the `goal` RPC. */
+  goal?: GoalModeState | null;
 }
 
 /**
@@ -139,6 +169,8 @@ export interface WebSessionState {
   tokensPerSecond?: number | null;
   /** Parsed public diagnostics DTO; absent means unsupported or malformed. */
   skillDiagnostics?: SkillDiagnosticsSnapshot;
+  /** Goal mode snapshot; absent when the live child has not reported it. */
+  goal?: GoalModeState | null;
   todoPhases: TodoPhase[];
   extensionStatuses: Array<{ key: string; text: string }>;
   extensionWidgets: Array<{ key: string; lines: string[]; placement: "aboveEditor" | "belowEditor" }>;

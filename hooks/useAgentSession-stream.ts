@@ -12,7 +12,7 @@ import type {
 } from "@/lib/types";
 import type { EventStream } from "@/lib/event-stream";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
-import type { QueuedMessages, RpcAvailableSlashCommand, SlowModeScope, TodoPhase, UsageLimitState } from "@/lib/pi-types";
+import type { GoalModeState, QueuedMessages, RpcAvailableSlashCommand, SlowModeScope, TodoPhase, UsageLimitState } from "@/lib/pi-types";
 import type {
   SubagentHistoryEntry,
   SubagentInfo,
@@ -202,6 +202,8 @@ export type AgentStateResponse = {
   queuedMessages?: QueuedMessages;
   /** Untrusted until parsed by parseSkillDiagnosticsSnapshot. */
   skillDiagnostics?: unknown;
+  /** omp goal mode; absent on builds without the goal RPC. */
+  goal?: GoalModeState | null;
   todoPhases?: TodoPhase[];
 };
 
@@ -240,7 +242,9 @@ export interface CompactResultInfo {
 export interface SlashCommandInfo {
   name: string;
   description?: string;
-  source: "extension" | "prompt" | "skill";
+  source: "builtin" | "extension" | "prompt" | "skill";
+  /** Bracketed argument hint from omp's `input.hint`. */
+  argumentHint?: string;
   sourceInfo?: {
     path: string;
     source: string;
@@ -252,7 +256,7 @@ export interface SlashCommandInfo {
 
 export type BuiltinSlashCommandResult =
   | { handled: false }
-  | { handled: true; message?: string; error?: string; action?: "openSessionStats"; retainInput?: boolean };
+  | { handled: true; message?: string; error?: string; retainInput?: boolean };
 
 export type ThinkingLevelOption = string;
 
@@ -474,17 +478,29 @@ export type SlashCommandsResponse = {
   commands?: RpcAvailableSlashCommand[];
 };
 
-// Map omp's slash-command sources onto the palette's grouping. Builtins are
-// skipped: the client intercepts its own builtin set, and other omp builtins
-// still work when typed (omp executes them via the prompt command).
-export function toSlashCommandInfo(command: RpcAvailableSlashCommand): SlashCommandInfo | null {
-  if (command.source === "builtin") return null;
+/** Every invocable spelling: primary names plus omp's aliases (`/models` for `/model`). */
+export function slashCommandRosterNames(commands: readonly RpcAvailableSlashCommand[]): string[] {
+  return commands.flatMap((command) => [command.name, ...(command.aliases ?? [])]);
+}
+
+// Map omp's slash-command sources onto the palette's grouping. Every source is
+// shown: omp's RPC catalog contains only text-capable commands, so a prompt
+// carrying one executes it. The composer still hides names the client
+// dispatches itself, so each command appears once.
+export function toSlashCommandInfo(command: RpcAvailableSlashCommand): SlashCommandInfo {
   const source: SlashCommandInfo["source"] = command.source === "extension"
     ? "extension"
     : command.source === "skill"
       ? "skill"
-      : "prompt";
-  return { name: command.name, description: command.description, source };
+      : command.source === "builtin"
+        ? "builtin"
+        : "prompt";
+  return {
+    name: command.name,
+    description: command.description,
+    source,
+    ...(command.input?.hint ? { argumentHint: command.input.hint } : {}),
+  };
 }
 
 // omp exposes only the commands its RPC prompt path can actually run. TUI-only
@@ -492,10 +508,9 @@ export function toSlashCommandInfo(command: RpcAvailableSlashCommand): SlashComm
 // so the client has no way to run them and sending one lands in the transcript
 // as literal prompt text with no hint that nothing happened (#167).
 //
-// Callers pass the FULL command list — including the builtins that
-// `toSlashCommandInfo` hides from the palette, which are still executed by omp
-// when typed and therefore must not warn. An empty list means the roster has
-// not arrived yet (or failed), in which case saying "unknown" would be a guess.
+// Callers pass the FULL command list, builtins included. An empty list means
+// the roster has not arrived yet (or failed), in which case saying "unknown"
+// would be a guess.
 export function isUnknownSlashCommand(text: string, knownNames: readonly string[]): boolean {
   if (knownNames.length === 0) return false;
   const match = /^\/([A-Za-z][A-Za-z0-9_-]*)/.exec(text.trim());
