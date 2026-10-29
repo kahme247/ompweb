@@ -2816,8 +2816,8 @@ export async function startRpcSession(
   // A child of this session the host still ran from before a restart of this
   // server is being adopted or killed. Waiting here, before the registry and
   // the lock, lets a start join an adopted child; a killed one must exit first:
-  // two children must never write one session file.
-  if (sessionFile && host !== localHost) await orphanExit(host.id, sessionId);
+  // two children must never write one session file. A live wrapper is past that.
+  if (sessionFile && host !== localHost && !registry.get(sessionId)?.isAlive()) await orphanExit(host.id, sessionId);
 
   const existing = registry.get(sessionId);
   // Union semantics, matching the spawn below and the wrapper identity:

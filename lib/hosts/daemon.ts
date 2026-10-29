@@ -44,6 +44,8 @@ type Unsequenced<M> = M extends { seq: number } ? Omit<M, "seq"> : never;
 
 interface Channel {
   transport: RpcTransport;
+  /** Where the child was spawned: a restarted main adopts it there. */
+  cwd: string;
   /** Bytes of this child's output waiting for an uplink ack. */
   buffered: number;
   /** Open blocking requests and the child's current session, both in the next hello. */
@@ -460,7 +462,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       throw new HostOpError(503, "host_stopping", "ompweb host is stopping");
     }
     const pending = new PendingRequests(LINK_LIMITS.pendingBytes, file ? readSessionHeaderSync(file)?.id ?? null : null);
-    channels.set(ch, { transport, buffered: 0, pending });
+    channels.set(ch, { transport, cwd: spawned.cwd, buffered: 0, pending });
     transport.onLine((line) => {
       pending.noteStdout(line);
       output(ch, { type: "stdout", ch, line });
@@ -492,7 +494,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
           platform: process.platform,
           home: homedir(),
           ack: down.acked,
-          channels: [...channels].map(([ch, channel]) => ({ ch, sessionId: channel.pending.sessionId, pending: replay ? channel.pending.lines() : null })),
+          channels: [...channels].map(([ch, channel]) => ({ ch, sessionId: channel.pending.sessionId, cwd: channel.cwd, pending: replay ? channel.pending.lines() : null })),
         });
         let hello: string;
         try {

@@ -421,16 +421,13 @@ function reattach(link: Link, listed: HelloChannel[]): void {
     transport.lost = true;
     transport.deliverExit(null, null);
   }
-  // Asked once per hello, and fresh: a cached list may still hold a session deleted since.
-  let sessions: Promise<SessionInfo[]> | undefined;
-  const listSessions = () => (sessions ??= link.host.sessionOps.listSessions());
-  for (const { ch, sessionId, pending } of listed) {
+  for (const { ch, sessionId, cwd, pending } of listed) {
     if (link.channels.has(ch)) continue;
     const child = new RemoteRpcTransport(link.id, ch, sessionId);
     child.spawned = true;
     link.channels.set(ch, child);
     // A null `pending` lost open requests to the daemon's cap: adopted, the run would wait on them forever.
-    if (sessionId && pending) child.adoption = adopt(link, child, sessionId, pending, listSessions);
+    if (sessionId && pending) child.adoption = adopt(link, child, sessionId, cwd, pending);
     else killOrphan(child);
   }
 }
@@ -443,20 +440,24 @@ function killOrphan(orphan: RemoteRpcTransport): void {
   orphan.onExit(() => clearTimeout(escalate));
 }
 
-/** Spec "Adopting live children": a session wrapper takes the child over; one
- * that cannot (unknown session, failed re-sync) is killed. True when adopted. */
-async function adopt(link: Link, child: RemoteRpcTransport, sessionId: string, replay: string[], listSessions: () => Promise<SessionInfo[]>): Promise<boolean> {
+/** Spec "Adopting live children": a session wrapper takes the child over, by
+ * the identity the child itself reports (a new session is in no list before
+ * its first reply is written). One that cannot re-sync is killed. True when adopted. */
+async function adopt(link: Link, child: RemoteRpcTransport, sessionId: string, cwd: string, replay: string[]): Promise<boolean> {
   try {
-    // rpc-manager imports this module. Awaiting it also defers the lookup past
-    // openDownlink, which marks the link up (ops need it) after reattach.
+    // Dynamic: rpc-manager imports this module.
     const { adoptRpcSession } = await import("../rpc-manager");
-    const session = (await listSessions()).find((entry) => entry.id === sessionId);
-    if (!session) throw new Error("its session is unknown");
-    await adoptRpcSession({ host: link.host, transport: child, sessionId, cwd: session.cwd, replay });
+    await adoptRpcSession({ host: link.host, transport: child, sessionId, cwd, replay });
     return true;
   } catch (error) {
-    console.warn(`[omp-web] killing the omp child of session ${sessionId} on ${labelOf(link.id)}: it could not be adopted (${error instanceof Error ? error.message : String(error)})`);
-    killOrphan(child);
+    const reason = error instanceof Error ? error.message : String(error);
+    if (hub().frozen) {
+      // Nothing reaches the daemon now, a kill included: the child runs on for the next server.
+      console.warn(`[omp-web] left the omp child of session ${sessionId} on ${labelOf(link.id)} to the next server: this one stopped while adopting it (${reason})`);
+    } else {
+      console.warn(`[omp-web] killing the omp child of session ${sessionId} on ${labelOf(link.id)}: it could not be adopted (${reason})`);
+      killOrphan(child);
+    }
     return false;
   }
 }
@@ -719,6 +720,8 @@ export class RemoteRpcTransport implements RpcTransport {
 
   write(line: string, callback: (error?: Error | null) => void): void {
     if (this.exitInfo) return callback(new Error("RPC process is not running"));
+    // sendDown would drop it: a command waiting on it fails now instead of at its timeout.
+    if (hub().frozen) return callback(new Error("omp-web is shutting down"));
     try {
       // Kept in the link outbox until the daemon acks it, across reconnects.
       sendDown(linkFor(this.hostId), { type: "stdin", ch: this.ch, line });

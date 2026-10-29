@@ -82,8 +82,9 @@ export type DownMessage =
   | { type: "ping" }
   | { type: "pong" };
 
-/** `pending`: raw stdout lines of the child's open blocking requests, or null when over `pendingBytes`. */
-export type HelloChannel = { ch: string; sessionId: string | null; pending: string[] | null };
+/** `sessionId`: the session the child last reported (null before it named one); `cwd`: where the
+ * daemon spawned it; `pending`: raw stdout lines of its open blocking requests, or null when over `pendingBytes`. */
+export type HelloChannel = { ch: string; sessionId: string | null; cwd: string; pending: string[] | null };
 
 export type UpMessage =
   | {
@@ -215,7 +216,7 @@ function channels(o: Obj): HelloChannel[] {
   if (!Array.isArray(list)) fail("channels must be an array");
   return list.map((c: unknown) => {
     if (!isObj(c)) fail("channel must be an object");
-    return { ch: str(c, "ch"), sessionId: nullable(c, "sessionId", str), pending: nullable(c, "pending", strings) };
+    return { ch: str(c, "ch"), sessionId: nullable(c, "sessionId", str), cwd: str(c, "cwd"), pending: nullable(c, "pending", strings) };
   });
 }
 
