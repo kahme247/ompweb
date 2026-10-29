@@ -2491,7 +2491,12 @@ function getRegistry(): Map<string, AgentSessionWrapper> {
     const cleanup = () => {
       // Children dying from here on are the shutdown, not finished runs.
       markShuttingDown();
-      globalThis.__ompSessions?.forEach((s) => s.destroy());
+      // Only this process's own children. A linked host's children run on: its daemon
+      // keeps them when the link drops, and the next server adopts them (a kill sent
+      // here could still reach the daemon over a downlink that outlives this handler).
+      globalThis.__ompSessions?.forEach((s) => {
+        if (s.host === localHost) s.destroy();
+      });
     };
     process.once("exit", cleanup);
     process.once("SIGINT", cleanup);
@@ -2807,6 +2812,12 @@ export async function startRpcSession(
   const registry = getRegistry();
   const locks = getLocks();
 
+  // A child of this session the host still ran from before a restart of this
+  // server is being adopted or killed. Waiting here, before the registry and
+  // the lock, lets a start join an adopted child; a killed one must exit first:
+  // two children must never write one session file.
+  if (sessionFile && host !== localHost) await orphanExit(host.id, sessionId);
+
   const existing = registry.get(sessionId);
   // Union semantics, matching the spawn below and the wrapper identity:
   // workspace advisor=true forces the flag on. The gate must compare this
@@ -2853,9 +2864,6 @@ export async function startRpcSession(
     // The wrapper needs the process and the process's onExit needs the wrapper;
     // the holder breaks that cycle (onExit only fires once the child dies).
     const holder: { wrapper?: AgentSessionWrapper } = {};
-    // A child of this session the host still ran from before a restart of this
-    // server is being killed: two children must never write one session file.
-    if (sessionFile && host !== localHost) await orphanExit(host.id, sessionId);
     const spawned = await host.spawnRpc({ cwd, recordedCwd: recordedCwd ?? null, sessionFile, toolNames, advisor: advisor === true, spawnModel });
     const proc = new RpcProcess({
       cwd: spawned.cwd,
@@ -2972,6 +2980,11 @@ export async function adoptRpcSession({ host, transport, sessionId, cwd, replay 
   const adopting = (async () => {
     try {
       await created.adopt(replay);
+      // The host names a child by the session it last reported; one that has since moved
+      // to a session this server already runs would be its second writer.
+      if (created.sessionId !== sessionId && (locks.has(created.sessionId) || registry.has(created.sessionId))) {
+        throw new Error(`Session ${created.sessionId} is already started on this server`);
+      }
     } catch (error) {
       const disposing = created.destroyAndWait("adoption-failed");
       // As for a failed resume: until the child really exits, a start for this

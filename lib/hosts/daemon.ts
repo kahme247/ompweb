@@ -44,10 +44,9 @@ type Unsequenced<M> = M extends { seq: number } ? Omit<M, "seq"> : never;
 
 interface Channel {
   transport: RpcTransport;
-  sessionId: string | null;
   /** Bytes of this child's output waiting for an uplink ack. */
   buffered: number;
-  /** Open blocking requests, replayed in the next hello. */
+  /** Open blocking requests and the child's current session, both in the next hello. */
   pending: PendingRequests;
 }
 
@@ -460,8 +459,8 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       transport.killTree(true);
       throw new HostOpError(503, "host_stopping", "ompweb host is stopping");
     }
-    const pending = new PendingRequests(LINK_LIMITS.pendingBytes);
-    channels.set(ch, { transport, sessionId: file ? readSessionHeaderSync(file)?.id ?? null : null, buffered: 0, pending });
+    const pending = new PendingRequests(LINK_LIMITS.pendingBytes, file ? readSessionHeaderSync(file)?.id ?? null : null);
+    channels.set(ch, { transport, buffered: 0, pending });
     transport.onLine((line) => {
       pending.noteStdout(line);
       output(ch, { type: "stdout", ch, line });
@@ -493,7 +492,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
           platform: process.platform,
           home: homedir(),
           ack: down.acked,
-          channels: [...channels].map(([ch, channel]) => ({ ch, sessionId: channel.sessionId, pending: replay ? channel.pending.lines() : null })),
+          channels: [...channels].map(([ch, channel]) => ({ ch, sessionId: channel.pending.sessionId, pending: replay ? channel.pending.lines() : null })),
         });
         let hello: string;
         try {
