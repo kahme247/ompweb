@@ -27,7 +27,7 @@
 
 1. A web restart during a run that is waiting on an `ask` dialog: after adoption the dialog shows again in the browser and answering it continues the run (Task 1 + Task 3 tests).
 2. A channel listed in `hello` whose session id is unknown, or whose re-sync times out: killed and resumed once, never two writers on one file (Task 3).
-3. Dev server takes the local link, then stops: production adopts channels dev started, including a run dev left mid-turn (Task 3 integration test).
+3. A dev server (`NODE_ENV=development`) starting next to production: it never rewrites `host.json`, the daemon stays linked to production, and production's runs are untouched (Task 4 test).
 4. A web server that regenerated the local token: the daemon re-reads `host.json` on 401 and relinks without restarting its children (Task 4).
 5. A machine with the new web server but no daemon service: "This machine" offline with the install hint, no crash, no direct spawn (Task 5 + Task 6).
 
@@ -108,7 +108,7 @@
   export function ensureLocalHostLink(input: { url: string }): { token: string; written: boolean };
   // registry: the "local" record exists exactly once; createHost never returns id "local"; updateHost/revokeHost("local") throw
   ```
-  At startup the web server calls `ensureLocalHostLink({ url: "http://127.0.0.1:<its port>" })`: creates or keeps the `local` record, writes `<agent dir>/omp-web/host.json` (0600, temp + rename) when its url/token differ. The daemon, on 401, re-reads `host.json` once and redials with the new token; it exits only when the file still holds the rejected token. `http://` is accepted for loopback hosts without `--allow-http`.
+  At startup the web server calls `ensureLocalHostLink({ url: "http://127.0.0.1:<its port>" })` — skipped when `NODE_ENV` is `development` — : creates or keeps the `local` record, writes `<agent dir>/omp-web/host.json` (0600, temp + rename) when its url/token differ. The port is the one the server actually listens on (read how `bin/omp-web.js` passes it to `next start`). The daemon, on 401, re-reads `host.json` once and redials with the new token; it exits only when the file still holds the rejected token. `http://` is accepted for loopback hosts without `--allow-http`.
 - [ ] **Step 1: Failing tests** — bootstrap writes `host.json` with the server's loopback url and a token `hostForToken` accepts; a second call with the same url does not rewrite; registry refuses to revoke/rename `local`; daemon given a stale token gets 401, re-reads the rewritten file and links; daemon with an unchanged stale file exits 1; `http://127.0.0.1` links without `--allow-http`.
 - [ ] **Step 2: Run** → FAIL.
 - [ ] **Step 3: Implement.**
