@@ -43,12 +43,26 @@ export function readGoalModeState(value: unknown): GoalModeState | null {
   return { enabled, mode, goal };
 }
 
-/** `goal_updated` event: prefer the full state, fall back to the bare goal. */
-export function readGoalUpdatedEvent(value: unknown): GoalModeState | null {
-  if (!isRecord(value)) return null;
-  const state = readGoalModeState(value.state);
-  if (state) return state;
-  return stateFromGoal(readGoal(value.goal));
+/**
+ * `goal_updated` event: prefer the full state, fall back to the bare goal.
+ * `undefined` means the payload is malformed and must not clear a displayed
+ * goal; `null` is a valid clear (`goal: null`).
+ */
+export function readGoalUpdatedEvent(value: unknown): GoalModeState | null | undefined {
+  if (!isRecord(value)) return undefined;
+  const hasGoal = "goal" in value;
+  const hasState = "state" in value;
+  if (!hasGoal && !hasState) return undefined;
+
+  if (value.state != null) {
+    const state = readGoalModeState(value.state);
+    if (state) return state;
+    // A malformed state is only recoverable from a valid bare goal.
+    if (!hasGoal || value.goal == null) return undefined;
+  }
+
+  if (value.goal === null) return null;
+  return stateFromGoal(readGoal(value.goal)) ?? undefined;
 }
 
 export function readGoalCommandResponse(value: unknown): GoalCommandResponse | null {
@@ -57,6 +71,7 @@ export function readGoalCommandResponse(value: unknown): GoalCommandResponse | n
   const state = readGoalModeState(value.state);
   const goal = readGoal(value.goal);
   if (value.goal != null && !goal) return null;
+  if (value.state != null && !state) return null;
   if (state || goal) return { goal: goal ?? state?.goal ?? null, state: state ?? stateFromGoal(goal) };
   // Both null is a valid "no goal" answer (drop/get).
   return { goal: null, state: null };
