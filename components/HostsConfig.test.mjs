@@ -71,3 +71,40 @@ test("this machine can be renamed but not revoked", async (t) => {
   act(() => workers[0].onmessage({ data: { id, type: "message", data: JSON.stringify({ hosts: [row({ id: "local", label: "Desk" })] }) } }));
   await screen.findByRole("button", { name: "Rename Desk" });
 });
+
+test("an offline this-machine row says to start the service, with the server's install command", async (t) => {
+  globalThis.Worker = FakeWorker;
+  t.mock.method(globalThis, "fetch", async () => Response.json({}));
+  render(createElement(HostsConfig));
+  const row = (fields) => ({ id: "local", label: "", status: "offline", ompVersion: null, platform: null, lastSeenAt: null, hostVersion: null, serverVersion: 3, serverPlatform: "darwin", ...fields });
+  await waitFor(() => assert.ok(workers[0].posted.some((message) => message.op === "open" && message.channel.kind === "hosts")));
+  const { id } = workers[0].posted.findLast((message) => message.op === "open" && message.channel.kind === "hosts");
+  const send = (hosts) => act(() => workers[0].onmessage({ data: { id, type: "message", data: JSON.stringify({ hosts }) } }));
+
+  send([row({})]);
+  const hint = await screen.findByText(/ompweb-host service/);
+  assert.ok(hint.textContent.includes("ompweb launchd install"), hint.textContent);
+  assert.deepEqual([...hint.closest("li").querySelectorAll("button")].map((button) => button.textContent), ["Rename"]);
+
+  send([row({ serverPlatform: "linux" })]);
+  assert.ok((await screen.findByText(/ompweb-host service/)).textContent.includes("ompweb systemd install"));
+  send([row({ serverPlatform: "win32" })]);
+  assert.ok((await screen.findByText(/ompweb-host service/)).textContent.includes("ompweb-tray install"));
+
+  send([row({ status: "online", hostVersion: 3 })]);
+  await waitFor(() => assert.equal(screen.queryByText(/ompweb-host service/), null));
+});
+
+test("the local name hint is the input's description, not part of its label", async (t) => {
+  globalThis.Worker = FakeWorker;
+  t.mock.method(globalThis, "fetch", async () => Response.json({}));
+  render(createElement(HostsConfig));
+  const row = { id: "local", label: "", status: "online", ompVersion: null, platform: null, lastSeenAt: null, hostVersion: 3, serverVersion: 3, serverPlatform: "linux" };
+  await waitFor(() => assert.ok(workers[0].posted.some((message) => message.op === "open" && message.channel.kind === "hosts")));
+  const { id } = workers[0].posted.findLast((message) => message.op === "open" && message.channel.kind === "hosts");
+  act(() => workers[0].onmessage({ data: { id, type: "message", data: JSON.stringify({ hosts: [row] }) } }));
+  await userEvent.setup().click(await screen.findByRole("button", { name: "Rename This machine" }));
+  // The label stays just "Name": the hint is not inside it.
+  screen.getByRole("textbox", { name: "Name" });
+  assert.equal(screen.getByRole("textbox").getAttribute("aria-describedby"), screen.getByText(/Leave empty/).id);
+});

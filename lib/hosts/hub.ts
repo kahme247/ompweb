@@ -921,6 +921,8 @@ export interface LocalHostRow {
   lastSeenAt: null;
   hostVersion: number | null;
   serverVersion: number;
+  /** `process.platform` of this server: picks the daemon install command while no daemon has linked. */
+  serverPlatform: string;
 }
 
 export type HostRow = LocalHostRow | LinkedHostRow;
@@ -937,6 +939,7 @@ export function hostsSnapshot(): { hosts: HostRow[] } {
     lastSeenAt: null,
     hostVersion: link?.hostVersion ?? null,
     serverVersion: LINK_PROTOCOL_VERSION,
+    serverPlatform: process.platform,
   };
   return { hosts: [local, ...listHosts()] };
 }

@@ -9,6 +9,12 @@ export function hostName(t: Translate, host: Pick<HostRow, "id" | "label">): str
   return host.id === "local" && !host.label ? t("hostsConfig.thisMachine") : host.label;
 }
 
+/** The command that installs the ompweb-host service on the server's platform (`LocalHostRow.serverPlatform`). */
+export function localInstallCommand(platform: string): string {
+  if (platform === "darwin") return "ompweb launchd install";
+  return platform === "win32" ? "ompweb-tray install" : "ompweb systemd install";
+}
+
 export function hostStatusText(t: Translate, host: HostRow): string {
   switch (host.status) {
     case "online":
