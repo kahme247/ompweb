@@ -1293,6 +1293,8 @@
   "hostsConfig.allowAgentStartAria": "エージェントが確認なしで {name} にセッションを開始できる",
   "hostsConfig.rename": "名前を変更",
   "hostsConfig.renameTitle": "ホスト名を変更",
+  "hostsConfig.renameAria": "{name} の名前を変更",
+  "hostsConfig.localNameHint": "空欄にすると「このマシン」に戻ります。",
   "hostsConfig.save": "保存",
   "hostsConfig.saving": "保存中…",
   "hostsConfig.cancel": "キャンセル",

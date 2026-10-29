@@ -76,8 +76,10 @@ export async function POST(req: Request) {
 export async function PATCH(req: Request) {
   const body = await readBody(req);
   if (!body || typeof body.id !== "string" || !body.id) return fail("id is required", 400);
-  if (body.id === "local") return fail("This machine cannot be edited", 400);
-  const label = parseLabel(body.label);
+  const isLocal = body.id === "local";
+  if (isLocal && body.allowAgentStart !== undefined) return fail("This machine's agent-start setting cannot be changed", 400);
+  // An empty name resets this machine to its default name.
+  const label = isLocal && typeof body.label === "string" && !body.label.trim() ? "" : parseLabel(body.label);
   if (label === null) return fail(`label must be a non-empty string of at most ${MAX_LABEL_LENGTH} characters`, 400);
   const { allowAgentStart } = body;
   if (allowAgentStart !== undefined && typeof allowAgentStart !== "boolean") return fail("allowAgentStart must be a boolean", 400);
@@ -85,7 +87,7 @@ export async function PATCH(req: Request) {
   try {
     updateHost(body.id, { label, allowAgentStart });
     notifyHostsChange();
-    return NextResponse.json({ host: listHosts().find((h) => h.id === body.id) }, { headers: noStore });
+    return NextResponse.json({ host: hostsSnapshot().hosts.find((h) => h.id === body.id) }, { headers: noStore });
   } catch (error) {
     return failFor(error);
   }

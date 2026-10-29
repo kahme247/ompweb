@@ -42,8 +42,9 @@ ompweb (web service)  ──link over 127.0.0.1──▶  ompweb host (daemon se
 ```
 
 - **"This machine" is a linked host with the fixed id `local`.** It is shown as
-  "This machine", listed first, and cannot be revoked or renamed in Settings →
-  Hosts.
+  "This machine" until it is renamed in Settings → Hosts (an empty name resets
+  it; the registry keeps "" for the default), and is listed first. It cannot be
+  revoked, and its `allowAgentStart` is fixed.
 - **Session file operations** (`session-ops.ts`) run in the daemon, as they do
   for remote hosts. The web server keeps no direct session-file reads for
   `local`, so the two paths cannot drift.

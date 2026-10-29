@@ -28,7 +28,7 @@ import {
   type HostOpName,
   type UpMessage,
 } from "./link-protocol";
-import { HostRegistryUnreadableError, hostForToken, LOCAL_HOST_ID, loadHosts, touchHost, type HostRecord } from "./registry";
+import { customLocalLabel, DEFAULT_LOCAL_LABEL, HostRegistryUnreadableError, hostForToken, LOCAL_HOST_ID, loadHosts, touchHost, type HostRecord } from "./registry";
 import type { SessionOps } from "./session-ops";
 
 /** Liveness and op timeouts from LINK_LIMITS; tests shorten them. */
@@ -130,7 +130,8 @@ function linkFor(id: string): Link {
 }
 
 function labelOf(id: string): string {
-  return loadHosts().find((h) => h.id === id)?.label ?? (id === LOCAL_HOST_ID ? "This machine" : id);
+  if (id === LOCAL_HOST_ID) return customLocalLabel() || DEFAULT_LOCAL_LABEL;
+  return loadHosts().find((h) => h.id === id)?.label ?? id;
 }
 
 function notify<A extends unknown[]>(listeners: Iterable<(...args: A) => void>, ...args: A): void {
@@ -912,6 +913,7 @@ export function listHosts(): LinkedHostRow[] {
 
 export interface LocalHostRow {
   id: "local";
+  /** The user's name for this machine; "" while it goes by the localized default. */
   label: string;
   status: HostStatus;
   ompVersion: string | null;
@@ -928,7 +930,7 @@ export function hostsSnapshot(): { hosts: HostRow[] } {
   const link = hub().links.get(LOCAL_HOST_ID);
   const local: LocalHostRow = {
     id: "local",
-    label: labelOf(LOCAL_HOST_ID),
+    label: customLocalLabel(),
     status: link?.status ?? "offline",
     ompVersion: link?.ompVersion ?? null,
     platform: link?.platform ?? null,

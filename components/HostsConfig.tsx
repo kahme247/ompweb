@@ -51,6 +51,7 @@ function CopyField({ label, value }: { label: string; value: string }) {
 function HostDialog({ dialog, onClose }: { dialog: NonNullable<Dialogs>; onClose: () => void }) {
   const { t } = useI18n();
   const adding = dialog.kind === "add";
+  const local = dialog.kind === "rename" && dialog.host.id === "local";
   const [label, setLabel] = useState(dialog.kind === "rename" ? dialog.host.label : "");
   const [busy, setBusy] = useState(false);
   const [created, setCreated] = useState<{ token: string; command: string } | null>(null);
@@ -92,11 +93,12 @@ function HostDialog({ dialog, onClose }: { dialog: NonNullable<Dialogs>; onClose
           <form onSubmit={(event) => void submit(event)} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, fontWeight: 500, color: "var(--text-muted)" }}>
               {t("hostsConfig.name")}
-              <input autoFocus value={label} maxLength={100} onChange={(event) => setLabel(event.target.value)} placeholder={t("hostsConfig.namePlaceholder")} style={inputStyle} />
+              <input autoFocus value={label} maxLength={100} onChange={(event) => setLabel(event.target.value)} placeholder={local ? t("hostsConfig.thisMachine") : t("hostsConfig.namePlaceholder")} style={inputStyle} />
+              {local && <span style={{ fontWeight: 400, color: "var(--text-dim)" }}>{t("hostsConfig.localNameHint")}</span>}
             </label>
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
               <button type="button" className="ui-focus-ring" style={buttonStyle} onClick={onClose}>{t("hostsConfig.cancel")}</button>
-              <button type="submit" className="ui-focus-ring" style={{ ...primaryStyle, opacity: busy || !label.trim() ? 0.7 : 1 }} disabled={busy || !label.trim()}>
+              <button type="submit" className="ui-focus-ring" style={{ ...primaryStyle, opacity: busy || (!local && !label.trim()) ? 0.7 : 1 }} disabled={busy || (!local && !label.trim())}>
                 {adding ? t(busy ? "hostsConfig.creating" : "hostsConfig.create") : t(busy ? "hostsConfig.saving" : "hostsConfig.save")}
               </button>
             </div>
@@ -127,22 +129,26 @@ function HostCard({ host, onRename, onRevoke }: { host: HostRow; onRename: () =>
         </div>
         {details && <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)", overflowWrap: "anywhere" }}>{details}</div>}
       </div>
-      {linked && (
-        <div className="settings-card-control" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ fontSize: 11, color: "var(--text-muted)", maxWidth: 200 }}>{t("hostsConfig.allowAgentStart")}</span>
-          <ToggleSwitch
-            checked={linked.allowAgentStart}
-            aria-label={t("hostsConfig.allowAgentStartAria", { name })}
-            onChange={(allowAgentStart) => void call("PATCH", "/api/hosts", { id: host.id, allowAgentStart }).catch(failure)}
-          />
-          <button type="button" className="ui-focus-ring" style={{ ...buttonStyle, display: "inline-flex", alignItems: "center", gap: 5 }} onClick={onRename}>
-            <Pencil size={13} aria-hidden="true" />{t("hostsConfig.rename")}
-          </button>
+      <div className="settings-card-control" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        {linked && (
+          <>
+            <span style={{ fontSize: 11, color: "var(--text-muted)", maxWidth: 200 }}>{t("hostsConfig.allowAgentStart")}</span>
+            <ToggleSwitch
+              checked={linked.allowAgentStart}
+              aria-label={t("hostsConfig.allowAgentStartAria", { name })}
+              onChange={(allowAgentStart) => void call("PATCH", "/api/hosts", { id: host.id, allowAgentStart }).catch(failure)}
+            />
+          </>
+        )}
+        <button type="button" className="ui-focus-ring" aria-label={t("hostsConfig.renameAria", { name })} style={{ ...buttonStyle, display: "inline-flex", alignItems: "center", gap: 5 }} onClick={onRename}>
+          <Pencil size={13} aria-hidden="true" />{t("hostsConfig.rename")}
+        </button>
+        {linked && (
           <button type="button" className="ui-focus-ring" style={{ ...buttonStyle, display: "inline-flex", alignItems: "center", gap: 5 }} onClick={onRevoke}>
             <Trash2 size={13} aria-hidden="true" />{t("hostsConfig.revoke")}
           </button>
-        </div>
-      )}
+        )}
+      </div>
     </li>
   );
 }

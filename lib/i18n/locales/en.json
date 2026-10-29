@@ -1334,6 +1334,8 @@
   "hostsConfig.allowAgentStartAria": "Agents can start sessions on {name} without asking",
   "hostsConfig.rename": "Rename",
   "hostsConfig.renameTitle": "Rename host",
+  "hostsConfig.renameAria": "Rename {name}",
+  "hostsConfig.localNameHint": "Leave empty to use “This machine”.",
   "hostsConfig.save": "Save",
   "hostsConfig.saving": "Saving…",
   "hostsConfig.cancel": "Cancel",
