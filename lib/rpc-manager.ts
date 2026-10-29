@@ -4,6 +4,7 @@ import { validateAgentImages } from "./image-attachments";
 import { hasVisibleAssistantContent } from "./assistant-response";
 import { invalidateModelsCache } from "./models-cache";
 import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame } from "./omp/rpc-process";
+import type { RpcTransport } from "./omp/rpc-transport";
 import { editSessionHistory, isSessionEditReply, SESSION_EDIT_COMMAND, SessionEditAgentInvocationError, type SessionEditResult } from "./omp/session-edit";
 import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
 import { allowFileRoot } from "./file-access";
@@ -294,6 +295,8 @@ export class AgentSessionWrapper {
   private _alive = true;
   /** Host tools the web UI registered via set_host_tools (agent-callable). */
   private hostToolNames: Set<string> = new Set();
+  /** Feeding an adopted child's open requests (see adopt): its host tools were registered through the wrapper a restart lost. */
+  private replaying = false;
   /** host_tool_call ids awaiting a host_tool_result from the browser. */
   private pendingHostTools: Map<string, UnsequencedAgentEvent> = new Map();
   /** URI schemes the web UI registered via set_host_uri_schemes. */
@@ -573,6 +576,34 @@ export class AgentSessionWrapper {
       this.handshaking = false;
       // The handshake is real activity, so the reap clock restarts from here
       // rather than from spawn (a slow start must not eat the whole window).
+      this.noteActivity();
+    }
+  }
+
+  /**
+   * Re-sync a child that outlived the server that spawned it (adoptRpcSession):
+   * the startup handshake minus the ready wait, every command bounded so a
+   * wedged child fails the adoption, then the daemon's lines of its open requests.
+   */
+  async adopt(replay: string[]): Promise<void> {
+    this.handshaking = true;
+    // Older omp rejects some of these, as at startup; a timeout or an exit fails the adoption.
+    const optional = (command: { type: string; [key: string]: unknown }) => this.proc.sendCommand(command, GET_STATE_TIMEOUT_MS).then(() => {}, (error) => {
+      if (!(error instanceof RpcCommandError)) throw error;
+    });
+    try {
+      await this.proc.negotiateProtocol(await this.proc.waitReady(), GET_STATE_TIMEOUT_MS);
+      await optional({ type: "set_subagent_subscription", level: "events" });
+      await optional({ type: "set_ask_dialog", enabled: true });
+      this.applyIdentity(await this.getStateWithTimeout());
+      // The wrapper keeps neither (a tab reads both when it attaches): a child that cannot answer them fails here instead.
+      await optional({ type: "get_subagents" });
+      await optional({ type: "get_btw_history" });
+      this.replaying = true;
+      this.proc.replay(replay);
+      this.replaying = false;
+    } finally {
+      this.handshaking = false;
       this.noteActivity();
     }
   }
@@ -946,7 +977,7 @@ export class AgentSessionWrapper {
         // any open omp-web tab (the user switched sessions mid-run). Otherwise
         // reject immediately so the agent never hangs on a tool nobody will
         // answer.
-        if (id && toolName && this.hostToolNames.has(toolName)) {
+        if (id && toolName && (this.hostToolNames.has(toolName) || this.replaying)) {
           if (this.listeners.length > 0) {
             this.pendingHostTools.set(id, event);
             this.emit(event);
@@ -2798,15 +2829,7 @@ export async function startRpcSession(
     }
 
     const realSessionId = created.sessionId;
-    created.onDestroy(() => {
-      // Drop every key (current id, original id, moved-from aliases).
-      for (const [key, wrapper] of registry) if (wrapper === created) registry.delete(key);
-    });
-    created.onIdentityChange((oldId, newId, options) => {
-      if (!options?.keepOldId && registry.get(oldId) === created) registry.delete(oldId);
-      registry.set(newId, created);
-    });
-    registry.set(realSessionId, created);
+    registerSession(created);
     // A successful respawn supersedes the crash record.
     clearExitedRpcSession(sessionId);
     if (realSessionId !== sessionId) clearExitedRpcSession(realSessionId);
@@ -2815,4 +2838,55 @@ export async function startRpcSession(
 
   locks.set(sessionId, starting);
   return starting;
+}
+
+/** Key a ready wrapper under its real id and keep its keys current as omp moves or switches it. */
+function registerSession(created: AgentSessionWrapper): void {
+  const registry = getRegistry();
+  created.onDestroy(() => {
+    // Drop every key (current id, original id, moved-from aliases).
+    for (const [key, wrapper] of registry) if (wrapper === created) registry.delete(key);
+  });
+  created.onIdentityChange((oldId, newId, options) => {
+    if (!options?.keepOldId && registry.get(oldId) === created) registry.delete(oldId);
+    registry.set(newId, created);
+  });
+  registry.set(created.sessionId, created);
+}
+
+/**
+ * Take over an omp child that outlived the server that spawned it (its host
+ * listed it in `hello`): no spawn and no ready wait. `replay` holds the host's
+ * raw stdout lines of the child's still-open blocking requests. A failed
+ * re-sync kills the child and rejects.
+ */
+export async function adoptRpcSession({ host, transport, sessionId, cwd, replay }: {
+  host: Host;
+  transport: RpcTransport;
+  sessionId: string;
+  sessionFile: string;
+  cwd: string;
+  replay: string[];
+}): Promise<AgentSessionWrapper> {
+  const locks = getLocks();
+  const holder: { wrapper?: AgentSessionWrapper } = {};
+  const proc = new RpcProcess({ cwd, transport, adopted: { protocolVersion: 2 }, onExit: (info) => holder.wrapper?.handleProcessExit(info, proc) });
+  // Spawn-time facts (--advisor, a cwd fallback) died with the server that spawned it.
+  const created = new AgentSessionWrapper(proc, cwd, cwd, false, sessionId, DISCONNECT_DESTROY_MS, host);
+  holder.wrapper = created;
+  created.start();
+  const adopting = (async () => {
+    try {
+      await created.adopt(replay);
+    } catch (error) {
+      await created.destroyAndWait("adoption-failed");
+      throw error;
+    }
+    registerSession(created);
+    notifyRunningChange();
+    return { session: created, realSessionId: created.sessionId };
+  })().finally(() => locks.delete(sessionId));
+  // A start for this session meanwhile joins the adoption instead of spawning a second child beside it.
+  locks.set(sessionId, adopting);
+  return (await adopting).session;
 }
