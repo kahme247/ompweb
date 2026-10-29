@@ -3055,8 +3055,9 @@ function registerSession(created: AgentSessionWrapper): void {
     // Drop every key (current id, original id, moved-from aliases).
     for (const [key, wrapper] of registry) if (wrapper === created) registry.delete(key);
   });
-  created.onIdentityChange((oldId, newId, options) => {
-    if (!options?.keepOldId && registry.get(oldId) === created) registry.delete(oldId);
+  created.onIdentityChange((_oldId, newId, options) => {
+    // A move keeps the old ids routable; a branch/new/switch serves another conversation, so every old key goes.
+    if (!options?.keepOldId) for (const [key, wrapper] of registry) if (wrapper === created) registry.delete(key);
     registry.set(newId, created);
   });
   registry.set(created.sessionId, created);
