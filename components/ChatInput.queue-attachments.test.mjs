@@ -233,6 +233,23 @@ test("an idle /goal with attachments is refused and keeps the draft", async () =
   assert.equal(getDraft(KEY)?.files.length, 1);
 });
 
+test("a catalog-owned /goal is forwarded to onSend", async () => {
+  window.HTMLElement.prototype.scrollIntoView = () => {};
+  const user = userEvent.setup();
+  const calls = await renderRunningWithAttachments({
+    attachments: false,
+    isStreaming: false,
+    slashCommands: [{ name: "goal", source: "extension", description: "extension goal" }],
+    onBuiltinCommand: async () => ({ handled: false }),
+  });
+  await user.type(screen.getByRole("textbox"), "/goal ship it");
+  await user.keyboard("{Enter}");
+  await waitFor(() => assert.equal(calls.length, 1));
+  delete window.HTMLElement.prototype.scrollIntoView;
+  assert.equal(calls[0].name, "onSend");
+  assert.equal(calls[0].message, "/goal ship it");
+});
+
 test("a refused follow-up goes back whole to its draft, ahead of what was typed meanwhile", async () => {
   let refuse;
   const calls = await renderRunningWithAttachments({ queued: new Promise((resolve) => { refuse = () => resolve(false); }) });

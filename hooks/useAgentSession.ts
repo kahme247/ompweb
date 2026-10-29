@@ -3725,8 +3725,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return;
     }
     try {
+      const goalSeq = goalSeqRef.current;
       const result = await sendAgentCommand<GoalCommandResponse>(sid, { type: "goal", op });
-      if (!hookAliveRef.current || sessionIdRef.current !== sid) return;
+      if (!hookAliveRef.current || sessionIdRef.current !== sid || goalSeq !== goalSeqRef.current) return;
       const parsed = readGoalCommandResponse(result);
       if (parsed) publishGoalState(parsed.state);
     } catch (e) {

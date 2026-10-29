@@ -1175,6 +1175,41 @@ test("GOAL pause, resume and drop send the matching RPC and update the banner", 
   );
 });
 
+test("GOAL an action reply cannot overwrite a newer goal_updated", async () => {
+  resetWorld();
+  primeSession("goal-action-race", [userMsg("u0", "loaded question")]);
+  world.agents.set("goal-action-race", { running: false, state: { goal: goalState() } });
+  const w = await mountSession("goal-action-race");
+
+  let release;
+  const responseGoal = { ...GOAL, updatedAt: 2000 };
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "goal",
+    produce: () => new Promise((resolve) => {
+      release = () => resolve({
+        value: { success: true, data: { goal: responseGoal, state: goalState(responseGoal) } },
+      });
+    }),
+  });
+  let action;
+  await act(async () => {
+    action = w.latest.handleGoalAction("pause");
+    await sleep(20);
+  });
+
+  const paused = { ...GOAL, status: "paused", updatedAt: 2000 };
+  await act(async () => {
+    w.latest.handleAgentEventRef.current({ type: "goal_updated", goal: paused, state: goalState(paused) });
+  });
+  await act(async () => {
+    release();
+    await action;
+  });
+
+  assert.equal(w.latest.goalState?.goal?.status, "paused");
+  assert.equal(w.latest.goalState?.goal?.updatedAt, 2000);
+});
+
 test("ISSUE #167 sending a TUI-only command warns once and still delivers the text", async () => {
   resetWorld();
   primeSession("tui-only", [userMsg("u0", "loaded question")]);

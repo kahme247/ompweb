@@ -72,6 +72,7 @@ export function readGoalCommandResponse(value: unknown): GoalCommandResponse | n
   const goal = readGoal(value.goal);
   if (value.goal != null && !goal) return null;
   if (value.state != null && !state) return null;
+  if (goal && state && state.goal?.id !== goal.id) return null;
   if (state || goal) return { goal: goal ?? state?.goal ?? null, state: state ?? stateFromGoal(goal) };
   // Both null is a valid "no goal" answer (drop/get).
   return { goal: null, state: null };

@@ -373,8 +373,12 @@ omp-web automatically defers to it:
 
 ## 10. Persistence and known limits
 
-- A goal is journaled by omp in the session. Reload restores it from
-  `get_state.goal` once the session has a `.jsonl` file.
+- A goal is journaled by omp in the session. With a live RPC child, reload
+  restores it from `get_state.goal`. A cold or reaped session has no child:
+  `/api/sessions/[id]/state` returns `{ running: false }` without a goal, so
+  the banner appears only after omp starts. The web does not parse the goal
+  journal (`mode_change` entries) today; that is the follow-up if cold-session
+  banners are required.
 - omp writes a session file lazily on the first message. A goal created on an
   empty new chat and followed by an immediate full reload has no file to list,
   so the session cannot be reopened until a message is sent. This is omp's

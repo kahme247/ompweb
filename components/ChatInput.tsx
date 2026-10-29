@@ -958,14 +958,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
    * queued. Attachments cannot ride along, so refuse and keep the draft
    * rather than drop them. False when `msg` is not `/btw`. */
   const sendSideQuestion = useCallback((msg: string, overrideText?: string): boolean => {
-    if (!/^\/btw(\s|$)/.test(msg) || !onBuiltinCommand) return false;
+    // A catalog command named `btw` wins over the client side-question panel.
+    if (!/^\/btw(\s|$)/.test(msg) || !onBuiltinCommand || ompCommandNames.has("btw")) return false;
     if (attachedImagesRef.current.length || attachedTextFilesRef.current.length) {
       toast.error(t("btw.attachmentsUnsupported"));
       return true;
     }
     runBuiltinCommand(msg, overrideText).catch(toastBtwError);
     return true;
-  }, [onBuiltinCommand, runBuiltinCommand, t]);
+  }, [onBuiltinCommand, ompCommandNames, runBuiltinCommand, t]);
 
   const handleSend = useCallback(async (overrideText?: string) => {
     const raw = overrideText ?? value;
