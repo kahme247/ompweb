@@ -6,6 +6,7 @@ import { mergeProjects, type ProjectRegistryEntry } from "../project-registry";
 import { isValidSessionId } from "../session-file-references-core";
 import type { ManagedProject, SessionInfo } from "../types";
 import { isLinkUp, type Host } from "./host";
+import { HostOpError } from "./link-protocol";
 import { getHost, listHosts, onHostHello } from "./hub";
 import { LOCAL_HOST_ID } from "./registry";
 
@@ -20,6 +21,8 @@ interface HostLists {
   loading: { generation: number; promise: Promise<SessionInfo[]> } | null;
   /** Last registry the host returned, shown while it is unreachable. */
   projects: ProjectRegistryEntry[];
+  /** The host answered a list at least once; until then a missing id may still be there. */
+  loaded: boolean;
 }
 
 declare global {
@@ -35,7 +38,7 @@ function hostLists(hostId: string): HostLists {
   }
   let lists = globalThis.__ompHostLists.get(hostId);
   if (!lists) {
-    lists = { sessions: [], fetchedAt: 0, generation: 0, loading: null, projects: [] };
+    lists = { sessions: [], fetchedAt: 0, generation: 0, loading: null, projects: [], loaded: false };
     globalThis.__ompHostLists.set(hostId, lists);
   }
   return lists;
@@ -57,6 +60,7 @@ export async function hostSessions(hostId: string, refresh = false): Promise<Ses
     const generation = lists.generation;
     const promise: Promise<SessionInfo[]> = host.sessionOps.listSessions().then((sessions) => {
       const tagged = sessions.map((session) => ({ ...session, hostId }));
+      lists.loaded = true;
       if (lists.generation === generation) {
         lists.sessions = tagged;
         lists.fetchedAt = Date.now();
@@ -93,12 +97,17 @@ async function hostWithSession(id: string, refresh: boolean): Promise<Host | nul
   return index === -1 ? null : getHost(ids[index]);
 }
 
-/** The host holding a session: this machine first, then the linked hosts by label; the lists are refreshed once on a miss. */
+/** The host holding a session: this machine first, then the linked hosts by label; the lists are refreshed once on a miss.
+ * Rejects 503 while this machine's daemon is offline or has never listed its sessions: its sessions are unknown then, not gone. */
 export async function hostForSessionId(id: string): Promise<Host | null> {
   // Host lists only hold valid ids: a malformed one never costs a round trip.
   if (!isValidSessionId(id)) return null;
   // shortcut: every miss re-asks each linked host; throttle per host if polling for gone sessions shows up.
-  return (await hostWithSession(id, false)) ?? (await hostWithSession(id, true));
+  const host = (await hostWithSession(id, false)) ?? (await hostWithSession(id, true));
+  if (host) return host;
+  const local = getHost(LOCAL_HOST_ID);
+  if (!isLinkUp(local.status()) || !hostLists(LOCAL_HOST_ID).loaded) throw new HostOpError(503, "host_offline", `${local.label} is offline`);
+  return null;
 }
 
 /** Where a session's file is and which cwd to start it in, on `host`; null when the host has no such session. */

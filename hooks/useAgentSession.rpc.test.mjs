@@ -2,6 +2,7 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
 import React from "react";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti";
 import { act, cleanup, fireEvent, render, renderHook, within } from "@testing-library/react/pure.js";
@@ -283,8 +284,18 @@ const { useAgentSession } = await jiti.import("../hooks/useAgentSession.ts");
 const { selectSessionHistory } = await jiti.import("@/lib/session-sync");
 const { publishSessionsChanged } = await jiti.import("@/lib/session-change-bus");
 const { AgentSessionWrapper } = await jiti.import("@/lib/rpc-manager");
-// Wrappers built directly need an online host; the daemon's machine host is one.
-const { localHost } = await jiti.import("@/lib/hosts/local-host");
+// Wrappers built directly need an online host: this machine's, as its daemon answers, minus spawning.
+const onlineHost = {
+  id: "local",
+  label: "This machine",
+  sessionOps: {},
+  status: () => "online",
+  onStatus: () => () => {},
+  spawnRpc: async () => { throw new Error("this test never spawns"); },
+  sessionFileExists: async (path) => existsSync(path),
+  invalidateSessionLists() {},
+  autoApproveExtension: () => false,
+};
 const { isUnknownSlashCommand, slashCommandName, runHostTool } = await jiti.import("@/hooks/useAgentSession-stream");
 const { toastCalls } = await jiti.import("@/components/ui/toast");
 const { MessageView } = await jiti.import("@/components/MessageView");
@@ -2125,7 +2136,7 @@ function attachNativeWrapper(t, sid) {
     },
     sendFrame() {},
     async dispose() {},
-  }, process.cwd(), null, false, "", undefined, localHost);
+  }, process.cwd(), null, false, "", undefined, onlineHost);
   wrapper.start();
   world.wrappers.set(sid, wrapper);
   t.after(() => wrapper.destroyAndWait());
@@ -2744,7 +2755,7 @@ async function attachEditableWrapper(t, native, { holdHistory = false } = {}) {
     },
     sendFrame() {},
     async dispose() { listeners.clear(); },
-  }, process.cwd(), null, false, "", undefined, localHost);
+  }, process.cwd(), null, false, "", undefined, onlineHost);
   t.after(() => wrapper.destroyAndWait());
   native.onMove = () => emitNative({ type: "notice", source: "session-persistence", level: "warning", message: "Session moved to a sibling file because another process owns the original" });
   wrapper.onIdentityChange((oldId, newId, options) => {
