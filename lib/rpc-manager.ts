@@ -307,6 +307,8 @@ export class AgentSessionWrapper {
   private pendingHostTools: Map<string, UnsequencedAgentEvent> = new Map();
   /** Own host calls no tab has seen yet (see parkHostTool), with their deadlines. */
   private parkedHostTools = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Listeners omp-web attaches itself (waitForTurnEnd), not tabs: a parked host call waits for a tab. */
+  private readonly internalListeners = new WeakSet<EventListener>();
   /** URI schemes the web UI registered via set_host_uri_schemes. */
   private hostUriSchemes: Map<string, { writable?: boolean }> = new Map();
   /** host_uri_request ids awaiting a host_uri_result from the browser. */
@@ -617,6 +619,8 @@ export class AgentSessionWrapper {
       } finally {
         this.replaying = false;
       }
+      // Frames omp sent during the handshake are live: its agent tool calls there run normally.
+      this.proc.release();
     } finally {
       this.handshaking = false;
       this.noteActivity();
@@ -1006,7 +1010,11 @@ export class AgentSessionWrapper {
         // reject immediately so the agent never hangs on a tool nobody will
         // answer.
         if (id && toolName && (this.hostToolNames.has(toolName) || this.hostToolsUnknown)) {
-          if (this.listeners.length > 0) {
+          // An adopted session's calls wait for a tab: an internal listener alone cannot answer them.
+          const ownTab = this.hostToolsUnknown
+            ? this.listeners.some((listener) => !this.internalListeners.has(listener))
+            : this.listeners.length > 0;
+          if (ownTab) {
             this.pendingHostTools.set(id, event);
             this.emit(event);
             notifyRunningChange();
@@ -1208,6 +1216,8 @@ export class AgentSessionWrapper {
     for (const [id, event] of this.pendingHostTools) {
       const cross = event.webCrossSession === true;
       if ((which === "own" && cross) || (which === "cross" && !cross)) continue;
+      // No tab ever received it: its own deadline settles it (see parkHostTool).
+      if (which === "own" && this.parkedHostTools.has(id)) continue;
       this.pendingHostTools.delete(id);
       this.unparkHostTool(id);
       this.proc.sendFrame({
@@ -1407,7 +1417,9 @@ export class AgentSessionWrapper {
     this.idleTimer.unref?.();
   }
 
-  onEvent(listener: EventListener): () => void {
+  /** `internal`: omp-web's own listener (waitForTurnEnd), never handed a parked host call. */
+  onEvent(listener: EventListener, { internal = false }: { internal?: boolean } = {}): () => void {
+    if (internal) this.internalListeners.add(listener);
     this.listeners.push(listener);
     this.noteActivity();
     const now = Date.now();
@@ -1420,7 +1432,7 @@ export class AgentSessionWrapper {
       listener({ ...event, web: { streamId: this.streamId, sequence: ++this.streamSequence } });
     }
     // Own host calls parked while no tab could answer go to the first tab that attaches, once.
-    for (const id of [...this.parkedHostTools.keys()]) {
+    for (const id of internal ? [] : [...this.parkedHostTools.keys()]) {
       this.unparkHostTool(id);
       const event = this.pendingHostTools.get(id);
       if (event) listener({ ...event, web: { streamId: this.streamId, sequence: ++this.streamSequence } });
@@ -1469,7 +1481,7 @@ export class AgentSessionWrapper {
         } else if (event.type === "prompt_error") {
           finish(new Error(typeof event.errorMessage === "string" ? event.errorMessage : "Target session turn failed."));
         }
-      });
+      }, { internal: true });
       const finish = (error: Error | null) => {
         if (done) return;
         done = true;
