@@ -269,7 +269,7 @@ bin/
   `x-omp-web-hello`; main takes the hello at that GET, so it opens one
   downlink once. A v1 daemon's header hello gets 426. Each `hello.channels`
   entry carries `pending` (link v3): the raw stdout lines of that child's
-  still-open `host_tool_call`s and blocking `extension_ui_request`s
+  still-open `host_tool_call`s, `host_uri_request`s and blocking `extension_ui_request`s
   (`PendingRequests`), or null past `LINK_LIMITS.pendingBytes`. Each side keeps unacked
   lines, resends after a reconnect and drops any `seq` it already applied.
   Main decodes a whole POST before applying any of it. `hello.ack === 0`
