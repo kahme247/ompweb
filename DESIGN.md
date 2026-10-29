@@ -78,19 +78,24 @@ v1-capable installations.
 Every machine-local action of a session goes through one interface,
 `Host` (`lib/hosts/host.ts`): spawning `omp --mode rpc-ui`, checking that a
 session file exists, invalidating cached session lists, and the
-file-reading operations behind the session and project routes. Two
-implementations exist:
-
-- `LocalHost` runs on the machine that serves ompweb, using `child_process` and
-  direct file access.
-- `RemoteHost` makes the same calls on another machine over the link described
-  below.
+file-reading operations behind the session and project routes. The web server
+has no direct path to any machine, its own included: it reaches every host
+through the link described below. The implementation on the web server is
+`RemoteHost`; the daemon (`ompweb host`) runs the other side, `LocalHost`, on
+the machine whose omp it owns.
 
 ```
-Browser ─▶ ompweb ──┬─ LocalHost ── spawn omp --mode rpc-ui (stdio)
-                    └─ RemoteHost ◀── link (HTTP) ── ompweb host
-                                                      └─ spawn omp --mode rpc-ui
+Browser ─▶ ompweb ◀── link (loopback) ── ompweb host ── spawn omp --mode rpc-ui (stdio)
+                 ◀── link (HTTP)     ── ompweb host on another machine
+                                          └─ spawn omp --mode rpc-ui
 ```
+
+"This machine" is the host with the fixed id `local`, linked to the daemon
+that the service installers set up next to the web service. Because the daemon
+owns the omp processes, restarting or redeploying the web server does not end
+a run: the restarted server adopts the live children from the daemon's hello,
+with their open blocking requests replayed. A direct spawn path would tie
+every run to the web server's lifetime, which is why none exists.
 
 The CLI boundary above holds on every machine: a remote machine runs its own
 installed `omp`, its own `~/.omp/agent` and its own credentials. ompweb only
@@ -128,7 +133,8 @@ the daemon requires `https://` except for loopback or an explicit
 Session browsing is implemented in pure Node against OMP JSONL files. The
 reader tolerates the fixed title slot and older session shapes, resolves blob
 references when needed, and builds the active branch context from the entry
-tree.
+tree. The session and project routes run it in the daemon of the session's host
+(`session-ops.ts`), so the same code serves this machine and every linked one.
 
 Direct session mutation is deliberately narrow and explicit: rename/title,
 archive, deletion, and required branch-parent maintenance. These writes are

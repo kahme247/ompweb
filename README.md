@@ -123,6 +123,7 @@ ompweb --install-tray                      # Install Windows System Tray service
 ompweb --uninstall-tray                    # Uninstall Windows System Tray service & shortcuts
 ompweb --tray                              # Start background System Tray manager
 ompweb systemd install                     # Install Linux systemd user services (web + ompweb-host daemon)
+ompweb launchd install                     # Install the macOS launchd agents (web + ompweb-host daemon)
 ompweb --help                              # Show help
 ompweb --version                           # Show version
 ```
@@ -171,6 +172,31 @@ your user or system environment (for example `setx OMP_WEB_PASSWORD_HASH
 started with. Changing or removing the hash takes effect at the next server
 restart, without signing out of Windows.
 
+### Two services: the web server and the local daemon
+
+ompweb runs this machine's `omp` sessions through a small daemon, `ompweb host`,
+linked to the web server over loopback. The service installers (`ompweb systemd install`,
+`ompweb launchd install`, `ompweb --install-tray`) install both: the web
+service and `ompweb-host`. Uninstall removes both.
+
+- **Restarting or redeploying the web server does not interrupt runs.** The daemon
+  keeps the omp processes running; the restarted web server takes them over, with
+  no resume prompt, and dialogs or tool calls omp was waiting on reappear.
+- **Restarting the daemon does end runs** (it owns the omp processes). With auto-resume
+  on, sessions that were running resume once. `ompweb systemd restart` restarts the
+  web service only; upgrades restart the daemon only when the link protocol
+  changed.
+- **First start after an upgrade:** if no daemon has linked after about 90 seconds,
+  ompweb shows a banner with the install command for your platform. It never installs
+  services itself. Until the daemon runs, "This machine" shows offline and new
+  sessions on it cannot start.
+- **It is a host like any other.** Rename "This machine" in **Settings → Hosts**
+  (clear the name to reset it); it cannot be revoked. The web server writes the
+  daemon's link (`~/.omp/agent/omp-web/host.json`, mode `600`) at startup, only
+  for a loopback bind address.
+- **Development:** `npm run dev` does not take the daemon (see
+  [Development](#development)).
+
 ### Run as a Windows Service (System Tray)
 
 Install ompweb as a Windows background service with a system tray icon and autostart at login:
@@ -186,7 +212,7 @@ ompweb --tray          # Start the tray manager
 ompweb --uninstall-tray
 ```
 
-Shortcuts are created on the Desktop and Start Menu. The service restarts automatically and shows the current port and status in the tray.
+Shortcuts are created on the Desktop and Start Menu. The service restarts automatically and shows the current port and status in the tray. The install also registers the [local daemon](#two-services-the-web-server-and-the-local-daemon) as a second scheduled task (`ompweb host`); the tray shows both states.
 
 ### Run as a macOS Service (launchd)
 
@@ -223,9 +249,12 @@ or equivalent access control) and HTTPS through a trusted reverse proxy or VPN.
 Never expose the unauthenticated web UI or send its password/session cookie over
 plaintext HTTP.
 
-Logs go to `~/Library/Logs/ompweb/ompweb.log` and the plist lives at
+Logs go to `~/Library/Logs/ompweb/ompweb.log` (web) and
+`~/Library/Logs/ompweb/ompweb-host.log` (the
+[local daemon](#two-services-the-web-server-and-the-local-daemon)). The plists live at
 `~/Library/LaunchAgents/com.kahme247.ompweb.plist` (mode 600; the password
-hash — not the password — is stored there).
+hash — not the password — is stored there) and
+`~/Library/LaunchAgents/com.kahme247.ompweb-host.plist`.
 
 ### Run as a Linux Service (systemd)
 
@@ -264,11 +293,13 @@ hostname, and password hash there and just restart the service; no reinstall
 needed.
 Install-time [environment variables](#environment-variables) are baked into
 that file. As a service, the browser is **not** auto-opened by default. The
-unit lives at `~/.config/systemd/user/ompweb.service` and logs go to the
-journal:
+units live at `~/.config/systemd/user/ompweb.service` and
+`~/.config/systemd/user/ompweb-host.service` (the
+[local daemon](#two-services-the-web-server-and-the-local-daemon)); logs go to
+the journal:
 
 ```bash
-journalctl --user -u ompweb -f
+journalctl --user -u ompweb -u ompweb-host -f
 ```
 
 On a headless server, enable user lingering if the service must keep running
@@ -348,10 +379,12 @@ Settings closes its link and the daemon stops its omp processes.
 
 Notes:
 
-- **Service helpers:** `ompweb-launchd` and `ompweb-systemd` install the web server
-  only (their service runs `ompweb` with no arguments), so they cannot run
-  `ompweb host`. To keep the link up across logouts or reboots, run
-  `ompweb host` under a supervisor of your choice that restarts it after failure.
+- **Service helpers:** `ompweb systemd install` and `ompweb launchd install` set up
+  this machine's own daemon next to its web server (see
+  [Two services](#two-services-the-web-server-and-the-local-daemon)). On the other
+  machine you only need the daemon, and the helpers would also start a web server
+  there, so run `ompweb host` under a supervisor of your choice that restarts it
+  after failure to keep the link up across logouts or reboots.
   The daemon exits with code `1` when the server revokes its token or when the
   link protocol versions differ (either side may be the newer one; upgrade ompweb
   on the older side), and `0` when a newer link for the same host replaces it.
@@ -534,6 +567,10 @@ npm run dev
 ```
 
 The dev server runs at [http://127.0.0.1:30178](http://127.0.0.1:30178).
+
+A dev server does not take over the local daemon: only the production web
+server writes the daemon's `host.json`, so "This machine" shows offline in dev
+and the daemon stays linked to your installed ompweb.
 
 The development server allows loopback and RFC1918 private IPv4 origins
 (`10.0.0.0/8`, `172.16.0.0/12`, and `192.168.0.0/16`). When using a tunnel
