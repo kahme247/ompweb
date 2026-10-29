@@ -437,10 +437,11 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
 
         {/* Bottom row: action buttons + timestamp — inside the bubble's column,
             spanning its width, so the timestamp aligns with its right edge. */}
-          <div className="message-actions-row" style={{
+          <div style={{
             display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "flex-end",
             gap: 6, marginTop: 3, width: "100%",
           }}>
+          <div className="message-actions-row" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "flex-end", gap: 6 }}>
           <MessageCopyActions texts={[content]} bodyRef={bodyRef} />
           {(canEdit || canFork) && (
             <div
@@ -476,6 +477,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
               {canFork && <ForkSessionButton entryId={entryId!} editPrompt onFork={onFork!} forking={forking} forkDisabled={forkDisabled || editing || editDisabled} />}
             </div>
           )}
+          </div>
           {time && <span style={{ fontSize: 10, color: "var(--text-dim)" }}>{time}</span>}
           </div>
       </div>
