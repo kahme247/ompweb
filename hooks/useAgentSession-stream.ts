@@ -241,6 +241,8 @@ export interface CompactResultInfo {
 
 export interface SlashCommandInfo {
   name: string;
+  /** omp aliases (`models` for `model`); they invoke the same command. */
+  aliases?: string[];
   description?: string;
   source: "builtin" | "extension" | "prompt" | "skill";
   /** Bracketed argument hint from omp's `input.hint`. */
@@ -497,6 +499,7 @@ export function toSlashCommandInfo(command: RpcAvailableSlashCommand): SlashComm
         : "prompt";
   return {
     name: command.name,
+    ...(command.aliases?.length ? { aliases: command.aliases } : {}),
     description: command.description,
     source,
     ...(command.input?.hint ? { argumentHint: command.input.hint } : {}),

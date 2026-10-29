@@ -338,9 +338,11 @@ Full behavior and rationale: `docs/specs/2026-10-29-native-slash-commands-and-go
   `goal` (native `goal` RPC), `btw`, `reload`, `name`, `copy`. Web prompt
   expansions (`plan`, `fix`, `test`, `explain`, `simplify`, `commit`, `loop`)
   are used only when omp does not report the same name, so an extension or
-  skill command always wins. `/compact`, `/session`, `/review`, `/advisor` are
-  omp commands; the top-bar compact button and context ring remain the web
-  entry points for those panels.
+  skill command always wins. Catalog names and aliases always win over a
+  client entry, including the client-only names. Client-only commands refuse
+  attachments and keep the draft. `/compact`, `/session`, `/review`,
+  `/advisor` are omp commands; the top-bar compact button and context ring
+  remain the web entry points for those panels.
 - `/goal` is native goal mode: `{type:"goal",op:"create",objective}` plus
   `goal_updated`/`get_state.goal`; pause/resume/drop send the matching op. No
   `sessionStorage` goal state. Goal snapshots are sequenced so a slow

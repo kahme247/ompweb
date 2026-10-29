@@ -2283,7 +2283,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "goal_updated": {
-        publishGoalState(readGoalUpdatedEvent(event));
+        const nextGoal = readGoalUpdatedEvent(event);
+        if (nextGoal !== undefined) publishGoalState(nextGoal);
         break;
       }
       case "manual_compaction_start": {
@@ -3614,6 +3615,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // the web prompt commands create it inside askBtw/handleSend, which
       // attach their own stream.
       const ensureRuntime = async () => sessionIdRef.current ?? await ensureNewSession();
+      // The catalog wins over every client handler, including the client-only
+      // names: an extension/skill command called `goal`, `btw`, `reload`,
+      // `name`, or `copy` must not be shadowed.
+      if (knownSlashCommandNamesRef.current.includes(commandName)) return { handled: false };
       switch (commandName) {
         case "reload": {
           const sid = await ensureRuntime();
@@ -3668,8 +3673,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             op: "create",
             objective,
           });
+          if (!hookAliveRef.current || sessionIdRef.current !== sid) return { handled: true };
           const parsed = readGoalCommandResponse(result);
-          if (parsed) publishGoalState(parsed.state);
+          if (!parsed?.goal) {
+            return complete({ handled: true, error: translate("agentSession.goalCreateFailed") });
+          }
+          publishGoalState(parsed.state);
           // A goal created on the empty new-chat screen must adopt the real
           // session so a reload opens it instead of a fresh composer.
           promoteNewSession();
@@ -3682,7 +3691,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // command line through the prompt pipeline. Never expand a name omp
           // already reports — an extension command must win over a web
           // convenience of the same name.
-          if (knownSlashCommandNamesRef.current.includes(commandName)) return { handled: false };
           const expansion = expandWebSlashCommand(text);
           if (expansion.kind === "not-web") return { handled: false };
           if (expansion.kind === "usage-error") {
@@ -3718,6 +3726,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     try {
       const result = await sendAgentCommand<GoalCommandResponse>(sid, { type: "goal", op });
+      if (!hookAliveRef.current || sessionIdRef.current !== sid) return;
       const parsed = readGoalCommandResponse(result);
       if (parsed) publishGoalState(parsed.state);
     } catch (e) {

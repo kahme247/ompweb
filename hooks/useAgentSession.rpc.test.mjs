@@ -1086,6 +1086,60 @@ test("GOAL a failed create reports omp's error and keeps the existing goal", asy
   assert.equal(w.latest.goalState?.goal?.id, "g1");
 });
 
+test("GOAL an empty create reply reports a failure and keeps the existing goal", async () => {
+  resetWorld();
+  primeSession("goal-empty", [userMsg("u0", "loaded question")]);
+  world.agents.set("goal-empty", { running: false, state: { goal: goalState() } });
+  const w = await mountSession("goal-empty");
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "goal",
+    produce: () => ({ value: { success: true, data: { goal: null, state: null } } }),
+  });
+
+  const result = await act(async () => w.latest.handleBuiltinSlashCommand("/goal ship the export"));
+  assert.equal(result.message, undefined, "no start notice without a goal");
+  assert.ok(result.error, "an empty create reply reports a failure");
+  assert.equal(w.latest.goalState?.goal?.id, "g1");
+});
+
+test("GOAL a success reply with no data does not announce a started goal", async () => {
+  resetWorld();
+  primeSession("goal-no-data", [userMsg("u0", "loaded question")]);
+  const w = await mountSession("goal-no-data");
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "goal",
+    produce: () => ({ value: { success: true } }),
+  });
+
+  const result = await act(async () => w.latest.handleBuiltinSlashCommand("/goal ship the export"));
+  assert.equal(result.message, undefined, "no start notice without data");
+  assert.ok(result.error, "a reply without data reports a failure");
+});
+
+test("GOAL a malformed goal_updated does not clear the banner", async () => {
+  resetWorld();
+  primeSession("goal-malformed", [userMsg("u0", "loaded question")]);
+  world.agents.set("goal-malformed", { running: false, state: { goal: goalState() } });
+  const w = await mountSession("goal-malformed");
+
+  await act(async () => w.latest.handleAgentEventRef.current({ type: "goal_updated", goal: null, state: { enabled: true } }));
+  assert.equal(w.latest.goalState?.goal?.id, "g1");
+});
+
+test("GOAL an omp command named goal wins over the client dispatch", async () => {
+  resetWorld();
+  primeSession("goal-shadow", [userMsg("u0", "loaded question")]);
+  const w = await mountSession("goal-shadow");
+  await act(async () => w.latest.handleAgentEventRef.current({
+    type: "available_commands_update",
+    commands: [{ name: "goal", source: "extension", description: "extension goal" }],
+  }));
+
+  const result = await act(async () => w.latest.handleBuiltinSlashCommand("/goal ship it"));
+  assert.deepEqual(result, { handled: false });
+  assert.equal(world.calls.some((call) => call.body?.type === "goal"), false, "no native goal RPC");
+});
+
 test("GOAL pause, resume and drop send the matching RPC and update the banner", async () => {
   resetWorld();
   primeSession("goal-actions", [userMsg("u0", "loaded question")]);

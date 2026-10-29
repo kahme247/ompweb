@@ -398,7 +398,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   // Names omp's catalog reports. A web prompt expansion of the same name must
   // yield to omp's own command (extension/custom/skill/builtin).
   const ompCommandNames = React.useMemo(
-    () => new Set((slashCommands ?? []).map((command) => command.name)),
+    () => new Set((slashCommands ?? []).flatMap((command) => [command.name, ...(command.aliases ?? [])])),
     [slashCommands],
   );
   const usageLimitLabel = usageLimit
@@ -974,6 +974,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (submissionBlockedRef.current || isStreaming) return;
     onAudioUnlock?.();
     if (sendSideQuestion(msg, overrideText)) return;
+    if (msg.startsWith("/") && (attachedImagesRef.current.length || attachedTextFilesRef.current.length)) {
+      const commandName = msg.slice(1).split(/\s+/)[0];
+      if (CLIENT_ONLY_COMMAND_NAMES[commandName] === true && !ompCommandNames.has(commandName)) {
+        toast.error(t("chatInput.commandAttachmentsUnsupported"));
+        return;
+      }
+    }
     const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFilesRef.current);
     if (!attachedImagesRef.current.length && !attachedTextFilesRef.current.length && msg.startsWith("/") && onBuiltinCommand) {
       const commandName = msg.slice(1).split(/\s+/)[0];
@@ -1000,7 +1007,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (key) recoverDraft(key, recovery);
       throw error;
     }
-  }, [value, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, ompCommandNames, rejectsOversizedPrompt, runBuiltinCommand, sendSideQuestion]);
+  }, [value, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, ompCommandNames, rejectsOversizedPrompt, runBuiltinCommand, sendSideQuestion, t]);
   const {
     isRecording,
     isPaused,
@@ -1116,9 +1123,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const builtinSlashCommands: SlashCommandPaletteItem[] = React.useMemo(
     () => BUILTIN_SLASH_COMMAND_DEFS
-      // Client-only actions always stay; web prompt expansions yield to an
-      // omp command with the same name.
-      .filter((def) => CLIENT_ONLY_COMMAND_NAMES[def.name] === true || !ompCommandNames.has(def.name))
+      // The catalog wins over every client entry, including client-only names.
+      .filter((def) => !ompCommandNames.has(def.name))
       .map((def) => ({
         name: def.name,
         description: t(def.descriptionKey),
@@ -1132,7 +1138,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   // client always dispatches itself is dropped so it appears exactly once.
   const externalSlashCommands: SlashCommandPaletteItem[] = React.useMemo(
     () => (slashCommands ?? []).flatMap((command): SlashCommandPaletteItem[] => {
-      if (CLIENT_ONLY_COMMAND_NAMES[command.name] === true) return [];
+      if (CLIENT_ONLY_COMMAND_NAMES[command.name] === true && !ompCommandNames.has(command.name)) return [];
       return [{
         name: command.name,
         description: command.description,
@@ -1140,7 +1146,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         source: command.source === "builtin" ? "ompBuiltin" : command.source,
       }];
     }),
-    [slashCommands],
+    [slashCommands, ompCommandNames],
   );
 
   const filteredSlashCommands = (() => {
@@ -1460,7 +1466,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       // Client-dispatched commands (/goal uses the native goal RPC, /btw is a
       // side question) must not enter the prompt queue: omp would treat the
       // text as an ordinary message. Run them now, mid-run included.
-      if (CLIENT_ONLY_COMMAND_NAMES[commandName] === true) {
+      if (CLIENT_ONLY_COMMAND_NAMES[commandName] === true && !ompCommandNames.has(commandName)) {
+        if (attachedImagesRef.current.length || attachedTextFilesRef.current.length) {
+          toast.error(t("chatInput.commandAttachmentsUnsupported"));
+          return;
+        }
         if (onBuiltinCommand) void runBuiltinCommand(msg, overrideText);
         return;
       }

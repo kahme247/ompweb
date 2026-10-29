@@ -45,6 +45,35 @@ test("an active goal shows its status, objective, tokens and pause/drop actions"
   assert.deepEqual(actions, ["pause", "drop"]);
 });
 
+test("goal controls stay disabled until a pending action settles", async () => {
+  const actions = [];
+  let release;
+  render(React.createElement(ComposerModeStatus, {
+    goal: state(goal()),
+    onGoalAction: (op) => {
+      actions.push(op);
+      return new Promise((resolve) => { release = resolve; });
+    },
+  }));
+
+  fireEvent.click(screen.getByRole("button", { name: /ship the export/ }));
+  fireEvent.click(screen.getByRole("button", { name: /^Pause$/ }));
+  const pause = screen.getByRole("button", { name: /^Pause$/ });
+  const drop = screen.getByRole("button", { name: /^Drop$/ });
+  assert.equal(pause.disabled, true);
+  assert.equal(drop.disabled, true);
+
+  fireEvent.click(drop);
+  assert.deepEqual(actions, ["pause"]);
+
+  await act(async () => {
+    release();
+    await Promise.resolve();
+  });
+  assert.equal(pause.disabled, false);
+  assert.equal(drop.disabled, false);
+});
+
 test("a paused goal offers resume, and a finished goal offers no actions", async () => {
   const actions = [];
   const view = render(React.createElement(ComposerModeStatus, {

@@ -62,7 +62,7 @@ afterEach(() => {
 });
 
 /** A composer with an image and a text file attached through the picker path. */
-async function renderWithAttachments({ queued = true, queueCallbacks = true, ...props } = {}) {
+async function renderWithAttachments({ queued = true, queueCallbacks = true, attachments = true, ...props } = {}) {
   const calls = [];
   // Images are the last argument of every queue callback, which resolves
   // false when omp refused the message.
@@ -84,17 +84,19 @@ async function renderWithAttachments({ queued = true, queueCallbacks = true, ...
     ...props,
   };
   const view = render(React.createElement(ChatInput, inputProps));
-  await act(async () => {
-    ref.current.addFiles([
-      new File([Buffer.from(PNG, "base64")], "dot.png", { type: "image/png" }),
-      new File(["hello"], "notes.txt", { type: "text/plain" }),
-    ]);
-  });
-  await waitFor(() => {
-    const draft = getDraft(KEY);
-    assert.equal(draft?.images.length, 1, "the image is attached");
-    assert.equal(draft?.files.length, 1);
-  });
+  if (attachments) {
+    await act(async () => {
+      ref.current.addFiles([
+        new File([Buffer.from(PNG, "base64")], "dot.png", { type: "image/png" }),
+        new File(["hello"], "notes.txt", { type: "text/plain" }),
+      ]);
+    });
+    await waitFor(() => {
+      const draft = getDraft(KEY);
+      assert.equal(draft?.images.length, 1, "the image is attached");
+      assert.equal(draft?.files.length, 1);
+    });
+  }
   return {
     calls,
     ref,
@@ -176,6 +178,7 @@ test("a queued /goal runs the native goal RPC instead of entering the prompt que
   const user = userEvent.setup();
   const builtins = [];
   const calls = await renderRunningWithAttachments({
+    attachments: false,
     onBuiltinCommand: async (message) => {
       builtins.push(message);
       return { handled: true };
@@ -187,6 +190,47 @@ test("a queued /goal runs the native goal RPC instead of entering the prompt que
   delete window.HTMLElement.prototype.scrollIntoView;
   assert.equal(calls.length, 0, "no prompt is queued");
   await waitFor(() => assert.equal(getDraft(KEY), null));
+});
+
+test("a queued /goal with attachments is refused and keeps the draft", async () => {
+  window.HTMLElement.prototype.scrollIntoView = () => {};
+  const user = userEvent.setup();
+  const builtins = [];
+  const calls = await renderRunningWithAttachments({
+    onBuiltinCommand: async (message) => {
+      builtins.push(message);
+      return { handled: true };
+    },
+  });
+  await user.type(screen.getByRole("textbox"), "/goal ship it");
+  await user.keyboard("{Enter}");
+  await waitFor(() => assert.equal(screen.getByRole("textbox").value, "/goal ship it"));
+  delete window.HTMLElement.prototype.scrollIntoView;
+  assert.deepEqual(builtins, [], "no goal RPC with attachments");
+  assert.equal(calls.length, 0, "no prompt is queued");
+  assert.equal(getDraft(KEY)?.images.length, 1);
+  assert.equal(getDraft(KEY)?.files.length, 1);
+});
+
+test("an idle /goal with attachments is refused and keeps the draft", async () => {
+  window.HTMLElement.prototype.scrollIntoView = () => {};
+  const user = userEvent.setup();
+  const builtins = [];
+  const calls = await renderRunningWithAttachments({
+    isStreaming: false,
+    onBuiltinCommand: async (message) => {
+      builtins.push(message);
+      return { handled: true };
+    },
+  });
+  await user.type(screen.getByRole("textbox"), "/goal ship it");
+  await user.keyboard("{Enter}");
+  await waitFor(() => assert.equal(screen.getByRole("textbox").value, "/goal ship it"));
+  delete window.HTMLElement.prototype.scrollIntoView;
+  assert.deepEqual(builtins, [], "no goal RPC with attachments");
+  assert.equal(calls.length, 0, "no prompt is sent");
+  assert.equal(getDraft(KEY)?.images.length, 1);
+  assert.equal(getDraft(KEY)?.files.length, 1);
 });
 
 test("a refused follow-up goes back whole to its draft, ahead of what was typed meanwhile", async () => {
