@@ -87,6 +87,8 @@ interface HubState {
   links: Map<string, Link>;
   changeListeners: Set<() => void>;
   helloListeners: Set<(hostId: string, channels: HelloChannel[]) => void>;
+  /** This server is shutting down (freezeHostLinks): links neither send nor apply anything. */
+  frozen: boolean;
 }
 
 declare global {
@@ -95,7 +97,7 @@ declare global {
 
 // globalThis, like the rpc-manager registry: survives Next.js hot reload.
 function hub(): HubState {
-  globalThis.__ompHostHub ??= { links: new Map(), changeListeners: new Set(), helloListeners: new Set() };
+  globalThis.__ompHostHub ??= { links: new Map(), changeListeners: new Set(), helloListeners: new Set(), frozen: false };
   return globalThis.__ompHostHub;
 }
 
@@ -164,8 +166,10 @@ function enqueue(link: Link, line: string): void {
   }
 }
 
-/** Number, keep until acked, and send; returns the seq. Throws LinkLimitError before recording anything. */
+/** Number, keep until acked, and send; returns the seq. Throws LinkLimitError before recording anything.
+ * Dropped once frozen (0): a kill, an answer or a command from a stopping server must not reach the children. */
 function sendDown(link: Link, body: Unsequenced<DownMessage>): number {
+  if (hub().frozen) return 0;
   const seq = link.downSeq + 1;
   const line = encodeLine({ ...body, seq } as DownMessage);
   link.downSeq = seq;
@@ -252,11 +256,26 @@ function currentLink(req: Request, record: HostRecord): Link | null {
 }
 
 const staleLink = () => json({ error: "This link was replaced; wait for the next welcome" }, 409);
+// The daemon retries a 503: what it sends lands on the next server instead.
+const stopping = () => json({ error: "omp-web is shutting down" }, 503);
+
+/**
+ * This server is shutting down. From here on nothing reaches a daemon (sendDown
+ * drops it), and no hello, uplink batch or blob upload is applied or acked: each
+ * daemon keeps its children's output unacked and sends it to the next server,
+ * which adopts the children. Without this a tab closing on the way out would
+ * answer omp's open host tool calls with an error, and output this server took
+ * but never showed would be lost to the next one.
+ */
+export function freezeHostLinks(): void {
+  hub().frozen = true;
+}
 
 /** GET /api/hosts/link: the daemon's downlink, an NDJSON stream, opened with the id of the hello it POSTed. */
 export async function handleLinkGet(req: Request): Promise<Response> {
   const record = authenticate(req);
   if (record instanceof Response) return record;
+  if (hub().frozen) return stopping();
   const link = linkFor(record.id);
   const helloId = req.headers.get(LINK_HELLO_HEADER);
   const offer = link.helloOffer;
@@ -446,6 +465,7 @@ async function adopt(link: Link, child: RemoteRpcTransport, sessionId: string, r
 export async function handleLinkPost(req: Request): Promise<Response> {
   const record = authenticate(req);
   if (record instanceof Response) return record;
+  if (hub().frozen) return stopping();
   if (req.headers.has(LINK_HELLO_HEADER)) return handleHelloPost(req, record);
   // A replaced link's late POST must not reach the current daemon's uplink window.
   const link = currentLink(req, record);
@@ -462,6 +482,7 @@ export async function handleLinkPost(req: Request): Promise<Response> {
     if (error instanceof RequestBodyTooLargeError) return json({ error: "Uplink batch too large" }, 413);
     return json({ error: "Malformed uplink batch" }, 400);
   }
+  if (hub().frozen) return stopping();
   // Replaced while the body was arriving.
   if (link.nonce !== nonce) return staleLink();
   sawDaemon(link);
@@ -521,6 +542,7 @@ function settle(link: Link, message: Res): void {
 export async function handleLinkBlob(req: Request, reqId: string): Promise<Response> {
   const record = authenticate(req);
   if (record instanceof Response) return record;
+  if (hub().frozen) return stopping();
   const link = currentLink(req, record);
   if (!link) return staleLink();
   const nonce = link.nonce;
@@ -535,6 +557,7 @@ export async function handleLinkBlob(req: Request, reqId: string): Promise<Respo
     if (error instanceof RequestBodyTooLargeError) return json({ error: "Result too large" }, 413);
     return json({ error: "Malformed result upload" }, 400);
   }
+  if (hub().frozen) return stopping();
   if (link.nonce !== nonce) return staleLink();
   pending.blob = blob;
   return json({ ok: true });
@@ -543,6 +566,7 @@ export async function handleLinkBlob(req: Request, reqId: string): Promise<Respo
 function request(hostId: string, op: HostOpName, args: Record<string, unknown>): Promise<unknown> {
   const link = linkFor(hostId);
   const label = labelOf(hostId);
+  if (hub().frozen) return Promise.reject(new HostOpError(503, "server_stopping", "omp-web is shutting down"));
   if (!link.nonce || !isLinkUp(link.status)) {
     return Promise.reject(new HostOpError(503, "host_offline", `${label} is offline`));
   }
