@@ -76,20 +76,25 @@ test("an offline this-machine row says to start the service, with the server's i
   globalThis.Worker = FakeWorker;
   t.mock.method(globalThis, "fetch", async () => Response.json({}));
   render(createElement(HostsConfig));
-  const row = (fields) => ({ id: "local", label: "", status: "offline", ompVersion: null, platform: null, lastSeenAt: null, hostVersion: null, serverVersion: 3, serverPlatform: "darwin", ...fields });
+  const row = (fields) => ({ id: "local", label: "", status: "offline", ompVersion: null, platform: null, lastSeenAt: null, hostVersion: null, serverVersion: 3, serverPlatform: "darwin", daemonManaged: true, ...fields });
   await waitFor(() => assert.ok(workers[0].posted.some((message) => message.op === "open" && message.channel.kind === "hosts")));
   const { id } = workers[0].posted.findLast((message) => message.op === "open" && message.channel.kind === "hosts");
   const send = (hosts) => act(() => workers[0].onmessage({ data: { id, type: "message", data: JSON.stringify({ hosts }) } }));
 
   send([row({})]);
   const hint = await screen.findByText(/ompweb-host service/);
-  assert.ok(hint.textContent.includes("ompweb launchd install"), hint.textContent);
-  assert.deepEqual([...hint.closest("li").querySelectorAll("button")].map((button) => button.textContent), ["Rename"]);
+  assert.equal(hint.closest("li").querySelector("code").textContent, "ompweb launchd install");
+  // The command is copyable; the local row still has no Revoke.
+  assert.deepEqual([...hint.closest("li").querySelectorAll("button")].map((button) => button.textContent), ["Copy", "Rename"]);
 
   send([row({ serverPlatform: "linux" })]);
-  assert.ok((await screen.findByText(/ompweb-host service/)).textContent.includes("ompweb systemd install"));
+  assert.equal((await screen.findByText(/ompweb-host service/)).closest("li").querySelector("code").textContent, "ompweb systemd install");
   send([row({ serverPlatform: "win32" })]);
-  assert.ok((await screen.findByText(/ompweb-host service/)).textContent.includes("ompweb-tray install"));
+  assert.equal((await screen.findByText(/ompweb-host service/)).closest("li").querySelector("code").textContent, "ompweb-tray install");
+
+  // Dev mode: offline by design, nothing to install.
+  send([row({ daemonManaged: false })]);
+  await waitFor(() => assert.equal(screen.queryByText(/ompweb-host service/), null));
 
   send([row({ status: "online", hostVersion: 3 })]);
   await waitFor(() => assert.equal(screen.queryByText(/ompweb-host service/), null));
@@ -99,7 +104,7 @@ test("the local name hint is the input's description, not part of its label", as
   globalThis.Worker = FakeWorker;
   t.mock.method(globalThis, "fetch", async () => Response.json({}));
   render(createElement(HostsConfig));
-  const row = { id: "local", label: "", status: "online", ompVersion: null, platform: null, lastSeenAt: null, hostVersion: 3, serverVersion: 3, serverPlatform: "linux" };
+  const row = { id: "local", label: "", status: "online", ompVersion: null, platform: null, lastSeenAt: null, hostVersion: 3, serverVersion: 3, serverPlatform: "linux", daemonManaged: true };
   await waitFor(() => assert.ok(workers[0].posted.some((message) => message.op === "open" && message.channel.kind === "hosts")));
   const { id } = workers[0].posted.findLast((message) => message.op === "open" && message.channel.kind === "hosts");
   act(() => workers[0].onmessage({ data: { id, type: "message", data: JSON.stringify({ hosts: [row] }) } }));
