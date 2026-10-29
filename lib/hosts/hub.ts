@@ -431,8 +431,6 @@ async function adopt(link: Link, child: RemoteRpcTransport, sessionId: string, r
     // rpc-manager imports this module. Awaiting it also defers the lookup past
     // openDownlink, which marks the link up (ops need it) after reattach.
     const { adoptRpcSession } = await import("../rpc-manager");
-    // shortcut: a start of this session during the lookup takes its lock first, so adoptRpcSession
-    // refuses and the child is killed and resumed; hold the start lock across the lookup if that shows up.
     const session = (await listSessions()).find((entry) => entry.id === sessionId);
     if (!session) throw new Error("its session is unknown");
     await adoptRpcSession({ host: link.host, transport: child, sessionId, cwd: session.cwd, replay });

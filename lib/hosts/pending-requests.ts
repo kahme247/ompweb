@@ -1,12 +1,13 @@
-// The blocking requests still open on one omp child, kept so the daemon's
-// `hello` can replay them to a main server that missed them (omp has no
-// command listing them, and they never time out).
+// What a main server that missed a child's output needs from it in the
+// daemon's `hello`: the blocking requests still open on it (omp has no command
+// listing them, and they never time out), and the session it runs now.
 import { BLOCKING_UI_METHODS } from "../notification-events";
 import { RpcFrameDecoder } from "../omp/rpc-frame";
+import { isValidSessionId } from "../session-file-references-core";
 import { isRecord } from "../type-guards";
 
 // A line without one of these types cannot matter: skips JSON-parsing streamed output.
-const STDOUT_TYPES = /"(?:rpc_chunk|host_tool_call|host_tool_cancel|host_uri_request|host_uri_cancel|extension_ui_request)"/;
+const STDOUT_TYPES = /"(?:rpc_chunk|host_tool_call|host_tool_cancel|host_uri_request|host_uri_cancel|extension_ui_request|get_state)"/;
 const STDIN_TYPES = /"(?:host_tool_result|host_uri_result|extension_ui_response)"/;
 
 /** Raw lines, or null once they no longer fit under the cap. */
@@ -19,7 +20,9 @@ export class PendingRequests {
   private chunk: Kept | undefined;
   private bytes = 0;
 
-  constructor(private readonly limitBytes: number) {}
+  /** `sessionId`: the session the child was started on, until a successful `get_state` names
+   * another (a new session's first one, a switch or a fork); null for one main could not adopt. */
+  constructor(private readonly limitBytes: number, public sessionId: string | null = null) {}
 
   noteStdout(line: string): void {
     if (this.chunk === undefined && !STDOUT_TYPES.test(line)) return;
@@ -47,6 +50,11 @@ export class PendingRequests {
       return;
     }
     this.free(kept);
+    if (frame.type === "response" && frame.command === "get_state" && frame.success === true && isRecord(frame.data)) {
+      const { sessionId } = frame.data;
+      this.sessionId = typeof sessionId === "string" && isValidSessionId(sessionId) ? sessionId : null;
+      return;
+    }
     const cancel = frame.type === "host_tool_cancel" || frame.type === "host_uri_cancel"
       || (frame.type === "extension_ui_request" && frame.method === "cancel");
     if (cancel && typeof frame.targetId === "string") this.close(frame.targetId);
