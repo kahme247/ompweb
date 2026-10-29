@@ -797,11 +797,6 @@ export function AppShell({ appName }: { appName: string }) {
     });
   }, [activeTopPanel, systemPrompt, systemPromptLoading, toggleTopPanel]);
 
-  // /session opens the same information panel as the top-bar control.
-  const openSessionStatsPanel = useCallback(() => {
-    chatInputRef.current?.openContextPanel();
-  }, []);
-
   const handleSidebarToggle = useCallback(() => {
     if (isMobile) {
       setActiveTopPanel(null);
@@ -2531,7 +2526,6 @@ export function AppShell({ appName }: { appName: string }) {
               onSystemPromptChange={handleSystemPromptChange}
               onSystemPromptLoaderChange={handleSystemPromptLoaderChange}
               onSessionStatsChange={handleSessionStatsChange}
-              onSessionStatsPanelOpen={openSessionStatsPanel}
               sessionInfoContainer={sessionInfoContainer}
               onGenerationSpeedChange={handleGenerationSpeedChange}
               onOpenProviders={() => setSettingsTab("providers")}

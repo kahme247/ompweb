@@ -169,6 +169,7 @@ const PASSTHROUGH_COMMANDS = new Set([
   "btw",
   "btw_cancel",
   "get_btw_history",
+  "goal",
 ]);
 
 // Outlasts omp's cold prediction-daemon start (up to 3 × 30s start rounds plus a
@@ -1576,6 +1577,7 @@ export class AgentSessionWrapper {
       slowModeScope: state.slowModeScope,
       usageLimit: state.usageLimit,
       ...(skillDiagnostics ? { skillDiagnostics } : {}),
+      ...(state.goal !== undefined ? { goal: state.goal } : {}),
       todoPhases: state.todoPhases ?? [],
       extensionStatuses: Array.from(this.extensionStatuses, ([key, text]) => ({ key, text })),
       extensionWidgets: Array.from(this.extensionWidgets.values()),

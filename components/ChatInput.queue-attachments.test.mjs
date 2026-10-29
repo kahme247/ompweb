@@ -163,12 +163,30 @@ test("a queued web slash command is expanded and keeps the attachments", async (
   window.HTMLElement.prototype.scrollIntoView = () => {};
   const user = userEvent.setup();
   const calls = await renderRunningWithAttachments();
-  await user.type(screen.getByRole("textbox"), "/goal ship it");
+  await user.type(screen.getByRole("textbox"), "/plan ship it");
   await user.keyboard("{Enter}");
   await waitFor(() => assert.equal(calls.length, 1));
   delete window.HTMLElement.prototype.scrollIntoView;
   assert.equal(calls[0].name, "onPromptWithStreamingBehavior");
-  assertQueuedWithAttachments(calls[0], expandWebSlashCommand("/goal ship it").prompt);
+  assertQueuedWithAttachments(calls[0], expandWebSlashCommand("/plan ship it").prompt);
+});
+
+test("a queued /goal runs the native goal RPC instead of entering the prompt queue", async () => {
+  window.HTMLElement.prototype.scrollIntoView = () => {};
+  const user = userEvent.setup();
+  const builtins = [];
+  const calls = await renderRunningWithAttachments({
+    onBuiltinCommand: async (message) => {
+      builtins.push(message);
+      return { handled: true };
+    },
+  });
+  await user.type(screen.getByRole("textbox"), "/goal ship it");
+  await user.keyboard("{Enter}");
+  await waitFor(() => assert.deepEqual(builtins, ["/goal ship it"]));
+  delete window.HTMLElement.prototype.scrollIntoView;
+  assert.equal(calls.length, 0, "no prompt is queued");
+  await waitFor(() => assert.equal(getDraft(KEY), null));
 });
 
 test("a refused follow-up goes back whole to its draft, ahead of what was typed meanwhile", async () => {
