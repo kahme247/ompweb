@@ -25,6 +25,7 @@ import {
   SeqWindow,
   SESSION_OP_PARAMS,
   type DownMessage,
+  type HelloChannel,
   type HostOpName,
   type UpMessage,
 } from "./link-protocol";
@@ -39,7 +40,6 @@ export const linkTimings = {
   opTimeoutMs: LINK_LIMITS.opTimeoutMs,
 };
 
-type HelloChannel = { ch: string; sessionId: string | null };
 type Hello = Extract<UpMessage, { type: "hello" }>;
 type Res = Extract<UpMessage, { type: "res" }>;
 /** A sequenced downlink message before the link numbers it. */
