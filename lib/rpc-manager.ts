@@ -104,6 +104,8 @@ const AWAITING_AGENT_START_TIMEOUT_MS = 10_000;
 const RESTARTING_MESSAGE = "This session is restarting — retry in a moment.";
 const BASH_EXCLUDE_MESSAGE =
   "omp cannot run a shell command with its output excluded from the model context (`!!`): the RPC bash command has no exclusion option, so the output would silently enter the context anyway. Run it with a single `!` to share the output with the model, or use a terminal outside omp web.";
+/** Answer to a replayed server agent tool call that changes things: it may have run before the restart. */
+const AGENT_TOOL_UNKNOWN_OUTCOME = "omp-web restarted while this ran; the outcome is unknown, check with list_sessions before retrying";
 
 /**
  * Failure raised by omp-web itself (not by omp) carrying a stable snake_case
@@ -295,10 +297,16 @@ export class AgentSessionWrapper {
   private _alive = true;
   /** Host tools the web UI registered via set_host_tools (agent-callable). */
   private hostToolNames: Set<string> = new Set();
-  /** Feeding an adopted child's open requests (see adopt): its host tools were registered through the wrapper a restart lost. */
+  /** Feeding an adopted child's open requests (see adopt): server agent tools there may already have run. */
   private replaying = false;
+  /** Adopted, and no tab has registered host tools since: omp may call tools the
+   * wrapper a restart lost registered, so every call routes as registered. */
+  private hostToolsUnknown = false;
+  private _adopted = false;
   /** host_tool_call ids awaiting a host_tool_result from the browser. */
   private pendingHostTools: Map<string, UnsequencedAgentEvent> = new Map();
+  /** Own host calls no tab has seen yet (see parkHostTool), with their deadlines. */
+  private parkedHostTools = new Map<string, ReturnType<typeof setTimeout>>();
   /** URI schemes the web UI registered via set_host_uri_schemes. */
   private hostUriSchemes: Map<string, { writable?: boolean }> = new Map();
   /** host_uri_request ids awaiting a host_uri_result from the browser. */
@@ -587,6 +595,8 @@ export class AgentSessionWrapper {
    */
   async adopt(replay: string[]): Promise<void> {
     this.handshaking = true;
+    this._adopted = true;
+    this.hostToolsUnknown = true;
     // Older omp rejects some of these, as at startup; a timeout or an exit fails the adoption.
     const optional = (command: { type: string; [key: string]: unknown }) => this.proc.sendCommand(command, GET_STATE_TIMEOUT_MS).then(() => {}, (error) => {
       if (!(error instanceof RpcCommandError)) throw error;
@@ -595,17 +605,27 @@ export class AgentSessionWrapper {
       await this.proc.negotiateProtocol(await this.proc.waitReady(), GET_STATE_TIMEOUT_MS);
       await optional({ type: "set_subagent_subscription", level: "events" });
       await optional({ type: "set_ask_dialog", enabled: true });
+      // omp's state has no shell-command flag: a `!!` command the lost server started
+      // leaves bashRunning false, and its result arrives as an unsolicited response.
       this.applyIdentity(await this.getStateWithTimeout());
       // The wrapper keeps neither (a tab reads both when it attaches): a child that cannot answer them fails here instead.
       await optional({ type: "get_subagents" });
       await optional({ type: "get_btw_history" });
       this.replaying = true;
-      this.proc.replay(replay);
-      this.replaying = false;
+      try {
+        this.proc.replay(replay);
+      } finally {
+        this.replaying = false;
+      }
     } finally {
       this.handshaking = false;
       this.noteActivity();
     }
+  }
+
+  /** Taken over from a previous run of this server (see adopt): its spawn-time --advisor flag is unknown. */
+  get adopted(): boolean {
+    return this._adopted;
   }
 
   private applyIdentity(state: RpcSessionState): void {
@@ -954,7 +974,15 @@ export class AgentSessionWrapper {
         // browser routing, so they work with no tab open. A disabled gate
         // is an explicit error, not a silent hang and not a browser call.
         if (id && toolName && AGENT_TOOL_NAMES.has(toolName)) {
-          if (loadWebServerSettings().agentToolsEnabled) {
+          // A replayed call may have run before the restart: only the read-only listing runs again.
+          if (this.replaying && toolName !== "list_sessions") {
+            this.proc.sendFrame({
+              type: "host_tool_result",
+              id,
+              isError: true,
+              result: { content: [{ type: "text", text: AGENT_TOOL_UNKNOWN_OUTCOME }] },
+            });
+          } else if (loadWebServerSettings().agentToolsEnabled) {
             void this.answerServerAgentTool(event);
           } else {
             this.proc.sendFrame({
@@ -977,7 +1005,7 @@ export class AgentSessionWrapper {
         // any open omp-web tab (the user switched sessions mid-run). Otherwise
         // reject immediately so the agent never hangs on a tool nobody will
         // answer.
-        if (id && toolName && (this.hostToolNames.has(toolName) || this.replaying)) {
+        if (id && toolName && (this.hostToolNames.has(toolName) || this.hostToolsUnknown)) {
           if (this.listeners.length > 0) {
             this.pendingHostTools.set(id, event);
             this.emit(event);
@@ -995,6 +1023,12 @@ export class AgentSessionWrapper {
             notifyRunningChange();
             return;
           }
+          // Adopted with every tab gone with the old server: the next tab to attach answers it.
+          if (this.hostToolsUnknown) {
+            this.parkHostTool(id, event);
+            notifyRunningChange();
+            return;
+          }
         }
         // Unregistered tool / no listener: reject (emits a notice) and do NOT
         // re-emit the frame — the UI must not answer a call nobody routed.
@@ -1004,6 +1038,7 @@ export class AgentSessionWrapper {
       case "host_tool_cancel": {
         const targetId = typeof event.targetId === "string" ? event.targetId : "";
         if (targetId && this.pendingHostTools.delete(targetId)) {
+          this.unparkHostTool(targetId);
           this.emit(event);
           notifyRunningChange();
           return;
@@ -1174,6 +1209,7 @@ export class AgentSessionWrapper {
       const cross = event.webCrossSession === true;
       if ((which === "own" && cross) || (which === "cross" && !cross)) continue;
       this.pendingHostTools.delete(id);
+      this.unparkHostTool(id);
       this.proc.sendFrame({
         type: "host_tool_result",
         id,
@@ -1181,6 +1217,33 @@ export class AgentSessionWrapper {
         result: { content: [{ type: "text", text: message }] },
       });
     }
+  }
+
+  /**
+   * Hold an own host call no tab can answer yet (adopted: every tab went with
+   * the old server) for the next tab to attach (see onEvent). If none attaches
+   * within the disconnect window it is settled, so the agent never waits forever.
+   */
+  private parkHostTool(id: string, event: UnsequencedAgentEvent): void {
+    this.pendingHostTools.set(id, event);
+    const timer = setTimeout(() => {
+      this.parkedHostTools.delete(id);
+      if (!this.pendingHostTools.delete(id)) return;
+      this.proc.sendFrame({
+        type: "host_tool_result",
+        id,
+        isError: true,
+        result: { content: [{ type: "text", text: "No omp-web tab reconnected to answer this host tool" }] },
+      });
+      notifyRunningChange();
+    }, this.disconnectDestroyMs);
+    timer.unref?.();
+    this.parkedHostTools.set(id, timer);
+  }
+
+  private unparkHostTool(id: string): void {
+    clearTimeout(this.parkedHostTools.get(id));
+    this.parkedHostTools.delete(id);
   }
 
   /** The last other tab left: settle calls routed to other tabs. */
@@ -1355,6 +1418,12 @@ export class AgentSessionWrapper {
         continue;
       }
       listener({ ...event, web: { streamId: this.streamId, sequence: ++this.streamSequence } });
+    }
+    // Own host calls parked while no tab could answer go to the first tab that attaches, once.
+    for (const id of [...this.parkedHostTools.keys()]) {
+      this.unparkHostTool(id);
+      const event = this.pendingHostTools.get(id);
+      if (event) listener({ ...event, web: { streamId: this.streamId, sequence: ++this.streamSequence } });
     }
     return () => {
       const i = this.listeners.indexOf(listener);
@@ -2218,11 +2287,16 @@ export class AgentSessionWrapper {
           : valid;
         this.hostToolNames = new Set(merged.map((t) => t.name as string));
         await this.proc.sendCommand({ type: "set_host_tools", tools: merged });
+        // omp now knows exactly these: an adopted child's lost registration is replaced.
+        this.hostToolsUnknown = false;
         return null;
       }
 
       case "host_tool_result": {
-        if (typeof command.id === "string") this.pendingHostTools.delete(command.id);
+        if (typeof command.id === "string") {
+          this.pendingHostTools.delete(command.id);
+          this.unparkHostTool(command.id);
+        }
         this.proc.sendFrame(command as { type: string; [key: string]: unknown });
         return null;
       }
@@ -2331,6 +2405,8 @@ export class AgentSessionWrapper {
     const disposed = this.proc.dispose().catch(() => {}).then(() => this.onDestroyCallback?.());
     this.destroyPromise = disposed;
     this.pendingHostTools.clear();
+    for (const timer of this.parkedHostTools.values()) clearTimeout(timer);
+    this.parkedHostTools.clear();
     this.hostToolNames.clear();
     this.pendingHostUris.clear();
     this.hostUriSchemes.clear();
@@ -2734,8 +2810,9 @@ export async function startRpcSession(
     // replace the child so the toggle takes effect on the next prompt. Busy
     // children are kept (a mid-run swap would drop in-flight work) and pick
     // the new flag up at the next natural respawn; callers that pass no
-    // advisor opinion (undefined) simply reuse whatever is running.
-    if (advisor === undefined || existing.advisorSpawned === effectiveAdvisor || existing.isRunning() || existing.isEditingHistory()) {
+    // advisor opinion (undefined) simply reuse whatever is running. An adopted
+    // child's flag is unknown, so it is never replaced over it.
+    if (advisor === undefined || existing.adopted || existing.advisorSpawned === effectiveAdvisor || existing.isRunning() || existing.isEditingHistory()) {
       return { session: existing, realSessionId: sessionId };
     }
     await existing.destroyAndWait();
@@ -2857,18 +2934,23 @@ function registerSession(created: AgentSessionWrapper): void {
 /**
  * Take over an omp child that outlived the server that spawned it (its host
  * listed it in `hello`): no spawn and no ready wait. `replay` holds the host's
- * raw stdout lines of the child's still-open blocking requests. A failed
- * re-sync kills the child and rejects.
+ * raw stdout lines of the child's still-open blocking requests. Rejects, with
+ * the child being killed, when this server already starts or keeps a wrapper
+ * for the session (never two children on one file) or when the re-sync fails.
  */
 export async function adoptRpcSession({ host, transport, sessionId, cwd, replay }: {
   host: Host;
   transport: RpcTransport;
   sessionId: string;
-  sessionFile: string;
   cwd: string;
   replay: string[];
 }): Promise<AgentSessionWrapper> {
+  const registry = getRegistry();
   const locks = getLocks();
+  if (locks.has(sessionId) || registry.has(sessionId)) {
+    transport.killTree(false);
+    throw new Error(`Session ${sessionId} is already started on this server`);
+  }
   const holder: { wrapper?: AgentSessionWrapper } = {};
   const proc = new RpcProcess({ cwd, transport, adopted: { protocolVersion: 2 }, onExit: (info) => holder.wrapper?.handleProcessExit(info, proc) });
   // Spawn-time facts (--advisor, a cwd fallback) died with the server that spawned it.
@@ -2879,13 +2961,25 @@ export async function adoptRpcSession({ host, transport, sessionId, cwd, replay 
     try {
       await created.adopt(replay);
     } catch (error) {
-      await created.destroyAndWait("adoption-failed");
+      const disposing = created.destroyAndWait("adoption-failed");
+      // As for a failed resume: until the child really exits, a start for this
+      // session waits for it (destroyAndWait returns early behind a dropped link).
+      registry.set(sessionId, created);
+      void created.destroyPromise?.then(() => {
+        if (registry.get(sessionId) === created) registry.delete(sessionId);
+      });
+      await disposing;
       throw error;
     }
     registerSession(created);
+    // The run goes on: any crash record for the session is stale.
+    clearExitedRpcSession(sessionId);
+    if (created.sessionId !== sessionId) clearExitedRpcSession(created.sessionId);
     notifyRunningChange();
     return { session: created, realSessionId: created.sessionId };
-  })().finally(() => locks.delete(sessionId));
+  })().finally(() => {
+    if (locks.get(sessionId) === adopting) locks.delete(sessionId);
+  });
   // A start for this session meanwhile joins the adoption instead of spawning a second child beside it.
   locks.set(sessionId, adopting);
   return (await adopting).session;
