@@ -94,6 +94,9 @@ export function translate(key: string, vars?: Record<string, string | number>): 
 
 /** Localized user-facing explanation for a retained unexpected process exit. */
 export function formatExitedSessionNotice(exit: ExitedRpcSession): string {
+  // `detail: "stalled"` is the liveness watchdog's internal sentinel, not an
+  // exit reason: never show it as plain text next to "code unknown".
+  if (exit.detail === "stalled") return translate("sessionSidebar.agentStalled");
   const status = exit.signal
     ? translate("sessionSidebar.exitSignal", { signal: exit.signal })
     : translate("sessionSidebar.exitCode", {

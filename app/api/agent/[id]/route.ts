@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
-import { readSessionHeader } from "@/lib/session-reader";
+import { readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
-import { startRpcSession, getRpcSession, resolveSpawnCwdResult, WebRpcError } from "@/lib/rpc-manager";
+import { startRpcSession, getOwnChildPids, getRpcSession, isLocallyOwnedSession, isOwnCrashedSession, resolveSpawnCwdResult, WebRpcError } from "@/lib/rpc-manager";
+import { detectSessionOwner } from "@/lib/session-owner";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "@/lib/image-attachments";
@@ -35,7 +36,7 @@ function commandErrorResponse(error: unknown) {
     return NextResponse.json({ error: "Invalid JSON request body", code: "invalid_json" }, { status: 400 });
   }
   if (error instanceof WebRpcError) {
-    return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
+    return NextResponse.json({ error: error.message, code: error.code, ...error.details }, { status: 400 });
   }
   if (error instanceof RpcCommandError) {
     return NextResponse.json({ error: error.message, code: error.code ?? "rpc_command_failed" }, { status: 400 });
@@ -86,6 +87,29 @@ export async function POST(
     const resolved = await resolveSessionPathOr404(id);
     if ("response" in resolved) return resolved.response;
     const filePath = resolved.filePath;
+
+    // omp ≥ 18.5 grants one writer per session. A second `--resume` does not
+    // fail: it silently moves the conversation to a copy on its first write,
+    // which is exactly the "new chat appeared from nowhere" bug. Refuse the
+    // spawn (409) unless the client explicitly asked for the copy.
+    const force = new URL(req.url).searchParams.get("force") === "1";
+    if (!force) {
+      const elsewhere = await detectSessionOwner(id, filePath, {
+        isLocal: isLocallyOwnedSession,
+        ownCrashed: isOwnCrashedSession,
+        excludePids: getOwnChildPids(),
+      });
+      if (elsewhere) {
+        return NextResponse.json(
+          {
+            error: "This session is being run by another omp process",
+            code: "session_running_elsewhere",
+            elsewhere,
+          },
+          { status: 409 },
+        );
+      }
+    }
 
     const header = readSessionHeader(filePath);
     const { cwd } = resolveSpawnCwdResult(header?.cwd);
@@ -150,14 +174,44 @@ export async function GET(
   try {
     const session = getRpcSession(id);
     if (!session || !session.isAlive()) {
-      return NextResponse.json({ running: false });
+      // Not ours: tell the client who is running it, if anyone. Never spawns.
+      const filePath = await resolveSessionPath(id).catch(() => null);
+      const elsewhere = filePath
+        ? await detectSessionOwner(id, filePath, { isLocal: isLocallyOwnedSession, ownCrashed: isOwnCrashedSession, excludePids: getOwnChildPids() })
+        : null;
+      return NextResponse.json({ running: false, alive: false, elsewhere });
     }
     try {
       const state = await session.send({ type: "get_state" });
-      return NextResponse.json({ running: true, state });
+      // `running` is the run, `alive` the child. A live omp that is merely idle
+      // (freshly spawned, between turns) must never look like a run in flight,
+      // or every client shows a working state over a chat nobody asked anything.
+      // `get_state` reconciled the wrapper's flags above, so the run state is
+      // authoritative here.
+      return NextResponse.json({ running: session.isRunning(), alive: true, state, elsewhere: null });
     } catch (error) {
-      if (error instanceof WebRpcError && error.code === "session_unresponsive") {
-        return NextResponse.json({ running: false, recovered: true });
+      // omp being slow is not the run ending: answer 503 so clients retry the
+      // poll instead of treating the session as idle/recovered. 0.6.0's own
+      // get_state timeout reports `session_state_timeout`; native clients know
+      // only one "still running, retry" state, so both codes answer as
+      // `session_slow`.
+      if (error instanceof WebRpcError && (error.code === "session_slow" || error.code === "session_state_timeout")) {
+        // A blocked child answers nothing, so this 503 is the client's only
+        // chance to learn how long the run it still shows has been silent — and
+        // whether that run exists at all: an idle child that is just loading a
+        // large session answers `session_slow` too, and clients must be able to
+        // settle on that instead of keeping the run marked until the next
+        // successful poll.
+        return NextResponse.json({
+          error: error.message,
+          code: "session_slow",
+          ...error.details,
+          running: session.isRunning(),
+          // The timeout that answers this 503 may just have disposed a stalled
+          // child; the body must not advertise a process that is gone.
+          alive: session.isAlive(),
+          silentForMs: session.silentForMs(),
+        }, { status: 503 });
       }
       throw error;
     }

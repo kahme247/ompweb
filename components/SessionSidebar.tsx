@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo, useDeferredValue } from "react";
-import type { ExitedRpcSession, ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
+import type { ElsewhereSessionInfo, ExitedRpcSession, ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { DirectoryPicker } from "./DirectoryPicker";
@@ -136,6 +136,10 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const [worktreeStateByProject, setWorktreeStateByProject] = useState<Record<string, WorktreeState>>({});
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
+  // Sessions another omp process holds (other omp-web instance / terminal).
+  // Badge-only: they never enter runningSessionIds, so unread markers and
+  // notifications keep meaning "a run THIS instance started".
+  const [elsewhereSessions, setElsewhereSessions] = useState<Map<string, ElsewhereSessionInfo>>(() => new Map());
   const [runningSessionCwds, setRunningSessionCwds] = useState<Record<string, string>>({});
   const [exitedSessions, setExitedSessions] = useState<Map<string, ExitedRpcSession>>(() => new Map());
   const knownRunningCwdsRef = useRef<Map<string, string>>(new Map());
@@ -218,8 +222,15 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const etag = res.headers.get("ETag");
       if (etag) sessionsEtagRef.current = etag;
-      const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[]; runningSessions?: Array<{ id: string; cwd: string }> };
+      const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[]; runningSessions?: Array<{ id: string; cwd: string }>; elsewhereSessions?: ElsewhereSessionInfo[] };
       setAllSessions(data.sessions);
+      // Same rule as the running set below: once an SSE frame has delivered an
+      // ownership snapshot, the stream owns it. A GET that was already in
+      // flight can be older than that frame, and applying it would drop the
+      // foreign-session badges until the next frame.
+      if (!sseAuthoritativeRef.current) {
+        setElsewhereSessions(new Map((data.elsewhereSessions ?? []).map((entry) => [entry.id, entry])));
+      }
       if (data.runningSessions) {
         for (const rs of data.runningSessions) {
           if (rs.id && rs.cwd) knownRunningCwdsRef.current.set(rs.id, rs.cwd);
@@ -352,12 +363,14 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
           runningSessionIds?: string[];
           runningSessions?: Array<{ id: string; cwd: string }>;
           exitedSessions?: ExitedRpcSession[];
+          elsewhereSessions?: ElsewhereSessionInfo[];
           refreshSessionList?: boolean;
           sessionIds?: string[];
         };
         if (data.type === "running") {
           sseAuthoritativeRef.current = true;
           setRunningSessionIds(new Set(data.runningSessionIds ?? []));
+          setElsewhereSessions(new Map((data.elsewhereSessions ?? []).map((entry) => [entry.id, entry])));
           setExitedSessions(new Map((data.exitedSessions ?? []).map((session) => [session.id, session])));
           if (data.runningSessions) {
             const nextCwds: Record<string, string> = {};
@@ -768,9 +781,20 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     () => groupSessionsByProject(sortedProjects, visibleSessions),
     [sortedProjects, visibleSessions],
   );
+  // "Running" for the sidebar = a run this instance owns (spinner, unread,
+  // notifications) plus a run another omp process holds (badge/filter). The two
+  // stay separate in state; only the aggregate views merge them.
+  const liveOrElsewhereIds = useMemo(() => {
+    if (elsewhereSessions.size === 0) return runningSessionIds;
+    const next = new Set(runningSessionIds);
+    for (const [id, info] of elsewhereSessions) {
+      if (info.running) next.add(id);
+    }
+    return next;
+  }, [runningSessionIds, elsewhereSessions]);
   const projectActivity = useMemo(
-    () => projectActivityCounts(visibleSessions, runningSessionIds, unreadSessionIds, exitedSessions.keys()),
-    [visibleSessions, runningSessionIds, unreadSessionIds, exitedSessions],
+    () => projectActivityCounts(visibleSessions, liveOrElsewhereIds, unreadSessionIds, exitedSessions.keys()),
+    [visibleSessions, liveOrElsewhereIds, unreadSessionIds, exitedSessions],
   );
 
   // Client-side filtering (Workspaces header: search + "running only").
@@ -847,7 +871,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     const entries: { project: ManagedProject; sessions: SessionInfo[]; scores?: Map<string, number>; rank: number }[] = [];
     for (const project of sortedProjects) {
       let list = sessionsByProject.get(project.path) ?? [];
-      if (runningOnly) list = list.filter((s) => runningSessionIds.has(s.id) || effectiveRecentCompletedSet.has(s.id));
+      if (runningOnly) list = list.filter((s) => runningSessionIds.has(s.id) || effectiveRecentCompletedSet.has(s.id) || liveOrElsewhereIds.has(s.id));
       if (!query) {
         if (list.length === 0 && runningOnly) continue;
         entries.push({ project, sessions: list, rank: 0 });
@@ -871,7 +895,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     // Best match first; ties keep the workspace order (stable sort).
     if (query) entries.sort((a, b) => b.rank - a.rank);
     return entries;
-  }, [sortedProjects, sessionsByProject, runningOnly, trimmedSearchQuery, currentTranscriptSearch, runningSessionIds, effectiveRecentCompletedSet]);
+  }, [sortedProjects, sessionsByProject, runningOnly, trimmedSearchQuery, currentTranscriptSearch, runningSessionIds, effectiveRecentCompletedSet, liveOrElsewhereIds]);
 
   const treesByProject = useMemo(() => {
     const m = new Map<string, ReturnType<typeof buildSessionTree>>();
@@ -1645,6 +1669,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                 hiddenCount={filtersActive ? 0 : Math.max(0, tree.length - MAX_PROJECT_SESSIONS)}
                 selectedSessionId={selectedSessionId}
                 runningSessionIds={runningSessionIds}
+                runningElsewhere={elsewhereSessions}
                 unreadSessionIds={unreadSessionIds}
                 exitedSessions={exitedSessions}
                 recentlyCompletedIds={effectiveRecentCompletedSet}

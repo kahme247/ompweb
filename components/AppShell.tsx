@@ -1438,8 +1438,19 @@ export function AppShell({ appName }: { appName: string }) {
         method: "POST",
       });
       const body = (await response.json().catch(() => ({}))) as { title?: string; error?: string; code?: string };
-      if (!response.ok || !body.title) {
+      if (!response.ok) {
         throw new Error(body.error || body.code ? formatApiError(body) : `HTTP ${response.status}`);
+      }
+      // A 200 without a title means another process owns the session and it has
+      // no stored title yet: a title is cosmetic, so this is a silent no-op, not
+      // the "HTTP 200" error a missing title used to produce.
+      if (!body.title) {
+        // Same guard as the branches below: the reset belongs to this session
+        // only, or it would re-enable the wand of the session now selected and
+        // let a second request start while its own naming is still pending.
+        if (activeSessionIdRef.current !== sessionId) return;
+        setAutoNameStatus({ kind: "idle" });
+        return;
       }
 
       const title = body.title.trim();

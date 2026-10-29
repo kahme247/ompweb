@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { createHash } from "crypto";
 import { listAllSessions } from "@/lib/session-reader";
-import { getRunningRpcSessions } from "@/lib/rpc-manager";
+import { getOwnChildPids, getRunningRpcSessions, isLocallyOwnedSession, isOwnCrashedSession } from "@/lib/rpc-manager";
+import { refreshElsewhereSessions } from "@/lib/session-owner";
 
 // The session list mixes on-disk sessions with the live runningSessionIds set,
 // which changes on every agent turn, so it must never be cached by proxies or
@@ -18,7 +19,18 @@ export async function GET(req: Request) {
     const sessions = await listAllSessions();
     const runningSessions = getRunningRpcSessions();
     const runningSessionIds = runningSessions.map((s) => s.id);
-    const body = { sessions, runningSessionIds, runningSessions };
+    // Sessions a foreign omp writer holds: another omp-web instance, a terminal
+    // `omp`, or a transcript that was still open a moment ago. Detected here so
+    // the sidebar gets the badge with the list instead of a second round trip.
+    const elsewhereSessions = await refreshElsewhereSessions(
+      sessions.map((session) => ({
+        id: session.id,
+        sessionFile: session.path,
+        mtimeMs: Date.parse(session.modified),
+      })),
+      { isLocal: isLocallyOwnedSession, ownCrashed: isOwnCrashedSession, excludePids: getOwnChildPids() },
+    );
+    const body = { sessions, runningSessionIds, runningSessions, elsewhereSessions };
     const bodyJson = JSON.stringify(body);
     const etag = `"${createHash("sha1").update(bodyJson).digest("hex").slice(0, 16)}"`;
     if (req.headers.get("if-none-match") === etag) {

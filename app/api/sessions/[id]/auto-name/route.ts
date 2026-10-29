@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { scanSessionInfo, setSessionTitle } from "@/lib/omp/session-files";
 import { deriveSessionTitleFromFirstMessage, sanitizeSessionTitle } from "@/lib/session-title";
-import { getRpcSession, resolveSpawnCwdResult, startRpcSession, WebRpcError } from "@/lib/rpc-manager";
+import { getOwnChildPids, getRpcSession, isLocallyOwnedSession, isOwnCrashedSession, resolveSpawnCwdResult, startRpcSession, WebRpcError } from "@/lib/rpc-manager";
 import { invalidateSessionCaches, readSessionHeader } from "@/lib/session-reader";
+import { detectSessionOwner } from "@/lib/session-owner";
 import { resolveSessionPathOr404 } from "@/lib/api-utils";
 
 /**
@@ -29,6 +30,20 @@ export async function POST(
     if (!rpc?.isAlive?.()) {
       const resolved = await resolveSessionPathOr404(id);
       if ("response" in resolved) return resolved.response;
+      // A title is cosmetic: never spawn a second omp for a session another
+      // process owns (that spawn would fork the conversation on its dispose).
+      // Report the stored title instead, and write nothing to a foreign file.
+      const elsewhere = await detectSessionOwner(id, resolved.filePath, {
+        isLocal: isLocallyOwnedSession,
+        ownCrashed: isOwnCrashedSession,
+        excludePids: getOwnChildPids(),
+      });
+      if (elsewhere) {
+        // No title yet is a valid answer here, not an error: the caller treats
+        // a 200 without a title as a silent no-op (another process owns it).
+        const stored = sanitizeSessionTitle(scanSessionInfo(resolved.filePath, false)?.title) || null;
+        return NextResponse.json({ title: stored, generated: false, usage: null });
+      }
       try {
         const header = readSessionHeader(resolved.filePath);
         const { cwd } = resolveSpawnCwdResult(header?.cwd);

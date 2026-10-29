@@ -111,6 +111,51 @@ function interruptedPath(): string {
   return resolve(getAgentDir(), `omp-web-interrupted-sessions-${process.pid}.json`);
 }
 
+export interface ForeignRunningList {
+  /** The other omp-web instance that wrote the list. */
+  pid: number;
+  ids: string[];
+}
+
+/**
+ * The per-instance running lists of OTHER live omp-web instances sharing this
+ * agent dir. Read-only: the caller must never rename or claim these — that is
+ * `readLeftover()`'s job for its own start, and claiming one here would drop
+ * another instance's resume list. A session listed here is being run by that
+ * instance right now.
+ */
+export function readForeignRunningLists(): ForeignRunningList[] {
+  const dir = getAgentDir();
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const lists: ForeignRunningList[] = [];
+  for (const name of names) {
+    const match = LIST_NAME.exec(name);
+    // The unsuffixed list predates per-instance lists and has no owner pid.
+    if (!match?.[1]) continue;
+    const pid = Number(match[1]);
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
+    const path = resolve(dir, name);
+    if (!ownedByLiveInstance(path, pid)) continue;
+    try {
+      const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
+      const entries = isRecord(raw) && Array.isArray(raw.sessions) ? raw.sessions : [];
+      const ids: string[] = [];
+      for (const entry of entries) {
+        if (isRecord(entry) && typeof entry.id === "string" && isValidSessionId(entry.id)) ids.push(entry.id);
+      }
+      if (ids.length > 0) lists.push({ pid, ids });
+    } catch {
+      // Unreadable mid-write: the next refresh sees the finished file.
+    }
+  }
+  return lists;
+}
+
 function writeInterrupted(sessions: InterruptibleSession[]): void {
   const path = interruptedPath();
   try {

@@ -3,7 +3,8 @@ import fs from "fs";
 import { authorizeFileAccess } from "./file-authorization";
 import { filePathApiSegments } from "./file-paths";
 import { attachNotificationClient } from "./notification-hub";
-import { getExitedRpcSessions, getRpcSession, getRunningRpcSessions, subscribeHostToolCalls, subscribeRunningSessions } from "./rpc-manager";
+import { getExitedRpcSessions, getOwnChildPids, getRpcSession, getRunningRpcSessions, isLocallyOwnedSession, isOwnCrashedSession, notifyRunningChange, subscribeHostToolCalls, subscribeRunningSessions } from "./rpc-manager";
+import { getElsewhereSessions, refreshElsewhereForSessionIds } from "./session-owner";
 import { subscribeSessionFileChanges } from "./session-watcher";
 import {
   MUX_CONTROL_EVENT,
@@ -244,17 +245,29 @@ function openRunningChannel(handle: SubscriptionHandle): SubscribeResult {
   handle.open();
   // Subscribe BEFORE taking the initial snapshot so no state change can slip
   // through the gap between snapshot and subscription.
-  const unsubscribeRunning = subscribeRunningSessions(({ ids, runningSessions, exitedSessions, refreshSessionList }) => {
+  const unsubscribeRunning = subscribeRunningSessions(({ ids, runningSessions, exitedSessions, elsewhereSessions, refreshSessionList }) => {
     handle.send({
       type: "running",
       runningSessionIds: ids,
       runningSessions,
       exitedSessions,
+      elsewhereSessions,
       ...(refreshSessionList ? { refreshSessionList: true } : {}),
     });
   });
   const unsubscribeFiles = subscribeSessionFileChanges((sessionIds) => {
     handle.send({ type: "sessions-changed", sessionIds, refreshSessionList: true });
+    // A write is the moment ownership can change (a foreign omp just started on
+    // the file, or wrote its `session_exit`): re-check, then let the running
+    // broadcast carry the new `elsewhereSessions` to every tab.
+    void refreshElsewhereForSessionIds(sessionIds, {
+      isLocal: isLocallyOwnedSession,
+      ownCrashed: isOwnCrashedSession,
+      excludePids: getOwnChildPids(),
+    }).then(() => notifyRunningChange()).catch(() => {
+      // Same as the self-tick: this chain is fire-and-forget, so a rejection
+      // would be unhandled and end the server. The next file write retries.
+    });
   });
   handle.setDetach(() => {
     unsubscribeRunning();
@@ -266,6 +279,7 @@ function openRunningChannel(handle: SubscriptionHandle): SubscribeResult {
     runningSessionIds: initialRunning.map((session) => session.id),
     runningSessions: initialRunning,
     exitedSessions: getExitedRpcSessions(),
+    elsewhereSessions: getElsewhereSessions(),
   });
   return SUBSCRIBED;
 }

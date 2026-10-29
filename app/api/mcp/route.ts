@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { deleteMcpServer, parseMcpListOutput, readDiscoveredMcpServers, readMcpConfig, readUserMcpConfig, type McpLiveServer, validateMcpServer, writeMcpServer } from "@/lib/omp/mcp-config";
 import { readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
-import { WebRpcError, getRpcSession, resolveSpawnCwdResult, startRpcSession } from "@/lib/rpc-manager";
+import { WebRpcError, getOwnChildPids, getRpcSession, isLocallyOwnedSession, isOwnCrashedSession, resolveSpawnCwdResult, startRpcSession } from "@/lib/rpc-manager";
+import { detectSessionOwner } from "@/lib/session-owner";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { redactMcpServer } from "@/lib/omp/mcp-config";
@@ -85,22 +86,44 @@ export async function GET(request: Request) {
     // /api/agent/[id]): an alive child is reused as-is below, never replaced —
     // listing servers must stay side-effect-free.
     const advisor = params.get("advisor") === "1";
-    let liveServers: ReturnType<typeof parseMcpListOutput> | undefined;
+    let liveServers: McpLiveServer[] | undefined;
     let liveError: string | undefined;
     if (includeLive && sessionId) {
       try {
         let session = getRpcSession(sessionId);
+        let foreignOwned = false;
         if (!session?.isAlive()) {
           const sessionFile = await resolveSessionPath(sessionId);
           if (!sessionFile) throw new Error("Session not found");
-          const header = readSessionHeader(sessionFile);
-          const { cwd } = resolveSpawnCwdResult(header?.cwd);
-          // Fresh spawn only (an alive child is reused above): apply the
-          // caller's advisor opinion so a racing prompt doesn't inherit a
-          // wrong-flag child for its whole turn.
-          ({ session } = await startRpcSession(sessionId, sessionFile, cwd, undefined, advisor, header?.cwd));
+          // Same gate as POST /api/agent/[id]: listing servers must not start a
+          // second writer. omp ≥ 18.5 moves a chat whose file another live
+          // process owns into a copy on its first write — that spawn is exactly
+          // the silent fork the ownership detection exists to prevent.
+          const elsewhere = await detectSessionOwner(sessionId, sessionFile, {
+            isLocal: isLocallyOwnedSession,
+            ownCrashed: isOwnCrashedSession,
+            excludePids: getOwnChildPids(),
+          });
+          if (elsewhere) {
+            // Answer through the existing error path: an empty live list reads
+            // as "no MCP servers" in both clients, so the ownership message is
+            // what makes them fall back to the configured inventory and explain
+            // the missing live status.
+            foreignOwned = true;
+            liveError = "This session is being run by another omp process.";
+          } else {
+            const header = readSessionHeader(sessionFile);
+            const { cwd } = resolveSpawnCwdResult(header?.cwd);
+            // Fresh spawn only (an alive child is reused above): apply the
+            // caller's advisor opinion so a racing prompt doesn't inherit a
+            // wrong-flag child for its whole turn.
+            ({ session } = await startRpcSession(sessionId, sessionFile, cwd, undefined, advisor, header?.cwd));
+          }
         }
-        liveServers = mergeMcpServers(parseMcpListOutput(await session.getMcpList()), inventory);
+        if (!foreignOwned) {
+          if (!session) throw new Error("Session not found");
+          liveServers = mergeMcpServers(parseMcpListOutput(await session.getMcpList()), inventory);
+        }
       } catch (error) {
         liveError = sanitizeMcpLiveError(error);
       }

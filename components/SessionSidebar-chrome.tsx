@@ -398,6 +398,30 @@ function RunningSessionIndicator({ size = 14 }: { size?: number }) {
     </span>
   );
 }
+/** Another omp process owns the session: a hollow ring, distinct from the
+ *  solid running spinner and from the unread dot. */
+function ElsewhereSessionIndicator({ title, size = 14 }: { title: string; size?: number }) {
+  return (
+    <span
+      title={title}
+      aria-label={title}
+      style={{
+        width: size,
+        height: size,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flexShrink: 0,
+        color: "var(--text-muted)",
+      }}
+    >
+      <svg width={size} height={size} viewBox="0 0 14 14" fill="none" aria-hidden="true" style={{ display: "block" }}>
+        <circle cx="7" cy="7" r="4.6" stroke="currentColor" strokeWidth="1.6" opacity="0.75" />
+        <circle cx="7" cy="7" r="1.6" fill="currentColor" opacity="0.55" />
+      </svg>
+    </span>
+  );
+}
 function ExitedSessionIndicator({ title, size = 14 }: { title: string; size?: number }) {
   return (
     <span
@@ -471,6 +495,7 @@ function UnreadSessionIndicator({ size = 14 }: { size?: number }) {
 export {
   OmpWebTitle,
   PathLabel,
+  ElsewhereSessionIndicator,
   ExitedSessionIndicator,
   RunningSessionIndicator,
   RecentlyCompletedIndicator,

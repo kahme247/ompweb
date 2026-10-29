@@ -456,6 +456,31 @@ export interface SessionInfo {
   worktreeBranch?: string;
 }
 
+/**
+ * Who holds a session that this omp-web instance does not run. omp ≥ 18.5 gives
+ * one process the write lease; a second writer silently forks the conversation
+ * into a copy. Reported by GET /api/sessions, the `running` event frame, and
+ * the per-session state routes (409/`elsewhere`).
+ */
+export interface SessionElsewhere {
+  /** Another omp-web instance, or a terminal/harness omp. */
+  kind: "omp-web" | "terminal";
+  /** How it was detected, strongest first. */
+  source: "instance-list" | "process" | "transcript";
+  /** Mid-turn right now. */
+  running: boolean;
+  /** A writer is (or was, within the activity window) present. */
+  active: boolean;
+  /** Last write to the session file, epoch ms — only when the server read the
+   *  transcript tail; absent for an old file that only a live process explains. */
+  lastActivityAt?: number;
+}
+
+/** One entry of `elsewhereSessions` on the session list and running frames. */
+export interface ElsewhereSessionInfo extends SessionElsewhere {
+  id: string;
+}
+
 /** Metadata for a gzip-compressed session in OMP's archive tree. */
 export interface ArchivedSessionInfo {
   key: string;

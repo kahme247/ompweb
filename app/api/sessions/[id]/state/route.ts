@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
-import { getExitedRpcSession, getRpcSession, WebRpcError } from "@/lib/rpc-manager";
+import { getExitedRpcSession, getOwnChildPids, getRpcSession, isLocallyOwnedSession, isOwnCrashedSession, WebRpcError } from "@/lib/rpc-manager";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
+import { resolveSessionPath } from "@/lib/session-reader";
+import { detectSessionOwner } from "@/lib/session-owner";
 
 export async function GET(
   _req: Request,
@@ -15,21 +17,53 @@ export async function GET(
     if (rpc?.isAlive()) {
       try {
         const state = await rpc.send({ type: "get_state" });
-        return NextResponse.json({ running: true, state });
+        // `running` = a run is in flight, `alive` = the child exists. An idle
+        // child that just answered `get_state` is alive and not running; the
+        // flags were reconciled by that answer, so this is authoritative.
+        return NextResponse.json({ running: rpc.isRunning(), alive: true, state, elsewhere: null });
       } catch (error) {
-        if (error instanceof WebRpcError && error.code === "session_unresponsive") {
-          return NextResponse.json({ running: false, recovered: true });
+        // omp being slow is not the run ending: answer 503 so clients retry
+        // instead of treating the session as idle/recovered. Both the code
+        // this tree raises (`session_slow`) and 0.6.0's own
+        // `session_state_timeout` mean the same thing to a client.
+        if (error instanceof WebRpcError && (error.code === "session_slow" || error.code === "session_state_timeout")) {
+          // Same clock as the success body: a blocked child answers nothing,
+          // so the 503 is where a client learns how long the run it still
+          // shows has been silent — and whether there is a run at all.
+          return NextResponse.json({
+            error: error.message,
+            code: "session_slow",
+            ...error.details,
+            running: rpc.isRunning(),
+            // The timeout behind this 503 may have disposed a stalled child;
+            // `alive` is the child, so read it after the catch.
+            alive: rpc.isAlive(),
+            silentForMs: rpc.silentForMs(),
+          }, { status: 503 });
         }
         throw error;
       }
     }
 
     const exited = getExitedRpcSession(id);
-    if (exited) return NextResponse.json({ running: false, exited });
+    if (exited) {
+      // Our own crashed child: it does not make the session local, a foreign
+      // owner still matters (and its spawn must stay blocked).
+      const filePath = await resolveSessionPath(id).catch(() => null);
+      const elsewhere = filePath
+        ? await detectSessionOwner(id, filePath, { isLocal: isLocallyOwnedSession, ownCrashed: isOwnCrashedSession, excludePids: getOwnChildPids() })
+        : null;
+      return NextResponse.json({ running: false, alive: false, exited, elsewhere });
+    }
 
     const resolved = await resolveSessionPathOr404(id);
     if ("response" in resolved) return resolved.response;
-    return NextResponse.json({ running: false });
+    const elsewhere = await detectSessionOwner(id, resolved.filePath, {
+      isLocal: isLocallyOwnedSession,
+      ownCrashed: isOwnCrashedSession,
+      excludePids: getOwnChildPids(),
+    });
+    return NextResponse.json({ running: false, alive: false, elsewhere });
   } catch (error) {
     return apiErrorResponse(error);
   }

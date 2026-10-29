@@ -196,6 +196,9 @@ export type AgentStateResponse = {
   isBashRunning?: boolean;
   isCompacting?: boolean;
   responseObserved?: boolean;
+  /** Milliseconds since the child's last frame while a run is marked (server
+   * frame clock; poll answers do not count). `null` when nothing runs. */
+  silentForMs?: number | null;
   tokensPerSecond?: number | null;
   extensionStatuses?: ExtensionStatusItem[];
   extensionWidgets?: ExtensionWidgetItem[];
@@ -262,6 +265,12 @@ export const PROMPT_SETTLE_INITIAL_DELAY_MS = 800;
 export const PROMPT_SETTLE_POLL_MS = 600;
 export const PROMPT_SETTLE_MAX_MS = 20_000;
 export const AGENT_STATE_RECONCILE_MS = 15_000;
+// A 503 `session_slow` keeps the run marked so the next poll can settle it, but
+// only while there is evidence the run exists: the answer itself carries the
+// server's run state. A server that does not report it (older build) gets this
+// bound — after this many consecutive slow answers the running list, the
+// server's own run registry, decides instead of an "unknown" that never ends.
+export const SLOW_STATE_MAX_ANSWERS = 3;
 // Stop waits at most this long to take queued messages back before aborting.
 export const WITHDRAW_BEFORE_ABORT_MS = 1_500;
 export const BASH_STATE_RECONCILE_MS = 1_000;

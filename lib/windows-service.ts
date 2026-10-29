@@ -122,7 +122,10 @@ export function resolveTaskkillBin(): string {
 
 export function getWindowsExecutionEnv(): NodeJS.ProcessEnv {
   if (process.platform !== "win32") {
-    return process.env;
+    // Same rule as on Windows: a spawned service/scan child must never see
+    // omp-web's own secrets (issue #239) — `ps`, `tailscale` and friends would
+    // otherwise inherit the login hash through PATH-resolved binaries.
+    return createChildProcessEnvironment();
   }
   const sysRoot = getSystemRoot();
   const system32 = path.join(sysRoot, "System32");

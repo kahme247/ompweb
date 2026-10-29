@@ -106,6 +106,8 @@ const world = {
   wrappers: new Map(),
   nativeHistories: new Map(), // isolated, parent-linked native history fixtures
   btwHistory: new Map(), // sid -> BtwRecord[] served by get_btw_history
+  /** `runningSessionIds` of `GET /api/sessions` (the run registry fallback). */
+  runningSessionIds: [],
 };
 
 async function fetchStub(url, init = {}) {
@@ -123,11 +125,26 @@ async function fetchStub(url, init = {}) {
   }
 
   let m;
+  if (u === "/api/sessions" && method === "GET") {
+    return jsonResponse(200, {
+      sessions: [],
+      runningSessionIds: world.runningSessionIds,
+      runningSessions: world.runningSessionIds.map((id) => ({ id, cwd: "/workspace" })),
+      exitedSessions: [],
+      elsewhereSessions: [],
+    });
+  }
   if ((m = u.match(/\/api\/sessions\/([^/?#]+)\/state/))) {
     const wrapper = world.wrappers.get(decodeURIComponent(m[1]));
-    if (wrapper) return jsonResponse(200, { running: wrapper.isAlive(), state: await wrapper.send({ type: "get_state" }) });
-    const a = world.agents.get(decodeURIComponent(m[1])) ?? { running: false, state: {} };
-    return jsonResponse(200, { running: a.running, state: a.state });
+    if (wrapper) return jsonResponse(200, { running: wrapper.isAlive(), alive: wrapper.isAlive(), state: await wrapper.send({ type: "get_state" }) });
+    const a = world.agents.get(decodeURIComponent(m[1]));
+    // A fixture entry without `alive` keeps the pre-split meaning of `running`
+    // ("a child answers"); an idle-but-alive child sets `alive: true`.
+    return jsonResponse(200, {
+      running: a?.running ?? false,
+      alive: a?.alive ?? a?.running ?? false,
+      state: a?.state ?? {},
+    });
   }
   if (/\/api\/sessions\/[^/?#]+\/subagents/.test(u)) {
     return jsonResponse(200, { subagents: [] });
@@ -166,12 +183,18 @@ async function fetchStub(url, init = {}) {
     const sid = decodeURIComponent(m[1]);
     const wrapper = world.wrappers.get(sid);
     if (wrapper) {
-      if (method === "GET") return jsonResponse(200, { running: wrapper.isAlive(), state: await wrapper.send({ type: "get_state" }) });
+      if (method === "GET") return jsonResponse(200, { running: wrapper.isAlive(), alive: wrapper.isAlive(), state: await wrapper.send({ type: "get_state" }) });
       if (method === "POST") return jsonResponse(200, { success: true, data: await wrapper.send(safeParse(init.body)) });
     }
     if (method === "GET") {
-      const a = world.agents.get(sid) ?? { running: false, state: {} };
-      return jsonResponse(200, { running: a.running, state: a.state });
+      const a = world.agents.get(sid);
+      // Same fixture rule as the state route: `running` stays the fallback for
+      // `alive` so pre-split fixtures keep their meaning.
+      return jsonResponse(200, {
+        running: a?.running ?? false,
+        alive: a?.alive ?? a?.running ?? false,
+        state: a?.state ?? {},
+      });
     }
     if (method === "POST") {
       const nativeHistory = world.nativeHistories.get(sid);
@@ -361,6 +384,7 @@ function resetWorld() {
   world.nativeHistories.clear();
   world.btwHistory.clear();
   world.abortRestoreQueue = null;
+  world.runningSessionIds = [];
 }
 
 function primeSession(sid, messages) {
@@ -432,6 +456,23 @@ test("the queue panel shows omp's snapshot on load and follows queue_update, not
   assert.deepEqual(w.latest.queuedMessages, { steering: ["from another device"], followUp: ["later"] });
   await act(() => es.emit({ type: "queue_update", steering: [], followUp: ["later"] }));
   assert.deepEqual(w.latest.queuedMessages, { steering: [], followUp: ["later"] });
+});
+
+test("a 'send anyway' bash message forwards force so a foreign owner accepts the copy", async () => {
+  // The confirmation in ChatInput is the explicit opt-in for `force=1`. A `!`
+  // command took the shell path, which dropped the flag: the POST hit the
+  // ownership gate unforced and came back `session_running_elsewhere` instead of
+  // running the copy the user just confirmed.
+  resetWorld();
+  primeSession("bash-force", [userMsg("u0", "q")]);
+  const w = await mountSession("bash-force");
+  await act(async () => {
+    await w.latest.handleSend("!ls", undefined, { force: true });
+    await sleep(30);
+  });
+  const posts = callsTo("POST", "/api/agent/").filter((call) => call.body?.type === "bash");
+  assert.equal(posts.length, 1, "the shell command reached the agent route");
+  assert.ok(posts[0].url.includes("force=1"), `the confirmed send carries force, got ${posts[0].url}`);
 });
 
 test("a prompt queued behind a running shell command drops the phantom turn and reports it", async () => {
@@ -1338,6 +1379,280 @@ for (const recovered of ["answer", "empty", "absent wrapper"]) {
   });
 }
 
+for (const code of ["session_slow", "session_state_timeout"]) {
+  test(`a 503 ${code} state read on open keeps the transcript, marks the run alive and settles via the poll`, async (t) => {
+    resetWorld();
+    primeSession("s1", [userMsg("u0", "old question"), assistantMsg("a0", "old answer")]);
+    // omp blocks its event loop on a large session until it finishes the turn;
+    // the state route answers "still running, retry later".
+    world.holds.push({
+      match: (method, url) => method === "GET" && url === "/api/sessions/s1/state",
+      produce: async () => ({ status: 503, value: { error: "omp is busy", code, silentForMs: 30 * 60_000 } }),
+    });
+    const consoleError = t.mock.method(console, "error", () => {});
+
+    const w = await mountSession("s1");
+
+    assert.equal(w.latest.loading, false, "hydration completes despite the busy child");
+    assert.equal(w.latest.error, null, "a busy session must not paint a load error");
+    assert.deepEqual(w.latest.messages.map((m) => m.role), ["user", "assistant"], "the transcript still comes from disk");
+    assert.equal(w.latest.agentRunning, true, "the live run stays marked (state unknown, not ended)");
+    assert.equal(w.latest.agentSilentMs, 30 * 60_000, "the busy answer carries how long omp has been silent");
+    assert.equal(world.esInstances.length, 1, "the observer stream attaches so frames still arrive");
+    assert.equal(consoleError.mock.callCount(), 0, "a busy child must not be a console error");
+
+    // The periodic reconcile poll answers once omp drains its loop: the run
+    // settles silently instead of staying a phantom forever.
+    await act(async () => {
+      window.dispatchEvent(new Event("online"));
+      await sleep(60);
+    });
+    await settle();
+    assert.equal(w.latest.agentRunning, false, "the poll settles the run once omp answers again");
+    assert.deepEqual(w.latest.notices.filter((n) => n.type === "error"), [], "settling a slow session is not a failure");
+  });
+}
+
+test("a busy reconcile poll keeps the run marked and reports how long omp has been silent", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "start it")]);
+  const { w } = await startRun("s1", "go on");
+  // omp's event loop is blocked, so the poll answers 503 `session_slow`. That
+  // must neither end the run nor hide the frame clock the answer carries —
+  // a blocked child produces no other report at all.
+  // Every poll hits the blocked child (a one-shot hold would let the gauge
+  // sampler see a healthy answer instead), so the answer is re-armed each time.
+  const busyPoll = { status: 503, value: { error: "omp is busy", code: "session_slow", silentForMs: 2 * 60 * 60_000 } };
+  const armBusyPoll = () => world.holds.push({
+    match: (method, url) => method === "GET" && url === "/api/agent/s1",
+    produce: async () => { armBusyPoll(); return busyPoll; },
+  });
+  armBusyPoll();
+  await act(async () => {
+    window.dispatchEvent(new Event("online"));
+    await sleep(60);
+  });
+  await settle();
+  assert.equal(w.latest.agentRunning, true, "a busy poll must not end the run");
+  assert.equal(w.latest.agentSilentMs, 2 * 60 * 60_000, "the busy answer's frame clock reaches the status line");
+  assert.deepEqual(w.latest.notices.filter((n) => n.type === "error"), [], "a busy child is not an error");
+
+  // The 2 s gauge sampler hits the same 503 between two reconciles. A sample
+  // that carries no state must not clear the clock the reconcile delivered, or
+  // "silent since" flickers once per sampler tick.
+  await act(async () => { await sleep(2300); });
+  assert.equal(w.latest.agentSilentMs, 2 * 60 * 60_000, "a stateless sample keeps the silence value");
+  w.unmount();
+});
+
+test("a 503 that reports no run in flight does not mark an idle child as working", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "old question"), assistantMsg("a0", "old answer")]);
+  // The fresh-spawn case from the report: omp is alive but still loading a
+  // large session, so `get_state` times out while nothing is running. `running`
+  // in the body is the server's run registry answering "no turn".
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === "/api/sessions/s1/state",
+    produce: async () => ({ status: 503, value: { error: "omp is busy", code: "session_slow", running: false, alive: true, silentForMs: 0 } }),
+  });
+
+  const w = await mountSession("s1");
+
+  assert.equal(w.latest.loading, false, "hydration completes despite the busy child");
+  assert.deepEqual(w.latest.messages.map((m) => m.role), ["user", "assistant"], "the transcript still comes from disk");
+  assert.equal(w.latest.agentRunning, false, "no run in flight is not a run");
+  assert.equal(w.latest.agentSilentMs, null, "an idle child has no run whose silence could be reported");
+  assert.equal(world.esInstances.length, 1, "the living child is observed, exactly as on the 200 mount path");
+  assert.equal(world.esInstances[0].channel.sessionId, "s1");
+
+  // The observer is what turns a run another tab starts into this tab's state.
+  await act(async () => {
+    lastEs().open();
+    lastEs().emit({ type: "agent_start" });
+  });
+  await settle();
+  assert.equal(w.latest.agentRunning, true, "a run announced on the observer marks the session");
+  w.unmount();
+});
+
+test("an idle but living child still gets an observer stream on the mount", async () => {
+  resetWorld();
+  // The idle wrapper a second client is looking at: no turn in flight, but the
+  // child exists and will broadcast the frames of a run another tab starts.
+  primeSession("s1", [userMsg("u0", "old question"), assistantMsg("a0", "old answer")]);
+  world.agents.set("s1", { running: false, alive: true, state: { slowModeSupported: true } });
+
+  const w = await mountSession("s1");
+
+  assert.equal(w.latest.agentRunning, false, "an idle child is not a run in flight");
+  assert.equal(world.esInstances.length, 1, "a living child is observed even while it is idle");
+  assert.equal(world.esInstances[0].channel.sessionId, "s1");
+  assert.equal(w.latest.agentSilentMs, null, "an idle child has no run whose silence could be reported");
+});
+
+test("a reconcile 503 that reports no run in flight settles the run", async () => {
+  resetWorld();
+  // A live child with a turn this client sees through its stream: the mount
+  // marks it running without starting the post-send settlement loop.
+  primeSession("s1", [userMsg("u0", "go"), assistantMsg("a1", "answered while the frame was lost")]);
+  world.agents.set("s1", { running: true, alive: true, state: { isStreaming: true } });
+  const w = await mountSession("s1");
+  assert.equal(w.latest.agentRunning, true, "the mounted run is marked");
+
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === "/api/agent/s1",
+    produce: async () => ({ status: 503, value: { error: "omp is busy", code: "session_slow", running: false, alive: true } }),
+  });
+  // The blocked child answers no poll at all: the settlement's own state read
+  // fails too, so only the 503's `running:false` can end the run.
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === "/api/sessions/s1/state",
+    produce: async () => ({ status: 503, value: { error: "omp is busy", code: "session_slow", running: false, alive: true } }),
+  });
+  await act(async () => {
+    window.dispatchEvent(new Event("online"));
+    await sleep(60);
+  });
+  await settle();
+  assert.equal(w.latest.agentRunning, false, "the authoritative answer ended the run");
+  assert.equal(w.latest.agentSilentMs, null, "an ended run has no silence to report");
+  assert.deepEqual(w.latest.notices.filter((n) => n.type === "error"), [], "settling an idle child is not an error");
+});
+
+test("an authoritative idle settles a run that produced nothing this client can read", async () => {
+  resetWorld();
+  // A run the client sees through its stream, with no answer yet: the
+  // transcript holds only the prompt, so a failed reload proves nothing.
+  primeSession("s1", [userMsg("u0", "go")]);
+  world.agents.set("s1", { running: true, alive: true, state: { isStreaming: true } });
+  const w = await mountSession("s1");
+  assert.equal(w.latest.agentRunning, true, "the mounted run is marked");
+
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === "/api/agent/s1",
+    produce: async () => ({ status: 503, value: { error: "omp is busy", code: "session_slow", running: false, alive: true } }),
+  });
+  // Every read of the blocked child fails, including the settlement's own two.
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === "/api/sessions/s1/state",
+    produce: async () => ({ status: 503, value: { error: "omp is busy", code: "session_slow", running: false, alive: true } }),
+  });
+  await act(async () => {
+    window.dispatchEvent(new Event("online"));
+    await sleep(60);
+  });
+  await settle();
+
+  assert.equal(w.latest.agentRunning, false, "the server's no-run answer ends the run even with no readable transcript");
+  assert.deepEqual(w.latest.notices.filter((n) => n.type === "error"), [], "an unreadable empty run is never claimed as a failure");
+  assert.deepEqual(
+    w.latest.notices.filter((n) => n.type === "warning").map((n) => n.message),
+    ["omp is busy — your message may still be running."],
+    "what stays unknown (whether the turn answered) is stated once",
+  );
+});
+
+test("a 503 without a run state is bounded by the running list instead of staying working", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "go"), assistantMsg("a1", "answered long ago")]);
+  world.agents.set("s1", { running: true, alive: true, state: { isStreaming: true } });
+  const w = await mountSession("s1");
+  assert.equal(w.latest.agentRunning, true);
+
+  const registryCalls = () => world.calls.filter((c) => c.method === "GET" && c.url === "/api/sessions").length;
+  const slowAnswer = () => {
+    // An older server answers without `running`: "unknown" is all the client gets.
+    world.holds.push({
+      match: (method, url) => method === "GET" && url === "/api/agent/s1",
+      produce: async () => ({ status: 503, value: { error: "omp is busy", code: "session_slow", silentForMs: 4 * 60 * 60_000 } }),
+    });
+  };
+  const poll = async () => {
+    slowAnswer();
+    await act(async () => {
+      window.dispatchEvent(new Event("online"));
+      await sleep(60);
+    });
+    await settle();
+  };
+  // The registry says nothing runs: the run the client still shows is a ghost.
+  world.runningSessionIds = [];
+
+  await poll();
+  await poll();
+  assert.equal(w.latest.agentRunning, true, "under the bound the run stays marked");
+  assert.equal(registryCalls(), 0, "the registry is only consulted once the bound is exceeded");
+
+  // Every poll of the blocked child fails, including the settlement's state read.
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === "/api/sessions/s1/state",
+    produce: async () => ({ status: 503, value: { error: "omp is busy", code: "session_slow", running: false, alive: true } }),
+  });
+  await poll(); // third consecutive answer: the bound is exceeded
+  assert.equal(registryCalls(), 1, "the run registry is consulted at the bound");
+  assert.equal(w.latest.agentRunning, false, "a session the registry does not run is not kept as working");
+});
+
+test("the slow-answer bound keeps a run the running list still names", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "go"), assistantMsg("a1", "long answer")]);
+  world.agents.set("s1", { running: true, alive: true, state: { isStreaming: true } });
+  const w = await mountSession("s1");
+
+  const registryCalls = () => world.calls.filter((c) => c.method === "GET" && c.url === "/api/sessions").length;
+  world.runningSessionIds = ["s1"];
+  for (let i = 0; i < 3; i += 1) {
+    world.holds.push({
+      match: (method, url) => method === "GET" && url === "/api/agent/s1",
+      produce: async () => ({ status: 503, value: { error: "omp is busy", code: "session_slow", silentForMs: 90_000 } }),
+    });
+    await act(async () => {
+      window.dispatchEvent(new Event("online"));
+      await sleep(60);
+    });
+    await settle();
+  }
+  assert.equal(registryCalls(), 1, "the registry answered");
+  assert.equal(w.latest.agentRunning, true, "a run the registry still reports keeps its working state");
+
+  // The bound restarts after the registry confirmed the run: no request per poll.
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === "/api/agent/s1",
+    produce: async () => ({ status: 503, value: { error: "omp is busy", code: "session_slow", silentForMs: 91_000 } }),
+  });
+  await act(async () => {
+    window.dispatchEvent(new Event("online"));
+    await sleep(60);
+  });
+  await settle();
+  assert.equal(registryCalls(), 1, "a confirmed run does not re-ask on the next slow answer");
+  assert.equal(w.latest.agentRunning, true);
+});
+
+test("a run omp keeps answering while it emits no frames shows how long it has been silent", { timeout: 10_000 }, async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "start it")]);
+  const { w } = await startRun("s1", "go on");
+  // The 2026-10-28 phantom: omp's RPC loop kept answering `get_state` (so the
+  // watchdog and every poll saw a live child) while the run itself emitted
+  // nothing for hours. The server's frame clock rides along as `silentForMs`;
+  // the status line needs it to say "no events for 30 min" instead of a bare
+  // "Thinking…".
+  world.agents.set("s1", { running: true, state: { isStreaming: true, silentForMs: 30 * 60_000 } });
+  await act(async () => {
+    await sleep(2200); // the 2 s gauge sample
+  });
+  assert.equal(w.latest.agentSilentMs, 30 * 60_000, "the server's frame silence reaches the status line");
+
+  // A run that reports nothing below the threshold keeps the phase alone.
+  world.agents.set("s1", { running: true, state: { isStreaming: true, silentForMs: null } });
+  await act(async () => {
+    await sleep(2200);
+  });
+  assert.equal(w.latest.agentSilentMs, null, "a null sample clears it again");
+  w.unmount();
+});
+
 for (const result of ["visible answer", "provider failure"]) {
   test(`${result} still settles when the state request fails`, async () => {
     resetWorld();
@@ -1737,6 +2052,33 @@ test("ISSUE #187 the context ring fills mid-run while the agent is still streami
   await settle();
   assert.deepEqual(w.latest.contextUsage, { percent: 42, contextWindow: 200000, tokens: 84000 });
   assert.equal(w.latest.agentRunning, true, "applying usage must not finish a busy run");
+});
+
+test("a 503 session_slow reconcile poll keeps the run alive instead of ending it", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  const { w, es } = await startRun("s1", "q1");
+  await act(async () => {
+    es.emit({ type: "agent_start" });
+    es.emit({ type: "message_update", message: assistantMsg("a1", "streaming") });
+    await Promise.resolve();
+  });
+  await settle(90);
+
+  // omp blocks its loop for tens of seconds on a large session, so the poll
+  // route answers 503 session_slow. That means "still running, retry later" —
+  // it must never finish the turn or show an error.
+  world.holds.push({
+    match: (method, url) => method === "GET" && url.includes("/api/agent/s1"),
+    produce: () => ({ status: 503, value: { error: "omp is busy", code: "session_slow" } }),
+  });
+  await act(async () => {
+    es.emit({ type: "todo_reminder" }); // triggers the mid-run reconcile poll
+    await sleep(30);
+  });
+  await settle();
+  assert.equal(w.latest.agentRunning, true, "a slow poll must not finish the run");
+  assert.deepEqual(w.latest.notices.filter((n) => n.type === "error"), []);
 });
 
 test("fatal SSE error mid-run reconnects after 1s and the new stream delivers events", async () => {
@@ -4529,6 +4871,141 @@ test("overlapping Stops share one atomic withdrawal; an image-only entry does no
   assert.equal(world.calls.filter((c) => c.body?.type === "abort_and_restore_queue").length, 1);
   assert.equal(getDraft("abort-atomic-twice")?.value, "words");
   clearDraft("abort-atomic-twice");
+});
+
+test("an atomic Stop omp did not confirm warns instead of claiming the run stopped", async () => {
+  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { translate } = await jiti.import("@/lib/i18n");
+  resetWorld();
+  clearDraft("abort-unconfirmed");
+  primeSession("abort-unconfirmed", [userMsg("u0", "loaded question")]);
+  const { w } = await startRun("abort-unconfirmed", "hello agent");
+  // omp is too busy to answer: neither the stop nor the state of its queue is known.
+  world.holds.push({
+    match: isAtomicStop,
+    produce: async () => ({
+      status: 400,
+      value: {
+        error: "omp is busy and did not answer the abort in time; the abort is not confirmed and the session keeps running.",
+        code: "session_slow",
+        abortUnconfirmed: true,
+      },
+    }),
+  });
+
+  await act(async () => { await w.latest.handleAbort(); });
+
+  assert.deepEqual(w.latest.notices.map((n) => [n.type, n.message]), [
+    ["warning", translate("agentSession.abortUnconfirmed")],
+  ]);
+  // Retrying a busy child would only keep the Stop pending; and a queue guess
+  // (per-entry withdrawal, a restored draft) would be wrong.
+  assert.equal(world.calls.filter((c) => c.body?.type === "abort_and_restore_queue").length, 1);
+  assert.equal(world.calls.some((c) => c.body?.type === "remove_queued_message"), false);
+  assert.equal(world.calls.some((c) => c.body?.type === "abort"), false);
+  assert.equal(getDraft("abort-unconfirmed"), null);
+  assert.equal(w.latest.agentRunning, true, "an unconfirmed stop never ends the run locally");
+  clearDraft("abort-unconfirmed");
+});
+
+test("a fallback Stop whose abort omp did not confirm warns as well", async () => {
+  const { translate } = await jiti.import("@/lib/i18n");
+  resetWorld();
+  primeSession("abort-unconfirmed-fallback", [userMsg("u0", "loaded question")]);
+  const { w } = await startRun("abort-unconfirmed-fallback", "hello agent");
+  // omp without abort_and_restore_queue: the fallback aborts per entry, and
+  // that abort is the one omp never answered.
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "abort",
+    produce: async () => ({
+      status: 400,
+      value: {
+        error: "omp is busy and did not answer the abort in time; the abort is not confirmed and the session keeps running.",
+        code: "session_slow",
+        abortUnconfirmed: true,
+      },
+    }),
+  });
+
+  await act(async () => { await w.latest.handleAbort(); });
+
+  assert.deepEqual(w.latest.notices.map((n) => [n.type, n.message]), [
+    ["warning", translate("agentSession.abortUnconfirmed")],
+  ]);
+  assert.equal(w.latest.agentRunning, true);
+});
+
+test("an interrupt-and-reply whose ack timed out keeps its bubble and its pending guard", async () => {
+  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { translate } = await jiti.import("@/lib/i18n");
+  resetWorld();
+  clearDraft("interrupt-maybe-started");
+  primeSession("interrupt-maybe-started", [userMsg("u0", "loaded question")]);
+  const { w } = await startRun("interrupt-maybe-started", "hello agent");
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "abort_and_prompt",
+    produce: async () => ({
+      status: 400,
+      value: {
+        error: "omp is busy and did not acknowledge the message in time; it may still be running.",
+        code: "session_slow",
+        maybeStarted: true,
+      },
+    }),
+  });
+
+  let submission;
+  await act(async () => {
+    submission = w.latest.handleInterruptAndReply("replacement");
+    await sleep(30);
+  });
+  let accepted;
+  // The send opens its own event stream and waits for it before dispatching.
+  await act(async () => {
+    lastEs().open();
+    accepted = await submission;
+  });
+
+  assert.equal(accepted, true, "a maybe-started interrupt is not a failed send");
+  assert.equal(w.latest.messages.at(-1).content, "replacement", "the optimistic bubble stays");
+  assert.equal(getDraft("interrupt-maybe-started"), null, "the text is not handed back to the composer");
+  assert.deepEqual(w.latest.notices.map((n) => [n.type, n.message]), [
+    ["warning", translate("agentSession.maybeStarted")],
+  ]);
+  assert.equal(w.latest.agentRunning, true);
+
+  // The interrupt guard stays: the old turn's terminal end may still arrive
+  // and must not end the replacement run's lock early.
+  await act(async () => { lastEs().emit({ type: "agent_end", isTerminal: true }); });
+  await settle();
+  assert.equal(w.latest.agentRunning, true, "the pending-interrupt guard is kept");
+  clearDraft("interrupt-maybe-started");
+});
+
+test("a steer whose ack timed out is reported as maybe delivered, not as failed", async () => {
+  const { translate } = await jiti.import("@/lib/i18n");
+  resetWorld();
+  primeSession("steer-maybe", [userMsg("u0", "loaded question")]);
+  const { w } = await startRun("steer-maybe", "hello agent");
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "steer",
+    produce: async () => ({
+      status: 400,
+      value: {
+        error: "omp is busy and did not acknowledge the message in time; it may still be running.",
+        code: "session_slow",
+        maybeStarted: true,
+      },
+    }),
+  });
+
+  let accepted;
+  await act(async () => { accepted = await w.latest.handleSteer("also check the tests"); });
+
+  assert.equal(accepted, true, "a maybe-delivered steer is not a failed send");
+  assert.deepEqual(w.latest.notices.map((n) => [n.type, n.message]), [
+    ["warning", translate("agentSession.maybeStarted")],
+  ]);
 });
 
 function skillDiagnosticsSnapshot(showStartupDiagnostics, name = "review") {

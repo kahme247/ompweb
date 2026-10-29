@@ -11,6 +11,7 @@ import { ConfirmDialog } from "@/components/ui/field";
 import { useDictation } from "@/hooks/useDictation";
 import { toastBtwError } from "@/hooks/useBtw";
 import type { GenerationSpeedInfo, SessionStatsInfo, SlowModeScope, UsageLimitState } from "@/lib/pi-types";
+import type { SessionElsewhere } from "@/lib/types";
 import type { SttAfter } from "@/lib/stt";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { ContextDetailPanel } from "./ComposerPanels";
@@ -151,7 +152,10 @@ const TOOL_PRESET_OPTIONS: Array<{ value: ToolPreset; descriptionKey: string }> 
 
 interface Props {
   /** Only a rejected submission is restored; completed/superseded runs must not be replayed. */
-  onSend: (message: string, images?: AttachedImage[]) => Promise<PromptSubmissionResult>;
+  onSend: (message: string, images?: AttachedImage[], options?: { force?: boolean }) => Promise<PromptSubmissionResult>;
+  /** Another omp process owns this session: the composer blocks and offers an
+   *  explicit "send anyway (copy)" instead of forking the conversation. */
+  foreignRun?: SessionElsewhere | null;
   /** Ghost-text word completion for the draft (omp `predict_word`); absent = no ghost text. */
   onPredictWord?: PredictWord;
   onPredictWordFeedback?: PredictWordFeedback;
@@ -330,7 +334,7 @@ function menuDropStyle(placement: MenuPlacement, maxHeight: number | null): Reac
 }
 
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onPredictWord, onPredictWordFeedback, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, fastModeEnabled, fastModeActive, usageLimit, fastModeSupported, onFastModeChange, slowModeSupported, slowModeEnabled, slowModeScope, onSlowModeChange,
+  onSend, foreignRun, onPredictWord, onPredictWordFeedback, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, fastModeEnabled, fastModeActive, usageLimit, fastModeSupported, onFastModeChange, slowModeSupported, slowModeEnabled, slowModeScope, onSlowModeChange,
   onAbortCompaction, isCompacting, compactResult,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
   toolPreset, onToolPresetChange,
@@ -400,6 +404,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     [locale],
   );
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
+  // "Send anyway (copy)" confirmation: only an explicit click here sets force.
+  const [foreignConfirmOpen, setForeignConfirmOpen] = useState(false);
+  useEffect(() => {
+    if (!foreignRun) setForeignConfirmOpen(false);
+  }, [foreignRun]);
   const [queuedDeleteTarget, setQueuedDeleteTarget] = useState<{
     text: string;
     kind: "follow-up" | "steer";
@@ -966,6 +975,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const msg = raw.trim();
     if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length) return;
     if (submissionBlockedRef.current || isStreaming) return;
+    if (foreignRun) {
+      // Another omp process owns this file; sending would move the conversation
+      // into a copy. Keep the draft and ask for the explicit override.
+      setForeignConfirmOpen(true);
+      return;
+    }
     onAudioUnlock?.();
     if (sendSideQuestion(msg, overrideText)) return;
     const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFilesRef.current);
@@ -991,7 +1006,31 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (key) recoverDraft(key, recovery);
       throw error;
     }
-  }, [value, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, rejectsOversizedPrompt, runBuiltinCommand, sendSideQuestion]);
+  }, [value, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, rejectsOversizedPrompt, runBuiltinCommand, sendSideQuestion, foreignRun]);
+
+  /** The user confirmed the copy: send the draft with the explicit override. */
+  const confirmSendAnyway = useCallback(() => {
+    const msg = value.trim();
+    if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length) return;
+    if (submissionBlockedRef.current || isStreaming) return;
+    setForeignConfirmOpen(false);
+    onAudioUnlock?.();
+    const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFilesRef.current);
+    if (rejectsOversizedPrompt(composedMessage, attachedImagesRef.current)) return;
+    const key = draftKeyRef.current;
+    const images = attachedImagesRef.current.length ? attachedImagesRef.current : undefined;
+    const recovery = { text: composedMessage, images: images?.map(imageToDraftImage) };
+    const pending = onSend(composedMessage, images, { force: true });
+    clearInput();
+    pending.then((result) => {
+      if (result.status !== "rejected") return;
+      const destination = result.recoveryKey ?? key;
+      if (destination) recoverDraft(destination, recovery);
+    }).catch((error) => {
+      if (key) recoverDraft(key, recovery);
+      console.error("[chatInput] forced send failed", error);
+    });
+  }, [value, isStreaming, onSend, clearInput, onAudioUnlock, rejectsOversizedPrompt]);
   const {
     isRecording,
     isPaused,
@@ -2787,6 +2826,50 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             )}
           </div>
         )}
+        {/* Foreign ownership: another omp process holds this session's file */}
+        {foreignRun && (
+          <div
+            role="status"
+            aria-live="polite"
+            style={{
+              border: "1px solid color-mix(in srgb, var(--accent) 45%, transparent)",
+              borderBottom: "none",
+              borderRadius: queuedCount > 0 ? 0 : "var(--radius-card) var(--radius-card) 0 0",
+              background: "color-mix(in srgb, var(--accent) 8%, var(--bg-panel))",
+              padding: "7px 14px",
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              fontSize: 12,
+              color: "var(--text)",
+            }}
+          >
+            <span aria-hidden className="live-status-dot live-pulse inline-block h-2 w-2 shrink-0 rounded-full bg-accent" />
+            <span style={{ minWidth: 0, flex: 1 }}>
+              <strong style={{ fontWeight: 600 }}>{t("sessionOwnership.bannerTitle")}</strong>{" "}
+              <span style={{ color: "var(--text-muted)" }}>{t("sessionOwnership.bannerBody")}</span>
+            </span>
+            <button
+              type="button"
+              className="ui-focus-ring"
+              onClick={() => setForeignConfirmOpen(true)}
+              disabled={!(value.trim() || attachedImages.length || attachedTextFiles.length)}
+              title={t("sessionOwnership.sendAnywayConfirm")}
+              style={{
+                flexShrink: 0,
+                padding: "3px 10px",
+                background: "var(--bg)",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-control)",
+                color: "var(--text)",
+                cursor: "pointer",
+                fontSize: 12,
+              }}
+            >
+              {t("sessionOwnership.sendAnyway")}
+            </button>
+          </div>
+        )}
         {/* Live agent status bar — attached to composer's top edge */}
         {statusText && (
           <div
@@ -2819,7 +2902,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               flexDirection: "column",
               background: "var(--bg)",
               border: `1px solid ${bashMode ? "var(--tool-bg)" : "color-mix(in srgb, var(--border) 70%, transparent)"}`,
-              borderRadius: (queuedCount > 0 || Boolean(statusText)) ? "0 0 var(--radius-card) var(--radius-card)" : "var(--radius-card)",
+              borderRadius: (queuedCount > 0 || Boolean(statusText) || Boolean(foreignRun)) ? "0 0 var(--radius-card) var(--radius-card)" : "var(--radius-card)",
               padding: "12px 12px 10px",
               boxShadow: "var(--shadow-card)",
             } as React.CSSProperties}
@@ -3597,8 +3680,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 type="button"
                 className="composer-primary-action"
                 onClick={isRecording || isPaused || isReviewing ? () => stopAndFinishDictation("send") : () => void handleSend()}
-                disabled={submissionBlocked || isTranscribing || !(isRecording || isPaused || isReviewing || value.trim() || attachedImages.length || attachedTextFiles.length)}
-                title={isRecording || isPaused || isReviewing ? t("chatInput.sendDictation") : t("chatInput.send")}
+                disabled={submissionBlocked || isTranscribing || Boolean(foreignRun) || !(isRecording || isPaused || isReviewing || value.trim() || attachedImages.length || attachedTextFiles.length)}
+                title={foreignRun
+                  ? t("sessionOwnership.bannerTitle")
+                  : isRecording || isPaused || isReviewing ? t("chatInput.sendDictation") : t("chatInput.send")}
                 style={{
                   display: "flex", alignItems: "center", gap: 6,
                   background: (isRecording || isPaused || isReviewing || isTranscribing || value.trim() || attachedImages.length || attachedTextFiles.length) ? "var(--accent-strong)" : "var(--bg-panel)",
@@ -3633,6 +3718,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             {bashExcluded ? t("chatInput.shellLocal") : t("chatInput.shellToModel")}
           </div>
         )}
+
+        {/* Explicit override: sending now continues in a COPY of the session. */}
+        <ConfirmDialog
+          open={foreignConfirmOpen}
+          onOpenChange={setForeignConfirmOpen}
+          title={t("sessionOwnership.sendAnyway")}
+          description={`${t("sessionOwnership.bannerBody")}\n\n${t("sessionOwnership.sendAnywayConfirm")}`}
+          confirmLabel={t("sessionOwnership.sendAnyway")}
+          cancelLabel={t("chatWindow.cancel")}
+          danger
+          onConfirm={confirmSendAnyway}
+        />
 
 
       </div>
