@@ -389,8 +389,9 @@ const ORPHAN_KILL_GRACE_MS = 5_000;
  * Spec Rules → Reattach. Listed channels this server has a transport for carry
  * on unchanged. A spawned child the daemon no longer lists died while the link
  * was down: its transport gets a synthesized exit, marked `lost`. Listed
- * channels without a transport are orphans of a restart of this server and are
- * killed; they stay registered until their `exit` (see orphanExit).
+ * channels without a transport are children of a previous run of this server:
+ * adopted (see adopt), or killed as orphans when that is not possible. Either
+ * way they stay registered until their `exit` (see orphanExit).
  */
 function reattach(link: Link, listed: HelloChannel[]): void {
   const live = new Set(listed.map(({ ch }) => ch));
@@ -401,16 +402,45 @@ function reattach(link: Link, listed: HelloChannel[]): void {
     transport.lost = true;
     transport.deliverExit(null, null);
   }
-  for (const { ch, sessionId } of listed) {
+  // Asked once per hello, and fresh: a cached list may still hold a session deleted since.
+  let sessions: Promise<SessionInfo[]> | undefined;
+  const listSessions = () => (sessions ??= link.host.sessionOps.listSessions());
+  for (const { ch, sessionId, pending } of listed) {
     if (link.channels.has(ch)) continue;
-    const orphan = new RemoteRpcTransport(link.id, ch, sessionId);
-    orphan.spawned = true;
-    orphan.orphaned = true;
-    link.channels.set(ch, orphan);
-    orphan.killTree(false);
-    const escalate = setTimeout(() => orphan.killTree(true), ORPHAN_KILL_GRACE_MS);
-    escalate.unref?.();
-    orphan.onExit(() => clearTimeout(escalate));
+    const child = new RemoteRpcTransport(link.id, ch, sessionId);
+    child.spawned = true;
+    link.channels.set(ch, child);
+    // A null `pending` lost open requests to the daemon's cap: adopted, the run would wait on them forever.
+    if (sessionId && pending) child.adoption = adopt(link, child, sessionId, pending, listSessions);
+    else killOrphan(child);
+  }
+}
+
+function killOrphan(orphan: RemoteRpcTransport): void {
+  orphan.orphaned = true;
+  orphan.killTree(false);
+  const escalate = setTimeout(() => orphan.killTree(true), ORPHAN_KILL_GRACE_MS);
+  escalate.unref?.();
+  orphan.onExit(() => clearTimeout(escalate));
+}
+
+/** Spec "Adopting live children": a session wrapper takes the child over; one
+ * that cannot (unknown session, failed re-sync) is killed. True when adopted. */
+async function adopt(link: Link, child: RemoteRpcTransport, sessionId: string, replay: string[], listSessions: () => Promise<SessionInfo[]>): Promise<boolean> {
+  try {
+    // rpc-manager imports this module. Awaiting it also defers the lookup past
+    // openDownlink, which marks the link up (ops need it) after reattach.
+    const { adoptRpcSession } = await import("../rpc-manager");
+    // shortcut: a start of this session during the lookup takes its lock first, so adoptRpcSession
+    // refuses and the child is killed and resumed; hold the start lock across the lookup if that shows up.
+    const session = (await listSessions()).find((entry) => entry.id === sessionId);
+    if (!session) throw new Error("its session is unknown");
+    await adoptRpcSession({ host: link.host, transport: child, sessionId, cwd: session.cwd, replay });
+    return true;
+  } catch (error) {
+    console.warn(`[omp-web] killing the omp child of session ${sessionId} on ${labelOf(link.id)}: it could not be adopted (${error instanceof Error ? error.message : String(error)})`);
+    killOrphan(child);
+    return false;
   }
 }
 
@@ -638,14 +668,16 @@ export class RemoteRpcTransport implements RpcTransport {
   get id(): string {
     return this.ch;
   }
-  /** Set for an orphan the daemon listed in `hello` (the session it runs); null for children this server spawned. */
+  /** Set for a child of a previous run the daemon listed in `hello` (the session it runs); null for children this server spawned. */
   readonly sessionId: string | null;
   /** The daemon confirmed the spawn (or listed the channel); until then a `hello` without it is not a loss. */
   spawned = false;
   /** The daemon stopped listing this child: it died while the link was down. Set before the synthesized exit. */
   lost = false;
-  /** Killed on sight: a child of a previous run of this server. Its output has no reader and is dropped. */
+  /** Killed: a child of a previous run of this server that it could not adopt. Its output has no reader and is dropped. */
   orphaned = false;
+  /** A listed child being taken over (see reattach): resolves true once adopted, false once killed instead. */
+  adoption: Promise<boolean> | null = null;
   private readonly lineListeners: Array<(line: string) => void> = [];
   private readonly stderrListeners: Array<(chunk: string) => void> = [];
   private readonly exitListeners: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = [];
@@ -897,8 +929,8 @@ export function onHostsChange(listener: () => void): () => void {
   };
 }
 
-/** Fires on every accepted hello with the omp children the daemon still runs.
- * Listeners run after reattach: lost channels have exited and orphans are being killed. */
+/** Fires on every accepted hello with the omp children the daemon still runs. Listeners
+ * run after reattach: lost channels have exited, the rest are being adopted or killed. */
 export function onHostHello(listener: (hostId: string, channels: HelloChannel[]) => void): () => void {
   const listeners = hub().helloListeners;
   listeners.add(listener);
@@ -907,27 +939,34 @@ export function onHostHello(listener: (hostId: string, channels: HelloChannel[])
   };
 }
 
-/** Resolves once every orphan of `sessionId` the host listed in a hello has exited.
+/** Whether this server adopted a child of `sessionId` the host listed in a hello; waits for an adoption still running. */
+export async function adoptedChild(hostId: string, sessionId: string): Promise<boolean> {
+  const listed = [...(hub().links.get(hostId)?.channels.values() ?? [])].filter((child) => child.sessionId === sessionId);
+  return (await Promise.all(listed.map((child) => child.adoption))).includes(true);
+}
+
+/** Resolves once every child of `sessionId` the host listed in a hello has exited or been adopted.
  * Rejects with 503 if the host goes offline first: waiting through an outage
  * would hold the session's start lock until the host redials. */
 export async function orphanExit(hostId: string, sessionId: string): Promise<void> {
   const link = hub().links.get(hostId);
-  const orphans = [...(link?.channels.values() ?? [])].filter((transport) => transport.sessionId === sessionId);
-  if (!link || orphans.length === 0) return;
-  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  const listed = [...(link?.channels.values() ?? [])].filter((child) => child.sessionId === sessionId);
+  if (!link || listed.length === 0) return;
+  const { promise: offline, reject } = Promise.withResolvers<never>();
   const onStatus = (status: HostStatus) => {
     if (!isLinkUp(status)) reject(new HostOpError(503, "host_offline", `${labelOf(hostId)} is offline`));
   };
   onStatus(link.status);
   link.statusListeners.add(onStatus);
-  let running = orphans.length;
-  for (const orphan of orphans) {
-    orphan.onExit(() => {
-      if (--running === 0) resolve();
-    });
-  }
+  const gone = listed.map((child) => {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    child.onExit(() => resolve());
+    // An adopted child runs the live session: not an orphan to wait for.
+    void child.adoption?.then((adopted) => adopted && resolve());
+    return promise;
+  });
   try {
-    await promise;
+    await Promise.race([offline, Promise.all(gone)]);
   } finally {
     link.statusListeners.delete(onStatus);
   }
