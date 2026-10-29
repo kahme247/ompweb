@@ -1293,6 +1293,8 @@
   "hostsConfig.allowAgentStartAria": "智能体可在 {name} 上无需确认即启动会话",
   "hostsConfig.rename": "重命名",
   "hostsConfig.renameTitle": "重命名主机",
+  "hostsConfig.renameAria": "重命名 {name}",
+  "hostsConfig.localNameHint": "留空则使用“本机”。",
   "hostsConfig.save": "保存",
   "hostsConfig.saving": "保存中…",
   "hostsConfig.cancel": "取消",

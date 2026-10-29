@@ -299,7 +299,8 @@ function checkMessageLength(message: string, field: string): void {
 /** `host` matched case-insensitively against ids, then labels; a label several hosts share is refused, not guessed. */
 function resolveHost(hosts: AgentToolHost[], host: string): AgentToolHost {
   const wanted = host.toLowerCase();
-  const byId = hosts.find((h) => h.id.toLowerCase() === wanted);
+  // "This machine" keeps working after the user renames it.
+  const byId = hosts.find((h) => h.id.toLowerCase() === (wanted === "this machine" ? "local" : wanted));
   const labelled = byId ? [] : hosts.filter((h) => h.label.toLowerCase() === wanted);
   if (labelled.length > 1) {
     throw new Error(`"${host}" matches more than one host (ids: ${labelled.map((h) => h.id).join(", ")}). Pass one of those ids as host.`);
