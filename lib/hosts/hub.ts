@@ -455,8 +455,8 @@ async function adopt(link: Link, child: RemoteRpcTransport, sessionId: string, c
       // Nothing reaches the daemon now, a kill included: the child runs on for the next server.
       console.warn(`[omp-web] left the omp child of session ${sessionId} on ${labelOf(link.id)} to the next server: this one stopped while adopting it (${reason})`);
     } else {
+      // adoptRpcSession has already killed it (its wrapper's dispose escalates to SIGKILL).
       console.warn(`[omp-web] killing the omp child of session ${sessionId} on ${labelOf(link.id)}: it could not be adopted (${reason})`);
-      killOrphan(child);
     }
     return false;
   }
