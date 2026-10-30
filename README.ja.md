@@ -27,7 +27,7 @@
 ## 必要条件
 
 - [omp](https://github.com/can1357/oh-my-pi) がインストールされ、`PATH` に含まれていること（または `OMP_WEB_OMP_BIN` で指定）
-- Node.js `>= 24`
+- Node.js `>= 24`。サーバーは [Bun](https://bun.sh) で動作し、npm パッケージの依存関係として自動的にインストールされます（同梱の Bun が見つからない場合は `PATH` 上の Bun を使用します）
 
 キュー内のフォローアップに対する **Steer** 操作には、`promote_queued_message` RPC コマンドをサポートする omp ランタイムが必要です（omp 18.1.16 では未対応）。古いランタイムではエラーを表示し、メッセージはフォローアップとしてキューに残ります。ompweb が重複したステアリングメッセージを送信することはありません。
 
@@ -143,15 +143,15 @@ npm run dev
 
 ローカル開発サーバーは [http://127.0.0.1:30178](http://127.0.0.1:30178) で起動します。
 
+`npm run dev` は Bun のホットリロード付きでサーバーを起動します。`npm run build` はブラウザアプリを `dist/` にバンドルし、`npm start` はそれをポート 30177 で配信します（`npm run smoke` で結果を確認できます）。`npm run dev:lan` は開発サーバーをすべてのインターフェースにバインドします。
+
 ### チェックコマンド
 
 ```bash
 npm run typecheck   # 型チェック (TypeScript)
 npm run lint        # ESLint
-npm test            # テスト実行
+npm test            # テスト実行 (bun test)
 ```
-
-> **注意**: ローカル開発中に `npm run build` を実行しないでください（`.next/` が生成され `npm run dev` に影響を与える恐れがあります）。
 
 ## クレジットとライセンス
 

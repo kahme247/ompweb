@@ -27,7 +27,7 @@ A clean, modern web UI for the [oh-my-pi (omp)](https://github.com/can1357/oh-my
 ## Requirements
 
 - [omp](https://github.com/can1357/oh-my-pi) installed and available on your `PATH` (or specified via `OMP_WEB_OMP_BIN`)
-- Node.js `>= 24`
+- Node.js `>= 24`. The server runs on [Bun](https://bun.sh), which installs automatically as a dependency of the npm package (a Bun on your `PATH` is used if the bundled one is missing)
 
 The **Steer** action on a queued follow-up requires an omp runtime with the `promote_queued_message` RPC command (not available in omp 18.1.16). Older runtimes report an error and leave the message queued as a follow-up; ompweb does not send a duplicate steering message.
 
@@ -449,7 +449,6 @@ Notes:
 | `OMP_WEB_DISABLE_AUTOUPDATE` | Set to `1` to disable update checks and in-app updates; restart after changing | `0` |
 | `OMP_WEB_NAME` | Name shown in browser tabs and installed-app names. `url`, `host` or `domain` (any case) uses the hostname the browser connected to, without port; localhost and IP addresses keep `omp web`. Any other value is used as-is. Restart after changing | `omp web` |
 | `OMP_WEB_OMP_BIN` | Path to `omp` binary if not on `PATH` | _auto-detected_ |
-| `OMP_WEB_DEV_ORIGIN` | Additional allowed hostname for the development server (no scheme or port); ignored in production | _None_ |
 | `PI_CODING_AGENT_DIR` | Custom omp agent directory | `~/.omp/agent` |
 | `OMP_WEB_STT_ENDPOINT` | OpenAI-compatible transcription endpoint URL. Leave unset to transcribe with `OMP_WEB_STT_MODEL` through omp's own credentials | _None_ |
 | `OMP_WEB_STT_KEY` | Optional API key for the STT endpoint | _None_ |
@@ -581,28 +580,15 @@ A dev server does not take over the local daemon: only the production web
 server writes the daemon's `host.json`, so "This machine" shows offline in dev
 and the daemon stays linked to your installed ompweb.
 
-The development server allows loopback and RFC1918 private IPv4 origins
-(`10.0.0.0/8`, `172.16.0.0/12`, and `192.168.0.0/16`). When using a tunnel
-or reverse proxy with a custom hostname, set it without editing `next.config.ts`:
-
-```bash
-OMP_WEB_DEV_ORIGIN=dev.example.com npm run dev
-```
-
-For a persistent setup, set the variable in your local environment or service
-configuration and restart the dev server. This does not change the bind address
-or enable authentication. Next.js hostname patterns cannot express IPv6 CIDRs;
-a private IPv6 origin must be supplied explicitly (for example, `[fd00::1]`).
+`npm run dev` runs the server with Bun hot reload. `npm run build` bundles the browser app into `dist/`, and `npm start` serves it on port 30177 (`npm run smoke` checks the result). `npm run dev:lan` binds the dev server to all interfaces.
 
 ### Checks
 
 ```bash
 npm run typecheck   # Type check (TypeScript)
 npm run lint        # ESLint
-npm test            # Run test suite
+npm test            # Run test suite (bun test)
 ```
-
-> **Note**: Do not run `npm run build` during local dev — it populates `.next/` and can break `npm run dev`.
 
 ## License & Credits
 
