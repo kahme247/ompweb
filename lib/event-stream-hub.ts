@@ -336,20 +336,30 @@ async function openFileChannel(rawPath: string, sessionId: string | null, handle
   handle.send({ type: "connected", filePath });
   let lastMtimeMs = access.stat.mtimeMs;
   let lastSize = access.stat.size;
+  const check = () => {
+    try {
+      const stat = fs.statSync(filePath);
+      // Some platforms emit watch events for file reads/attribute access.
+      // Ignore those or the client's refresh read loops.
+      if (stat.mtimeMs === lastMtimeMs && stat.size === lastSize) return;
+      lastMtimeMs = stat.mtimeMs;
+      lastSize = stat.size;
+      handle.send({ type: "change", mtime: stat.mtime.toISOString(), size: stat.size });
+    } catch {
+      if (lastSize === -1) return; // already reported gone
+      lastSize = -1;
+      handle.send({ type: "change", mtime: new Date().toISOString(), size: 0 });
+    }
+  };
+  let trailing: ReturnType<typeof setTimeout> | undefined;
   let watcher: fs.FSWatcher;
   try {
     watcher = fs.watch(filePath, () => {
-      try {
-        const stat = fs.statSync(filePath);
-        // Some platforms emit watch events for file reads/attribute access.
-        // Ignore those or the client's refresh read loops.
-        if (stat.mtimeMs === lastMtimeMs && stat.size === lastSize) return;
-        lastMtimeMs = stat.mtimeMs;
-        lastSize = stat.size;
-        handle.send({ type: "change", mtime: stat.mtime.toISOString(), size: stat.size });
-      } catch {
-        handle.send({ type: "change", mtime: new Date().toISOString(), size: 0 });
-      }
+      check();
+      // Bun's fs.watch drops an event within ~2 ms of the previous one; re-stat
+      // once the burst is quiet so a rapid second save still reports.
+      clearTimeout(trailing);
+      trailing = setTimeout(check, 50);
     });
   } catch {
     handle.send({ type: "error", message: "Failed to watch file" });
@@ -357,6 +367,9 @@ async function openFileChannel(rawPath: string, sessionId: string | null, handle
     return SUBSCRIBED;
   }
   watcher.on("error", () => handle.end());
-  handle.setDetach(() => watcher.close());
+  handle.setDetach(() => {
+    clearTimeout(trailing);
+    watcher.close();
+  });
   return SUBSCRIBED;
 }
