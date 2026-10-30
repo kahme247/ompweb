@@ -6,10 +6,15 @@ function canonicalOrigin(value: string): string | null {
   }
 }
 
+/** `https:` when the first X-Forwarded-Proto value says so: behind a TLS-terminating proxy Bun's request.url is still http://. */
+export function requestProtocol(request: Request): string {
+  const forwarded = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
+  return forwarded === "https" ? "https:" : new URL(request.url).protocol;
+}
+
 function getRequestOrigin(request: Request): string | null {
-  const requestUrl = new URL(request.url);
   const host = request.headers.get("host");
-  return host ? canonicalOrigin(`${requestUrl.protocol}//${host}`) : requestUrl.origin;
+  return host ? canonicalOrigin(`${requestProtocol(request)}//${host}`) : new URL(request.url).origin;
 }
 
 /** Reject browser cross-site API requests while preserving non-browser clients. */
