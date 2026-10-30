@@ -2,7 +2,7 @@
 import { rmSync } from "node:fs";
 import path from "node:path";
 import type { BunPlugin } from "bun";
-import tailwind from "bun-plugin-tailwind";
+import tailwind from "./tailwind-plugin";
 import { clientEnv } from "../server/client-env";
 import { stylesheetFirst } from "../server/http";
 
