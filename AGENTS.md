@@ -80,7 +80,7 @@ server/
   http.ts             `finalizeResponse` (security headers, gzip for pages and static files, never `/api/`), `serveFile` (dist/, public/, KaTeX), `renderIndex`
   client-env.ts       build-time constants for the browser bundle (app version, event-stream worker hash)
 app/
-  index.html          the SPA shell, the bundler entry
+  index.html          the SPA shell, the bundler entry; #root holds the RouteLoadingFallback skeleton as static HTML (painted before the bundle runs, removed on /login)
   client.tsx          browser entry: renders `LoginForm` on `/login`, else `AppShell` (a path check, no router)
   boot.ts             runs first in client.tsx: installs the sidebar history bridge before AppShell registers popstate listeners
 app/api/
