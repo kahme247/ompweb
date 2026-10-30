@@ -44,9 +44,8 @@ export interface SttClaim extends SttJobView {
 }
 
 /**
- * Cap on how long the server waits on the STT endpoint. Kept under undici's
- * default 300s headersTimeout so a slow upstream ends as "timed out", not
- * an opaque "fetch failed".
+ * Cap on how long the server waits on the STT endpoint, so a slow upstream
+ * ends as "timed out", not an opaque "fetch failed".
  */
 const STT_UPSTREAM_TIMEOUT_MS = 290_000;
 /** Unclaimed results and failures (with their audio) stay retrievable this long. */

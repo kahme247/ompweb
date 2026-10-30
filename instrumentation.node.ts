@@ -11,12 +11,6 @@ export async function register(): Promise<void> {
     process.on(signal, () => process.exit(code));
   }
 
-  // Honor HTTP(S)_PROXY/NO_PROXY for server-side fetch (update checks, skill
-  // search, model connection tests). Node's built-in fetch ignores proxy env
-  // vars (NODE_USE_ENV_PROXY is Node 24+ only; engines floor is 22).
-  const { configureHttpDispatcher } = await import("@/lib/http-dispatcher");
-  configureHttpDispatcher();
-
   // Startup diagnostics: agent dir. Kept to one line so it greps cleanly;
   // failures here must never block boot.
   try {

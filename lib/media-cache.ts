@@ -205,19 +205,11 @@ export function existingThumbnail(hash: string): string | null {
   return HASH_RE.test(hash) && existsSync(thumb) ? thumb : null;
 }
 
-/** Generate and cache a small WebP preview; null when sharp is unavailable or fails. */
+/** Generate and cache a small WebP preview (Bun.Image applies EXIF orientation); null when the bytes are not a decodable image. */
 export async function createThumbnail(hash: string, image: Buffer): Promise<Buffer | null> {
   let thumb: Buffer;
   try {
-    // Dynamic on purpose: sharp's native binary is platform-specific and may be
-    // missing, and this module is also loaded by the session reader and RPC
-    // manager, which must not fail or load libvips just to rewrite URLs.
-    const { default: sharp } = await import("sharp");
-    thumb = await sharp(image)
-      .rotate() // apply EXIF orientation; WebP output drops the tag
-      .resize(THUMB_PX, THUMB_PX, { fit: "inside", withoutEnlargement: true })
-      .webp({ quality: 80 })
-      .toBuffer();
+    thumb = Buffer.from(await new Bun.Image(image).resize(THUMB_PX, THUMB_PX, { fit: "inside", withoutEnlargement: true }).webp({ quality: 80 }).bytes());
   } catch {
     return null;
   }
