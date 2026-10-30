@@ -19,6 +19,9 @@ import {
 // themselves before they read any body (lib/hosts/hub.ts).
 export const UNGATED = /^\/(?:assets\/|_bun\/|favicon\.ico|icon\.svg|icon\.png|icon-192\.png|badge-96\.png|sw\.js|api\/hosts\/link(?:\/|$))/;
 
+// Relative: request.url is always http:// under Bun, so an absolute Location would leave https behind a TLS proxy.
+const redirect = (location: string) => new Response(null, { status: 307, headers: { location } });
+
 /** The password gate and API origin check; null means "continue". */
 export function proxy(request: Request): Response | null {
   const url = new URL(request.url);
@@ -39,21 +42,19 @@ export function proxy(request: Request): Response | null {
     });
   }
   if (!isWebPasswordEnabled()) {
-    return pathname === "/login" ? Response.redirect(new URL("/", url), 307) : null;
+    return pathname === "/login" ? redirect("/") : null;
   }
 
   const hasSession = isTrustedProxyRequest(request.headers.get(OMP_WEB_TRUSTED_HEADER))
     || isValidWebSession(new Bun.CookieMap(request.headers.get("cookie") ?? "").get(OMP_WEB_SESSION_COOKIE) ?? undefined);
   if (pathname === "/login") {
-    return hasSession ? Response.redirect(new URL("/", url), 307) : null;
+    return hasSession ? redirect("/") : null;
   }
   if (pathname === "/api/web-auth/session") return null;
   if (hasSession) return null;
   if (pathname.startsWith("/api/")) {
     return Response.json({ error: "Password required", code: "password_required" }, { status: 401 });
   }
-  const login = new URL("/login", url);
   // Keep a deep link to a session (e.g. a notification click) across sign-in.
-  if (pathname === "/" && url.search) login.searchParams.set("next", `/${url.search}`);
-  return Response.redirect(login, 307);
+  return redirect(pathname === "/" && url.search ? `/login?${new URLSearchParams({ next: `/${url.search}` })}` : "/login");
 }

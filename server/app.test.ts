@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test, { after } from "node:test";
+import { hashPassword } from "@/lib/web-password-hash";
 
 const repo = path.join(import.meta.dir, "..");
 const root = mkdtempSync(path.join(os.tmpdir(), "omp-web-app-"));
@@ -22,6 +24,22 @@ Object.assign(process.env, ENV);
 const { startServer } = await import("./app");
 const server = startServer({ port: 0, hostname: "127.0.0.1", dev: false, root });
 const url = (pathname: string) => new URL(pathname, server.url);
+
+/** A request whose target goes on the wire verbatim: fetch() would resolve `..` and `%2e%2e` before sending. */
+function rawRequest(method: string, target: string, headers: Record<string, string> = {}): Promise<{ status: number; body: string }> {
+  const { promise, resolve, reject } = Promise.withResolvers<{ status: number; body: string }>();
+  const socket = net.createConnection(server.port!, "127.0.0.1", () => {
+    const lines = [`${method} ${target} HTTP/1.1`, "Host: 127.0.0.1", "Connection: close", "Content-Length: 0"];
+    for (const [name, value] of Object.entries(headers)) lines.push(`${name}: ${value}`);
+    socket.write(`${lines.join("\r\n")}\r\n\r\n`);
+  });
+  let response = "";
+  socket.setEncoding("utf8");
+  socket.on("data", (chunk) => (response += chunk));
+  socket.on("end", () => resolve({ status: Number(response.slice(9, 12)), body: response.slice(response.indexOf("\r\n\r\n") + 4) }));
+  socket.on("error", reject);
+  return promise;
+}
 
 after(async () => {
   await server.stop(true);
@@ -43,6 +61,38 @@ test("API routes answer through the gate", async () => {
 
   assert.equal((await fetch(url("/api/nope"))).status, 404);
   assert.equal((await fetch(url("/api/sessions/%E0%A4%A/state"))).status, 400);
+  assert.equal((await fetch(url("/api"))).status, 404);
+});
+
+test("a path that leaves its route after `..` resolution never reaches that route's handler", async (t) => {
+  // The files route serves anything under the agent dir; `x` pads `/assets/x` to the route's `/api/files` depth.
+  const secret = path.join(ENV.PI_CODING_AGENT_DIR, "secret.txt");
+  mkdirSync(ENV.PI_CODING_AGENT_DIR, { recursive: true });
+  writeFileSync(secret, "TOP-SECRET");
+  const file = secret.split(path.sep).join("/").replace(/^\/?/, "/");
+  process.env.OMP_WEB_PASSWORD_HASH = hashPassword("pw", { logN: 12 });
+  t.after(() => {
+    delete process.env.OMP_WEB_PASSWORD_HASH;
+  });
+
+  assert.equal((await rawRequest("GET", `/api/files${file}?type=read`)).status, 401);
+  for (const target of [
+    `/api/files/../../assets/x${file}?type=read`,
+    `/api/files/%2e%2e/%2e%2e/assets/x${file}?type=read`,
+    `/api/files/.%2e/%2e./assets/x${file}?type=read`,
+  ]) {
+    const { status, body } = await rawRequest("GET", target);
+    assert.equal(status, 404, target);
+    assert.doesNotMatch(body, /TOP-SECRET/, target);
+  }
+  // An encoded slash is not a separator, so this stays in the files route and its gate.
+  assert.equal((await rawRequest("GET", `/api/files/..%2f..%2fassets/x${file}?type=read`)).status, 401);
+  assert.equal((await rawRequest("GET", "/assets/../api/hosts")).status, 401);
+
+  // The origin check reads the same resolved path: the upload handler is never reached cross-origin.
+  const evil = { Origin: "https://evil.example" };
+  assert.equal((await rawRequest("POST", `/api/files/../../assets/x${path.posix.dirname(file)}`, evil)).status, 404);
+  assert.equal((await rawRequest("POST", "/api/files/../hosts", evil)).status, 403);
 });
 
 test("pages get the index, files their content, and anything else 404", async () => {
@@ -54,6 +104,7 @@ test("pages get the index, files their content, and anything else 404", async ()
 
   const page = await fetch(url("/some/page"));
   assert.equal(page.status, 200);
+  assert.equal(page.headers.get("cache-control"), "private, no-cache, max-age=0, must-revalidate");
   assert.match(await page.text(), /<title>omp web<\/title>/);
   assert.equal((await fetch(url("/missing.js"))).status, 404);
   assert.equal((await fetch(url("/sw.js"))).headers.get("cache-control"), "no-cache");

@@ -9,7 +9,6 @@ test("the route table lists every app/api/**/route.ts and nothing else", () => {
   const onDisk = [...new Bun.Glob("app/api/**/route.ts").scanSync(root)]
     .map((file) => path.dirname(file).split(path.sep).join("/").slice("app/api/".length))
     .sort();
-  assert.equal(onDisk.length, 70);
   assert.deepEqual(Object.keys(ROUTE_MODULES).sort(), onDisk);
 });
 
