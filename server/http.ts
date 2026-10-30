@@ -1,4 +1,4 @@
-import { realpathSync, statSync } from "node:fs";
+import { realpathSync, statSync, type Stats } from "node:fs";
 import path from "node:path";
 import { getInstallName } from "@/lib/install-name";
 
@@ -75,25 +75,27 @@ export async function serveFile(request: Request, root: string, dev: boolean): P
   for (const base of bases) {
     const file = path.resolve(base, relative);
     if (!file.startsWith(base + path.sep)) continue;
-    let mtime: Date;
+    let stat: Stats;
     try {
       // statSync and Bun.file follow symlinks: serve a link only when its target stays inside the (real) base.
       if (!realpathSync(file).startsWith(realpathSync(base) + path.sep)) continue;
-      const stat = statSync(file);
+      stat = statSync(file);
       if (!stat.isFile()) continue;
-      mtime = stat.mtime;
     } catch {
       continue;
     }
     if (request.method !== "GET" && request.method !== "HEAD") {
       return new Response(null, { status: 405, headers: { Allow: "GET, HEAD" } });
     }
-    const headers = { "Cache-Control": cacheControl(pathname), "Last-Modified": mtime.toUTCString() };
-    // HTTP dates carry whole seconds.
-    const since = Date.parse(request.headers.get("if-modified-since") ?? "");
-    if (since >= Math.floor(mtime.getTime() / 1000) * 1000) {
-      return new Response(null, { status: 304, headers });
-    }
+    // Weak: size and mtime, as Next sent. The Nix store gives every file the same mtime, so the size must count too.
+    const etag = `W/"${stat.size}-${stat.mtimeMs}"`;
+    const headers = { "Cache-Control": cacheControl(pathname), "Last-Modified": stat.mtime.toUTCString(), ETag: etag };
+    // RFC 9110: If-None-Match (weak comparison) wins over If-Modified-Since, whose HTTP dates carry whole seconds.
+    const match = request.headers.get("if-none-match");
+    const notModified = match === null
+      ? Date.parse(request.headers.get("if-modified-since") ?? "") >= Math.floor(stat.mtimeMs / 1000) * 1000
+      : match.split(",").some((tag) => tag.trim() === "*" || tag.trim().replace(/^W\//, "") === etag.slice(2));
+    if (notModified) return new Response(null, { status: 304, headers });
     return new Response(Bun.file(file), { headers });
   }
   return null;
