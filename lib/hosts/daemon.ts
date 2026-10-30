@@ -15,8 +15,8 @@ import { isLoopbackHost, readHostLogin } from "./host-login";
 import {
   decodeDown,
   encodeLine,
-  HOST_OP_NAMES,
   HostOpError,
+  isHostOp,
   LINK_ACK_HEADER,
   LINK_HELLO_HEADER,
   LINK_LIMITS,
@@ -28,7 +28,7 @@ import {
   SeqWindow,
   SESSION_OP_PARAMS,
   type DownMessage,
-  type HostOpName,
+  type UnknownMessage,
   type UpMessage,
 } from "./link-protocol";
 import { localHost, resolveSpawnCwdResult } from "./local-host";
@@ -313,8 +313,11 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     welcome = Promise.withResolvers<void>();
   }
 
+  /** Message types already noted on this link: an unknown one is logged once. */
+  const unknownTypes = new Set<string>();
+
   function handleDown(line: string): void {
-    let message: DownMessage;
+    let message: DownMessage | UnknownMessage;
     try {
       message = decodeDown(line);
     } catch (error) {
@@ -325,6 +328,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     switch (message.type) {
       case "welcome":
         log(`linked to ${serverUrl}`);
+        unknownTypes.clear();
         nonce = message.nonce;
         welcome.resolve();
         // A fresh link: resend what main has not acked now, not after the old backoff.
@@ -338,6 +342,14 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         scheduleFlush();
         return;
       case "pong":
+        return;
+      case "unknown":
+        // A newer main's message: skipped, but its seq is applied so it is acked and never resent.
+        if (message.seq !== null) down.applied(message.seq);
+        if (!unknownTypes.has(message.messageType)) {
+          unknownTypes.add(message.messageType);
+          log(`ignored an unknown link message type "${message.messageType}"`);
+        }
         return;
     }
     // Resent after a reconnect but already applied.
@@ -362,7 +374,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     }
   }
 
-  /** A line that does not decode (an op outside HOST_OP_NAMES, say) is never run. */
+  /** A line that does not decode (a known type with a bad field, say) is never run. */
   function refuse(line: string, why: string): void {
     let raw: unknown;
     try {
@@ -380,7 +392,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     log(`ignored a malformed link message: ${why}`);
   }
 
-  async function answer(id: string, op: HostOpName, args: unknown): Promise<void> {
+  async function answer(id: string, op: string, args: unknown): Promise<void> {
     try {
       const result = await runOp(op, args);
       const media = op === "readMedia" && isRecord(result) && result.ok === true && result.value instanceof Uint8Array ? result.value : null;
@@ -435,9 +447,9 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     }
   }
 
-  async function runOp(op: HostOpName, args: unknown): Promise<unknown> {
-    // decodeDown already refuses unknown names; checked again where ops run.
-    if (!(HOST_OP_NAMES as readonly string[]).includes(op)) throw new HostOpError(400, "unknown_op", `Unknown host op: ${String(op)}`);
+  async function runOp(op: string, args: unknown): Promise<unknown> {
+    // An older daemon than main: callers fall back on the 501.
+    if (!isHostOp(op)) throw new HostOpError(501, "unknown_op", `Unknown host op: ${op}`);
     if (!isRecord(args)) throw new HostOpError(400, "invalid_request", "Host op arguments must be an object");
     switch (op) {
       case "spawn":
