@@ -6,6 +6,7 @@ import {
   acknowledgeSelfUpdate,
   commitSelfUpdate,
   getSelfUpdateStatus,
+  getSelfUpdateSupport,
   markSelfUpdateStopping,
   prepareSelfUpdate,
   SelfUpdateError,
@@ -33,7 +34,8 @@ export async function POST(request: Request) {
     if (!body || typeof body !== "object" || Array.isArray(body)) throw new SelfUpdateError("invalid_action", "action must be check, restart, update, status, or acknowledge");
     const keys = Object.keys(body);
     if (body.action === "check") {
-      return Response.json(await checkOmpUpdate(body.force === true));
+      // selfUpdateSupported: whether "Update now" can run here (never in the compiled binary, lib/self-update.ts).
+      return Response.json({ ...await checkOmpUpdate(body.force === true), selfUpdateSupported: getSelfUpdateSupport().supported });
     }
     if (body.action === "restart" && keys.length === 1) {
       const sessionsRestarted = await restartAllRpcSessions();

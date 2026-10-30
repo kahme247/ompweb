@@ -1873,14 +1873,16 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                       <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{t("settingsConfig.runOmpUpdateCommand")}</div>
                       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                         <code style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent)", wordBreak: "break-all" }}>{update.updateCommand || "omp update"}</code>
-                        <button
-                          type="button"
-                          onClick={() => void handleOmpUpdateNow()}
-                          disabled={ompUpdating}
-                          style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 8px", border: "1px solid var(--accent-strong)", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "var(--on-accent)", cursor: ompUpdating ? "wait" : "pointer", fontSize: 11, fontWeight: 600 }}
-                        >
-                          <Download size={12} aria-hidden="true" /> {ompUpdating ? t("settingsConfig.updating") : t("settingsConfig.ompUpdateAction")}
-                        </button>
+                        {update.selfUpdateSupported === true && (
+                          <button
+                            type="button"
+                            onClick={() => void handleOmpUpdateNow()}
+                            disabled={ompUpdating}
+                            style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 8px", border: "1px solid var(--accent-strong)", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "var(--on-accent)", cursor: ompUpdating ? "wait" : "pointer", fontSize: 11, fontWeight: 600 }}
+                          >
+                            <Download size={12} aria-hidden="true" /> {ompUpdating ? t("settingsConfig.updating") : t("settingsConfig.ompUpdateAction")}
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => {
