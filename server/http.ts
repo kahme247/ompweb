@@ -54,7 +54,10 @@ function cacheControl(pathname: string): string {
   return "public, max-age=0";
 }
 
-/** A file from dist/ (prod), public/ or the KaTeX dist under /katex/; null when no file matches. */
+/**
+ * A file from dist/ (prod), public/ or the KaTeX dist under /katex/; null when no file matches. dist/index.html is
+ * not one: the shell is only served rendered (renderIndex).
+ */
 export async function serveFile(request: Request, root: string, dev: boolean): Promise<Response | null> {
   let pathname: string;
   try {
@@ -63,6 +66,7 @@ export async function serveFile(request: Request, root: string, dev: boolean): P
     return null;
   }
   if (pathname.includes("\0") || pathname.includes("\\") || pathname.split("/").includes("..")) return null;
+  if (pathname === "/index.html") return null;
   const katex = pathname.startsWith("/katex/");
   const relative = pathname.slice(katex ? "/katex/".length : 1);
   const bases = katex
@@ -79,10 +83,13 @@ export async function serveFile(request: Request, root: string, dev: boolean): P
     } catch {
       continue;
     }
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      return new Response(null, { status: 405, headers: { Allow: "GET, HEAD" } });
+    }
     const headers = { "Cache-Control": cacheControl(pathname), "Last-Modified": mtime.toUTCString() };
-    // HTTP dates carry whole seconds; RFC 9110 makes only GET and HEAD conditional on If-Modified-Since.
+    // HTTP dates carry whole seconds.
     const since = Date.parse(request.headers.get("if-modified-since") ?? "");
-    if ((request.method === "GET" || request.method === "HEAD") && since >= Math.floor(mtime.getTime() / 1000) * 1000) {
+    if (since >= Math.floor(mtime.getTime() / 1000) * 1000) {
       return new Response(null, { status: 304, headers });
     }
     return new Response(Bun.file(file), { headers });
