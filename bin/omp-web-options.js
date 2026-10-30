@@ -62,8 +62,9 @@ non-loopback hostname, so the password and session cookie stay private.`);
 /**
  * Resolve launch options from argv and the environment. A legacy plaintext
  * password (env or `--password`) is reported instead of parsed: the caller
- * migrates or refuses it rather than passing it to the server.
- * @returns {{ port: string, hostname: string, passwordHash?: string, legacyPassword?: string, legacyPasswordSource?: "env" | "flag", openBrowser: boolean, installTray: boolean, uninstallTray: boolean, tray: boolean, help?: boolean, version?: boolean }}
+ * migrates or refuses it rather than passing it to the server. A bad port is
+ * reported in `error`, which the caller prints before exiting with 2.
+ * @returns {{ port: string, hostname: string, passwordHash?: string, legacyPassword?: string, legacyPasswordSource?: "env" | "flag", openBrowser: boolean, installTray: boolean, uninstallTray: boolean, tray: boolean, help?: boolean, version?: boolean, error?: string }}
  */
 function parseLaunchOptions(args = process.argv.slice(2), env = process.env) {
   const { values: cliArgs } = parseArgs({
@@ -85,8 +86,9 @@ function parseLaunchOptions(args = process.argv.slice(2), env = process.env) {
   const passwordHash = typeof env.OMP_WEB_PASSWORD_HASH === "string" ? env.OMP_WEB_PASSWORD_HASH.trim() : undefined;
   const legacy = legacyPassword(args, env);
 
+  const port = String(cliArgs.port ?? env.PORT ?? "30177");
   const shared = {
-    port: cliArgs.port ?? env.PORT ?? "30177",
+    port,
     hostname: cliArgs.hostname ?? env.OMP_WEB_HOSTNAME ?? "127.0.0.1",
     passwordHash,
     legacyPassword: legacy?.value,
@@ -95,6 +97,7 @@ function parseLaunchOptions(args = process.argv.slice(2), env = process.env) {
     installTray: Boolean(cliArgs["install-tray"] || cliArgs["install-service"]),
     uninstallTray: Boolean(cliArgs["uninstall-tray"]),
     tray: Boolean(cliArgs.tray),
+    ...(/^\d{1,5}$/.test(port) && Number(port) <= 65535 ? {} : { error: `Invalid port: ${port}. Use an integer from 0 to 65535.` }),
   };
 
   if (cliArgs.version) {

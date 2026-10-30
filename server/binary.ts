@@ -31,6 +31,10 @@ if (["launchd", "ompweb-launchd", "systemd", "ompweb-systemd"].includes(command)
 
 const options = parseLaunchOptions();
 if (options.help || options.version) process.exit(0);
+if (options.error) {
+  console.error(options.error);
+  process.exit(2);
+}
 if (options.installTray || options.uninstallTray || options.tray) {
   console.error(`The ompweb binary has no tray. ${SEE_README}`);
   process.exit(2);
