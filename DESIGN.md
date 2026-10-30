@@ -283,7 +283,7 @@ Releases are independent:
 ## Non-goals
 
 - Reimplementing OMP, its provider registry, or its credential database.
-- Embedding Bun-only OMP SDK packages in the Node server.
+- Embedding Bun-only OMP SDK packages in the omp-web server.
 - Turning a local agent workspace into an internet-facing multi-user service.
 - Unrestricted filesystem browsing or arbitrary browser-triggered host tools.
 - Automatic bulk synchronization from `agegr/pi-web`.
