@@ -506,13 +506,12 @@ The two notification routes are async, but every query is a microsecond-scale lo
   - `verify-pr.yml` steps: after "Verify production build", add "Smoke test" (`npm run smoke`) and "Packed install smoke test" with `shell: bash` (the Step 3 commands with `$RUNNER_TEMP/ompweb-prefix`), both on ubuntu and windows.
   - Windows only: parse both `.ps1` scripts (`pwsh -NoProfile -Command "foreach ($f in 'scripts/windows/omp-web-service.ps1','scripts/windows/omp-web-tray.ps1') { $e=$null; [System.Management.Automation.Language.Parser]::ParseFile($f,[ref]$null,[ref]$e) | Out-Null; if ($e) { $e; exit 1 } }"`).
   - `publish.yml`: add `npm run smoke` after `npm run build`.
-- [ ] **Step 5: Nix.**
+- [ ] **Step 5: Nix.** (As built: nixpkgs' `bun` is 1.4.2, below the pinned 1.4.4, so Nix keeps the npm `@oven/bun-<os>-<arch>` binary that every install uses.)
   - `nix/package.nix`: delete the four `fetchurl` fonts, `localFontsPatch`, `patches` and `postPatch`. In the fileset, drop `instrumentation.ts`, `next.config.ts`, `next-env.d.ts` and `postcss.config.mjs`, and add `../server` and `../bunfig.toml`.
-  - Add `nativeBuildInputs = [ bun makeWrapper ]`.
-  - `preBuild`: `rm -f node_modules/.bin/bun node_modules/.bin/bunx` (the npm binary is not patched for Nix).
-  - `postInstall`: remove `$out/lib/node_modules/@kahme247/ompweb/node_modules/{bun,@oven}`, then `wrapProgram $out/bin/ompweb --prefix PATH : ${lib.makeBinPath [ bun ]}`. The resolver then falls to PATH Bun.
+  - `npmRebuildFlags = [ "--ignore-scripts" ]`: bun's postinstall execs the unpatched binary, so `bin/bun-runtime.js` resolves the `@oven` binary itself.
+  - Linux only: `autoPatchelfHook` with `dontAutoPatchelf = true`; `preBuild` runs `autoPatchelf -- node_modules/@oven`, removes `node_modules/.bin/bun{,x}` and puts the resolved binary's directory on `PATH` for the build. The shipped `@oven` binary stays in `node_modules` for the launcher.
   - `flake.nix` devShell: add `bun`.
-  - `npmDepsHash` changes with the lockfile and needs `nix build .#default` to report the new hash. If `nix` is unavailable, say so in the commit body; the controller refreshes it on a machine with nix.
+  - Unverified: written without nix. `npmDepsHash` changes with the lockfile and needs `nix build .#default` to report the new hash; the controller refreshes it on a machine with nix.
 - [ ] **Step 6: Verify** `npm run typecheck && npm run lint && npm test && npm run build && npm run smoke` → pass.
 - [ ] **Step 7: Commit** `ci: smoke-test the Bun server and the packed install`.
 
