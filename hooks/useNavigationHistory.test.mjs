@@ -1,8 +1,7 @@
 import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
-import { createJiti } from "jiti";
-import { act, cleanup, renderHook } from "@testing-library/react/pure.js";
+const { act, cleanup, renderHook } = await import("@testing-library/react/pure.js");
 
 // lib/navigation-history.test.mjs covers the pure stack arithmetic; this file
 // covers the React wrapper: recording from a view-change effect, the
@@ -10,11 +9,7 @@ import { act, cleanup, renderHook } from "@testing-library/react/pure.js";
 // that committing a step makes the subsequent re-record a no-op (that is
 // what keeps back/forward from pushing onto themselves).
 
-const jiti = createJiti(import.meta.url, {
-  jsx: { runtime: "automatic" },
-  tsconfigPaths: true,
-});
-const { useNavigationHistory } = await jiti.import("./useNavigationHistory.ts");
+const { useNavigationHistory } = await import("./useNavigationHistory.ts");
 
 const session = (id, cwd = "/repo") => ({ sessionId: id, cwd });
 const newChat = (cwd) => ({ sessionId: null, cwd });

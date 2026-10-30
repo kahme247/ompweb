@@ -2,13 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createJiti } from "jiti";
 
-const jiti = createJiti(import.meta.url, {
-  jsx: { runtime: "automatic" },
-  tsconfigPaths: true,
-});
-const { ComposerPanels } = await jiti.import("./ComposerPanels.tsx");
+const { ComposerPanels } = await import("./ComposerPanels.tsx");
 
 const noop = () => {};
 

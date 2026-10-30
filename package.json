@@ -43,7 +43,7 @@
     "build": "next build --webpack",
     "start": "next start -H 127.0.0.1 -p 30177",
     "start:lan": "next start -H 0.0.0.0 -p 30177",
-    "test": "node --experimental-strip-types --test lib/*.test.mjs lib/hosts/*.test.mjs lib/omp/*.test.mjs components/*.test.mjs components/ui/*.test.mjs hooks/*.test.mjs bin/*.test.mjs",
+    "test": "bun test --parallel --timeout 30000",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "tray:install": "node bin/omp-web-tray.js --install",

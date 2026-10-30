@@ -1,13 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createJiti } from "jiti";
 
-const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
 const {
   STORAGE_KEY,
   nextTouchTargetsPreference,
   storedTouchTargetsPreference,
-} = await jiti.import("./useTouchTargets.ts");
+} = await import("./useTouchTargets.ts");
 
 function withStoredValue(value, fn) {
   const hadWindow = "window" in globalThis;

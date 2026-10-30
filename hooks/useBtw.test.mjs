@@ -1,19 +1,14 @@
 import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
-import { createJiti } from "jiti";
-import { act, cleanup, renderHook } from "@testing-library/react/pure.js";
+const { act, cleanup, renderHook } = await import("@testing-library/react/pure.js");
 
 // hooks/useBtw.ts had no test at all: lib/btw.test.mjs covers the pure merges,
 // but the ordering decisions the hook itself makes live only here. The one that
 // matters most is when queued SSE frames are applied relative to a history
 // snapshot — get it wrong and streamed text is applied twice.
 
-const jiti = createJiti(import.meta.url, {
-  jsx: { runtime: "automatic" },
-  tsconfigPaths: true,
-});
-const { useBtw } = await jiti.import("./useBtw.ts");
+const { useBtw } = await import("./useBtw.ts");
 
 const T0 = 1_700_000_000_000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

@@ -2,11 +2,9 @@ import assert from "node:assert/strict";
 import "../tests/setup-dom.mjs";
 import test, { afterEach } from "node:test";
 import React from "react";
-import { cleanup, render, waitFor } from "@testing-library/react/pure.js";
-import { createJiti } from "jiti";
+const { cleanup, render, waitFor } = await import("@testing-library/react/pure.js");
 
-const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
-const { IosFocusZoomGuard } = await jiti.import("./IosFocusZoomGuard.tsx");
+const { IosFocusZoomGuard } = await import("./IosFocusZoomGuard.tsx");
 
 const BASE = "width=device-width, initial-scale=1";
 const IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15";
