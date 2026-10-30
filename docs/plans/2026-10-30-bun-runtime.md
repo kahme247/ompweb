@@ -76,6 +76,8 @@
 | `NextRequest.cookies` / `NextResponse.cookies` | `Bun.CookieMap` / `Bun.Cookie` | Replace |
 | Next's built-in gzip | `CompressionStream("gzip")` (web standard, built in) | Replace |
 | Gzip of `/api/` answers (Next 16 never compressed route-handler responses; a 40 MB session read cost ~1 s per request) | `CompressionStream`, `Bun.gzipSync` (blocks the loop ~650 ms per 40 MB), `node:zlib` streams (slower under Bun) | None: `/api/` answers go uncompressed, as under Next |
+| `node:sqlite` `close()` finalized open statements | `bun:sqlite` `close()` keeps the file open until its prepared statements are collected (Windows: EBUSY) | `close(true)` |
+| Next's `listen` failed on a taken port | `Bun.serve` sets `SO_REUSEPORT` when `development` is false | `reusePort: false` |
 | `node:child_process` (45 files) incl. IPC to the Node launcher | `Bun.spawn`; Node's API works under Bun, including Node↔Bun IPC | Keep (no problem) |
 | `web-push` (VAPID, aes128gcm) | No built-in; works under Bun (spike probe 5) | Keep |
 | `fs.accessSync` returns `null` on Bun | — (semantics bug) | try/catch |
