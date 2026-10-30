@@ -291,8 +291,10 @@ bin/
   newer side can send must be valid for an older receiver, and every message the
   older side can send valid for a newer receiver. Compatible: a sender starting
   to always include a field the receiver already accepts as optional; adding an
-  optional field; adding a message type receivers ignore when unknown (today
-  neither side ignores unknown types or ops, so those still need a new version).
+  optional field; adding a message type receivers ignore when unknown. Receivers
+  skip an unknown message type (still acking its `seq`) and answer an unknown host
+  op with 501 `unknown_op`; a sender must not rely on a newer message being
+  understood unless the version (or, later, a capability) says so.
   Not compatible, so a new version: making a field the receiver requires
   optional for senders; changing a field's type or meaning; a receiver starting
   to require a field older senders may omit. Main keeps supporting older

@@ -80,7 +80,8 @@ export type DownMessage =
   | { type: "welcome"; v: number; hostId: string; nonce: string }
   | { type: "stdin"; seq: number; ch: string; line: string }
   | { type: "kill"; seq: number; ch: string; force: boolean }
-  | { type: "req"; seq: number; id: string; op: HostOpName; args: unknown }
+  /** `op` is whatever the sender named: the daemon answers one it does not know with 501 `unknown_op`. */
+  | { type: "req"; seq: number; id: string; op: string; args: unknown }
   | { type: "replaced"; seq: number }
   | { type: "ping" }
   | { type: "pong" };
@@ -115,6 +116,10 @@ export type UpMessage =
     }
   | { type: "ping" }
   | { type: "pong" };
+
+/** A message whose `type` this side does not know (a newer peer's): receivers skip it, but ack its `seq`
+ * (null when it carries none) so it is never resent. */
+export type UnknownMessage = { type: "unknown"; messageType: string; seq: number | null };
 
 export class LinkProtocolError extends Error {
   readonly name = "LinkProtocolError";
@@ -172,8 +177,12 @@ function strings(o: Obj, key: string): string[] {
   return v;
 }
 
-function isHostOp(name: string): name is HostOpName {
+export function isHostOp(name: string): name is HostOpName {
   return (HOST_OP_NAMES as readonly string[]).includes(name);
+}
+
+function unknownMessage(o: Obj): UnknownMessage {
+  return { type: "unknown", messageType: str(o, "type"), seq: "seq" in o ? int(o, "seq") : null };
 }
 
 function parseLine(line: string): Obj {
@@ -190,7 +199,7 @@ function parseLine(line: string): Obj {
   return value;
 }
 
-export function decodeDown(line: string): DownMessage {
+export function decodeDown(line: string): DownMessage | UnknownMessage {
   const o = parseLine(line);
   switch (o.type) {
     case "welcome":
@@ -199,12 +208,8 @@ export function decodeDown(line: string): DownMessage {
       return { type: "stdin", seq: int(o, "seq"), ch: str(o, "ch"), line: str(o, "line") };
     case "kill":
       return { type: "kill", seq: int(o, "seq"), ch: str(o, "ch"), force: bool(o, "force") };
-    case "req": {
-      const op = str(o, "op");
-      if (!isHostOp(op)) fail(`unknown host op: ${op}`);
-      if (!("args" in o)) fail("args must be present");
-      return { type: "req", seq: int(o, "seq"), id: str(o, "id"), op, args: o.args };
-    }
+    case "req":
+      return { type: "req", seq: int(o, "seq"), id: str(o, "id"), op: str(o, "op"), args: "args" in o ? o.args : fail("args must be present") };
     case "replaced":
       return { type: "replaced", seq: int(o, "seq") };
     case "ping":
@@ -212,7 +217,7 @@ export function decodeDown(line: string): DownMessage {
     case "pong":
       return { type: "pong" };
     default:
-      return fail(`unknown down message type: ${String(o.type)}`);
+      return unknownMessage(o);
   }
 }
 
@@ -255,7 +260,7 @@ function res(o: Obj): UpMessage {
   return fail("ok must be true or false");
 }
 
-export function decodeUp(line: string): UpMessage {
+export function decodeUp(line: string): UpMessage | UnknownMessage {
   const o = parseLine(line);
   switch (o.type) {
     case "hello": {
@@ -293,7 +298,7 @@ export function decodeUp(line: string): UpMessage {
     case "pong":
       return { type: "pong" };
     default:
-      return fail(`unknown up message type: ${String(o.type)}`);
+      return unknownMessage(o);
   }
 }
 

@@ -257,9 +257,15 @@ On 409 the daemon keeps the messages and sends them after the next
   - Not compatible: making a field the receiver requires optional for
     senders; changing a field's type or meaning; a receiver starting to
     require a field older senders may omit.
-  - Today neither side ignores an unknown message type or host op (the daemon
-    refuses the line, main rejects the uplink batch with 400), so adding one
-    still needs a new version.
+  - Receivers tolerate what they do not know: an unknown message type (valid
+    envelope: a string `type` and, where the direction numbers messages, an
+    integer `seq`) is skipped, its `seq` still applied and acked so it is never
+    resent and later messages are not blocked; each side logs it once per type
+    per link. An unknown host op in a `req` is answered `res {ok: false, error:
+    {status: 501, code: "unknown_op"}}`, which main surfaces as a 501
+    `HostOpError` so callers can fall back. A sender must not rely on a newer
+    message being understood unless the version (or, later, a capability) says
+    so.
 - **Older versions stay supported** until supporting one becomes too much of a
   maintenance burden; dropping one is an explicit decision (raising
   `MIN_LINK_PROTOCOL_VERSION`). In practice main keeps at least version N-1.
