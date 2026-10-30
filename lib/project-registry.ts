@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, 
 import { homedir } from "os";
 import { isAbsolute, resolve } from "path";
 import { comparableProjectPath } from "./comparable-path";
+import { isValidOmpProfile } from "./omp-profile";
 import { getAgentDir } from "./omp/paths";
 import type { ManagedProject, ProjectLaunchConfig } from "./types";
 
@@ -75,7 +76,10 @@ function parseLaunchConfig(item: Record<string, unknown>): ProjectLaunchConfig |
   const raw = item.launchConfig;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const value = raw as Record<string, unknown>;
-  const profile = typeof value.profile === "string" && value.profile.trim() && !value.profile.trim().startsWith("-") ? value.profile.trim() : undefined;
+  const rawProfile = typeof value.profile === "string" && value.profile.trim() && !value.profile.trim().startsWith("-") ? value.profile.trim() : undefined;
+  // A profile omp would reject (e.g. containing a space) must not reach the
+  // spawn boundary: it makes every session in the workspace fail at startup.
+  const profile = rawProfile !== undefined && isValidOmpProfile(rawProfile) ? rawProfile : undefined;
   const advisor = value.advisor === true ? true : undefined;
   const extraArgs = Array.isArray(value.extraArgs)
     ? value.extraArgs.filter((arg): arg is string => typeof arg === "string" && arg.length > 0 && arg.length <= 256 && !isReservedLaunchArg(arg)).slice(0, 32)

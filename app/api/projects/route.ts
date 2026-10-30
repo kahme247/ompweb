@@ -4,6 +4,7 @@ import { isAbsolute, resolve } from "path";
 import { NextResponse } from "next/server";
 import { apiErrorResponse } from "@/lib/api-utils";
 import { comparableProjectPath } from "@/lib/comparable-path";
+import { isValidOmpProfile } from "@/lib/omp-profile";
 import { allowFileRoot } from "@/lib/file-access";
 import {
   hideProject,
@@ -29,7 +30,7 @@ function parseLaunchConfig(value: unknown): ProjectLaunchConfig | undefined {
   const raw = value as Record<string, unknown>;
   const profile = raw.profile === undefined ? undefined : typeof raw.profile === "string" && raw.profile.trim() ? raw.profile.trim() : undefined;
   if (raw.profile !== undefined && !profile) throw new ProjectPathError("invalid_profile", "Profile must be a non-empty string");
-  if (profile?.startsWith("-")) throw new ProjectPathError("invalid_profile", "Profile must not start with '-'");
+  if (profile !== undefined && !isValidOmpProfile(profile)) throw new ProjectPathError("invalid_profile", "Profile names must match ^[a-z0-9][a-z0-9._-]{0,63}$, cannot end with '.', and cannot be a Windows reserved device name (CON, PRN, AUX, NUL, COM0-9, LPT0-9, or any of those with an extension)");
   const advisor = raw.advisor === undefined ? undefined : raw.advisor;
   if (advisor !== undefined && typeof advisor !== "boolean") throw new ProjectPathError("invalid_advisor", "Advisor must be a boolean");
   if (raw.extraArgs !== undefined && (!Array.isArray(raw.extraArgs) || raw.extraArgs.length > MAX_EXTRA_ARGS)) throw new ProjectPathError("invalid_extra_args", "Extra args must contain at most 32 arguments");
