@@ -7,7 +7,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/kahme247/ompweb.svg?logo=github)](https://github.com/kahme247/ompweb/stargazers)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/kahme247/ompweb/pulls)
 
-[English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md)
+[English](./README.md) | [简体中文](./README.zh-CN.md) | [繁體中文](./README.zh-TW.md) | [日本語](./README.ja.md)
 
 コミュニティ：[OMPWEB Discord に参加](https://discord.gg/evqgGzRfM5)
 
@@ -111,7 +111,7 @@ Linux トレイ、Windows サービス）はインストール時に `OMP_WEB_PA
 - **Git Worktree サポート**: サイドバーから直接 Git ワークツリーを切り替え・管理。
 - **GUI 設定管理**: 設定ファイルを直接編集することなく、モデル、API キー、MCP サーバー、スキル、プラグイン、OMP 設定を変更可能。
 - **スラッシュコマンド・ショートカット**: `/plan`、`/review`、`/fix`、`/test` などの定型プロンプトと `⌘K` / `Ctrl+K` コマンドパレット。
-- **テーマと多言語対応**: ペーパー調のライト/ダークテーマ、英語・簡体字中国語・日本語に完全対応。
+- **テーマと多言語対応**: ペーパー調のライト/ダークテーマ、英語・簡体字中国語・繁体字中国語（繁體中文）・日本語に完全対応。
 
 ## 環境変数
 

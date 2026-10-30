@@ -5,12 +5,14 @@ import type { ExitedRpcSession } from "@/lib/types";
 import en from "./locales/en.json";
 import ja from "./locales/ja.json";
 import zhCN from "./locales/zh-CN.json";
+import zhTW from "./locales/zh-TW.json";
 
-export type Locale = "en" | "zh-CN" | "ja";
+export type Locale = "en" | "zh-CN" | "zh-TW" | "ja";
 
 export const LOCALES: Array<{ value: Locale; label: string }> = [
   { value: "en", label: "EN" },
-  { value: "zh-CN", label: "中文" },
+  { value: "zh-CN", label: "简体中文" },
+  { value: "zh-TW", label: "繁體中文" },
   { value: "ja", label: "日本語" },
 ];
 
@@ -19,6 +21,7 @@ const STORAGE_KEY = "omp-lang";
 const dictionaries: Record<Locale, Record<string, string>> = {
   en: en as Record<string, string>,
   "zh-CN": zhCN as Record<string, string>,
+  "zh-TW": zhTW as Record<string, string>,
   ja: ja as Record<string, string>,
 };
 
@@ -41,20 +44,30 @@ const state: I18nState = (globalThis.__ompI18nState ??= {
   hydrated: false,
 });
 const listeners = state.listeners;
+const TRADITIONAL_ZH_RE = /^zh-(tw|hk|mo|hant)\b/i;
+
+export function resolveNavigatorLocale(language: string | undefined | null): Locale {
+  if (!language) return "en";
+  const lang = language.toLowerCase();
+  if (lang.startsWith("zh")) {
+    return TRADITIONAL_ZH_RE.test(lang) ? "zh-TW" : "zh-CN";
+  }
+  if (lang.startsWith("ja")) return "ja";
+  return "en";
+}
+
 
 function detectLocale(): Locale {
   try {
     if (typeof window !== "undefined" && typeof localStorage !== "undefined") {
       const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored === "en" || stored === "zh-CN" || stored === "ja") return stored;
+      if (stored === "en" || stored === "zh-CN" || stored === "zh-TW" || stored === "ja") return stored;
     }
   } catch {
     // storage unavailable (private mode etc.)
   }
   if (typeof navigator !== "undefined" && navigator.language) {
-    const lang = navigator.language.toLowerCase();
-    if (lang.startsWith("zh")) return "zh-CN";
-    if (lang.startsWith("ja")) return "ja";
+    return resolveNavigatorLocale(navigator.language);
   }
   return "en";
 }

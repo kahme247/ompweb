@@ -7,7 +7,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/kahme247/ompweb.svg?logo=github)](https://github.com/kahme247/ompweb/stargazers)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/kahme247/ompweb/pulls)
 
-[English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md)
+[English](./README.md) | [简体中文](./README.zh-CN.md) | [繁體中文](./README.zh-TW.md) | [日本語](./README.ja.md)
 
 社区：[加入 OMPWEB Discord](https://discord.gg/evqgGzRfM5)
 
@@ -104,7 +104,7 @@ Windows 服务）仍在安装时接受 `OMP_WEB_PASSWORD`，但在写入配置�
 - **Git Worktree 支持**：直接在侧边栏切换与管理 Git 工作树。
 - **可视化设置**：在 Web 界面中直接配置模型、API 密钥、MCP 服务器、技能、插件及 OMP 原生设置。
 - **快捷指令与命令面板**：内置常用指令（`/plan`、`/review`、`/fix`、`/test` 等）及 `⌘K` / `Ctrl+K` 全局面板。
-- **主题与多语言**：温暖纸感深浅主题，完整支持英语、简体中文及日本語。
+- **主题与多语言**：温暖纸感深浅主题，完整支持英语、简体中文、繁體中文及日本語。
 
 ## 环境变量
 

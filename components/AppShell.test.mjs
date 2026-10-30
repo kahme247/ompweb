@@ -35,7 +35,7 @@ test("the expand-thinking preference reaches the thinking block, off unless stor
 });
 
 test("every locale carries the expand-thinking setting copy", async () => {
-  for (const locale of ["en", "zh-CN", "ja"]) {
+  for (const locale of ["en", "zh-CN", "zh-TW", "ja"]) {
     const messages = JSON.parse(await readFile(new URL(`../lib/i18n/locales/${locale}.json`, import.meta.url), "utf8"));
     assert.ok(messages["settingsConfig.expandThinkingByDefault"], `${locale} label`);
     assert.ok(messages["settingsConfig.expandThinkingByDefaultDesc"], `${locale} description`);
