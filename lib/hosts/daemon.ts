@@ -509,6 +509,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
           ompVersion,
           platform: process.platform,
           home: homedir(),
+          autoApproveExtension: localHost.autoApproveExtension(),
           ack: down.acked,
           channels: [...channels].map(([ch, channel]) => ({ ch, sessionId: channel.pending.sessionId, cwd: channel.cwd, pending: replay ? channel.pending.lines() : null })),
         });
