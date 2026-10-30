@@ -1,9 +1,9 @@
 import { existsSync, realpathSync, statSync } from "fs";
 import { homedir } from "os";
+import { fileURLToPath } from "url";
 import { comparableProjectPath } from "../comparable-path";
 import { getAgentEnvOverrides } from "../omp/agent-env";
 import { spawnOmpTransport } from "../omp/rpc-process";
-import { SESSION_EDIT_EXTENSION_PATH } from "../omp/session-edit";
 import { readNativeSettings } from "../omp/settings-config";
 import { isReservedLaunchArg, loadProjectRegistry } from "../project-registry";
 import { invalidateSessionEntriesCache, invalidateSessionListCache, invalidateSessionListMeta } from "../session-reader";
@@ -11,6 +11,9 @@ import { PRESET_FULL } from "../tool-presets";
 import type { ProjectLaunchConfig } from "../types";
 import type { Host } from "./host";
 import { sessionOps } from "./session-ops";
+
+/** omp loads it for history edits (#278). Next to this module, not in the cwd: the daemon runs in HOME. */
+export const SESSION_EDIT_EXTENSION_PATH = fileURLToPath(new URL("../omp/session-edit-extension.mjs", import.meta.url));
 
 // omp aliases "find"->"glob" and has no "ls" tool; the web UI presets still use
 // the pi names (lib/tool-presets.ts), so translate before building --tools.
