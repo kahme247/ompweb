@@ -16,7 +16,8 @@ writeFileSync(path.join(root, "dist", "index.html"), "<!doctype html><html><head
 for (const dir of ["public", "node_modules"]) symlinkSync(path.join(repo, dir), path.join(root, dir), "junction");
 
 const ENV = { HOME: home, PI_CODING_AGENT_DIR: path.join(home, ".omp", "agent"), OMP_WEB_OMP_BIN: "/nonexistent/omp" };
-const UNSET = ["OMP_WEB_PASSWORD_HASH", "OMP_WEB_PASSWORD", "OMP_WEB_TRUSTED_HEADER_SHA256"];
+// XDG_DATA_HOME could move the blobs dir out of the temp home (lib/omp/paths.ts).
+const UNSET = ["OMP_WEB_PASSWORD_HASH", "OMP_WEB_PASSWORD", "OMP_WEB_TRUSTED_HEADER_SHA256", "XDG_DATA_HOME"];
 const saved = Object.fromEntries([...UNSET, ...Object.keys(ENV)].map((name) => [name, process.env[name]]));
 for (const name of UNSET) delete process.env[name];
 Object.assign(process.env, ENV);
@@ -127,6 +128,32 @@ test("pages get the index, files their content, and anything else 404", async ()
   assert.equal((await fetch(url("/icon.svg"))).status, 200);
   assert.equal((await fetch(url("/katex/katex.min.css"))).status, 200);
   assert.equal((await fetch(url("/..%2Fpackage.json"))).status, 404);
+});
+
+test("each route answers under its own path with decoded params, and the manifest stays gated", async (t) => {
+  // A space and a non-ASCII name pin the decoded `[...path]` segments, taken from the right index.
+  mkdirSync(path.join(ENV.PI_CODING_AGENT_DIR, "blobs"), { recursive: true });
+  const file = path.join(ENV.PI_CODING_AGENT_DIR, "my file é.txt");
+  writeFileSync(file, "HELLO");
+  const read = await fetch(url(`/api/files${file.split(path.sep).join("/").replace(/^\/?/, "/")}?type=read`));
+  assert.equal(read.status, 200);
+  assert.equal((await read.json()).content, "HELLO");
+
+  // A `:param` is decoded too: only the decoded hash (`%61` is `a`) names this PNG-signed blob.
+  const hash = "a".repeat(64);
+  writeFileSync(path.join(ENV.PI_CODING_AGENT_DIR, "blobs", hash), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  assert.equal((await fetch(url(`/api/media/%61${hash.slice(1)}`))).status, 200);
+
+  // Static segments win over `:id`: agent/new has no GET, and the search streams NDJSON.
+  assert.equal((await fetch(url("/api/agent/new"))).status, 405);
+  assert.match((await fetch(url("/api/sessions/search?q=x"))).headers.get("content-type") ?? "", /^application\/x-ndjson/);
+
+  // Its link carries credentials (spec invariant 4).
+  process.env.OMP_WEB_PASSWORD_HASH = hashPassword("pw", { logN: 12 });
+  t.after(() => {
+    delete process.env.OMP_WEB_PASSWORD_HASH;
+  });
+  assert.equal((await fetch(url("/api/manifest"))).status, 401);
 });
 
 /** Sends `head` (request line and headers) and nothing more; resolves once the server hangs up. */
