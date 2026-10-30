@@ -103,7 +103,7 @@ test("serveFile never follows a symlink out of its directory", { skip: process.p
   assert.equal(await (await get("/alias.txt"))?.text(), "ok", "a link that stays inside is served");
 });
 
-test("serveFile sends Last-Modified and answers a matching If-Modified-Since with 304", async () => {
+test("serveFile sends Last-Modified and a weak ETag, and answers a match with 304", async () => {
   const get = (headers: Record<string, string> = {}, method = "GET") =>
     serveFile(new Request("http://localhost/icon.svg", { method, headers }), root, false);
   const lastModified = (await get())?.headers.get("last-modified");
@@ -115,6 +115,12 @@ test("serveFile sends Last-Modified and answers a matching If-Modified-Since wit
   const older = new Date(Date.parse(lastModified) - 1000).toUTCString();
   assert.equal((await get({ "if-modified-since": older }))?.status, 200);
   assert.equal((await get({ "if-modified-since": "garbage" }))?.status, 200);
+  const etag = (await get())?.headers.get("etag");
+  assert.match(etag ?? "", /^W\/"\d+-[\d.]+"$/);
+  assert.equal((await get({ "if-none-match": etag! }))?.status, 304);
+  assert.equal((await get({ "if-none-match": `"x", ${etag!.slice(2)}` }))?.status, 304, "weak comparison, in a list");
+  // If-None-Match wins over If-Modified-Since: the Nix store gives every file the same mtime across releases.
+  assert.equal((await get({ "if-none-match": 'W/"0-0"', "if-modified-since": lastModified }))?.status, 200);
   // RFC 9110: only GET and HEAD are conditional on If-Modified-Since; a static file takes no other method.
   const post = await get({ "if-modified-since": lastModified }, "POST");
   assert.equal(post?.status, 405);
