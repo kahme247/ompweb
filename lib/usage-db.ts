@@ -149,7 +149,12 @@ export function getUsageDatabase(customPath?: string): Database {
   try {
     migrateUsageDatabase(db);
   } catch (err) {
-    db.close(true);
+    // A failing close must not hide the migration error.
+    try {
+      db.close(true);
+    } catch {
+      // Ignore
+    }
     throw err;
   }
 

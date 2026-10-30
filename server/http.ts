@@ -69,6 +69,9 @@ function cacheControl(pathname: string): string {
   return "public, max-age=0";
 }
 
+// Real paths of the serving directories, resolved once each. One that does not exist (yet) is skipped and tried again.
+const realBases = new Map<string, string>();
+
 /**
  * A file from dist/ (prod), public/ or the KaTeX dist under /katex/; null when no file matches. dist/index.html is
  * not one: the shell is only served rendered (renderIndex).
@@ -90,10 +93,19 @@ export async function serveFile(request: Request, root: string, dev: boolean): P
   for (const base of bases) {
     const file = path.resolve(base, relative);
     if (!file.startsWith(base + path.sep)) continue;
+    let realBase = realBases.get(base);
+    if (realBase === undefined) {
+      try {
+        realBase = realpathSync(base);
+      } catch {
+        continue;
+      }
+      realBases.set(base, realBase);
+    }
     let stat: Stats;
     try {
       // statSync and Bun.file follow symlinks: serve a link only when its target stays inside the (real) base.
-      if (!realpathSync(file).startsWith(realpathSync(base) + path.sep)) continue;
+      if (!realpathSync(file).startsWith(realBase + path.sep)) continue;
       stat = statSync(file);
       if (!stat.isFile()) continue;
     } catch {
