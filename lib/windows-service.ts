@@ -653,12 +653,12 @@ export async function stopTrayService(): Promise<{ success: boolean; message?: s
       foreach ($p in $nativeProcs) {
           Start-Process -FilePath '${taskkillExe.replace(/'/g, "''")}' -ArgumentList "/PID $($p.ProcessId) /T /F" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue | Out-Null
       }
-      # Also kill orphaned node servers on the service port
+      # Also kill orphaned node or bun servers on the service port
       $port = if ($cfg -and $cfg.port) { [int]$cfg.port } else { 30177 }
       $conns = Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue | Where-Object { $_.State -eq "Listen" }
       foreach ($c in $conns) {
           $owner = Get-CimInstance Win32_Process -Filter "ProcessId = $($c.OwningProcess)" -ErrorAction SilentlyContinue
-          if ($owner -and $owner.Name -like "node*") {
+          if ($owner -and ($owner.Name -like "node*" -or $owner.Name -like "bun*")) {
               Start-Process -FilePath '${taskkillExe.replace(/'/g, "''")}' -ArgumentList "/PID $($c.OwningProcess) /T /F" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue | Out-Null
           }
       }

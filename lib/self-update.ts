@@ -514,7 +514,9 @@ export async function commitSelfUpdate(attemptId: string, kind: Kind = "app"): P
     const systemd = kind === "app" ? await detectSystemdService(launcherPid) : null;
     if (systemd) args.push("--systemd-unit", systemd.unit, "--systemd-user", systemd.user ? "1" : "0");
     const workerArgs = workerPath ? [workerPath, ...args] : args;
-    let command = process.execPath;
+    // Windows locks a running bun.exe, and npm replaces the package's: the worker runs on the launcher's Node.
+    const runtime = process.env.OMP_WEB_NODE_BIN || process.execPath;
+    let command = runtime;
     let commandArgs = workerArgs;
     if (systemd) {
       // A worker left in the unit's cgroup is killed with the server it stops,
@@ -528,7 +530,7 @@ export async function commitSelfUpdate(attemptId: string, kind: Kind = "app"): P
         throw new Error(`systemd-run cannot start the update worker: ${commandError(error)}`);
       }
       command = "systemd-run";
-      commandArgs = [...systemdRun, process.execPath, ...workerArgs];
+      commandArgs = [...systemdRun, runtime, ...workerArgs];
     }
     const child = spawn(command, commandArgs, {
       detached: true,
