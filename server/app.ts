@@ -105,6 +105,8 @@ export function startServer(options: { port: number; hostname: string; dev: bool
     port: options.port,
     hostname: options.hostname,
     development: dev ? { hmr: true, console: true } : false,
+    // Bun turns SO_REUSEPORT on when development is false: a second omp-web would share the port instead of failing.
+    reusePort: false,
     idleTimeout: IDLE_TIMEOUT,
     routes,
     fetch: async (request, server) => {
