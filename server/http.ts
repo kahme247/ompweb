@@ -71,12 +71,21 @@ export async function serveFile(request: Request, root: string, dev: boolean): P
   for (const base of bases) {
     const file = path.resolve(base, relative);
     if (!file.startsWith(base + path.sep)) continue;
+    let mtime: Date;
     try {
-      if (!statSync(file).isFile()) continue;
+      const stat = statSync(file);
+      if (!stat.isFile()) continue;
+      mtime = stat.mtime;
     } catch {
       continue;
     }
-    return new Response(Bun.file(file), { headers: { "Cache-Control": cacheControl(pathname) } });
+    const headers = { "Cache-Control": cacheControl(pathname), "Last-Modified": mtime.toUTCString() };
+    // HTTP dates carry whole seconds; RFC 9110 makes only GET and HEAD conditional on If-Modified-Since.
+    const since = Date.parse(request.headers.get("if-modified-since") ?? "");
+    if ((request.method === "GET" || request.method === "HEAD") && since >= Math.floor(mtime.getTime() / 1000) * 1000) {
+      return new Response(null, { status: 304, headers });
+    }
+    return new Response(Bun.file(file), { headers });
   }
   return null;
 }
