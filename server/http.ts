@@ -100,3 +100,15 @@ export function renderIndex(html: string, request: Request): string {
     .replace('<meta name="apple-mobile-web-app-title" content="omp web"', () => `<meta name="apple-mobile-web-app-title" content="${name}"`)
     .replace("</head>", '<link rel="manifest" href="/api/manifest" crossorigin="use-credentials"></head>');
 }
+
+/**
+ * Bun moves the entry stylesheet to the end of <head>, after the pre-paint scripts. The theme script reads --bg from
+ * it for theme-color, and a stylesheet only blocks the scripts that follow it, so put it before them.
+ */
+export function stylesheetFirst(html: string): string {
+  const stylesheet = /<link rel="stylesheet"[^>]*>/.exec(html)?.[0];
+  if (!stylesheet) throw new Error("the page has no stylesheet link");
+  // Without this anchor the replace below would drop the stylesheet from the page.
+  if (!html.includes("<script>")) throw new Error("the page has no inline <script> to put the stylesheet before");
+  return html.replace(stylesheet, "").replace("<script>", `${stylesheet}\n    <script>`);
+}

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { proxy } from "@/proxy";
-import { finalizeResponse, INDEX_CACHE, renderIndex, serveFile } from "./http";
+import { finalizeResponse, INDEX_CACHE, renderIndex, serveFile, stylesheetFirst } from "./http";
 import { dispatch, ROUTE_MODULES, routePattern } from "./routes";
 
 export function parseListenArgs(argv: string[], defaultPort: number): { port: number; hostname: string } {
@@ -70,7 +70,7 @@ async function devIndex(server: Bun.Server<undefined>): Promise<string> {
   if (url.hostname === "0.0.0.0") url.hostname = "127.0.0.1";
   else if (url.hostname === "[::]") url.hostname = "[::1]";
   // Never through HTTP(S)_PROXY: a proxy cannot reach this loopback server.
-  return (await fetch(url, { proxy: false })).text();
+  return stylesheetFirst(await (await fetch(url, { proxy: false })).text());
 }
 
 export function startServer(options: { port: number; hostname: string; dev: boolean; root: string; html?: Bun.HTMLBundle }): Bun.Server<undefined> {

@@ -156,10 +156,14 @@ test("each route answers under its own path with decoded params, and the manifes
   assert.equal((await fetch(url("/api/manifest"))).status, 401);
 });
 
-test("dev pages render when HTTP_PROXY points nowhere", async (t) => {
+test("dev pages put the stylesheet before the pre-paint scripts, even when HTTP_PROXY points nowhere", async (t) => {
   // The dev shell comes from Bun's HTML bundle over loopback, which must not go through the proxy.
   const saved = Object.fromEntries(["HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"].map((name) => [name, process.env[name]]));
-  writeFileSync(path.join(root, "dev.html"), "<!doctype html><html><head><title>omp web</title></head><body></body></html>");
+  writeFileSync(path.join(root, "dev.css"), "body { color: red; }");
+  writeFileSync(
+    path.join(root, "dev.html"),
+    '<!doctype html><html><head><title>omp web</title><script>void 0</script><link rel="stylesheet" href="./dev.css" /></head><body></body></html>',
+  );
   // A file written at run time, so no static import; Bun turns it into an HTML bundle as dev.ts's import does.
   const { default: html } = await import(path.join(root, "dev.html"));
   const dev = startServer({ port: 0, hostname: "127.0.0.1", dev: true, root, html });
@@ -175,7 +179,10 @@ test("dev pages render when HTTP_PROXY points nowhere", async (t) => {
   });
   const page = await fetch(new URL("/", dev.url), { proxy: false });
   assert.equal(page.status, 200);
-  assert.match(await page.text(), /<link rel="manifest" href="\/api\/manifest"/);
+  const body = await page.text();
+  assert.match(body, /<link rel="manifest" href="\/api\/manifest"/);
+  // Bun moves the stylesheet after the inline scripts; the theme script reads --bg from it.
+  assert.ok(body.indexOf('<link rel="stylesheet"') < body.indexOf("<script>void 0</script>"), body);
 });
 
 /** Sends `head` (request line and headers) and nothing more; resolves once the server hangs up. */
