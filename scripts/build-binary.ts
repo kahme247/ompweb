@@ -1,9 +1,11 @@
 // `npm run build:binary [-- --target bun-<os>-<arch>]` (after the client build): compiles server/binary.ts into
-// release/ompweb-<os>-<arch>/ompweb (ompweb.exe for Windows) next to the files it serves and hands to omp, then
-// archives that directory as release/ompweb-<os>-<arch>.tar.gz (.zip for Windows). Default target: this machine.
-import { cpSync, rmSync } from "node:fs";
+// release/ompweb-<os>-<arch>/ompweb (ompweb.exe for Windows) next to the files it serves and hands to omp and the
+// licenses of what it redistributes, then archives that directory as release/ompweb-<os>-<arch>.tar.gz (.zip for
+// Windows). Default target: this machine.
+import { cpSync, existsSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
+import { bundledPackageDirs, writeLicenses } from "./licenses";
 
 const root = path.join(import.meta.dir, "..");
 const { values } = parseArgs({ args: Bun.argv.slice(2), options: { target: { type: "string" } } });
@@ -14,6 +16,18 @@ const release = path.join(root, "release");
 const out = path.join(release, name);
 rmSync(out, { recursive: true, force: true });
 
+// build-client.ts lists the npm packages in the client bundle; the binary embeds this Bun's runtime.
+const clientPackagesFile = path.join(root, "build", "client-packages.json");
+if (!existsSync(clientPackagesFile)) {
+  console.error("No build/client-packages.json: run `npm run build` first.");
+  process.exit(1);
+}
+const bunLicense = path.join(import.meta.dir, `bun-LICENSE-${Bun.version}.md`);
+if (!existsSync(bunLicense)) {
+  console.error(`No scripts/bun-LICENSE-${Bun.version}.md: save https://github.com/oven-sh/bun/blob/bun-v${Bun.version}/LICENSE.md there.`);
+  process.exit(1);
+}
+
 const result = await Bun.build({
   entrypoints: [path.join(root, "server", "binary.ts")],
   // A .env or bunfig.toml in the directory ompweb is started from belongs to the user's project, not to ompweb.
@@ -21,6 +35,7 @@ const result = await Bun.build({
   // What `bun build --compile --production` sets. Without the define the bundle reads NODE_ENV as "development", and
   // the server never writes the local daemon link (instrumentation.node.ts), so no session ever lists.
   minify: true,
+  metafile: true,
   define: { "process.env.NODE_ENV": JSON.stringify("production") },
   throw: false,
 });
@@ -34,6 +49,8 @@ for (const file of ["dist", "public", "LICENSE", "lib/omp/session-edit-extension
 for (const file of new Bun.Glob("app/fonts/*-{OFL.txt,LICENSE.*}").scanSync(root)) copy(path.join(root, file), file);
 const katex = path.dirname(Bun.resolveSync("katex/package.json", root));
 for (const file of ["package.json", "LICENSE", "dist/katex.min.css", "dist/fonts"]) copy(path.join(katex, file), `node_modules/katex/${file}`);
+const clientPackages = (JSON.parse(readFileSync(clientPackagesFile, "utf8")) as string[]).map((dir) => path.resolve(root, dir));
+writeLicenses(out, [...new Set([...bundledPackageDirs(result.metafile!, process.cwd()), ...clientPackages])].sort(), bunLicense);
 
 // Bun.Archive writes every entry as 0644 (the binary would lose its execute bit) and makes no zip: the system tools do.
 // shortcut: a Linux or macOS archive built on Windows loses the execute bit the same way; build releases on Linux (CI).

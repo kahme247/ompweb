@@ -1,7 +1,9 @@
-// Bundles the SPA (app/index.html) into dist/: index.html plus hashed files under dist/assets/.
+// Bundles the SPA (app/index.html) into dist/: index.html plus hashed files under dist/assets/. Lists the npm packages
+// in the bundle in build/client-packages.json, for the binary release's licenses (scripts/build-binary.ts).
 import { rmSync } from "node:fs";
 import path from "node:path";
 import type { BunPlugin } from "bun";
+import { bundledPackageDirs } from "./licenses";
 import tailwind from "./tailwind-plugin";
 import { clientEnv } from "../server/client-env";
 import { stylesheetFirst } from "../server/http";
@@ -32,6 +34,7 @@ const result = await Bun.build({
   outdir,
   target: "browser",
   minify: true,
+  metafile: true,
   splitting: true,
   sourcemap: "none",
   publicPath: "/",
@@ -49,4 +52,5 @@ if (!result.success) process.exit(1);
 for (const [url, source] of fonts) await Bun.write(path.join(outdir, url), Bun.file(source));
 const indexPath = path.join(outdir, "index.html");
 await Bun.write(indexPath, stylesheetFirst(await Bun.file(indexPath).text()));
+await Bun.write(path.join(root, "build", "client-packages.json"), `${JSON.stringify(bundledPackageDirs(result.metafile!, process.cwd()).map((dir) => path.relative(root, dir)), null, 2)}\n`);
 console.log(`built ${result.outputs.length + fonts.size} files into ${path.relative(process.cwd(), outdir) || "."}`);
