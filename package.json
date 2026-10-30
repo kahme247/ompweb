@@ -25,6 +25,8 @@
     "bin",
     "lib",
     "app/api",
+    "app/fonts/*-OFL.txt",
+    "app/fonts/*-LICENSE.*",
     "server",
     "dist",
     "public",
