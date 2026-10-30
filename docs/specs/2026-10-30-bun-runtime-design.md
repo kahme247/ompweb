@@ -92,6 +92,13 @@ Pre-checks by the planner (2026-10-30, Bun 1.4.4, Node 26.8.1, npm 11.19.0, Linu
 | Bun.Image | EXIF orientation 6 on a 40×20 JPEG reads as 20×40. `resize(480,480,{fit:"inside",withoutEnlargement:true}).webp({quality:80})` turns 1600×1000 into 480×300 |
 | Bun.build HTML | With `naming` it writes `dist/index.html` plus `dist/assets/<name>-<hash>.{js,css}`, and inline classic `<script>`s stay in `<head>` |
 | bun test | It finds `*.test.mjs` and supports `--parallel` (implies `--isolate`). `import("./m.ts?fresh=1")` gives a fresh instance, and `mock.module("node:fs")` reaches named imports of modules loaded afterwards |
+| Task 1 probe: packed global install (Linux x64, npm 11.19.0) | `npm pack --ignore-scripts`, then `npm install -g --prefix <p> ./kahme247-ompweb-0.6.0.tgz`: `resolveBunBinary(<p>/lib/node_modules/@kahme247/ompweb)` → `…/node_modules/bun/bin/bun.exe` (107 MB), `--version` → `1.4.4`. npm warned the `bun` postinstall is "not yet covered by allowScripts" but still ran it. With `--ignore-scripts`, `bin/bun.exe` is 450 bytes and the resolver returns `…/node_modules/@oven/bun-linux-x64/bin/bun`, `--version` → `1.4.4` |
+| Task 1 probe: NO_PROXY | `HTTP_PROXY=http://127.0.0.1:9 NO_PROXY=127.0.0.1 bun np.ts` (`Bun.serve({port:0})` + `fetch`) → `200 ok`. Without `NO_PROXY` → `ECONNREFUSED` |
+| Task 1 probe: launcher IPC | Node `spawn(resolveBunBinary(repo), ["child.ts"], {stdio:["inherit","inherit","inherit","ipc"]})`: parent got `{"ready":true}`, sent `{hello:1}`, got `{"echo":{"hello":1},"bun":"1.4.4"}` |
+| Task 1 probe: store compatibility | Under Node + jiti with `PI_CODING_AGENT_DIR=<tmp>`: `getVapidKeys`, `saveDevice`, `recordHistory`, `getUsageDatabase()` created `omp-web/notifications.db` and `usage.db`. `bun:sqlite` read back the vapid row, the device row and the history row, and the usage tables (`synced_files`, `usage_records`); `PRAGMA journal_mode` → `wal` (both); `stat -c %a notifications.db` → `600`. A second `bun` process doing `BEGIN IMMEDIATE` (`busy_timeout = 5000`) while the first held a write transaction for 1.5 s waited 933 ms (started 0.6 s in), then succeeded after the commit |
+| Task 1 probe: body cap | Streamed 150 MiB POST to `Bun.serve`: default → `413`; `maxRequestBodySize: Number.MAX_SAFE_INTEGER` → `200 ok 157286400` |
+| Task 1 probe: macOS | pending: user's Mac (Task 8 packed smoke) |
+| Task 1 probe: Windows | pending: Windows CI (Task 8) |
 
 ## Acceptance criteria
 
