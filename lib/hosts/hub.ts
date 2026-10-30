@@ -240,12 +240,15 @@ function sawDaemon(link: Link): void {
 }
 
 /** The host the bearer token names, or the refusal to answer with. */
-function authenticate(req: Request): HostRecord | Response {
+function authenticate(req: Request, disableIdleTimeout?: () => void): HostRecord | Response {
   const header = req.headers.get("authorization");
   const token = typeof header === "string" && header.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : "";
   try {
     const record = token ? hostForToken(token) : null;
-    return record ?? json({ error: "Invalid host token" }, 401);
+    if (!record) return json({ error: "Invalid host token" }, 401);
+    // Only a known host may keep the socket open past Bun's idle timeout (a ping comes every 15 s).
+    disableIdleTimeout?.();
+    return record;
   } catch (error) {
     if (!(error instanceof HostRegistryUnreadableError)) throw error;
     // Never 401 here: a daemon told its token is unknown stops every omp child.
@@ -277,8 +280,8 @@ export function freezeHostLinks(): void {
 }
 
 /** GET /api/hosts/link: the daemon's downlink, an NDJSON stream, opened with the id of the hello it POSTed. */
-export async function handleLinkGet(req: Request): Promise<Response> {
-  const record = authenticate(req);
+export async function handleLinkGet(req: Request, disableIdleTimeout?: () => void): Promise<Response> {
+  const record = authenticate(req, disableIdleTimeout);
   if (record instanceof Response) return record;
   if (hub().frozen) return stopping();
   const link = linkFor(record.id);
@@ -472,8 +475,8 @@ async function adopt(link: Link, child: RemoteRpcTransport, sessionId: string, c
 }
 
 /** POST /api/hosts/link: a batch of uplink NDJSON messages, or a hello (see handleHelloPost). */
-export async function handleLinkPost(req: Request): Promise<Response> {
-  const record = authenticate(req);
+export async function handleLinkPost(req: Request, disableIdleTimeout?: () => void): Promise<Response> {
+  const record = authenticate(req, disableIdleTimeout);
   if (record instanceof Response) return record;
   if (hub().frozen) return stopping();
   if (req.headers.has(LINK_HELLO_HEADER)) return handleHelloPost(req, record);
@@ -556,8 +559,8 @@ function settle(link: Link, message: Res): void {
 }
 
 /** POST /api/hosts/link/blob/<reqId>: the bytes of one large op result, sent before its `res`. */
-export async function handleLinkBlob(req: Request, reqId: string): Promise<Response> {
-  const record = authenticate(req);
+export async function handleLinkBlob(req: Request, reqId: string, disableIdleTimeout?: () => void): Promise<Response> {
+  const record = authenticate(req, disableIdleTimeout);
   if (record instanceof Response) return record;
   if (hub().frozen) return stopping();
   const link = currentLink(req, record);

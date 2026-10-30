@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { proxy } from "@/proxy";
+import { proxy, UNGATED } from "@/proxy";
 import { finalizeResponse, INDEX_CACHE, renderIndex, serveFile } from "./http";
 import { dispatch, ROUTE_MODULES, routePattern } from "./routes";
 
@@ -24,9 +24,26 @@ function decodable(pathname: string): boolean {
   }
 }
 
-/** The gate, then the 400 for malformed `%` encoding, then `respond`; every answer goes through finalizeResponse. */
-async function handle(request: Request, respond: () => Response | Promise<Response>): Promise<Response> {
-  const response = proxy(request) ?? (decodable(new URL(request.url).pathname) ? await respond() : text("Bad Request", 400));
+/**
+ * The gate, then the 400 for malformed `%` encoding, then `respond`; every answer but a 400 for an unparsable URL goes
+ * through finalizeResponse. A request past the gate may stay open without traffic (SSE, the clone/bash-output/search
+ * streams): Bun's idle timeout is switched off for it alone, so no unauthenticated caller can hold a socket open.
+ */
+async function handle(request: Request, server: Bun.Server<undefined>, respond: () => Response | Promise<Response>): Promise<Response> {
+  let pathname: string;
+  try {
+    pathname = new URL(request.url).pathname;
+  } catch {
+    // Bun builds request.url from the Host header, so a malformed or missing Host makes it unparsable.
+    return text("Bad Request", 400);
+  }
+  const gate = proxy(request);
+  // server.timeout(request, 0) outlives the response on a keep-alive socket, so public paths (UNGATED, the sign-in
+  // page and route) keep the timeout; the host link switches it off itself once its bearer token checks out.
+  if (gate === null && pathname.startsWith("/api/") && !UNGATED.test(pathname) && pathname !== "/api/web-auth/session") {
+    server.timeout(request, 0);
+  }
+  const response = gate ?? (decodable(pathname) ? await respond() : text("Bad Request", 400));
   return finalizeResponse(request, response);
 }
 
@@ -47,11 +64,11 @@ export function startServer(options: { port: number; hostname: string; dev: bool
   // Dev serves the SPA from the HTML import (`html`) and never reads dist/.
   const index = dev ? null : readFileSync(path.join(root, "dist", "index.html"), "utf8");
 
-  const routes: Record<string, Bun.HTMLBundle | ((request: Bun.BunRequest) => Promise<Response>)> = {};
+  const routes: Record<string, Bun.HTMLBundle | ((request: Bun.BunRequest, server: Bun.Server<undefined>) => Promise<Response>)> = {};
   for (const [key, mod] of Object.entries(ROUTE_MODULES)) {
     const { pattern, rest } = routePattern(key);
     const matcher = new URLPattern({ pathname: pattern });
-    routes[pattern] = (request) => handle(request, () => {
+    routes[pattern] = (request, server) => handle(request, server, () => {
       // Bun's router matched the raw path, but the gate and the handler read request.url, where `..` and `%2e%2e`
       // are resolved. Answer only when that path is still this route, so no gated route runs under an ungated path.
       const { pathname } = new URL(request.url);
@@ -62,7 +79,7 @@ export function startServer(options: { port: number; hostname: string; dev: bool
         if (name !== "0" && value !== undefined) params[name] = decodeURIComponent(value);
       }
       if (rest) params[rest.name] = pathname.split("/").slice(rest.index).filter(Boolean).map(decodeURIComponent);
-      return dispatch(mod, request, params);
+      return dispatch(mod, request, params, () => server.timeout(request, 0));
     });
   }
   if (html) routes[DEV_INDEX] = html;
@@ -70,12 +87,10 @@ export function startServer(options: { port: number; hostname: string; dev: bool
   return Bun.serve({
     port: options.port,
     hostname: options.hostname,
-    // SSE (/api/events) and the host link stay open for minutes without traffic; Bun's default would cut them at 10 s.
-    idleTimeout: 0,
     development: dev ? { hmr: true, console: true } : false,
     routes,
     fetch: async (request, server) => {
-      const response = await handle(request, async () => {
+      const response = await handle(request, server, async () => {
         const file = await serveFile(request, root, dev);
         if (file) return file;
         const { pathname } = new URL(request.url);
