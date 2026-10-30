@@ -161,6 +161,10 @@ const launchOptions = parseLaunchOptions();
 if (launchOptions.help || launchOptions.version) {
   process.exit(0);
 }
+if (launchOptions.error) {
+  console.error(launchOptions.error);
+  process.exit(2);
+}
 
 if (launchOptions.installTray || launchOptions.uninstallTray || launchOptions.tray) {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
