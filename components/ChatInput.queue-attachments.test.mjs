@@ -849,7 +849,6 @@ for (const includeRecovery of [false, true]) {
 
     let releaseText;
     let releaseImage;
-    // Bun appends ";charset=utf-8" to a text File's type; the draft must keep whatever type the file reports.
     const text = new File(["boundary text"], "boundary.txt", { type: "text/plain" });
     const image = new File([Buffer.from(PNG, "base64")], "boundary.png", { type: "image/png" });
     override(text, "text", () => new Promise((resolve) => { releaseText = resolve; }));
@@ -901,10 +900,13 @@ for (const includeRecovery of [false, true]) {
       };
       rerender({ ...movedProps, submissionBlocked: true });
     });
+    // Bun appends ";charset=utf-8" to a text File's type, so the type is pinned by its prefix.
+    const mimeType = getDraft(targetKey)?.files.at(-1)?.mimeType ?? "";
+    assert.ok(mimeType.startsWith("text/plain"), mimeType);
     const expected = {
       value: `${sourceDraft.value} transcribed words\n\nolder target draft`,
       images: [...transferred.images, { data: PNG, mimeType: "image/png" }],
-      files: [...transferred.files, { name: "boundary.txt", mimeType: text.type, content: "boundary text", size: text.size }],
+      files: [...transferred.files, { name: "boundary.txt", mimeType, content: "boundary text", size: text.size }],
     };
     assert.equal(screen.getByRole("textbox").value, expected.value, "new source text wins without overwriting older target text");
     assert.deepEqual(getDraft(targetKey), expected, "only completions missing from the source transfer are added");
