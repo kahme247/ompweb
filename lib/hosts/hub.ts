@@ -20,6 +20,7 @@ import {
   LINK_NONCE_HEADER,
   LINK_PROTOCOL_VERSION,
   LinkLimitError,
+  MIN_LINK_PROTOCOL_VERSION,
   Outbox,
   SeqWindow,
   SESSION_OP_PARAMS,
@@ -296,10 +297,11 @@ function legacyHelloVersion(link: Link, header: string | null): Response | null 
   }
 }
 
-/** 426 for a daemon on another protocol version. Compared before decoding: another version may shape its hello differently. */
+/** 426 for a daemon outside MIN_LINK_PROTOCOL_VERSION..LINK_PROTOCOL_VERSION (a newer one too: the web app upgrades first).
+ * Compared before decoding: another version may shape its hello differently. */
 function versionMismatch(link: Link, raw: unknown): Response | null {
   const version = isRecord(raw) ? raw.v : undefined;
-  if (version === LINK_PROTOCOL_VERSION) return null;
+  if (typeof version === "number" && version >= MIN_LINK_PROTOCOL_VERSION && version <= LINK_PROTOCOL_VERSION && Number.isInteger(version)) return null;
   const hostVersion = typeof version === "number" && Number.isInteger(version) ? version : null;
   // A stray old daemon with this token must not take down the healthy link.
   if (!link.stream) {
@@ -375,8 +377,9 @@ function openDownlink(link: Link, hello: Hello, signal: AbortSignal): Response {
   }, { once: true });
   link.stream = controller;
   link.nonce = randomUUID();
-  link.hostVersion = LINK_PROTOCOL_VERSION;
-  enqueue(link, encodeLine({ type: "welcome", v: LINK_PROTOCOL_VERSION, hostId: link.id, nonce: link.nonce }));
+  // The version this link speaks: the daemon's (decodeUp read a v2 hello as today's shape; v2 and v3 send the same down messages).
+  link.hostVersion = hello.v;
+  enqueue(link, encodeLine({ type: "welcome", v: hello.v, hostId: link.id, nonce: link.nonce }));
   // Resend what the daemon has not applied, in order, before anything new.
   for (const { line } of link.outbox.pending()) enqueue(link, line);
   reattach(link, hello.channels);

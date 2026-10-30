@@ -3,8 +3,11 @@
 import type { SessionOps } from "./session-ops";
 
 /** 2: the hello moved from a GET header into a POST body (a v1 daemon gets 426).
- * 3: hello channels carry `pending`, the raw lines of their open blocking requests. */
+ * 3: hello channels carry `pending`, the raw lines of their open blocking requests.
+ * Rules for changing it: docs/specs/2026-10-28-remote-hosts-design.md, "Protocol versions and compatibility". */
 export const LINK_PROTOCOL_VERSION = 3;
+/** The oldest daemon protocol the server still links (older ones get 426). Dropping one is an explicit decision. */
+export const MIN_LINK_PROTOCOL_VERSION = 2;
 
 export const LINK_LIMITS = {
   pingMs: 15_000,
@@ -213,12 +216,15 @@ export function decodeDown(line: string): DownMessage {
   }
 }
 
-function channels(o: Obj): HelloChannel[] {
+/** A v2 hello's channels carry no `cwd` or `pending`: decoded with `pending: null`, which reattach kills instead of adopting. */
+function channels(o: Obj, v2: boolean): HelloChannel[] {
   const list = o.channels;
   if (!Array.isArray(list)) fail("channels must be an array");
   return list.map((c: unknown) => {
     if (!isObj(c)) fail("channel must be an object");
-    return { ch: str(c, "ch"), sessionId: nullable(c, "sessionId", str), cwd: str(c, "cwd"), pending: nullable(c, "pending", strings) };
+    const ch = str(c, "ch");
+    const sessionId = nullable(c, "sessionId", str);
+    return v2 ? { ch, sessionId, cwd: "", pending: null } : { ch, sessionId, cwd: str(c, "cwd"), pending: nullable(c, "pending", strings) };
   });
 }
 
@@ -252,17 +258,20 @@ function res(o: Obj): UpMessage {
 export function decodeUp(line: string): UpMessage {
   const o = parseLine(line);
   switch (o.type) {
-    case "hello":
+    case "hello": {
+      const v = int(o, "v");
       return {
         type: "hello",
-        v: int(o, "v"),
+        v,
         ompVersion: nullable(o, "ompVersion", str),
         platform: str(o, "platform"),
         home: str(o, "home"),
-        autoApproveExtension: bool(o, "autoApproveExtension"),
+        // A v2 hello does not say: off until a spawn result reports it.
+        autoApproveExtension: v === 2 ? false : bool(o, "autoApproveExtension"),
         ack: int(o, "ack"),
-        channels: channels(o),
+        channels: channels(o, v === 2),
       };
+    }
     case "stdout":
       return { type: "stdout", seq: int(o, "seq"), ch: str(o, "ch"), line: str(o, "line") };
     case "stderr":
