@@ -52,5 +52,7 @@ const indexPath = path.join(outdir, "index.html");
 const html = await Bun.file(indexPath).text();
 const stylesheet = /<link rel="stylesheet"[^>]*>/.exec(html)?.[0];
 if (!stylesheet) throw new Error("dist/index.html has no stylesheet link");
+// Without this anchor the replace below would drop the stylesheet from the page.
+if (!html.includes("<script>")) throw new Error("dist/index.html has no inline <script> to put the stylesheet before");
 await Bun.write(indexPath, html.replace(stylesheet, "").replace("<script>", `${stylesheet}\n    <script>`));
 console.log(`built ${result.outputs.length + fonts.size} files into ${path.relative(process.cwd(), outdir) || "."}`);
