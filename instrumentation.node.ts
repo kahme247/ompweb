@@ -3,6 +3,14 @@ import { join } from "path";
 import { getDiagnosticsDir } from "@/lib/omp/paths";
 
 export async function register(): Promise<void> {
+  // Modules add SIGINT/SIGTERM cleanup listeners (lib/rpc-manager.ts), and any
+  // listener cancels the default exit: end the process the way a signal would
+  // (130/143, as `next start` did). Their "exit" listeners still run. First,
+  // before any await, so a signal during boot is not swallowed.
+  for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]] as const) {
+    process.on(signal, () => process.exit(code));
+  }
+
   // Honor HTTP(S)_PROXY/NO_PROXY for server-side fetch (update checks, skill
   // search, model connection tests). Node's built-in fetch ignores proxy env
   // vars (NODE_USE_ENV_PROXY is Node 24+ only; engines floor is 22).
@@ -80,13 +88,6 @@ export async function register(): Promise<void> {
       console.warn(`[omp-web] session auto-resume failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   })();
-
-  // Modules add SIGINT/SIGTERM cleanup listeners (lib/rpc-manager.ts), and any
-  // listener cancels the default exit: end the process the way a signal would
-  // (130/143, as `next start` did). Their "exit" listeners still run.
-  for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]] as const) {
-    process.on(signal, () => process.exit(code));
-  }
 
   // Crash/stall journal: a long-running server that dies or wedges while the
   // user is away leaves no trace in a terminal that no longer exists (CLI runs
