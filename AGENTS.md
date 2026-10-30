@@ -230,9 +230,9 @@ bin/
   omp-web-host.js     `ompweb host [login]`: daemon CLI; token read from stdin, never argv. `omp-web.js host` requires it in-process (no child) so SIGTERM/SIGINT reach the daemon's stop
 
 scripts/
-  build-client.ts     `npm run build`: bundles app/index.html into dist/ (Bun.build + tailwind-plugin.ts; fonts emitted as /assets files)
+  build-client.ts     `npm run build`: bundles app/index.html into dist/ (Bun.build + tailwind-plugin.ts; fonts emitted as /assets files, first-paint faces preloaded)
   tailwind-plugin.ts  bun-plugin-tailwind minus Tailwind's color-mix() polyfill (Bun 1.4.4 drops repeated @supports rules); build and dev
-  smoke.ts            `npm run smoke`: starts the built server on a free port with a throwaway HOME and checks the SPA, an asset, the API and SSE
+  smoke.ts            `npm run smoke`: starts the built server on a free port with a throwaway HOME and checks the SPA, an asset, the font preloads, the API and SSE
 
 dist/                 build output (git-ignored, shipped in the package); the production server reads index.html and assets from here
 bunfig.toml           Bun dev-server bundling: tailwind plugin and the OMP_WEB_PUBLIC_* inlining
