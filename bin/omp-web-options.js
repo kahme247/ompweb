@@ -63,6 +63,7 @@ non-loopback hostname, so the password and session cookie stay private.`);
  * Resolve launch options from argv and the environment. A legacy plaintext
  * password (env or `--password`) is reported instead of parsed: the caller
  * migrates or refuses it rather than passing it to the server.
+ * @returns {{ port: string, hostname: string, passwordHash?: string, legacyPassword?: string, legacyPasswordSource?: "env" | "flag", openBrowser: boolean, installTray: boolean, uninstallTray: boolean, tray: boolean, help?: boolean, version?: boolean }}
  */
 function parseLaunchOptions(args = process.argv.slice(2), env = process.env) {
   const { values: cliArgs } = parseArgs({
