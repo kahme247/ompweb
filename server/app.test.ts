@@ -25,12 +25,22 @@ const { startServer } = await import("./app");
 const server = startServer({ port: 0, hostname: "127.0.0.1", dev: false, root });
 const url = (pathname: string) => new URL(pathname, server.url);
 
-/** A request whose target goes on the wire verbatim: fetch() would resolve `..` and `%2e%2e` before sending. */
-function rawRequest(method: string, target: string, headers: Record<string, string> = {}): Promise<{ status: number; body: string }> {
+/**
+ * A request whose target goes on the wire verbatim: fetch() would resolve `..` and `%2e%2e` before sending.
+ * `headers` override the defaults; a null value leaves that header out.
+ */
+function rawRequest(
+  method: string,
+  target: string,
+  headers: Record<string, string | null> = {},
+  version = "HTTP/1.1",
+): Promise<{ status: number; body: string }> {
   const { promise, resolve, reject } = Promise.withResolvers<{ status: number; body: string }>();
   const socket = net.createConnection(server.port!, "127.0.0.1", () => {
-    const lines = [`${method} ${target} HTTP/1.1`, "Host: 127.0.0.1", "Connection: close", "Content-Length: 0"];
-    for (const [name, value] of Object.entries(headers)) lines.push(`${name}: ${value}`);
+    const lines = [`${method} ${target} ${version}`];
+    for (const [name, value] of Object.entries({ Host: "127.0.0.1", Connection: "close", "Content-Length": "0", ...headers })) {
+      if (value !== null) lines.push(`${name}: ${value}`);
+    }
     socket.write(`${lines.join("\r\n")}\r\n\r\n`);
   });
   let response = "";
@@ -62,6 +72,12 @@ test("API routes answer through the gate", async () => {
   assert.equal((await fetch(url("/api/nope"))).status, 404);
   assert.equal((await fetch(url("/api/sessions/%E0%A4%A/state"))).status, 400);
   assert.equal((await fetch(url("/api"))).status, 404);
+});
+
+test("a malformed or missing Host answers 400, not a 500", async () => {
+  // Bun builds request.url from the Host header; HTTP/1.1 without one never reaches the app, HTTP/1.0 does.
+  for (const host of ["a b", "[", ""]) assert.equal((await rawRequest("GET", "/api/hosts", { Host: host })).status, 400, host);
+  assert.equal((await rawRequest("GET", "/", { Host: null }, "HTTP/1.0")).status, 400);
 });
 
 test("a path that leaves its route after `..` resolution never reaches that route's handler", async (t) => {
