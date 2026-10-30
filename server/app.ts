@@ -30,9 +30,9 @@ function decodable(pathname: string): boolean {
  * The gate, then the 400 for malformed `%` encoding, then `respond`; every answer but a 400 for an unparsable URL goes
  * through finalizeResponse. Bun's idle timeout also cuts a handler that is still working, so an authenticated API
  * request runs without it. The setting outlives the response on a keep-alive socket, so it is put back once the
- * handler returns, unless the handler keeps its response open (a stream) with `disableIdleTimeout`. Public requests
- * keep it unless their handler lifts it (the host link, once its bearer token checks out), so no unauthenticated
- * caller can hold a socket open.
+ * handler returns or throws, or, when the handler keeps its response open (a stream) with `disableIdleTimeout`, once
+ * that stream ends or is cancelled. Public requests keep it unless their handler lifts it (the host link, once its
+ * bearer token checks out), so no unauthenticated caller can hold a socket open.
  */
 async function handle(
   request: Request,
@@ -52,15 +52,43 @@ async function handle(
   const lifted = gate === "authenticated" && pathname.startsWith("/api/");
   if (lifted) server.timeout(request, 0);
   let keepOpen = false;
-  const response = await respond({
-    gate,
-    disableIdleTimeout: () => {
-      keepOpen = true;
-      server.timeout(request, 0);
+  let response: Response | undefined;
+  const restore = () => server.timeout(request, IDLE_TIMEOUT);
+  try {
+    response = await respond({
+      gate,
+      disableIdleTimeout: () => {
+        keepOpen = true;
+        server.timeout(request, 0);
+      },
+    });
+  } finally {
+    if (keepOpen && response?.body) response = new Response(untilEnd(response.body, restore), response);
+    else if (lifted || keepOpen) restore();
+  }
+  return finalizeResponse(request, response);
+}
+
+/** `body`, calling `end` once it is done, fails or is cancelled. */
+function untilEnd(body: ReadableStream<Uint8Array>, end: () => void): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  return new ReadableStream({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (!done) return controller.enqueue(value);
+        end();
+        controller.close();
+      } catch (error) {
+        end();
+        controller.error(error);
+      }
+    },
+    cancel(reason) {
+      end();
+      return reader.cancel(reason);
     },
   });
-  if (lifted && !keepOpen) server.timeout(request, IDLE_TIMEOUT);
-  return finalizeResponse(request, response);
 }
 
 // Dev mounts the HTML import here, and pages fetch it so they pass the gate and renderIndex as in prod.
