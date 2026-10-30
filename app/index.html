@@ -21,7 +21,35 @@
     <link rel="stylesheet" href="./globals.css" />
   </head>
   <body translate="no" class="notranslate" style="height: 100%; max-height: 100%; overflow: hidden; display: flex; flex-direction: column">
-    <div id="root" style="display: contents"></div>
+    <!-- components/RouteLoadingFallback.tsx as static HTML: painted before the bundle runs; createRoot replaces it. -->
+    <div id="root" style="display: contents">
+      <div class="route-fallback" role="status" aria-busy="true" aria-label="Loading omp web">
+        <aside class="route-fallback-sidebar" aria-hidden="true">
+          <div class="skeleton route-fallback-sidebar-title"></div>
+          <div class="skeleton route-fallback-sidebar-button"></div>
+          <div class="route-fallback-sidebar-list">
+            <div class="skeleton route-fallback-sidebar-row"></div>
+            <div class="skeleton route-fallback-sidebar-row"></div>
+            <div class="skeleton route-fallback-sidebar-row"></div>
+          </div>
+        </aside>
+        <main class="route-fallback-main" aria-hidden="true">
+          <div class="route-fallback-topbar">
+            <div class="skeleton route-fallback-topbar-control"></div>
+            <div class="skeleton route-fallback-topbar-title"></div>
+            <div class="skeleton route-fallback-topbar-control"></div>
+          </div>
+          <div class="route-fallback-content">
+            <div class="skeleton route-fallback-line route-fallback-line-short"></div>
+            <div class="skeleton route-fallback-line"></div>
+            <div class="skeleton route-fallback-line"></div>
+            <div class="skeleton route-fallback-composer"></div>
+          </div>
+        </main>
+      </div>
+      <!-- The sign-in page never showed the workspace silhouette (Next rendered the form there). -->
+      <script>if(location.pathname==="/login")document.querySelector(".route-fallback").remove();</script>
+    </div>
     <script type="module" src="./client.tsx"></script>
   </body>
 </html>
