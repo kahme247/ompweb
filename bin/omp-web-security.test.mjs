@@ -12,7 +12,7 @@ const { verifyPassword } = require("./omp-web-password-hash.js");
 const binDir = fileURLToPath(new URL(".", import.meta.url));
 
 /** Run the launcher against a stub `server/main.ts` that records the environment it was started with. */
-async function launch(env) {
+async function launch(env, args = []) {
   const pkg = await mkdtemp(join(tmpdir(), "ompweb-launch-"));
   try {
     await mkdir(join(pkg, "bin"));
@@ -26,7 +26,7 @@ async function launch(env) {
     // The package has no bun dependency, so the launcher runs this under the Bun on PATH: this test's own,
     // as on Windows npm puts only a bun.cmd shim there, which a spawn without a shell cannot run.
     await writeFile(join(pkg, "server", "main.ts"), `require("fs").writeFileSync(${JSON.stringify(dump)}, JSON.stringify(process.env));`);
-    const result = spawnSync("node", [join(pkg, "bin", "omp-web.js"), "--no-open", "-p", "0"], {
+    const result = spawnSync("node", [join(pkg, "bin", "omp-web.js"), "--no-open", "-p", "0", ...args], {
       env: { PATH: [dirname(process.execPath), process.env.PATH].join(delimiter), HOME: pkg, ...env },
       encoding: "utf8",
       timeout: 20_000,
@@ -39,9 +39,10 @@ async function launch(env) {
 }
 
 test("launcher refuses unauthenticated non-loopback binds", async () => {
-  const source = await readFile(new URL("./omp-web.js", import.meta.url), "utf8");
-  assert.match(source, /Refusing to listen on/);
-  assert.match(source, /!passwordEnabled/);
+  const { status, stderr, serverEnv } = await launch({}, ["-H", "0.0.0.0"]);
+  assert.equal(status, 1);
+  assert.match(stderr, /Refusing to listen on 0\.0\.0\.0 without a password hash/);
+  assert.equal(serverEnv, null);
 });
 
 test("launcher hands the server a hash of a plaintext OMP_WEB_PASSWORD, never the plaintext", async () => {

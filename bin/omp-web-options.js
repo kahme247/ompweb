@@ -2,6 +2,10 @@
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { parseArgs } = require("util");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { hashPassword, isPasswordHash } = require("./omp-web-password-hash");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { isLoopbackHost } = require("./network-addresses");
 
 const TRUE_VALUES = new Set(["1", "true", "yes", "on"]);
 
@@ -110,4 +114,61 @@ function parseLaunchOptions(args = process.argv.slice(2), env = process.env) {
   return shared;
 }
 
-module.exports = { parseLaunchOptions, printHelp };
+/**
+ * The password and bind checks before a server starts (bin/omp-web.js, server/binary.ts). Only a password hash reaches
+ * the server (issue #239): a plaintext OMP_WEB_PASSWORD alone is migrated, hashed into OMP_WEB_PASSWORD_HASH and
+ * removed from process.env before any child can inherit it. The removed --password flag, a plaintext set next to a
+ * hash, an invalid hash, or a non-loopback bind without a password print why and exit 1.
+ * @returns {string | undefined} the password hash, if any
+ */
+function checkLaunchSecurity(launchOptions) {
+  let passwordHash = launchOptions.passwordHash;
+  if (launchOptions.legacyPasswordSource === "env" && !passwordHash) {
+    passwordHash = hashPassword(process.env.OMP_WEB_PASSWORD);
+    process.env.OMP_WEB_PASSWORD_HASH = passwordHash;
+    delete process.env.OMP_WEB_PASSWORD;
+    console.warn([
+      "Warning: OMP_WEB_PASSWORD holds a plaintext password. This option has been deprecated and is marked for removal.",
+      "",
+      "Every omp session inherits omp-web's environment, so an agent could print",
+      "the password into its transcript. ompweb hashed it and kept it out of the",
+      "server's environment, but agents can still read it from this launcher",
+      "process, and a new hash is made on every start, which signs every browser",
+      "out on each restart.",
+      "",
+      "Remove OMP_WEB_PASSWORD and set this instead:",
+      "",
+      `  OMP_WEB_PASSWORD_HASH='${passwordHash}'`,
+    ].join("\n"));
+  } else if (launchOptions.legacyPasswordSource === "env") {
+    console.error("OMP_WEB_PASSWORD_HASH and the plaintext OMP_WEB_PASSWORD are both set. Remove OMP_WEB_PASSWORD.");
+    process.exit(1);
+  } else if (launchOptions.legacyPassword !== undefined) {
+    console.error([
+      "ompweb no longer accepts a plaintext password: the --password flag was removed.",
+      "Every omp session inherits this process's environment, so an agent could",
+      "print the password into its transcript.",
+      "",
+      "Create a hash and use that instead:",
+      "",
+      "  ompweb hash-password",
+      "  OMP_WEB_PASSWORD_HASH='scrypt$...' ompweb",
+    ].join("\n"));
+    process.exit(1);
+  }
+  if (passwordHash !== undefined && !isPasswordHash(passwordHash)) {
+    console.error(`OMP_WEB_PASSWORD_HASH is not a valid password hash.\n\nGenerate one with: ompweb hash-password`);
+    process.exit(1);
+  }
+  const { hostname } = launchOptions;
+  if (!isLoopbackHost(hostname)) {
+    if (passwordHash === undefined) {
+      console.error(`Refusing to listen on ${hostname} without a password hash. Run: ompweb hash-password, then set OMP_WEB_PASSWORD_HASH. Or bind to 127.0.0.1.`);
+      process.exit(1);
+    }
+    console.warn(`Warning: ompweb is listening on ${hostname} over HTTP. Use HTTPS or a trusted VPN to protect the password and session cookie in transit.`);
+  }
+  return passwordHash;
+}
+
+module.exports = { checkLaunchSecurity, parseLaunchOptions, printHelp };

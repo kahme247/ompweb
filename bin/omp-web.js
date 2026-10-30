@@ -62,13 +62,13 @@ const fs = require("node:fs");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const crypto = require("node:crypto");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { parseLaunchOptions } = require("./omp-web-options");
+const { checkLaunchSecurity, parseLaunchOptions } = require("./omp-web-options");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { isPortAvailable } = require("./port-availability");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { terminateChildProcess, wireChildProcessLifecycle } = require("./process-lifecycle");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { getAccessibleAddresses, getBrowserUrl, formatAddressBanner, isLoopbackHost } = require("./network-addresses");
+const { getAccessibleAddresses, getBrowserUrl, formatAddressBanner, openInBrowser } = require("./network-addresses");
 // module.require: bin/ files add no new eslint-disable comments (see bin/bun-runtime.js).
 const { resolveBunBinary } = module.require("./bun-runtime");
 
@@ -187,55 +187,7 @@ if (launchOptions.installTray || launchOptions.uninstallTray || launchOptions.tr
 const port = launchOptions.port;
 const hostname = launchOptions.hostname;
 const openBrowser = launchOptions.openBrowser;
-// Only a password hash reaches the server (issue #239). A plaintext
-// OMP_WEB_PASSWORD alone is migrated: hashed here and removed from the
-// environment before any child can inherit it. The removed --password flag,
-// or a plaintext set next to a hash, stops the launcher.
-let passwordHash = launchOptions.passwordHash;
-if (launchOptions.legacyPasswordSource === "env" && !passwordHash) {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { hashPassword } = require("./omp-web-password-hash");
-  passwordHash = hashPassword(process.env.OMP_WEB_PASSWORD);
-  process.env.OMP_WEB_PASSWORD_HASH = passwordHash;
-  delete process.env.OMP_WEB_PASSWORD;
-  console.warn([
-    "Warning: OMP_WEB_PASSWORD holds a plaintext password. This option has been deprecated and is marked for removal.",
-    "",
-    "Every omp session inherits omp-web's environment, so an agent could print",
-    "the password into its transcript. ompweb hashed it and kept it out of the",
-    "server's environment, but agents can still read it from this launcher",
-    "process, and a new hash is made on every start, which signs every browser",
-    "out on each restart.",
-    "",
-    "Remove OMP_WEB_PASSWORD and set this instead:",
-    "",
-    `  OMP_WEB_PASSWORD_HASH='${passwordHash}'`,
-  ].join("\n"));
-} else if (launchOptions.legacyPasswordSource === "env") {
-  console.error("OMP_WEB_PASSWORD_HASH and the plaintext OMP_WEB_PASSWORD are both set. Remove OMP_WEB_PASSWORD.");
-  process.exit(1);
-} else if (launchOptions.legacyPassword !== undefined) {
-  console.error([
-    "ompweb no longer accepts a plaintext password: the --password flag was removed.",
-    "Every omp session inherits this process's environment, so an agent could",
-    "print the password into its transcript.",
-    "",
-    "Create a hash and use that instead:",
-    "",
-    "  ompweb hash-password",
-    "  OMP_WEB_PASSWORD_HASH='scrypt$...' ompweb",
-  ].join("\n"));
-  process.exit(1);
-}
-if (passwordHash !== undefined) {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { isPasswordHash } = require("./omp-web-password-hash");
-  if (!isPasswordHash(passwordHash)) {
-    console.error(`OMP_WEB_PASSWORD_HASH is not a valid password hash.\n\nGenerate one with: ompweb hash-password`);
-    process.exit(1);
-  }
-}
-const passwordEnabled = passwordHash !== undefined;
+const passwordEnabled = checkLaunchSecurity(launchOptions) !== undefined;
 
 // Resolved at every spawn, so a restart after an update finds the updated Bun.
 function serverCommand() {
@@ -457,10 +409,7 @@ function attachOutput(child) {
     }
     if (openBrowser && !browserOpened) {
       browserOpened = true;
-      const openCmd = process.platform === "win32" ? "explorer.exe" : process.platform === "darwin" ? "open" : "xdg-open";
-      const opener = spawn(openCmd, [browserUrl], { stdio: "ignore", detached: true });
-      opener.on("error", (error) => console.warn(`Could not open browser automatically: ${error.message}`));
-      opener.unref();
+      openInBrowser(browserUrl);
     }
   });
 }
@@ -616,14 +565,6 @@ async function main() {
     console.error("Build artifacts not found. Please report this issue.");
     process.exit(1);
   }
-  if (!isLoopbackHost(hostname)) {
-    if (!passwordEnabled) {
-      console.error(`Refusing to listen on ${hostname} without a password hash. Run: ompweb hash-password, then set OMP_WEB_PASSWORD_HASH. Or bind to 127.0.0.1.`);
-      process.exit(1);
-    }
-    console.warn(`Warning: ompweb is listening on ${hostname} over HTTP. Use HTTPS or a trusted VPN to protect the password and session cookie in transit.`);
-  }
-
   if (!await isPortAvailable(port, hostname)) {
     console.error(`Port ${port} on ${hostname} is already in use.`);
     console.error(`If ompweb is already running, open ${browserUrl}. Otherwise, stop the process using it or run: ompweb --port ${Number(port) + 1}`);

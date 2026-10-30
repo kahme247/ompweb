@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { proxy } from "@/proxy";
+import { register } from "../instrumentation.node";
 import { finalizeResponse, INDEX_CACHE, renderIndex, serveFile, stylesheetFirst } from "./http";
 import { dispatch, ROUTE_MODULES, routePattern } from "./routes";
 
@@ -166,4 +167,24 @@ export function startServer(options: { port: number; hostname: string; dev: bool
       return response;
     },
   });
+}
+
+/**
+ * The production server: listen, start the background services, then print the Ready line the npm launcher waits for.
+ * Run by server/main.ts and by the compiled binary (server/binary.ts) once NODE_ENV is "production". A taken port
+ * prints why and exits 1.
+ */
+export async function startProduction(listen: { port: number; hostname: string }): Promise<Bun.Server<undefined>> {
+  let server: Bun.Server<undefined>;
+  try {
+    server = startServer({ ...listen, dev: false, root: process.env.OMP_WEB_PACKAGE_DIR ?? process.cwd() });
+  } catch (error) {
+    // The npm launcher checks the port first, but another process can take it before this bind.
+    if (!(error instanceof Error && "code" in error && error.code === "EADDRINUSE")) throw error;
+    console.error(`Port ${listen.port} on ${listen.hostname} is already in use: is ompweb already running? Otherwise stop the process using it or start ompweb with --port ${listen.port + 1}.`);
+    process.exit(1);
+  }
+  await register();
+  console.log(`[omp-web] Ready on ${server.url.origin}`);
+  return server;
 }
