@@ -16,7 +16,7 @@ if (Object.keys(env).some((name) => !process.env[name])) {
     env: { ...process.env, ...env },
     stdio: ["inherit", "inherit", "inherit"],
   }));
-  for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => child.kill(signal));
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, () => child.kill(signal));
   process.exit(await child.exited);
 }
 
