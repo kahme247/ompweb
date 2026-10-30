@@ -3001,18 +3001,19 @@ test("relocation merges existing target attachments and preserves typing added w
   });
   await act(async () => { fireEvent.click(w.editButton()); });
   await until(() => release, "confirmed target history must be awaiting its load");
-  // Bun appends ";charset=utf-8" to a text File's type; the draft must keep whatever type the file reports.
-  const newFile = new File(["new file while waiting"], "new.txt", { type: "text/plain" });
   await act(async () => {
     fireEvent.change(w.view.getByRole("textbox"), { target: { value: "new source typing" } });
-    w.chatInputRef.current.addFiles([newFile]);
+    w.chatInputRef.current.addFiles([new File(["new file while waiting"], "new.txt", { type: "text/plain" })]);
   });
   await until(() => getDraft(sid)?.files.length === 2, "attachment reads completed during the reload must join the moved draft");
   await act(async () => { release(); });
   await until(() => w.selectedId === target, "the confirmed move must transition its composer");
+  // Bun appends ";charset=utf-8" to a text File's type, so the type is pinned by its prefix.
+  const mimeType = getDraft(target)?.files[1]?.mimeType ?? "";
+  assert.ok(mimeType.startsWith("text/plain"), mimeType);
   assert.deepEqual(getDraft(target), {
     value: "new source typing\n\nexisting target draft", images: [sourceImage, targetImage],
-    files: [sourceFile, { name: "new.txt", mimeType: newFile.type, content: "new file while waiting", size: 22 }, targetFile],
+    files: [sourceFile, { name: "new.txt", mimeType, content: "new file while waiting", size: 22 }, targetFile],
   });
   assert.equal(w.view.getByRole("textbox").value, "new source typing\n\nexisting target draft");
   assert.equal(getDraft(sid), null);
