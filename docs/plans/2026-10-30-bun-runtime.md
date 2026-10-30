@@ -75,6 +75,7 @@
 | `@tailwindcss/postcss` + `postcss` | Bun CSS bundler + official `bun-plugin-tailwind` | Replace |
 | `NextRequest.cookies` / `NextResponse.cookies` | `Bun.CookieMap` / `Bun.Cookie` | Replace |
 | Next's built-in gzip | `CompressionStream("gzip")` (web standard, built in) | Replace |
+| Gzip of `/api/` answers (Next 16 never compressed route-handler responses; a 40 MB session read cost ~1 s per request) | `CompressionStream`, `Bun.gzipSync` (blocks the loop ~650 ms per 40 MB), `node:zlib` streams (slower under Bun) | None: `/api/` answers go uncompressed, as under Next |
 | `node:child_process` (45 files) incl. IPC to the Node launcher | `Bun.spawn`; Node's API works under Bun, including Node↔Bun IPC | Keep (no problem) |
 | `web-push` (VAPID, aes128gcm) | No built-in; works under Bun (spike probe 5) | Keep |
 | `fs.accessSync` returns `null` on Bun | — (semantics bug) | try/catch |

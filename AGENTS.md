@@ -77,7 +77,7 @@ server/
   dev.ts              dev entry (`bun --hot`): serves the HTML import with HMR; re-runs itself once with OMP_WEB_PUBLIC_* set so `bunfig.toml` can inline them
   app.ts              `startServer`: `Bun.serve` + route table + gate + SPA fallback; `parseListenArgs`
   routes.ts           the API route table (see "Adding an API route"); `routePattern`, `dispatch`
-  http.ts             `finalizeResponse` (security headers, gzip), `serveFile` (dist/, public/, KaTeX), `renderIndex`
+  http.ts             `finalizeResponse` (security headers, gzip for pages and static files, never `/api/`), `serveFile` (dist/, public/, KaTeX), `renderIndex`
   client-env.ts       build-time constants for the browser bundle (app version, event-stream worker hash)
 app/
   index.html          the SPA shell, the bundler entry
