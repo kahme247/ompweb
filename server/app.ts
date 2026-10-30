@@ -109,9 +109,13 @@ export function startServer(options: { port: number; hostname: string; dev: bool
     routes,
     fetch: async (request, server) => {
       const response = await handle(request, server, async ({ gate }) => {
+        const { pathname, search } = new URL(request.url);
+        // No route matched: /x/ goes to /x as Next did. Leading slashes collapse, so //host/ never becomes //host.
+        if (pathname.length > 1 && pathname.endsWith("/")) {
+          return new Response(null, { status: 308, headers: { location: `/${pathname.replace(/^\/+|\/+$/g, "")}${search}` } });
+        }
         const file = await serveFile(request, root, dev);
         if (file) return file;
-        const { pathname } = new URL(request.url);
         // Unknown extensionless page paths get the SPA too, but /api and its subpaths never do, and neither does a
         // miss under a gate-exempt path (only /login is public and a page).
         const isPage = pathname === "/" || pathname === "/login" || (

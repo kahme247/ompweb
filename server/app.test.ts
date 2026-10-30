@@ -35,8 +35,8 @@ function rawRequest(
   target: string,
   headers: Record<string, string | null> = {},
   version = "HTTP/1.1",
-): Promise<{ status: number; body: string }> {
-  const { promise, resolve, reject } = Promise.withResolvers<{ status: number; body: string }>();
+): Promise<{ status: number; head: string; body: string }> {
+  const { promise, resolve, reject } = Promise.withResolvers<{ status: number; head: string; body: string }>();
   const socket = net.createConnection(server.port!, "127.0.0.1", () => {
     const lines = [`${method} ${target} ${version}`];
     for (const [name, value] of Object.entries({ Host: "127.0.0.1", Connection: "close", "Content-Length": "0", ...headers })) {
@@ -47,7 +47,10 @@ function rawRequest(
   let response = "";
   socket.setEncoding("utf8");
   socket.on("data", (chunk) => (response += chunk));
-  socket.on("end", () => resolve({ status: Number(response.slice(9, 12)), body: response.slice(response.indexOf("\r\n\r\n") + 4) }));
+  socket.on("end", () => {
+    const split = response.indexOf("\r\n\r\n");
+    resolve({ status: Number(response.slice(9, 12)), head: response.slice(0, split), body: response.slice(split + 4) });
+  });
   socket.on("error", reject);
   return promise;
 }
@@ -142,6 +145,29 @@ test("pages get the index, files their content, and anything else 404", async ()
   assert.equal((await fetch(url("/..%2Fpackage.json"))).status, 404);
   // The shell is only served rendered (title, manifest link), never as the raw template.
   assert.equal((await fetch(url("/index.html"))).status, 404);
+});
+
+test("a trailing slash 308-redirects to the path without it, behind the gate", async (t) => {
+  const location = (head: string) => /^location: (.*)$/im.exec(head)?.[1];
+  for (const [target, expected] of [
+    ["/some/page/?session=x", "/some/page?session=x"],
+    ["/api/hosts/", "/api/hosts"],
+    ["/icon.svg/", "/icon.svg"],
+    // Never a protocol-relative target.
+    ["//evil.example/", "/evil.example"],
+  ]) {
+    const { status, head } = await rawRequest("GET", target);
+    assert.equal(status, 308, target);
+    assert.equal(location(head), expected, target);
+  }
+  assert.equal((await rawRequest("GET", "/")).status, 200);
+
+  process.env.OMP_WEB_PASSWORD_HASH = hashPassword("pw", { logN: 12 });
+  t.after(() => {
+    delete process.env.OMP_WEB_PASSWORD_HASH;
+  });
+  assert.equal((await rawRequest("GET", "/api/hosts/")).status, 401);
+  assert.equal(location((await rawRequest("GET", "/some/page/")).head), "/login");
 });
 
 test("each route answers under its own path with decoded params, and the manifest stays gated", async (t) => {
