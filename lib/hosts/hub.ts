@@ -28,6 +28,7 @@ import {
   type HelloChannel,
   type HostOpName,
   type UnknownMessage,
+  UnknownMessageLog,
   type UpMessage,
 } from "./link-protocol";
 import { customLocalLabel, DEFAULT_LOCAL_LABEL, HostRegistryUnreadableError, hostForToken, LOCAL_HOST_ID, loadHosts, touchHost, type HostRecord } from "./registry";
@@ -76,8 +77,8 @@ interface Link {
   downSeq: number;
   outbox: Outbox<{ seq: number; line: string }>;
   up: SeqWindow;
-  /** Uplink message types already warned about on this link. */
-  unknownTypes: Set<string>;
+  /** What this link has already logged about messages it skipped. */
+  unknownLog: UnknownMessageLog;
   pending: Map<string, PendingOp>;
   channels: Map<string, RemoteRpcTransport>;
   pingTimer: NodeJS.Timeout | undefined;
@@ -122,7 +123,7 @@ function linkFor(id: string): Link {
       downSeq: 0,
       outbox: new Outbox(),
       up: new SeqWindow(),
-      unknownTypes: new Set(),
+      unknownLog: new UnknownMessageLog("daemon"),
       pending: new Map(),
       channels: new Map(),
       pingTimer: undefined,
@@ -381,7 +382,7 @@ function openDownlink(link: Link, hello: Hello, signal: AbortSignal): Response {
   }, { once: true });
   link.stream = controller;
   link.nonce = randomUUID();
-  link.unknownTypes.clear();
+  link.unknownLog.reset();
   // The version this link speaks: the daemon's (decodeUp read a v2 hello as today's shape; v2 and v3 send the same down messages).
   link.hostVersion = hello.v;
   enqueue(link, encodeLine({ type: "welcome", v: hello.v, hostId: link.id, nonce: link.nonce }));
@@ -504,12 +505,10 @@ function applyUp(link: Link, message: UpMessage | UnknownMessage): void {
   if (message.type === "ping") return enqueue(link, encodeLine({ type: "pong" }));
   if (message.type === "pong" || message.type === "hello") return;
   if (message.type === "unknown") {
-    // A newer daemon's message: skipped, but its seq is applied so it is acked and never resent.
+    // A newer daemon's message, or one only the server sends: skipped, but its seq is applied so it is acked and never resent.
     if (message.seq !== null) link.up.applied(message.seq);
-    if (!link.unknownTypes.has(message.messageType)) {
-      link.unknownTypes.add(message.messageType);
-      console.warn(`[omp-web] ignored an unknown "${message.messageType}" message from ${labelOf(link.id)}`);
-    }
+    const note = link.unknownLog.note(message);
+    if (note) console.warn(`[omp-web] ${labelOf(link.id)}: ${note}`);
     return;
   }
   // Already applied before a resend.

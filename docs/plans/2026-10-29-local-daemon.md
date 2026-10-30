@@ -161,7 +161,7 @@
 - Modify (outside the repo, not under git): `/opt/omp-deployment/bin/ompweb-deploy`; create the `ompweb-host` systemd unit for this VM
 - Modify: `AGENTS.md`, `README.md`, `DESIGN.md`, `CHANGELOG.md`
 
-- [ ] **Step 1:** Back up `/opt/omp-deployment/bin/ompweb-deploy`, then add: `ompweb-host` unit pointing at the same release; restart it only when the release's `LINK_PROTOCOL_VERSION` differs from the running daemon's (`GET /api/hosts`, local row `hostVersion`); rollback restores both units' release.
+- [ ] **Step 1:** Back up `/opt/omp-deployment/bin/ompweb-deploy`, then add: `ompweb-host` unit pointing at the same release; restart it only when the running daemon's link version (`GET /api/hosts`, local row `hostVersion`) is outside the new release's `[MIN_LINK_PROTOCOL_VERSION, LINK_PROTOCOL_VERSION]` range; rollback restores both units' release.
 - [ ] **Step 2:** Docs per the spec's Documentation section.
 - [ ] **Step 3: Deploy smoke (needs the user's go-ahead to deploy):** start a long run on this machine, deploy a web-only change, confirm the run continues with the same omp pid and no resume prompt.
 - [ ] **Step 4: Commit** `docs(hosts): document the local daemon`.

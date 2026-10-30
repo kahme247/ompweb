@@ -117,9 +117,9 @@ export type UpMessage =
   | { type: "ping" }
   | { type: "pong" };
 
-/** A message whose `type` this side does not know (a newer peer's): receivers skip it, but ack its `seq`
- * (null when it carries none) so it is never resent. */
-export type UnknownMessage = { type: "unknown"; messageType: string; seq: number | null };
+/** A message this side cannot decode by type (a newer peer's), or one that only the other side may send
+ * (`wrongDirection`): receivers skip it, but ack its `seq` (null when it carries none) so it is never resent. */
+export type UnknownMessage = { type: "unknown"; messageType: string; seq: number | null; wrongDirection: boolean };
 
 export class LinkProtocolError extends Error {
   readonly name = "LinkProtocolError";
@@ -155,6 +155,13 @@ function str(o: Obj, key: string): string {
   return v;
 }
 
+/** A `seq` or `ack`: a safe non-negative integer, so one line cannot push a window out of reach of every later message. */
+function seqNum(o: Obj, key: string): number {
+  const v = o[key];
+  if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0) fail(`${key} must be a non-negative safe integer`);
+  return v;
+}
+
 function int(o: Obj, key: string): number {
   const v = o[key];
   if (typeof v !== "number" || !Number.isInteger(v)) fail(`${key} must be an integer`);
@@ -181,8 +188,48 @@ export function isHostOp(name: string): name is HostOpName {
   return (HOST_OP_NAMES as readonly string[]).includes(name);
 }
 
-function unknownMessage(o: Obj): UnknownMessage {
-  return { type: "unknown", messageType: str(o, "type"), seq: "seq" in o ? int(o, "seq") : null };
+const DOWN_TYPES: readonly string[] = ["welcome", "stdin", "kill", "req", "replaced", "ping", "pong"];
+const UP_TYPES: readonly string[] = ["hello", "stdout", "stderr", "exit", "resync", "res", "ping", "pong"];
+
+/** `otherDirection`: the types only the other direction decodes; one of those arrived on the wrong way. */
+function unknownMessage(o: Obj, otherDirection: readonly string[]): UnknownMessage {
+  const messageType = str(o, "type");
+  return { type: "unknown", messageType, seq: "seq" in o ? seqNum(o, "seq") : null, wrongDirection: otherDirection.includes(messageType) };
+}
+
+/** Distinct unknown types, and wrong-direction messages, one link may make a side log. */
+export const UNKNOWN_LOG_CAP = 16;
+
+/** What one side logs about the messages it skips, per link: an unknown type once, a wrong-direction message every
+ * time, each within UNKNOWN_LOG_CAP, so a peer cannot flood the log. The type is escaped and cut to 64 characters. */
+export class UnknownMessageLog {
+  private readonly types = new Set<string>();
+  private misdirected = 0;
+  private readonly from: "daemon" | "server";
+
+  /** `from`: who sends the messages this log sees. */
+  constructor(from: "daemon" | "server") {
+    this.from = from;
+  }
+
+  /** The text to log for `message`, or null when there is nothing to log. */
+  note(message: UnknownMessage): string | null {
+    const type = JSON.stringify(message.messageType.slice(0, 64));
+    if (message.wrongDirection) {
+      if (this.misdirected >= UNKNOWN_LOG_CAP) return null;
+      this.misdirected += 1;
+      return `${type} is not valid from the ${this.from}`;
+    }
+    if (this.types.has(type) || this.types.size >= UNKNOWN_LOG_CAP) return null;
+    this.types.add(type);
+    return `ignored an unknown link message type ${type}`;
+  }
+
+  /** A new link starts again. */
+  reset(): void {
+    this.types.clear();
+    this.misdirected = 0;
+  }
 }
 
 function parseLine(line: string): Obj {
@@ -205,19 +252,19 @@ export function decodeDown(line: string): DownMessage | UnknownMessage {
     case "welcome":
       return { type: "welcome", v: int(o, "v"), hostId: str(o, "hostId"), nonce: str(o, "nonce") };
     case "stdin":
-      return { type: "stdin", seq: int(o, "seq"), ch: str(o, "ch"), line: str(o, "line") };
+      return { type: "stdin", seq: seqNum(o, "seq"), ch: str(o, "ch"), line: str(o, "line") };
     case "kill":
-      return { type: "kill", seq: int(o, "seq"), ch: str(o, "ch"), force: bool(o, "force") };
+      return { type: "kill", seq: seqNum(o, "seq"), ch: str(o, "ch"), force: bool(o, "force") };
     case "req":
-      return { type: "req", seq: int(o, "seq"), id: str(o, "id"), op: str(o, "op"), args: "args" in o ? o.args : fail("args must be present") };
+      return { type: "req", seq: seqNum(o, "seq"), id: str(o, "id"), op: str(o, "op"), args: "args" in o ? o.args : fail("args must be present") };
     case "replaced":
-      return { type: "replaced", seq: int(o, "seq") };
+      return { type: "replaced", seq: seqNum(o, "seq") };
     case "ping":
       return { type: "ping" };
     case "pong":
       return { type: "pong" };
     default:
-      return unknownMessage(o);
+      return unknownMessage(o, UP_TYPES);
   }
 }
 
@@ -234,7 +281,7 @@ function channels(o: Obj, v2: boolean): HelloChannel[] {
 }
 
 function res(o: Obj): UpMessage {
-  const seq = int(o, "seq");
+  const seq = seqNum(o, "seq");
   const id = str(o, "id");
   if (o.ok === true) {
     const blob = o.blob;
@@ -273,24 +320,24 @@ export function decodeUp(line: string): UpMessage | UnknownMessage {
         home: str(o, "home"),
         // A v2 hello does not say: off until a spawn result reports it.
         autoApproveExtension: v === 2 ? false : bool(o, "autoApproveExtension"),
-        ack: int(o, "ack"),
+        ack: seqNum(o, "ack"),
         channels: channels(o, v === 2),
       };
     }
     case "stdout":
-      return { type: "stdout", seq: int(o, "seq"), ch: str(o, "ch"), line: str(o, "line") };
+      return { type: "stdout", seq: seqNum(o, "seq"), ch: str(o, "ch"), line: str(o, "line") };
     case "stderr":
-      return { type: "stderr", seq: int(o, "seq"), ch: str(o, "ch"), chunk: str(o, "chunk") };
+      return { type: "stderr", seq: seqNum(o, "seq"), ch: str(o, "ch"), chunk: str(o, "chunk") };
     case "exit":
       return {
         type: "exit",
-        seq: int(o, "seq"),
+        seq: seqNum(o, "seq"),
         ch: str(o, "ch"),
         code: nullable(o, "code", int),
         signal: nullable(o, "signal", str),
       };
     case "resync":
-      return { type: "resync", seq: int(o, "seq"), ch: str(o, "ch") };
+      return { type: "resync", seq: seqNum(o, "seq"), ch: str(o, "ch") };
     case "res":
       return res(o);
     case "ping":
@@ -298,7 +345,7 @@ export function decodeUp(line: string): UpMessage | UnknownMessage {
     case "pong":
       return { type: "pong" };
     default:
-      return unknownMessage(o);
+      return unknownMessage(o, DOWN_TYPES);
   }
 }
 
