@@ -52,7 +52,7 @@
   unicode-range: U+E000-F8FF, U+F0000-FFFFD;
 }
 /* CJK display serif for headings, bundled instead of fetched from Google
-   Fonts (whose extensionless /l/font?kit= URLs crashed next/font builds).
+   Fonts (whose extensionless /l/font?kit= URLs crashed the font build).
    A GB2312 + kana subset of Noto Serif SC, weights 600-700; unicode-range
    keeps Latin-only pages from downloading it. See fonts/NotoSerifSC-README.md. */
 @font-face {

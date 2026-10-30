@@ -124,8 +124,8 @@ app/api/
   worktrees/route.ts              GET/POST/DELETE git worktrees
 
 lib/
-  dynamic.tsx          `dynamic()` over `React.lazy` + `Suspense` (replaces `next/dynamic`)
-  navigation.ts        `useRouter`/`useSearchParams` over the History API (replaces `next/navigation`)
+  dynamic.tsx          `dynamic()` over `React.lazy` + `Suspense`
+  navigation.ts        `useRouter`/`useSearchParams` over the History API
   omp/                 shared omp foundations (paths, CLI probe, RpcProcess)
   hosts/               hosts and the local daemon (see "Remote hosts"); none of the daemon-loaded files may import `@/` (the daemon runs on Node through `jiti`)
     host.ts            `Host` interface, `HostStatus`, `isLinkUp`
