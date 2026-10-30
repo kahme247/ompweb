@@ -152,9 +152,11 @@ or an adoption failure.
   terminal. Not in dev mode, where this machine is offline by design.
   Until then "This machine" is offline as above.
 - **Upgrades:** an upgrade replaces the package for both. The web unit restarts
-  as today. The daemon unit restarts only when `LINK_PROTOCOL_VERSION`
-  changed; otherwise the old daemon keeps running the live children and new
-  code takes effect at its next restart.
+  as today. The daemon unit restarts only when the running daemon's link version
+  is outside the new release's `[MIN_LINK_PROTOCOL_VERSION,
+  LINK_PROTOCOL_VERSION]` range (it would get 426 and exit); otherwise the
+  running daemon keeps its live children and new code takes effect at its next
+  restart.
 
 ### This machine's deployment
 
@@ -162,8 +164,9 @@ or an adoption failure.
 from the same release:
 
 - It restarts `ompweb-api` with the existing probes and rollback.
-- It restarts `ompweb-host` only when the release's `LINK_PROTOCOL_VERSION`
-  differs from the running daemon's. The script reads the daemon's from the
+- It restarts `ompweb-host` only when the running daemon's link version is
+  outside the new release's `[MIN_LINK_PROTOCOL_VERSION,
+  LINK_PROTOCOL_VERSION]` range. The script reads the daemon's from the
   release its process was started from (`/proc/<MainPID>/cmdline`);
   `GET /api/hosts` (local row, `hostVersion`) says the same but sits behind
   the web password.

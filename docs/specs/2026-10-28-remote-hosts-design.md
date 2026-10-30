@@ -203,8 +203,10 @@ On 409 the daemon keeps the messages and sends them after the next
   `LINK_PROTOCOL_VERSION`, and its `welcome` carries the version the link
   speaks, the daemon's (see "Protocol versions and compatibility"). Any other
   version, older or newer than main, gets 426 with both versions, and so does a
-  v1 daemon's GET carrying its hello in the header; the daemon exits with
-  "upgrade omp-web on this host"; Settings → Hosts shows "needs upgrade (host
+  v1 daemon's GET carrying its hello in the header; the daemon exits, telling
+  which side to update ("update ompweb on this host", or "this host's ompweb is
+  newer than the server's: update ompweb on the server" when the 426's
+  `serverVersion` is below its own); Settings → Hosts shows "needs upgrade (host
   vN, server vM)". A hello POST answered 400, 404, 405 or 409 without a
   `helloId` comes from an older main (v1 answers a POST without a link nonce
   409): the daemon logs "the server runs an older ompweb: upgrade it" and exits
@@ -258,14 +260,19 @@ On 409 the daemon keeps the messages and sends them after the next
     senders; changing a field's type or meaning; a receiver starting to
     require a field older senders may omit.
   - Receivers tolerate what they do not know: an unknown message type (valid
-    envelope: a string `type` and, where the direction numbers messages, an
-    integer `seq`) is skipped, its `seq` still applied and acked so it is never
-    resent and later messages are not blocked; each side logs it once per type
-    per link. An unknown host op in a `req` is answered `res {ok: false, error:
+    envelope: a string `type` and, where the direction numbers messages, a
+    non-negative safe-integer `seq`) is skipped, its `seq` still applied and
+    acked so it is never resent and later messages are not blocked. A known
+    type arriving the wrong way (`stdout` on the downlink) is skipped and acked
+    the same way. Each side logs an unknown type once per link (at most 16
+    distinct types, escaped and cut to 64 characters) and a wrong-way message
+    each time (at most 16 per link). An unknown host op in a `req` is answered `res {ok: false, error:
     {status: 501, code: "unknown_op"}}`, which main surfaces as a 501
     `HostOpError` so callers can fall back. A sender must not rely on a newer
     message being understood unless the version (or, later, a capability) says
-    so.
+    so. Tolerance starts with v3: a v2 daemon is strict (an unknown type or op
+    makes it refuse the line), so main sends a v2 daemon only messages and ops
+    v2 understands.
 - **Older versions stay supported** until supporting one becomes too much of a
   maintenance burden; dropping one is an explicit decision (raising
   `MIN_LINK_PROTOCOL_VERSION`). In practice main keeps at least version N-1.

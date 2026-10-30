@@ -29,6 +29,7 @@ import {
   SESSION_OP_PARAMS,
   type DownMessage,
   type UnknownMessage,
+  UnknownMessageLog,
   type UpMessage,
 } from "./link-protocol";
 import { localHost, resolveSpawnCwdResult } from "./local-host";
@@ -244,7 +245,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         body,
         signal: AbortSignal.any([stopSignal.signal, AbortSignal.timeout(LINK_LIMITS.offlineMs)]),
       });
-      if (fatal(response.status, sent)) return;
+      if (await fatal(response, sent)) return;
       if (response.status === 409) {
         // Sent on a link main has replaced: resend on the current one, now if
         // its welcome already arrived, else when it does.
@@ -276,7 +277,8 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
 
   /** 426 (outdated) ends the daemon. So does 401 (revoked) unless host.json already holds a newer token, which the daemon then dials with.
    * `sent` is the authorization the request carried; true when the daemon is stopping. */
-  function fatal(status: number, sent: string): boolean {
+  async function fatal(response: Response, sent: string): Promise<boolean> {
+    const { status } = response;
     // A 401 for a token another request already replaced needs nothing more.
     if (status === 401 && sent === authorization) {
       const saved = readHostLogin();
@@ -290,7 +292,13 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       }
     }
     if (status === 426) {
-      log("the server speaks a different link protocol: upgrade omp-web on this host");
+      // The 426 body carries the server's newest version: below this daemon's, the server is the outdated side.
+      const { serverVersion } = (await response.json().catch(() => ({}))) as { serverVersion?: unknown };
+      log(
+        typeof serverVersion === "number" && serverVersion < LINK_PROTOCOL_VERSION
+          ? "this host's ompweb is newer than the server's: update ompweb on the server"
+          : "the server speaks a different link protocol: update ompweb on this host",
+      );
       void shutdown(1);
     }
     return stopped;
@@ -313,8 +321,8 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     welcome = Promise.withResolvers<void>();
   }
 
-  /** Message types already noted on this link: an unknown one is logged once. */
-  const unknownTypes = new Set<string>();
+  /** What this link has already logged about messages it skipped. */
+  const unknownLog = new UnknownMessageLog("server");
 
   function handleDown(line: string): void {
     let message: DownMessage | UnknownMessage;
@@ -328,7 +336,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     switch (message.type) {
       case "welcome":
         log(`linked to ${serverUrl}`);
-        unknownTypes.clear();
+        unknownLog.reset();
         nonce = message.nonce;
         welcome.resolve();
         // A fresh link: resend what main has not acked now, not after the old backoff.
@@ -344,11 +352,11 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       case "pong":
         return;
       case "unknown":
-        // A newer main's message: skipped, but its seq is applied so it is acked and never resent.
+        // A newer main's message, or one only the daemon sends: skipped, but its seq is applied so it is acked and never resent.
         if (message.seq !== null) down.applied(message.seq);
-        if (!unknownTypes.has(message.messageType)) {
-          unknownTypes.add(message.messageType);
-          log(`ignored an unknown link message type "${message.messageType}"`);
+        {
+          const note = unknownLog.note(message);
+          if (note) log(note);
         }
         return;
     }
@@ -435,7 +443,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         body: bytes as Uint8Array<ArrayBuffer>,
         signal,
       });
-      if (fatal(response.status, sent)) throw new HostOpError(503, "host_stopping", "ompweb host is stopping");
+      if (await fatal(response, sent)) throw new HostOpError(503, "host_stopping", "ompweb host is stopping");
       // The token was just replaced (or this request carried a replaced one): upload again with the current one.
       if (response.status === 401) continue;
       if (response.status === 409) {
@@ -541,7 +549,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
           body: hello,
           signal,
         });
-        if (fatal(offered.status, sent)) return;
+        if (await fatal(offered, sent)) return;
         const { helloId } = (offered.ok ? await offered.json().catch(() => ({})) : {}) as { helloId?: unknown };
         if (typeof helloId !== "string" || !helloId) {
           // A v1 main answers a nonce-less POST 409 and has no hello leg: redialing would loop forever.
@@ -553,7 +561,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
           throw new Error(`the server answered the hello with ${offered.status}`);
         }
         const response = await fetchLink(linkUrl, { headers: { authorization: sent, [LINK_HELLO_HEADER]: helloId }, signal });
-        if (fatal(response.status, sent)) return;
+        if (await fatal(response, sent)) return;
         if (!response.ok || !response.body) throw new Error(`the server answered ${response.status}`);
         for await (const line of readLines(response.body)) {
           alive();

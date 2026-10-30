@@ -190,8 +190,8 @@ the daemon's link when it starts, so start the web server first.
   no resume prompt, and dialogs or tool calls omp was waiting on reappear.
 - **Restarting the daemon does end runs** (it owns the omp processes). With auto-resume
   on, sessions that were running resume once. `ompweb systemd restart` restarts the
-  web service only; upgrades restart the daemon only when the link protocol
-  changed.
+  web service only; upgrades restart the daemon only when its link protocol version
+  is outside the range the new release supports.
 - **First start after an upgrade:** if no daemon has linked after about 90 seconds,
   ompweb shows a banner with the install command for your platform. It never installs
   services itself. Until the daemon runs, "This machine" shows offline and new
@@ -393,9 +393,10 @@ Notes:
   machine you only need the daemon, and the helpers would also start a web server
   there, so run `ompweb host` under a supervisor of your choice that restarts it
   after failure to keep the link up across logouts or reboots.
-  The daemon exits with code `1` when the server revokes its token or when the
-  link protocol versions differ (either side may be the newer one; upgrade ompweb
-  on the older side), and `0` when a newer link for the same host replaces it.
+  The daemon exits with code `1` when the server revokes its token or when its
+  link protocol version is outside the range the server supports (older than the
+  server's oldest supported version, or newer than the server: update ompweb on
+  the older side), and `0` when a newer link for the same host replaces it.
   SIGTERM or SIGINT stops the daemon and its omp processes.
   A link is one-per-host, so never run two daemons with the same token.
 - **The server's agent directory holds the host list** (`omp-web/hosts.json`).
