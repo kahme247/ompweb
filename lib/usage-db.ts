@@ -135,13 +135,7 @@ export function getUsageDatabase(customPath?: string): Database {
     return cached;
   }
 
-  if (cached) {
-    try {
-      cached.close();
-    } catch {
-      // Ignore close error on re-init
-    }
-  }
+  closeUsageDatabase();
 
   const dir = dirname(targetPath);
   if (!existsSync(dir)) {
@@ -155,7 +149,7 @@ export function getUsageDatabase(customPath?: string): Database {
   try {
     migrateUsageDatabase(db);
   } catch (err) {
-    db.close();
+    db.close(true);
     throw err;
   }
 
@@ -164,11 +158,11 @@ export function getUsageDatabase(customPath?: string): Database {
   return db;
 }
 
-/** Close the usage database instance. */
+/** Close the usage database instance. `close(true)` finalizes the statements still alive: without it the file stays open until GC, and Windows keeps it locked. */
 export function closeUsageDatabase(): void {
   if (globalThis.__ompUsageDatabase) {
     try {
-      globalThis.__ompUsageDatabase.close();
+      globalThis.__ompUsageDatabase.close(true);
     } catch {
       // Ignore
     }

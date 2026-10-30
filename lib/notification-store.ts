@@ -121,9 +121,15 @@ function db(): Database {
   if (cached?.path === path) return cached.db;
   const database = open(dir, path);
   // Only a working store replaces the cached one; a failed open leaves it usable.
-  cached?.db.close();
+  closeNotificationStore();
   globalThis.__ompNotificationStore = { path, db: database };
   return database;
+}
+
+/** Closes the cached store. `close(true)` finalizes the statements still alive: without it the file stays open until GC, and Windows keeps it locked. */
+export function closeNotificationStore(): void {
+  globalThis.__ompNotificationStore?.db.close(true);
+  globalThis.__ompNotificationStore = undefined;
 }
 
 function open(dir: string, path: string): Database {
@@ -158,7 +164,7 @@ function open(dir: string, path: string): Database {
     }
     return database;
   } catch (error) {
-    database.close();
+    database.close(true);
     throw error;
   }
 }
