@@ -1,4 +1,4 @@
-// next/dynamic replacement: React.lazy + Suspense (client-only app, `ssr` is moot).
+// dynamic(): React.lazy + Suspense (client-only app, `ssr` is moot).
 import { lazy, Suspense, type ComponentType } from "react";
 
 type Loader<P> = () => Promise<ComponentType<P> | { default: ComponentType<P> }>;

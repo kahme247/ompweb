@@ -1,4 +1,4 @@
-// The two next/navigation hooks AppShell uses (useRouter, useSearchParams), over the History API.
+// useRouter and useSearchParams (the two hooks AppShell uses), over the History API.
 import { useMemo, useSyncExternalStore } from "react";
 
 const EVENT = "omp:navigate";
