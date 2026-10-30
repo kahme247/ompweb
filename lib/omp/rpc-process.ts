@@ -99,6 +99,9 @@ function parseLine(line: string): unknown {
   }
 }
 
+const REQUEST_TYPES = new Set(["host_tool_call", "host_uri_request", "extension_ui_request"]);
+const requestId = (frame: RpcFrame) => (REQUEST_TYPES.has(frame.type) && typeof frame.id === "string" ? frame.id : null);
+
 /** Spawns the installed omp in RPC mode with the sanitized child environment. */
 export function spawnOmpTransport(options: RpcProcessOptions): RpcTransport {
   const resolveBin = options.dependencies?.resolveOmpBin ?? resolveOmpBin;
@@ -130,6 +133,8 @@ export class RpcProcess {
   private heldBytes = 0;
   /** Set once an adopted child's output outgrew the cap before `release`: the adoption fails. */
   private heldOverflow: Error | null = null;
+  /** Ids of the requests `replay` delivered (see `release`). */
+  private readonly replayedRequests = new Set<string>();
   private nextId = 1;
   private stderrTail = "";
   private exited = false;
@@ -244,12 +249,17 @@ export class RpcProcess {
     }
   }
 
-  /** Adopted child, after `replay`: delivers the frames held since and stops holding. */
+  /** Adopted child, after `replay`: delivers the frames held since and stops holding. A request
+   * opened while the old server stopped is in both (replayed, and resent unacked): it is delivered once. */
   release(): void {
     if (this.heldOverflow) throw this.heldOverflow;
     const held = this.heldFrames ?? [];
     this.heldFrames = null;
-    for (const frame of held) this.dispatch(frame);
+    for (const frame of held) {
+      const id = requestId(frame);
+      if (id === null || !this.replayedRequests.has(id)) this.dispatch(frame);
+    }
+    this.replayedRequests.clear();
   }
 
   /**
@@ -304,6 +314,8 @@ export class RpcProcess {
       this.heldFrames.push(frame);
       return;
     }
+    const id = replayed ? requestId(frame) : null;
+    if (id !== null) this.replayedRequests.add(id);
     for (const listener of this.frameListeners) {
       try {
         listener(frame);
@@ -394,7 +406,8 @@ export class RpcProcess {
   private handleResponse(response: RpcResponseFrame): void {
     const id = response.id;
     const entry = id ? this.pending.get(id) : undefined;
-    if (!entry || !id) {
+    // An adopted child numbers from w1 again: a late answer to the old server's command of another type is not this one's.
+    if (!entry || !id || (response.command && response.command !== entry.command)) {
       // Unsolicited response (or a command we already timed out) — surface to
       // frame listeners so nothing is silently dropped.
       this.dispatch(response as unknown as RpcFrame);
