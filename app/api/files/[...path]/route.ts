@@ -401,7 +401,7 @@ ${bodyHtml}
 
 export async function GET(
   request: Request,
-  { params }: { params: Promise<{ path: string[] }> }
+  { params, disableIdleTimeout }: { params: Promise<{ path: string[] }>; disableIdleTimeout: () => void }
 ) {
   try {
     const { path: segments } = await params;
@@ -418,6 +418,11 @@ export async function GET(
       return Response.json({ error: access.error, code: access.code }, { status: access.status });
     }
     const { filePath, stat } = access;
+    // A paused media element stops reading its stream, which Bun's idle timeout would cut.
+    const stream = (contentType: string, asDownload = false) => {
+      disableIdleTimeout();
+      return streamFile(filePath, stat, contentType, request.headers.get("range"), asDownload);
+    };
 
     if (type === "read") {
       if (!stat.isFile()) {
@@ -428,15 +433,15 @@ export async function GET(
         if (stat.size > IMAGE_PREVIEW_MAX_BYTES) {
           return Response.json({ error: "Image too large (>10MB)", code: "image_too_large" }, { status: 413 });
         }
-        return streamFile(filePath, stat, imageMime, request.headers.get("range"));
+        return stream(imageMime);
       }
       const audioMime = getAudioMime(filePath);
       if (audioMime) {
-        return streamFile(filePath, stat, audioMime, request.headers.get("range"));
+        return stream(audioMime);
       }
       const documentMime = getDocumentMime(filePath);
       if (documentMime) {
-        return streamFile(filePath, stat, documentMime, request.headers.get("range"));
+        return stream(documentMime);
       }
       if (stat.size > TEXT_PREVIEW_MAX_BYTES) {
         return Response.json({ error: "File too large for preview (>256KB)", code: "file_too_large_preview" }, { status: 413 });
@@ -451,7 +456,7 @@ export async function GET(
         return Response.json({ error: "Not a file", code: "not_a_file" }, { status: 400 });
       }
       const mime = getImageMime(filePath) || getAudioMime(filePath) || getDocumentMime(filePath) || "application/octet-stream";
-      return streamFile(filePath, stat, mime, request.headers.get("range"), true);
+      return stream(mime, true);
     }
 
     if (type === "meta") {

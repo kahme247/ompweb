@@ -195,12 +195,14 @@ test("Bun's idle timeout spares the event stream and the host link, and only the
     const linkReader = link.body!.getReader();
     assert.match(decoder.decode((await linkReader.read()).value), /"type":"welcome"/);
 
-    // No caller without a session or a host token holds a socket open, wherever it stalls.
+    // No caller without a session or a host token holds a socket open, wherever it stalls, and a signed-in
+    // keep-alive socket is closed once its JSON answer went out.
     const stalled = {
       gated: stall("POST /api/hosts HTTP/1.1\r\nContent-Length: 100"),
       signIn: stall("POST /api/web-auth/session HTTP/1.1\r\nContent-Length: 100"),
       link: stall("POST /api/hosts/link HTTP/1.1\r\nAuthorization: Bearer nope\r\nContent-Length: 100"),
       page: stall("GET /login HTTP/1.1"),
+      keptAlive: stall("GET /api/hosts HTTP/1.1\r\nx-omp-web-auth: trusted"),
     };
     // Real waits: Bun.serve's native idle timer (10 s, checked every 4 s) cannot be faked. The 20 s deadline only
     // names a socket that never closes.

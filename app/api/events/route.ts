@@ -6,7 +6,8 @@ const MAX_REQUEST_BYTES = 16 * 1024;
 
 // GET /api/events — the browser's single multiplexed live-event stream.
 // Subscriptions are attached with POST (see lib/event-stream-protocol.ts).
-export function GET(req: Request) {
+export function GET(req: Request, { disableIdleTimeout }: { disableIdleTimeout: () => void }) {
+  disableIdleTimeout();
   const connection = new EventStreamConnection(req.signal);
   return new Response(connection.stream, {
     headers: {
