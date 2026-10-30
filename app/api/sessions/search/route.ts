@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import { searchSessions } from "@/lib/session-content-search";
 
 const MAX_QUERY_LENGTH = 500;
@@ -9,7 +8,7 @@ const MAX_QUERY_LENGTH = 500;
 export async function GET(req: Request) {
   const q = new URL(req.url).searchParams.get("q") ?? "";
   if (q.length > MAX_QUERY_LENGTH) {
-    return NextResponse.json({ error: "Query too long", code: "query_too_long" }, { status: 400 });
+    return Response.json({ error: "Query too long", code: "query_too_long" }, { status: 400 });
   }
   const batches = searchSessions(q);
   const encoder = new TextEncoder();

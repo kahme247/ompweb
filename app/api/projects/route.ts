@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import { apiErrorResponse, opErrorResponse, resolveHostOrError } from "@/lib/api-utils";
 import { allowFileRoot } from "@/lib/file-access";
 import { LOCAL_HOST_ID } from "@/lib/hosts/registry";
@@ -42,7 +41,7 @@ export async function GET() {
     // empty managed project derives no root from sessions). Only this
     // machine's: another host's paths do not exist here.
     for (const project of projects) if (project.hostId === LOCAL_HOST_ID) allowFileRoot(project.path);
-    return NextResponse.json({ projects });
+    return Response.json({ projects });
   } catch (error) {
     return apiErrorResponse(error);
   }
@@ -61,12 +60,12 @@ export async function POST(req: Request) {
     const { host } = target;
     const result = await host.sessionOps.addProject(cwd, launchConfig);
     if (!result.ok) return opErrorResponse(result);
-    if (host.id !== LOCAL_HOST_ID) return NextResponse.json({ project: { ...result.value, hostId: host.id } });
+    if (host.id !== LOCAL_HOST_ID) return Response.json({ project: { ...result.value, hostId: host.id } });
     allowFileRoot(result.value.path);
-    return NextResponse.json({ project: result.value });
+    return Response.json({ project: result.value });
   } catch (error) {
     if (error instanceof ProjectPathError) {
-      return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
+      return Response.json({ error: error.message, code: error.code }, { status: 400 });
     }
     return apiErrorResponse(error);
   }
@@ -98,23 +97,23 @@ export async function PATCH(req: Request) {
         ? [{ cwd: body.cwd, alias: body.alias, sortOrder: body.sortOrder, pinOrder: body.pinOrder, launchConfig: body.launchConfig }]
         : [];
     if (rawUpdates.length === 0) {
-      return NextResponse.json({ error: "Path is required", code: "path_required" }, { status: 400 });
+      return Response.json({ error: "Path is required", code: "path_required" }, { status: 400 });
     }
     if (rawUpdates.length > MAX_PRESENTATION_UPDATES) {
-      return NextResponse.json({ error: "Too many updates", code: "too_many_updates" }, { status: 400 });
+      return Response.json({ error: "Too many updates", code: "too_many_updates" }, { status: 400 });
     }
 
     const parsed: ProjectUpdate[] = [];
     for (const item of rawUpdates) {
       const entry = item as { cwd?: unknown; alias?: unknown; sortOrder?: unknown; pinOrder?: unknown; launchConfig?: unknown };
       const cwd = typeof entry.cwd === "string" ? entry.cwd.trim() : "";
-      if (!cwd) return NextResponse.json({ error: "Path is required", code: "path_required" }, { status: 400 });
+      if (!cwd) return Response.json({ error: "Path is required", code: "path_required" }, { status: 400 });
       const alias = entry.alias === null ? null : typeof entry.alias === "string" ? entry.alias : undefined;
       const sortOrder = entry.sortOrder === null ? null : typeof entry.sortOrder === "number" && Number.isFinite(entry.sortOrder) ? entry.sortOrder : undefined;
       const pinOrder = entry.pinOrder === null ? null : typeof entry.pinOrder === "number" && Number.isFinite(entry.pinOrder) ? entry.pinOrder : undefined;
-      if (entry.alias !== undefined && alias === undefined) return NextResponse.json({ error: "Alias must be a string", code: "invalid_alias" }, { status: 400 });
-      if (entry.sortOrder !== undefined && sortOrder === undefined) return NextResponse.json({ error: "Sort order must be a number", code: "invalid_sort_order" }, { status: 400 });
-      if (entry.pinOrder !== undefined && pinOrder === undefined) return NextResponse.json({ error: "Pin order must be a number", code: "invalid_pin_order" }, { status: 400 });
+      if (entry.alias !== undefined && alias === undefined) return Response.json({ error: "Alias must be a string", code: "invalid_alias" }, { status: 400 });
+      if (entry.sortOrder !== undefined && sortOrder === undefined) return Response.json({ error: "Sort order must be a number", code: "invalid_sort_order" }, { status: 400 });
+      if (entry.pinOrder !== undefined && pinOrder === undefined) return Response.json({ error: "Pin order must be a number", code: "invalid_pin_order" }, { status: 400 });
       const launchConfig = entry.launchConfig === null ? null : parseLaunchConfig(entry.launchConfig);
       parsed.push({ cwd, alias, sortOrder, pinOrder, launchConfig });
     }
@@ -127,10 +126,10 @@ export async function PATCH(req: Request) {
     // in-memory browse authorization behind. Never for another host's paths.
     if (target.host.id === LOCAL_HOST_ID) for (const root of result.value.newRoots) allowFileRoot(root);
     const { projects } = result.value;
-    return NextResponse.json({ projects: target.host.id === LOCAL_HOST_ID ? projects : projects.map((project) => ({ ...project, hostId: target.host.id })) });
+    return Response.json({ projects: target.host.id === LOCAL_HOST_ID ? projects : projects.map((project) => ({ ...project, hostId: target.host.id })) });
   } catch (error) {
     if (error instanceof ProjectPathError) {
-      return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
+      return Response.json({ error: error.message, code: error.code }, { status: 400 });
     }
     return apiErrorResponse(error);
   }
@@ -144,13 +143,13 @@ export async function DELETE(req: Request) {
     const body = await req.json() as { cwd?: unknown; hostId?: unknown };
     const cwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
     if (!cwd) {
-      return NextResponse.json({ error: "Path is required", code: "path_required" }, { status: 400 });
+      return Response.json({ error: "Path is required", code: "path_required" }, { status: 400 });
     }
     const target = resolveHostOrError(body.hostId);
     if ("response" in target) return target.response;
     const result = await target.host.sessionOps.hideProject(cwd);
     if (!result.ok) return opErrorResponse(result);
-    return NextResponse.json({ success: true });
+    return Response.json({ success: true });
   } catch (error) {
     return apiErrorResponse(error);
   }

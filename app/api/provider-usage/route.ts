@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import { getProviderUsage } from "@/lib/provider-usage";
 
 export const dynamic = "force-dynamic";
@@ -20,16 +19,16 @@ export async function GET(request: Request) {
   const modelId = readIdentifier(rawModel);
 
   if ((rawProvider !== null && !provider) || (rawModel !== null && !modelId)) {
-    return NextResponse.json(
+    return Response.json(
       { error: "Invalid provider or model identifier", code: "invalid_usage_query" },
       { status: 400 },
     );
   }
 
   try {
-    return NextResponse.json(await getProviderUsage({ provider, modelId }, searchParams.get("refresh") === "true"));
+    return Response.json(await getProviderUsage({ provider, modelId }, searchParams.get("refresh") === "true"));
   } catch {
-    return NextResponse.json(
+    return Response.json(
       { error: "Provider usage is currently unavailable", code: "provider_usage_unavailable" },
       { status: 502 },
     );

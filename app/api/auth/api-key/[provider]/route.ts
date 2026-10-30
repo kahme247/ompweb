@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import { apiErrorResponse } from "@/lib/api-utils";
 import { type OmpLoginProvider, type OmpModel, runUtilityCommand } from "@/lib/omp/rpc-utility";
 
@@ -30,7 +29,7 @@ export async function GET(_req: Request, { params }: Params) {
     );
     const loginProvider = loginProviders.find((p) => p.id === provider);
     const modelCount = models.filter((m) => m.provider === provider).length;
-    return NextResponse.json({
+    return Response.json({
       provider,
       displayName: loginProvider?.name ?? provider,
       configured: modelCount > 0 || loginProvider?.authenticated === true,
@@ -44,7 +43,7 @@ export async function GET(_req: Request, { params }: Params) {
 // POST /api/auth/api-key/[provider] — not supported against omp's credential store
 export async function POST(_req: Request, { params }: Params) {
   const { provider } = await params;
-  return NextResponse.json(
+  return Response.json(
     { error: `Cannot store an API key for "${provider}" from omp-web. ${API_KEY_WRITE_GUIDANCE}`, code: "api_key_store_unsupported" },
     { status: 501 },
   );
@@ -53,7 +52,7 @@ export async function POST(_req: Request, { params }: Params) {
 // DELETE /api/auth/api-key/[provider] — not supported against omp's credential store
 export async function DELETE(_req: Request, { params }: Params) {
   const { provider } = await params;
-  return NextResponse.json(
+  return Response.json(
     { error: `Cannot remove the API key for "${provider}" from omp-web. ${API_KEY_WRITE_GUIDANCE}`, code: "api_key_remove_unsupported" },
     { status: 501 },
   );

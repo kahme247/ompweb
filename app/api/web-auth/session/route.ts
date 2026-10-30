@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import {
   createWebSession,
@@ -12,7 +11,7 @@ const MAX_PASSWORD_REQUEST_BYTES = 8 * 1024;
 
 export async function POST(request: Request) {
   if (!isWebPasswordEnabled()) {
-    return NextResponse.json({ error: "Password protection is disabled" }, { status: 404 });
+    return Response.json({ error: "Password protection is disabled" }, { status: 404 });
   }
 
   let body: { password?: unknown };
@@ -20,22 +19,20 @@ export async function POST(request: Request) {
     body = await parseJsonWithinLimit(request, MAX_PASSWORD_REQUEST_BYTES);
   } catch (error) {
     const status = error instanceof RequestBodyTooLargeError ? 413 : 400;
-    return NextResponse.json({ error: "Invalid password request" }, { status });
+    return Response.json({ error: "Invalid password request" }, { status });
   }
   if (typeof body.password !== "string" || !isValidWebPassword(body.password)) {
-    return NextResponse.json({ error: "Incorrect password" }, { status: 401 });
+    return Response.json({ error: "Incorrect password" }, { status: 401 });
   }
 
-  const response = NextResponse.json({ ok: true });
+  const response = Response.json({ ok: true });
   const secure = new URL(request.url).protocol === "https:" || request.headers.get("x-forwarded-proto") === "https";
-  response.cookies.set({
-    name: OMP_WEB_SESSION_COOKIE,
-    value: createWebSession(),
+  response.headers.append("Set-Cookie", new Bun.Cookie(OMP_WEB_SESSION_COOKIE, createWebSession(), {
     httpOnly: true,
     secure,
     sameSite: "lax",
     maxAge: OMP_WEB_SESSION_MAX_AGE_SECONDS,
     path: "/",
-  });
+  }).serialize());
   return response;
 }

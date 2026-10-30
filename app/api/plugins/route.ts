@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import { execFile } from "child_process";
 import { existsSync, promises as fs } from "fs";
 import { basename, extname, join } from "path";
@@ -266,25 +265,25 @@ function readScope(scope: unknown): PluginScope {
 
 /** Dynamic CLI failures keep their message; a missing omp binary is the one
  * known cause worth a stable code for client-side localization. */
-function pluginErrorResponse(error: unknown): NextResponse {
+function pluginErrorResponse(error: unknown): Response {
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes("omp binary not found")) {
-    return NextResponse.json({ error: message, code: "omp_not_found" }, { status: 500 });
+    return Response.json({ error: message, code: "omp_not_found" }, { status: 500 });
   }
-  return NextResponse.json({ error: message }, { status: 500 });
+  return Response.json({ error: message }, { status: 500 });
 }
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const cwd = searchParams.get("cwd");
-  if (!cwd) return NextResponse.json({ error: "cwd required", code: "cwd_required" }, { status: 400 });
+  if (!cwd) return Response.json({ error: "cwd required", code: "cwd_required" }, { status: 400 });
 
   try {
     const allowedRoots = await getAllowedFileRoots();
     if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied", code: "access_denied" }, { status: 403 });
+      return Response.json({ error: "Access denied", code: "access_denied" }, { status: 403 });
     }
-    return NextResponse.json(await readPlugins(cwd));
+    return Response.json(await readPlugins(cwd));
   } catch (error) {
     return pluginErrorResponse(error);
   }
@@ -299,32 +298,32 @@ export async function POST(req: Request) {
       scope?: PluginScope;
       cwd?: string;
     };
-    if (!body.cwd) return NextResponse.json({ error: "cwd required", code: "cwd_required" }, { status: 400 });
-    if (!body.action) return NextResponse.json({ error: "action required", code: "action_required" }, { status: 400 });
+    if (!body.cwd) return Response.json({ error: "cwd required", code: "cwd_required" }, { status: 400 });
+    if (!body.action) return Response.json({ error: "action required", code: "action_required" }, { status: 400 });
     const allowedRoots = await getAllowedFileRoots();
     if (!isExistingFilePathAllowed(body.cwd, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied", code: "access_denied" }, { status: 403 });
+      return Response.json({ error: "Access denied", code: "access_denied" }, { status: 403 });
     }
 
     const source = body.source?.trim();
     const scopeArgs = readScope(body.scope) === "project" ? ["--scope", "project"] : [];
 
     if (body.action === "install") {
-      if (!source) return NextResponse.json({ error: "source required", code: "source_required" }, { status: 400 });
+      if (!source) return Response.json({ error: "source required", code: "source_required" }, { status: 400 });
       await runOmp(["plugin", "install", source, "--json", ...scopeArgs], { cwd: body.cwd, timeout: 300_000 });
     } else if (body.action === "remove") {
-      if (!source) return NextResponse.json({ error: "source required", code: "source_required" }, { status: 400 });
+      if (!source) return Response.json({ error: "source required", code: "source_required" }, { status: 400 });
       await runOmp(["plugin", "uninstall", source, "--json", ...scopeArgs], { cwd: body.cwd, timeout: 120_000 });
     } else if (body.action === "update") {
       await runOmp(["plugin", "upgrade", ...(source ? [source, ...scopeArgs] : [])], { cwd: body.cwd, timeout: 300_000 });
     } else if (body.action === "disable" || body.action === "enable") {
-      if (!source) return NextResponse.json({ error: "source required", code: "source_required" }, { status: 400 });
+      if (!source) return Response.json({ error: "source required", code: "source_required" }, { status: 400 });
       await runOmp(["plugin", body.action, source, "--json", ...scopeArgs], { cwd: body.cwd, timeout: 60_000 });
     } else {
-      return NextResponse.json({ error: `Unsupported action: ${body.action}`, code: "plugin_unsupported_action" }, { status: 400 });
+      return Response.json({ error: `Unsupported action: ${body.action}`, code: "plugin_unsupported_action" }, { status: 400 });
     }
 
-    return NextResponse.json(await readPlugins(body.cwd));
+    return Response.json(await readPlugins(body.cwd));
   } catch (error) {
     return pluginErrorResponse(error);
   }

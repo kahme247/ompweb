@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import { apiErrorResponse, hostOfflineResponse, opErrorResponse, resolveSessionHostOr404 } from "@/lib/api-utils";
 import { HostOpError } from "@/lib/hosts/link-protocol";
 import { invalidateHostSessionList } from "@/lib/hosts/session-index";
@@ -20,7 +19,7 @@ export async function POST(
     // flattening their tree in the sidebar. Archive leaves first instead.
     const hasChildren = (await sessionOps.listSessions()).some((session) => session.parentSessionId === id);
     if (hasChildren) {
-      return NextResponse.json(
+      return Response.json(
         { error: "Archive child sessions before archiving this session", code: "session_has_children" },
         { status: 409 },
       );
@@ -36,10 +35,10 @@ export async function POST(
     if (!result.ok) return opErrorResponse(result);
     invalidateHostSessionList(resolved.host.id);
     clearExitedRpcSession(id);
-    return NextResponse.json({ ok: true, archived: true, archivedPath: result.value.archivedPath });
+    return Response.json({ ok: true, archived: true, archivedPath: result.value.archivedPath });
   } catch (error) {
     if (error instanceof HostOpError) return apiErrorResponse(error);
     const message = error instanceof Error ? error.message : String(error);
-    return NextResponse.json({ error: message, code: "session_archive_failed" }, { status: 500 });
+    return Response.json({ error: message, code: "session_archive_failed" }, { status: 500 });
   }
 }
