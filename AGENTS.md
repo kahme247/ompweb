@@ -257,7 +257,7 @@ The table is static imports, not a runtime glob, so a future `bun build --compil
 - Dev (`npm run dev`) serves the SPA from the HTML import with HMR, bundled in memory, and re-runs itself once with `OMP_WEB_PUBLIC_*` set because `bunfig.toml` inlines them from the environment Bun started with. Dev pages carry `script-src blob:` in their CSP (HMR updates run as blob scripts); production does not.
 - `OMP_WEB_PACKAGE_DIR` (set by the launcher) is the root for `dist/`, `public/` and KaTeX; `process.cwd()` is the fallback for dev and tests.
 - The in-app update worker runs on Node (`OMP_WEB_NODE_BIN`, the launcher's `process.execPath`), not Bun.
-- Bun's `fs.watch` drops an event that follows the previous one within ~2 ms, and drops `close` events, so the file channel (`openFileChannel`, `lib/event-stream-hub.ts`) re-stats the file ~50 ms after every event.
+- Bun's `fs.watch` drops an event that follows the previous one within ~2 ms, so the file channel (`openFileChannel`, `lib/event-stream-hub.ts`) re-stats the file ~50 ms after every event.
 - `bun:sqlite` `.get()` returns `null` for no row (not `undefined`).
 - `readSttConfig` lives in server-only `lib/stt-jobs.ts`; the browser bundle must never import it.
 - Browser code must not import `next/*`: use `lib/dynamic.tsx` and `lib/navigation.ts`.
@@ -387,8 +387,9 @@ The table is static imports, not a runtime glob, so a future `bun build --compil
   hello) and is then destroyed; no replacement spawns beside it.
   `restartAllRpcSessions` (omp update) restarts local sessions only.
   Remote-only transport members (`onResync`, `lost`) are optional on
-  `RpcTransport` and duck-typed: route bundles and instrumentation load
-  separate `hub.ts` module instances, so never `instanceof RemoteRpcTransport`.
+  `RpcTransport` and duck-typed: there is one module graph, but a `bun --hot`
+  re-evaluation can create a fresh `RemoteRpcTransport` class while live
+  objects keep the old one, so never `instanceof RemoteRpcTransport`.
 - **Live-link recycle rule.** A prompt, history-edit or MCP command that times
   out normally recycles the child. On a remote host it does so only if the host
   sent uplink traffic after the command was dispatched (`lastUplinkAt`,
