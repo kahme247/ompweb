@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -67,7 +67,15 @@ test("gzip applies to compressible 200 responses only", async () => {
 
 test("serveFile refuses traversal and sets the cache policy", async () => {
   const get = (pathname: string) => serveFile(new Request(`http://localhost${pathname}`), root, false);
-  for (const pathname of ["/..%2Fpackage.json", "/%2e%2e/package.json", "/assets/..%5C..%5Cpackage.json", "/sw.js%00", "/katex/..%2F..%2Fpackage.json"]) {
+  for (const pathname of [
+    "/..%2Fpackage.json",
+    "/%2e%2e/package.json",
+    "/assets/..%5C..%5Cpackage.json",
+    "/sw.js%00",
+    "/katex/..%2F..%2Fpackage.json",
+    "//etc/passwd",
+    "/katex//etc/passwd",
+  ]) {
     assert.equal(await get(pathname), null, pathname);
   }
   assert.equal((await get("/sw.js"))?.headers.get("cache-control"), "no-cache");
@@ -76,6 +84,23 @@ test("serveFile refuses traversal and sets the cache policy", async () => {
   assert.equal((await get("/katex/katex.min.css"))?.headers.get("cache-control"), "public, max-age=0");
   assert.equal(await get("/"), null);
   assert.equal(await get("/assets"), null);
+});
+
+test("serveFile never follows a symlink out of its directory", { skip: process.platform === "win32" }, async (t) => {
+  const packageDir = mkdtempSync(path.join(os.tmpdir(), "omp-web-serve-link-"));
+  t.after(() => rmSync(packageDir, { recursive: true, force: true }));
+  const outside = path.join(packageDir, "outside");
+  mkdirSync(outside);
+  writeFileSync(path.join(outside, "secret.txt"), "TOP-SECRET");
+  mkdirSync(path.join(packageDir, "public"));
+  writeFileSync(path.join(packageDir, "public", "inside.txt"), "ok");
+  symlinkSync(path.join(outside, "secret.txt"), path.join(packageDir, "public", "leak.txt"));
+  symlinkSync(outside, path.join(packageDir, "public", "outdir"));
+  symlinkSync(path.join(packageDir, "public", "inside.txt"), path.join(packageDir, "public", "alias.txt"));
+  const get = (pathname: string) => serveFile(new Request(`http://localhost${pathname}`), packageDir, true);
+  assert.equal(await get("/leak.txt"), null);
+  assert.equal(await get("/outdir/secret.txt"), null);
+  assert.equal(await (await get("/alias.txt"))?.text(), "ok", "a link that stays inside is served");
 });
 
 test("serveFile sends Last-Modified and answers a matching If-Modified-Since with 304", async () => {

@@ -1,4 +1,4 @@
-import { statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { getInstallName } from "@/lib/install-name";
 
@@ -77,6 +77,8 @@ export async function serveFile(request: Request, root: string, dev: boolean): P
     if (!file.startsWith(base + path.sep)) continue;
     let mtime: Date;
     try {
+      // statSync and Bun.file follow symlinks: serve a link only when its target stays inside the (real) base.
+      if (!realpathSync(file).startsWith(realpathSync(base) + path.sep)) continue;
       const stat = statSync(file);
       if (!stat.isFile()) continue;
       mtime = stat.mtime;
