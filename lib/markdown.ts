@@ -59,7 +59,7 @@ function getRawCodeClosePattern(tag: string): RegExp {
   return RAW_CODE_CLOSE_PATTERNS[tag] ?? new RegExp(`</${tag}\\s*>`, "i");
 }
 
-/** Loads remark-math + rehype-katex + the KaTeX CSS once, caching module-level. */
+/** Loads remark-math + rehype-katex once (module-level cache) and links the KaTeX CSS the server serves at /katex/. */
 export function loadMathMarkdownPlugins(): Promise<MarkdownPlugins> {
   if (!mathMarkdownPluginsPromise) {
     mathMarkdownPluginsPromise = (async () => {
@@ -67,9 +67,13 @@ export function loadMathMarkdownPlugins(): Promise<MarkdownPlugins> {
         import("remark-math").then((m) => m.default),
         import("rehype-katex").then((m) => m.default),
       ]);
-      if (typeof window !== "undefined") {
-        // KaTeX styles are only needed (and only loadable) in the browser.
-        await import("katex/dist/katex.min.css");
+      if (typeof document !== "undefined" && !document.querySelector("link[data-katex]")) {
+        // Linked rather than imported: the stylesheet and its fonts stay out of the entry chunk.
+        const link = document.createElement("link");
+        link.rel = "stylesheet";
+        link.href = "/katex/katex.min.css";
+        link.dataset.katex = "";
+        document.head.append(link);
       }
       mathMarkdownPlugins = {
         remarkPlugins: [...baseMarkdownPlugins.remarkPlugins, remarkMath],

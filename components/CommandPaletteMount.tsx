@@ -1,6 +1,6 @@
 "use client";
 
-import dynamic from "next/dynamic";
+import dynamic from "@/lib/dynamic";
 import { useEffect, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
 

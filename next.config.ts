@@ -128,9 +128,8 @@ const nextConfig = (phase: string): NextConfig => {
       return [globalRule, fileRule, staticImmutableRule, rootNoCacheRule];
     },
     env: {
-      NEXT_PUBLIC_APP_VERSION: version,
-      NEXT_PUBLIC_OMP_WEB_VERSION: version,
-      NEXT_PUBLIC_EVENT_STREAM_WORKER_VERSION: eventStreamWorkerVersion,
+      OMP_WEB_PUBLIC_APP_VERSION: version,
+      OMP_WEB_PUBLIC_EVENT_STREAM_WORKER_VERSION: eventStreamWorkerVersion,
     },
   };
 };
