@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { MetadataRoute } from "next";
 import { getInstallName } from "@/lib/install-name";
 
 // Packaged public assets are read/encoded once per server module. Native
@@ -8,7 +7,7 @@ import { getInstallName } from "@/lib/install-name";
 const pngDataUrl = (filename: string) =>
   `data:image/png;base64,${readFileSync(join(process.cwd(), "public", filename)).toString("base64")}`;
 
-const manifest: MetadataRoute.Manifest = {
+const manifest = {
   description: "Web UI for the oh-my-pi (omp) coding agent",
   start_url: "/",
   scope: "/",

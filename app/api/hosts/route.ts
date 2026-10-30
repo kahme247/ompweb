@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import { closeHostLink, hostsSnapshot, listHosts, notifyHostsChange } from "@/lib/hosts/hub";
 import { createHost, HostRegistryUnreadableError, revokeHost, UnknownHostError, updateHost } from "@/lib/hosts/registry";
 import { isRecord } from "@/lib/type-guards";
@@ -8,7 +7,7 @@ export const dynamic = "force-dynamic";
 const MAX_LABEL_LENGTH = 100;
 const noStore = { "cache-control": "no-store" };
 
-const fail = (error: string, status: number) => NextResponse.json({ error }, { status, headers: noStore });
+const fail = (error: string, status: number) => Response.json({ error }, { status, headers: noStore });
 
 function failFor(error: unknown) {
   if (error instanceof HostRegistryUnreadableError) {
@@ -50,7 +49,7 @@ function requestOrigin(req: Request): string {
 }
 
 export function GET() {
-  return NextResponse.json(hostsSnapshot(), { headers: noStore });
+  return Response.json(hostsSnapshot(), { headers: noStore });
 }
 
 export async function POST(req: Request) {
@@ -60,7 +59,7 @@ export async function POST(req: Request) {
   try {
     const { host, token } = createHost(label);
     notifyHostsChange();
-    return NextResponse.json(
+    return Response.json(
       {
         host: listHosts().find((h) => h.id === host.id),
         token,
@@ -87,7 +86,7 @@ export async function PATCH(req: Request) {
   try {
     updateHost(body.id, { label, allowAgentStart });
     notifyHostsChange();
-    return NextResponse.json({ host: hostsSnapshot().hosts.find((h) => h.id === body.id) }, { headers: noStore });
+    return Response.json({ host: hostsSnapshot().hosts.find((h) => h.id === body.id) }, { headers: noStore });
   } catch (error) {
     return failFor(error);
   }
@@ -102,7 +101,7 @@ export async function DELETE(req: Request) {
     if (!revokeHost(id)) return fail("Unknown host", 404);
     closeHostLink(id);
     notifyHostsChange();
-    return NextResponse.json({ ok: true }, { headers: noStore });
+    return Response.json({ ok: true }, { headers: noStore });
   } catch (error) {
     return failFor(error);
   }

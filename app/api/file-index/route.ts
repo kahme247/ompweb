@@ -1,4 +1,3 @@
-import { NextRequest, NextResponse } from "next/server";
 import { apiErrorResponse } from "@/lib/api-utils";
 import { execFile } from "child_process";
 import { promisify } from "util";
@@ -150,30 +149,31 @@ function listWithWalk(cwd: string): FileListing {
 // before ranking and reports a `truncated` flag; refresh=1 rebuilds the listing
 // instead of using the TTL cache, for the explorer's refresh button.
 // Guarded by the same allow-list as /api/files.
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   try {
-    const cwd = req.nextUrl.searchParams.get("cwd")?.trim() ?? "";
+    const { searchParams } = new URL(req.url);
+    const cwd = searchParams.get("cwd")?.trim() ?? "";
     if (!cwd || (!cwd.startsWith("/") && !isWindowsAbsolutePath(cwd))) {
-      return NextResponse.json({ error: "cwd must be an absolute path", code: "cwd_must_be_absolute" }, { status: 400 });
+      return Response.json({ error: "cwd must be an absolute path", code: "cwd_must_be_absolute" }, { status: 400 });
     }
-    const query = req.nextUrl.searchParams.get("q")?.slice(0, MAX_QUERY_LENGTH) ?? "";
+    const query = searchParams.get("q")?.slice(0, MAX_QUERY_LENGTH) ?? "";
 
     const allowedRoots = await getAllowedFileRoots();
     if (!isFilePathAllowed(cwd, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied", code: "access_denied" }, { status: 403 });
+      return Response.json({ error: "Access denied", code: "access_denied" }, { status: 403 });
     }
 
     let stat: fs.Stats;
     try {
       stat = fs.statSync(cwd);
     } catch {
-      return NextResponse.json({ error: "Directory not found", code: "directory_not_found" }, { status: 404 });
+      return Response.json({ error: "Directory not found", code: "directory_not_found" }, { status: 404 });
     }
     if (!stat.isDirectory()) {
-      return NextResponse.json({ error: "Not a directory", code: "not_a_directory" }, { status: 400 });
+      return Response.json({ error: "Not a directory", code: "not_a_directory" }, { status: 400 });
     }
     if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied", code: "access_denied" }, { status: 403 });
+      return Response.json({ error: "Access denied", code: "access_denied" }, { status: 403 });
     }
 
     const cache = getIndexCache();
@@ -182,7 +182,7 @@ export async function GET(req: NextRequest) {
     // or a file the agent just wrote stays invisible. loadListing collapses
     // concurrent rebuilds onto one scan, which is the whole bound: an age gate
     // on top of it can only suppress the refresh the user actually asked for.
-    const forceRefresh = req.nextUrl.searchParams.get("refresh") === "1";
+    const forceRefresh = searchParams.get("refresh") === "1";
     let cached = cache.get(cwd);
     if (!cached || cached.expiresAt <= now || forceRefresh) {
       const listing = await loadListing(cwd);
@@ -199,13 +199,13 @@ export async function GET(req: NextRequest) {
     }
 
     if (query) {
-      const limit = parseResultLimit(req.nextUrl.searchParams.get("limit"));
+      const limit = parseResultLimit(searchParams.get("limit"));
       cached.entries ??= buildEntriesFromFiles(cached.listing.files);
       // Directories score a ranking bonus, so a caller that only renders files
       // must drop them before the limit is applied: "api" in this repo matches
       // 67 directories, which would otherwise consume half the budget and
       // silently push matching files out of the response.
-      if (req.nextUrl.searchParams.get("kind") === "file") {
+      if (searchParams.get("kind") === "file") {
         cached.fileEntries ??= cached.entries.filter((entry) => !entry.isDir);
         // Ask for one past the limit: the extra row never ships, it only tells
         // the panel that the list it shows is incomplete. A listing that hit the
@@ -213,16 +213,16 @@ export async function GET(req: NextRequest) {
         // though fewer than `limit` rows matched what survived.
         const ranked = filterFileEntries(cached.fileEntries, query, limit + 1);
         const truncated = ranked.length > limit || cached.listing.hardTruncated;
-        return NextResponse.json({
+        return Response.json({
           matches: truncated ? ranked.slice(0, limit) : ranked,
           truncated,
         });
       }
-      return NextResponse.json({ matches: filterFileEntries(cached.entries, query, limit) });
+      return Response.json({ matches: filterFileEntries(cached.entries, query, limit) });
     }
 
     const { files, hardTruncated } = cached.listing;
-    return NextResponse.json({
+    return Response.json({
       files: files.slice(0, MAX_FILES),
       truncated: hardTruncated || files.length > MAX_FILES,
     });

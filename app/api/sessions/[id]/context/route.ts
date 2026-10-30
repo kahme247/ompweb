@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import { buildSessionContext } from "@/lib/session-reader";
 import { apiErrorResponse, opErrorResponse, resolveSessionHostOr404 } from "@/lib/api-utils";
 import { getRpcSession } from "@/lib/rpc-manager";
@@ -19,28 +18,28 @@ export async function GET(
   const boundary = url.searchParams.get("boundary");
   if (boundary !== null) {
     if (boundary !== "1" || url.searchParams.getAll("boundary").length !== 1) {
-      return NextResponse.json({ error: "Invalid boundary mode", code: "invalid_boundary" }, { status: 400 });
+      return Response.json({ error: "Invalid boundary mode", code: "invalid_boundary" }, { status: 400 });
     }
     if (["sync", "leafId", "includePreCompaction", "cursor", "limit"].some((option) => url.searchParams.has(option))) {
-      return NextResponse.json({ error: "Boundary mode requires the current active context", code: "invalid_boundary_options" }, { status: 400 });
+      return Response.json({ error: "Boundary mode requires the current active context", code: "invalid_boundary_options" }, { status: 400 });
     }
   }
   let cursor: SessionHistoryCursor | null = null;
   let limit = MAX_SYNC_MESSAGES;
   if (sync !== null && sync !== "1") {
-    return NextResponse.json({ error: "Invalid sync mode", code: "invalid_sync" }, { status: 400 });
+    return Response.json({ error: "Invalid sync mode", code: "invalid_sync" }, { status: 400 });
   }
   if (sync === "1") {
     try {
       cursor = parseHistoryCursor(url.searchParams.get("cursor"));
     } catch {
-      return NextResponse.json({ error: "Invalid history cursor", code: "invalid_sync_cursor" }, { status: 400 });
+      return Response.json({ error: "Invalid history cursor", code: "invalid_sync_cursor" }, { status: 400 });
     }
     const rawLimit = url.searchParams.get("limit");
     if (rawLimit !== null) {
       limit = Number(rawLimit);
       if (!/^[1-9]\d*$/.test(rawLimit) || !Number.isInteger(limit) || limit > MAX_SYNC_MESSAGES) {
-        return NextResponse.json({ error: "Invalid history page limit", code: "invalid_sync_limit" }, { status: 400 });
+        return Response.json({ error: "Invalid history page limit", code: "invalid_sync_limit" }, { status: 400 });
       }
     }
   }
@@ -64,7 +63,7 @@ export async function GET(
       const session = notFound && (boundary === "1" || (sync === "1" && !cursor?.lastEntryId && leafId === undefined)) ? getRpcSession(id) : undefined;
       if (session?.isAlive() && !(await session.host.sessionFileExists(session.sessionFile))) {
         if (boundary === "1") {
-          return NextResponse.json({ entryIds: [] }, { headers: { "Cache-Control": "no-store" } });
+          return Response.json({ entryIds: [] }, { headers: { "Cache-Control": "no-store" } });
         }
         const response: SessionSyncResponse = {
           ...selectSessionHistory(buildSessionContext([]), cursor, limit),
@@ -72,12 +71,12 @@ export async function GET(
           leafId: null,
           live: session.getStreamSnapshot(),
         };
-        return NextResponse.json(response, { headers: { "Cache-Control": "no-store" } });
+        return Response.json(response, { headers: { "Cache-Control": "no-store" } });
       }
       return "response" in result ? result.response : opErrorResponse(result);
     }
     if (boundary === "1") {
-      return NextResponse.json(result.value, { headers: { "Cache-Control": "no-store" } });
+      return Response.json(result.value, { headers: { "Cache-Control": "no-store" } });
     }
     if (sync === "1") {
       const page = result.value as { history: SessionHistoryPage; leafId: string | null; tipId: string | null };
@@ -88,9 +87,9 @@ export async function GET(
         ? session.getStreamSnapshot()
         : null;
       const response: SessionSyncResponse = { ...page.history, sessionId: id, leafId: page.leafId, live };
-      return NextResponse.json(response, { headers: { "Cache-Control": "no-store" } });
+      return Response.json(response, { headers: { "Cache-Control": "no-store" } });
     }
-    return NextResponse.json(result.value);
+    return Response.json(result.value);
   } catch (error) {
     return apiErrorResponse(error);
   }

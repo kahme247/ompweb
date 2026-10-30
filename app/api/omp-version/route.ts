@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import { getOmpVersion } from "@/lib/omp/omp-cli";
 
 export const dynamic = "force-dynamic";
@@ -7,5 +6,5 @@ export const dynamic = "force-dynamic";
  * build-time omp-web version — the two can legitimately drift. */
 export async function GET() {
   const version = await getOmpVersion();
-  return NextResponse.json({ version });
+  return Response.json({ version });
 }
