@@ -78,6 +78,22 @@ test("serveFile refuses traversal and sets the cache policy", async () => {
   assert.equal(await get("/assets"), null);
 });
 
+test("serveFile sends Last-Modified and answers a matching If-Modified-Since with 304", async () => {
+  const get = (headers: Record<string, string> = {}, method = "GET") =>
+    serveFile(new Request("http://localhost/icon.svg", { method, headers }), root, false);
+  const lastModified = (await get())?.headers.get("last-modified");
+  assert.ok(lastModified);
+  const notModified = await get({ "if-modified-since": lastModified });
+  assert.equal(notModified?.status, 304);
+  assert.equal(notModified?.body, null);
+  assert.equal(notModified?.headers.get("cache-control"), "public, max-age=0");
+  const older = new Date(Date.parse(lastModified) - 1000).toUTCString();
+  assert.equal((await get({ "if-modified-since": older }))?.status, 200);
+  assert.equal((await get({ "if-modified-since": "garbage" }))?.status, 200);
+  // RFC 9110: only GET and HEAD are conditional on If-Modified-Since.
+  assert.equal((await get({ "if-modified-since": lastModified }, "POST"))?.status, 200);
+});
+
 test("serveFile marks hashed assets immutable", async () => {
   const packageDir = mkdtempSync(path.join(os.tmpdir(), "omp-web-serve-file-"));
   try {
