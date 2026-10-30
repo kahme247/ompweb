@@ -59,7 +59,7 @@ npm run dev:   bun --hot server/dev.ts (HTML import, HMR, no dist/)
    - the session cookie keeps its name, `HttpOnly; SameSite=Lax; Path=/; Max-Age`, and `Secure` on https or `x-forwarded-proto: https`;
    - the trusted proxy header is honored.
 
-   Ungated paths stay the same: the icons, `sw.js`, `/api/hosts/link` and its subpaths, plus the login page's assets (`/assets/*`, which replace `/_next/static/*`). No `x-middleware-*` header ever reaches a client.
+   Ungated paths stay the same: the icons, `sw.js`, `/api/hosts/link` and its subpaths, plus the login page's assets (`/assets/*`, which replace `/_next/static/*`). The icon and `sw.js` names are exact, so `/icon.svg/foo` is gated. No `x-middleware-*` header ever reaches a client.
 5. **Origin check.** Cross-origin `/api/*` requests still get 403.
 6. **Security headers.** These are exactly the `next.config.ts` values. CSP, `X-Frame-Options: DENY`, `nosniff`, `no-referrer` and `Permissions-Policy: camera=(), microphone=(self), geolocation=()` apply to every path except `/api/files/*`. That path gets `nosniff`, `SAMEORIGIN`, `no-referrer` and `camera=(), microphone=(), geolocation=()`, and keeps the handler's own CSP. A config header overwrites a handler header of the same name. No `X-Powered-By`.
 7. **SSE and host link.** `/api/events` behavior is unchanged: hello, subscribe, 30 s heartbeats, cleanup on client abort. The stream stays open past Bun's 10 s default idle timeout. The host link keeps bearer auth, NDJSON and blob uploads, with only its own 16 MB/64 MB limits under Bun's 128 MiB server cap (Next truncated gated bodies at 10 MB).
@@ -72,7 +72,7 @@ npm run dev:   bun --hot server/dev.ts (HTML import, HMR, no dist/)
 - **Dev HTML path:** dev also answers `/__omp_dev_index` without the gate. Pages fetch Bun's HTML import from there, and it is the same public shell that `/login` serves. Dev pages also allow `blob:` scripts in their CSP, because Bun's HMR client runs each update as one.
 - **`OMP_WEB_DEV_ORIGIN` is removed.** It was dev-only.
 - **Bodies over 10 MB on gated routes reach the handler** (up to Bun's 128 MiB cap). Its own limit applies instead of a silent truncation.
-- **Unknown paths:** unknown extensionless page paths get the SPA instead of Next's 404 page, and unknown `/api/*` paths get a plain-text 404.
+- **Unknown paths:** unknown extensionless page paths get the SPA instead of Next's 404 page, once signed in (a miss under an ungated path such as `/assets/x` is a 404), and unknown `/api/*` paths get a plain-text 404.
 - **ESLint covers less:** it runs typescript-eslint recommended plus react-hooks. The Next config's `react`, `jsx-a11y`, `import` and `@next/next` rules are dropped.
 - **No error page around the layout:** `app/global-error.tsx` has no counterpart. One root error boundary shows the `app/error.tsx` screen.
 
