@@ -584,7 +584,15 @@ async function waitForRestartRequest(control) {
         && request.action === "start"
         && Number.isInteger(request.generation)
         && request.generation === currentGeneration + 1) {
-        const command = serverCommand();
+        let command;
+        try {
+          command = serverCommand();
+        } catch (error) {
+          // Retried while the update is active; one line per attempt, not a spin.
+          console.error(`Could not start the updated server: ${error.message}`);
+          await new Promise((resolve) => setTimeout(resolve, 1_000));
+          continue;
+        }
         const child = trackServer(spawnRestartGate());
         if (await acknowledgeAndStartRestart(control, request, child, command)) return;
       }
