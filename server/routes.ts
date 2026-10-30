@@ -73,7 +73,11 @@ import * as worktrees from "@/app/api/worktrees/route";
 
 type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 // never: each handler narrows its own params; the router passes Record<string, string | string[]>.
-export type RouteHandler = (request: Request, context: { params: Promise<never> }) => Response | Promise<Response>;
+// disableIdleTimeout: for a gate-exempt route that authenticates itself (the host link) and then stays open.
+export type RouteHandler = (
+  request: Request,
+  context: { params: Promise<never>; disableIdleTimeout: () => void },
+) => Response | Promise<Response>;
 export type RouteModule = Partial<Record<Method, RouteHandler>>;
 
 // Key: the route's directory under app/api.
@@ -162,7 +166,12 @@ export function routePattern(key: string): { pattern: string; rest: { name: stri
 }
 
 /** Runs the module's handler for the request method, answering HEAD, OPTIONS and missing methods as Next did. */
-export async function dispatch(mod: RouteModule, request: Request, params: Record<string, string | string[]>): Promise<Response> {
+export async function dispatch(
+  mod: RouteModule,
+  request: Request,
+  params: Record<string, string | string[]>,
+  disableIdleTimeout: () => void = () => {},
+): Promise<Response> {
   const handler = mod[request.method as Method] ?? (request.method === "HEAD" ? mod.GET : undefined);
   if (!handler) {
     const methods = METHODS.filter((method) => mod[method]);
@@ -171,7 +180,7 @@ export async function dispatch(mod: RouteModule, request: Request, params: Recor
     return new Response(null, { status: 204, headers: { allow } });
   }
   try {
-    return await handler(request, { params: Promise.resolve(params) as Promise<never> });
+    return await handler(request, { params: Promise.resolve(params) as Promise<never>, disableIdleTimeout });
   } catch (error) {
     console.error(error);
     return Response.json({ error: "Internal Server Error" }, { status: 500 });

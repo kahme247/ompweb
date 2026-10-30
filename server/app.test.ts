@@ -16,9 +16,9 @@ writeFileSync(path.join(root, "dist", "index.html"), "<!doctype html><html><head
 for (const dir of ["public", "node_modules"]) symlinkSync(path.join(repo, dir), path.join(root, dir), "junction");
 
 const ENV = { HOME: home, PI_CODING_AGENT_DIR: path.join(home, ".omp", "agent"), OMP_WEB_OMP_BIN: "/nonexistent/omp" };
-const saved = Object.fromEntries(["OMP_WEB_PASSWORD_HASH", "OMP_WEB_PASSWORD", ...Object.keys(ENV)].map((name) => [name, process.env[name]]));
-delete process.env.OMP_WEB_PASSWORD_HASH;
-delete process.env.OMP_WEB_PASSWORD;
+const UNSET = ["OMP_WEB_PASSWORD_HASH", "OMP_WEB_PASSWORD", "OMP_WEB_TRUSTED_HEADER_SHA256"];
+const saved = Object.fromEntries([...UNSET, ...Object.keys(ENV)].map((name) => [name, process.env[name]]));
+for (const name of UNSET) delete process.env[name];
 Object.assign(process.env, ENV);
 // Imported after the environment is set, so no module sees the real home or agent dir.
 const { startServer } = await import("./app");
@@ -113,9 +113,26 @@ test("pages get the index, files their content, and anything else 404", async ()
   assert.equal((await fetch(url("/..%2Fpackage.json"))).status, 404);
 });
 
-test("the event stream outlives Bun's 10 s default idle timeout", { timeout: 25_000 }, async () => {
+/** Sends `head` (request line and headers) and nothing more; resolves once the server hangs up. */
+function stall(head: string): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  const socket = net.createConnection(server.port!, "127.0.0.1", () => socket.write(`${head}\r\nHost: 127.0.0.1\r\n\r\n`));
+  socket.resume();
+  socket.on("close", () => resolve());
+  socket.on("error", () => {});
+  return promise;
+}
+
+test("Bun's idle timeout spares the event stream and the host link, and only them", { timeout: 30_000 }, async (t) => {
+  process.env.OMP_WEB_PASSWORD_HASH = hashPassword("pw", { logN: 12 });
+  process.env.OMP_WEB_TRUSTED_HEADER_SHA256 = new Bun.CryptoHasher("sha256").update("trusted").digest("hex");
+  t.after(() => {
+    delete process.env.OMP_WEB_PASSWORD_HASH;
+    delete process.env.OMP_WEB_TRUSTED_HEADER_SHA256;
+  });
+  const signedIn = { "x-omp-web-auth": "trusted" };
   const controller = new AbortController();
-  const stream = await fetch(url("/api/events"), { signal: controller.signal });
+  const stream = await fetch(url("/api/events"), { headers: signedIn, signal: controller.signal });
   assert.equal(stream.headers.get("content-type"), "text/event-stream");
   const reader = stream.body!.getReader();
   const decoder = new TextDecoder();
@@ -124,11 +141,42 @@ test("the event stream outlives Bun's 10 s default idle timeout", { timeout: 25_
     const connectionId = /"connectionId":"([^"]+)"/.exec(hello)?.[1];
     assert.ok(connectionId, hello);
 
-    // A real idle gap: Bun.serve's native idle timer cannot be faked.
-    await Bun.sleep(12_000);
+    // A host daemon's link: a hello, then the downlink, which pings 15 s after it opens.
+    const created = await fetch(url("/api/hosts"), { method: "POST", headers: signedIn, body: JSON.stringify({ label: "box" }) });
+    const bearer = { authorization: `Bearer ${(await created.json()).token}` };
+    const hostHello = { type: "hello", v: 3, ompVersion: "14.0.0", platform: "linux", home: "/home/u", autoApproveExtension: false, ack: 0, channels: [] };
+    const offered = await fetch(url("/api/hosts/link"), { method: "POST", headers: { ...bearer, "x-omp-web-hello": "1" }, body: JSON.stringify(hostHello) });
+    assert.equal(offered.status, 200);
+    const link = await fetch(url("/api/hosts/link"), { headers: { ...bearer, "x-omp-web-hello": (await offered.json()).helloId }, signal: controller.signal });
+    assert.equal(link.status, 200);
+    const linkReader = link.body!.getReader();
+    assert.match(decoder.decode((await linkReader.read()).value), /"type":"welcome"/);
+
+    // No caller without a session or a host token holds a socket open, wherever it stalls.
+    const stalled = {
+      gated: stall("POST /api/hosts HTTP/1.1\r\nContent-Length: 100"),
+      signIn: stall("POST /api/web-auth/session HTTP/1.1\r\nContent-Length: 100"),
+      link: stall("POST /api/hosts/link HTTP/1.1\r\nAuthorization: Bearer nope\r\nContent-Length: 100"),
+      page: stall("GET /login HTTP/1.1"),
+    };
+    // Real waits: Bun.serve's native idle timer (10 s, checked every 4 s) cannot be faked. The 20 s deadline only
+    // names a socket that never closes.
+    const open = new Set(Object.keys(stalled));
+    await Promise.race([
+      Promise.all(Object.entries(stalled).map(([name, closed]) => closed.then(() => open.delete(name)))),
+      Bun.sleep(20_000),
+    ]);
+    assert.deepEqual([...open], []);
+
+    // The ping proves the downlink outlived the idle timeout; so has the event stream, opened before it.
+    for (let lines = ""; !lines.includes('"type":"ping"');) {
+      const { done, value } = await linkReader.read();
+      assert.equal(done, false, "the host link was closed while idle");
+      lines += decoder.decode(value);
+    }
     const subscribe = await fetch(url("/api/events"), {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { ...signedIn, "content-type": "application/json" },
       body: JSON.stringify({ connectionId, subscribe: { id: "s1", channel: { kind: "hosts" } } }),
     });
     assert.equal(subscribe.status, 200);
