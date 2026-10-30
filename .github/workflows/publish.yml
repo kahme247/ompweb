@@ -35,11 +35,13 @@ jobs:
       - run: npm run build
       - run: npm run smoke
 
-      # Bun cross-compiles all five from here (scripts/build-binary.ts): release/ompweb-<os>-<arch>.tar.gz, .zip for Windows.
+      # Bun cross-compiles all five from here (scripts/build-binary.ts), from the client built above:
+      # release/ompweb-<os>-<arch>.tar.gz, .zip for Windows. The x64 ones are -baseline builds: Bun's default x64 runtime
+      # needs AVX2, which older CPUs and Rosetta 2 lack. They keep the plain ompweb-<os>-x64 names.
       - name: Build the release binaries
         run: |
-          for target in bun-linux-x64 bun-linux-arm64 bun-darwin-x64 bun-darwin-arm64 bun-windows-x64; do
-            npm run build:binary -- --target "$target"
+          for target in bun-linux-x64-baseline bun-linux-arm64 bun-darwin-x64-baseline bun-darwin-arm64 bun-windows-x64-baseline; do
+            npx bun scripts/build-binary.ts --target "$target"
           done
       - run: npm run smoke -- --binary release/ompweb-linux-x64/ompweb
 

@@ -61,12 +61,18 @@ jobs:
       - name: Smoke test
         run: npm run smoke
 
-      # The compiled linux-x64 release binary, with its own `ompweb host` daemon (scripts/build-binary.ts).
-      - name: Binary smoke test (Linux only)
-        if: runner.os == 'Linux'
+      # The release binary for this runner (the -baseline x64 build releases ship), from the client built above, with its
+      # own `ompweb host` daemon (scripts/build-binary.ts).
+      - name: Binary smoke test
+        shell: bash
         run: |
-          npm run build:binary
-          npm run smoke -- --binary release/ompweb-linux-x64/ompweb
+          if [ "$RUNNER_OS" = Windows ]; then
+            npx bun scripts/build-binary.ts --target bun-windows-x64-baseline
+            npm run smoke -- --binary release/ompweb-windows-x64/ompweb.exe
+          else
+            npx bun scripts/build-binary.ts --target bun-linux-x64-baseline
+            npm run smoke -- --binary release/ompweb-linux-x64/ompweb
+          fi
 
       - name: Packed install smoke test
         shell: bash
