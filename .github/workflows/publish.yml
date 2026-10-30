@@ -35,6 +35,14 @@ jobs:
       - run: npm run build
       - run: npm run smoke
 
+      # Bun cross-compiles all five from here (scripts/build-binary.ts): release/ompweb-<os>-<arch>.tar.gz, .zip for Windows.
+      - name: Build the release binaries
+        run: |
+          for target in bun-linux-x64 bun-linux-arm64 bun-darwin-x64 bun-darwin-arm64 bun-windows-x64; do
+            npm run build:binary -- --target "$target"
+          done
+      - run: npm run smoke -- --binary release/ompweb-linux-x64/ompweb
+
       - name: Create draft GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -44,6 +52,12 @@ jobs:
             node bin/generate-release-notes.js --tag "$TAG" --output release-notes.md
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --notes-file release-notes.md --draft
           fi
+
+      - name: Attach the binaries to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" release/ompweb-*.tar.gz release/ompweb-*.zip --repo "$GITHUB_REPOSITORY" --clobber
 
       - name: Publish to npm
         run: |
