@@ -77,8 +77,6 @@
     "rehype-sanitize": "^6.0.0",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
-    "sharp": "^0.35.4",
-    "undici": "8.10.1",
     "web-push": "^3.6.7",
     "yaml": "^2"
   },

@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, statSync } from "fs";
-import { DatabaseSync } from "node:sqlite";
+import { Database } from "bun:sqlite";
 import { basename, dirname, join } from "path";
 import { readModelsConfig, type ModelsFileConfig } from "./omp/models-config";
 import { getAgentDir, getSessionsDir } from "./omp/paths";
@@ -27,7 +27,7 @@ import type {
 } from "./usage-types";
 
 declare global {
-  var __ompUsageDatabase: DatabaseSync | undefined;
+  var __ompUsageDatabase: Database | undefined;
   var __ompUsageDatabasePath: string | undefined;
 }
 
@@ -56,9 +56,9 @@ export function getUsageDbPath(): string {
  * processes opening an old database cannot interleave a drop with the other's
  * rebuild. Throws, after rolling back, when the migration cannot run.
  */
-function migrateUsageDatabase(db: DatabaseSync): void {
+function migrateUsageDatabase(db: Database): void {
   const readSchemaVersion = (): number => {
-    const row = db.prepare("PRAGMA user_version").get();
+    const row = db.prepare("PRAGMA user_version").get() as { user_version?: unknown } | null;
     return typeof row?.user_version === "number" ? row.user_version : 0;
   };
   if (readSchemaVersion() >= USAGE_DB_SCHEMA_VERSION) return;
@@ -111,7 +111,7 @@ function migrateUsageDatabase(db: DatabaseSync): void {
     }
     db.exec("COMMIT;");
   } catch (err) {
-    if (db.isTransaction) db.exec("ROLLBACK;");
+    if (db.inTransaction) db.exec("ROLLBACK;");
     throw err;
   }
 }
@@ -119,7 +119,7 @@ function migrateUsageDatabase(db: DatabaseSync): void {
 /**
  * Open or reuse the persistent SQLite database for usage tracking.
  */
-export function getUsageDatabase(customPath?: string): DatabaseSync {
+export function getUsageDatabase(customPath?: string): Database {
   const targetPath = customPath || getUsageDbPath();
 
   const cached = globalThis.__ompUsageDatabase;
@@ -148,7 +148,7 @@ export function getUsageDatabase(customPath?: string): DatabaseSync {
     mkdirSync(dir, { recursive: true });
   }
 
-  const db = new DatabaseSync(targetPath);
+  const db = new Database(targetPath);
   db.exec("PRAGMA journal_mode = WAL;");
   db.exec("PRAGMA busy_timeout = 5000;");
   db.exec("PRAGMA synchronous = NORMAL;");
@@ -194,7 +194,7 @@ export interface SyncStats {
 export function syncSessionFilesToDb(
   sessionFiles: string[],
   customModelsConfig: ModelsFileConfig = readModelsConfig(),
-  customDb?: DatabaseSync,
+  customDb?: Database,
 ): SyncStats {
   const db = customDb || getUsageDatabase();
   const now = Date.now();
@@ -347,7 +347,7 @@ export function syncSessionFilesToDb(
  *   (possible in a branch, which does not copy artifacts) does not cover it.
  * Computed once per report so the report's queries share it.
  */
-function collectUncountedUsage(db: DatabaseSync): void {
+function collectUncountedUsage(db: Database): void {
   db.exec(`
     DROP TABLE IF EXISTS temp.uncounted_usage;
     CREATE TEMP TABLE uncounted_usage AS
@@ -385,7 +385,7 @@ const COUNTED_ROWS = "id NOT IN (SELECT id FROM temp.uncounted_usage)";
  */
 export async function getUsageReportFromDb(
   options: UsageQueryOptions = {},
-  customDb?: DatabaseSync,
+  customDb?: Database,
 ): Promise<UsageReport> {
   const startTime = Date.now();
   const timeRange = options.range || "30d";
