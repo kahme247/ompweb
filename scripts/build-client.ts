@@ -47,6 +47,16 @@ const result = await Bun.build({
 for (const log of result.logs) console.log(log);
 if (!result.success) process.exit(1);
 for (const [url, source] of fonts) await Bun.write(path.join(outdir, url), Bun.file(source));
+
+// Faces the first paint uses, as Next preloaded them: Source Serif 4 (titles) in every theme, Geist and JetBrains Mono
+// in the default omp theme, Noto Sans Mono (code) in the others. A tag cannot depend on the theme, and one a script
+// adds would wait for the stylesheet, so all four are listed. The cyrillic Noto subset loads only for cyrillic text.
+const preloads = ["geist-latin", "jetbrains-mono-latin", "noto-sans-mono-latin", "source-serif-4-latin"].map((name) => {
+  const url = [...fonts].find(([, source]) => path.basename(source) === `${name}-wght-normal.woff2`)?.[0];
+  if (!url) throw new Error(`app/globals.css no longer uses fonts/${name}-wght-normal.woff2: update the preload list`);
+  return `<link rel="preload" href="${url}" as="font" type="font/woff2" crossorigin>`;
+});
 const indexPath = path.join(outdir, "index.html");
-await Bun.write(indexPath, stylesheetFirst(await Bun.file(indexPath).text()));
+const html = stylesheetFirst(await Bun.file(indexPath).text());
+await Bun.write(indexPath, html.replace(/<link rel="stylesheet"[^>]*>/, (stylesheet) => [stylesheet, ...preloads].join("\n    ")));
 console.log(`built ${result.outputs.length + fonts.size} files into ${path.relative(process.cwd(), outdir) || "."}`);

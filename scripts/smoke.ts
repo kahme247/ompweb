@@ -1,6 +1,7 @@
 // `npm run smoke [-- --package <dir>]`: starts `node <dir>/bin/omp-web.js` on a free port with a throwaway HOME and
-// checks the shipped bundle, the SPA, a hashed asset, the API and the SSE stream, then stops it. <dir>: the repo root
-// (after `npm run build`) or a packed install. Prints one `ok <step>` / `FAIL <step>: <detail>` line per step.
+// checks the shipped bundle, the SPA, a hashed asset, the font preloads, the API and the SSE stream, then stops it.
+// <dir>: the repo root (after `npm run build`) or a packed install. Prints one `ok <step>` / `FAIL <step>: <detail>`
+// line per step.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
@@ -118,6 +119,21 @@ try {
       assert(response.status === 200, `${asset}: status ${response.status}`);
       assert(response.headers.get("cache-control")?.includes("immutable"), `${asset}: cache-control ${response.headers.get("cache-control")}`);
       assert(response.headers.get("content-encoding") === "gzip", `${asset}: content-encoding ${response.headers.get("content-encoding")}`);
+    });
+
+    await step("the page preloads the 4 first-paint fonts its stylesheet uses", async () => {
+      const fonts = [...html.matchAll(/<link rel="preload" href="([^"]+)" as="font" type="font\/woff2" crossorigin>/g)].map((match) => match[1]);
+      assert(fonts.length === 4, `${fonts.length} font preloads: ${fonts.join(", ")}`);
+      const stylesheet = /<link rel="stylesheet"[^>]*href="([^"]+)"/.exec(html)?.[1];
+      assert(stylesheet, "the page names no stylesheet");
+      const css = await (await fetch(`${base}${stylesheet}`)).text();
+      for (const font of fonts) {
+        // A URL the stylesheet does not use would download the font twice.
+        assert(css.includes(font), `${stylesheet} does not use ${font}`);
+        const response = await fetch(`${base}${font}`);
+        await response.arrayBuffer();
+        assert(response.status === 200 && response.headers.get("content-type") === "font/woff2", `${font}: ${response.status} ${response.headers.get("content-type")}`);
+      }
     });
 
     await step("GET /api/hosts returns JSON", async () => {
