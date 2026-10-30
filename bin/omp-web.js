@@ -470,6 +470,7 @@ function serverEnvironment() {
     ...process.env,
     OMP_WEB_PACKAGE_DIR: pkgDir,
     OMP_WEB_LAUNCHER_PID: String(process.pid),
+    OMP_WEB_NODE_BIN: process.execPath,
     OMP_WEB_PORT: port,
     OMP_WEB_HOSTNAME: hostname,
     OMP_WEB_RESTART_DESCRIPTOR: restartDescriptor,

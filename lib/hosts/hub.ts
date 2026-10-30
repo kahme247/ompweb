@@ -940,7 +940,7 @@ export interface LocalHostRow {
   serverVersion: number;
   /** `process.platform` of this server: picks the daemon install command while no daemon has linked. */
   serverPlatform: string;
-  /** False in `next dev`, where this machine runs sessions in-process and is offline by design: no install hints. */
+  /** False under the dev server (`NODE_ENV=development`), where this machine runs sessions in-process and is offline by design: no install hints. */
   daemonManaged: boolean;
 }
 
