@@ -349,6 +349,7 @@ export function getSelfUpdateSupport(): { supported: boolean; reason?: string; p
   if (isUpdateDisabled()) {
     return { supported: false, reason: `Updates are disabled by ${DISABLE_AUTOUPDATE_ENV_VAR}`, packageDir };
   }
+  if (Bun.isStandaloneExecutable) return { supported: false, reason: "The ompweb binary updates by download", packageDir };
   // simplified: always supported if packageDir exists
   try {
     if (!existsSync(packageDir)) return { supported: false, reason: "package dir not found", packageDir };
@@ -366,6 +367,10 @@ function detectManager(packageDir: string): { manager: "npm" | "bun"; managerPat
 
 export async function prepareSelfUpdate(kind: Kind = "app"): Promise<PrepareResult> {
   assertUpdatesEnabled();
+  // The compiled binary has no npm install to replace and no runtime for the worker: its updates run from a terminal.
+  if (Bun.isStandaloneExecutable) {
+    throw new SelfUpdateError("self_update_unsupported", "In-app updates are not available in the ompweb binary: update from a terminal", 409);
+  }
   cleanupStaleSelfUpdate(Date.now(), kind);
   ensureSecureRoot(kind, true);
   const leaseFile = leasePath(kind);

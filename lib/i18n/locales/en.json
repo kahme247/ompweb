@@ -140,6 +140,7 @@
   "settingsConfig.checkOmpUpdates": "Check OMP updates",
   "settingsConfig.refresh": "Refresh",
   "settingsConfig.runAppUpdateCommand": "Run this command in terminal to update ompweb:",
+  "settingsConfig.downloadAppUpdate": "Download the new release for this platform from this page, stop ompweb and ompweb host, and replace the ompweb folder with the new one:",
   "settingsConfig.appUpdateAction": "Update and restart",
   "appUpdateDialog.title": "ompweb update available",
   "appUpdateDialog.description": "A new version can be installed automatically.",

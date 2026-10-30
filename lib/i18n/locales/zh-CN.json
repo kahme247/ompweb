@@ -137,6 +137,7 @@
   "settingsConfig.checkOmpUpdates": "检查 OMP 更新",
   "settingsConfig.refresh": "刷新",
   "settingsConfig.runAppUpdateCommand": "请在终端运行以下命令更新 ompweb：",
+  "settingsConfig.downloadAppUpdate": "请从此页面下载适用于本平台的新版本，停止 ompweb 和 ompweb host，然后用新版本替换 ompweb 文件夹：",
   "settingsConfig.appUpdateAction": "更新并重启",
   "appUpdateDialog.title": "ompweb 有可用更新",
   "appUpdateDialog.description": "可以自动安装新版本。",

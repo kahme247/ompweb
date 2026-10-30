@@ -137,6 +137,7 @@
   "settingsConfig.checkOmpUpdates": "OMP の更新を確認",
   "settingsConfig.refresh": "更新",
   "settingsConfig.runAppUpdateCommand": "ターミナルで次のコマンドを実行して ompweb を更新してください:",
+  "settingsConfig.downloadAppUpdate": "このページからお使いのプラットフォーム向けの新しいリリースをダウンロードし、ompweb と ompweb host を停止してから、ompweb フォルダーを新しいものに置き換えてください:",
   "settingsConfig.appUpdateAction": "更新して再起動",
   "appUpdateDialog.title": "ompweb の更新があります",
   "appUpdateDialog.description": "新しいバージョンを自動でインストールできます。",

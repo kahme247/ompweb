@@ -170,6 +170,17 @@ try {
       assert(sessions.some((session) => session.id === SESSION_ID), `listed: ${sessions.map((session) => session.id).join(", ") || "none"}`);
     });
 
+    if (binary) {
+      await step("the binary points updates at the release page and refuses in-app updates", async () => {
+        const update = await (await fetch(`${base}/api/app-update`)).json() as { installMethod?: string; selfUpdateSupported?: boolean; updateCommand?: string };
+        assert(update.installMethod === "binary" && update.selfUpdateSupported === false, JSON.stringify(update));
+        assert(update.updateCommand?.startsWith("https://github.com/kahme247/ompweb/releases"), `updateCommand ${update.updateCommand}`);
+        // Started, the worker would run on this binary: a second ompweb, not the update.
+        const response = await fetch(`${base}/api/omp-update`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "update" }) });
+        assert(response.status === 409, `POST /api/omp-update update: status ${response.status}`);
+      });
+    }
+
     await step("GET /api/events delivers an event and stays open for 12 s", async () => {
       const abort = new AbortController();
       try {
