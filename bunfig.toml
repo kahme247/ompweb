@@ -1,0 +1,4 @@
+# Bun's dev server (server/dev.ts HTML import) bundles the SPA with these; scripts/build-client.ts passes its own.
+[serve.static]
+plugins = ["bun-plugin-tailwind"]
+env = "OMP_WEB_PUBLIC_*"

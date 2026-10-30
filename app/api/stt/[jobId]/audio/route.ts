@@ -1,7 +1,5 @@
 import { getSttJobAudio } from "@/lib/stt-jobs";
 
-export const dynamic = "force-dynamic";
-
 /** GET /api/stt/[jobId]/audio — the recording kept with a live job, for playback in any browser. */
 export async function GET(_req: Request, { params }: { params: Promise<{ jobId: string }> }) {
   const audio = getSttJobAudio((await params).jobId);

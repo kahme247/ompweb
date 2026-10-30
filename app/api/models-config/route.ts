@@ -9,8 +9,6 @@ import {
   type ModelsFileConfig,
 } from "@/lib/omp/models-config";
 
-export const dynamic = "force-dynamic";
-
 export async function GET() {
   const file = readModelsConfigFile();
   if (file.parseError) {

@@ -11,7 +11,7 @@ const require = createRequire(import.meta.url);
 const { verifyPassword } = require("./omp-web-password-hash.js");
 const binDir = fileURLToPath(new URL(".", import.meta.url));
 
-/** Run the launcher against a stub `next` that records the environment it was started with. */
+/** Run the launcher against a stub `server/main.ts` that records the environment it was started with. */
 async function launch(env) {
   const pkg = await mkdtemp(join(tmpdir(), "ompweb-launch-"));
   try {
@@ -19,11 +19,12 @@ async function launch(env) {
     for (const name of await readdir(binDir)) {
       if (name.endsWith(".js")) await copyFile(join(binDir, name), join(pkg, "bin", name));
     }
-    await mkdir(join(pkg, ".next"));
-    const nextBin = join(pkg, "node_modules", "next", "dist", "bin");
-    await mkdir(nextBin, { recursive: true });
+    await mkdir(join(pkg, "dist"));
+    await writeFile(join(pkg, "dist", "index.html"), "<!doctype html>");
+    await mkdir(join(pkg, "server"));
     const dump = join(pkg, "server-env.json");
-    await writeFile(join(nextBin, "next"), `require("fs").writeFileSync(${JSON.stringify(dump)}, JSON.stringify(process.env));`);
+    // The package has no bun dependency, so the launcher runs this under the Bun on PATH.
+    await writeFile(join(pkg, "server", "main.ts"), `require("fs").writeFileSync(${JSON.stringify(dump)}, JSON.stringify(process.env));`);
     const result = spawnSync("node", [join(pkg, "bin", "omp-web.js"), "--no-open", "-p", "0"], {
       env: { PATH: process.env.PATH, HOME: pkg, ...env },
       encoding: "utf8",

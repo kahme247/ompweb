@@ -14,8 +14,6 @@ import {
   validateCommitSelfUpdate,
 } from "@/lib/self-update";
 
-export const dynamic = "force-dynamic";
-
 type CommitResult = { accepted: true; attemptId: string };
 
 async function commitAppUpdate(attemptId: string): Promise<CommitResult> {

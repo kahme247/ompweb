@@ -2,8 +2,6 @@ import { apiErrorResponse } from "@/lib/api-utils";
 import { getUsageReport } from "@/lib/usage-service";
 import type { UsageGranularity, UsageTimeRange } from "@/lib/usage-types";
 
-export const dynamic = "force-dynamic";
-
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url);

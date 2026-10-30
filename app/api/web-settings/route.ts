@@ -3,8 +3,6 @@ import { parseAgentEnvText, sanitizeAgentEnvValues, type AgentEnvParseResult } f
 import { loadWebServerSettings, saveWebServerSettings, type WebServerSettings } from "@/lib/web-settings";
 import { isRecord } from "@/lib/type-guards";
 
-export const dynamic = "force-dynamic";
-
 /** GET/PUT /api/web-settings - omp-web's own server-side settings. */
 export async function GET() {
   return Response.json(readSettings());

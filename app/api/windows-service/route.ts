@@ -8,8 +8,6 @@ import {
   restartTrayService,
 } from "@/lib/windows-service";
 
-export const dynamic = "force-dynamic";
-
 interface WindowsServiceRequestBody {
   action?: "install" | "uninstall" | "toggle-autostart" | "start" | "stop" | "restart";
   port?: number;

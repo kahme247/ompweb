@@ -2,8 +2,6 @@ import { readFile } from "node:fs/promises";
 import { fetchMediaFromHosts } from "@/lib/hosts/session-index";
 import { createThumbnail, existingThumbnail, imageMimeType, mediaFilePath, storeMediaCopy } from "@/lib/media-cache";
 
-export const dynamic = "force-dynamic";
-
 function image(body: Buffer, type: string, immutable = true): Response {
   // A view, not a copy: these buffers come from readFile/sharp, never a SharedArrayBuffer.
   return new Response(new Uint8Array(body.buffer as ArrayBuffer, body.byteOffset, body.byteLength), {

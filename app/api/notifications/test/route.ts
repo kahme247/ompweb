@@ -2,8 +2,6 @@ import { isValidNotificationId } from "@/lib/notification-events";
 import { sendTestPush } from "@/lib/notification-hub";
 import { isRecord } from "@/lib/type-guards";
 
-export const dynamic = "force-dynamic";
-
 /** POST /api/notifications/test { deviceId } — one push to this device; 502 when the push service refuses it. */
 export async function POST(req: Request) {
   const body: unknown = await req.json().catch(() => null);

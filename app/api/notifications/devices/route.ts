@@ -3,8 +3,6 @@ import { getVapidPublicKey } from "@/lib/notification-hub";
 import { getDevice, parsePushSubscription, saveDevice } from "@/lib/notification-store";
 import { isRecord } from "@/lib/type-guards";
 
-export const dynamic = "force-dynamic";
-
 /** GET /api/notifications/devices?deviceId= — VAPID public key and whether this device has a push subscription. */
 export async function GET(req: Request) {
   const deviceId = new URL(req.url).searchParams.get("deviceId");

@@ -5,8 +5,6 @@ import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-fo
 import { AGENT_NAME_RE, MAX_AGENT_BYTES, deleteAgent, discoverAgents, readAgentFile, resolveAgentsScope, unpackBundled, validateAgentFileReference, validateAgentPayload, writeAgent, type AgentPayload } from "@/lib/omp/agents-service";
 import { getProjectAgentsDir, getUserAgentsDir } from "@/lib/omp/paths";
 
-export const dynamic = "force-dynamic";
-
 // JSON can expand control characters in a maximum-size agent prompt to six
 // bytes each, with room for the envelope fields.
 const MAX_AGENT_REQUEST_BYTES = MAX_AGENT_BYTES * 6 + 64 * 1024;

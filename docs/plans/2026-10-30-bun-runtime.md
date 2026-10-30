@@ -81,6 +81,8 @@
 | `eslint-config-next` / `tsc` | Bun has no linter or typechecker | `typescript-eslint` + `eslint-plugin-react-hooks`; `tsc` with `@types/bun` |
 | `next/font/google` (4 families) | No Bun font loader. Bun's CSS bundler inlines every `url()` asset under 128 KiB as a base64 data URL and ignores `loader: { ".woff2": "file" }` (oven-sh/bun#24599) | Self-host `@fontsource-variable` woff2 (OFL) in `app/fonts/`; a `Bun.build` plugin (`onResolve`, `external: true`) keeps them as hashed `/assets/` URLs and `scripts/build-client.ts` copies them |
 | `next/dynamic`, `next/navigation` (client) | `React.lazy` + `Suspense`; History API with `useSyncExternalStore` (Bun has no client router) | Replace (`lib/dynamic.tsx`, `lib/navigation.ts`) |
+| `fs.watch` in the file viewer channel (Bun drops an event within ~2 ms of the previous one) | Bun has no other file-watch API (`--watch`/`--hot` watch the process's own modules) | Keep `fs.watch`; `lib/event-stream-hub.ts` re-stats once 50 ms after the last event |
+| Bun's HTML bundler moves the entry `<link rel="stylesheet">` to the end of `<head>`, after the pre-paint theme script that reads `--bg` | No bundler option for tag placement | `scripts/build-client.ts` moves the link before the first inline script in `dist/index.html` (dev keeps Bun's order) |
 
 **Bun.SQL (async) vs bun:sqlite for the notification store — assessment.** `lib/notification-hub.ts` calls the store synchronously on hot paths:
 - `publishNotification` (sync, called from session event handling) runs `listDevices` and `recordHistory`;

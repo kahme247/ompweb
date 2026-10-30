@@ -9,8 +9,6 @@ import {
 } from "@/lib/skills-service";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 
-export const dynamic = "force-dynamic";
-
 // GET /api/skills?cwd=<path>
 // Lists what omp resolves (`omp skill list --json`), falling back to a scan
 // of omp's skill roots on binaries that predate the command. Each skill

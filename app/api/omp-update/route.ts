@@ -12,8 +12,6 @@ import {
   validateCommitSelfUpdate,
 } from "@/lib/self-update";
 
-export const dynamic = "force-dynamic";
-
 const OMP_KIND = "omp" as const;
 
 function errorResponse(error: unknown): Response {

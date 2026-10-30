@@ -4,8 +4,6 @@ import { enableProvider } from "@/lib/omp/model-roles";
 import { RpcProcess, type RpcFrame } from "@/lib/omp/rpc-process";
 import { disposeUtilityRpc } from "@/lib/omp/rpc-utility";
 
-export const dynamic = "force-dynamic";
-
 /**
  * Interactive login over a dedicated `omp --mode rpc-ui` process. omp drives
  * the flow with extension_ui_request frames: `open_url` carries the OAuth URL,
