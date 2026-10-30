@@ -4,6 +4,7 @@ import path from "node:path";
 import type { BunPlugin } from "bun";
 import tailwind from "bun-plugin-tailwind";
 import { clientEnv } from "../server/client-env";
+import { stylesheetFirst } from "../server/http";
 
 const root = path.join(import.meta.dir, "..");
 const outdir = path.join(root, "dist");
@@ -46,13 +47,6 @@ const result = await Bun.build({
 for (const log of result.logs) console.log(log);
 if (!result.success) process.exit(1);
 for (const [url, source] of fonts) await Bun.write(path.join(outdir, url), Bun.file(source));
-// Bun moves the entry stylesheet to the end of <head>, after the pre-paint scripts. The theme script reads --bg
-// from it for theme-color, and a stylesheet only blocks the scripts that follow it, so put it before them.
 const indexPath = path.join(outdir, "index.html");
-const html = await Bun.file(indexPath).text();
-const stylesheet = /<link rel="stylesheet"[^>]*>/.exec(html)?.[0];
-if (!stylesheet) throw new Error("dist/index.html has no stylesheet link");
-// Without this anchor the replace below would drop the stylesheet from the page.
-if (!html.includes("<script>")) throw new Error("dist/index.html has no inline <script> to put the stylesheet before");
-await Bun.write(indexPath, html.replace(stylesheet, "").replace("<script>", `${stylesheet}\n    <script>`));
+await Bun.write(indexPath, stylesheetFirst(await Bun.file(indexPath).text()));
 console.log(`built ${result.outputs.length + fonts.size} files into ${path.relative(process.cwd(), outdir) || "."}`);
