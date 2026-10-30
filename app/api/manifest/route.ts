@@ -2,10 +2,12 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getInstallName } from "@/lib/install-name";
 
-// Packaged public assets are read/encoded once per server module. Native
-// installers fetch HTTP icons without cookies, even with a credentialed manifest.
+// Packaged public assets are read/encoded once per server module, from the
+// package directory the launcher names (the working directory is wherever
+// ompweb was started). Native installers fetch HTTP icons without cookies,
+// even with a credentialed manifest.
 const pngDataUrl = (filename: string) =>
-  `data:image/png;base64,${readFileSync(join(process.cwd(), "public", filename)).toString("base64")}`;
+  `data:image/png;base64,${readFileSync(join(process.env.OMP_WEB_PACKAGE_DIR ?? process.cwd(), "public", filename)).toString("base64")}`;
 
 const manifest = {
   description: "Web UI for the oh-my-pi (omp) coding agent",
