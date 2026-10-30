@@ -8,7 +8,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
-const { MIN_BUN_VERSION, resolveBunBinary } = require("./bun-runtime.js");
+const { MIN_BUN_VERSION, PLATFORM_PACKAGES, resolveBunBinary } = require("./bun-runtime.js");
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const isWindows = process.platform === "win32";
 
@@ -32,15 +32,19 @@ test("resolves the package's own Bun", () => {
 
 test("falls back to the platform package when the postinstall did not run", (t) => {
   const dir = tempDir(t);
-  const os = isWindows ? "windows" : process.platform;
-  const arch = process.arch === "arm64" ? "aarch64" : "x64";
+  const name = PLATFORM_PACKAGES[`${process.platform}-${process.arch}`][0];
   const exe = isWindows ? "bun.exe" : "bun";
   writeFile(path.join(dir, "node_modules/bun/package.json"), '{"name":"bun","version":"1.4.4"}');
   writeFile(path.join(dir, "node_modules/bun/bin/bun.exe"), "x".repeat(450));
-  const platformDir = path.join(dir, `node_modules/@oven/bun-${os}-${arch}`);
-  writeFile(path.join(platformDir, "package.json"), `{"name":"@oven/bun-${os}-${arch}","version":"1.4.4"}`);
+  const platformDir = path.join(dir, "node_modules", name);
+  writeFile(path.join(platformDir, "package.json"), `{"name":"${name}","version":"1.4.4"}`);
   writeFile(path.join(platformDir, "bin", exe), "binary");
   assert.equal(resolveBunBinary(dir, { PATH: "" }), path.join(platformDir, "bin", exe));
+});
+
+test("the platform packages are exactly the ones the bun package can install", () => {
+  const installable = Object.keys(require("bun/package.json").optionalDependencies).sort();
+  assert.deepEqual(Object.values(PLATFORM_PACKAGES).flat().sort(), installable);
 });
 
 test("uses bun on PATH last and refuses an old one", { skip: isWindows }, (t) => {

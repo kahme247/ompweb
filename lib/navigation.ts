@@ -16,15 +16,11 @@ export function useSearchParams(): URLSearchParams {
   return useMemo(() => new URLSearchParams(search), [search]);
 }
 
-const navigate = (method: "pushState" | "replaceState") => (url: string) => {
-  window.history[method](window.history.state, "", url);
-  window.dispatchEvent(new Event(EVENT));
-};
 const router = {
-  replace: navigate("replaceState"),
-  push: navigate("pushState"),
-  back: () => window.history.back(),
-  refresh: () => window.location.reload(),
+  replace: (url: string) => {
+    window.history.replaceState(window.history.state, "", url);
+    window.dispatchEvent(new Event(EVENT));
+  },
 };
 
 export function useRouter() {

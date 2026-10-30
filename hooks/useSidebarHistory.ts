@@ -44,8 +44,8 @@ export function useSidebarHistory({ active, ready, sidebarOpen, setSidebarOpen, 
     if (!current) return;
     const marker = { ...current.marker, entry, sidebarOpen: open };
     const state = { ...current.state, [HISTORY_KEY]: marker };
-    // Keep Next's router tree and unrelated history state. Sidebar traversal
-    // changes neither route nor session, so Next must not restore an older URL.
+    // Keep unrelated history state. Sidebar traversal changes neither route
+    // nor session, so the entry keeps the current URL.
     window.history[push ? "pushState" : "replaceState"](state, "", current.href);
     snapshot.current = { ...current, state, marker };
   }, []);

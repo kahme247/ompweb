@@ -96,7 +96,6 @@ import { publishSessionsChanged } from "@/lib/session-change-bus";
 // No loading placeholder: it would take the panel's place in the layout (on
 // phones, squeezing out the chat) for a frame even when the code is cached.
 const RightPanel = dynamic(() => import("./RightPanel").then((m) => m.RightPanel), {
-  ssr: false,
   loading: () => null,
 });
 
@@ -1252,8 +1251,7 @@ export function AppShell({ appName }: { appName: string }) {
       // genuine project switch.
       suppressCwdRef.current = session.cwd;
     }
-    // Skip router.replace when restoring from URL — the param is already correct
-    // and calling replace in production Next.js triggers a Suspense remount loop
+    // Skip router.replace when restoring from the URL: the param is already correct.
     if (!isRestore) {
       router.replace(`?session=${encodeURIComponent(session.id)}`);
     }

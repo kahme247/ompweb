@@ -18,7 +18,7 @@ function device(t, userAgent, platform, maxTouchPoints) {
   }
 }
 
-// React can mount a fresh viewport meta after hydration; model that as a replacement.
+// A viewport meta that replaces the original one later.
 function replaceViewportMeta() {
   document.head.querySelector('meta[name="viewport"]')?.remove();
   const meta = document.createElement("meta");
@@ -38,7 +38,7 @@ for (const [name, userAgent, platform, touchPoints] of [
   ["iPhone", IPHONE, "iPhone", 5],
   ["iPadOS with a desktop user agent", MAC, "MacIntel", 5],
 ]) {
-  test(`${name} caps viewport scale, including on a viewport meta React mounts later`, async (t) => {
+  test(`${name} caps viewport scale, including on a viewport meta that replaces it later`, async (t) => {
     device(t, userAgent, platform, touchPoints);
     replaceViewportMeta();
     render(React.createElement(IosFocusZoomGuard));
