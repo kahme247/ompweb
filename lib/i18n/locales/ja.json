@@ -1297,6 +1297,7 @@
   "hostsConfig.localNameHint": "空欄にすると「このマシン」に戻ります。",
   "hostsConfig.localOfflineHint": "ompweb-host サービスを起動してください。インストールするには次を実行します:",
   "hostsConfig.localDaemonBanner": "{host} には ompweb-host サービスが必要です。次のコマンドでインストールします:",
+  "hostsConfig.localForegroundHint": "ターミナルや npx で ompweb を起動している場合は、代わりに別のターミナルでこれを実行したままにしてください（npx の場合: npx @kahme247/ompweb@latest host）:",
   "hostsConfig.dismiss": "閉じる",
   "hostsConfig.save": "保存",
   "hostsConfig.saving": "保存中…",

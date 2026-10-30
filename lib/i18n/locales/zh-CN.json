@@ -1297,6 +1297,7 @@
   "hostsConfig.localNameHint": "留空则使用“本机”。",
   "hostsConfig.localOfflineHint": "请启动 ompweb-host 服务。安装方法，运行：",
   "hostsConfig.localDaemonBanner": "{host} 需要 ompweb-host 服务。请用以下命令安装：",
+  "hostsConfig.localForegroundHint": "如果是在终端中或用 npx 运行 ompweb，请改为在另一个终端中保持运行以下命令（npx：npx @kahme247/ompweb@latest host）：",
   "hostsConfig.dismiss": "关闭",
   "hostsConfig.save": "保存",
   "hostsConfig.saving": "保存中…",

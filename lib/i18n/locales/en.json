@@ -1338,6 +1338,7 @@
   "hostsConfig.localNameHint": "Leave empty to use “This machine”.",
   "hostsConfig.localOfflineHint": "Start the ompweb-host service. To install it, run:",
   "hostsConfig.localDaemonBanner": "{host} needs the ompweb-host service. Install it with:",
+  "hostsConfig.localForegroundHint": "Running ompweb in a terminal or with npx instead? Keep this running in another terminal (with npx: npx @kahme247/ompweb@latest host):",
   "hostsConfig.dismiss": "Dismiss",
   "hostsConfig.save": "Save",
   "hostsConfig.saving": "Saving…",

@@ -44,7 +44,9 @@ test("the install banner appears after 90 s offline, once: dismissing it keeps i
   assert.equal(screen.queryByText(text), null);
   act(() => t.mock.timers.tick(1));
   assert.ok(screen.getByText(text).textContent.startsWith("This machine needs the ompweb-host service. Install it with:"));
-  assert.equal(screen.getByRole("status").querySelector("code").textContent, "ompweb systemd install");
+  // A foreground ompweb (terminal or npx) has no service: it needs `ompweb host` running beside it.
+  assert.deepEqual([...screen.getByRole("status").querySelectorAll("code")].map((code) => code.textContent), ["ompweb systemd install", "ompweb host"]);
+  assert.match(screen.getByRole("status").textContent, /in a terminal or with npx/);
 
   fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
   assert.equal(screen.queryByText(text), null);

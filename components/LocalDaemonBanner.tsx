@@ -8,7 +8,7 @@ import { CopyField } from "./HostsConfig";
 import { hostName, isLocalRow, localInstallCommand } from "./host-status";
 
 export const LOCAL_DAEMON_BANNER_DISMISSED_KEY = "omp-web:local-daemon-banner-dismissed";
-// Longer than the daemon's 60 s redial backoff cap, so a restarting daemon does not trip it.
+// Well past the daemon's redial wait (at most 3 s on loopback), so a restarting daemon does not trip it.
 export const LOCAL_DAEMON_GRACE_MS = 90_000;
 
 /** One-time hint to install the ompweb-host service: this machine has not linked since this server started and 90 s have passed. */
@@ -54,6 +54,8 @@ export function LocalDaemonBanner() {
           <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 8 }}>
             {t("hostsConfig.localDaemonBanner", { host: hostName(t, local) })}
             <CopyField label={t("hostsConfig.command")} value={localInstallCommand(local.serverPlatform)} />
+            {t("hostsConfig.localForegroundHint")}
+            <CopyField label={t("hostsConfig.command")} value="ompweb host" />
           </div>
           <button type="button" className="ui-focus-ring" aria-label={t("hostsConfig.dismiss")} onClick={dismiss} style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", padding: 2, display: "inline-flex" }}>
             <X size={14} aria-hidden="true" />
