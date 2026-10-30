@@ -104,7 +104,9 @@ is also resent as unacked output; the adopted wrapper delivers it once (the
 replayed copy). `hello` also carries `autoApproveExtension` (the host's
 `tools.approval.extension: allow`), which a spawn result reported before: an
 adopted run has no spawn. This changes the hello shape, so
-`LINK_PROTOCOL_VERSION` becomes 3.
+`LINK_PROTOCOL_VERSION` becomes 3; the web server still links v2 daemons (their
+children are killed and resumed, never adopted; see the remote-hosts spec,
+"Protocol versions and compatibility").
 
 **Framing.** omp answers `negotiate_protocol` every time, and every ompweb child
 is already on protocol v2, so the adopted wrapper starts its decoder at v2,
@@ -127,7 +129,8 @@ or an adoption failure.
 |---|---|
 | Web server restarts, daemon fine | Runs continue; adopted on `hello`; no resume prompt. |
 | Daemon restarts or upgrades | Children end; sessions that were running resume once (existing auto-resume). |
-| Web and daemon on different link protocol versions | 426; "This machine" shows "needs upgrade"; new sessions there are disabled until the daemon is restarted on the new version. |
+| Daemon one link protocol version behind the web server (N-1) | Links and runs sessions; after a web restart its live children are killed and resumed on `hello`, not adopted (a v2 hello carries no `pending`). The web server is upgraded first; the daemon catches up at its next restart. |
+| Daemon on a version the web server dropped, or newer than it | 426; "This machine" shows "needs upgrade"; new sessions there are disabled until the daemon is restarted on a supported version. An update-only mode for this is planned. |
 | Dev server running | It never writes `host.json`, so the daemon stays linked to production; dev shows "This machine" offline. |
 | Daemon not installed or not running | "This machine" shows offline with "start the ompweb-host service"; new local sessions are disabled. |
 | `host.json` token stale (web regenerated it) | Daemon gets 401, re-reads `host.json`, redials. It exits only if the file still holds the rejected token. |
