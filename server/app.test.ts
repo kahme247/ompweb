@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -76,6 +77,22 @@ test("API routes answer through the gate", async () => {
   assert.equal((await fetch(url("/api/nope"))).status, 404);
   assert.equal((await fetch(url("/api/sessions/%E0%A4%A/state"))).status, 400);
   assert.equal((await fetch(url("/api"))).status, 404);
+});
+
+// Bun.serve sets SO_REUSEPORT when `development` is false unless `reusePort: false` says otherwise; a second omp-web
+// on the same agent dir must fail to start, as it did under Next, instead of sharing the port.
+test("a second server on a port this one holds fails with EADDRINUSE", () => {
+  assert.throws(() => startServer({ port: server.port!, hostname: "127.0.0.1", dev: false, root }), { code: "EADDRINUSE" });
+});
+
+test("server/main.ts on a taken port says so in one line and exits 1", () => {
+  const result = spawnSync(process.execPath, [path.join(repo, "server", "main.ts"), "-p", String(server.port), "-H", "127.0.0.1"], {
+    env: { ...process.env, OMP_WEB_PACKAGE_DIR: root },
+    encoding: "utf8",
+    timeout: 20_000,
+  });
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(result.stderr.trim(), `Port ${server.port} on 127.0.0.1 is already in use: is ompweb already running? Otherwise stop the process using it or start ompweb with --port ${server.port! + 1}.`);
 });
 
 test("a malformed or missing Host answers 400, not a 500", async () => {
