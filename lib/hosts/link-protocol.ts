@@ -93,6 +93,8 @@ export type UpMessage =
       ompVersion: string | null;
       platform: string;
       home: string;
+      /** omp's `tools.approval.extension: allow` on the host: a run adopted after a web restart had no spawn to report it. */
+      autoApproveExtension: boolean;
       ack: number;
       channels: HelloChannel[];
     }
@@ -257,6 +259,7 @@ export function decodeUp(line: string): UpMessage {
         ompVersion: nullable(o, "ompVersion", str),
         platform: str(o, "platform"),
         home: str(o, "home"),
+        autoApproveExtension: bool(o, "autoApproveExtension"),
         ack: int(o, "ack"),
         channels: channels(o),
       };

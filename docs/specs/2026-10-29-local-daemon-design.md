@@ -96,7 +96,11 @@ keeps, per channel, the raw lines of each blocking request still open:
 capped at 1 MB per channel; over the cap the channel is not adoptable and takes
 the kill-and-resume path). The adopted wrapper feeds them through its normal
 frame handling, so dialogs reappear, input-needed notifications fire, and browser
-tool calls reach a tab again. This changes the hello shape, so
+tool calls reach a tab again. A request opened while the old server was stopping
+is also resent as unacked output; the adopted wrapper delivers it once (the
+replayed copy). `hello` also carries `autoApproveExtension` (the host's
+`tools.approval.extension: allow`), which a spawn result reported before: an
+adopted run has no spawn. This changes the hello shape, so
 `LINK_PROTOCOL_VERSION` becomes 3.
 
 **Framing.** omp answers `negotiate_protocol` every time, and every ompweb child

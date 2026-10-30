@@ -383,6 +383,7 @@ function openDownlink(link: Link, hello: Hello, signal: AbortSignal): Response {
 
   link.ompVersion = hello.ompVersion;
   link.platform = hello.platform;
+  link.autoApprove = hello.autoApproveExtension;
   sawDaemon(link);
   persistLastSeen(link);
   clearInterval(link.pingTimer);
