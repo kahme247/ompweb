@@ -133,6 +133,8 @@ function HostCard({ host, onRename, onRevoke }: { host: HostRow; onRename: () =>
           <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 6, fontSize: 12, color: "var(--text-muted)" }}>
             {t("hostsConfig.localOfflineHint")}
             <CopyField label={t("hostsConfig.command")} value={localInstallCommand(host.serverPlatform)} />
+            {t("hostsConfig.localForegroundHint")}
+            <CopyField label={t("hostsConfig.command")} value="ompweb host" />
           </div>
         )}
       </div>

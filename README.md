@@ -179,6 +179,12 @@ linked to the web server over loopback. The service installers (`ompweb systemd 
 `ompweb launchd install`, `ompweb --install-tray`) install both: the web
 service and `ompweb-host`. Uninstall removes both.
 
+**Running ompweb in the foreground** (`ompweb` in a terminal, or `npx
+@kahme247/ompweb@latest`) installs no service, so nothing runs the daemon: keep
+`ompweb host` (with npx: `npx @kahme247/ompweb@latest host`) running in a
+second terminal. Without it "This machine" stays offline. The web server writes
+the daemon's link when it starts, so start the web server first.
+
 - **Restarting or redeploying the web server does not interrupt runs.** The daemon
   keeps the omp processes running; the restarted web server takes them over, with
   no resume prompt, and dialogs or tool calls omp was waiting on reappear.

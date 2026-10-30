@@ -141,10 +141,12 @@ or an adoption failure.
 - Windows (`lib/windows-service.ts`, tray): the same split, a second service
   for the daemon. The tray shows both states.
 - **Existing installs:** on first start after the upgrade, if no local daemon
-  links within 90 s (longer than the daemon's 60 s redial backoff cap, so a
-  restart does not trip it), the web server shows a one-time banner with the
-  exact command to install the daemon service (it does not install services
-  itself). Not in dev mode, where this machine is offline by design.
+  links within 90 s (well past the daemon's redial wait, at most 3 s on
+  loopback, so a restart does not trip it), the web server shows a one-time
+  banner with the exact command to install the daemon service (it does not
+  install services itself), and `ompweb host` for a foreground `ompweb`
+  (terminal or npx), which has no service: the user keeps it running in another
+  terminal. Not in dev mode, where this machine is offline by design.
   Until then "This machine" is offline as above.
 - **Upgrades:** an upgrade replaces the package for both. The web unit restarts
   as today. The daemon unit restarts only when `LINK_PROTOCOL_VERSION`

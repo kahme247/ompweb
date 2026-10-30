@@ -83,9 +83,10 @@ test("an offline this-machine row says to start the service, with the server's i
 
   send([row({})]);
   const hint = await screen.findByText(/ompweb-host service/);
-  assert.equal(hint.closest("li").querySelector("code").textContent, "ompweb launchd install");
-  // The command is copyable; the local row still has no Revoke.
-  assert.deepEqual([...hint.closest("li").querySelectorAll("button")].map((button) => button.textContent), ["Copy", "Rename"]);
+  assert.deepEqual([...hint.closest("li").querySelectorAll("code")].map((code) => code.textContent), ["ompweb launchd install", "ompweb host"]);
+  assert.match(hint.closest("li").textContent, /in a terminal or with npx/);
+  // The commands are copyable; the local row still has no Revoke.
+  assert.deepEqual([...hint.closest("li").querySelectorAll("button")].map((button) => button.textContent), ["Copy", "Copy", "Rename"]);
 
   send([row({ serverPlatform: "linux" })]);
   assert.equal((await screen.findByText(/ompweb-host service/)).closest("li").querySelector("code").textContent, "ompweb systemd install");
