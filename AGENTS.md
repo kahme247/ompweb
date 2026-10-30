@@ -260,6 +260,7 @@ The table is static imports, not a runtime glob, so a future `bun build --compil
 - The in-app update worker runs on Node (`OMP_WEB_NODE_BIN`, the launcher's `process.execPath`), not Bun.
 - Bun's `fs.watch` drops an event that follows the previous one within ~2 ms, so the file channel (`openFileChannel`, `lib/event-stream-hub.ts`) re-stats the file ~50 ms after every event.
 - `bun:sqlite` `.get()` returns `null` for no row (not `undefined`).
+- `bun:sqlite` `close()` keeps the database file open while prepared statements are alive (until GC), so Windows cannot remove or replace it: the stores close with `close(true)`, which finalizes them (`closeNotificationStore`, `closeUsageDatabase`).
 - `readSttConfig` lives in server-only `lib/stt-jobs.ts`; the browser bundle must never import it.
 - Browser code must not import `next/*`: use `lib/dynamic.tsx` and `lib/navigation.ts`.
 
