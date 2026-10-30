@@ -68,6 +68,13 @@ jobs:
           npm install -g --prefix "$RUNNER_TEMP/ompweb-prefix" ./kahme247-ompweb-*.tgz
           npm run smoke -- --package "$(npm root -g --prefix "$RUNNER_TEMP/ompweb-prefix")/@kahme247/ompweb"
 
+      # Bun's postinstall does not run here: the launcher must fall back to @oven/bun-<os>-<arch> (spec R1).
+      - name: Packed install smoke test (install scripts disabled)
+        shell: bash
+        run: |
+          npm install -g --ignore-scripts --prefix "$RUNNER_TEMP/ompweb-prefix-no-scripts" ./kahme247-ompweb-*.tgz
+          npm run smoke -- --package "$(npm root -g --prefix "$RUNNER_TEMP/ompweb-prefix-no-scripts")/@kahme247/ompweb"
+
       - name: Parse Windows PowerShell scripts (Windows only)
         if: runner.os == 'Windows'
         shell: pwsh
