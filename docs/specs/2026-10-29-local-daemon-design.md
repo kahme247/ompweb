@@ -56,7 +56,10 @@ ompweb (web service)  ──link over 127.0.0.1──▶  ompweb host (daemon se
   `<agent dir>/omp-web/host.json` (`{url, token}`, mode 0600) with its own
   loopback URL. The daemon re-reads `host.json` when its link gets 401, so a
   web server that regenerated the token is picked up without restarting the
-  daemon. Loopback links use `http://` without `--allow-http`.
+  daemon, and after every failed dial, so a web server that came back on
+  another port is followed (a URL it could not have started with, such as
+  plain http elsewhere without `--allow-http`, is ignored). Loopback links use
+  `http://` without `--allow-http` and redial at most 3 s apart.
 
 ## Adopting live children
 
@@ -128,6 +131,7 @@ or an adoption failure.
 | Dev server running | It never writes `host.json`, so the daemon stays linked to production; dev shows "This machine" offline. |
 | Daemon not installed or not running | "This machine" shows offline with "start the ompweb-host service"; new local sessions are disabled. |
 | `host.json` token stale (web regenerated it) | Daemon gets 401, re-reads `host.json`, redials. It exits only if the file still holds the rejected token. |
+| Web server moved to another port | The dial to the old port fails; the daemon re-reads `host.json` and dials the new URL. |
 
 ## Installing and upgrading
 

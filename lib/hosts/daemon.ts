@@ -37,6 +37,8 @@ import { sessionOps } from "./session-ops";
 
 const FIRST_RETRY_MS = 1_000;
 const MAX_RETRY_MS = 60_000;
+// This machine's web server is back within seconds of a restart.
+const LOOPBACK_MAX_RETRY_MS = 3_000;
 /** Children still running this long after SIGTERM get SIGKILL. */
 const KILL_GRACE_MS = 5_000;
 const PONG_LINE = encodeLine({ type: "pong" });
@@ -64,8 +66,23 @@ interface Queued {
 const trimUrl = (url: string) => url.replace(/\/+$/, "");
 const reason = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const log = (message: string) => console.error(`[ompweb host] ${message}`);
-// 1 s doubling to 60 s; each wait varies ±20% so many hosts do not redial in step.
+// Each wait varies ±20% so many hosts do not redial in step.
 const withJitter = (ms: number) => ms * (0.8 + Math.random() * 0.4);
+
+/** The redial wait after `delay`: doubling to 60 s, or to 3 s for a server on this machine. */
+export function nextRedialDelay(delay: number, url: string): number {
+  return Math.min(delay * 2, isLoopbackHost(new URL(url).hostname) ? LOOPBACK_MAX_RETRY_MS : MAX_RETRY_MS);
+}
+
+/** A URL the daemon dials: https, or http on loopback or with --allow-http. */
+function dialable(url: string, allowHttp: boolean): boolean {
+  try {
+    const { protocol, hostname } = new URL(url);
+    return protocol === "https:" || (protocol === "http:" && (allowHttp || isLoopbackHost(hostname)));
+  } catch {
+    return false;
+  }
+}
 
 /** realpath of the longest existing prefix; null when a component is a dangling symlink. */
 function canonicalPath(path: string): string | null {
@@ -120,13 +137,13 @@ async function* readLines(body: ReadableStream<Uint8Array>): AsyncGenerator<stri
 /** Dial the main server and keep the link up until stopped, revoked (exit 1),
  * outdated (426, exit 1) or replaced by a newer link with this token (exit 0). */
 export function runHostDaemon(options: { url: string; token: string; allowHttp: boolean; fetch?: typeof fetch }): { stop(): Promise<void>; done: Promise<number> } {
-  const { protocol, hostname } = new URL(options.url);
-  if (protocol !== "https:" && !(protocol === "http:" && (options.allowHttp || isLoopbackHost(hostname)))) {
+  if (!dialable(options.url, options.allowHttp)) {
     throw new Error("ompweb host needs an https:// server URL (http:// only for loopback, or with --allow-http)");
   }
   const fetchLink = options.fetch ?? fetch;
-  const linkUrl = `${options.url.replace(/\/+$/, "")}/api/hosts/link`;
-  // Replaced when a 401 finds a newer token in host.json (the web server re-keyed this host).
+  // Both follow host.json: a 401 finds a newer token there (the web server re-keyed this host), a failed dial a new url or token.
+  let serverUrl = trimUrl(options.url);
+  let linkUrl = `${serverUrl}/api/hosts/link`;
   let authorization = `Bearer ${options.token}`;
 
   const channels = new Map<string, Channel>();
@@ -264,7 +281,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     if (status === 401 && sent === authorization) {
       const saved = readHostLogin();
       // Only a host.json for this same server counts: one that names another server is not this daemon's link.
-      if (saved && trimUrl(saved.url) === trimUrl(options.url) && `Bearer ${saved.token}` !== sent) {
+      if (saved && trimUrl(saved.url) === serverUrl && `Bearer ${saved.token}` !== sent) {
         authorization = `Bearer ${saved.token}`;
         log("the server rejected this host's token; using the new one from host.json");
       } else {
@@ -277,6 +294,18 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       void shutdown(1);
     }
     return stopped;
+  }
+
+  /** host.json names another url or token now (the web server came back on another port): dial with those. */
+  function followLogin(): void {
+    const saved = readHostLogin();
+    if (!saved || !dialable(saved.url, options.allowHttp)) return;
+    const url = trimUrl(saved.url);
+    if (url === serverUrl && `Bearer ${saved.token}` === authorization) return;
+    log(`host.json changed; dialing ${url}`);
+    serverUrl = url;
+    linkUrl = `${url}/api/hosts/link`;
+    authorization = `Bearer ${saved.token}`;
   }
 
   function forgetLink(): void {
@@ -295,7 +324,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     }
     switch (message.type) {
       case "welcome":
-        log(`linked to ${options.url}`);
+        log(`linked to ${serverUrl}`);
         nonce = message.nonce;
         welcome.resolve();
         // A fresh link: resend what main has not acked now, not after the old backoff.
@@ -523,11 +552,12 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       } catch (error) {
         if (stopped) return;
         log(`link lost (${reason(error)}); redialing`);
+        followLogin();
       } finally {
         clearTimeout(watchdog);
       }
       await sleep(withJitter(redialDelay), undefined, { signal: stopSignal.signal }).catch(() => {});
-      redialDelay = Math.min(redialDelay * 2, MAX_RETRY_MS);
+      redialDelay = nextRedialDelay(redialDelay, serverUrl);
     }
   }
 

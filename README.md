@@ -370,7 +370,9 @@ npx @kahme247/ompweb@latest host --allow-http
 ```
 
 If the connection drops, the daemon reconnects by itself (1 s backoff doubling to
-60 s). After a network drop, runs keep going on the remote machine; the chat shows
+60 s; 3 s at most for the web server on the same machine). After a failed dial it
+re-reads its saved link, so a web server that came back on another port is found
+without restarting the daemon. After a network drop, runs keep going on the remote machine; the chat shows
 an offline banner and the runs reattach when the link returns. A laptop that goes
 to sleep (closing the lid, usually) pauses the daemon and its omp runs along with
 everything else on it: they resume when it wakes, and the link returns then. A
