@@ -128,6 +128,8 @@ test("pages get the index, files their content, and anything else 404", async ()
   assert.equal((await fetch(url("/icon.svg"))).status, 200);
   assert.equal((await fetch(url("/katex/katex.min.css"))).status, 200);
   assert.equal((await fetch(url("/..%2Fpackage.json"))).status, 404);
+  // The shell is only served rendered (title, manifest link), never as the raw template.
+  assert.equal((await fetch(url("/index.html"))).status, 404);
 });
 
 test("each route answers under its own path with decoded params, and the manifest stays gated", async (t) => {

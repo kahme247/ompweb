@@ -90,8 +90,12 @@ test("serveFile sends Last-Modified and answers a matching If-Modified-Since wit
   const older = new Date(Date.parse(lastModified) - 1000).toUTCString();
   assert.equal((await get({ "if-modified-since": older }))?.status, 200);
   assert.equal((await get({ "if-modified-since": "garbage" }))?.status, 200);
-  // RFC 9110: only GET and HEAD are conditional on If-Modified-Since.
-  assert.equal((await get({ "if-modified-since": lastModified }, "POST"))?.status, 200);
+  // RFC 9110: only GET and HEAD are conditional on If-Modified-Since; a static file takes no other method.
+  const post = await get({ "if-modified-since": lastModified }, "POST");
+  assert.equal(post?.status, 405);
+  assert.equal(post?.headers.get("allow"), "GET, HEAD");
+  assert.equal((await get({}, "DELETE"))?.status, 405);
+  assert.equal((await get({}, "HEAD"))?.status, 200);
 });
 
 test("serveFile marks hashed assets immutable", async () => {
