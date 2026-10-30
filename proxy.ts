@@ -9,7 +9,7 @@ import {
 } from "@/lib/web-auth";
 
 // The sign-in screen still needs its JavaScript, CSS and fonts (/assets/, and
-// Bun's dev bundles under /_bun/) before a session exists; these and the
+// in dev only Bun's bundles under /_bun/) before a session exists; these and the
 // ordinary browser icons are public assets, not workspace data. /api/manifest
 // stays authenticated: its link includes credentials and its embedded
 // installation icons need no separate request. The service worker script holds
@@ -17,7 +17,7 @@ import {
 // the sign-in cookie expired. /api/hosts/link and its blob/ subpath (only
 // those: the pattern is anchored) authenticate the host's bearer token
 // themselves before they read any body (lib/hosts/hub.ts).
-export const UNGATED = /^\/(?:assets\/|_bun\/|favicon\.ico|icon\.svg|icon\.png|icon-192\.png|badge-96\.png|sw\.js|api\/hosts\/link(?:\/|$))/;
+export const UNGATED = /^\/(?:assets\/|favicon\.ico|icon\.svg|icon\.png|icon-192\.png|badge-96\.png|sw\.js|api\/hosts\/link(?:\/|$))/;
 
 // Relative: request.url is always http:// under Bun, so an absolute Location would leave https behind a TLS proxy.
 const redirect = (location: string) => new Response(null, { status: 307, headers: { location } });
@@ -26,7 +26,7 @@ const redirect = (location: string) => new Response(null, { status: 307, headers
 export function proxy(request: Request): Response | null {
   const url = new URL(request.url);
   const { pathname } = url;
-  if (UNGATED.test(pathname)) return null;
+  if (UNGATED.test(pathname) || (process.env.NODE_ENV === "development" && pathname.startsWith("/_bun/"))) return null;
   if (pathname.startsWith("/api/") && shouldCheckApiRequestOrigin(request) && !isApiRequestOriginAllowed(request)) {
     return Response.json({ error: "Cross-origin API requests are not allowed" }, { status: 403 });
   }
