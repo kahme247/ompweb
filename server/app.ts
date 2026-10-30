@@ -69,7 +69,8 @@ async function devIndex(server: Bun.Server<undefined>): Promise<string> {
   // A wildcard bind answers on loopback.
   if (url.hostname === "0.0.0.0") url.hostname = "127.0.0.1";
   else if (url.hostname === "[::]") url.hostname = "[::1]";
-  return (await fetch(url)).text();
+  // Never through HTTP(S)_PROXY: a proxy cannot reach this loopback server.
+  return (await fetch(url, { proxy: false })).text();
 }
 
 export function startServer(options: { port: number; hostname: string; dev: boolean; root: string; html?: Bun.HTMLBundle }): Bun.Server<undefined> {
