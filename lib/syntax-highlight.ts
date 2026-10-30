@@ -6,7 +6,7 @@
 //
 // IMPORTANT: every grammar is registered EAGERLY via static imports. An earlier
 // design lazy-loaded the rarer grammars with `() => import(...)`; under the
-// previous Turbopack build those ESM-only refractor chains were split into async
+// former Next.js (Turbopack) build those ESM-only refractor chains were split into async
 // chunks that intermittently failed to instantiate ("module factory is not
 // available"), taking down the whole page. Static imports keep every grammar in
 // the entry chunk: nothing is split, so nothing can race. Grammars are small

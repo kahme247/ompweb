@@ -90,8 +90,7 @@ const MAX_LIVE_JOBS = 20;
 const MAX_TOMBSTONES = 20;
 
 declare global {
-  // globalThis survives Next.js hot reload and is shared by the separately
-  // bundled /api/stt route handlers; a module-level Map is neither.
+  // globalThis survives a `bun --hot` re-evaluation; a module-level Map does not.
   var __ompSttJobs: Map<string, SttJob> | undefined;
 }
 

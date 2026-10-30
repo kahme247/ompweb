@@ -18,7 +18,7 @@ import {
 // socket, carrying any number of channel subscriptions for every tab behind
 // the browser's shared worker.
 
-// Heartbeat keeps the socket alive through proxies (Next.js idles ~120-150s).
+// Heartbeat keeps the socket alive through reverse proxies that drop silent connections.
 const HEARTBEAT_MS = 30_000;
 const encoder = new TextEncoder();
 

@@ -387,9 +387,10 @@ The table is static imports, not a runtime glob, so a future `bun build --compil
   hello) and is then destroyed; no replacement spawns beside it.
   `restartAllRpcSessions` (omp update) restarts local sessions only.
   Remote-only transport members (`onResync`, `lost`) are optional on
-  `RpcTransport` and duck-typed: there is one module graph, but a `bun --hot`
-  re-evaluation can create a fresh `RemoteRpcTransport` class while live
-  objects keep the old one, so never `instanceof RemoteRpcTransport`.
+  `RpcTransport` and duck-typed. There is one module graph, but live objects on
+  `globalThis` outlive a `bun --hot` re-evaluation, which may re-create the
+  `RemoteRpcTransport` class (not verified); duck typing holds either way, so
+  never `instanceof RemoteRpcTransport`.
 - **Live-link recycle rule.** A prompt, history-edit or MCP command that times
   out normally recycles the child. On a remote host it does so only if the host
   sent uplink traffic after the command was dispatched (`lastUplinkAt`,
