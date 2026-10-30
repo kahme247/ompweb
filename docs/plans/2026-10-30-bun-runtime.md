@@ -330,7 +330,7 @@ The two notification routes are async, but every query is a microsecond-scale lo
   - Always build a new `Response(body, { status, statusText, headers })`, because `Response.redirect()` headers are immutable.
   - Headers: `SECURITY_HEADERS` (copy the values from `next.config.ts`) for every path except `/api/files/*`, which gets `FILE_RESPONSE_HEADERS`.
   - Cache: `/` and `/login` → `private, no-cache, max-age=0, must-revalidate`.
-  - gzip when all of these hold: `accept-encoding` includes `gzip`; status 200; no `content-encoding` or `content-range`; content-type matches `^(text/(?!event-stream)|application/(json|javascript|manifest\+json|xml)|image/svg\+xml)`; `content-length` absent or ≥ 1024. Then: body through `CompressionStream("gzip")`, delete `content-length`, set `content-encoding: gzip` and `vary: accept-encoding`.
+  - gzip when all of these hold: `accept-encoding` includes `gzip`; status 200; no `content-encoding` or `content-range`; content-type matches `^(text/(?!event-stream)|application/(json|javascript|manifest\+json|xml)|image/svg\+xml)`. Then: body through `CompressionStream("gzip")`, delete `content-length`, set `content-encoding: gzip` and `vary: accept-encoding`. (No size floor: `Response.json` and `Bun.file` responses carry no `content-length` here, so a `≥ 1024` rule never applied; final review.)
 - `serveFile` rules:
   - Decode the pathname; reject a NUL byte, `\`, or any `..` segment. The resolved path must start with its base dir plus the separator, and the target must be a regular file (`statSync().isFile()`).
   - Cache-control: `/assets/*` → `public, max-age=31536000, immutable`; `/sw.js` and `/event-stream-worker.js` → `no-cache`; other public and KaTeX files → `public, max-age=0`.
