@@ -110,6 +110,8 @@ npm install -g @kahme247/ompweb
 ompweb
 ```
 
+**Or download the single binary** (no Node or npm): see [Single binary](#single-binary).
+
 Open [http://127.0.0.1:30177](http://127.0.0.1:30177) in your browser.
 
 ### CLI Options
@@ -202,6 +204,78 @@ the daemon's link when it starts, so start the web server first.
   for a loopback bind address.
 - **Development:** `npm run dev` does not take the daemon (see
   [Development](#development)).
+
+### Single binary
+
+Each [release](https://github.com/kahme247/ompweb/releases/latest) also ships
+ompweb as one compiled program with the files it serves beside it:
+`ompweb-linux-x64.tar.gz`, `ompweb-linux-arm64.tar.gz`, `ompweb-darwin-x64.tar.gz`,
+`ompweb-darwin-arm64.tar.gz` and `ompweb-windows-x64.zip`. It needs no Node, npm
+or Bun; only omp must be installed.
+
+```bash
+tar -xzf ompweb-linux-x64.tar.gz -C ~/.local/share   # unpacks ompweb-linux-x64/
+~/.local/share/ompweb-linux-x64/ompweb               # the web server: same options and environment variables as above
+~/.local/share/ompweb-linux-x64/ompweb host          # the local daemon, in a second terminal
+```
+
+- **Keep `ompweb` in its directory.** It serves `dist/`, `public/` and the other
+  files from the directory it is in (a symlink to it on your `PATH` works), or
+  from `OMP_WEB_PACKAGE_DIR` when that is set.
+- **macOS** quarantines downloads: run `xattr -dr com.apple.quarantine ompweb-darwin-arm64`
+  once before the first start.
+- **No tray, service installers or in-app update.** To update, stop `ompweb` and
+  `ompweb host`, replace the directory with the new release, and start both again;
+  **Settings → System** links the release page when a new version is out.
+  Your sessions and settings live in `~/.omp`, not in that directory.
+- **As systemd user services**, write the two units yourself (adjust the paths;
+  add omp's directory to `PATH`, or set `OMP_WEB_OMP_BIN`):
+
+```ini
+# ~/.config/systemd/user/ompweb.service
+[Unit]
+Description=ompweb web service
+
+[Service]
+WorkingDirectory=%h
+ExecStart=%h/.local/share/ompweb-linux-x64/ompweb --no-open
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+# OMP_WEB_PASSWORD_HASH, PORT and OMP_WEB_HOSTNAME go here, as for ompweb-systemd.
+EnvironmentFile=-%h/.omp/agent/web-service.env
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+```
+
+```ini
+# ~/.config/systemd/user/ompweb-host.service
+[Unit]
+Description=ompweb host daemon
+# It exits until the web server has written its link: keep restarting.
+StartLimitIntervalSec=0
+
+[Service]
+WorkingDirectory=%h
+ExecStart=%h/.local/share/ompweb-linux-x64/ompweb host
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.omp/agent/web-service.env
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now ompweb ompweb-host
+```
+
+  On macOS, two launchd agents (`ProgramArguments` `…/ompweb --no-open` and
+  `…/ompweb host`, with `RunAtLoad` and `KeepAlive`) do the same; on Windows, two
+  Task Scheduler tasks that run `ompweb.exe --no-open` and `ompweb.exe host` at logon.
 
 ### Run as a Windows Service (System Tray)
 
@@ -580,7 +654,7 @@ A dev server does not take over the local daemon: only the production web
 server writes the daemon's `host.json`, so "This machine" shows offline in dev
 and the daemon stays linked to your installed ompweb.
 
-`npm run dev` runs the server with Bun hot reload. `npm run build` bundles the browser app into `dist/`, and `npm start` serves it on port 30177 (`npm run smoke` checks the result). `npm run dev:lan` binds the dev server to all interfaces.
+`npm run dev` runs the server with Bun hot reload. `npm run build` bundles the browser app into `dist/`, and `npm start` serves it on port 30177 (`npm run smoke` checks the result). `npm run dev:lan` binds the dev server to all interfaces. `npm run build:binary` builds the [single binary](#single-binary) for this machine into `release/` (`-- --target bun-linux-arm64` and the like for another platform; `npm run smoke -- --binary release/ompweb-linux-x64/ompweb` checks it).
 
 ### Checks
 
