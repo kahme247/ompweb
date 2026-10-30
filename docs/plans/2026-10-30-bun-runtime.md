@@ -28,7 +28,7 @@
 ## Review Focus
 
 1. **SSE and host link through an idle gap longer than Bun's 10 s default:** `/api/events` stays open and keeps delivering (Task 5 `server/app.test.ts` idle test, Task 8 smoke step).
-2. **Sign-in over the new server:** with a password set, `/?session=x` → 307 `/login?next=%2F%3Fsession%3Dx`. The login page's `/assets/*` load without a cookie, `/api/hosts/link` answers its own 401, and no `x-middleware-*` header appears (Task 5 `lib/web-auth.test.mjs` + `server/app.test.ts`).
+2. **Sign-in over the new server:** with a password set, `/?session=x` → 307 `/login?next=%2F%3Fsession%3Dx`. The login page's `/assets/*` load without a cookie and `/api/hosts/link` answers its own 401 (Task 5 `lib/web-auth.test.mjs` + `server/app.test.ts`). No code sets an `x-middleware-*` header any more, so the final review dropped that never-firing assertion.
 3. **Static path traversal:** `/..%2Fpackage.json`, `/%2e%2e/package.json`, `/assets/..%5C..%5Cpackage.json` and a NUL byte all answer 404 and never a file outside `dist/`, `public/` or the KaTeX dir (Task 5 `server/http.test.ts`).
 4. **Windows in-app update:** no process runs from the package's `bun.exe` while `npm install -g` replaces it. The update worker command is `OMP_WEB_NODE_BIN`, and the worker stops the server first (Task 7 `lib/self-update.test.mjs`).
 5. **Installs where Bun's postinstall did not run** (`--ignore-scripts`, `bun add -g` without trusted deps, npm blocking scripts): the launcher uses the `@oven/bun-<os>-<arch>` binary (Task 1 `bin/bun-runtime.test.mjs`, Task 8 packed smoke).
