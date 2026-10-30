@@ -51,3 +51,17 @@ test("OMP's Update now shows only when this server can run the update; the comma
   const npm = await renderSystemTab(t, { ompCheck: { ...update, selfUpdateSupported: true } });
   assert.ok(buttonLabels(npm).includes("Update now"), buttonLabels(npm).join(" | "));
 });
+
+test("a binary install's ompweb update links the release page instead of showing a command", async (t) => {
+  const releases = "https://github.com/kahme247/ompweb/releases/latest";
+  const appUpdate = { currentVersion: "0.6.0", availableVersion: "0.7.0", updateAvailable: true, selfUpdateSupported: false };
+  const binary = await renderSystemTab(t, { appUpdate: { ...appUpdate, installMethod: "binary", updateCommand: releases } });
+  const link = binary.querySelector(`a[href="${releases}"]`);
+  assert.ok(link, "no link to the release page");
+  assert.equal(link.target, "_blank");
+  assert.match(link.rel, /\bnoopener\b/);
+  assert.ok(![...binary.querySelectorAll("code")].some((code) => code.textContent === releases), "the release page is shown as a command");
+
+  const npm = await renderSystemTab(t, { appUpdate: { ...appUpdate, installMethod: "npm", updateCommand: "npm install -g @kahme247/ompweb" } });
+  assert.ok([...npm.querySelectorAll("code")].some((code) => code.textContent === "npm install -g @kahme247/ompweb"), "the npm command is gone");
+});

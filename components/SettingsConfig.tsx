@@ -1824,20 +1824,24 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                           <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
                             {t(appUpdate.installMethod === "binary" ? "settingsConfig.downloadAppUpdate" : "settingsConfig.runAppUpdateCommand")}
                           </div>
-                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            <code style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent)", wordBreak: "break-all" }}>{appUpdate.updateCommand || "npm install -g @kahme247/ompweb"}</code>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                void copyText(appUpdate.updateCommand || "npm install -g @kahme247/ompweb")
-                                  .then(() => toast.success(t("appShell.commandCopied")))
-                                  .catch(() => toast.error(t("appShell.commandCopyFailed")));
-                              }}
-                              style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}
-                            >
-                              <Copy size={12} aria-hidden="true" /> {t("appShell.copyCommand")}
-                            </button>
-                          </div>
+                          {appUpdate.installMethod === "binary" ? (
+                            <a href={appUpdate.updateCommand} target="_blank" rel="noopener noreferrer" style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent)", wordBreak: "break-all" }}>{appUpdate.updateCommand}</a>
+                          ) : (
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                              <code style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent)", wordBreak: "break-all" }}>{appUpdate.updateCommand || "npm install -g @kahme247/ompweb"}</code>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  void copyText(appUpdate.updateCommand || "npm install -g @kahme247/ompweb")
+                                    .then(() => toast.success(t("appShell.commandCopied")))
+                                    .catch(() => toast.error(t("appShell.commandCopyFailed")));
+                                }}
+                                style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}
+                              >
+                                <Copy size={12} aria-hidden="true" /> {t("appShell.copyCommand")}
+                              </button>
+                            </div>
+                          )}
                         </>
                       )}
                     </div>
