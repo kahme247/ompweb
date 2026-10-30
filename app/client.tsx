@@ -5,7 +5,6 @@ import { AppErrorBoundary } from "@/components/AppErrorBoundary";
 import { AppShell } from "@/components/AppShell";
 import { IosFocusZoomGuard } from "@/components/IosFocusZoomGuard";
 import { LoginForm } from "@/components/LoginForm";
-import { ThemeColor } from "@/hooks/useTheme";
 
 function RouteLoadingFallback() {
   return (
@@ -40,7 +39,6 @@ createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <AppErrorBoundary>
       <IosFocusZoomGuard />
-      <ThemeColor />
       {location.pathname === "/login" ? (
         <LoginForm />
       ) : (
