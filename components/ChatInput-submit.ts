@@ -85,15 +85,20 @@ export function useComposerSubmit({
 
   /** Run a client builtin. True once handled; the composer is cleared only on
    * success and only if it still holds what was sent (the user may have
-   * started typing while the command ran). */
+   * started typing or attached files while the command ran). */
   const runBuiltinCommand = useCallback(async (msg: string, overrideText?: string): Promise<boolean> => {
     if (submissionBlockedRef.current || !onBuiltinCommand) return false;
     const sentValue = overrideText ?? valueRef.current;
+    const sentImages = attachedImagesRef.current;
+    const sentTextFiles = attachedTextFilesRef.current;
     const result = await onBuiltinCommand(msg);
     if (!result.handled) return false;
-    if (!submissionBlockedRef.current && !result.error && !result.retainInput && (overrideText !== undefined || valueRef.current === sentValue)) clearInput();
+    const composerUnchanged = (overrideText !== undefined || valueRef.current === sentValue)
+      && attachedImagesRef.current === sentImages
+      && attachedTextFilesRef.current === sentTextFiles;
+    if (!submissionBlockedRef.current && !result.error && !result.retainInput && composerUnchanged) clearInput();
     return true;
-  }, [onBuiltinCommand, clearInput, submissionBlockedRef, valueRef]);
+  }, [onBuiltinCommand, clearInput, submissionBlockedRef, valueRef, attachedImagesRef, attachedTextFilesRef]);
 
   /** `/btw` asks a side question beside any run: never a prompt, never
    * queued. Attachments cannot ride along, so refuse and keep the draft
