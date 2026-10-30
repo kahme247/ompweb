@@ -417,12 +417,13 @@ function ExitedSessionIndicator({ title, size = 14 }: { title: string; size?: nu
     </span>
   );
 }
-function RecentlyCompletedIndicator({ size = 12 }: { size?: number }) {
+/** A session that finished in the background and has not been opened since. */
+function CompletedUnreadIndicator({ size = 12 }: { size?: number }) {
   const { t } = useI18n();
   return (
     <span
-      title={t("sessionSidebar.recentlyCompleted")}
-      aria-label={t("sessionSidebar.recentlyCompleted")}
+      title={t("sessionSidebar.completedUnread")}
+      aria-label={t("sessionSidebar.completedUnread")}
       style={{
         width: size,
         height: size,
@@ -437,46 +438,14 @@ function RecentlyCompletedIndicator({ size = 12 }: { size?: number }) {
     </span>
   );
 }
-
-
-function UnreadSessionIndicator({ size = 14 }: { size?: number }) {
-  const { t } = useI18n();
-  const reducedMotion = usePrefersReducedMotion();
-  return (
-    <span
-      title={t("sessionSidebar.newActivity")}
-      aria-label={t("sessionSidebar.newSessionActivity")}
-      style={{
-        width: size,
-        height: size,
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        flexShrink: 0,
-        color: "var(--accent)",
-      }}
-    >
-      <svg width={size} height={size} viewBox="0 0 14 14" fill="none" aria-hidden="true" style={{ display: "block" }}>
-        <circle cx="7" cy="7" r="2.5" fill="currentColor" />
-        {!reducedMotion && (
-          <circle cx="7" cy="7" r="3" stroke="currentColor" strokeWidth="1.4" opacity="0.32">
-            <animate attributeName="r" values="3;6;3" dur="1.6s" repeatCount="indefinite" />
-            <animate attributeName="opacity" values="0.32;0;0.32" dur="1.6s" repeatCount="indefinite" />
-          </circle>
-        )}
-      </svg>
-    </span>
-  );
-}
 export {
   OmpWebTitle,
   PathLabel,
   ExitedSessionIndicator,
   RunningSessionIndicator,
-  RecentlyCompletedIndicator,
+  CompletedUnreadIndicator,
   SIDEBAR_BUTTON_TRANSITION,
   SidebarIconButton,
   SidebarPortalMenu,
-  UnreadSessionIndicator,
   useScramble,
 };

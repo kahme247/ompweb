@@ -10,6 +10,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 - **In-app updates work when ompweb runs as a systemd service.** The update worker ran inside the service's cgroup, so stopping the server killed the worker too: nothing was installed, the service could stay down (`Restart=on-failure` does not restart a clean SIGTERM exit), and every page load reopened the update dialog at "Stop ompweb-managed sessions". The worker now runs in its own transient scope (`systemd-run --scope`) and stops, updates and starts the unit through `systemctl`, starting it again if the install fails.
 - **An update whose worker died is reported as failed.** A running update whose worker process is gone, or whose lease has expired, now becomes a failed attempt the dialog can show and clean up, instead of waiting forever.
+- **The sidebar's green check clears once you open the conversation.** The check marked the most recently active sessions (the "recent runs" limit, 10 by default), so it stayed on conversations you had already read and never went away. It now means "finished in the background and not opened yet": opening the session removes it, a session that finishes while you are viewing it never gets one, and other tabs of the same browser drop it too. The state is kept per browser, not synced across devices. The pulsing "new activity" dot, which marked the same state, is gone. The running-only filter still keeps recently finished sessions.
 
 ---
 
