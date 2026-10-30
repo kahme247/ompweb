@@ -58,6 +58,26 @@ jobs:
       - name: Verify production build
         run: npm run build
 
+      - name: Smoke test
+        run: npm run smoke
+
+      - name: Packed install smoke test
+        shell: bash
+        run: |
+          npm pack --ignore-scripts
+          npm install -g --prefix "$RUNNER_TEMP/ompweb-prefix" ./kahme247-ompweb-*.tgz
+          npm run smoke -- --package "$(npm root -g --prefix "$RUNNER_TEMP/ompweb-prefix")/@kahme247/ompweb"
+
+      - name: Parse Windows PowerShell scripts (Windows only)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($f in 'scripts/windows/omp-web-service.ps1', 'scripts/windows/omp-web-tray.ps1') {
+            $e = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f).Path, [ref]$null, [ref]$e) | Out-Null
+            if ($e) { $e; exit 1 }
+          }
+
       - name: Verify Windows System Tray & Shortcuts (Windows only)
         if: runner.os == 'Windows'
         run: |
