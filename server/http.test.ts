@@ -56,11 +56,20 @@ test("gzip applies to compressible 200 responses only", async () => {
   assert.equal(compressed.headers.get("vary"), "accept-encoding");
   assert.equal(compressed.headers.get("content-length"), null);
   assert.equal(new TextDecoder().decode(Bun.gunzipSync(new Uint8Array(await compressed.arrayBuffer()))), json);
+  // An existing Vary keeps its names.
+  const varied = finalize("/api/sessions", Response.json(JSON.parse(json), { headers: { vary: "Origin" } }), gzip);
+  assert.equal(varied.headers.get("vary"), "Origin, accept-encoding");
+  assert.equal(finalize("/api/sessions", Response.json(JSON.parse(json), { headers: { vary: "Accept-Encoding" } }), gzip).headers.get("vary"), "Accept-Encoding");
+  assert.equal(finalize("/api/sessions", Response.json(JSON.parse(json)), { "accept-encoding": "br;q=1, GZIP;q=0.5" }).headers.get("content-encoding"), "gzip");
 
   const skipped = [
     finalize("/api/events", new Response(json, { headers: { "content-type": "text/event-stream" } }), gzip),
     finalize("/api/files/a.txt", new Response(json, { status: 206, headers: { "content-type": "text/plain" } }), gzip),
     finalize("/api/sessions", Response.json(JSON.parse(json))),
+    // q=0 means "not acceptable" (RFC 9110).
+    finalize("/api/sessions", Response.json(JSON.parse(json)), { "accept-encoding": "gzip;q=0, identity" }),
+    finalize("/api/sessions", Response.json(JSON.parse(json)), { "accept-encoding": "gzip; q=0.000" }),
+    finalize("/api/sessions", Response.json(JSON.parse(json)), { "accept-encoding": "x-gzipped" }),
   ];
   for (const response of skipped) assert.equal(response.headers.get("content-encoding"), null);
 });

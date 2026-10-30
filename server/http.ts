@@ -23,6 +23,17 @@ const FILE_RESPONSE_HEADERS = {
 export const INDEX_CACHE = "private, no-cache, max-age=0, must-revalidate";
 const COMPRESSIBLE = /^(text\/(?!event-stream)|application\/(json|javascript|manifest\+json|xml)|image\/svg\+xml)/;
 
+/** Whether Accept-Encoding lists gzip with a q-value above 0 (RFC 9110: q=0 means not acceptable). */
+function acceptsGzip(header: string | null): boolean {
+  for (const entry of header?.split(",") ?? []) {
+    const [coding, ...params] = entry.split(";").map((part) => part.trim().toLowerCase());
+    if (coding !== "gzip") continue;
+    const q = params.find((param) => param.startsWith("q="));
+    return q === undefined || Number(q.slice(2)) > 0;
+  }
+  return false;
+}
+
 /** Security headers (overwriting the handler's), the index cache policy and gzip, on a fresh Response. */
 export function finalizeResponse(request: Request, response: Response): Response {
   const { pathname } = new URL(request.url);
@@ -34,7 +45,7 @@ export function finalizeResponse(request: Request, response: Response): Response
   let body = response.body;
   if (
     body
-    && request.headers.get("accept-encoding")?.includes("gzip")
+    && acceptsGzip(request.headers.get("accept-encoding"))
     && response.status === 200
     && !headers.has("content-encoding")
     && !headers.has("content-range")
@@ -43,7 +54,7 @@ export function finalizeResponse(request: Request, response: Response): Response
     body = body.pipeThrough(new CompressionStream("gzip"));
     headers.delete("content-length");
     headers.set("content-encoding", "gzip");
-    headers.set("vary", "accept-encoding");
+    if (!/accept-encoding|\*/i.test(headers.get("vary") ?? "")) headers.append("vary", "accept-encoding");
   }
   return new Response(body, { status: response.status, statusText: response.statusText, headers });
 }
