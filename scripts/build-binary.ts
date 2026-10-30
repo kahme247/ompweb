@@ -11,7 +11,8 @@ const root = path.join(import.meta.dir, "..");
 const { values } = parseArgs({ args: Bun.argv.slice(2), options: { target: { type: "string" } } });
 const target = (values.target ?? `bun-${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`) as Bun.Build.CompileTarget;
 const windows = target.startsWith("bun-windows-");
-const name = `ompweb-${target.replace(/^bun-/, "")}`;
+// A -baseline target (x64 without AVX2, what releases ship) keeps the plain name, which the README and the update notice use.
+const name = `ompweb-${target.replace(/^bun-/, "").replace(/-baseline$/, "")}`;
 const release = path.join(root, "release");
 const out = path.join(release, name);
 rmSync(out, { recursive: true, force: true });
@@ -53,9 +54,11 @@ const clientPackages = (JSON.parse(readFileSync(clientPackagesFile, "utf8")) as 
 writeLicenses(out, [...new Set([...bundledPackageDirs(result.metafile!, process.cwd()), ...clientPackages])].sort(), bunLicense);
 
 // Bun.Archive writes every entry as 0644 (the binary would lose its execute bit) and makes no zip: the system tools do.
+// On Windows that is its own bsdtar, which makes zips: a GNU tar from Git Bash on PATH makes none.
 // shortcut: a Linux or macOS archive built on Windows loses the execute bit the same way; build releases on Linux (CI).
 const archive = path.join(release, `${name}${windows ? ".zip" : ".tar.gz"}`);
 rmSync(archive, { force: true });
-const command = !windows ? ["tar", "-czf", archive, name] : process.platform === "win32" ? ["tar", "-a", "-cf", archive, name] : ["zip", "-qr", archive, name];
+const tar = process.platform === "win32" ? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe") : "tar";
+const command = !windows ? [tar, "-czf", path.basename(archive), name] : process.platform === "win32" ? [tar, "-a", "-cf", path.basename(archive), name] : ["zip", "-qr", path.basename(archive), name];
 if (Bun.spawnSync(command, { cwd: release, stdio: ["ignore", "inherit", "inherit"] }).exitCode !== 0) process.exit(1);
 console.log(`built ${path.relative(root, out)} and ${path.relative(root, archive)}`);
