@@ -50,6 +50,8 @@ npm install -g @kahme247/ompweb
 ompweb
 ```
 
+**Node や npm を使わない単一バイナリ**もリリースごとに配布しています。手順は英語版 README の [Single binary](README.md#single-binary) を参照してください。
+
 ブラウザで [http://127.0.0.1:30177](http://127.0.0.1:30177) を開きます。
 
 ### CLI オプション

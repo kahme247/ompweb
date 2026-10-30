@@ -14,7 +14,7 @@ import { runHostCli } from "@/lib/hosts/host-cli";
 // lib/omp/session-edit-extension.mjs in it to omp.
 process.env.OMP_WEB_PACKAGE_DIR ??= path.dirname(realpathSync(process.execPath));
 const root = process.env.OMP_WEB_PACKAGE_DIR;
-const SEE_README = "README.md (Single binary) shows how to run `ompweb` and `ompweb host` as services instead.";
+const SEE_README = "https://github.com/kahme247/ompweb#single-binary shows how to run `ompweb` and `ompweb host` as services instead.";
 
 const command = process.argv[2];
 if (command === "host") process.exit(await runHostCli(process.argv.slice(3)));

@@ -7,7 +7,8 @@ npm run dev     # Bun server with hot reload (HMR for the SPA), port 30178
 npm run build   # bundle the SPA into dist/ (scripts/build-client.ts)
 npm start       # serve dist/ + the API, port 30177
 npm test        # bun test --parallel
-npm run smoke   # start the built server (or a packed install: -- --package <dir>) and check it
+npm run smoke   # start the built server and `ompweb host` (or a packed install: -- --package <dir>; a binary: -- --binary <path>) and check them
+npm run build:binary [-- --target bun-<os>-<arch>]   # build, then compile release/ompweb-<os>-<arch>/ and its .tar.gz/.zip (scripts/build-binary.ts)
 npm run typecheck && npm run lint
 ```
 
@@ -43,7 +44,9 @@ The launcher (`bin/omp-web.js`) and the host daemon (`bin/omp-web-host.js`)
 and tray run on Node. The launcher spawns `bun server/main.ts` (Bun resolved by
 `bin/bun-runtime.js`: the npm `@oven/bun-*` binary, else `bun` on `PATH`), which
 serves the SPA from `dist/`, the API routes and the password gate in one
-process. Nothing in the daemon or tray may use a Bun API.
+process. Nothing in the daemon or tray may use a Bun API. The compiled binary
+(`server/binary.ts`) is the exception: one Bun program that runs the server in
+its own process (no launcher), `ompweb host` and `ompweb hash-password`.
 
 **Session browsing** (read-only): pure-Node parsing of omp session `.jsonl`
 files via `lib/session-reader.ts` — no child process involved.  
@@ -73,9 +76,10 @@ Shared foundations in `lib/omp/`:
 
 ```
 server/
-  main.ts             production entry: sets NODE_ENV, `startServer`, then `register()` (instrumentation.node.ts); prints the `Ready on` line the launcher waits for
+  main.ts             production entry: sets NODE_ENV, then `startProduction` (app.ts); prints the `Ready on` line the launcher waits for
+  binary.ts           the compiled `ompweb` (scripts/build-binary.ts): the launcher's checks (`checkLaunchSecurity`) and `startProduction` in-process, `host` (lib/hosts/host-cli.ts), `hash-password`; refuses tray/service commands
   dev.ts              dev entry (`bun --hot`): serves the HTML import with HMR; re-runs itself once with OMP_WEB_PUBLIC_* set so `bunfig.toml` can inline them
-  app.ts              `startServer`: `Bun.serve` + route table + gate + SPA fallback; `parseListenArgs`
+  app.ts              `startServer`: `Bun.serve` + route table + gate + SPA fallback; `startProduction` (listen, `register()`, Ready line); `parseListenArgs`
   routes.ts           the API route table (see "Adding an API route"); `routePattern`, `dispatch`
   http.ts             `finalizeResponse` (security headers, gzip for pages and static files, never `/api/`), `serveFile` (dist/, public/, KaTeX), `renderIndex`
   client-env.ts       build-time constants for the browser bundle (app version, event-stream worker hash)
@@ -227,12 +231,13 @@ hooks/
 
 bin/
   bun-runtime.js      resolves the Bun binary (npm `@oven/bun-*`, else PATH, minimum version check); used by the launcher, scripts and nix
-  omp-web-host.js     `ompweb host [login]`: daemon CLI; token read from stdin, never argv. `omp-web.js host` requires it in-process (no child) so SIGTERM/SIGINT reach the daemon's stop
+  omp-web-host.js     `ompweb host [login]`: loads lib/hosts/host-cli.ts through jiti; token read from stdin, never argv. `omp-web.js host` requires it in-process (no child) so SIGTERM/SIGINT reach the daemon's stop
 
 scripts/
   build-client.ts     `npm run build`: bundles app/index.html into dist/ (Bun.build + tailwind-plugin.ts; fonts emitted as /assets files)
   tailwind-plugin.ts  bun-plugin-tailwind minus Tailwind's color-mix() polyfill (Bun 1.4.4 drops repeated @supports rules); build and dev
-  smoke.ts            `npm run smoke`: starts the built server on a free port with a throwaway HOME and checks the SPA, an asset, the API and SSE
+  smoke.ts            `npm run smoke`: starts the built server (or `--binary <path>`) and `ompweb host` with a throwaway HOME; checks the SPA, an asset, the API, a session listed through the daemon and SSE
+  build-binary.ts     `npm run build:binary`: compiles server/binary.ts (NODE_ENV define, no .env/bunfig autoload) into release/ompweb-<os>-<arch>/ beside dist/, public/, the KaTeX files, the session-edit extension and the licenses; archives it
 
 dist/                 build output (git-ignored, shipped in the package); the production server reads index.html and assets from here
 bunfig.toml           Bun dev-server bundling: tailwind plugin and the OMP_WEB_PUBLIC_* inlining
@@ -247,7 +252,7 @@ bunfig.toml           Bun dev-server bundling: tailwind plugin and the OMP_WEB_P
 2. Add one `import * as x from "@/app/api/<path>/route"` and one entry to `ROUTE_MODULES` in `server/routes.ts`; the key is the directory under `app/api` (`"sessions/[id]"`).
 3. `server/routes.test.ts` fails when the table and the files on disk differ, and when a route module exports anything but method handlers.
 
-The table is static imports, not a runtime glob, so a future `bun build --compile` can bundle every handler. `dispatch` answers HEAD from `GET`, OPTIONS and a missing method (405 with `allow`), passes `params` as a promise (plus `disableIdleTimeout`, below), and turns a throw into a 500 JSON body.
+The table is static imports, not a runtime glob, so `bun build --compile` (`scripts/build-binary.ts`) bundles every handler. `dispatch` answers HEAD from `GET`, OPTIONS and a missing method (405 with `allow`), passes `params` as a promise (plus `disableIdleTimeout`, below), and turns a throw into a 500 JSON body.
 
 ### Bun server (`server/`)
 - Bun's 10 s `idleTimeout` stays on: it reaps sockets that stall before or during a request, and it also cuts a handler still working after 10 s. So `handle` (`server/app.ts`) calls `server.timeout(request, 0)` for an `/api/` request that `proxy()` reports as `"authenticated"` (never `"public"`) and puts the 10 s back once the handler returns or throws: the setting outlives the response on a keep-alive socket. A handler whose response stays open without traffic (SSE `/api/events`, the login SSE, the clone/search/bash-output/file streams) calls `disableIdleTimeout` from the route context (`dispatch`, `server/routes.ts`) to keep it off until that stream ends or is cancelled; a new stream must do the same, or it is cut after 10 s idle. The host link is gate-exempt (`"public"`), and `lib/hosts/hub.ts` calls `disableIdleTimeout` only once the bearer token checks out. `maxRequestBodySize` is left at Bun's 128 MiB default, above the 101 MB upload cap and the 64 MB link legs; do not lower it.
@@ -256,9 +261,10 @@ The table is static imports, not a runtime glob, so a future `bun build --compil
 - `Response.redirect()` headers are immutable; `finalizeResponse` (`server/http.ts`) copies every answer into a fresh `Response` to set the security headers and gzip. Do not mutate a handler's response headers elsewhere.
 - `globalThis` state survives `bun --hot` re-evaluation, and `register()` (`instrumentation.node.ts`) runs once per process behind a `globalThis` guard in `server/dev.ts`. New server singletons use the `globalThis` registry pattern of `rpc-manager.ts`.
 - Dev (`npm run dev`) serves the SPA from the HTML import with HMR, bundled in memory, and re-runs itself once with `OMP_WEB_PUBLIC_*` set because `bunfig.toml` inlines them from the environment Bun started with. Dev pages carry `script-src blob:` in their CSP (HMR updates run as blob scripts); production does not.
-- `OMP_WEB_PACKAGE_DIR` (set by the launcher) is the root for `dist/`, `public/` and KaTeX; `process.cwd()` is the fallback for dev and tests.
-- `Bun.serve` turns on `SO_REUSEPORT` when `development` is false, so a second omp-web would share the port instead of failing; `startServer` passes `reusePort: false`, and `server/main.ts` reports an `EADDRINUSE` in one line.
-- The in-app update worker runs on Node (`OMP_WEB_NODE_BIN`, the launcher's `process.execPath`), not Bun.
+- `OMP_WEB_PACKAGE_DIR` (set by the launcher) is the root for `dist/`, `public/` and KaTeX; `process.cwd()` is the fallback for dev and tests. The compiled binary sets it to its own directory (unless set) before any server module loads, so every runtime file must come from that root: a module's `import.meta.url` in the binary is Bun's virtual `/$bunfs/`, which no other process can read. A new file the server or daemon reads at runtime also goes into `scripts/build-binary.ts`'s copy list.
+- The binary needs `process.env.NODE_ENV` defined as `"production"` at build time (`scripts/build-binary.ts`): a plain `bun build --compile` inlines `"development"`, and the server then never writes the daemon's link. `npm run smoke -- --binary` catches that (no session lists).
+- `Bun.serve` turns on `SO_REUSEPORT` when `development` is false, so a second omp-web would share the port instead of failing; `startServer` passes `reusePort: false`, and `startProduction` (`server/app.ts`) reports an `EADDRINUSE` in one line.
+- The in-app update worker runs on Node (`OMP_WEB_NODE_BIN`, the launcher's `process.execPath`), not Bun. The compiled binary has no in-app update: `Bun.isStandaloneExecutable` turns it off (`lib/self-update.ts`) and `/api/app-update` names the release page (`installMethod: "binary"`).
 - Bun's `fs.watch` drops an event that follows the previous one within ~2 ms, so the file channel (`openFileChannel`, `lib/event-stream-hub.ts`) re-stats the file ~50 ms after every event.
 - `bun:sqlite` `.get()` returns `null` for no row (not `undefined`).
 - `bun:sqlite` `close()` keeps the database file open while prepared statements are alive (until GC), so Windows cannot remove or replace it: the stores close with `close(true)`, which finalizes them (`closeNotificationStore`, `closeUsageDatabase`).
@@ -860,7 +866,7 @@ during the wait.
 
 ### Update notifications (`/api/omp-update`, `/api/app-update`)
 - Automatic in-app self-updating has been removed in favor of explicit user notifications and manual terminal commands.
-- `GET /api/app-update` queries the npm registry for `@kahme247/ompweb` updates, detects the install manager (`bun` vs `npm` via `detectInstallMethod`), and returns `updateAvailable` plus the exact terminal command (e.g. `npm install -g @kahme247/ompweb` or `bun add -g @kahme247/ompweb`).
+- `GET /api/app-update` queries the npm registry for `@kahme247/ompweb` updates, detects the install (`installMethod`: `bun` vs `npm` via `detectInstallMethod`, `binary` for the compiled release), and returns `updateAvailable` plus the exact terminal command (e.g. `npm install -g @kahme247/ompweb` or `bun add -g @kahme247/ompweb`; for `binary`, the release page, which Settings shows under a download message).
 - `POST /api/omp-update` (`action: "check"`) runs `omp update --check` and returns `updateAvailable` plus `updateCommand: "omp update"`.
 - `POST /api/omp-update` (`action: "restart"`) restarts active OMP sessions after a manual CLI update.
 - Notifications in `AppShell` and settings cards in `SettingsConfig` present the update notification alongside copyable terminal update commands.

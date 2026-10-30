@@ -50,6 +50,8 @@ npm install -g @kahme247/ompweb
 ompweb
 ```
 
+每个版本也提供**无需 Node 或 npm 的单一可执行文件**，用法见英文 README 的 [Single binary](README.md#single-binary)。
+
 在浏览器中打开 [http://127.0.0.1:30177](http://127.0.0.1:30177)。
 
 ### CLI 选项
