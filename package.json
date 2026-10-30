@@ -24,17 +24,14 @@
   "files": [
     "bin",
     "lib",
-    ".next",
-    "!.next/cache",
-    "!.next/dev",
-    "!.next/diagnostics",
-    "!.next/types",
-    "!.next/trace",
-    "!.next/trace-build",
-    "!.next/**/*.map",
+    "app/api",
+    "server",
+    "dist",
     "public",
     "scripts",
-    "next.config.ts",
+    "proxy.ts",
+    "instrumentation.node.ts",
+    "tsconfig.json",
     "package.json"
   ],
   "scripts": {
@@ -56,7 +53,8 @@
     "systemd:stop": "node bin/omp-web-systemd.js stop",
     "systemd:status": "node bin/omp-web-systemd.js status",
     "prepack": "npm run build",
-    "release:check": "npm run typecheck && npm run lint && npm test && npm run build"
+    "smoke": "bun scripts/smoke.ts",
+    "release:check": "npm run typecheck && npm run lint && npm test && npm run build && npm run smoke"
   },
   "dependencies": {
     "@base-ui/react": "^1.7.0",
