@@ -50,7 +50,7 @@ interface CacheEntry {
   expiresAt: number;
 }
 
-// Per-cwd cache on globalThis so it survives Next.js hot-reload; the @ menu
+// Per-cwd cache on globalThis so it survives a `bun --hot` re-evaluation; the @ menu
 // re-requests on every open and searches on every keystroke, so listings must
 // not be recomputed within a short window.
 declare global {

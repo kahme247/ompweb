@@ -98,7 +98,7 @@ declare global {
   var __ompHostHub: HubState | undefined;
 }
 
-// globalThis, like the rpc-manager registry: survives Next.js hot reload.
+// globalThis, like the rpc-manager registry: survives a `bun --hot` re-evaluation.
 function hub(): HubState {
   globalThis.__ompHostHub ??= { links: new Map(), changeListeners: new Set(), helloListeners: new Set(), frozen: false };
   return globalThis.__ompHostHub;

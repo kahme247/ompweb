@@ -1,6 +1,6 @@
 // The `OMP_WEB_PASSWORD_HASH` format lives in bin/omp-web-password-hash.js:
 // the packaged launcher and the service installers must hash and validate a
-// password before Next.js (and this module) exists. This file is the typed
+// password before the server (and this module) exists. This file is the typed
 // view of it for the server — never a second implementation.
 import * as passwordHash from "../bin/omp-web-password-hash.js";
 

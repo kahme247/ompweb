@@ -3,7 +3,7 @@
  * process. Two groups are stripped:
  *
  *  - Host runtime variables (PORT, NODE_ENV, NEXT_*): these describe the
- *    Next.js server, not the selected project, and can make project commands
+ *    omp-web server, not the selected project, and can make project commands
  *    behave as if they were running inside the web app.
  *  - omp-web's own secrets. Every `omp` session inherits this environment, so
  *    an agent that runs `env` would otherwise print the web password hash into

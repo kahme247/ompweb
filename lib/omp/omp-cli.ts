@@ -62,7 +62,7 @@ function probeOmpBin(): string | null {
  * miss is re-probed after MISS_TTL_MS. */
 export function resolveOmpBin(): string | null {
   // A global Bun/npm update can replace or remove its launcher while this
-  // Next.js process is still alive. Never keep returning a stale cache entry.
+  // server process is still alive. Never keep returning a stale cache entry.
   if (cachedBin && existsSync(cachedBin)) return cachedBin;
   cachedBin = null;
   if (Date.now() - binMissAt < MISS_TTL_MS) return null;
