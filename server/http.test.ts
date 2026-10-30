@@ -172,6 +172,20 @@ test("serveFile skips a missing directory and serves from it once it exists", as
   assert.equal(await (await get())?.text(), "ok");
 });
 
+test("serveFile follows a static directory swapped while it runs", async (t) => {
+  // A release swapped in place: public/ is a link (a junction on Windows) that moves to a new directory.
+  const packageDir = mkdtempSync(path.join(os.tmpdir(), "omp-web-serve-swap-"));
+  t.after(() => rmSync(packageDir, { recursive: true, force: true }));
+  for (const release of ["old", "new"]) await Bun.write(path.join(packageDir, release, "page.txt"), release);
+  const link = path.join(packageDir, "public");
+  const get = async () => (await serveFile(new Request("http://localhost/page.txt"), packageDir, false))?.text();
+  symlinkSync(path.join(packageDir, "old"), link, "junction");
+  assert.equal(await get(), "old");
+  rmSync(link);
+  symlinkSync(path.join(packageDir, "new"), link, "junction");
+  assert.equal(await get(), "new");
+});
+
 test("renderIndex escapes the install name into the titles and adds the manifest link", () => {
   const html = '<html><head><title>omp web</title><meta name="apple-mobile-web-app-title" content="omp web" /></head><body></body></html>';
   const previous = process.env.OMP_WEB_NAME;
