@@ -51,27 +51,40 @@ test("a config header overwrites the handler's, and redirects pass", () => {
 test("gzip applies to compressible 200 responses only", async () => {
   const gzip = { "accept-encoding": "gzip, deflate, br" };
   const json = JSON.stringify({ text: "x".repeat(2048) });
-  const compressed = finalize("/api/sessions", Response.json(JSON.parse(json)), gzip);
+  const compressed = finalize("/assets/x.json", Response.json(JSON.parse(json)), gzip);
   assert.equal(compressed.headers.get("content-encoding"), "gzip");
   assert.equal(compressed.headers.get("vary"), "accept-encoding");
   assert.equal(compressed.headers.get("content-length"), null);
   assert.equal(new TextDecoder().decode(Bun.gunzipSync(new Uint8Array(await compressed.arrayBuffer()))), json);
   // An existing Vary keeps its names.
-  const varied = finalize("/api/sessions", Response.json(JSON.parse(json), { headers: { vary: "Origin" } }), gzip);
+  const varied = finalize("/assets/x.json", Response.json(JSON.parse(json), { headers: { vary: "Origin" } }), gzip);
   assert.equal(varied.headers.get("vary"), "Origin, accept-encoding");
-  assert.equal(finalize("/api/sessions", Response.json(JSON.parse(json), { headers: { vary: "Accept-Encoding" } }), gzip).headers.get("vary"), "Accept-Encoding");
-  assert.equal(finalize("/api/sessions", Response.json(JSON.parse(json)), { "accept-encoding": "br;q=1, GZIP;q=0.5" }).headers.get("content-encoding"), "gzip");
+  assert.equal(finalize("/assets/x.json", Response.json(JSON.parse(json), { headers: { vary: "Accept-Encoding" } }), gzip).headers.get("vary"), "Accept-Encoding");
+  assert.equal(finalize("/assets/x.json", Response.json(JSON.parse(json)), { "accept-encoding": "br;q=1, GZIP;q=0.5" }).headers.get("content-encoding"), "gzip");
 
   const skipped = [
-    finalize("/api/events", new Response(json, { headers: { "content-type": "text/event-stream" } }), gzip),
-    finalize("/api/files/a.txt", new Response(json, { status: 206, headers: { "content-type": "text/plain" } }), gzip),
-    finalize("/api/sessions", Response.json(JSON.parse(json))),
+    finalize("/assets/x.json", new Response(json, { headers: { "content-type": "text/event-stream" } }), gzip),
+    finalize("/assets/x.txt", new Response(json, { status: 206, headers: { "content-type": "text/plain" } }), gzip),
+    finalize("/assets/x.json", Response.json(JSON.parse(json))),
     // q=0 means "not acceptable" (RFC 9110).
-    finalize("/api/sessions", Response.json(JSON.parse(json)), { "accept-encoding": "gzip;q=0, identity" }),
-    finalize("/api/sessions", Response.json(JSON.parse(json)), { "accept-encoding": "gzip; q=0.000" }),
-    finalize("/api/sessions", Response.json(JSON.parse(json)), { "accept-encoding": "x-gzipped" }),
+    finalize("/assets/x.json", Response.json(JSON.parse(json)), { "accept-encoding": "gzip;q=0, identity" }),
+    finalize("/assets/x.json", Response.json(JSON.parse(json)), { "accept-encoding": "gzip; q=0.000" }),
+    finalize("/assets/x.json", Response.json(JSON.parse(json)), { "accept-encoding": "x-gzipped" }),
   ];
   for (const response of skipped) assert.equal(response.headers.get("content-encoding"), null);
+});
+
+// As under Next: gzipping a 40 MB session read cost ~1 s per request on loopback. A reverse proxy can compress API traffic.
+test("API answers are never gzipped, whatever the client accepts", async () => {
+  const json = JSON.stringify({ text: "x".repeat(2048) });
+  for (const [pathname, response] of [
+    ["/api/sessions", Response.json(JSON.parse(json))],
+    ["/api/files/a.txt", new Response(json, { headers: { "content-type": "text/plain" } })],
+  ] as const) {
+    const answer = finalize(pathname, response, { "accept-encoding": "gzip, deflate, br" });
+    assert.equal(answer.headers.get("content-encoding"), null, pathname);
+    assert.equal(await answer.text(), json, pathname);
+  }
 });
 
 test("serveFile refuses traversal and sets the cache policy", async () => {
