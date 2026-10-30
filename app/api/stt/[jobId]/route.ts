@@ -1,8 +1,6 @@
 import { readSttConfig } from "@/lib/stt";
 import { closeSttJob, getSttJob, retrySttJob } from "@/lib/stt-jobs";
 
-export const dynamic = "force-dynamic";
-
 type Params = { params: Promise<{ jobId: string }> };
 
 const notFound = () =>

@@ -2,8 +2,6 @@ import { parseFormDataWithinLimit, RequestBodyTooLargeError } from "@/lib/bounde
 import { isSttAfter, MAX_STT_AUDIO_BYTES, MAX_STT_REQUEST_BYTES, readSttConfig } from "@/lib/stt";
 import { listSttJobs, startSttJob } from "@/lib/stt-jobs";
 
-export const dynamic = "force-dynamic";
-
 const MAX_SCOPE_LENGTH = 1024;
 
 /** GET /api/stt?scope=<draft key> — live jobs for that composer, newest first. */

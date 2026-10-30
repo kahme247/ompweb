@@ -25,14 +25,13 @@ export async function POST(request: Request) {
     return Response.json({ error: "Incorrect password" }, { status: 401 });
   }
 
-  const response = Response.json({ ok: true });
   const secure = new URL(request.url).protocol === "https:" || request.headers.get("x-forwarded-proto") === "https";
-  response.headers.append("Set-Cookie", new Bun.Cookie(OMP_WEB_SESSION_COOKIE, createWebSession(), {
+  const cookie = new Bun.Cookie(OMP_WEB_SESSION_COOKIE, createWebSession(), {
     httpOnly: true,
     secure,
     sameSite: "lax",
     maxAge: OMP_WEB_SESSION_MAX_AGE_SECONDS,
     path: "/",
-  }).serialize());
-  return response;
+  });
+  return Response.json({ ok: true }, { headers: { "set-cookie": cookie.serialize() } });
 }

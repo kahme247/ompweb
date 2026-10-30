@@ -2,8 +2,6 @@ import { apiErrorResponse, opErrorResponse, resolveSessionHostOr404 } from "@/li
 import { HostOpError } from "@/lib/hosts/link-protocol";
 import { isValidSubagentId } from "@/lib/hosts/session-ops";
 
-export const dynamic = "force-dynamic";
-
 /**
  * GET /api/sessions/[id]/subagents/[subagentId]?fromByte=N
  *

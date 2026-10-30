@@ -69,6 +69,8 @@ const { isPortAvailable } = require("./port-availability");
 const { terminateChildProcess, wireChildProcessLifecycle } = require("./process-lifecycle");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { getAccessibleAddresses, getBrowserUrl, formatAddressBanner, isLoopbackHost } = require("./network-addresses");
+// module.require: bin/ files add no new eslint-disable comments (see bin/bun-runtime.js).
+const { resolveBunBinary } = module.require("./bun-runtime");
 
 const UPDATE_PROTOCOL = 1;
 const UPDATE_MESSAGE = "ompweb:update-control";
@@ -134,8 +136,8 @@ function runRestartGate(startMessageType) {
   process.once("disconnect", () => stop());
   process.on("message", (message) => {
     if (!child) {
-      if (message?.type !== startMessageType || !Array.isArray(message.args)) return;
-      child = spawnChild(process.execPath, message.args, {
+      if (message?.type !== startMessageType || !Array.isArray(message.args) || message.args.length === 0) return;
+      child = spawnChild(message.args[0], message.args.slice(1), {
         cwd: process.cwd(),
         env: process.env,
         stdio: ["inherit", "pipe", "inherit", "ipc"],
@@ -154,22 +156,6 @@ function runRestartGate(startMessageType) {
   });
 }
 const pkgDir = path.join(__dirname, "..");
-const nextDir = path.join(pkgDir, ".next");
-
-function resolveNextBin(packageDirectory) {
-  try {
-    return require.resolve("next/dist/bin/next", { paths: [packageDirectory] });
-  } catch {
-    try {
-      const nextPackage = require.resolve("next/package.json", { paths: [packageDirectory] });
-      return path.join(path.dirname(nextPackage), "dist", "bin", "next");
-    } catch {
-      return path.join(packageDirectory, "node_modules", "next", "dist", "bin", "next");
-    }
-  }
-}
-
-const nextBin = resolveNextBin(pkgDir);
 
 const launchOptions = parseLaunchOptions();
 if (launchOptions.help || launchOptions.version) {
@@ -251,8 +237,10 @@ if (passwordHash !== undefined) {
 }
 const passwordEnabled = passwordHash !== undefined;
 
-
-const nextArgs = ["start", "-p", port, "-H", hostname];
+// Resolved at every spawn, so a restart after an update finds the updated Bun.
+function serverCommand() {
+  return [resolveBunBinary(pkgDir), path.join(pkgDir, "server", "main.ts"), "-p", String(port), "-H", String(hostname)];
+}
 const restartDescriptor = JSON.stringify({
   launcherPath: path.join(pkgDir, "bin", "omp-web.js"),
   hostname: String(hostname),
@@ -513,8 +501,8 @@ function trackServer(child) {
   return child;
 }
 
-function spawnServer() {
-  return trackServer(spawn(process.execPath, [nextBin, ...nextArgs], {
+function spawnServer(command) {
+  return trackServer(spawn(command[0], command.slice(1), {
     cwd: pkgDir,
     stdio: ["inherit", "pipe", "inherit", "ipc"],
     env: serverEnvironment(),
@@ -596,8 +584,9 @@ async function waitForRestartRequest(control) {
         && request.action === "start"
         && Number.isInteger(request.generation)
         && request.generation === currentGeneration + 1) {
+        const command = serverCommand();
         const child = trackServer(spawnRestartGate());
-        if (await acknowledgeAndStartRestart(control, request, child, [nextBin, ...nextArgs])) return;
+        if (await acknowledgeAndStartRestart(control, request, child, command)) return;
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
@@ -614,7 +603,7 @@ async function waitForRestartRequest(control) {
 }
 
 async function main() {
-  if (!fs.existsSync(nextDir) || !fs.existsSync(nextBin)) {
+  if (!fs.existsSync(path.join(pkgDir, "dist", "index.html")) || !fs.existsSync(path.join(pkgDir, "server", "main.ts"))) {
     console.error("Build artifacts not found. Please report this issue.");
     process.exit(1);
   }
@@ -632,7 +621,14 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  spawnServer();
+  let command;
+  try {
+    command = serverCommand();
+  } catch (error) {
+    console.error(error.message);
+    process.exit(1);
+  }
+  spawnServer(command);
 }
 
 if (require.main === module) {
@@ -646,7 +642,6 @@ module.exports = {
   acknowledgeAndStartRestart,
   acknowledgeRestartRequest,
   handleUpdateArm,
-  resolveNextBin,
   spawnRestartGate,
   startRestartGate,
 };

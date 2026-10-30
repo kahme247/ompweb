@@ -2,8 +2,6 @@ import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-fo
 import { clearHistory, listHistory, markHistoryRead, removeHistory } from "@/lib/notification-store";
 import { isRecord } from "@/lib/type-guards";
 
-export const dynamic = "force-dynamic";
-
 const MAX_BODY_BYTES = 32 * 1024;
 const MAX_IDS = 100;
 const MAX_ID_LENGTH = 256;

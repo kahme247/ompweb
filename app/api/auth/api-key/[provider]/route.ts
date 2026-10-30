@@ -1,8 +1,6 @@
 import { apiErrorResponse } from "@/lib/api-utils";
 import { type OmpLoginProvider, type OmpModel, runUtilityCommand } from "@/lib/omp/rpc-utility";
 
-export const dynamic = "force-dynamic";
-
 type Params = { params: Promise<{ provider: string }> };
 
 // omp stores API keys in its encrypted SQLite credential store (agent.db),

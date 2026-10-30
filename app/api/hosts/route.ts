@@ -2,8 +2,6 @@ import { closeHostLink, hostsSnapshot, listHosts, notifyHostsChange } from "@/li
 import { createHost, HostRegistryUnreadableError, revokeHost, UnknownHostError, updateHost } from "@/lib/hosts/registry";
 import { isRecord } from "@/lib/type-guards";
 
-export const dynamic = "force-dynamic";
-
 const MAX_LABEL_LENGTH = 100;
 const noStore = { "cache-control": "no-store" };
 

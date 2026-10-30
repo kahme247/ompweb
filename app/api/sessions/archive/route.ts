@@ -4,8 +4,6 @@ import { invalidateLocalSessionLists } from "@/lib/hosts/session-index";
 import { invalidateSessionListCache } from "@/lib/session-reader";
 import type { ArchivedSessionInfo } from "@/lib/types";
 
-export const runtime = "nodejs";
-
 export async function GET() {
   try {
     const archives = await listArchivedSessions();

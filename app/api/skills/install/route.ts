@@ -2,8 +2,6 @@ import { runNpx } from "@/lib/npx";
 import { createChildProcessEnvironment } from "@/lib/project-command-env";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 
-export const dynamic = "force-dynamic";
-
 const ANSI_RE = /\x1B\[[0-9;]*m/g;
 
 // POST /api/skills/install  body: { package: string; scope: "global" | "project"; cwd?: string }

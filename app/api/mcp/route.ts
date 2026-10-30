@@ -8,7 +8,6 @@ import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { redactMcpServer } from "@/lib/omp/mcp-config";
 
-export const dynamic = "force-dynamic";
 const MAX_MCP_REQUEST_BYTES = 1024 * 1024;
 
 function mcpErrorResponse(error: unknown) {

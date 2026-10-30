@@ -2,8 +2,6 @@ import { apiErrorResponse, opErrorResponse, resolveSessionHostOr404 } from "@/li
 import { HostOpError } from "@/lib/hosts/link-protocol";
 import { getRpcSession } from "@/lib/rpc-manager";
 
-export const dynamic = "force-dynamic";
-
 /**
  * GET /api/sessions/[id]/subagents
  *

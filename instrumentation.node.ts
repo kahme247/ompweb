@@ -81,6 +81,13 @@ export async function register(): Promise<void> {
     }
   })();
 
+  // Modules add SIGINT/SIGTERM cleanup listeners (lib/rpc-manager.ts), and any
+  // listener cancels the default exit: end the process the way a signal would
+  // (130/143, as `next start` did). Their "exit" listeners still run.
+  for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]] as const) {
+    process.on(signal, () => process.exit(code));
+  }
+
   // Crash/stall journal: a long-running server that dies or wedges while the
   // user is away leaves no trace in a terminal that no longer exists (CLI runs
   // are killed with their terminal; pages then show endless loading until the
@@ -102,12 +109,10 @@ export async function register(): Promise<void> {
   const describe = (value: unknown) => (value instanceof Error ? `${value.name}: ${value.message}\n${value.stack ?? ""}` : String(value));
   process.on("uncaughtException", (error) => {
     // A client disconnecting mid-request can surface here as an unhandled
-    // `Error: aborted` (ECONNRESET): for POSTs through proxy.ts, Next's body
-    // cloning drops the request's `error` listeners (replaceRequestBody,
-    // vercel/next.js#99278). That is a peer event, not a corrupted server:
-    // journal it (one line, no stack, so aborts cannot rotate real crash
-    // records out of the journal quickly) and keep serving, as Next's own
-    // handler does.
+    // `Error: aborted` (ECONNRESET) from a request stream nobody listens to.
+    // That is a peer event, not a corrupted server: journal it (one line, no
+    // stack, so aborts cannot rotate real crash records out of the journal
+    // quickly) and keep serving.
     if (error instanceof Error && error.message === "aborted" && (error as NodeJS.ErrnoException).code === "ECONNRESET") {
       appendDiag("client-abort", "uncaughtException Error: aborted (ECONNRESET)");
       return;

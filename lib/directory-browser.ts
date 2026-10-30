@@ -57,11 +57,7 @@ export async function resolveDirectory(directory: string): Promise<string> {
 }
 
 export async function listDirectories(directory: string): Promise<BrowsableDirectory[]> {
-  // Keep the directory argument opaque to Next's NFT build tracer. This is a
-  // user-selected path and must only be inspected at request time; tracing it
-  // as a static glob would walk the entire Windows profile during `next build`.
-  const readDirectory = Reflect.get(fsPromises, "readdir") as typeof fsPromises.readdir;
-  const entries = await readDirectory(directory, { withFileTypes: true });
+  const entries = await fsPromises.readdir(directory, { withFileTypes: true });
   // Skip broken, inaccessible, or non-directory symlinks.
   const candidates = await Promise.all(entries.map(async (entry) => {
     if (entry.isDirectory()) {

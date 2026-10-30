@@ -1,8 +1,6 @@
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { readModelRoles, writeModelRoles } from "@/lib/omp/model-roles";
 
-export const dynamic = "force-dynamic";
-
 export function GET() {
   try {
     return Response.json(readModelRoles());

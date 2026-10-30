@@ -2,8 +2,6 @@ import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-fo
 import { EventStreamConnection, getEventStreamConnection } from "@/lib/event-stream-hub";
 import { parseEventStreamRequest, UNKNOWN_CONNECTION_CODE } from "@/lib/event-stream-protocol";
 
-export const dynamic = "force-dynamic";
-
 const MAX_REQUEST_BYTES = 16 * 1024;
 
 // GET /api/events — the browser's single multiplexed live-event stream.

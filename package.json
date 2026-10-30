@@ -38,11 +38,11 @@
     "package.json"
   ],
   "scripts": {
-    "dev": "next dev -H 127.0.0.1 -p 30178",
-    "dev:lan": "next dev -H 0.0.0.0 -p 30178",
-    "build": "next build --webpack",
-    "start": "next start -H 127.0.0.1 -p 30177",
-    "start:lan": "next start -H 0.0.0.0 -p 30177",
+    "dev": "bun --hot server/dev.ts -H 127.0.0.1 -p 30178",
+    "dev:lan": "bun --hot server/dev.ts -H 0.0.0.0 -p 30178",
+    "build": "bun scripts/build-client.ts",
+    "start": "bun server/main.ts -H 127.0.0.1 -p 30177",
+    "start:lan": "bun server/main.ts -H 0.0.0.0 -p 30177",
     "test": "bun test --parallel --timeout 30000",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
@@ -68,7 +68,6 @@
     "mammoth": "^1.12.2",
     "mdast-util-find-and-replace": "^3.0.2",
     "mermaid": "^11.17.2",
-    "next": "16.3.4",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-markdown": "^10.1.0",
@@ -84,7 +83,6 @@
     "yaml": "^2"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.3.3",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.3",
     "@testing-library/user-event": "^14.6.7",
@@ -97,11 +95,11 @@
     "@types/web-push": "^3.6.4",
     "bun-plugin-tailwind": "0.1.2",
     "eslint": "^9",
-    "eslint-config-next": "16.3.4",
+    "eslint-plugin-react-hooks": "^7.0.1",
     "jsdom": "^29.1.1",
-    "postcss": "^8",
     "tailwindcss": "^4.3.3",
     "typescript": "^5",
+    "typescript-eslint": "^8.72.1",
     "typescript-language-server": "^6.0.0"
   }
 }

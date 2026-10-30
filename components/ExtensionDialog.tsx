@@ -105,7 +105,7 @@ function useMobileInputOpen(panelRef: RefObject<HTMLDivElement | null>, attached
     // area drops well below the tallest seen at this width, and closes when
     // the area grows well above its lowest since then. Comparing to
     // `innerHeight` cannot work: with `interactive-widget: resizes-content`
-    // (app/layout.tsx) the keyboard shrinks the layout viewport too.
+    // (app/index.html) the keyboard shrinks the layout viewport too.
     let width = window.innerWidth;
     let fullHeight = Math.max(visibleHeight(), window.innerHeight);
     // Lowest visible height while the keyboard is up; null while it is down.
