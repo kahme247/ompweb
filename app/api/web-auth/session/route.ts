@@ -1,4 +1,5 @@
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
+import { requestProtocol } from "@/lib/request-security";
 import {
   createWebSession,
   isValidWebPassword,
@@ -25,7 +26,7 @@ export async function POST(request: Request) {
     return Response.json({ error: "Incorrect password" }, { status: 401 });
   }
 
-  const secure = new URL(request.url).protocol === "https:" || request.headers.get("x-forwarded-proto") === "https";
+  const secure = requestProtocol(request) === "https:";
   const cookie = new Bun.Cookie(OMP_WEB_SESSION_COOKIE, createWebSession(), {
     httpOnly: true,
     secure,
