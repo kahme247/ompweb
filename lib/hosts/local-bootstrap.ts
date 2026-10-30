@@ -1,6 +1,6 @@
 // The web server's side of the local daemon link: keep the `local` host record
 // and the daemon's host.json in step. Pure Node: no Next or `@/` imports.
-import { isLoopbackHost, loginHost, readHostLogin } from "./daemon";
+import { isLoopbackHost, loginHost, readHostLogin } from "./host-login";
 import { hostForToken, LOCAL_HOST_ID, rotateLocalHostToken } from "./registry";
 
 /** Where the daemon dials this server, or why it cannot: the daemon uses plain http only on loopback, so a bind address elsewhere gets no link. */

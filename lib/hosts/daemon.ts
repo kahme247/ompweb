@@ -1,16 +1,17 @@
 // `ompweb host` (spec "Daemon"): links this machine to a main omp-web, runs
 // the omp children it asks for and answers host ops with this machine's files.
 // bin/omp-web-host.js loads it through jiti: no `next/*` or `@/` imports.
-import { lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { getOmpVersion } from "../omp/omp-cli";
-import { getAgentDir, getSessionsDir } from "../omp/paths";
+import { getSessionsDir } from "../omp/paths";
 import type { RpcTransport } from "../omp/rpc-transport";
 import { readSessionHeaderSync } from "../omp/session-files";
 import { ProjectPathError } from "../project-registry";
 import { isRecord } from "../type-guards";
+import { isLoopbackHost, readHostLogin } from "./host-login";
 import {
   decodeDown,
   encodeLine,
@@ -60,41 +61,11 @@ interface Queued {
   ch: string | null;
 }
 
-const loginFile = () => join(getAgentDir(), "omp-web", "host.json");
 const trimUrl = (url: string) => url.replace(/\/+$/, "");
 const reason = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const log = (message: string) => console.error(`[ompweb host] ${message}`);
 // 1 s doubling to 60 s; each wait varies ±20% so many hosts do not redial in step.
 const withJitter = (ms: number) => ms * (0.8 + Math.random() * 0.4);
-
-/** Save the server URL and host token, owner-only. The token never goes through argv. */
-export function loginHost(options: { url: string; token: string }): void {
-  const { protocol } = new URL(options.url);
-  if (protocol !== "https:" && protocol !== "http:") throw new Error("The server URL must start with https:// or http://");
-  const token = options.token.trim();
-  if (!token) throw new Error("The host token is empty");
-  const file = loginFile();
-  mkdirSync(dirname(file), { recursive: true });
-  // A fresh 0600 file renamed into place: the token never sits in a wider-mode file.
-  const temp = `${file}.${process.pid}.tmp`;
-  try {
-    writeFileSync(temp, `${JSON.stringify({ url: options.url.replace(/\/+$/, ""), token })}\n`, { mode: 0o600 });
-    renameSync(temp, file);
-  } finally {
-    rmSync(temp, { force: true });
-  }
-}
-
-/** What `loginHost` saved, or null before the first login. */
-export function readHostLogin(): { url: string; token: string } | null {
-  try {
-    const saved: unknown = JSON.parse(readFileSync(loginFile(), "utf8"));
-    if (isRecord(saved) && typeof saved.url === "string" && typeof saved.token === "string") return { url: saved.url, token: saved.token };
-  } catch {
-    // Missing or unreadable: not logged in.
-  }
-  return null;
-}
 
 /** realpath of the longest existing prefix; null when a component is a dangling symlink. */
 function canonicalPath(path: string): string | null {
@@ -122,8 +93,6 @@ function sessionsPath(value: unknown): string {
   }
   return target;
 }
-
-export const isLoopbackHost = (hostname: string) => hostname === "localhost" || hostname === "[::1]" || /^127(\.\d{1,3}){3}$/.test(hostname);
 
 async function* readLines(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
   const reader = body.getReader();

@@ -38,8 +38,8 @@ function readTokenLine() {
 
 async function main(argv) {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { createJiti } = require("jiti");
-  const { loginHost, readHostLogin, runHostDaemon } = await createJiti(__filename).import("../lib/hosts/daemon.ts");
+  const jiti = require("jiti").createJiti(__filename);
+  const { loginHost, readHostLogin } = await jiti.import("../lib/hosts/host-login.ts");
 
   if (argv[0] === "login") {
     const urlIndex = argv.indexOf("--url");
@@ -62,6 +62,7 @@ async function main(argv) {
     console.error("This machine is not linked yet. Start ompweb on this machine (it writes the link), or run `ompweb host login --url <server url>`.");
     return 1;
   }
+  const { runHostDaemon } = await jiti.import("../lib/hosts/daemon.ts");
   const daemon = runHostDaemon({ ...login, allowHttp: argv.includes("--allow-http") });
   for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, () => void daemon.stop());
   return daemon.done;

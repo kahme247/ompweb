@@ -109,12 +109,13 @@ lib/
   omp/                 shared omp foundations (paths, CLI probe, RpcProcess)
   hosts/               hosts and the local daemon (see "Remote hosts"); none of the daemon-loaded files may import `next/*` or `@/`
     host.ts            `Host` interface, `HostStatus`, `isLinkUp`
-    local-host.ts      `localHost`, the daemon's side: spawn + file checks on the daemon's machine; `resolveSpawnCwdResult`. Never imported by main (`no-direct-local.test.mjs`)
+    local-host.ts      `localHost`, the daemon's side: spawn + file checks on the daemon's machine; `resolveSpawnCwdResult`; `SESSION_EDIT_EXTENSION_PATH` (from the module's own location: the daemon runs in HOME). Never imported by main, nor is `daemon.ts` (`no-direct-local.test.mjs`)
     local-bootstrap.ts web server side of the local link: `localLinkUrl`, `ensureLocalHostLink` (the `local` record + `host.json`)
+    host-login.ts      `host.json` (`loginHost`, `readHostLogin`) and `isLoopbackHost`, shared by the daemon and local-bootstrap
     session-ops.ts     file-reading half of the session/project routes, run on the owning host's daemon (this machine's too)
     link-protocol.ts   link messages, codec, size limits, `HOST_OP_NAMES`, `SeqWindow`/`Outbox`
     hub.ts             main side: link GET/POST/blob handlers, `RemoteHost`, `getHost`, `listHosts`, adoption of live children (`reattach`/`adopt`), orphans, `freezeHostLinks`, `hosts` change events
-    daemon.ts          daemon side: `loginHost`, `readHostLogin`, `runHostDaemon` (reconnect, buffering, op dispatch, hello with each child's `{sessionId, cwd, pending}`)
+    daemon.ts          daemon side: `runHostDaemon` (reconnect, buffering, op dispatch, hello with each child's `{sessionId, cwd, pending}`; follows a `host.json` url or token change when a dial fails; loopback redials at most 3 s apart)
     pending-requests.ts daemon side: `PendingRequests`, a channel's still-open blocking requests and current session id for the hello
     registry.ts        `<agent dir>/omp-web/hosts.json`: create/update/revoke, token hashing and lookup; the `local` record (`rotateLocalHostToken`, `customLocalLabel`)
     session-index.ts   sessions and projects across hosts, cached per host; `hostForSessionId`, `sessionSpawnTarget`, `invalidateLocalSessionLists`
