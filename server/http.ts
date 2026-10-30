@@ -20,7 +20,7 @@ const FILE_RESPONSE_HEADERS = {
   "Referrer-Policy": "no-referrer",
   "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
 };
-const INDEX_CACHE = "private, no-cache, max-age=0, must-revalidate";
+export const INDEX_CACHE = "private, no-cache, max-age=0, must-revalidate";
 const COMPRESSIBLE = /^(text\/(?!event-stream)|application\/(json|javascript|manifest\+json|xml)|image\/svg\+xml)/;
 
 /** Security headers (overwriting the handler's), the index cache policy and gzip, on a fresh Response. */
