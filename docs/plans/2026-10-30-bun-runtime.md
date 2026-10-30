@@ -79,6 +79,8 @@
 | `web-push` (VAPID, aes128gcm) | No built-in; works under Bun (spike probe 5) | Keep |
 | `fs.accessSync` returns `null` on Bun | — (semantics bug) | try/catch |
 | `eslint-config-next` / `tsc` | Bun has no linter or typechecker | `typescript-eslint` + `eslint-plugin-react-hooks`; `tsc` with `@types/bun` |
+| `next/font/google` (4 families) | No Bun font loader. Bun's CSS bundler inlines every `url()` asset under 128 KiB as a base64 data URL and ignores `loader: { ".woff2": "file" }` (oven-sh/bun#24599) | Self-host `@fontsource-variable` woff2 (OFL) in `app/fonts/`; a `Bun.build` plugin (`onResolve`, `external: true`) keeps them as hashed `/assets/` URLs and `scripts/build-client.ts` copies them |
+| `next/dynamic`, `next/navigation` (client) | `React.lazy` + `Suspense`; History API with `useSyncExternalStore` (Bun has no client router) | Replace (`lib/dynamic.tsx`, `lib/navigation.ts`) |
 
 **Bun.SQL (async) vs bun:sqlite for the notification store — assessment.** `lib/notification-hub.ts` calls the store synchronously on hot paths:
 - `publishNotification` (sync, called from session event handling) runs `listDevices` and `recordHistory`;

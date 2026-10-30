@@ -1,41 +1,11 @@
 import type { Metadata, Viewport } from "next";
 import { headers } from "next/headers";
 import Script from "next/script";
-import { Geist, JetBrains_Mono, Noto_Sans_Mono, Source_Serif_4 } from "next/font/google";
 import { ThemeColor } from "@/hooks/useTheme";
 import { IosFocusZoomGuard } from "@/components/IosFocusZoomGuard";
 import { SIDEBAR_HISTORY_BRIDGE_SCRIPT } from "@/lib/sidebar-history-bridge";
 import { getInstallName } from "@/lib/install-name";
 import "./globals.css";
-
-const geist = Geist({
-  subsets: ["latin"],
-  variable: "--font-geist",
-  display: "swap",
-});
-
-const jetbrainsMono = JetBrains_Mono({
-  subsets: ["latin"],
-  weight: ["400", "500", "600"],
-  variable: "--font-jb-mono",
-  display: "swap",
-});
-
-const notoSansMono = Noto_Sans_Mono({
-  subsets: ["latin", "cyrillic"],
-  variable: "--font-noto-mono",
-  display: "swap",
-});
-
-// Display serif for the warm-humanistic heading voice. Source Serif 4 covers
-// latin; CJK uses a bundled Noto Serif SC subset declared in globals.css, not
-// next/font/google: Google Fonts sometimes serves it through extensionless
-// `/l/font?kit=` URLs that next/font cannot parse, which failed builds at random.
-const sourceSerif = Source_Serif_4({
-  subsets: ["latin"],
-  variable: "--font-source-serif",
-  display: "swap",
-});
 
 export async function generateMetadata(): Promise<Metadata> {
   const title = getInstallName(await headers());
@@ -70,7 +40,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" translate="no" className={`${geist.variable} ${jetbrainsMono.variable} ${notoSansMono.variable} ${sourceSerif.variable} notranslate`} suppressHydrationWarning>
+    <html lang="en" translate="no" className="notranslate" suppressHydrationWarning>
       <head>
         <link rel="manifest" href="/api/manifest" crossOrigin="use-credentials" />
         <ThemeColor />

@@ -4,6 +4,7 @@ import typescript from "eslint-config-next/typescript";
 const eslintConfig = [
   ...coreWebVitals,
   ...typescript,
+  { ignores: ["dist/**"] },
   {
     rules: {
       "react-hooks/immutability": "off",

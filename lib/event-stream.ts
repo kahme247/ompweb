@@ -37,7 +37,7 @@ interface WorkerPort {
 
 // Content-hashed at build time (next.config.ts) so a new worker version gets
 // a new SharedWorker instead of old tabs' copy speaking a stale protocol.
-const WORKER_URL = `/event-stream-worker.js?v=${process.env.NEXT_PUBLIC_EVENT_STREAM_WORKER_VERSION ?? "dev"}`;
+const WORKER_URL = `/event-stream-worker.js?v=${process.env.OMP_WEB_PUBLIC_EVENT_STREAM_WORKER_VERSION ?? "dev"}`;
 
 class Transport {
   private nextId = 1;

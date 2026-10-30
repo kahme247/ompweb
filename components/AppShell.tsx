@@ -1,8 +1,8 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo } from "react";
-import dynamic from "next/dynamic";
-import { useRouter, useSearchParams } from "next/navigation";
+import dynamic from "@/lib/dynamic";
+import { useRouter, useSearchParams } from "@/lib/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { useSidebarHistory } from "@/hooks/useSidebarHistory";
 import { useModalDialog } from "@/hooks/useModalDialog";
@@ -1223,7 +1223,7 @@ export function AppShell({ appName }: { appName: string }) {
     setSystemPrompt(null);
     setSystemPromptLoading(false);
     setActiveTopPanel(null);
-    router.replace("/", { scroll: false });
+    router.replace("/");
   }, [router, selectedSession]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
@@ -1255,7 +1255,7 @@ export function AppShell({ appName }: { appName: string }) {
     // Skip router.replace when restoring from URL — the param is already correct
     // and calling replace in production Next.js triggers a Suspense remount loop
     if (!isRestore) {
-      router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
+      router.replace(`?session=${encodeURIComponent(session.id)}`);
     }
   }, [router, isMobile, selectedSession?.id]);
 
@@ -1274,7 +1274,7 @@ export function AppShell({ appName }: { appName: string }) {
       setSidebarOpen(false);
       requestAnimationFrame(() => chatInputRef.current?.focus());
     }
-    router.replace("/", { scroll: false });
+    router.replace("/");
   }, [router, isMobile]);
 
   // ---- In-app Navigate back / forward over visited chat views ----
@@ -1399,7 +1399,7 @@ export function AppShell({ appName }: { appName: string }) {
     setSelectedSession(session);
     setRefreshKey((k) => k + 1);
     hydrateSelectedSession(session.id);
-    router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
+    router.replace(`?session=${encodeURIComponent(session.id)}`);
   }, [router, hydrateSelectedSession]);
 
   const handleSessionMoved = useCallback((oldId: string, newId: string) => {
@@ -1410,7 +1410,7 @@ export function AppShell({ appName }: { appName: string }) {
     hydrateSelectedSession(newId);
     // This is the same conversation. Preserve ChatWindow's run/edit fences
     // and its mounted composer, including unfinished attachments and audio.
-    router.replace(`?session=${encodeURIComponent(newId)}`, { scroll: false });
+    router.replace(`?session=${encodeURIComponent(newId)}`);
   }, [router, hydrateSelectedSession]);
 
   const handleAgentEnd = useCallback(() => {
@@ -1502,7 +1502,7 @@ export function AppShell({ appName }: { appName: string }) {
       path: "",
     }));
     hydrateSelectedSession(newSessionId);
-    router.replace(`?session=${encodeURIComponent(newSessionId)}`, { scroll: false });
+    router.replace(`?session=${encodeURIComponent(newSessionId)}`);
   }, [router, hydrateSelectedSession]);
 
   const handleSessionDeleted = useCallback((sessionId: string) => {
@@ -1519,7 +1519,7 @@ export function AppShell({ appName }: { appName: string }) {
       setBranchActiveLeafId(null);
       setSystemPrompt(null);
       setActiveTopPanel(null);
-      router.replace("/", { scroll: false });
+      router.replace("/");
     }
   }, [selectedSession, router]);
   const handleInitialRestoreDone = useCallback(() => {
@@ -1556,7 +1556,7 @@ export function AppShell({ appName }: { appName: string }) {
       if (attemptsLeft > 0) {
         archiveRetryTimerRef.current = setTimeout(() => void selectRestoredSession(attemptsLeft - 1), 300);
       } else if (activeSessionIdRef.current === sessionAtRestoreStart) {
-        router.replace(`?session=${encodeURIComponent(sessionId)}`, { scroll: false });
+        router.replace(`?session=${encodeURIComponent(sessionId)}`);
       }
     };
 
