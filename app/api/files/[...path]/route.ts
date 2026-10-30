@@ -418,10 +418,11 @@ export async function GET(
       return Response.json({ error: access.error, code: access.code }, { status: access.status });
     }
     const { filePath, stat } = access;
-    // A paused media element stops reading its stream, which Bun's idle timeout would cut.
+    // A paused media element stops reading its stream, which Bun's idle timeout would cut. Lifted once the stream exists.
     const stream = (contentType: string, asDownload = false) => {
+      const response = streamFile(filePath, stat, contentType, request.headers.get("range"), asDownload);
       disableIdleTimeout();
-      return streamFile(filePath, stat, contentType, request.headers.get("range"), asDownload);
+      return response;
     };
 
     if (type === "read") {
