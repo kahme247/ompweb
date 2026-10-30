@@ -157,6 +157,7 @@ function getAccessibleAddresses({ hostname, port, interfaces = os.networkInterfa
   return { entries };
 }
 
+/** @param {{ version?: string, entries?: { label: string, url: string }[], hint?: string, passwordEnabled?: boolean, isTTY?: boolean }} options */
 function formatAddressBanner({
   version = "0.0.0",
   entries = [],

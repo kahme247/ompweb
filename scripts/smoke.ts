@@ -1,14 +1,18 @@
-// `npm run smoke [-- --package <dir>]`: starts `node <dir>/bin/omp-web.js` on a free port with a throwaway HOME and
-// checks the shipped bundle, the SPA, a hashed asset, the API and the SSE stream, then stops it. <dir>: the repo root
-// (after `npm run build`) or a packed install. Prints one `ok <step>` / `FAIL <step>: <detail>` line per step.
+// `npm run smoke [-- --package <dir> | --binary <path>]`: starts ompweb (`node <dir>/bin/omp-web.js`, or the compiled
+// binary) on a free port with a throwaway HOME, then `ompweb host` from the same install, and checks the shipped
+// bundle, the SPA, a hashed asset, the API, a session listed through the daemon and the SSE stream, then stops both.
+// <dir>: the repo root (after `npm run build`) or a packed install; <path>: release/ompweb-<os>-<arch>/ompweb, whose
+// directory holds the static files. Prints one `ok <step>` / `FAIL <step>: <detail>` line per step.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
 
-const { values } = parseArgs({ args: Bun.argv.slice(2), options: { package: { type: "string" } } });
-const dir = path.resolve(values.package ?? path.join(import.meta.dir, ".."));
+const { values } = parseArgs({ args: Bun.argv.slice(2), options: { package: { type: "string" }, binary: { type: "string" } } });
+const binary = values.binary && path.resolve(values.binary);
+const dir = binary ? path.dirname(binary) : path.resolve(values.package ?? path.join(import.meta.dir, ".."));
+const ompweb = binary ? [binary] : ["node", path.join(dir, "bin", "omp-web.js")];
 
 let failed = false;
 async function step(name: string, run: () => unknown): Promise<boolean> {
@@ -62,6 +66,16 @@ const temp = mkdtempSync(path.join(os.tmpdir(), "ompweb-smoke-"));
 const home = path.join(temp, "home");
 const agentDir = path.join(home, ".omp", "agent");
 mkdirSync(agentDir, { recursive: true });
+// The daemon lists it: its id must be a UUID, and its cwd must exist.
+const SESSION_ID = "5a0c0e5e-0000-4000-8000-000000000001";
+const projectDir = path.join(temp, "project");
+mkdirSync(projectDir);
+mkdirSync(path.join(agentDir, "sessions", "-project"), { recursive: true });
+writeFileSync(path.join(agentDir, "sessions", "-project", `2026-01-01_${SESSION_ID}.jsonl`), [
+  { type: "session", version: 3, id: SESSION_ID, cwd: projectDir, timestamp: "2026-01-01T00:00:00.000Z" },
+  { type: "message", id: "m0", parentId: null, timestamp: "2026-01-01T00:00:01.000Z", message: { role: "user", content: "hello" } },
+  { type: "message", id: "m1", parentId: "m0", timestamp: "2026-01-01T00:00:02.000Z", message: { role: "assistant", content: [{ type: "text", text: "hi" }] } },
+].map((line) => `${JSON.stringify(line)}\n`).join(""));
 // USERPROFILE: os.homedir() on Windows, so the real ~/.omp stays untouched there too.
 const env: Record<string, string | undefined> = {
   ...process.env,
@@ -74,10 +88,15 @@ for (const name of ["OMP_WEB_PASSWORD", "OMP_WEB_PASSWORD_HASH"]) delete env[nam
 
 let log = "";
 let launcher: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined;
+let daemon: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined;
+const stop = (child: Bun.Subprocess) => {
+  if (process.platform === "win32") Bun.spawnSync(["taskkill", "/pid", String(child.pid), "/t", "/f"]);
+  else child.kill("SIGTERM");
+};
 try {
   const ready = Promise.withResolvers<void>();
   const started = await step(`launcher prints Ready on port ${port}`, async () => {
-    const child = Bun.spawn(["node", path.join(dir, "bin", "omp-web.js"), "-p", String(port), "-H", "127.0.0.1", "--no-open"], {
+    const child = Bun.spawn([...ompweb, "-p", String(port), "-H", "127.0.0.1", "--no-open"], {
       env,
       stdin: "ignore",
       stdout: "pipe",
@@ -127,6 +146,30 @@ try {
       await response.json();
     });
 
+    await step("`ompweb host` links this machine", async () => {
+      const child = Bun.spawn([...ompweb, "host"], { env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+      daemon = child;
+      void readText(child.stdout, (text) => { log += text; });
+      void readText(child.stderr, (text) => { log += text; });
+      const deadline = Date.now() + 30_000;
+      for (;;) {
+        const { hosts } = await (await fetch(`${base}/api/hosts`)).json() as { hosts: { id: string; status: string }[] };
+        // Linked: "omp-missing" rather than "online", as OMP_WEB_OMP_BIN names no omp.
+        if (hosts.find((host) => host.id === "local")?.status === "omp-missing") break;
+        assert(child.exitCode === null, `ompweb host exited with ${child.exitCode}`);
+        assert(Date.now() < deadline, "this machine is not linked 30 s after `ompweb host` started");
+        await Bun.sleep(200);
+      }
+    });
+
+    // Sessions list only through the daemon, so this also proves the server ran as production: it wrote the link.
+    await step("GET /api/sessions lists the session through the daemon", async () => {
+      const response = await fetch(`${base}/api/sessions`);
+      assert(response.status === 200, `status ${response.status}`);
+      const { sessions } = await response.json() as { sessions: { id: string }[] };
+      assert(sessions.some((session) => session.id === SESSION_ID), `listed: ${sessions.map((session) => session.id).join(", ") || "none"}`);
+    });
+
     await step("GET /api/events delivers an event and stays open for 12 s", async () => {
       const abort = new AbortController();
       try {
@@ -150,11 +193,18 @@ try {
     });
   }
 } finally {
+  if (daemon) {
+    const child = daemon;
+    await step("`ompweb host` stops", async () => {
+      stop(child);
+      const outcome = await Promise.race([child.exited, Bun.sleep(15_000).then(() => "running")]);
+      assert(outcome !== "running", "ompweb host still runs 15 s after the stop");
+    });
+  }
   if (launcher) {
     const child = launcher;
     await step("launcher stops and the port closes", async () => {
-      if (process.platform === "win32") Bun.spawnSync(["taskkill", "/pid", String(child.pid), "/t", "/f"]);
-      else child.kill("SIGTERM");
+      stop(child);
       const deadline = Date.now() + 15_000;
       while (await portOpen(port)) {
         assert(Date.now() < deadline, `port ${port} still accepts connections 15 s after the stop`);
@@ -165,5 +215,5 @@ try {
   await step("temp dirs removed", () => rmSync(temp, { recursive: true, force: true }));
 }
 
-if (failed && log) console.log(`--- launcher output ---\n${log}`);
+if (failed && log) console.log(`--- ompweb output ---\n${log}`);
 process.exit(failed ? 1 : 0);
