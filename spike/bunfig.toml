@@ -1,0 +1,3 @@
+[serve.static]
+plugins = ["/tmp/bunspike/deps/node_modules/bun-plugin-tailwind/index.mjs", "./shim-plugin.ts"]
+env = "NEXT_PUBLIC_*"
