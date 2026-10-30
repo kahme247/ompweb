@@ -32,7 +32,6 @@ export function finalizeResponse(request: Request, response: Response): Response
   }
   if (pathname === "/" || pathname === "/login") headers.set("Cache-Control", INDEX_CACHE);
   let body = response.body;
-  const length = headers.get("content-length");
   if (
     body
     && request.headers.get("accept-encoding")?.includes("gzip")
@@ -40,7 +39,6 @@ export function finalizeResponse(request: Request, response: Response): Response
     && !headers.has("content-encoding")
     && !headers.has("content-range")
     && COMPRESSIBLE.test(headers.get("content-type") ?? "")
-    && (length === null || Number(length) >= 1024)
   ) {
     body = body.pipeThrough(new CompressionStream("gzip"));
     headers.delete("content-length");

@@ -48,7 +48,7 @@ test("a config header overwrites the handler's, and redirects pass", () => {
   assert.equal(redirect.headers.get("cache-control"), "private, no-cache, max-age=0, must-revalidate");
 });
 
-test("gzip applies to large compressible 200 responses only", async () => {
+test("gzip applies to compressible 200 responses only", async () => {
   const gzip = { "accept-encoding": "gzip, deflate, br" };
   const json = JSON.stringify({ text: "x".repeat(2048) });
   const compressed = finalize("/api/sessions", Response.json(JSON.parse(json)), gzip);
@@ -60,7 +60,6 @@ test("gzip applies to large compressible 200 responses only", async () => {
   const skipped = [
     finalize("/api/events", new Response(json, { headers: { "content-type": "text/event-stream" } }), gzip),
     finalize("/api/files/a.txt", new Response(json, { status: 206, headers: { "content-type": "text/plain" } }), gzip),
-    finalize("/api/sessions", new Response("x".repeat(500), { headers: { "content-type": "application/json", "content-length": "500" } }), gzip),
     finalize("/api/sessions", Response.json(JSON.parse(json))),
   ];
   for (const response of skipped) assert.equal(response.headers.get("content-encoding"), null);
