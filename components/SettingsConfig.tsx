@@ -1822,7 +1822,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                       ) : (
                         <>
                           <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
-                            {t("settingsConfig.runAppUpdateCommand")}
+                            {t(appUpdate.installMethod === "binary" ? "settingsConfig.downloadAppUpdate" : "settingsConfig.runAppUpdateCommand")}
                           </div>
                           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                             <code style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent)", wordBreak: "break-all" }}>{appUpdate.updateCommand || "npm install -g @kahme247/ompweb"}</code>
