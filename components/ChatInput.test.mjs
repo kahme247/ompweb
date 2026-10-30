@@ -2,15 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createJiti } from "jiti";
 import { JSDOM } from "jsdom";
 
-const jiti = createJiti(import.meta.url, {
-  jsx: { runtime: "automatic" },
-  tsconfigPaths: true,
-});
-const { ChatInput, ModelErrorBanner, filterModelOptions } = await jiti.import("./ChatInput.tsx");
-const { setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+const { ChatInput, ModelErrorBanner, filterModelOptions } = await import("./ChatInput.tsx");
+const { setDraft, clearDraft } = await import("@/lib/draft-store");
 
 test("provider-defined reasoning levels appear once in the trigger", () => {
   for (const thinkingLevel of ["ultra", "ultrathink-extended", "constructor"]) {
@@ -299,7 +294,7 @@ test("renders multiple queued prompts with count and expand action", () => {
 
 
 test("nested model picker groups by provider and pins the current provider first", async () => {
-  const { groupModelOptionsByProvider, orderProviderGroups } = await jiti.import("./ChatInput-model-picker.tsx");
+  const { groupModelOptionsByProvider, orderProviderGroups } = await import("./ChatInput-model-picker.tsx");
   const options = [
     { provider: "anthropic", modelId: "claude", name: "Claude" },
     { provider: "openai", modelId: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
@@ -315,7 +310,7 @@ test("nested model picker groups by provider and pins the current provider first
 });
 
 test("model picker panel renders providers rail, models pane, and Add Providers", async () => {
-  const { ModelPickerPanel } = await jiti.import("./ChatInput-model-picker.tsx");
+  const { ModelPickerPanel } = await import("./ChatInput-model-picker.tsx");
   const html = renderToStaticMarkup(
     React.createElement(ModelPickerPanel, {
       modelOptions: [

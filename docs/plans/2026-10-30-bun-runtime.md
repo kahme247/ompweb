@@ -70,6 +70,7 @@
 | jiti in tests | `bun test` loads TS and tsconfig paths natively; `mock.module`; `?fresh=N` imports | Replace |
 | jiti in `bin/omp-web-host.js`, `bin/omp-web-tray.js` | Running them under Bun would drop jiti, but every supervisor-started daemon would need a Node→Bun hop (SIGTERM must reach the daemon) | Keep (Node) |
 | `node:test` / `node:assert` imports in tests | `bun test` runs them as they are | Keep; use `bun:test` only for `mock.module`/`spyOn` |
+| `t.mock.method(fs \| childProcess, …)` + `syncBuiltinESMExports()` | `mock.module("node:fs", …)` swaps the builtin for every importer, but `mock.restore()` does not undo it | `bun:test` `mock.module` via `tests/mock-builtin.mjs`, which re-registers the real exports in `t.after` |
 | `jsdom` | No DOM built into Bun | Keep |
 | `@tailwindcss/postcss` + `postcss` | Bun CSS bundler + official `bun-plugin-tailwind` | Replace |
 | `NextRequest.cookies` / `NextResponse.cookies` | `Bun.CookieMap` / `Bun.Cookie` | Replace |

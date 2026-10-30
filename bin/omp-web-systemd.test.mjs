@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+// The scripts under test run on Node in production. Some tests narrow PATH, so resolve it up front.
+const NODE = Bun.which("node");
 const require = createRequire(import.meta.url);
 const {
   buildHostUnit,
@@ -196,7 +198,7 @@ test("install creates the env file and unit with LAN settings", { skip: process.
     delete childEnv.PI_CODING_AGENT_DIR;
     delete childEnv.OMP_WEB_OMP_BIN;
 
-    const result = spawnSync(process.execPath, [path.join(process.cwd(), "bin", "omp-web-systemd.js"), "install", "--no-autostart"], {
+    const result = spawnSync(NODE, [path.join(process.cwd(), "bin", "omp-web-systemd.js"), "install", "--no-autostart"], {
       env: childEnv,
       encoding: "utf8",
     });
@@ -253,7 +255,7 @@ test("install writes a pre-hashed password unchanged and rejects a broken one", 
     delete base.OMP_WEB_PASSWORD;
 
     const provided = hashPassword("preset-password");
-    const ok = spawnSync(process.execPath, [path.join(process.cwd(), "bin", "omp-web-systemd.js"), "install", "--no-autostart"], {
+    const ok = spawnSync(NODE, [path.join(process.cwd(), "bin", "omp-web-systemd.js"), "install", "--no-autostart"], {
       env: { ...base, OMP_WEB_PASSWORD_HASH: provided },
       encoding: "utf8",
     });
@@ -263,7 +265,7 @@ test("install writes a pre-hashed password unchanged and rejects a broken one", 
       provided,
     );
 
-    const broken = spawnSync(process.execPath, [path.join(process.cwd(), "bin", "omp-web-systemd.js"), "install", "--no-autostart"], {
+    const broken = spawnSync(NODE, [path.join(process.cwd(), "bin", "omp-web-systemd.js"), "install", "--no-autostart"], {
       env: { ...base, OMP_WEB_PASSWORD_HASH: "definitely-not-a-hash" },
       encoding: "utf8",
     });
@@ -293,7 +295,7 @@ test("install fails loudly when the omp launcher interpreter is missing", () => 
       OMP_WEB_OMP_BIN: path.join(binDir, "omp"),
       PORT: "40123",
     };
-    const result = spawnSync(process.execPath, [path.join(process.cwd(), "bin", "omp-web-systemd.js"), "install", "--no-autostart"], {
+    const result = spawnSync(NODE, [path.join(process.cwd(), "bin", "omp-web-systemd.js"), "install", "--no-autostart"], {
       env: childEnv,
       encoding: "utf8",
     });
@@ -306,7 +308,7 @@ test("install fails loudly when the omp launcher interpreter is missing", () => 
 });
 
 test("main ompweb bin forwards the systemd subcommand", () => {
-  const result = spawnSync(process.execPath, [path.join(process.cwd(), "bin", "omp-web.js"), "systemd", "--version"], {
+  const result = spawnSync(NODE, [path.join(process.cwd(), "bin", "omp-web.js"), "systemd", "--version"], {
     encoding: "utf8",
   });
   assert.equal(result.status, 0, result.stderr);
@@ -340,7 +342,7 @@ function runWithFakeSystemctl(command, { hostUnit = true, active = false, dir: s
   );
   const env = { ...process.env, HOME: home, PATH: binDir, OMP_WEB_SYSTEMD_BIN: fakeOmpweb, OMP_WEB_DISABLE_AUTOUPDATE: "1" };
   for (const key of ["PI_CODING_AGENT_DIR", "OMP_WEB_OMP_BIN", "OMP_WEB_PASSWORD"]) delete env[key];
-  const result = spawnSync(process.execPath, [path.join(process.cwd(), "bin", "omp-web-systemd.js"), command], { env, encoding: "utf8" });
+  const result = spawnSync(NODE, [path.join(process.cwd(), "bin", "omp-web-systemd.js"), command], { env, encoding: "utf8" });
   const calls = existsSync(log) ? readFileSync(log, "utf8").trim().split("\n") : [];
   rmSync(log, { force: true });
   return { result, calls, dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };

@@ -24,7 +24,7 @@ async function launch(env) {
     await mkdir(nextBin, { recursive: true });
     const dump = join(pkg, "server-env.json");
     await writeFile(join(nextBin, "next"), `require("fs").writeFileSync(${JSON.stringify(dump)}, JSON.stringify(process.env));`);
-    const result = spawnSync(process.execPath, [join(pkg, "bin", "omp-web.js"), "--no-open", "-p", "0"], {
+    const result = spawnSync("node", [join(pkg, "bin", "omp-web.js"), "--no-open", "-p", "0"], {
       env: { PATH: process.env.PATH, HOME: pkg, ...env },
       encoding: "utf8",
       timeout: 20_000,

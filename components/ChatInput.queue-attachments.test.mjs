@@ -2,13 +2,11 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
 import React, { act } from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react/pure.js";
-import userEvent from "@testing-library/user-event";
-import { createJiti } from "jiti";
+const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react/pure.js");
+const { default: userEvent } = await import("@testing-library/user-event");
 
-const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
-const { ChatInput } = await jiti.import("./ChatInput.tsx");
-const { clearDraft, getDraft, recoverDraft, setDraft } = await jiti.import("@/lib/draft-store");
+const { ChatInput } = await import("./ChatInput.tsx");
+const { clearDraft, getDraft, recoverDraft, setDraft } = await import("@/lib/draft-store");
 
 const KEY = "queue-attachments";
 // 1x1 transparent PNG.
@@ -159,7 +157,7 @@ test("a stored Steer preference turns the primary button into Steer, which steer
 });
 
 test("a queued web slash command is expanded and keeps the attachments", async () => {
-  const { expandWebSlashCommand } = await jiti.import("@/lib/web-slash-commands");
+  const { expandWebSlashCommand } = await import("@/lib/web-slash-commands");
   window.HTMLElement.prototype.scrollIntoView = () => {};
   const user = userEvent.setup();
   const calls = await renderRunningWithAttachments();
@@ -190,7 +188,7 @@ for (const { label, fill, oversized } of [
   test(`merged text drafts past picker count and byte budgets survive persistence and remount (${label})`, async () => {
     const {
       MAX_ATTACHED_TEXT_FILES, MAX_TOTAL_ATTACHED_TEXT_BYTES, selectTextAttachments,
-    } = await jiti.import("@/lib/chat-attachments");
+    } = await import("@/lib/chat-attachments");
     const count = Math.floor(MAX_ATTACHED_TEXT_FILES / 2) + 1;
     const fileBytes = Math.floor(MAX_TOTAL_ATTACHED_TEXT_BYTES * 0.75 / count);
     const makeFiles = (origin) => Array.from({ length: count }, (_, index) => {
@@ -269,8 +267,8 @@ test("malformed recovered text files are filtered without discarding valid neigh
 });
 
 test("recovered images past the attachment cap all stay in the composer", async () => {
-  const { MAX_ATTACHED_IMAGES } = await jiti.import("@/lib/image-attachments");
-  const { recoverDraft } = await jiti.import("@/lib/draft-store");
+  const { MAX_ATTACHED_IMAGES } = await import("@/lib/image-attachments");
+  const { recoverDraft } = await import("@/lib/draft-store");
   await renderRunningWithAttachments();
   const recovered = Array.from({ length: MAX_ATTACHED_IMAGES }, () => ({ data: PNG, mimeType: "image/png" }));
   await act(async () => { recoverDraft(KEY, { text: "", images: recovered }); });
@@ -742,8 +740,8 @@ for (const [responseBeforeCommit, movedBeforeNavigation] of [[false, false], [fa
 test("held text and image reads finish exactly once in the confirmed Edit target, persist and send there", async (t) => {
   const targetKey = `${KEY}:held-reads-target`;
   t.after(() => clearDraft(targetKey));
-  const { MAX_ATTACHED_IMAGES } = await jiti.import("@/lib/image-attachments");
-  const { MAX_ATTACHED_TEXT_FILES } = await jiti.import("@/lib/chat-attachments");
+  const { MAX_ATTACHED_IMAGES } = await import("@/lib/image-attachments");
+  const { MAX_ATTACHED_TEXT_FILES } = await import("@/lib/chat-attachments");
   const user = userEvent.setup();
   const { calls, ref, rerender } = await renderWithAttachments({ isStreaming: false, queueCallbacks: false });
   await user.type(screen.getByRole("textbox"), "source draft");
@@ -835,8 +833,8 @@ for (const includeRecovery of [false, true]) {
   test(`same-batch reads and claimed transcript survive Edit exactly once${includeRecovery ? " with source recovery already transferred" : ""}`, async (t) => {
     const targetKey = `${KEY}:same-batch-${includeRecovery}`;
     t.after(() => clearDraft(targetKey));
-    const { MAX_ATTACHED_IMAGES } = await jiti.import("@/lib/image-attachments");
-    const { MAX_ATTACHED_TEXT_FILES } = await jiti.import("@/lib/chat-attachments");
+    const { MAX_ATTACHED_IMAGES } = await import("@/lib/image-attachments");
+    const { MAX_ATTACHED_TEXT_FILES } = await import("@/lib/chat-attachments");
     const dictation = installPendingDictation({ holdClaim: true });
     t.after(() => dictation.releaseClaim());
     const user = userEvent.setup();
@@ -851,6 +849,7 @@ for (const includeRecovery of [false, true]) {
 
     let releaseText;
     let releaseImage;
+    // Bun appends ";charset=utf-8" to a text File's type; the draft must keep whatever type the file reports.
     const text = new File(["boundary text"], "boundary.txt", { type: "text/plain" });
     const image = new File([Buffer.from(PNG, "base64")], "boundary.png", { type: "image/png" });
     override(text, "text", () => new Promise((resolve) => { releaseText = resolve; }));
@@ -905,7 +904,7 @@ for (const includeRecovery of [false, true]) {
     const expected = {
       value: `${sourceDraft.value} transcribed words\n\nolder target draft`,
       images: [...transferred.images, { data: PNG, mimeType: "image/png" }],
-      files: [...transferred.files, { name: "boundary.txt", mimeType: "text/plain", content: "boundary text", size: text.size }],
+      files: [...transferred.files, { name: "boundary.txt", mimeType: text.type, content: "boundary text", size: text.size }],
     };
     assert.equal(screen.getByRole("textbox").value, expected.value, "new source text wins without overwriting older target text");
     assert.deepEqual(getDraft(targetKey), expected, "only completions missing from the source transfer are added");

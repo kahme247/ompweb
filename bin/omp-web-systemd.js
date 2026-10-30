@@ -78,7 +78,8 @@ function fail(message) {
 
 function isExecutableFile(candidate) {
   try {
-    return fs.statSync(candidate).isFile() && fs.accessSync(candidate, fs.constants.X_OK) === undefined;
+    fs.accessSync(candidate, fs.constants.X_OK);
+    return fs.statSync(candidate).isFile();
   } catch {
     return false;
   }
