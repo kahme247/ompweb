@@ -156,6 +156,28 @@ test("each route answers under its own path with decoded params, and the manifes
   assert.equal((await fetch(url("/api/manifest"))).status, 401);
 });
 
+test("dev pages render when HTTP_PROXY points nowhere", async (t) => {
+  // The dev shell comes from Bun's HTML bundle over loopback, which must not go through the proxy.
+  const saved = Object.fromEntries(["HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"].map((name) => [name, process.env[name]]));
+  writeFileSync(path.join(root, "dev.html"), "<!doctype html><html><head><title>omp web</title></head><body></body></html>");
+  // A file written at run time, so no static import; Bun turns it into an HTML bundle as dev.ts's import does.
+  const { default: html } = await import(path.join(root, "dev.html"));
+  const dev = startServer({ port: 0, hostname: "127.0.0.1", dev: true, root, html });
+  Object.assign(process.env, { HTTP_PROXY: "http://127.0.0.1:9", http_proxy: "http://127.0.0.1:9" });
+  delete process.env.NO_PROXY;
+  delete process.env.no_proxy;
+  t.after(async () => {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    await dev.stop(true);
+  });
+  const page = await fetch(new URL("/", dev.url), { proxy: false });
+  assert.equal(page.status, 200);
+  assert.match(await page.text(), /<link rel="manifest" href="\/api\/manifest"/);
+});
+
 /** Sends `head` (request line and headers) and nothing more; resolves once the server hangs up. */
 function stall(head: string): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
