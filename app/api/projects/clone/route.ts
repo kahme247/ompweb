@@ -61,7 +61,7 @@ function runGitClone(url: string, target: string, signal: AbortSignal, onOutput:
 // Clones `url` into `<parent>/<repo name>` and streams NDJSON frames:
 // output chunks, then exactly one of done / cancelled / error. The target is
 // removed on failure or cancellation (DELETE, or the client disconnecting).
-export async function POST(req: Request) {
+export async function POST(req: Request, { disableIdleTimeout }: { disableIdleTimeout: () => void }) {
   let body: { id?: unknown; parent?: unknown; url?: unknown };
   try {
     body = await req.json();
@@ -97,6 +97,7 @@ export async function POST(req: Request) {
     }
     return apiErrorResponse(error);
   }
+  disableIdleTimeout();
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     async start(streamController) {

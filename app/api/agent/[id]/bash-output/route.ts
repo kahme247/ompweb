@@ -16,7 +16,7 @@ import { isBashOutputPathReferencedBySession } from "@/lib/session-file-referenc
 // path — a path alone is never enough.
 export async function GET(
   _req: Request,
-  { params }: { params: Promise<{ id: string }> }
+  { params, disableIdleTimeout }: { params: Promise<{ id: string }>; disableIdleTimeout: () => void }
 ) {
   const { id } = await params;
   let path: string | null = null;
@@ -46,6 +46,7 @@ export async function GET(
     if (download) {
       const { handle } = await openRegularFileNoFollow(resolved);
       const stream = Readable.toWeb(handle.createReadStream()) as unknown as ReadableStream<Uint8Array>;
+      disableIdleTimeout();
       return new Response(stream, {
         headers: {
           "Content-Type": "text/plain; charset=utf-8",

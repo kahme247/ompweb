@@ -64,8 +64,9 @@ export async function POST(
 // GET /api/auth/login/[provider] — SSE stream for the login flow
 export async function GET(
   req: Request,
-  { params }: { params: Promise<{ provider: string }> }
+  { params, disableIdleTimeout }: { params: Promise<{ provider: string }>; disableIdleTimeout: () => void }
 ) {
+  disableIdleTimeout();
   const { provider } = await params;
   const token = `${provider}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const registry = getLoginRegistry();
@@ -83,7 +84,7 @@ export async function GET(
         }
       };
       // OAuth flows sit idle while the user is in the browser; keep the SSE
-      // connection alive past proxy/Next idle timeouts.
+      // connection alive past reverse-proxy idle timeouts.
       const heartbeat = setInterval(() => {
         if (closed) return;
         try {

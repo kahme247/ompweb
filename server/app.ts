@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { proxy, UNGATED } from "@/proxy";
+import { proxy } from "@/proxy";
 import { finalizeResponse, INDEX_CACHE, renderIndex, serveFile } from "./http";
 import { dispatch, ROUTE_MODULES, routePattern } from "./routes";
 
@@ -14,6 +14,8 @@ export function parseListenArgs(argv: string[], defaultPort: number): { port: nu
 }
 
 const text = (body: string, status: number) => new Response(body, { status, headers: { "content-type": "text/plain; charset=utf-8" } });
+// Seconds; Bun's default, passed explicitly because handle() puts it back.
+const IDLE_TIMEOUT = 10;
 
 function decodable(pathname: string): boolean {
   try {
@@ -26,10 +28,17 @@ function decodable(pathname: string): boolean {
 
 /**
  * The gate, then the 400 for malformed `%` encoding, then `respond`; every answer but a 400 for an unparsable URL goes
- * through finalizeResponse. A request past the gate may stay open without traffic (SSE, the clone/bash-output/search
- * streams): Bun's idle timeout is switched off for it alone, so no unauthenticated caller can hold a socket open.
+ * through finalizeResponse. Bun's idle timeout also cuts a handler that is still working, so an authenticated API
+ * request runs without it. The setting outlives the response on a keep-alive socket, so it is put back once the
+ * handler returns, unless the handler keeps its response open (a stream) with `disableIdleTimeout`. Public requests
+ * keep it unless their handler lifts it (the host link, once its bearer token checks out), so no unauthenticated
+ * caller can hold a socket open.
  */
-async function handle(request: Request, server: Bun.Server<undefined>, respond: () => Response | Promise<Response>): Promise<Response> {
+async function handle(
+  request: Request,
+  server: Bun.Server<undefined>,
+  respond: (disableIdleTimeout: () => void) => Response | Promise<Response>,
+): Promise<Response> {
   let pathname: string;
   try {
     pathname = new URL(request.url).pathname;
@@ -38,12 +47,16 @@ async function handle(request: Request, server: Bun.Server<undefined>, respond: 
     return text("Bad Request", 400);
   }
   const gate = proxy(request);
-  // server.timeout(request, 0) outlives the response on a keep-alive socket, so public paths (UNGATED, the sign-in
-  // page and route) keep the timeout; the host link switches it off itself once its bearer token checks out.
-  if (gate === null && pathname.startsWith("/api/") && !UNGATED.test(pathname) && pathname !== "/api/web-auth/session") {
+  if (gate instanceof Response) return finalizeResponse(request, gate);
+  if (!decodable(pathname)) return finalizeResponse(request, text("Bad Request", 400));
+  const lifted = gate === "authenticated" && pathname.startsWith("/api/");
+  if (lifted) server.timeout(request, 0);
+  let keepOpen = false;
+  const response = await respond(() => {
+    keepOpen = true;
     server.timeout(request, 0);
-  }
-  const response = gate ?? (decodable(pathname) ? await respond() : text("Bad Request", 400));
+  });
+  if (lifted && !keepOpen) server.timeout(request, IDLE_TIMEOUT);
   return finalizeResponse(request, response);
 }
 
@@ -68,7 +81,7 @@ export function startServer(options: { port: number; hostname: string; dev: bool
   for (const [key, mod] of Object.entries(ROUTE_MODULES)) {
     const { pattern, rest } = routePattern(key);
     const matcher = new URLPattern({ pathname: pattern });
-    routes[pattern] = (request, server) => handle(request, server, () => {
+    routes[pattern] = (request, server) => handle(request, server, (disableIdleTimeout) => {
       // Bun's router matched the raw path, but the gate and the handler read request.url, where `..` and `%2e%2e`
       // are resolved. Answer only when that path is still this route, so no gated route runs under an ungated path.
       const { pathname } = new URL(request.url);
@@ -79,7 +92,7 @@ export function startServer(options: { port: number; hostname: string; dev: bool
         if (name !== "0" && value !== undefined) params[name] = decodeURIComponent(value);
       }
       if (rest) params[rest.name] = pathname.split("/").slice(rest.index).filter(Boolean).map(decodeURIComponent);
-      return dispatch(mod, request, params, () => server.timeout(request, 0));
+      return dispatch(mod, request, params, disableIdleTimeout);
     });
   }
   if (html) routes[DEV_INDEX] = html;
@@ -88,6 +101,7 @@ export function startServer(options: { port: number; hostname: string; dev: bool
     port: options.port,
     hostname: options.hostname,
     development: dev ? { hmr: true, console: true } : false,
+    idleTimeout: IDLE_TIMEOUT,
     routes,
     fetch: async (request, server) => {
       const response = await handle(request, server, async () => {

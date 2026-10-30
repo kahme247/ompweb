@@ -22,11 +22,14 @@ export const UNGATED = /^\/(?:assets\/|favicon\.ico|icon\.svg|icon\.png|icon-192
 // Relative: request.url is always http:// under Bun, so an absolute Location would leave https behind a TLS proxy.
 const redirect = (location: string) => new Response(null, { status: 307, headers: { location } });
 
-/** The password gate and API origin check; null means "continue". */
-export function proxy(request: Request): Response | null {
+/**
+ * The password gate and API origin check. A Response answers the request; otherwise it continues, "authenticated"
+ * when it carries a session or the trusted header (or no password is set), "public" when it needs neither.
+ */
+export function proxy(request: Request): Response | "public" | "authenticated" {
   const url = new URL(request.url);
   const { pathname } = url;
-  if (UNGATED.test(pathname) || (process.env.NODE_ENV === "development" && pathname.startsWith("/_bun/"))) return null;
+  if (UNGATED.test(pathname) || (process.env.NODE_ENV === "development" && pathname.startsWith("/_bun/"))) return "public";
   if (pathname.startsWith("/api/") && shouldCheckApiRequestOrigin(request) && !isApiRequestOriginAllowed(request)) {
     return Response.json({ error: "Cross-origin API requests are not allowed" }, { status: 403 });
   }
@@ -42,16 +45,16 @@ export function proxy(request: Request): Response | null {
     });
   }
   if (!isWebPasswordEnabled()) {
-    return pathname === "/login" ? redirect("/") : null;
+    return pathname === "/login" ? redirect("/") : "authenticated";
   }
 
   const hasSession = isTrustedProxyRequest(request.headers.get(OMP_WEB_TRUSTED_HEADER))
     || isValidWebSession(new Bun.CookieMap(request.headers.get("cookie") ?? "").get(OMP_WEB_SESSION_COOKIE) ?? undefined);
   if (pathname === "/login") {
-    return hasSession ? redirect("/") : null;
+    return hasSession ? redirect("/") : "public";
   }
-  if (pathname === "/api/web-auth/session") return null;
-  if (hasSession) return null;
+  if (pathname === "/api/web-auth/session") return "public";
+  if (hasSession) return "authenticated";
   if (pathname.startsWith("/api/")) {
     return Response.json({ error: "Password required", code: "password_required" }, { status: 401 });
   }

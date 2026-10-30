@@ -73,7 +73,8 @@ import * as worktrees from "@/app/api/worktrees/route";
 
 type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 // never: each handler narrows its own params; the router passes Record<string, string | string[]>.
-// disableIdleTimeout: for a gate-exempt route that authenticates itself (the host link) and then stays open.
+// disableIdleTimeout: a handler whose response stays open without traffic (a stream) keeps Bun's idle timeout off for
+// its socket; see handle() in server/app.ts.
 export type RouteHandler = (
   request: Request,
   context: { params: Promise<never>; disableIdleTimeout: () => void },
