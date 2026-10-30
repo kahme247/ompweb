@@ -14,7 +14,8 @@ import {
 // stays authenticated: its link includes credentials and its embedded
 // installation icons need no separate request. The service worker script holds
 // no data either, and the browser re-fetches it for update checks even after
-// the sign-in cookie expired. The file names are exact (anchored), so no path
+// the sign-in cookie expired. /assets/ is a prefix on purpose: it holds only the
+// hashed build output. The icon and sw.js names are exact (anchored), so no path
 // below or beside them skips the gate. /api/hosts/link and its blob/ subpath
 // authenticate the host's bearer token themselves before they read any body
 // (lib/hosts/hub.ts).

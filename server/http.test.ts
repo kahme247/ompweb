@@ -163,6 +163,15 @@ test("serveFile marks hashed assets immutable", async () => {
   }
 });
 
+test("serveFile skips a missing directory and serves from it once it exists", async (t) => {
+  const packageDir = mkdtempSync(path.join(os.tmpdir(), "omp-web-serve-missing-"));
+  t.after(() => rmSync(packageDir, { recursive: true, force: true }));
+  const get = () => serveFile(new Request("http://localhost/late.txt"), packageDir, false);
+  assert.equal(await get(), null);
+  await Bun.write(path.join(packageDir, "public", "late.txt"), "ok");
+  assert.equal(await (await get())?.text(), "ok");
+});
+
 test("renderIndex escapes the install name into the titles and adds the manifest link", () => {
   const html = '<html><head><title>omp web</title><meta name="apple-mobile-web-app-title" content="omp web" /></head><body></body></html>';
   const previous = process.env.OMP_WEB_NAME;
