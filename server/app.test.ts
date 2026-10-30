@@ -112,6 +112,18 @@ test("a path that leaves its route after `..` resolution never reaches that rout
   assert.equal((await rawRequest("POST", "/api/files/../hosts", evil)).status, 403);
 });
 
+test("an ungated path is the file itself, and an ungated miss never gets the app shell", async (t) => {
+  process.env.OMP_WEB_PASSWORD_HASH = hashPassword("pw", { logN: 12 });
+  t.after(() => {
+    delete process.env.OMP_WEB_PASSWORD_HASH;
+  });
+  assert.equal((await fetch(url("/icon.svg"))).status, 200);
+  for (const pathname of ["/icon.svg/foo", "/sw.js/not-a-file"]) {
+    assert.equal((await fetch(url(pathname), { redirect: "manual" })).status, 307, pathname);
+  }
+  assert.equal((await fetch(url("/assets/missing"))).status, 404);
+});
+
 test("pages get the index, files their content, and anything else 404", async () => {
   const index = await fetch(url("/"));
   assert.equal(index.status, 200);

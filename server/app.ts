@@ -37,7 +37,7 @@ function decodable(pathname: string): boolean {
 async function handle(
   request: Request,
   server: Bun.Server<undefined>,
-  respond: (disableIdleTimeout: () => void) => Response | Promise<Response>,
+  respond: (context: { gate: "public" | "authenticated"; disableIdleTimeout: () => void }) => Response | Promise<Response>,
 ): Promise<Response> {
   let pathname: string;
   try {
@@ -52,9 +52,12 @@ async function handle(
   const lifted = gate === "authenticated" && pathname.startsWith("/api/");
   if (lifted) server.timeout(request, 0);
   let keepOpen = false;
-  const response = await respond(() => {
-    keepOpen = true;
-    server.timeout(request, 0);
+  const response = await respond({
+    gate,
+    disableIdleTimeout: () => {
+      keepOpen = true;
+      server.timeout(request, 0);
+    },
   });
   if (lifted && !keepOpen) server.timeout(request, IDLE_TIMEOUT);
   return finalizeResponse(request, response);
@@ -82,7 +85,7 @@ export function startServer(options: { port: number; hostname: string; dev: bool
   for (const [key, mod] of Object.entries(ROUTE_MODULES)) {
     const { pattern, rest } = routePattern(key);
     const matcher = new URLPattern({ pathname: pattern });
-    routes[pattern] = (request, server) => handle(request, server, (disableIdleTimeout) => {
+    routes[pattern] = (request, server) => handle(request, server, ({ disableIdleTimeout }) => {
       // Bun's router matched the raw path, but the gate and the handler read request.url, where `..` and `%2e%2e`
       // are resolved. Answer only when that path is still this route, so no gated route runs under an ungated path.
       const { pathname } = new URL(request.url);
@@ -105,13 +108,15 @@ export function startServer(options: { port: number; hostname: string; dev: bool
     idleTimeout: IDLE_TIMEOUT,
     routes,
     fetch: async (request, server) => {
-      const response = await handle(request, server, async () => {
+      const response = await handle(request, server, async ({ gate }) => {
         const file = await serveFile(request, root, dev);
         if (file) return file;
         const { pathname } = new URL(request.url);
-        // Unknown extensionless page paths get the SPA too, but /api and its subpaths never do.
+        // Unknown extensionless page paths get the SPA too, but /api and its subpaths never do, and neither does a
+        // miss under a gate-exempt path (only /login is public and a page).
         const isPage = pathname === "/" || pathname === "/login" || (
-          (request.method === "GET" || request.method === "HEAD")
+          gate === "authenticated"
+          && (request.method === "GET" || request.method === "HEAD")
           && !/^\/api(\/|$)/.test(pathname)
           && !pathname.slice(pathname.lastIndexOf("/") + 1).includes(".")
         );

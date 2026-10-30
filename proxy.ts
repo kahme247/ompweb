@@ -14,10 +14,11 @@ import {
 // stays authenticated: its link includes credentials and its embedded
 // installation icons need no separate request. The service worker script holds
 // no data either, and the browser re-fetches it for update checks even after
-// the sign-in cookie expired. /api/hosts/link and its blob/ subpath (only
-// those: the pattern is anchored) authenticate the host's bearer token
-// themselves before they read any body (lib/hosts/hub.ts).
-export const UNGATED = /^\/(?:assets\/|favicon\.ico|icon\.svg|icon\.png|icon-192\.png|badge-96\.png|sw\.js|api\/hosts\/link(?:\/|$))/;
+// the sign-in cookie expired. The file names are exact (anchored), so no path
+// below or beside them skips the gate. /api/hosts/link and its blob/ subpath
+// authenticate the host's bearer token themselves before they read any body
+// (lib/hosts/hub.ts).
+export const UNGATED = /^\/(?:assets\/|(?:favicon\.ico|icon\.svg|icon\.png|icon-192\.png|badge-96\.png|sw\.js)$|api\/hosts\/link(?:\/|$))/;
 
 // Relative: request.url is always http:// under Bun, so an absolute Location would leave https behind a TLS proxy.
 const redirect = (location: string) => new Response(null, { status: 307, headers: { location } });
