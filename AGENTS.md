@@ -286,6 +286,23 @@ bin/
   and size limits live in
   `lib/hosts/link-protocol.ts` (one op allow-list, `HOST_OP_NAMES`, shared by
   both sides); the spec is `docs/specs/2026-10-28-remote-hosts-design.md`.
+- **Link protocol versions** (spec "Protocol versions and compatibility").
+  A released `LINK_PROTOCOL_VERSION` changes only compatibly: every message the
+  newer side can send must be valid for an older receiver, and every message the
+  older side can send valid for a newer receiver. Compatible: a sender starting
+  to always include a field the receiver already accepts as optional; adding an
+  optional field; adding a message type receivers ignore when unknown (today
+  neither side ignores unknown types or ops, so those still need a new version).
+  Not compatible, so a new version: making a field the receiver requires
+  optional for senders; changing a field's type or meaning; a receiver starting
+  to require a field older senders may omit. Main keeps supporting older
+  daemons, at least N-1, from `MIN_LINK_PROTOCOL_VERSION` (2) up; dropping one is
+  an explicit decision (a daemon on a dropped version gets 426; an update-only
+  mode is planned). For an older daemon main decodes its hello into today's shape
+  (`decodeUp`), sends only messages that version understands, and echoes its
+  version in `welcome` and `hostVersion`; a v2 daemon's listed children are
+  killed, never adopted. Upgrade order: web app first, then hosts; a daemon need
+  not support a newer main (it gets 426).
 - **One link per host, and the 409 nonce rule.** A new link with the same token
   replaces the old one (`replaced` is sent, the old daemon exits); two daemons
   must never run competing `omp --resume` children on one agent dir. Each
