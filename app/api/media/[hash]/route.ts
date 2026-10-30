@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { fetchMediaFromHosts } from "@/lib/hosts/session-index";
 import { createThumbnail, existingThumbnail, imageMimeType, mediaFilePath, storeMediaCopy } from "@/lib/media-cache";
 
-function image(body: Buffer, type: string, immutable = true): Response {
+function image(body: Uint8Array, type: string, immutable = true): Response {
   // A view, not a copy: these buffers come from readFile/Bun.Image, never a SharedArrayBuffer.
   return new Response(new Uint8Array(body.buffer as ArrayBuffer, body.byteOffset, body.byteLength), {
     headers: {

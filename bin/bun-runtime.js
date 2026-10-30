@@ -9,6 +9,19 @@ const MIN_BUN_VERSION = "1.4.4";
 // The postinstall replaces bin/bun.exe (a 450-byte placeholder) with the real ~100 MB binary.
 const PLACEHOLDER_LIMIT = 1024 * 1024;
 const REINSTALL = "npm install -g @kahme247/ompweb";
+// bun@1.4.4's optionalDependencies, by `${process.platform}-${process.arch}` (Android uses the linux-*-android builds).
+const PLATFORM_PACKAGES = {
+  "darwin-arm64": ["@oven/bun-darwin-aarch64"],
+  "darwin-x64": ["@oven/bun-darwin-x64"],
+  "linux-arm64": ["@oven/bun-linux-aarch64", "@oven/bun-linux-aarch64-musl"],
+  "linux-x64": ["@oven/bun-linux-x64", "@oven/bun-linux-x64-musl"],
+  "android-arm64": ["@oven/bun-linux-aarch64-android"],
+  "android-x64": ["@oven/bun-linux-x64-android"],
+  "freebsd-arm64": ["@oven/bun-freebsd-aarch64"],
+  "freebsd-x64": ["@oven/bun-freebsd-x64"],
+  "win32-arm64": ["@oven/bun-windows-aarch64"],
+  "win32-x64": ["@oven/bun-windows-x64"],
+};
 
 function isRealBinary(file) {
   try {
@@ -41,16 +54,14 @@ function resolveBunBinary(packageDir, env = process.env) {
     const own = path.join(bunDir, "bin", "bun.exe");
     if (isRealBinary(own)) return own;
 
-    const os = process.platform === "win32" ? "windows" : process.platform;
-    const arch = process.arch === "arm64" ? "aarch64" : "x64";
-    const exe = os === "windows" ? "bun.exe" : "bun";
-    for (const variant of ["", "-musl", "-baseline", "-musl-baseline"]) {
+    const exe = process.platform === "win32" ? "bun.exe" : "bun";
+    for (const name of PLATFORM_PACKAGES[`${process.platform}-${process.arch}`] ?? []) {
       try {
-        const pkg = require.resolve(`@oven/bun-${os}-${arch}${variant}/package.json`, { paths: [bunDir] });
+        const pkg = require.resolve(`${name}/package.json`, { paths: [bunDir] });
         const binary = path.join(path.dirname(pkg), "bin", exe);
         if (existsSync(binary)) return binary;
       } catch {
-        // variant not installed
+        // not installed for this platform
       }
     }
   }
@@ -63,7 +74,7 @@ function resolveBunBinary(packageDir, env = process.env) {
   throw new Error(`Bun runtime not found${found}. Reinstall ompweb with: ${REINSTALL}`);
 }
 
-module.exports = { MIN_BUN_VERSION, resolveBunBinary };
+module.exports = { MIN_BUN_VERSION, PLATFORM_PACKAGES, resolveBunBinary };
 
 // `node bin/bun-runtime.js <args…>` runs Bun with <args> (Windows dev fallback).
 if (require.main === module) {

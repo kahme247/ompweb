@@ -4,9 +4,7 @@ import dynamic from "@/lib/dynamic";
 import { useEffect, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
 
-const CommandPalette = dynamic(() => import("./CommandPalette").then((module) => module.CommandPalette), {
-  ssr: false,
-});
+const CommandPalette = dynamic(() => import("./CommandPalette").then((module) => module.CommandPalette));
 
 type Props = {
   onSelectSession: (session: SessionInfo) => void;
