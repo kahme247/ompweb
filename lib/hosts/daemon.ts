@@ -350,6 +350,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         scheduleFlush();
         return;
       case "pong":
+      case "ack":
         return;
       case "unknown":
         // A newer main's message, or one only the daemon sends: skipped, but its seq is applied so it is acked and never resent.

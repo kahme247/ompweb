@@ -24,6 +24,9 @@ export const LINK_LIMITS = {
   pendingBytes: 1024 * 1024,
 };
 
+/** WebSocket close codes the link uses. */
+export const LINK_CLOSE = { goingAway: 1001, invalidData: 1007, policy: 1008, tooBig: 1009, replaced: 4409, versionMismatch: 4426 } as const;
+
 /** A POST carrying this header (value `1`) is the daemon's `hello`, in its body;
  * main answers `{helloId}`, and the downlink GET names that id in this header. */
 export const LINK_HELLO_HEADER = "x-omp-web-hello";
@@ -81,7 +84,9 @@ export type DownMessage =
   | { type: "req"; seq: number; id: string; op: string; args: unknown }
   | { type: "replaced"; seq: number }
   | { type: "ping" }
-  | { type: "pong" };
+  | { type: "pong" }
+  /** Unsequenced: the highest uplink `seq` the hub applied. */
+  | { type: "ack"; ack: number };
 
 /** `sessionId`: the session the child last reported (null before it named one); `cwd`: where the
  * daemon spawned it; `pending`: raw stdout lines of its open blocking requests, or null when over `pendingBytes`. */
@@ -112,7 +117,9 @@ export type UpMessage =
       error: { status: number; code: string; message: string };
     }
   | { type: "ping" }
-  | { type: "pong" };
+  | { type: "pong" }
+  /** Unsequenced: the highest downlink `seq` the daemon applied. */
+  | { type: "ack"; ack: number };
 
 /** A message this side cannot decode by type (a newer peer's), or one that only the other side may send
  * (`wrongDirection`): receivers skip it, but ack its `seq` (null when it carries none) so it is never resent. */
@@ -127,6 +134,7 @@ export class LinkLimitError extends Error {
 }
 
 const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 
 export function encodeLine(message: DownMessage | UpMessage): string {
   const json = JSON.stringify(message);
@@ -185,8 +193,8 @@ export function isHostOp(name: string): name is HostOpName {
   return (HOST_OP_NAMES as readonly string[]).includes(name);
 }
 
-const DOWN_TYPES: readonly string[] = ["welcome", "stdin", "kill", "req", "replaced", "ping", "pong"];
-const UP_TYPES: readonly string[] = ["hello", "stdout", "stderr", "exit", "resync", "res", "ping", "pong"];
+const DOWN_TYPES: readonly string[] = ["welcome", "stdin", "kill", "req", "replaced", "ping", "pong", "ack"];
+const UP_TYPES: readonly string[] = ["hello", "stdout", "stderr", "exit", "resync", "res", "ping", "pong", "ack"];
 
 /** `otherDirection`: the types only the other direction decodes; one of those arrived on the wrong way. */
 function unknownMessage(o: Obj, otherDirection: readonly string[]): UnknownMessage {
@@ -260,6 +268,8 @@ export function decodeDown(line: string): DownMessage | UnknownMessage {
       return { type: "ping" };
     case "pong":
       return { type: "pong" };
+    case "ack":
+      return { type: "ack", ack: seqNum(o, "ack") };
     default:
       return unknownMessage(o, UP_TYPES);
   }
@@ -341,9 +351,30 @@ export function decodeUp(line: string): UpMessage | UnknownMessage {
       return { type: "ping" };
     case "pong":
       return { type: "pong" };
+    case "ack":
+      return { type: "ack", ack: seqNum(o, "ack") };
     default:
       return unknownMessage(o, DOWN_TYPES);
   }
+}
+
+/** One binary WebSocket frame: `[n][id: n bytes][payload]`, n = UTF-8 length of the request id (1..255). */
+export function encodeBlobFrame(id: string, bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+  const idBytes = encoder.encode(id);
+  if (idBytes.byteLength === 0 || idBytes.byteLength > 255) fail("blob frame id must be 1..255 UTF-8 bytes");
+  const frame = new Uint8Array(1 + idBytes.byteLength + bytes.byteLength);
+  frame[0] = idBytes.byteLength;
+  frame.set(idBytes, 1);
+  frame.set(bytes, 1 + idBytes.byteLength);
+  return frame;
+}
+
+/** `bytes` is a view into `frame`, not a copy. */
+export function decodeBlobFrame(frame: Uint8Array): { id: string; bytes: Uint8Array } {
+  const n = frame[0];
+  if (!n) fail("blob frame has no id");
+  if (frame.byteLength < 1 + n) fail("blob frame is shorter than its header");
+  return { id: decoder.decode(frame.subarray(1, 1 + n)), bytes: frame.subarray(1 + n) };
 }
 
 // Receiving side keeps a high-water mark: a seq at or below it was already applied.

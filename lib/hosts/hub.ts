@@ -506,7 +506,7 @@ export async function handleLinkPost(req: Request, disableIdleTimeout?: () => vo
 
 function applyUp(link: Link, message: UpMessage | UnknownMessage): void {
   if (message.type === "ping") return enqueue(link, encodeLine({ type: "pong" }));
-  if (message.type === "pong" || message.type === "hello") return;
+  if (message.type === "pong" || message.type === "hello" || message.type === "ack") return;
   if (message.type === "unknown") {
     // A newer daemon's message, or one only the server sends: skipped, but its seq is applied so it is acked and never resent.
     if (message.seq !== null) link.up.applied(message.seq);
