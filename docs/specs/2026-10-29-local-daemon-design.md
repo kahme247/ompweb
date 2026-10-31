@@ -129,8 +129,8 @@ or an adoption failure.
 |---|---|
 | Web server restarts, daemon fine | Runs continue; adopted on `hello`; no resume prompt. |
 | Daemon restarts or upgrades | Children end; sessions that were running resume once (existing auto-resume). |
-| Daemon one link protocol version behind the web server (N-1) | Links and runs sessions; after a web restart its live children are killed and resumed on `hello`, not adopted (a v2 hello carries no `pending`). The web server is upgraded first; the daemon catches up at its next restart. |
-| Daemon on a version the web server dropped, or newer than it | 426; "This machine" shows "needs upgrade"; new sessions there are disabled until the daemon is restarted on a supported version. An update-only mode for this is planned. |
+| Daemon one link protocol version behind the web server (N-1) | From the next protocol bump on, the web server links a daemon one version behind: it runs sessions, and after a web restart its live children are killed and resumed on `hello` rather than adopted when that version's hello lacks what adoption needs. Today (v4 links only v4) there is no N-1 daemon. The web server is upgraded first; the daemon catches up at its next restart. |
+| Daemon on a version the web server dropped, or newer than it | 426 (a pre-WebSocket daemon's POST) or close 4426 (a hello frame); "This machine" shows "needs upgrade"; new sessions there are disabled until the daemon is restarted on a supported version. An update-only mode for this is planned. |
 | Dev server running | It never writes `host.json`, so the daemon stays linked to production; dev shows "This machine" offline. |
 | Daemon not installed or not running | "This machine" shows offline with "start the ompweb-host service"; new local sessions are disabled. |
 | `host.json` token stale (web regenerated it) | Daemon gets 401, re-reads `host.json`, redials. It exits only if the file still holds the rejected token. |
