@@ -1,3 +1,4 @@
+import { broadcastBrowserTransport } from "@/lib/event-stream-hub";
 import { syncInterruptibleSessions } from "@/lib/rpc-manager";
 import { parseAgentEnvText, sanitizeAgentEnvValues, type AgentEnvParseResult } from "@/lib/omp/agent-env";
 import { loadWebServerSettings, saveWebServerSettings, type WebServerSettings } from "@/lib/web-settings";
@@ -24,7 +25,7 @@ export async function PUT(req: Request) {
   if (!isRecord(body)) {
     return Response.json({ error: "Request body must be a settings object", code: "invalid_settings" }, { status: 400 });
   }
-  const payload = body as { autoResumeSessions?: unknown; agentToolsEnabled?: unknown; agentEnv?: unknown };
+  const payload = body as { autoResumeSessions?: unknown; agentToolsEnabled?: unknown; agentEnv?: unknown; browserTransport?: unknown };
   const patch: Partial<WebServerSettings> = {};
 
   // Both keys are optional so a caller can update one without reading the other;
@@ -43,6 +44,13 @@ export async function PUT(req: Request) {
       return Response.json({ error: "agentToolsEnabled must be a boolean", code: "invalid_settings" }, { status: 400 });
     }
     patch.agentToolsEnabled = payload.agentToolsEnabled;
+  }
+
+  if (payload.browserTransport !== undefined) {
+    if (payload.browserTransport !== "sse" && payload.browserTransport !== "websocket") {
+      return Response.json({ error: "browserTransport must be \"sse\" or \"websocket\"", code: "invalid_settings" }, { status: 400 });
+    }
+    patch.browserTransport = payload.browserTransport;
   }
 
   if (payload.agentEnv !== undefined) {
@@ -71,5 +79,6 @@ export async function PUT(req: Request) {
   // Apply to sessions that are already running, not only the next run. Only when the
   // flag was part of this save — an agentEnv-only write must not touch live sessions.
   if (resumeProvided) syncInterruptibleSessions();
+  if (patch.browserTransport) broadcastBrowserTransport(patch.browserTransport);
   return Response.json({ ...settings, agentEnv: sanitizeAgentEnvValues(settings.agentEnv).values });
 }
