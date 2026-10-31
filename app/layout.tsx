@@ -1,11 +1,12 @@
 import type { Metadata, Viewport } from "next";
-import { headers } from "next/headers";
+import { cookies, headers } from "next/headers";
 import Script from "next/script";
 import { Geist, JetBrains_Mono, Noto_Sans_Mono, Source_Serif_4 } from "next/font/google";
 import { ThemeColor } from "@/hooks/useTheme";
 import { IosFocusZoomGuard } from "@/components/IosFocusZoomGuard";
 import { SIDEBAR_HISTORY_BRIDGE_SCRIPT } from "@/lib/sidebar-history-bridge";
 import { getInstallName } from "@/lib/install-name";
+import { manifestHref, THEME_COLOR_COOKIE } from "@/lib/manifest-theme";
 import "./globals.css";
 
 const geist = Geist({
@@ -64,15 +65,16 @@ export const viewport: Viewport = {
   interactiveWidget: "resizes-content",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  const themeColor = (await cookies()).get(THEME_COLOR_COOKIE)?.value;
   return (
     <html lang="en" translate="no" className={`${geist.variable} ${jetbrainsMono.variable} ${notoSansMono.variable} ${sourceSerif.variable} notranslate`} suppressHydrationWarning>
       <head>
-        <link rel="manifest" href="/api/manifest" crossOrigin="use-credentials" />
+        <link rel="manifest" href={manifestHref(themeColor)} crossOrigin="use-credentials" />
         <ThemeColor />
         <meta name="google" content="notranslate" />
         {/* Register before Next's router. Owned sidebar traversals must be handled
@@ -80,11 +82,11 @@ export default function RootLayout({
         <Script id="sidebar-history" strategy="beforeInteractive">
           {SIDEBAR_HISTORY_BRIDGE_SCRIPT}
         </Script>
-        {/* Apply the stored theme and its CSS background to browser chrome before
+        {/* Apply the stored theme and its top bar color to browser chrome before
             first paint. The hydrated hook keeps both in sync afterward. */}
         <script
           dangerouslySetInnerHTML={{
-            __html: `(function(){try{var t;try{t=localStorage.getItem("omp-theme")}catch(e){}var d=matchMedia("(prefers-color-scheme: dark)").matches;var dt={"dark":1,"omp":1,"dracula":1,"harbor":1,"one-dark-pro":1,"rose-pine":1,"catppuccin-mocha":1,"gruvbox-dark":1,"nord":1,"tokyo-night":1};var lt={"light":1,"one-light":1,"catppuccin-latte":1,"rose-pine-dawn":1};var res=t==="system"?(d?"dark":"light"):(!t?"omp":t);if(!dt[res]&&!lt[res]&&res!=="omp")res="omp";var dark=!!dt[res]&&res!=="omp";if(dark)document.documentElement.classList.add("dark");if(res==="omp"){document.documentElement.classList.add("omp")}else{document.documentElement.classList.add("theme-"+res)}document.documentElement.setAttribute("data-theme",res);var m=document.querySelector('meta[name="theme-color"]'),c=getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();if(m&&c)m.setAttribute("content",c);}catch(e){}})();`,
+            __html: `(function(){try{var t;try{t=localStorage.getItem("omp-theme")}catch(e){}var d=matchMedia("(prefers-color-scheme: dark)").matches;var dt={"dark":1,"omp":1,"dracula":1,"harbor":1,"one-dark-pro":1,"rose-pine":1,"catppuccin-mocha":1,"gruvbox-dark":1,"nord":1,"tokyo-night":1};var lt={"light":1,"one-light":1,"catppuccin-latte":1,"rose-pine-dawn":1};var res=t==="system"?(d?"dark":"light"):(!t?"omp":t);if(!dt[res]&&!lt[res]&&res!=="omp")res="omp";var dark=!!dt[res]&&res!=="omp";if(dark)document.documentElement.classList.add("dark");if(res==="omp"){document.documentElement.classList.add("omp")}else{document.documentElement.classList.add("theme-"+res)}document.documentElement.setAttribute("data-theme",res);var m=document.querySelector('meta[name="theme-color"]'),c=getComputedStyle(document.documentElement).getPropertyValue("--bg-panel").trim();if(m&&c)m.setAttribute("content",c);}catch(e){}})();`,
           }}
         />
         <script

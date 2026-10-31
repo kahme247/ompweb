@@ -4251,9 +4251,16 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
   .chat-stats-center {
     display: none !important;
   }
+  /* Drawers are sized with height, never bottom-anchored: Chrome treats a
+     bottom-anchored box padded with env(safe-area-inset-bottom) as a "complex
+     safe-area constraint" and stops drawing edge-to-edge, leaving the Android
+     navigation bar black in the installed app. */
   .sidebar-container {
     position: fixed !important;
-    inset: 0;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 100%;
     /* Full-screen drawer: safe-area padding (the list adds its own bottom). */
     padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px);
     transition: transform var(--dur-slow) var(--ease-out-warm);
@@ -4271,7 +4278,10 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
      takes the top inset so its background fills it, like the top bar's. */
   .right-panel-container {
     position: fixed;
-    inset: 0;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 100%;
     padding: 0 env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
     overflow: hidden;
     transition: transform var(--dur-slow) var(--ease-out-warm), visibility 0s;
@@ -4407,11 +4417,11 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
   border-radius: var(--radius-control);
   background: var(--bg-panel);
   color: var(--text);
-  box-shadow: var(--shadow-pop);
+  /* Shadow only while shown: parked above the viewport, its blur spilled onto the top bar. */
   transform: translateY(-150%);
   transition: transform var(--dur-fast) var(--ease-out-warm);
 }
-.skip-link:focus { transform: translateY(0); }
+.skip-link:focus { transform: translateY(0); box-shadow: var(--shadow-pop); }
 
 /* Touch target density options (Settings -> Touch Targets). */
 html[data-touch-targets="accessible"] :is(

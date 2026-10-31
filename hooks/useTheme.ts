@@ -1,6 +1,7 @@
 "use client";
 
 import { createElement, useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { manifestHref, THEME_COLOR_COOKIE } from "@/lib/manifest-theme";
 
 export type LightTheme = "light" | "one-light" | "catppuccin-latte" | "rose-pine-dawn";
 export type DarkTheme =
@@ -23,27 +24,29 @@ export type ThemeDefinition = {
   name: string;
   mode: "light" | "dark";
   bg: string;
+  /** `--bg-panel`, the top bar's color: browser and Android system bars blend into it. */
+  panel: string;
   accent: string;
 };
 
 export const LIGHT_THEMES: ReadonlyArray<ThemeDefinition> = [
-  { id: "light", name: "Light (default)", mode: "light", bg: "#FAF9F6", accent: "#B03E22" },
-  { id: "one-light", name: "One Light", mode: "light", bg: "#FAFAFA", accent: "#2F65D9" },
-  { id: "catppuccin-latte", name: "Catppuccin Latte", mode: "light", bg: "#EFF1F5", accent: "#1E66F5" },
-  { id: "rose-pine-dawn", name: "Rosé Pine Dawn", mode: "light", bg: "#FAF4ED", accent: "#286983" },
+  { id: "light", name: "Light (default)", mode: "light", bg: "#FAF9F6", panel: "#F2F0EA", accent: "#B03E22" },
+  { id: "one-light", name: "One Light", mode: "light", bg: "#FAFAFA", panel: "#F0F0F0", accent: "#2F65D9" },
+  { id: "catppuccin-latte", name: "Catppuccin Latte", mode: "light", bg: "#EFF1F5", panel: "#E6E9EF", accent: "#1E66F5" },
+  { id: "rose-pine-dawn", name: "Rosé Pine Dawn", mode: "light", bg: "#FAF4ED", panel: "#FFFAF3", accent: "#286983" },
 ];
 
 export const DARK_THEMES: ReadonlyArray<ThemeDefinition> = [
-  { id: "omp", name: "OMP Midnight", mode: "dark", bg: "#000000", accent: "#EC5BAB" },
-  { id: "dark", name: "Dark", mode: "dark", bg: "#1B1916", accent: "#E07B54" },
-  { id: "dracula", name: "Dracula", mode: "dark", bg: "#282A36", accent: "#FF79C6" },
-  { id: "harbor", name: "Harbor", mode: "dark", bg: "#1B1B1B", accent: "#E75A50" },
-  { id: "one-dark-pro", name: "One Dark Pro", mode: "dark", bg: "#282C34", accent: "#61AFEF" },
-  { id: "rose-pine", name: "Rosé Pine", mode: "dark", bg: "#191724", accent: "#EBBCBA" },
-  { id: "catppuccin-mocha", name: "Catppuccin Mocha", mode: "dark", bg: "#1E1E2E", accent: "#CBA6F7" },
-  { id: "gruvbox-dark", name: "Gruvbox Dark", mode: "dark", bg: "#282828", accent: "#FE8019" },
-  { id: "nord", name: "Nord", mode: "dark", bg: "#2E3440", accent: "#88C0D0" },
-  { id: "tokyo-night", name: "Tokyo Night", mode: "dark", bg: "#1A1B26", accent: "#7AA2F7" },
+  { id: "omp", name: "OMP Midnight", mode: "dark", bg: "#000000", panel: "#0A0A0C", accent: "#EC5BAB" },
+  { id: "dark", name: "Dark", mode: "dark", bg: "#1B1916", panel: "#231F1B", accent: "#E07B54" },
+  { id: "dracula", name: "Dracula", mode: "dark", bg: "#282A36", panel: "#21222C", accent: "#FF79C6" },
+  { id: "harbor", name: "Harbor", mode: "dark", bg: "#1B1B1B", panel: "#242424", accent: "#E75A50" },
+  { id: "one-dark-pro", name: "One Dark Pro", mode: "dark", bg: "#282C34", panel: "#21252B", accent: "#61AFEF" },
+  { id: "rose-pine", name: "Rosé Pine", mode: "dark", bg: "#191724", panel: "#1F1D2E", accent: "#EBBCBA" },
+  { id: "catppuccin-mocha", name: "Catppuccin Mocha", mode: "dark", bg: "#1E1E2E", panel: "#181825", accent: "#CBA6F7" },
+  { id: "gruvbox-dark", name: "Gruvbox Dark", mode: "dark", bg: "#282828", panel: "#1D2021", accent: "#FE8019" },
+  { id: "nord", name: "Nord", mode: "dark", bg: "#2E3440", panel: "#272C36", accent: "#88C0D0" },
+  { id: "tokyo-night", name: "Tokyo Night", mode: "dark", bg: "#1A1B26", panel: "#16161E", accent: "#7AA2F7" },
 ];
 
 export const ALL_THEMES: ReadonlyArray<ThemeDefinition> = [...LIGHT_THEMES, ...DARK_THEMES];
@@ -130,9 +133,17 @@ export function applyDomTheme(theme: Theme): void {
     cl.add(`theme-${theme}`);
   }
   document.documentElement.setAttribute("data-theme", theme);
-  const color = ALL_THEMES.find((definition) => definition.id === theme)?.bg;
+  const color = ALL_THEMES.find((definition) => definition.id === theme)?.panel;
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta && color) meta.setAttribute("content", color);
+  if (!color) return;
+  // The installed app's system bars use the manifest's color (lib/manifest-theme.ts):
+  // the cookie lets the server render it into the link on the next load, and a
+  // new href makes Chrome drop the manifest it cached for this page.
+  document.cookie = `${THEME_COLOR_COOKIE}=${color.slice(1)}; path=/; max-age=31536000; SameSite=Lax`;
+  const manifest = document.querySelector('link[rel="manifest"]');
+  const href = manifestHref(color.slice(1));
+  if (manifest && manifest.getAttribute("href") !== href) manifest.setAttribute("href", href);
 }
 
 function applyTheme(preference: ThemePreference): void {
