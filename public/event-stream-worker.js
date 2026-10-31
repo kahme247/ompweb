@@ -73,6 +73,8 @@ const clients = new Set();
  * Empty in SSE mode, so wakes and silence checks have nothing to act on there.
  */
 const conns = new Map();
+/** Retired Conns whose sockets stay open until the commands sent on them are answered (see retire). */
+const draining = new Set();
 /** SSE subscriptions' `conn`: the EventSource's per-connection state, shaped like a Conn's. */
 const sseConn = { clock: null, lastEventSampleAt: 0, reconnect: null };
 /** @type {ReturnType<typeof setInterval> | undefined} */
@@ -366,10 +368,7 @@ function idle(conn) {
 /** Done with this socket: forgotten now, closed once the commands sent on it are answered. */
 function retire(conn) {
   conns.delete(conn.key);
-  if (conns.size === 0) {
-    clearInterval(silenceTimer);
-    silenceTimer = undefined;
-  }
+  draining.add(conn);
   clearTimeout(conn.lingerTimer);
   clearTimeout(conn.reconnectTimer);
   conn.retiring = true;
@@ -382,6 +381,11 @@ function retire(conn) {
 }
 
 function shut(conn) {
+  draining.delete(conn);
+  if (conns.size === 0 && draining.size === 0) {
+    clearInterval(silenceTimer);
+    silenceTimer = undefined;
+  }
   const ws = conn.ws;
   conn.ws = null;
   conn.connectionId = null;
@@ -506,6 +510,8 @@ function waitToSend(conn, command) {
 
 function sendCommand(conn, command) {
   clearTimeout(command.deadline);
+  // Commands sent before it and not yet acked: their bytes go first even once they left the browser's buffer.
+  const ahead = Math.max(conn.ws.bufferedAmount, unackedBytes(conn));
   command.attempts += 1;
   command.inFlight = true;
   command.serverId = conn.serverId;
@@ -513,15 +519,22 @@ function sendCommand(conn, command) {
   command.behindBytes = conn.ws.bufferedAmount;
   conn.ws.send(command.frame);
   // No ack in time is a silent hang: the socket is dead even if it never closed.
-  const timeout = ACK_TIMEOUT_MS + Math.ceil((command.behindBytes + command.body.length) / 32);
+  const timeout = ACK_TIMEOUT_MS + Math.ceil((ahead + command.body.length) / 32);
   command.ackTimer = setTimeout(() => redial(conn, backoff(conn)), timeout);
 }
 
-/** After a hello: a lost command goes again only where it cannot run twice, as an idempotent one or to the server that dedupes its rid. */
+/** Bytes of the commands on this socket that the server has not acked yet. */
+function unackedBytes(conn) {
+  let bytes = 0;
+  for (const command of conn.pending.values()) if (command.inFlight && command.recvAt === null) bytes += command.body.length;
+  return bytes;
+}
+
+/** After a hello: a lost command goes again only where it cannot run twice, to the server that dedupes its rid or as an idempotent one. */
 function sendWaiting(conn) {
   for (const command of conn.pending.values()) {
     if (command.inFlight) continue;
-    if (command.attempts === 0 || idempotent(command) || command.serverId === conn.serverId) sendCommand(conn, command);
+    if (command.attempts === 0 || command.serverId === conn.serverId || idempotent(command)) sendCommand(conn, command);
     else settle(conn, command, failure(command, TRANSPORT_LOST));
   }
 }
@@ -566,23 +579,33 @@ function settle(conn, command, message) {
   idle(conn);
 }
 
+/** Every socket: the current ones, then retired ones still waiting for replies (a dead one answers them transport_lost). */
+function eachSocket(fn) {
+  for (const conn of conns.values()) fn(conn);
+  for (const conn of draining) fn(conn);
+}
+
 function checkSilence() {
   const now = Date.now();
-  for (const conn of conns.values()) {
+  eachSocket((conn) => {
     if (conn.ws && now - conn.lastFrameAt >= WS_SILENCE_MS) redial(conn, backoff(conn));
-  }
+  });
 }
 
 /** A tab saw the network change or the page come back (SSE mode has no sockets: EventSource reconnects on its own). */
 function wake(reason) {
   const now = Date.now();
-  for (const conn of conns.values()) {
-    if (conn.ws && !conn.connectionId && now - conn.dialedAt < WAKE_REDIAL_GAP_MS) continue;
-    if (reason === "online" || reason === "network") {
-      redial(conn, 0);
-    } else if (reason === "visible") {
+  const justDialed = (conn) => conn.ws && !conn.connectionId && now - conn.dialedAt < WAKE_REDIAL_GAP_MS;
+  if (reason === "online" || reason === "network") {
+    eachSocket((conn) => {
+      if (!justDialed(conn)) redial(conn, 0);
+    });
+  } else if (reason === "visible") {
+    for (const conn of conns.values()) {
+      if (justDialed(conn)) continue;
       if (conn.reconnectTimer !== undefined) redial(conn, 0);
-      else if (conn.connectionId) probe(conn);
+      // A pong cannot overtake an upload still ahead of it: the ack timer watches such a socket.
+      else if (conn.connectionId && unackedBytes(conn) === 0) probe(conn);
     }
   }
 }
