@@ -6,10 +6,10 @@ function canonicalOrigin(value: string): string | null {
   }
 }
 
-/** `https:` when the first X-Forwarded-Proto value says so: behind a TLS-terminating proxy Bun's request.url is still http://. */
+/** `https:` when the first X-Forwarded-Proto value says so (`wss` on a WebSocket upgrade, as Traefik sends): behind a TLS-terminating proxy Bun's request.url is still http://. */
 export function requestProtocol(request: Request): string {
   const forwarded = request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
-  return forwarded === "https" ? "https:" : new URL(request.url).protocol;
+  return forwarded === "https" || forwarded === "wss" ? "https:" : new URL(request.url).protocol;
 }
 
 function getRequestOrigin(request: Request): string | null {
