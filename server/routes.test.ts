@@ -36,20 +36,20 @@ test("dispatch answers missing methods, OPTIONS and HEAD as Next did, and passes
   };
   const request = (method: string) => new Request("http://localhost/api/x", { method });
 
-  const post = await dispatch(mod, request("POST"), {});
+  const post = (await dispatch(mod, request("POST"), {}))!;
   assert.equal(post.status, 405);
   assert.equal(post.headers.get("allow"), "GET");
-  const options = await dispatch(mod, request("OPTIONS"), {});
+  const options = (await dispatch(mod, request("OPTIONS"), {}))!;
   assert.equal(options.status, 204);
   assert.equal(options.headers.get("allow"), "GET, HEAD, OPTIONS");
-  assert.equal((await dispatch(mod, request("HEAD"), {})).status, 203);
-  assert.equal((await dispatch(mod, request("GET"), { id: "a b" })).status, 203);
+  assert.equal((await dispatch(mod, request("HEAD"), {}))!.status, 203);
+  assert.equal((await dispatch(mod, request("GET"), { id: "a b" }))!.status, 203);
   assert.deepEqual(seen, { id: "a b" });
 });
 
 test("dispatch turns a handler throw into a logged 500", async (t) => {
   const error = t.mock.method(console, "error", () => {});
-  const response = await dispatch({ GET: () => { throw new Error("boom"); } }, new Request("http://localhost/api/x"), {});
+  const response = (await dispatch({ GET: () => { throw new Error("boom"); } }, new Request("http://localhost/api/x"), {}))!;
   assert.equal(response.status, 500);
   assert.deepEqual(await response.json(), { error: "Internal Server Error" });
   assert.equal(error.mock.callCount(), 1);

@@ -21,7 +21,6 @@ import * as gitDiff from "@/app/api/git/diff/route";
 import * as gitStatus from "@/app/api/git/status/route";
 import * as githubRepo from "@/app/api/github-repo/route";
 import * as home from "@/app/api/home/route";
-import * as hostsLinkBlobReqId from "@/app/api/hosts/link/blob/[reqId]/route";
 import * as hostsLink from "@/app/api/hosts/link/route";
 import * as hosts from "@/app/api/hosts/route";
 import * as manifest from "@/app/api/manifest/route";
@@ -70,15 +69,17 @@ import * as webAuthSession from "@/app/api/web-auth/session/route";
 import * as webSettings from "@/app/api/web-settings/route";
 import * as windowsService from "@/app/api/windows-service/route";
 import * as worktrees from "@/app/api/worktrees/route";
+import type { LinkSocketData } from "@/lib/hosts/hub";
 
 type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 // never: each handler narrows its own params; the router passes Record<string, string | string[]>.
 // disableIdleTimeout: a handler whose response stays open without traffic (a stream) keeps Bun's idle timeout off for
 // its socket; see handle() in server/app.ts.
+// upgrade: makes the request a host link WebSocket (server.upgrade); a handler that upgraded returns undefined.
 export type RouteHandler = (
   request: Request,
-  context: { params: Promise<never>; disableIdleTimeout: () => void },
-) => Response | Promise<Response>;
+  context: { params: Promise<never>; disableIdleTimeout: () => void; upgrade: (data: LinkSocketData) => boolean },
+) => Response | undefined | Promise<Response | undefined>;
 export type RouteModule = Partial<Record<Method, RouteHandler>>;
 
 // Key: the route's directory under app/api.
@@ -104,7 +105,6 @@ export const ROUTE_MODULES: Record<string, RouteModule> = {
   "git/status": gitStatus,
   "github-repo": githubRepo,
   "home": home,
-  "hosts/link/blob/[reqId]": hostsLinkBlobReqId,
   "hosts/link": hostsLink,
   "hosts": hosts,
   "manifest": manifest,
@@ -172,7 +172,8 @@ export async function dispatch(
   request: Request,
   params: Record<string, string | string[]>,
   disableIdleTimeout: () => void = () => {},
-): Promise<Response> {
+  upgrade: (data: LinkSocketData) => boolean = () => false,
+): Promise<Response | undefined> {
   const handler = mod[request.method as Method] ?? (request.method === "HEAD" ? mod.GET : undefined);
   if (!handler) {
     const methods = METHODS.filter((method) => mod[method]);
@@ -181,7 +182,7 @@ export async function dispatch(
     return new Response(null, { status: 204, headers: { allow } });
   }
   try {
-    return await handler(request, { params: Promise.resolve(params) as Promise<never>, disableIdleTimeout });
+    return await handler(request, { params: Promise.resolve(params) as Promise<never>, disableIdleTimeout, upgrade });
   } catch (error) {
     console.error(error);
     return Response.json({ error: "Internal Server Error" }, { status: 500 });

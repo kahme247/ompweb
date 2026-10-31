@@ -270,16 +270,20 @@ test("Bun's idle timeout spares the event stream and the host link, and only the
     const connectionId = /"connectionId":"([^"]+)"/.exec(hello)?.[1];
     assert.ok(connectionId, hello);
 
-    // A host daemon's link: a hello, then the downlink, which pings 15 s after it opens.
+    // A host daemon's link: a WebSocket whose hello gets a welcome, and which the hub pings 15 s after it opens.
     const created = await fetch(url("/api/hosts"), { method: "POST", headers: signedIn, body: JSON.stringify({ label: "box" }) });
     const bearer = { authorization: `Bearer ${(await created.json()).token}` };
-    const hostHello = { type: "hello", v: 3, ompVersion: "14.0.0", platform: "linux", home: "/home/u", autoApproveExtension: false, ack: 0, channels: [] };
-    const offered = await fetch(url("/api/hosts/link"), { method: "POST", headers: { ...bearer, "x-omp-web-hello": "1" }, body: JSON.stringify(hostHello) });
-    assert.equal(offered.status, 200);
-    const link = await fetch(url("/api/hosts/link"), { headers: { ...bearer, "x-omp-web-hello": (await offered.json()).helloId }, signal: controller.signal });
-    assert.equal(link.status, 200);
-    const linkReader = link.body!.getReader();
-    assert.match(decoder.decode((await linkReader.read()).value), /"type":"welcome"/);
+    const hostHello = { type: "hello", v: 4, ompVersion: "14.0.0", platform: "linux", home: "/home/u", autoApproveExtension: false, ack: 0, channels: [] };
+    // This repo's DOM typing has no init argument; Bun's WebSocket takes `{ headers }`.
+    const link = new WebSocket(url("/api/hosts/link").href.replace(/^http/, "ws"), { headers: bearer } as unknown as string[]);
+    t.after(() => link.close());
+    const welcome = Promise.withResolvers<string>();
+    link.addEventListener("message", ({ data }) => welcome.resolve(String(data)), { once: true });
+    link.onopen = () => link.send(JSON.stringify(hostHello));
+    assert.match(await welcome.promise, /"type":"welcome"/);
+    const ping = Promise.withResolvers<void>();
+    link.addEventListener("message", ({ data }) => String(data).includes('"type":"ping"') && ping.resolve());
+    link.addEventListener("close", ({ code }) => ping.reject(new Error(`the host link was closed while idle (${code})`)));
 
     // No caller without a session or a host token holds a socket open, wherever it stalls, and a signed-in
     // keep-alive socket is closed once its JSON answer, or a stream that lifted the timeout, went out.
@@ -300,12 +304,9 @@ test("Bun's idle timeout spares the event stream and the host link, and only the
     ]);
     assert.deepEqual([...open], []);
 
-    // The ping proves the downlink outlived the idle timeout; so has the event stream, opened before it.
-    for (let lines = ""; !lines.includes('"type":"ping"');) {
-      const { done, value } = await linkReader.read();
-      assert.equal(done, false, "the host link was closed while idle");
-      lines += decoder.decode(value);
-    }
+    // The ping proves the socket outlived the idle timeout; so has the event stream, opened before it.
+    await ping.promise;
+    assert.equal(link.readyState, WebSocket.OPEN);
     const subscribe = await fetch(url("/api/events"), {
       method: "POST",
       headers: { ...signedIn, "content-type": "application/json" },
@@ -318,4 +319,29 @@ test("Bun's idle timeout spares the event stream and the host link, and only the
   } finally {
     controller.abort();
   }
+});
+
+test("the host link refuses an unauthenticated upgrade with 401, not the gate's 307, and answers 426 to a request that does not upgrade", async (t) => {
+  const created = await fetch(url("/api/hosts"), { method: "POST", body: JSON.stringify({ label: "refusing" }) });
+  const bearer = { authorization: `Bearer ${(await created.json()).token}` };
+  process.env.OMP_WEB_PASSWORD_HASH = hashPassword("pw", { logN: 12 });
+  t.after(() => {
+    delete process.env.OMP_WEB_PASSWORD_HASH;
+  });
+
+  const refused = new WebSocket(url("/api/hosts/link").href.replace(/^http/, "ws"));
+  const events: string[] = [];
+  refused.onopen = () => events.push("open");
+  refused.onerror = (event) => events.push(`error ${(event as ErrorEvent).message}`);
+  const closed = Promise.withResolvers<void>();
+  refused.onclose = () => closed.resolve();
+  await closed.promise;
+  assert.equal(events.length, 1, events.join(" | "));
+  assert.match(events[0], /^error .*\b401\b/);
+
+  assert.equal((await fetch(url("/api/hosts/link"), { headers: bearer })).status, 426);
+  const hostHello = { type: "hello", v: 3, ompVersion: "14.0.0", platform: "linux", home: "/home/u", autoApproveExtension: false, ack: 0, channels: [] };
+  const outdated = await fetch(url("/api/hosts/link"), { method: "POST", headers: bearer, body: JSON.stringify(hostHello) });
+  assert.equal(outdated.status, 426);
+  assert.equal((await outdated.json()).hostVersion, 3);
 });
