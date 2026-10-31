@@ -84,6 +84,10 @@ const draining = new Set();
 const sseConn = { clock: null, lastEventSampleAt: 0, reconnect: null };
 /** @type {ReturnType<typeof setInterval> | undefined} */
 let silenceTimer;
+/** ws-pool's size N (spec D2 "ws-pool sizing"); 1 outside ws-pool. */
+let poolSize = 1;
+/** Running while the pool's target is below N (see sizePool). @type {ReturnType<typeof setTimeout> | undefined} */
+let shrinkTimer;
 
 function post(client, message) {
   try {
@@ -233,10 +237,15 @@ function setTransport(next) {
   if (!BROWSER_TRANSPORTS.includes(next.transport)) return false;
   if (next.transport === state.transport && perSocket === state.perSocket && maxSockets === state.maxSockets) return false;
   const previous = state.transport;
+  const fromPool = previous === "ws-pool" ? poolSize : null;
   state = { transport: next.transport, perSocket, maxSockets };
   if (state.transport !== previous) for (const client of clients) post(client, { transport: state.transport });
+  // A setting or mode change applies its N at once, in both directions.
+  clearTimeout(shrinkTimer);
+  shrinkTimer = undefined;
+  poolSize = state.transport === "ws-pool" ? poolTarget(activeSessions()) : 1;
   if (isWebSocketTransport(previous) === isWebSocketTransport(state.transport)) {
-    if (isWebSocketTransport(state.transport)) rebalance();
+    if (isWebSocketTransport(state.transport)) rebalance(state.transport === previous ? "setting" : "mode", fromPool);
     return true;
   }
   markConnecting(subscriptions.values());
@@ -260,16 +269,93 @@ function setTransport(next) {
 /** The socket for a session's stream and commands, or for every non-session channel (null): spec D2. */
 function socketKeyFor(sessionId) {
   if (state.transport === "ws-client") return "client";
-  // shortcut: one pool socket (N = 1) for everything; upgrade when the pool sizes itself from the active sessions.
-  if (state.transport === "ws-pool") return "pool:0";
+  // Sessions ranked 0 share pool:0 with every non-session channel.
+  if (state.transport === "ws-pool") return sessionId === null ? "pool:0" : `pool:${poolRank(sessionId, poolSize)}`;
   return sessionId === null ? "general" : `session:${sessionId}`;
 }
 
 /** Whether the current policy can still produce `key`: an idle socket whose key it cannot closes at once. */
 function keyValid(key) {
   if (state.transport === "ws-client") return key === "client";
-  if (state.transport === "ws-pool") return key === "pool:0";
+  if (state.transport === "ws-pool") return key.startsWith("pool:") && Number(key.slice(5)) < poolSize;
   return state.transport === "ws-session" && (key === "general" || key.startsWith("session:"));
+}
+
+// Rendezvous (highest-random-weight) ranking, spec D2: the hash is fixed so every worker ranks the same.
+// Growing N to N+1 moves only the sessions whose top score is the new index; shrinking only those of the removed one.
+
+function fnv1a(text) {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 0x01000193);
+  return hash >>> 0;
+}
+
+function fmix32(hash) {
+  hash = Math.imul(hash ^ (hash >>> 16), 0x85ebca6b);
+  hash = Math.imul(hash ^ (hash >>> 13), 0xc2b2ae35);
+  return (hash ^ (hash >>> 16)) >>> 0;
+}
+
+/** The index in [0, n) with the highest score for this session (the lowest on a tie). */
+function poolRank(sessionId, n) {
+  let best = 0;
+  let bestScore = -1;
+  for (let i = 0; i < n; i++) {
+    const score = fmix32(fnv1a(`${i}:${sessionId}`));
+    if (score > bestScore) {
+      best = i;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+/** This worker's active sessions (spec D2): a `session` stream (current or moving) or an unanswered command on any socket. */
+function activeSessions() {
+  const active = new Set();
+  for (const subscription of subscriptions.values()) if (subscription.channel.kind === "session") active.add(subscription.channel.sessionId);
+  eachSocket((conn) => {
+    for (const command of conn.pending.values()) active.add(command.session);
+  });
+  return active;
+}
+
+/** ws-pool's N for these active sessions: clamp(ceil(active / perSocket), 1, maxSockets). */
+function poolTarget(active) {
+  return Math.min(Math.max(Math.ceil(active.size / state.perSocket), 1), state.maxSockets);
+}
+
+/**
+ * Recomputes N in ws-pool after the active sessions changed: grows at once; shrinks only once the target has
+ * stayed below N for SESSION_LINGER_MS (a recompute that reaches N cancels it). `joining`: a session about to
+ * become active, counted now so its stream or command goes straight to its bucket of the new size.
+ */
+function sizePool(joining) {
+  if (state.transport !== "ws-pool") return;
+  const active = activeSessions();
+  if (joining !== undefined) active.add(joining);
+  const target = poolTarget(active);
+  if (target > poolSize) {
+    resizePool("grow", target);
+  } else if (target === poolSize) {
+    clearTimeout(shrinkTimer);
+    shrinkTimer = undefined;
+  } else if (shrinkTimer === undefined) {
+    shrinkTimer = setTimeout(() => {
+      shrinkTimer = undefined;
+      const now = poolTarget(activeSessions());
+      if (now < poolSize) resizePool("shrink", now);
+    }, SESSION_LINGER_MS);
+  }
+}
+
+/** N becomes `target` now; every stream and command whose bucket changed moves (rebalance). */
+function resizePool(reason, target) {
+  const fromPool = poolSize;
+  clearTimeout(shrinkTimer);
+  shrinkTimer = undefined;
+  poolSize = target;
+  return rebalance(reason, fromPool);
 }
 
 function subscriptionKey(subscription) {
@@ -278,24 +364,39 @@ function subscriptionKey(subscription) {
 }
 
 /**
- * After a policy change (spec D2 "Moves"): every stream whose key changed moves
- * make-before-break; a session's commands move to its new socket together and only
- * while none of them was sent (a sent one is answered on its socket, and the
- * session's later ones wait behind it there); then sockets left with nothing close
- * (at once when the policy no longer produces their key) or linger.
+ * After a policy change (spec D2 "Moves"; reason: "grow" | "shrink" | "setting" | "mode"): every stream whose key
+ * changed moves make-before-break; a session's commands move to its new socket together and only while none of
+ * them was sent (a sent one is answered on its socket, and the session's later ones wait behind it there); then
+ * sockets left with nothing close (at once when the policy no longer produces their key) or linger.
+ * Returns the change for its `rebalance` sample (spec D6): `fromPool`/`toPool` are N in ws-pool, else null;
+ * `fromSockets` the sockets held before, `toSockets` those the policy still produces after; `moved` the sessions
+ * whose socket changed; `movedOther` the non-session streams moved.
  */
-function rebalance() {
+function rebalance(reason, fromPool) {
+  const fromSockets = conns.size;
+  const moved = new Set();
+  let movedOther = 0;
   for (const subscription of subscriptions.values()) {
     const key = subscriptionKey(subscription);
     if (subscription.moving && subscription.moving.key !== key) cancelMove(subscription);
-    if (subscription.conn.key !== key && !subscription.moving) move(subscription, connFor(key));
+    if (subscription.conn.key === key || subscription.moving) continue;
+    move(subscription, connFor(key));
+    if (subscription.channel.kind === "session") moved.add(subscription.channel.sessionId);
+    else movedOther += 1;
   }
   for (const conn of [...conns.values()]) {
     const sessions = strayCommandSessions(conn);
     for (const command of conn.pending.values()) if (command.attempts > 0) sessions.delete(command.session);
-    for (const session of sessions) moveCommands(conn, session);
+    for (const session of sessions) {
+      moveCommands(conn, session);
+      moved.add(session);
+    }
   }
   for (const conn of [...conns.values()]) idle(conn);
+  let toSockets = 0;
+  for (const conn of conns.values()) if (keyValid(conn.key)) toSockets += 1;
+  const toPool = state.transport === "ws-pool" ? poolSize : null;
+  return { reason, fromPool, toPool, fromSockets, toSockets, active: activeSessions().size, moved: moved.size, movedOther };
 }
 
 /** Subscribes on `conn`; the current socket keeps delivering until `conn` opens it (handleControl). */
@@ -361,6 +462,7 @@ function release(subscription) {
   subscription.client.streams.delete(subscription.streamId);
   cancelMove(subscription);
   if (subscription.conn !== sseConn) leave(subscription.conn, subscription);
+  if (subscription.channel.kind === "session") sizePool();
   source?.removeEventListener(subscription.id, subscription.listener);
   if (subscriptions.size === 0) {
     // Nothing left to deliver: free the browser's socket until a tab asks again.
@@ -372,6 +474,8 @@ function release(subscription) {
 
 function open(client, streamId, channel) {
   close(client, streamId);
+  // Counted before it joins, so a stream that grows the pool goes straight to its bucket of the new size.
+  if (channel.kind === "session") sizePool(channel.sessionId);
   const subscription = {
     id: `s${nextSubscriptionId++}`,
     streamId,
@@ -618,6 +722,7 @@ function queueCommand(client, message) {
     post(client, reply(command, 413, { error: "Agent command is too large", code: "request_too_large" }));
     return;
   }
+  sizePool(command.session);
   const conn = connForCommand(command.session);
   conn.pending.set(req, command);
   if (conn.connectionId) sendCommand(conn, command);
@@ -729,6 +834,7 @@ function settle(conn, command, message) {
   conn.pending.delete(command.req);
   post(command.client, message);
   idle(conn);
+  sizePool();
 }
 
 /** Every socket: the current ones, then retired ones still waiting for replies (a dead one answers them transport_lost). */
