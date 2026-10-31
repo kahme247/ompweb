@@ -723,6 +723,8 @@
   "errors.skill_update_unsupported": "このスキルは自動更新できません",
   "errors.source_required": "プラグインのソースが必要です",
   "errors.thinking_block_not_found": "思考ブロックが見つかりません",
+  "errors.transport_lost": "応答が届く前に omp-web との接続が切れました。コマンドは実行された可能性があります。もう一度送信する前に確認してください。",
+  "errors.transport_unavailable": "送信されませんでした: omp-web に接続できません。もう一度お試しください。",
   "errors.upload_conflict": "1 つ以上のファイルが既に存在します",
   "errors.upload_directory_not_found": "アップロード先ディレクトリが見つかりません",
   "errors.upload_file_too_large": "各ファイルは 25MB 以下である必要があります",
