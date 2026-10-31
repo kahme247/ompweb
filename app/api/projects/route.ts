@@ -81,7 +81,7 @@ export async function POST(req: Request) {
     allowFileRoot(projectRoot);
 
     const entry = next.projects.find((p) => comparableProjectPath(p.path) === comparableProjectPath(projectRoot))!;
-    return NextResponse.json({ project: { path: entry.path, addedAt: entry.addedAt, launchConfig: entry.launchConfig } satisfies ManagedProject });
+    return NextResponse.json({ project: { path: entry.path, addedAt: entry.addedAt, alias: entry.alias, sortOrder: entry.sortOrder, pinOrder: entry.pinOrder, launchConfig: entry.launchConfig } satisfies ManagedProject });
   } catch (error) {
     if (error instanceof ProjectPathError) {
       return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });

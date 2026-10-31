@@ -1,4 +1,5 @@
 import { execFile } from "child_process";
+import { createHash } from "crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { promisify } from "util";
@@ -278,6 +279,24 @@ function sanitizeBranchForDir(branch: string): string {
   return branch.replace(/[\/\\:*?"<>|\s]+/g, "-").replace(/^-+|-+$/g, "");
 }
 
+/** Short stable suffix distinguishing branches whose sanitized directory
+ *  names collide (e.g. "a/b" and "a-b" both sanitize to "a-b"). Only used on
+ *  collision, so already-created worktree directories keep their names. */
+function worktreeDirSuffix(branch: string): string {
+  return createHash("sha256").update(branch).digest("hex").slice(0, 8);
+}
+
+/** Branch checked out at a worktree path, or null when the path is not a
+ *  registered worktree (stray directory, prunable entry, or missing git). */
+async function findWorktreeBranch(cwd: string, worktreePath: string): Promise<string | null> {
+  try {
+    const worktrees = await listWorktrees(cwd);
+    return findWorktreeByPath(worktrees, worktreePath)?.branch ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function addWorktree(cwd: string, branch: string): Promise<{ path: string; branch: string }> {
   const trimmed = branch.trim();
   if (!trimmed) throw new Error("Branch name is required");
@@ -295,9 +314,31 @@ export async function addWorktree(cwd: string, branch: string): Promise<{ path: 
 
   const repoRoot = await getRepoRoot(cwd);
   const baseDir = `${resolve(repoRoot)}-worktrees`;
-  const worktreePath = join(baseDir, dirName);
+  // sanitizeBranchForDir is not injective ("a/b" and "a-b" both map to
+  // "a-b"), so a plain exists check refuses the second branch. The base name
+  // is kept as-is so already-created worktrees keep working; only on a real
+  // collision does the directory gain a short hash of the branch name.
+  let worktreePath = join(baseDir, dirName);
   if (existsSync(worktreePath)) {
-    throw new Error(`Directory already exists: ${worktreePath}`);
+    const owner = await findWorktreeBranch(cwd, worktreePath);
+    if (owner === trimmed) {
+      throw new Error(`Directory already exists: ${worktreePath}`);
+    }
+    const disambiguated = join(baseDir, `${dirName}-${worktreeDirSuffix(trimmed)}`);
+    if (existsSync(disambiguated)) {
+      const disambiguatedOwner = await findWorktreeBranch(cwd, disambiguated);
+      if (disambiguatedOwner === trimmed) {
+        throw new Error(`Directory already exists: ${disambiguated}`);
+      }
+      // Distinct error: the directory is taken by something other than this
+      // branch and even the hash-suffixed fallback is occupied, so no safe
+      // directory can be picked automatically.
+      throw new Error(
+        `Worktree directory already exists for a different branch: ${disambiguated}` +
+          (disambiguatedOwner ? ` (checked out branch: ${disambiguatedOwner})` : " (not a registered worktree)"),
+      );
+    }
+    worktreePath = disambiguated;
   }
   mkdirSync(baseDir, { recursive: true });
 

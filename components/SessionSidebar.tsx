@@ -9,7 +9,7 @@ import { ProjectLaunchConfigDialog } from "./ProjectLaunchConfigDialog";
 import { ProviderUsageBar } from "./ProviderUsageBar";
 import { Tooltip } from "./ui/primitives";
 import { toast } from "./ui/toast";
-import { clearLastOpenSession, setLastOpenSession, workspaceKeyOf } from "@/lib/workspace-memory";
+import { workspaceKeyOf } from "@/lib/workspace-memory";
 import { groupSessionsByProject, nextPinOrder, orderProjects, projectActivityCounts, type ProjectSortMode } from "@/lib/project-ordering";
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { compileSearchQuery, FIRST_MESSAGE_WEIGHT, scoreSearchFields, searchField, TITLE_WEIGHT } from "@/lib/session-search";
@@ -1288,16 +1288,9 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   // Stable callbacks for the session list so memoized children don't re-render
   // on every parent state change.
   const handleSessionDeleted = useCallback((id: string) => {
-    const deleted = allSessions.find((session) => session.id === id);
-    if (deleted) clearLastOpenSession(workspaceKeyOf(deleted));
     onSessionDeleted?.(id);
     loadSessions();
-  }, [allSessions, onSessionDeleted, loadSessions]);
-
-  useEffect(() => {
-    const selected = allSessions.find((session) => session.id === selectedSessionId);
-    if (selected) setLastOpenSession(workspaceKeyOf(selected), selected.id);
-  }, [allSessions, selectedSessionId]);
+  }, [onSessionDeleted, loadSessions]);
 
   return (
     <div className="sidebar-shell" style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", paddingBottom: "env(safe-area-inset-bottom)" }}>

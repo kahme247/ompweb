@@ -154,10 +154,21 @@ export function upsertProject(
   const key = comparableProjectPath(canonical);
   const existing = registry.projects.find((p) => comparableProjectPath(p.path) === key);
   const projects = registry.projects.filter((p) => comparableProjectPath(p.path) !== key);
-  // An omitted launchConfig preserves the stored one: re-adding a workspace
-  // (e.g. un-hiding) without config must not wipe it. Explicit clear goes
-  // through PATCH with null.
-  projects.push({ path: canonical, addedAt: now, hidden: false, launchConfig: launchConfig ?? existing?.launchConfig });
+  // Re-adding a workspace (e.g. un-hiding) must not wipe its stored display
+  // data: alias, sort order, pin order, and launch config all carry over
+  // from the existing entry. An omitted launchConfig preserves the stored
+  // one; explicit clear goes through PATCH with null. Display fields have no
+  // POST parameter, so carrying them over is unconditional — PATCH applies
+  // its own updates on top afterwards.
+  projects.push({
+    path: canonical,
+    addedAt: now,
+    hidden: false,
+    alias: existing?.alias,
+    sortOrder: existing?.sortOrder,
+    pinOrder: existing?.pinOrder,
+    launchConfig: launchConfig ?? existing?.launchConfig,
+  });
   return { version: 1, projects };
 }
 

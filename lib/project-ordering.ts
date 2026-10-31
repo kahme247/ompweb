@@ -109,7 +109,10 @@ export function projectActivityCounts(
  *  matched through a case-folded lookup (Windows/NTFS is case-insensitive and
  *  session-file cwds can carry different casing than the registered path), so
  *  casing-only differences land in the right bucket instead of silently
- *  dropping the session from the sidebar. */
+ *  dropping the session from the sidebar. Sessions with no workspace key at
+ *  all (a header with no cwd) land in an "unknown workspace" bucket keyed ""
+ *  instead of being skipped, so grouping callers can surface them rather
+ *  than losing them. */
 export function groupSessionsByProject(
   projects: ManagedProject[],
   sessions: SessionInfo[],
@@ -121,9 +124,18 @@ export function groupSessionsByProject(
     grouped.set(project.path, bucket);
     bucketByKey.set(comparableProjectPath(project.path), bucket);
   }
+  // Lazily created so projects-only callers see no extra entry.
+  let unknownBucket: SessionInfo[] | null = null;
   for (const session of sessions) {
     const key = workspaceKeyOf(session);
-    if (!key) continue;
+    if (!key) {
+      if (!unknownBucket) {
+        unknownBucket = [];
+        grouped.set("", unknownBucket);
+      }
+      unknownBucket.push(session);
+      continue;
+    }
     // workspaceKeyOf already prefers projectKey, so this IS the session's
     // key; bucketByKey covers every registered project under its case-folded
     // path, and an exact-case fallback here could only hit when the folded
