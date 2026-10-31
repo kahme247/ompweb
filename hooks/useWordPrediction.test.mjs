@@ -1,18 +1,12 @@
 import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
-import { fileURLToPath } from "node:url";
-import { createJiti } from "jiti";
-import { act, cleanup, renderHook } from "@testing-library/react/pure.js";
+const { act, cleanup, renderHook } = await import("@testing-library/react/pure.js");
 
 // Drives the composer's ghost-text controller with a fake omp: the ghost a
 // user would see (peek) and the feedback omp would learn from.
 
-const jiti = createJiti(import.meta.url, {
-  tryNative: false,
-  alias: { "@/": fileURLToPath(new URL("../", import.meta.url)) },
-});
-const { useWordPrediction } = await jiti.import("../hooks/useWordPrediction.ts");
+const { useWordPrediction } = await import("../hooks/useWordPrediction.ts");
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const settle = (ms = 120) => act(() => sleep(ms));

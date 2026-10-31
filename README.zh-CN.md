@@ -27,7 +27,7 @@
 ## 环境要求
 
 - 已安装 [omp](https://github.com/can1357/oh-my-pi) 且在 `PATH` 中（或通过 `OMP_WEB_OMP_BIN` 指定路径）
-- Node.js `>= 24`
+- Node.js `>= 24`。服务器运行在 [Bun](https://bun.sh) 上，Bun 会作为 npm 包的依赖自动安装（找不到随包安装的 Bun 时使用 `PATH` 中的 Bun）
 
 将排队的后续消息转为 **Steer** 需要 omp 运行时支持 `promote_queued_message` RPC 命令（omp 18.1.16 尚不支持）。旧版运行时会返回错误，消息仍作为后续消息排队；ompweb 不会重复发送一条引导消息。
 
@@ -49,6 +49,8 @@ npx @kahme247/ompweb@latest
 npm install -g @kahme247/ompweb
 ompweb
 ```
+
+每个版本也提供**无需 Node 或 npm 的单一可执行文件**，用法见英文 README 的 [Single binary](README.md#single-binary)。
 
 在浏览器中打开 [http://127.0.0.1:30177](http://127.0.0.1:30177)。
 
@@ -136,15 +138,15 @@ npm run dev
 
 本地开发服务器运行在 [http://127.0.0.1:30178](http://127.0.0.1:30178)。
 
+`npm run dev` 以 Bun 热重载方式运行服务器。`npm run build` 将浏览器端应用打包到 `dist/`，`npm start` 在 30177 端口提供该产物（可用 `npm run smoke` 检查结果）。`npm run dev:lan` 会将开发服务器绑定到所有网络接口。
+
 ### 代码检查
 
 ```bash
 npm run typecheck   # TypeScript 类型检查
 npm run lint        # ESLint 检查
-npm test            # 运行测试套件
+npm test            # 运行测试套件 (bun test)
 ```
-
-> **注意**：本地开发期间请勿运行 `npm run build`，以免污染 `.next/` 导致开发服务器异常。
 
 ## 致谢与许可证
 

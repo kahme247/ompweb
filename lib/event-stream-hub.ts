@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import fs from "fs";
 import { authorizeFileAccess } from "./file-authorization";
 import { filePathApiSegments } from "./file-paths";
+import { hostsSnapshot, onHostsChange } from "./hosts/hub";
 import { attachNotificationClient } from "./notification-hub";
 import { getExitedRpcSessions, getRpcSession, getRunningRpcSessions, subscribeHostToolCalls, subscribeRunningSessions } from "./rpc-manager";
 import { subscribeSessionFileChanges } from "./session-watcher";
@@ -17,7 +18,7 @@ import {
 // socket, carrying any number of channel subscriptions for every tab behind
 // the browser's shared worker.
 
-// Heartbeat keeps the socket alive through proxies (Next.js idles ~120-150s).
+// Heartbeat keeps the socket alive through reverse proxies that drop silent connections.
 const HEARTBEAT_MS = 30_000;
 const encoder = new TextEncoder();
 
@@ -236,6 +237,8 @@ async function openChannel(channel: EventStreamChannel, handle: SubscriptionHand
       return openFileChannel(channel.path, channel.sessionId, handle);
     case "host-tools":
       return openHostToolsChannel(handle);
+    case "hosts":
+      return openHostsChannel(handle);
   }
 }
 
@@ -286,6 +289,24 @@ function openHostToolsChannel(handle: SubscriptionHandle): SubscribeResult {
   return SUBSCRIBED;
 }
 
+// Settings → Hosts: the linked-hosts list on subscribe and after every change.
+function openHostsChannel(handle: SubscriptionHandle): SubscribeResult {
+  handle.open();
+  // Snapshots are built one at a time so frames never arrive out of order.
+  let chain: Promise<void> = Promise.resolve();
+  const push = () => {
+    chain = chain
+      .then(() => {
+        const snapshot = hostsSnapshot();
+        if (handle.active) handle.send(snapshot);
+      })
+      .catch(() => {});
+  };
+  handle.setDetach(onHostsChange(push));
+  push();
+  return SUBSCRIBED;
+}
+
 // Agent events of one live omp wrapper.
 function openSessionChannel(sessionId: string, handle: SubscriptionHandle): SubscribeResult {
   // Observer-only: opening a saved session must not create another omp
@@ -315,20 +336,30 @@ async function openFileChannel(rawPath: string, sessionId: string | null, handle
   handle.send({ type: "connected", filePath });
   let lastMtimeMs = access.stat.mtimeMs;
   let lastSize = access.stat.size;
+  const check = () => {
+    try {
+      const stat = fs.statSync(filePath);
+      // Some platforms emit watch events for file reads/attribute access.
+      // Ignore those or the client's refresh read loops.
+      if (stat.mtimeMs === lastMtimeMs && stat.size === lastSize) return;
+      lastMtimeMs = stat.mtimeMs;
+      lastSize = stat.size;
+      handle.send({ type: "change", mtime: stat.mtime.toISOString(), size: stat.size });
+    } catch {
+      if (lastSize === -1) return; // already reported gone
+      lastSize = -1;
+      handle.send({ type: "change", mtime: new Date().toISOString(), size: 0 });
+    }
+  };
+  let trailing: ReturnType<typeof setTimeout> | undefined;
   let watcher: fs.FSWatcher;
   try {
     watcher = fs.watch(filePath, () => {
-      try {
-        const stat = fs.statSync(filePath);
-        // Some platforms emit watch events for file reads/attribute access.
-        // Ignore those or the client's refresh read loops.
-        if (stat.mtimeMs === lastMtimeMs && stat.size === lastSize) return;
-        lastMtimeMs = stat.mtimeMs;
-        lastSize = stat.size;
-        handle.send({ type: "change", mtime: stat.mtime.toISOString(), size: stat.size });
-      } catch {
-        handle.send({ type: "change", mtime: new Date().toISOString(), size: 0 });
-      }
+      check();
+      // Bun's fs.watch drops an event within ~2 ms of the previous one; re-stat
+      // once the burst is quiet so a rapid second save still reports.
+      clearTimeout(trailing);
+      trailing = setTimeout(check, 50);
     });
   } catch {
     handle.send({ type: "error", message: "Failed to watch file" });
@@ -336,6 +367,9 @@ async function openFileChannel(rawPath: string, sessionId: string | null, handle
     return SUBSCRIBED;
   }
   watcher.on("error", () => handle.end());
-  handle.setDetach(() => watcher.close());
+  handle.setDetach(() => {
+    clearTimeout(trailing);
+    watcher.close();
+  });
   return SUBSCRIBED;
 }

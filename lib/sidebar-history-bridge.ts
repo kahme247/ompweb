@@ -1,7 +1,6 @@
 /**
- * Injected with `beforeInteractive` (see app/layout.tsx) so it runs before
- * hydration, and therefore before the App Router registers its own `popstate`
- * listener.
+ * Injected by app/boot.ts before the app's modules evaluate, so it registers
+ * before any other `popstate` listener (lib/navigation.ts included).
  *
  * The re-dispatch is synchronous and carries the original event as `detail`,
  * so the sidebar hook can call `stopImmediatePropagation()` on the native event

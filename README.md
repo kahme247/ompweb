@@ -27,7 +27,7 @@ A clean, modern web UI for the [oh-my-pi (omp)](https://github.com/can1357/oh-my
 ## Requirements
 
 - [omp](https://github.com/can1357/oh-my-pi) installed and available on your `PATH` (or specified via `OMP_WEB_OMP_BIN`)
-- Node.js `>= 24`
+- Node.js `>= 24`. The server runs on [Bun](https://bun.sh), which installs automatically as a dependency of the npm package (a Bun on your `PATH` is used if the bundled one is missing)
 
 The **Steer** action on a queued follow-up requires an omp runtime with the `promote_queued_message` RPC command (not available in omp 18.1.16). Older runtimes report an error and leave the message queued as a follow-up; ompweb does not send a duplicate steering message.
 
@@ -110,6 +110,8 @@ npm install -g @kahme247/ompweb
 ompweb
 ```
 
+**Or download the single binary** (no Node or npm): see [Single binary](#single-binary).
+
 Open [http://127.0.0.1:30177](http://127.0.0.1:30177) in your browser.
 
 ### CLI Options
@@ -122,7 +124,8 @@ ompweb --no-open                           # Don't auto-open the browser
 ompweb --install-tray                      # Install Windows System Tray service & Desktop shortcuts
 ompweb --uninstall-tray                    # Uninstall Windows System Tray service & shortcuts
 ompweb --tray                              # Start background System Tray manager
-ompweb systemd install                     # Install Linux systemd user service
+ompweb systemd install                     # Install Linux systemd user services (web + ompweb-host daemon)
+ompweb launchd install                     # Install the macOS launchd agents (web + ompweb-host daemon)
 ompweb --help                              # Show help
 ompweb --version                           # Show version
 ```
@@ -171,6 +174,116 @@ your user or system environment (for example `setx OMP_WEB_PASSWORD_HASH
 started with. Changing or removing the hash takes effect at the next server
 restart, without signing out of Windows.
 
+### Two services: the web server and the local daemon
+
+ompweb runs this machine's `omp` sessions through a small daemon, `ompweb host`,
+linked to the web server over loopback. The service installers (`ompweb systemd install`,
+`ompweb launchd install`, `ompweb --install-tray`) install both: the web
+service and `ompweb-host`. Uninstall removes both.
+
+**Running ompweb in the foreground** (`ompweb` in a terminal, or `npx
+@kahme247/ompweb@latest`) installs no service, so nothing runs the daemon: keep
+`ompweb host` (with npx: `npx @kahme247/ompweb@latest host`) running in a
+second terminal. Without it "This machine" stays offline. The web server writes
+the daemon's link when it starts, so start the web server first.
+
+- **Restarting or redeploying the web server does not interrupt runs.** The daemon
+  keeps the omp processes running; the restarted web server takes them over, with
+  no resume prompt, and dialogs or tool calls omp was waiting on reappear.
+- **Restarting the daemon does end runs** (it owns the omp processes). With auto-resume
+  on, sessions that were running resume once. `ompweb systemd restart` restarts the
+  web service only; upgrades restart the daemon only when its link protocol version
+  is outside the range the new release supports.
+- **First start after an upgrade:** if no daemon has linked after about 90 seconds,
+  ompweb shows a banner with the install command for your platform. It never installs
+  services itself. Until the daemon runs, "This machine" shows offline and new
+  sessions on it cannot start.
+- **It is a host like any other.** Rename "This machine" in **Settings → Hosts**
+  (clear the name to reset it); it cannot be revoked. The web server writes the
+  daemon's link (`~/.omp/agent/omp-web/host.json`, mode `600`) at startup, only
+  for a loopback bind address.
+- **Development:** `npm run dev` does not take the daemon (see
+  [Development](#development)).
+
+### Single binary
+
+Each [release](https://github.com/kahme247/ompweb/releases/latest) also ships
+ompweb as one compiled program with the files it serves beside it:
+`ompweb-linux-x64.tar.gz`, `ompweb-linux-arm64.tar.gz`, `ompweb-darwin-x64.tar.gz`,
+`ompweb-darwin-arm64.tar.gz` and `ompweb-windows-x64.zip`. It needs no Node, npm
+or Bun; only omp must be installed. The x64 builds use Bun's baseline runtime, so
+they also run on CPUs without AVX2. Each archive carries the licenses of what it
+bundles in `licenses/`.
+
+```bash
+tar -xzf ompweb-linux-x64.tar.gz -C ~/.local/share   # unpacks ompweb-linux-x64/
+~/.local/share/ompweb-linux-x64/ompweb               # the web server: same options and environment variables as above
+~/.local/share/ompweb-linux-x64/ompweb host          # the local daemon, in a second terminal
+```
+
+- **Keep `ompweb` in its directory.** It serves `dist/`, `public/` and the other
+  files from the directory it is in (a symlink to it on your `PATH` works), or
+  from `OMP_WEB_PACKAGE_DIR` when that is set.
+- **macOS** quarantines downloads: run `xattr -dr com.apple.quarantine ompweb-darwin-arm64`
+  once before the first start.
+- **macOS 15 and later** ask before an app may reach your local network. If
+  `ompweb host` on a Mac reports `ECONNREFUSED` for a server on your LAN while
+  `curl` reaches it, allow your terminal (or `ompweb`) under System Settings →
+  Privacy & Security → Local Network. A server reached over a VPN such as
+  Tailscale, or a host started from an SSH session, is not affected.
+- **No tray, service installers or in-app update.** To update, stop `ompweb` and
+  `ompweb host`, replace the directory with the new release, and start both again;
+  **Settings → System** links the release page when a new version is out.
+  Your sessions and settings live in `~/.omp`, not in that directory.
+- **As systemd user services**, write the two units yourself (adjust the paths;
+  add omp's directory to `PATH`, or set `OMP_WEB_OMP_BIN`):
+
+```ini
+# ~/.config/systemd/user/ompweb.service
+[Unit]
+Description=ompweb web service
+
+[Service]
+WorkingDirectory=%h
+ExecStart=%h/.local/share/ompweb-linux-x64/ompweb --no-open
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+# OMP_WEB_PASSWORD_HASH, PORT and OMP_WEB_HOSTNAME go here, as for ompweb-systemd.
+EnvironmentFile=-%h/.omp/agent/web-service.env
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+```
+
+```ini
+# ~/.config/systemd/user/ompweb-host.service
+[Unit]
+Description=ompweb host daemon
+# It exits until the web server has written its link: keep restarting.
+StartLimitIntervalSec=0
+
+[Service]
+WorkingDirectory=%h
+ExecStart=%h/.local/share/ompweb-linux-x64/ompweb host
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.omp/agent/web-service.env
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now ompweb ompweb-host
+```
+
+  On macOS, two launchd agents (`ProgramArguments` `…/ompweb --no-open` and
+  `…/ompweb host`, with `RunAtLoad` and `KeepAlive`) do the same; on Windows, two
+  Task Scheduler tasks that run `ompweb.exe --no-open` and `ompweb.exe host` at logon.
+
 ### Run as a Windows Service (System Tray)
 
 Install ompweb as a Windows background service with a system tray icon and autostart at login:
@@ -186,7 +299,7 @@ ompweb --tray          # Start the tray manager
 ompweb --uninstall-tray
 ```
 
-Shortcuts are created on the Desktop and Start Menu. The service restarts automatically and shows the current port and status in the tray.
+Shortcuts are created on the Desktop and Start Menu. The service restarts automatically and shows the current port and status in the tray. The install also registers the [local daemon](#two-services-the-web-server-and-the-local-daemon) as a second scheduled task (`ompweb host`); the tray shows both states.
 
 ### Run as a macOS Service (launchd)
 
@@ -223,9 +336,12 @@ or equivalent access control) and HTTPS through a trusted reverse proxy or VPN.
 Never expose the unauthenticated web UI or send its password/session cookie over
 plaintext HTTP.
 
-Logs go to `~/Library/Logs/ompweb/ompweb.log` and the plist lives at
+Logs go to `~/Library/Logs/ompweb/ompweb.log` (web) and
+`~/Library/Logs/ompweb/ompweb-host.log` (the
+[local daemon](#two-services-the-web-server-and-the-local-daemon)). The plists live at
 `~/Library/LaunchAgents/com.kahme247.ompweb.plist` (mode 600; the password
-hash — not the password — is stored there).
+hash — not the password — is stored there) and
+`~/Library/LaunchAgents/com.kahme247.ompweb-host.plist`.
 
 ### Run as a Linux Service (systemd)
 
@@ -264,11 +380,13 @@ hostname, and password hash there and just restart the service; no reinstall
 needed.
 Install-time [environment variables](#environment-variables) are baked into
 that file. As a service, the browser is **not** auto-opened by default. The
-unit lives at `~/.config/systemd/user/ompweb.service` and logs go to the
-journal:
+units live at `~/.config/systemd/user/ompweb.service` and
+`~/.config/systemd/user/ompweb-host.service` (the
+[local daemon](#two-services-the-web-server-and-the-local-daemon)); logs go to
+the journal:
 
 ```bash
-journalctl --user -u ompweb -f
+journalctl --user -u ompweb -u ompweb-host -f
 ```
 
 On a headless server, enable user lingering if the service must keep running
@@ -303,6 +421,82 @@ access.
 `~/.config/autostart/ompweb-tray.desktop`. Requires a running StatusNotifierItem
 host (KDE Plasma, and most Wayland/X11 desktops).
 
+## Run sessions on another machine
+
+One ompweb can start and watch omp sessions on other machines. Each machine keeps
+its own `omp` install, `~/.omp/agent` directory, sessions, and credentials;
+ompweb only routes. The remote machine needs Node 24 and `omp` installed, and must
+be able to reach the ompweb server over HTTP(S). It dials out, so it can sit behind NAT.
+
+1. On the ompweb server, open **Settings → Hosts → Add host**, enter a name, and copy
+   the token. The token is shown once; only its hash is stored.
+2. On the remote machine, save the link. The token is read from stdin, never from
+   an argument, so it does not show up in `ps`:
+
+   ```bash
+   npx @kahme247/ompweb@latest host login --url https://your-ompweb.example.com
+   ```
+
+   Paste the token when prompted (or pipe it in). It is saved to
+   `~/.omp/agent/omp-web/host.json` with mode `600`.
+3. Start the link and leave it running:
+
+   ```bash
+   npx @kahme247/ompweb@latest host
+   ```
+
+   The host shows **online** in Settings → Hosts, the sidebar gets a group for it,
+   and the new-session screen gets a host picker.
+
+`https://` is required. Plain `http://` is accepted only for loopback addresses, or
+with `--allow-http` (for example on a tailnet):
+
+```bash
+npx @kahme247/ompweb@latest host login --url http://100.64.0.1:30177
+npx @kahme247/ompweb@latest host --allow-http
+```
+
+If the connection drops, the daemon reconnects by itself (1 s backoff doubling to
+60 s; 3 s at most for the web server on the same machine). After a failed dial it
+re-reads its saved link, so a web server that came back on another port is found
+without restarting the daemon. After a network drop, runs keep going on the remote machine; the chat shows
+an offline banner and the runs reattach when the link returns. A laptop that goes
+to sleep (closing the lid, usually) pauses the daemon and its omp runs along with
+everything else on it: they resume when it wakes, and the link returns then. A
+docked or no-sleep setup keeps running with the lid closed. Revoking a host in
+Settings closes its link and the daemon stops its omp processes.
+
+Notes:
+
+- **Service helpers:** `ompweb systemd install` and `ompweb launchd install` set up
+  this machine's own daemon next to its web server (see
+  [Two services](#two-services-the-web-server-and-the-local-daemon)). On the other
+  machine you only need the daemon, and the helpers would also start a web server
+  there, so run `ompweb host` under a supervisor of your choice that restarts it
+  after failure to keep the link up across logouts or reboots.
+  The daemon exits with code `1` when the server revokes its token or when its
+  link protocol version is outside the range the server supports (older than the
+  server's oldest supported version, or newer than the server: update ompweb on
+  the older side), and `0` when a newer link for the same host replaces it.
+  SIGTERM or SIGINT stops the daemon and its omp processes.
+  A link is one-per-host, so never run two daemons with the same token.
+- **The server's agent directory holds the host list** (`omp-web/hosts.json`).
+  Starting the ompweb server with a different `PI_CODING_AGENT_DIR`, or losing
+  that file, makes every host token unknown: each daemon is told it was revoked,
+  stops its omp processes and exits.
+- **Trust:** a linked host runs omp with full tool access on that machine for
+  whoever controls the ompweb server or the token. Keep the token private and
+  revoke it when a machine is retired.
+- **Not available on remote hosts yet:** the file explorer, Git and worktree
+  panels, directory browsing, and the Skills, Plugins, Agents and MCP settings only
+  work on the machine ompweb runs on. Chat, session history, notifications and
+  starting sessions work on every host.
+- **Agent-started sessions:** with agent tools enabled, an agent can pass a `host`
+  to `new_session` (it defaults to the agent's own host). A remote host asks for
+  confirmation each time unless **Agents can start sessions here without asking**
+  is switched on for it in Settings → Hosts. An agent running on a remote host
+  always asks before it starts or messages a session on this machine.
+
 ## Features
 
 - **Interactive Chat**: Real-time streaming conversation with your local `omp` agent — tool calls, thinking levels, token counts, cost, context gauge, queue controls, and interrupt & retry.
@@ -314,12 +508,13 @@ host (KDE Plasma, and most Wayland/X11 desktops).
 - **Tool Preset Picker**: Choose the toolset for new sessions in the composer — `none` / `default` (`read,bash,edit,write`) / `full` (all tools including subagents). Persists to localStorage.
 - **File Explorer & Previews**: Browse workspaces side-by-side with chat; preview code, markdown, Mermaid, images, audio, PDFs, and diffs with allow-listed access.
 - **Git Worktree Support**: Create, switch, and manage Git worktrees directly from the sidebar; sessions and file roots stay grouped by project.
+- **Remote Hosts**: Link other machines (for example a MacBook) and run sessions there from one ompweb. The sidebar groups sessions by host. See [Run sessions on another machine](#run-sessions-on-another-machine).
 - **Usage & Analytics**: Dashboard in **Settings → Usage** for tokens, costs, cache savings, and breakdowns by provider / model / day / project with SQLite persistence.
 - **Windows System Tray & Service**: Background service, tray icon, logon autostart, and Desktop/Start Menu shortcuts (Windows).
 - **macOS launchd Service**: LaunchAgent that starts at login, restarts on crash, and logs under `~/Library/Logs/ompweb`.
 - **Linux systemd Service & Tray**: User service that starts at login and restarts on crash, plus a StatusNotifierItem tray icon with service controls (KDE Plasma and compatible desktops).
 - **Notifications**: Desktop and mobile (PWA) notifications for finished tasks, questions waiting for an answer, failed runs, and automatic model switches, with Web Push when served over HTTPS. See [Notifications](#notifications).
-- **Web-based Settings** (10 tabs): Interface & Behavior, Safety & Approvals, AI Model Defaults, API Keys & Providers, Usage, Agent & Intelligence (advisor, memory, compaction), Agents, Extensions & Tools (MCP, skills, plugins), Notifications, System & Updates.
+- **Web-based Settings** (11 tabs): Interface & Behavior, Safety & Approvals, AI Model Defaults, API Keys & Providers, Usage, Agent & Intelligence (advisor, memory, compaction), Agents, Extensions & Tools (MCP, skills, plugins), Hosts, Notifications, System & Updates.
 - **Slash Commands & Shortcuts**: Quick prompts (`/plan`, `/review`, `/fix`, `/test`, etc.), `⌘K` / `Ctrl+K` palette, and model/reasoning cycling.
 - **UI Themes & Localization**: Warm paper light/dark themes plus an omp.sh-inspired midnight (`omp`) theme, chat font size & interface scale, with full English, Chinese (简体中文), and Japanese (日本語) translations.
 
@@ -335,7 +530,6 @@ host (KDE Plasma, and most Wayland/X11 desktops).
 | `OMP_WEB_DISABLE_AUTOUPDATE` | Set to `1` to disable update checks and in-app updates; restart after changing | `0` |
 | `OMP_WEB_NAME` | Name shown in browser tabs and installed-app names. `url`, `host` or `domain` (any case) uses the hostname the browser connected to, without port; localhost and IP addresses keep `omp web`. Any other value is used as-is. Restart after changing | `omp web` |
 | `OMP_WEB_OMP_BIN` | Path to `omp` binary if not on `PATH` | _auto-detected_ |
-| `OMP_WEB_DEV_ORIGIN` | Additional allowed hostname for the development server (no scheme or port); ignored in production | _None_ |
 | `PI_CODING_AGENT_DIR` | Custom omp agent directory | `~/.omp/agent` |
 | `OMP_WEB_STT_ENDPOINT` | OpenAI-compatible transcription endpoint URL. Leave unset to transcribe with `OMP_WEB_STT_MODEL` through omp's own credentials | _None_ |
 | `OMP_WEB_STT_KEY` | Optional API key for the STT endpoint | _None_ |
@@ -463,28 +657,19 @@ npm run dev
 
 The dev server runs at [http://127.0.0.1:30178](http://127.0.0.1:30178).
 
-The development server allows loopback and RFC1918 private IPv4 origins
-(`10.0.0.0/8`, `172.16.0.0/12`, and `192.168.0.0/16`). When using a tunnel
-or reverse proxy with a custom hostname, set it without editing `next.config.ts`:
+A dev server does not take over the local daemon: only the production web
+server writes the daemon's `host.json`, so "This machine" shows offline in dev
+and the daemon stays linked to your installed ompweb.
 
-```bash
-OMP_WEB_DEV_ORIGIN=dev.example.com npm run dev
-```
-
-For a persistent setup, set the variable in your local environment or service
-configuration and restart the dev server. This does not change the bind address
-or enable authentication. Next.js hostname patterns cannot express IPv6 CIDRs;
-a private IPv6 origin must be supplied explicitly (for example, `[fd00::1]`).
+`npm run dev` runs the server with Bun hot reload. `npm run build` bundles the browser app into `dist/`, and `npm start` serves it on port 30177 (`npm run smoke` checks the result). `npm run dev:lan` binds the dev server to all interfaces. `npm run build:binary` builds the [single binary](#single-binary) for this machine into `release/` (`-- --target bun-linux-arm64` and the like for another platform; `npm run smoke -- --binary release/ompweb-linux-x64/ompweb` checks it).
 
 ### Checks
 
 ```bash
 npm run typecheck   # Type check (TypeScript)
 npm run lint        # ESLint
-npm test            # Run test suite
+npm test            # Run test suite (bun test)
 ```
-
-> **Note**: Do not run `npm run build` during local dev — it populates `.next/` and can break `npm run dev`.
 
 ## License & Credits
 

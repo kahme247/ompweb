@@ -1,7 +1,7 @@
 "use client";
 
 import { useI18n } from "@/lib/i18n";
-import { BarChart3, Bell, Bot, Cable, Cpu, KeyRound, RefreshCw, Settings2, ShieldCheck, Sparkles } from "lucide-react";
+import { BarChart3, Bell, Bot, Cable, Cpu, KeyRound, Network, RefreshCw, Settings2, ShieldCheck, Sparkles } from "lucide-react";
 import type { ComponentType, CSSProperties } from "react";
 
 export type SettingsTab =
@@ -14,6 +14,7 @@ export type SettingsTab =
   | "agents"
   | "extensions"
   | "mcp"
+  | "hosts"
   | "skills"
   | "plugins"
   | "notifications"
@@ -36,6 +37,7 @@ export const SETTINGS_CATEGORIES: TabItem[] = [
   { id: "intelligence", label: "Agent & Intelligence", description: "Advisor, memory, autolearn, compaction and retry", Icon: Sparkles },
   { id: "agents", label: "Agents", description: "Task agents, model settings, and tool policy", Icon: Bot },
   { id: "mcp", label: "Extensions & Tools", description: "MCP servers, managed skills, and OMP plugins", Icon: Cable },
+  { id: "hosts", label: "Hosts", description: "Link other machines to run sessions there", Icon: Network },
   { id: "notifications", label: "Notifications", description: "Desktop and mobile notifications for your sessions", Icon: Bell },
   { id: "system", label: "System & Updates", description: "App updates, runtime version, and active session restart", Icon: RefreshCw },
 ];

@@ -43,6 +43,14 @@ try {
         Log-Message "  Stopping headless service process tree (PID $($p.ProcessId))..."
         Start-Process -FilePath $taskkillExe -ArgumentList "/PID $($p.ProcessId) /T /F" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue | Out-Null
     }
+    # Also terminate the host daemon supervisor (omp-web-host.ps1) and its `ompweb host` child
+    $hostProcs = Get-CimInstance Win32_Process -Filter "Name LIKE '%powershell%' OR Name LIKE '%pwsh%'" -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*omp-web-host.ps1*' }
+    foreach ($p in $hostProcs) {
+        Log-Message "  Stopping host daemon process tree (PID $($p.ProcessId))..."
+        Start-Process -FilePath $taskkillExe -ArgumentList "/PID $($p.ProcessId) /T /F" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue | Out-Null
+    }
+    try { schtasks /delete /tn "omp-web-host" /f 2>$null | Out-Null; Log-Message "  [OK] Removed Scheduled Task: omp-web-host" } catch { }
+    try { Unregister-ScheduledTask -TaskName "omp-web-host" -Confirm:$false -ErrorAction SilentlyContinue | Out-Null } catch { }
     # Delete Scheduled Task (both schtasks and PowerShell fallback)
     try { schtasks /delete /tn "omp-web" /f 2>$null | Out-Null; Log-Message "  [OK] Removed Scheduled Task: omp-web" } catch { }
     try { Unregister-ScheduledTask -TaskName "omp-web" -Confirm:$false -ErrorAction SilentlyContinue | Out-Null } catch { }

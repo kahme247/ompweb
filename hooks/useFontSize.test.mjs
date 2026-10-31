@@ -1,15 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createJiti } from "jiti";
 
-const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
 const {
   DEFAULT_FONT_SIZE,
   STORAGE_KEY,
   nextFontSizePreference,
   resolveFontSizePx,
   storedFontSizePreference,
-} = await jiti.import("./useFontSize.ts");
+} = await import("./useFontSize.ts");
 
 test("has expected constants", () => {
   assert.equal(DEFAULT_FONT_SIZE, "md");

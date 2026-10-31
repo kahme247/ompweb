@@ -3,7 +3,7 @@
  *
  * The values live in omp-web's own settings file (~/.omp/agent/omp-web-settings.json,
  * see lib/web-settings.ts) — omp's config.yml stays omp's. `getAgentEnvOverrides()`
- * is what lib/rpc-manager.ts hands to `new RpcProcess({ env })`; it runs inside the
+ * is what lib/hosts/local-host.ts passes as the spawn env overrides; it runs inside the
  * spawn path, so it must never throw: a missing, unreadable or hand-edited settings
  * file yields `{}` and the child simply inherits process.env unchanged.
  *

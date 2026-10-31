@@ -4,7 +4,7 @@ import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useTransition, cloneElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { getSubmitDuringRunBehavior, getWordCompletionMode, setSubmitDuringRunBehavior, setWordCompletionMode, type SubmitDuringRunBehavior, type WordCompletionMode } from "@/lib/composer-prefs";
-import dynamic from "next/dynamic";
+import dynamic from "@/lib/dynamic";
 import { ArrowDown, ArrowLeft, ArrowUp, Copy, Download, ExternalLink, RefreshCw, RotateCcw, Search, Monitor, Play, Square, Trash2, X } from "lucide-react";
 import { COMPACTION_METHODS, DEFAULT_COMPACTION_METHOD_ORDER, type CompactionMethod } from "@/lib/compaction-methods";
 import { formatAgentEnvText, parseAgentEnvText, type AgentEnvErrorLabels } from "@/lib/omp/agent-env-policy";
@@ -36,12 +36,13 @@ const SettingsTabLoading = () => {
   const { t } = useI18n();
   return <div role="status" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>{t("settingsConfig.loadingSettings")}</div>;
 };
-const ModelsConfig = dynamic(() => import("./ModelsConfig").then((module) => module.ModelsConfig), { loading: SettingsTabLoading, ssr: false });
-const SkillsConfig = dynamic(() => import("./SkillsConfig").then((module) => module.SkillsConfig), { loading: SettingsTabLoading, ssr: false });
-const PluginsConfig = dynamic(() => import("./PluginsConfig").then((module) => module.PluginsConfig), { loading: SettingsTabLoading, ssr: false });
-const McpConfig = dynamic(() => import("./McpConfig").then((module) => module.McpConfig), { loading: SettingsTabLoading, ssr: false });
-const AgentsConfig = dynamic(() => import("./AgentsConfig").then((module) => module.AgentsConfig), { loading: SettingsTabLoading, ssr: false });
-const UsageConfig = dynamic(() => import("./UsageConfig").then((module) => module.UsageConfig), { loading: SettingsTabLoading, ssr: false });
+const ModelsConfig = dynamic(() => import("./ModelsConfig").then((module) => module.ModelsConfig), { loading: SettingsTabLoading });
+const SkillsConfig = dynamic(() => import("./SkillsConfig").then((module) => module.SkillsConfig), { loading: SettingsTabLoading });
+const PluginsConfig = dynamic(() => import("./PluginsConfig").then((module) => module.PluginsConfig), { loading: SettingsTabLoading });
+const McpConfig = dynamic(() => import("./McpConfig").then((module) => module.McpConfig), { loading: SettingsTabLoading });
+const AgentsConfig = dynamic(() => import("./AgentsConfig").then((module) => module.AgentsConfig), { loading: SettingsTabLoading });
+const HostsConfig = dynamic(() => import("./HostsConfig").then((module) => module.HostsConfig), { loading: SettingsTabLoading });
+const UsageConfig = dynamic(() => import("./UsageConfig").then((module) => module.UsageConfig), { loading: SettingsTabLoading });
 
 type UpdateState = AppUpdateInfo;
 type WindowsServiceStatus = {
@@ -740,7 +741,7 @@ function CompactionMethodOrder({ value, onChange, ...aria }: { value: readonly C
   );
 }
 
-export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, hideToolActivity, onHideToolActivityChange, expandThinkingByDefault, onExpandThinkingByDefaultChange, onHideThinkingBlockChange, providerUsageVisible, onProviderUsageVisibleChange, scopeNativeSelectAll, onScopeNativeSelectAllChange, openUrlAutomatically, onOpenUrlAutomaticallyChange, cwd, sessionId, onModelsSaved, onPluginsReloaded, appUpdate, ompUpdateAvailable, ompUpdatesDisabled, onRefreshAppUpdate, onOmpUpdateAvailabilityChange, onRequestAppUpdate, onSelectTab, onClose }: {
+export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, hideToolActivity, onHideToolActivityChange, expandThinkingByDefault, onExpandThinkingByDefaultChange, onHideThinkingBlockChange, providerUsageVisible, onProviderUsageVisibleChange, scopeNativeSelectAll, onScopeNativeSelectAllChange, openUrlAutomatically, onOpenUrlAutomaticallyChange, cwd, remoteHost, sessionId, onModelsSaved, onPluginsReloaded, appUpdate, ompUpdateAvailable, ompUpdatesDisabled, onRefreshAppUpdate, onOmpUpdateAvailabilityChange, onRequestAppUpdate, onSelectTab, onClose }: {
   activeTab: SettingsTab;
   toolCallsDefaultCollapsed: boolean;
   onToolCallsDefaultCollapsedChange: (collapsed: boolean) => void;
@@ -756,6 +757,8 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   openUrlAutomatically: boolean;
   onOpenUrlAutomaticallyChange: (enabled: boolean) => void;
   cwd: string | null;
+  /** `cwd` lives on a remote host: its MCP settings are not available yet. */
+  remoteHost: boolean;
   sessionId: string | null;
   onModelsSaved: () => void;
   onPluginsReloaded: () => void;
@@ -771,6 +774,8 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   const isMobile = useIsMobile();
   const { t } = useI18n();
   const workspaceReady = cwd !== null;
+  // Workspace-scoped panels read this machine's disk: not for a remote workspace yet.
+  const remoteUnavailable = <p role="status" style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>{t("hosts.notAvailableRemote")}</p>;
   const { fontSize, setFontSize } = useFontSize();
   const { uiScale, setUiScale } = useUiScale();
   const { touchTargets, setTouchTargets } = useTouchTargets();
@@ -1670,9 +1675,9 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                 <div style={{ marginBottom: 4 }}>
                   <h2 className="display-serif" style={{ fontSize: 22, fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("settingsConfig.extensionsTools")}</h2>
                   <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.extensionsToolsDesc")}</p>
-                  {cwd && <button type="button" className="settings-back ui-focus-ring" onClick={() => handleSelectTab("skills")}>{t("skillsConfig.title")}</button>}
+                  {cwd && !remoteHost && <button type="button" className="settings-back ui-focus-ring" onClick={() => handleSelectTab("skills")}>{t("skillsConfig.title")}</button>}
                 </div>
-                {cwd && (
+                {cwd && !remoteHost && (
                   <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
                     <NativeSetting searchId="load-project-mcp-servers" label={t("settingsConfig.loadProjectMcp")} description={t("settingsConfig.loadProjectMcpDesc")} scope="Native OMP">
                       <ToggleSwitch
@@ -1694,7 +1699,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                     </NativeSetting>
                   </div>
                 )}
-                <McpConfig cwd={cwd} sessionId={sessionId} />
+                {remoteHost ? remoteUnavailable : <McpConfig cwd={cwd} sessionId={sessionId} />}
                 {!cwd && <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>{t("settingsConfig.selectWorkspaceForMcp")}</p>}
               </div>
             )}
@@ -1702,14 +1707,14 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
             {/* SKILLS SUB-PANEL CONTRACT MATCH */}
             {cwd && currentTab === "skills" && (
               <div role="tabpanel" id="settings-panel-skills" aria-labelledby="settings-tab-mcp" className="settings-panel-inner" style={{ display: currentTab === "skills" ? "flex" : "none", width: "100%", maxWidth: 940, minHeight: isMobile ? undefined : 600, flexDirection: "column", padding: isMobile ? "16px 14px 32px" : "32px 24px 64px" }}>
-                <SkillsConfig embedded cwd={cwd} sessionId={sessionId} onClose={onClose} />
+                {remoteHost ? remoteUnavailable : <SkillsConfig embedded cwd={cwd} sessionId={sessionId} onClose={onClose} />}
               </div>
             )}
 
             {/* PLUGINS SUB-PANEL CONTRACT MATCH */}
             {cwd && currentTab === "plugins" && (
               <div role="tabpanel" id="settings-panel-plugins" aria-labelledby="settings-tab-plugins" className="settings-panel-inner" style={{ display: currentTab === "plugins" ? "flex" : "none", width: "100%", maxWidth: 940, minHeight: isMobile ? undefined : 600, flexDirection: "column", padding: isMobile ? "16px 14px 32px" : "32px 24px 64px" }}>
-                <PluginsConfig embedded cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onPluginsReloaded} />
+                {remoteHost ? remoteUnavailable : <PluginsConfig embedded cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onPluginsReloaded} />}
               </div>
             )}
 
@@ -1739,7 +1744,17 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                     {t("settingsConfig.agentsDesc")}
                   </p>
                 </div>
-                <AgentsConfig cwd={cwd} />
+                {remoteHost ? remoteUnavailable : <AgentsConfig cwd={cwd} />}
+              </div>
+            )}
+
+            {/* HOSTS TAB */}
+            {currentTab === "hosts" && (
+              <div role="tabpanel" id="settings-panel-hosts" aria-labelledby="settings-tab-hosts" className="settings-panel-inner" style={{ padding: isMobile ? "16px 14px 32px" : "32px 24px 64px", gap: 16 }}>
+                <div style={{ marginBottom: 4 }}>
+                  <h2 className="display-serif" style={{ fontSize: 22, fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("hostsConfig.title")}</h2>
+                </div>
+                <HostsConfig />
               </div>
             )}
 
@@ -1807,22 +1822,26 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                       ) : (
                         <>
                           <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
-                            {t("settingsConfig.runAppUpdateCommand")}
+                            {t(appUpdate.installMethod === "binary" ? "settingsConfig.downloadAppUpdate" : "settingsConfig.runAppUpdateCommand")}
                           </div>
-                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            <code style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent)", wordBreak: "break-all" }}>{appUpdate.updateCommand || "npm install -g @kahme247/ompweb"}</code>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                void copyText(appUpdate.updateCommand || "npm install -g @kahme247/ompweb")
-                                  .then(() => toast.success(t("appShell.commandCopied")))
-                                  .catch(() => toast.error(t("appShell.commandCopyFailed")));
-                              }}
-                              style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}
-                            >
-                              <Copy size={12} aria-hidden="true" /> {t("appShell.copyCommand")}
-                            </button>
-                          </div>
+                          {appUpdate.installMethod === "binary" ? (
+                            <a href={appUpdate.updateCommand} target="_blank" rel="noopener noreferrer" style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent)", wordBreak: "break-all" }}>{appUpdate.updateCommand}</a>
+                          ) : (
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                              <code style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent)", wordBreak: "break-all" }}>{appUpdate.updateCommand || "npm install -g @kahme247/ompweb"}</code>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  void copyText(appUpdate.updateCommand || "npm install -g @kahme247/ompweb")
+                                    .then(() => toast.success(t("appShell.commandCopied")))
+                                    .catch(() => toast.error(t("appShell.commandCopyFailed")));
+                                }}
+                                style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}
+                              >
+                                <Copy size={12} aria-hidden="true" /> {t("appShell.copyCommand")}
+                              </button>
+                            </div>
+                          )}
                         </>
                       )}
                     </div>
@@ -1858,14 +1877,16 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                       <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{t("settingsConfig.runOmpUpdateCommand")}</div>
                       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                         <code style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent)", wordBreak: "break-all" }}>{update.updateCommand || "omp update"}</code>
-                        <button
-                          type="button"
-                          onClick={() => void handleOmpUpdateNow()}
-                          disabled={ompUpdating}
-                          style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 8px", border: "1px solid var(--accent-strong)", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "var(--on-accent)", cursor: ompUpdating ? "wait" : "pointer", fontSize: 11, fontWeight: 600 }}
-                        >
-                          <Download size={12} aria-hidden="true" /> {ompUpdating ? t("settingsConfig.updating") : t("settingsConfig.ompUpdateAction")}
-                        </button>
+                        {update.selfUpdateSupported === true && (
+                          <button
+                            type="button"
+                            onClick={() => void handleOmpUpdateNow()}
+                            disabled={ompUpdating}
+                            style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 8px", border: "1px solid var(--accent-strong)", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "var(--on-accent)", cursor: ompUpdating ? "wait" : "pointer", fontSize: 11, fontWeight: 600 }}
+                          >
+                            <Download size={12} aria-hidden="true" /> {ompUpdating ? t("settingsConfig.updating") : t("settingsConfig.ompUpdateAction")}
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => {

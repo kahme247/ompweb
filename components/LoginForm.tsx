@@ -4,9 +4,10 @@ import { LockKeyhole } from "lucide-react";
 import { FormEvent, useState } from "react";
 import { useI18n } from "@/lib/i18n";
 
-export function LoginForm() {
+/** `initialPassword`: what was typed into app/index.html's static copy of this form before the bundle ran. */
+export function LoginForm({ initialPassword = "" }: { initialPassword?: string }) {
   const { t } = useI18n();
-  const [password, setPassword] = useState("");
+  const [password, setPassword] = useState(initialPassword);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 

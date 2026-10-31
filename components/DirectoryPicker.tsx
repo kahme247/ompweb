@@ -58,9 +58,12 @@ interface Props {
   onSelect: (path: string, launchConfig?: { profile?: string; advisor?: boolean; extraArgs?: string[] }) => void;
   busy?: boolean;
   error?: string | null;
+  /** A remote host the workspace is added on. Its folders cannot be browsed from
+   *  here yet: the path is typed and validated by that host when selected. */
+  host?: { name: string } | null;
 }
 
-export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Props) {
+export function DirectoryPicker({ onCancel, onSelect, busy = false, error, host = null }: Props) {
   const { t } = useI18n();
   const [portalTarget, setPortalTarget] = useState<HTMLElement | null>(null);
   const [currentPath, setCurrentPath] = useState("");
@@ -72,7 +75,8 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
   const [profile, setProfile] = useState("");
   const [advisor, setAdvisor] = useState(false);
   const [extraArgs, setExtraArgs] = useState("");
-  const [loading, setLoading] = useState(true);
+  const remote = host !== null;
+  const [loading, setLoading] = useState(!remote);
   const [cloneUrl, setCloneUrl] = useState("");
   const [cloneId, setCloneId] = useState<string | null>(null);
   const [cloneLog, setCloneLog] = useState("");
@@ -107,8 +111,8 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
 
   useEffect(() => {
     setPortalTarget(document.body);
-    void navigateTo();
-  }, [navigateTo]);
+    if (!remote) void navigateTo();
+  }, [navigateTo, remote]);
 
   // Unmounting mid-clone drops the stream; the server cancels and cleans up.
   useEffect(() => () => cloneAbortRef.current?.abort(), []);
@@ -121,18 +125,19 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
   const handlePathSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const candidate = pathInput.trim();
-    if (candidate) void navigateTo(candidate);
+    if (candidate && !remote) void navigateTo(candidate);
   };
-  const hasUncommittedPath = pathInput.trim() !== currentPath;
+  const hasUncommittedPath = !remote && pathInput.trim() !== currentPath;
   const cloneName = cloneUrl.trim() ? cloneDirectoryName(cloneUrl) : null;
   const cloneTarget = cloneName && currentPath ? `${currentPath.replace(/[\\/]+$/, "")}${currentPath.includes("\\") ? "\\" : "/"}${cloneName}` : null;
-  const canSelect = Boolean(currentPath) && !hasUncommittedPath && !locked && (!cloneUrl.trim() || cloneName !== null);
-  const canNavigateUp = Boolean(parentDirectory) || isWindowsDriveRoot(currentPath);
+  const canSelect = Boolean(remote ? pathInput.trim() : currentPath) && !hasUncommittedPath && !locked && (!cloneUrl.trim() || cloneName !== null);
+  const goDisabled = loading || remote || !pathInput.trim();
+  const canNavigateUp = !remote && (Boolean(parentDirectory) || isWindowsDriveRoot(currentPath));
   const submitSelection = async () => {
     const args = extraArgs.split("\n").map((arg) => arg.trim()).filter(Boolean);
     const launchConfig = { profile: profile.trim() || undefined, advisor: advisor || undefined, extraArgs: args.length ? args : undefined };
     if (!cloneUrl.trim()) {
-      onSelect(currentPath, launchConfig);
+      onSelect(remote ? pathInput.trim() : currentPath, launchConfig);
       return;
     }
     const id = crypto.randomUUID();
@@ -264,10 +269,10 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
           <button
             className="directory-picker-action"
             type="submit"
-            disabled={loading || !pathInput.trim()}
-            title={t("directoryPicker.goToDirectory")}
-            style={{ minWidth: 58, height: 36, padding: "0 12px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-hover)", color: "var(--text-muted)", cursor: loading || !pathInput.trim() ? "default" : "pointer", opacity: loading || !pathInput.trim() ? 0.6 : 1, transition: "background-color var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm), opacity var(--dur-fast) var(--ease-out-warm)" }}
-            onMouseEnter={(e) => { if (!loading && pathInput.trim()) { e.currentTarget.style.background = "var(--bg-selected)"; e.currentTarget.style.color = "var(--text)"; } }}
+            disabled={goDisabled}
+            title={remote ? t("hosts.notAvailableRemote") : t("directoryPicker.goToDirectory")}
+            style={{ minWidth: 58, height: 36, padding: "0 12px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-hover)", color: "var(--text-muted)", cursor: goDisabled ? "default" : "pointer", opacity: goDisabled ? 0.6 : 1, transition: "background-color var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm), opacity var(--dur-fast) var(--ease-out-warm)" }}
+            onMouseEnter={(e) => { if (!goDisabled) { e.currentTarget.style.background = "var(--bg-selected)"; e.currentTarget.style.color = "var(--text)"; } }}
             onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text-muted)"; }}
           >
             {t("directoryPicker.go")}
@@ -275,7 +280,12 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
         </form>
 
         <div className="directory-picker-list" style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "8px 10px" }}>
-          {loading ? (
+          {remote ? (
+            <div role="status" style={{ padding: 8, color: "var(--text-dim)", fontSize: 11, lineHeight: 1.6 }}>
+              <div style={{ color: "var(--text-muted)", fontWeight: 600 }}>{t("hosts.notAvailableRemote")}</div>
+              <div>{t("hosts.remotePathHint", { host: host.name })}</div>
+            </div>
+          ) : loading ? (
             <div style={{ display: "grid", gap: 6, padding: 8 }} aria-busy="true" aria-label={t("directoryPicker.loadingDirectories")}>
               {Array.from({ length: 7 }).map((_, i) => (
                 <div
@@ -314,14 +324,14 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
           {(loadError || error) && (
             <div role="alert" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px", color: "var(--status-error)", fontSize: 11 }}>
               <span>{loadError ?? error}</span>
-              <button className="load-retry-button" type="button" onClick={() => void navigateTo(currentPath || undefined)} style={{ minHeight: 32, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 11, fontWeight: 600 }}>{t("directoryPicker.retry")}</button>
+              {!remote && <button className="load-retry-button" type="button" onClick={() => void navigateTo(currentPath || undefined)} style={{ minHeight: 32, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 11, fontWeight: 600 }}>{t("directoryPicker.retry")}</button>}
             </div>
           )}
         </div>
 
         {/* Shrinks and scrolls on short viewports (phone landscape) so the footer — incl. Cancel clone — stays reachable. */}
         <div style={{ flexShrink: 1, minHeight: 0, overflowY: "auto", padding: "10px 18px", borderTop: "1px solid var(--border)" }}>
-          <input className="directory-picker-clone-url" type="text" value={cloneUrl} disabled={cloning} onChange={(event) => { setCloneUrl(event.target.value); setCloneStatus(null); }} placeholder={t("directoryPicker.cloneUrlPlaceholder")} aria-label={t("directoryPicker.cloneUrlLabel")} autoComplete="off" spellCheck={false} style={{ width: "100%", height: 30, boxSizing: "border-box", marginBottom: 7, padding: "0 8px", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11 }} />
+          <input className="directory-picker-clone-url" type="text" value={cloneUrl} disabled={cloning || remote} title={remote ? t("hosts.notAvailableRemote") : undefined} onChange={(event) => { setCloneUrl(event.target.value); setCloneStatus(null); }} placeholder={t("directoryPicker.cloneUrlPlaceholder")} aria-label={t("directoryPicker.cloneUrlLabel")} autoComplete="off" spellCheck={false} style={{ width: "100%", height: 30, boxSizing: "border-box", marginBottom: 7, padding: "0 8px", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11 }} />
           {cloneUrl.trim() && !cloning && !cloneStatus && (
             <div style={{ marginBottom: 7, color: cloneTarget ? "var(--text-muted)" : "var(--status-error)", fontSize: 11, overflowWrap: "anywhere" }}>
               {cloneTarget ? t("directoryPicker.cloneInto", { path: cloneTarget }) : t("errors.invalid_git_url")}

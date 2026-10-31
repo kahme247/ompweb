@@ -4,30 +4,31 @@ Thanks for your interest in contributing!
 
 ## Setup
 
-- Node.js 24 or newer
+- Node.js 24 or newer (the server runs on [Bun](https://bun.sh), which `npm install` provides)
 - The [omp](https://github.com/can1357/oh-my-pi) binary on your `PATH` (or set `OMP_WEB_OMP_BIN`)
 
 ```bash
 npm install
-npm run dev   # http://127.0.0.1:30178
+npm run dev   # http://127.0.0.1:30178, Bun hot reload
 ```
 
 ## Checks (must pass before submitting)
 
 ```bash
-npx tsc --noEmit                                   # type check
+npm run typecheck                                  # type check
 npm run lint                                       # ESLint, zero warnings
-npm test                                           # unit tests
+npm test                                           # unit tests (bun test --parallel)
 ```
 
-Avoid `npm run build` during local development — it writes to `.next/` and
-interferes with the dev server. Builds are for release work.
+`npm run build` bundles the browser app into `dist/` and `npm run smoke`
+starts the built server and checks it; the dev server never reads `dist/`.
 
 ### React tests
 
-Tests use `node:test` and `jiti`; no Jest or Vitest configuration is required.
+Tests use `bun test` with `node:test`-style `test()` calls; no Jest or Vitest configuration is required.
+Mock a Node builtin with `mockBuiltin` (`tests/mock-builtin.mjs`, built on `mock.module`) and import the module under test afterwards with a fresh `?fresh=N` query.
 For interactive components and hooks, import `tests/setup-dom.mjs` before
-`@testing-library/react/pure.js`, and register `cleanup` with `afterEach`.
+`@testing-library/react/pure.js` (both imported dynamically, in that order), and register `cleanup` with `afterEach`.
 Use DOM queries and `@testing-library/user-event` for component interactions,
 and `renderHook` for hook state and lifecycle tests. Keep the real jsdom
 `window` and `document`; mock only the browser or network APIs a scenario needs.

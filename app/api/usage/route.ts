@@ -1,9 +1,6 @@
-import { NextResponse } from "next/server";
 import { apiErrorResponse } from "@/lib/api-utils";
 import { getUsageReport } from "@/lib/usage-service";
 import type { UsageGranularity, UsageTimeRange } from "@/lib/usage-types";
-
-export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
   try {
@@ -38,7 +35,7 @@ export async function GET(req: Request) {
       forceRefresh,
     });
 
-    return NextResponse.json(report);
+    return Response.json(report);
   } catch (error) {
     return apiErrorResponse(error);
   }

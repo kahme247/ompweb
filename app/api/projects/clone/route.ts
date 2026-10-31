@@ -1,7 +1,6 @@
 import { spawn } from "child_process";
 import { mkdir, rm } from "fs/promises";
 import { join } from "path";
-import { NextResponse } from "next/server";
 import { apiErrorResponse } from "@/lib/api-utils";
 import { cloneDirectoryName } from "@/lib/git-clone";
 import { createChildProcessEnvironment } from "@/lib/project-command-env";
@@ -62,23 +61,23 @@ function runGitClone(url: string, target: string, signal: AbortSignal, onOutput:
 // Clones `url` into `<parent>/<repo name>` and streams NDJSON frames:
 // output chunks, then exactly one of done / cancelled / error. The target is
 // removed on failure or cancellation (DELETE, or the client disconnecting).
-export async function POST(req: Request) {
+export async function POST(req: Request, { disableIdleTimeout }: { disableIdleTimeout: () => void }) {
   let body: { id?: unknown; parent?: unknown; url?: unknown };
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "Invalid request", code: "invalid_request" }, { status: 400 });
+    return Response.json({ error: "Invalid request", code: "invalid_request" }, { status: 400 });
   }
   const id = typeof body.id === "string" && CLONE_ID.test(body.id) ? body.id : null;
   const url = typeof body.url === "string" ? body.url.trim() : "";
   const name = cloneDirectoryName(url);
-  if (!id || clones.has(id)) return NextResponse.json({ error: "Invalid request", code: "invalid_request" }, { status: 400 });
-  if (!name) return NextResponse.json({ error: "Enter an https:// or ssh Git URL", code: "invalid_git_url" }, { status: 400 });
+  if (!id || clones.has(id)) return Response.json({ error: "Invalid request", code: "invalid_request" }, { status: 400 });
+  if (!name) return Response.json({ error: "Enter an https:// or ssh Git URL", code: "invalid_git_url" }, { status: 400 });
   let target: string;
   try {
     target = join(validateProjectPath(typeof body.parent === "string" ? body.parent : ""), name);
   } catch (error) {
-    if (error instanceof ProjectPathError) return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
+    if (error instanceof ProjectPathError) return Response.json({ error: error.message, code: error.code }, { status: 400 });
     throw error;
   }
   // Registered before any await so a cancel sent while the target is being
@@ -94,10 +93,11 @@ export async function POST(req: Request) {
   } catch (error) {
     clones.delete(id);
     if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      return NextResponse.json({ error: `Already exists: ${target}`, code: "clone_target_exists" }, { status: 409 });
+      return Response.json({ error: `Already exists: ${target}`, code: "clone_target_exists" }, { status: 409 });
     }
     return apiErrorResponse(error);
   }
+  disableIdleTimeout();
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     async start(streamController) {
@@ -136,7 +136,7 @@ export async function POST(req: Request) {
 export async function DELETE(req: Request) {
   const body = await req.json().catch(() => ({})) as { id?: unknown };
   const controller = typeof body.id === "string" ? clones.get(body.id) : undefined;
-  if (!controller) return NextResponse.json({ error: "No clone in progress", code: "clone_not_found" }, { status: 404 });
+  if (!controller) return Response.json({ error: "No clone in progress", code: "clone_not_found" }, { status: 404 });
   controller.abort();
-  return NextResponse.json({ ok: true });
+  return Response.json({ ok: true });
 }

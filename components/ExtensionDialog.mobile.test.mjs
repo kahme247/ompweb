@@ -4,12 +4,10 @@ import test, { afterEach, beforeEach } from "node:test";
 import React from "react";
 import { readFile } from "node:fs/promises";
 import { renderToStaticMarkup } from "react-dom/server";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react/pure.js";
-import { createJiti } from "jiti";
+const { act, cleanup, fireEvent, render, screen } = await import("@testing-library/react/pure.js");
 
-const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
-const { ExtensionDialog, shouldDeferAttachedFocus } = await jiti.import("./ExtensionDialog.tsx");
-const { MOBILE_QUERY } = await jiti.import("@/hooks/useIsMobile");
+const { ExtensionDialog, shouldDeferAttachedFocus } = await import("./ExtensionDialog.tsx");
+const { MOBILE_QUERY } = await import("@/hooks/useIsMobile");
 const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
 
 const OPTIONS = [

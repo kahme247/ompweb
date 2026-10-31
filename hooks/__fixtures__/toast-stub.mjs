@@ -1,5 +1,5 @@
-// Test stub for components/ui/toast.tsx: jiti cannot parse the real TSX file
-// and the DOM-backed toast must never fire inside Node tests. Calls are
+// Test stub for components/ui/toast.tsx: the DOM-backed toast must never fire
+// inside these tests. Calls are
 // recorded so tests can assert what the user was told.
 export const toastCalls = [];
 export const toast = {

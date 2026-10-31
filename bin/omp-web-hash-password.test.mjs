@@ -12,7 +12,7 @@ const launcher = fileURLToPath(new URL("./omp-web.js", import.meta.url));
 const hasScript = process.platform === "linux" && spawnSync("script", ["--version"]).status === 0;
 
 test("hash-password accepts Enter (\\r) at the hidden terminal prompt", { skip: !hasScript && "needs util-linux script", timeout: 10_000 }, async (t) => {
-  const child = spawn("script", ["-qec", `"${process.execPath}" "${launcher}" hash-password`, "/dev/null"]);
+  const child = spawn("script", ["-qec", `node "${launcher}" hash-password`, "/dev/null"]);
   // A prompt that never ends must not keep the test file alive after the timeout.
   t.after(() => child.kill("SIGKILL"));
   let output = "";

@@ -2,13 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createJiti } from "jiti";
 
-const jiti = createJiti(import.meta.url, {
-  jsx: { runtime: "automatic" },
-  tsconfigPaths: true,
-});
-const { ClampedDescription, clampDescriptionStyle, resolveToastTimeout } = await jiti.import("./toast.tsx");
+const { ClampedDescription, clampDescriptionStyle, resolveToastTimeout } = await import("./toast.tsx");
 
 const TOOL_LIST = "xd://: mounted mcp__ida_reverse_engineering_ida_address_context, mcp__ida_decompile";
 

@@ -2,12 +2,10 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import React from "react";
-import { cleanup, render, screen } from "@testing-library/react/pure.js";
-import userEvent from "@testing-library/user-event";
-import { createJiti } from "jiti";
+const { cleanup, render, screen } = await import("@testing-library/react/pure.js");
+const { default: userEvent } = await import("@testing-library/user-event");
 
-const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
-const { ExtensionDialog } = await jiti.import("./ExtensionDialog.tsx");
+const { ExtensionDialog } = await import("./ExtensionDialog.tsx");
 
 afterEach(cleanup);
 

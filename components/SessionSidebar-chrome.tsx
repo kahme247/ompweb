@@ -318,7 +318,7 @@ function OmpWebTitle() {
   const scrambleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reducedMotion = usePrefersReducedMotion();
 
-  const target = showVersion ? `v${process.env.NEXT_PUBLIC_OMP_WEB_VERSION ?? "0.0.0"}` : "omp web";
+  const target = showVersion ? `v${process.env.OMP_WEB_PUBLIC_APP_VERSION ?? "0.0.0"}` : "omp web";
   const display = useScramble(target, scrambling, reducedMotion);
 
   const triggerScramble = useCallback((toVersion: boolean) => {

@@ -1,7 +1,6 @@
-import { NextResponse } from "next/server";
-import { readSessionHeader } from "@/lib/session-reader";
-import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
-import { startRpcSession, getRpcSession, resolveSpawnCwdResult, WebRpcError } from "@/lib/rpc-manager";
+import { apiErrorResponse, hostOfflineResponse, resolveSessionHostOr404 } from "@/lib/api-utils";
+import { startRpcSession, getRpcSession, WebRpcError } from "@/lib/rpc-manager";
+import { sessionSpawnTarget } from "@/lib/hosts/session-index";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "@/lib/image-attachments";
@@ -29,16 +28,17 @@ const LIVE_SESSION_ONLY = new Set(["get_skill_diagnostics", "set_skill_startup_d
  * errors stay opaque English text. */
 function commandErrorResponse(error: unknown) {
   if (error instanceof RequestBodyTooLargeError) {
-    return NextResponse.json({ error: "Agent command is too large", code: "request_too_large" }, { status: 413 });
+    return Response.json({ error: "Agent command is too large", code: "request_too_large" }, { status: 413 });
   }
   if (error instanceof SyntaxError) {
-    return NextResponse.json({ error: "Invalid JSON request body", code: "invalid_json" }, { status: 400 });
+    return Response.json({ error: "Invalid JSON request body", code: "invalid_json" }, { status: 400 });
   }
-  if (error instanceof WebRpcError) {
-    return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
+  // host_offline falls through to apiErrorResponse: 503 {hostOffline: true}.
+  if (error instanceof WebRpcError && error.code !== "host_offline") {
+    return Response.json({ error: error.message, code: error.code }, { status: 400 });
   }
   if (error instanceof RpcCommandError) {
-    return NextResponse.json({ error: error.message, code: error.code ?? "rpc_command_failed" }, { status: 400 });
+    return Response.json({ error: error.message, code: error.code ?? "rpc_command_failed" }, { status: 400 });
   }
   return apiErrorResponse(error);
 }
@@ -53,7 +53,7 @@ export async function POST(
   try {
     const body = await parseJsonWithinLimit<{ type?: unknown; [key: string]: unknown }>(req, MAX_AGENT_COMMAND_REQUEST_BYTES);
     if (typeof body.type !== "string" || !body.type.trim()) {
-      return NextResponse.json({ error: "command type is required", code: "command_type_required" }, { status: 400 });
+      return Response.json({ error: "command type is required", code: "command_type_required" }, { status: 400 });
     }
 
     // The per-chat advisor choice rides on the query string (never the RPC
@@ -71,24 +71,28 @@ export async function POST(
     if (existing?.isAlive()) {
       if (noSpawn || liveOnly || existing.advisorSpawned === advisor || existing.isRunning() || existing.isEditingHistory()) {
         const result = await existing.send(body);
-        return NextResponse.json({ success: true, data: result });
+        return Response.json({ success: true, data: result });
       }
+      // Disposing a child behind a down link would wait for the link to return.
+      const offline = hostOfflineResponse(existing.host);
+      if (offline) return offline;
       await existing.destroyAndWait();
     }
-    if (noSpawn) return NextResponse.json({ success: true, data: NO_SPAWN_REPLIES[body.type] });
+    if (noSpawn) return Response.json({ success: true, data: NO_SPAWN_REPLIES[body.type] });
     if (liveOnly) {
-      return NextResponse.json(
+      return Response.json(
         { error: "Skill diagnostics require a running session", code: "skill_diagnostics_unavailable" },
         { status: 409 },
       );
     }
 
-    const resolved = await resolveSessionPathOr404(id);
+    const resolved = await resolveSessionHostOr404(id);
     if ("response" in resolved) return resolved.response;
-    const filePath = resolved.filePath;
-
-    const header = readSessionHeader(filePath);
-    const { cwd } = resolveSpawnCwdResult(header?.cwd);
+    const { host } = resolved;
+    const offline = hostOfflineResponse(host);
+    if (offline) return offline;
+    const target = await sessionSpawnTarget(id, host);
+    if (!target) return Response.json({ error: "Session not found", code: "session_not_found" }, { status: 404 });
 
     // A cold set_model must reach omp before the saved model is restored:
     // spawning with only --resume lets omp exit on an unrestorable saved
@@ -109,7 +113,7 @@ export async function POST(
         ? `${body.provider}/${body.modelId}`
         : undefined;
 
-    const { session } = await startRpcSession(id, filePath, cwd, undefined, advisor, header?.cwd, undefined, spawnModel);
+    const { session } = await startRpcSession(id, target.sessionFile, target.cwd, undefined, advisor, target.recordedCwd, spawnModel, host);
     if (spawnModel) {
       // Try the normal RPC first: when it succeeds it also records the new
       // model in the session, so later spawns restore it without an override.
@@ -121,20 +125,20 @@ export async function POST(
       // precedence) rethrows the RPC error, so a real failure still surfaces.
       try {
         const result = await session.send(body);
-        return NextResponse.json({ success: true, data: result });
+        return Response.json({ success: true, data: result });
       } catch (error) {
         const state = (await session.send({ type: "get_state" })) as {
           model?: { id?: unknown; provider?: unknown };
         } | null;
         if (state?.model?.provider === body.provider && state?.model?.id === body.modelId) {
-          return NextResponse.json({ success: true, data: { id: body.modelId, provider: body.provider } });
+          return Response.json({ success: true, data: { id: body.modelId, provider: body.provider } });
         }
         throw error;
       }
     }
     const result = await session.send(body);
 
-    return NextResponse.json({ success: true, data: result });
+    return Response.json({ success: true, data: result });
   } catch (error) {
     return commandErrorResponse(error);
   }
@@ -150,14 +154,14 @@ export async function GET(
   try {
     const session = getRpcSession(id);
     if (!session || !session.isAlive()) {
-      return NextResponse.json({ running: false });
+      return Response.json({ running: false });
     }
     try {
       const state = await session.send({ type: "get_state" });
-      return NextResponse.json({ running: true, state });
+      return Response.json({ running: true, state });
     } catch (error) {
       if (error instanceof WebRpcError && error.code === "session_unresponsive") {
-        return NextResponse.json({ running: false, recovered: true });
+        return Response.json({ running: false, recovered: true });
       }
       throw error;
     }

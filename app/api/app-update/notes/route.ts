@@ -1,8 +1,6 @@
 import { getGitHubReleaseNotes } from "@/lib/github-release-notes";
 import { checkNpmUpdate } from "@/lib/npm-update";
 
-export const dynamic = "force-dynamic";
-
 const NO_STORE_HEADERS = { "Cache-Control": "no-store" };
 
 function noContent(): Response {
