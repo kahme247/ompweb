@@ -36,8 +36,9 @@ jobs:
       - run: npm run smoke
 
       # Bun cross-compiles all five from here (scripts/build-binary.ts), from the client built above:
-      # release/ompweb-<os>-<arch>.tar.gz, .zip for Windows. The x64 ones are -baseline builds: Bun's default x64 runtime
-      # needs AVX2, which older CPUs lack. They keep the plain ompweb-<os>-x64 names.
+      # release/ompweb-<os>-<arch>.tar.gz, .zip for Windows. The x64 targets name -baseline (no AVX2 needed): in Bun 1.4.4
+      # that is the default x64 runtime too (the same bytes), and naming it keeps a later Bun from shipping a -modern one.
+      # They keep the plain ompweb-<os>-x64 names.
       - name: Build the release binaries
         run: |
           for target in bun-linux-x64-baseline bun-linux-arm64 bun-darwin-x64-baseline bun-darwin-arm64 bun-windows-x64-baseline; do
