@@ -214,7 +214,6 @@ function handleControl(frame, conn = sseConn) {
       // Switched to sockets: the switch moved every subscription off this EventSource.
       if (isWebSocketTransport(state.transport)) return;
       connectionId = frame.connectionId;
-      probeSseClock(connectionId);
     } else {
       conn.reconnectDelayMs = RECONNECT_MIN_MS;
       // Retired by the switch (to SSE, or emptied by a move and no key of the new mode).
@@ -231,7 +230,9 @@ function handleControl(frame, conn = sseConn) {
       if (subscription.conn === conn) subscribe(subscription);
       else if (subscription.moving === conn) sendSub(conn, subscription);
     }
-    if (conn !== sseConn) sendWaiting(conn);
+    // The probe after the subscribe POSTs: on HTTP/1.1 it would otherwise hold one of the 6 connections first paint needs.
+    if (conn === sseConn) probeSseClock(connectionId);
+    else sendWaiting(conn);
     return;
   }
   if (frame.type === "open") endReconnect(conn, Date.now());
