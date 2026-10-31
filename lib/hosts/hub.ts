@@ -85,6 +85,10 @@ interface Link {
   /** Last downlink seq handed out. Lines stay in `outbox` until the daemon acks them. */
   downSeq: number;
   outbox: Outbox<{ seq: number; line: string }>;
+  /** Highest outbox seq written to the current socket; `flush` sends what is past it. */
+  sentSeq: number;
+  /** Bun queued the last line over the socket's buffered data: the rest waits for its `drain`. */
+  awaitingDrain: boolean;
   up: SeqWindow;
   /** What this link has already logged about messages it skipped. */
   unknownLog: UnknownMessageLog;
@@ -129,6 +133,8 @@ function linkFor(id: string): Link {
       socket: null,
       downSeq: 0,
       outbox: new Outbox(),
+      sentSeq: 0,
+      awaitingDrain: false,
       up: new SeqWindow(),
       unknownLog: new UnknownMessageLog("daemon"),
       pending: new Map(),
@@ -168,20 +174,38 @@ function setStatus(link: Link, status: HostStatus): void {
 const isStatus = (status: unknown): status is number => Number.isInteger(status) && (status as number) >= 400 && (status as number) <= 599;
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { "cache-control": "no-store" } });
 
-/** Bun closes a socket over its backpressure limit instead of buffering on; sequenced lines stay in the outbox. */
+/** Unsequenced lines (welcome, ping, pong, ack): small, sent at once, never resent. */
 function enqueue(link: Link, line: string): void {
   link.socket?.send(line);
 }
 
-/** Number, keep until acked, and send; returns the seq. Throws LinkLimitError before recording anything.
- * Dropped once frozen (0): a kill, an answer or a command from a stopping server must not reach the children. */
+/** Send outbox lines past `sentSeq`, in order, until Bun queues one under backpressure (-1: the rest goes on
+ * `drain`) or drops it (0: the socket is closing; the next socket starts from its hello's ack). So at most one
+ * sequenced line sits in Bun's buffer, and a daemon that stops reading is waited for instead of closed. */
+function flush(link: Link): void {
+  const ws = link.socket;
+  if (!ws || link.awaitingDrain || hub().frozen) return;
+  for (const { seq, line } of link.outbox.pending()) {
+    if (seq <= link.sentSeq) continue;
+    const sent = ws.send(line);
+    if (sent !== 0) link.sentSeq = seq;
+    if (sent <= 0) {
+      link.awaitingDrain = true;
+      return;
+    }
+  }
+}
+
+/** Number, keep until acked, and send when the socket has room; returns the seq. Throws LinkLimitError before
+ * recording anything. Dropped once frozen (0): a kill, an answer or a command from a stopping server must not reach
+ * the children. */
 function sendDown(link: Link, body: Unsequenced<DownMessage>): number {
   if (hub().frozen) return 0;
   const seq = link.downSeq + 1;
   const line = encodeLine({ ...body, seq } as DownMessage);
   link.downSeq = seq;
   link.outbox.push({ seq, line });
-  enqueue(link, line);
+  flush(link);
   return seq;
 }
 
@@ -316,7 +340,8 @@ function versionMismatch(link: Link, raw: unknown): boolean {
 export const hostLinkSocket = {
   // A result frame is up to blobBytes plus its id header; Bun closes 1009 above it.
   maxPayloadLength: LINK_LIMITS.blobBytes + 256,
-  // A daemon that stops reading is closed rather than buffered for; what it missed is resent after its redial.
+  // A backstop: flush keeps at most one sequenced line in Bun's buffer. Past the limit the socket closes instead of
+  // buffering on, and what the daemon missed is resent after its redial.
   backpressureLimit: LINK_LIMITS.uplinkBytes,
   closeOnBackpressureLimit: true as const,
   message(ws: LinkSocket, data: string | Uint8Array): void {
@@ -328,6 +353,15 @@ export const hostLinkSocket = {
       // A socket a newer one replaced: what it still sends belongs to no link.
       if (ws.data.hello) return;
       onFirstFrame(ws, data);
+    });
+  },
+  /** Bun wrote out what it had queued: send the outbox lines that waited. */
+  drain(ws: LinkSocket): void {
+    guarded(ws, () => {
+      const link = hub().links.get(ws.data.hostId);
+      if (link?.socket !== ws) return;
+      link.awaitingDrain = false;
+      flush(link);
     });
   },
   close(ws: LinkSocket): void {
@@ -396,8 +430,10 @@ function openLink(link: Link, ws: LinkSocket, hello: Hello): void {
   // The version this link speaks.
   link.hostVersion = hello.v;
   enqueue(link, encodeLine({ type: "welcome", v: hello.v, hostId: link.id }));
-  // Resend what the daemon has not applied, in order, before anything new.
-  for (const { line } of link.outbox.pending()) enqueue(link, line);
+  // Resend what the daemon has not applied, in order and paced, before anything new.
+  link.sentSeq = hello.ack;
+  link.awaitingDrain = false;
+  flush(link);
   reattach(link, hello.channels);
 
   link.ompVersion = hello.ompVersion;
