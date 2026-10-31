@@ -164,9 +164,14 @@ export class RpcProcess {
       ready.resolve({ type: "ready", supportedProtocolVersions: [options.adopted.protocolVersion] });
     }
 
-    const decoder = new RpcFrameDecoder();
+    let decoder = new RpcFrameDecoder();
     // An adopted child's output can resume mid chunk sequence: skip to the next frame's start.
     let midSequence = options.adopted !== undefined;
+    // A linked host dropped lines (resync): the half-read sequence is gone, and the next lines may be another's tail.
+    this.transport.onResync?.(() => {
+      decoder = new RpcFrameDecoder();
+      midSequence = true;
+    });
     this.transport.onLine((line) => {
       if (this.heldFrames && !this.holdable(line)) return;
       const parsed = parseLine(line);
