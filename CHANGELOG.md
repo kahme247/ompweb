@@ -6,6 +6,10 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ## [Unreleased]
 
+### Added
+
+- **Settings → Mobile app tells you how to reach this server from a phone.** The new `GET /api/mobile-access` reports the binding (`-H`/`OMP_WEB_HOSTNAME`), whether a password is configured, the addresses a phone can type in (Tailscale MagicDNS when `tailscale` is installed, then Tailscale and LAN IPv4s, never loopback) and the exact install commands for the CLI, the Windows tray, systemd and launchd. It never changes the binding and never returns a credential — only whether the hash is present. The Tailscale probe runs a fixed install path with a sanitized environment, so a `tailscale` binary on `PATH` cannot read the server's secrets.
+
 ### Fixes & Improvements
 
 - **In-app updates work when ompweb runs as a systemd service.** The update worker ran inside the service's cgroup, so stopping the server killed the worker too: nothing was installed, the service could stay down (`Restart=on-failure` does not restart a clean SIGTERM exit), and every page load reopened the update dialog at "Stop ompweb-managed sessions". The worker now runs in its own transient scope (`systemd-run --scope`) and stops, updates and starts the unit through `systemctl`, starting it again if the install fails.

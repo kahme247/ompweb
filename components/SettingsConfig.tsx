@@ -349,6 +349,106 @@ function AgentToolsSetting() {
   );
 }
 
+type MobileAccessData = {
+  binding: { hostname: string | null; exposure: "loopback" | "network" | "unknown"; port: number };
+  password: { configured: boolean; problem: boolean };
+  addresses: Array<{ url: string; label: "magicdns" | "tailscale" | "lan" }>;
+  methods: Array<{ id: "cli" | "windowsTray" | "systemd" | "launchd"; commands: string[] }>;
+};
+
+/** Read-only guide for the Android app: binding, password state, addresses, exact commands. */
+function MobileAppCard() {
+  const { t } = useI18n();
+  const [data, setData] = useState<MobileAccessData | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/mobile-access")
+      .then((res) => (res.ok ? res.json() as Promise<MobileAccessData> : Promise.reject(new Error(`HTTP ${res.status}`))))
+      .then((next) => { if (alive) setData(next); })
+      .catch(() => { if (alive) setFailed(true); });
+    return () => { alive = false; };
+  }, []);
+  const bindingText = data === null ? ""
+    : t(`settingsConfig.mobileAppBinding.${data.binding.exposure}`, {
+      hostname: data.binding.hostname ?? "—",
+      port: String(data.binding.port),
+    });
+  const methodTitleKey: Record<MobileAccessData["methods"][number]["id"], string> = {
+    cli: "settingsConfig.mobileAppCli",
+    windowsTray: "settingsConfig.mobileAppWindowsTray",
+    systemd: "settingsConfig.mobileAppSystemd",
+    launchd: "settingsConfig.mobileAppLaunchd",
+  };
+  const methodHintKey: Record<MobileAccessData["methods"][number]["id"], string> = {
+    cli: "settingsConfig.mobileAppCliHint",
+    windowsTray: "settingsConfig.mobileAppWindowsTrayHint",
+    systemd: "settingsConfig.mobileAppSystemdHint",
+    launchd: "settingsConfig.mobileAppLaunchdHint",
+  };
+  return (
+    <section style={{ padding: 14, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", display: "flex", flexDirection: "column", gap: 12 }}>
+      <div>
+        <div className="settings-card-title" style={{ marginBottom: 4 }}>{t("settingsConfig.mobileAppTitle")}</div>
+        <div className="settings-card-desc">{t("settingsConfig.mobileAppDesc")}</div>
+      </div>
+      {failed && <Alert variant="warning" description={t("settingsConfig.mobileAppLoadFailed")} />}
+      {data !== null && (
+        <>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12.5 }}>
+            <div>{bindingText}</div>
+            <div>{data.password.problem ? t("settingsConfig.mobileAppPasswordProblem") : data.password.configured ? t("settingsConfig.mobileAppPasswordSet") : t("settingsConfig.mobileAppPasswordMissing")}</div>
+            {data.binding.exposure !== "network" && <div style={{ color: "var(--warning, #b45309)" }}>{t("settingsConfig.mobileAppNetworkHint")}</div>}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <div className="settings-section-title" style={{ fontSize: 12.5, fontWeight: 600 }}>{t("settingsConfig.mobileAppAddresses")}</div>
+            {data.addresses.length === 0
+              ? <div style={{ color: "var(--text-muted)", fontSize: 12.5 }}>{t("settingsConfig.mobileAppNoAddresses")}</div>
+              : data.addresses.map((address) => (
+                <div key={address.url} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <code style={{ fontSize: 12.5 }}>{address.url}</code>
+                  <span style={{ color: "var(--text-muted)", fontSize: 11.5 }}>{t(`settingsConfig.mobileAppLabel.${address.label}`)}</span>
+                  <button
+                    type="button"
+                    onClick={() => { void copyText(address.url).catch(() => toast.error(t("appShell.commandCopyFailed"))); }}
+                    title={t("appShell.copyCommand")}
+                    aria-label={t("appShell.copyCommand")}
+                    style={{ border: "none", background: "none", cursor: "pointer", color: "var(--text-muted)", padding: 2, display: "inline-flex" }}
+                  >
+                    <Copy size={13} />
+                  </button>
+                </div>
+              ))}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <div className="settings-section-title" style={{ fontSize: 12.5, fontWeight: 600 }}>{t("settingsConfig.mobileAppSteps")}</div>
+            {data.methods.map((method) => (
+              <div key={method.id} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 600 }}>{t(methodTitleKey[method.id])}</div>
+                <div style={{ color: "var(--text-muted)", fontSize: 12, lineHeight: 1.45 }}>{t(methodHintKey[method.id])}</div>
+                {method.commands.map((command) => (
+                  <div key={command} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <code style={{ fontSize: 12, overflowWrap: "anywhere", minWidth: 0 }}>{command}</code>
+                    <button
+                      type="button"
+                      onClick={() => { void copyText(command).catch(() => toast.error(t("appShell.commandCopyFailed"))); }}
+                      title={t("appShell.copyCommand")}
+                      aria-label={t("appShell.copyCommand")}
+                      style={{ border: "none", background: "none", cursor: "pointer", color: "var(--text-muted)", padding: 2, display: "inline-flex", flexShrink: 0 }}
+                    >
+                      <Copy size={13} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
 /** Server-side omp-web setting (issue #104): KEY=VALUE text injected into the
  * `omp` child process. Parsing/validation lives in lib/omp/agent-env.ts; this only
  * feeds it localized messages and renders the result. */
@@ -1769,6 +1869,8 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                 <AgentToolsSetting />
 
                 <AgentEnvSetting />
+
+                <MobileAppCard />
 
                 {/* ompweb app update card */}
                 <section style={{ padding: 14, border: appUpdateIsAvailable ? "1px solid color-mix(in srgb, var(--accent) 45%, var(--border))" : "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", display: "flex", flexDirection: "column", gap: 10 }}>
