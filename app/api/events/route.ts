@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
-import { EventStreamConnection, getEventStreamConnection } from "@/lib/event-stream-hub";
+import { EventStreamConnection, getEventStreamConnection, parseHeartbeatSeconds } from "@/lib/event-stream-hub";
 import { parseEventStreamRequest, UNKNOWN_CONNECTION_CODE } from "@/lib/event-stream-protocol";
 
 export const dynamic = "force-dynamic";
@@ -10,7 +10,8 @@ const MAX_REQUEST_BYTES = 16 * 1024;
 // GET /api/events — the browser's single multiplexed live-event stream.
 // Subscriptions are attached with POST (see lib/event-stream-protocol.ts).
 export function GET(req: Request) {
-  const connection = new EventStreamConnection(req.signal);
+  const heartbeat = parseHeartbeatSeconds(new URL(req.url).searchParams.get("heartbeat"));
+  const connection = new EventStreamConnection(req.signal, heartbeat * 1000);
   return new Response(connection.stream, {
     headers: {
       "Content-Type": "text/event-stream",

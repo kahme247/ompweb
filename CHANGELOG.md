@@ -6,6 +6,11 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ## [Unreleased]
 
+### Added
+
+- **Full-text search across session messages.** `GET /api/sessions/messages/search?q=&limit=&cursor=` searches the text of user and assistant messages in every session file, newest first, and returns a cursor to fetch the next slice. The corpus is far larger than memory allows, so the scan is bounded: sessions are opened newest-first, each file is read backwards in chunks, and each request stops at whichever limit trips first (results, per-file bytes, total bytes, a 5 s budget), so `partial:true` means "more remains", not "the answer is incomplete". Thinking blocks, tool results and tool-call arguments are not searchable, matching the transcript. At most a fixed number of scans run per process; further requests get `429` with `Retry-After` instead of stalling the event loop.
+- **A handshake for native clients.** `GET /api/app-info` answers with the app name `ompweb` (not the npm package name `@kahme247/ompweb`), version, API level and which server-side capabilities exist. It carries no configuration and no credentials (it sits behind the normal auth gate), and it lets a client tell "not an ompweb server" from "server too old" from "OK" instead of probing endpoints. A native client can also ask for its own keep-alive interval with `GET /api/events?heartbeat=<seconds>` (15-110 s; any other value keeps the 30 s default). The interval belongs to that connection only, so the browser's shared stream is unchanged, and a phone's radio can sleep for the whole idle interval.
+
 ### Fixes & Improvements
 
 - **In-app updates work when ompweb runs as a systemd service.** The update worker ran inside the service's cgroup, so stopping the server killed the worker too: nothing was installed, the service could stay down (`Restart=on-failure` does not restart a clean SIGTERM exit), and every page load reopened the update dialog at "Stop ompweb-managed sessions". The worker now runs in its own transient scope (`systemd-run --scope`) and stops, updates and starts the unit through `systemctl`, starting it again if the install fails.
