@@ -17,7 +17,7 @@
 //                 { op: "lock", name }  (tab holds this Web Lock while alive)
 //                 { op: "bye" }         (pagehide: drop this tab's streams)
 //                 { op: "wake", reason, visible, clientId }  (reason: init | visible | hidden | online | network)
-//                 { op: "cmd", n, req, sessionId, advisor, body }  (an agent command; body: its JSON text)
+//                 { op: "cmd", n, req, sessionId, advisor, body, type }  (an agent command; body: its JSON text, type: its type)
 //                 { op: "metric", sample }  (a transport sample of the tab's: tagged, buffered and POSTed here)
 // Worker -> tab:  { id, type: "open" }
 //                 { id, type: "message", data }   (raw JSON string)
@@ -66,6 +66,12 @@ const EVENT_SAMPLE_MS = 1000;
 const WAKE_WINDOW_MS = 60000;
 const BATCH_WINDOW_MS = 2000;
 const SSE_CLOCK_PROBES = 3;
+// After those, one probe per this, the server's socket heartbeat: every transport's clock is refreshed as often.
+const SSE_CLOCK_PROBE_MS = 10000;
+// The clock is the lowest-RTT of the last CLOCK_WINDOW_SAMPLES samples no older than CLOCK_WINDOW_MS (the newest always
+// stays), so a device clock step ages out.
+const CLOCK_WINDOW_MS = 300000;
+const CLOCK_WINDOW_SAMPLES = 20;
 const LARGE_FRAME_BYTES = 64 * 1024;
 const LARGE_FRAME_LOG_MS = 30000;
 
@@ -94,7 +100,7 @@ const conns = new Map();
 /** Retired Conns whose sockets stay open until the commands sent on them are answered (see retire). */
 const draining = new Set();
 /** SSE subscriptions' `conn`: the EventSource's per-connection state, shaped like a Conn's. */
-const sseConn = { key: "sse", clock: null, lastEventSampleAt: -Infinity, reconnect: null, largeFrames: [] };
+const sseConn = { key: "sse", lastEventSampleAt: -Infinity, heldEvent: null, reconnect: null, largeFrames: [] };
 /** @type {ReturnType<typeof setInterval> | undefined} */
 let silenceTimer;
 /** ws-pool's size N (spec D2 "ws-pool sizing"); 1 outside ws-pool. */
@@ -107,8 +113,11 @@ let droppedSamples = 0;
 let flushing = false;
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let flushTimer;
-/** The min-RTT clock sample of any connection: `serverNow = clientNow + offset`. @type {{ offset: number, rtt: number } | null} */
-let bestClock = null;
+/**
+ * One clock for every connection, event and action (spec D6): `serverNow = clientNow + offset`, from the WS pongs and
+ * the SSE probes, oldest first as `{ offset, rtt, takenAt }` (see currentClock).
+ */
+let clockSamples = [];
 /** From the tabs' wakes: this browser's id, and the effective connection type as of the latest one. */
 let clientId = null;
 let knownEffectiveType = null;
@@ -203,7 +212,7 @@ function handleControl(frame, conn = sseConn) {
       // Switched to sockets: the switch moved every subscription off this EventSource.
       if (isWebSocketTransport(state.transport)) return;
       connectionId = frame.connectionId;
-      probeSseClock(source);
+      probeSseClock(connectionId);
     } else {
       conn.reconnectDelayMs = RECONNECT_MIN_MS;
       // Retired by the switch (to SSE, or emptied by a move and no key of the new mode).
@@ -608,7 +617,7 @@ function connFor(key) {
       reconnectTimer: undefined,
       lingerTimer: undefined,
       retiring: false,
-      clock: null,
+      heldEvent: null,
       lastEventSampleAt: -Infinity,
       reconnect: null,
       largeFrames: [],
@@ -773,7 +782,7 @@ function onSocketFrame(conn, text) {
       return;
     }
     if (name === MUX_CONTROL_EVENT) handleControl(frame, conn);
-    else if (name === "pong") clockSample(conn, frame.c, at, now);
+    else if (name === "pong") clockSample(frame.c, at, now);
     else onCommandFrame(conn, name, at, frame, data.length);
     return;
   }
@@ -795,6 +804,8 @@ function queueCommand(client, message) {
     client,
     req,
     body,
+    // From the tab, which built the body: the worker never parses it.
+    type: typeof message.type === "string" ? message.type : "",
     session: message.sessionId,
     frame: `{"t":"cmd","rid":${JSON.stringify(req)},"session":${JSON.stringify(message.sessionId)},"advisor":${message.advisor === true},"command":${body}}`,
     attempts: 0,
@@ -880,7 +891,7 @@ function sendCommand(conn, command) {
   // No ack in time is a silent hang: the socket is dead even if it never closed.
   const timeout = ACK_TIMEOUT_MS + Math.ceil((ahead + command.body.length) / 32);
   command.ackTimer = setTimeout(() => {
-    record({ metric: "hang", socket: conn.key, req: command.req, type: JSON.parse(command.body).type, via: "ws", bytes: command.body.length, waitedMs: timeout });
+    record({ metric: "hang", socket: conn.key, req: command.req, type: command.type, via: "ws", bytes: command.body.length, waitedMs: timeout });
     redial(conn, backoff(conn), "hang");
   }, timeout);
 }
@@ -904,8 +915,7 @@ function sendIfSafe(conn, command) {
 }
 
 function idempotent(command) {
-  const type = JSON.parse(command.body).type;
-  return typeof type === "string" && (type.startsWith("get_") || type === "predict_word");
+  return command.type.startsWith("get_") || command.type === "predict_word";
 }
 
 /** Its socket dropped before the reply: resent at most once (redial moves it to the session's socket of now), never from a retiring socket. */
@@ -924,8 +934,11 @@ function onCommandFrame(conn, name, at, frame, bytes) {
     clearTimeout(command.ackTimer);
     command.recvAt = at;
   } else {
-    const behind = frameArrived(conn, command.session, bytes, at, Date.now());
-    settle(conn, command, reply(command, frame.status, frame.body, at, frame.deduped === true, behind && behind.other));
+    const now = Date.now();
+    const entry = logFrame(conn, command.session, bytes, at, now);
+    const clock = currentClock(now);
+    const behind = clock && Number.isFinite(at) ? behindFrames(conn.largeFrames, command.session, at, now, clock, entry).other : null;
+    settle(conn, command, reply(command, frame.status, frame.body, at, frame.deduped === true, behind));
   }
 }
 
@@ -1013,71 +1026,143 @@ function clockPing(conn) {
   sendFrame(conn, { t: "ping", c: Date.now() });
 }
 
-/** A clock sample (spec D6, NTP-style) from a ping sent at `c` and answered at the server's `at`; the lowest RTT wins. */
-function clockSample(conn, c, at, now) {
-  if (!Number.isFinite(c) || !Number.isFinite(at)) return;
-  const sample = { offset: at - (c + now) / 2, rtt: now - c };
-  if (!conn.clock || sample.rtt < conn.clock.rtt) conn.clock = sample;
-  if (!bestClock || sample.rtt < bestClock.rtt) bestClock = sample;
+/**
+ * A clock sample (spec D6, NTP-style) from a ping sent at `c` and answered at the server's `at`. A negative RTT (the
+ * device clock stepped back mid-ping) is none. The worker's first clock records the frames held for it.
+ */
+function clockSample(c, at, now) {
+  const rtt = now - c;
+  if (!Number.isFinite(rtt) || !Number.isFinite(at) || rtt < 0) return;
+  const first = clockSamples.length === 0;
+  clockSamples.push({ offset: at - (c + now) / 2, rtt, takenAt: now });
+  if (clockSamples.length > CLOCK_WINDOW_SAMPLES) clockSamples.shift();
+  if (first) recordHeldEvents();
 }
 
-/** After an SSE hello: SSE_CLOCK_PROBES reads of the server clock, one after another, while this EventSource lasts. */
-async function probeSseClock(current) {
-  for (let i = 0; i < SSE_CLOCK_PROBES && source === current; i++) {
-    const c = Date.now();
-    try {
-      const response = await fetch(METRICS_PATH, { cache: "no-store" });
-      const body = await response.json();
-      clockSample(sseConn, c, body.now, Date.now());
-    } catch {
-      return;
-    }
-  }
+/** The lowest-RTT sample of the window, or null before the first. */
+function currentClock(now) {
+  while (clockSamples.length > 1 && now - clockSamples[0].takenAt > CLOCK_WINDOW_MS) clockSamples.shift();
+  let best = null;
+  for (const sample of clockSamples) if (!best || sample.rtt < best.rtt) best = sample;
+  return best;
 }
 
 /**
- * Logs a frame of LARGE_FRAME_BYTES or more and returns the bytes of the logged frames it arrived behind, by owner
- * (spec D6 "Cross-session blocking"): those written before it and still arriving when it was written. Null without a clock.
+ * After an SSE hello: SSE_CLOCK_PROBES reads of the server clock one after another, then one per SSE_CLOCK_PROBE_MS,
+ * while that connection lasts (`current`: its id).
  */
-function frameArrived(conn, owner, bytes, at, gotAt) {
-  const clock = conn.clock ?? bestClock;
+async function probeSseClock(current) {
+  for (let i = 0; i < SSE_CLOCK_PROBES; i++) {
+    if (connectionId !== current) return;
+    await probeClock();
+  }
+  scheduleSseProbe(current);
+}
+
+function scheduleSseProbe(current) {
+  setTimeout(async () => {
+    if (connectionId !== current) return;
+    await probeClock();
+    scheduleSseProbe(current);
+  }, SSE_CLOCK_PROBE_MS);
+}
+
+async function probeClock() {
+  const c = Date.now();
+  try {
+    const response = await fetch(METRICS_PATH, { cache: "no-store" });
+    const body = await response.json();
+    clockSample(c, body.now, Date.now());
+  } catch {
+    // Offline or refused: the next probe tries again.
+  }
+}
+
+/** Prunes the connection's log of large frames (spec D6 "Cross-session blocking") and logs this one if it is large. */
+function logFrame(conn, owner, bytes, at, gotAt) {
   const log = conn.largeFrames;
   while (log.length > 0 && gotAt - log[0].gotAt > LARGE_FRAME_LOG_MS) log.shift();
-  if (!Number.isFinite(at)) return null;
-  let behind = null;
-  if (clock) {
-    behind = { same: 0, other: 0 };
-    for (const frame of log) {
-      if (frame.at <= at && frame.gotAt + clock.offset > at) behind[frame.owner === owner ? "same" : "other"] += frame.bytes;
-    }
+  if (bytes < LARGE_FRAME_BYTES || !Number.isFinite(at)) return null;
+  const entry = { owner, bytes, at, gotAt };
+  log.push(entry);
+  return entry;
+}
+
+/**
+ * The bytes of logged frames that a frame written at `at` and arrived at `gotAt` came in behind, by owner: written
+ * before it, arrived before it and still arriving when it was written. `self`: its own entry, if logged.
+ */
+function behindFrames(log, owner, at, gotAt, clock, self) {
+  const behind = { same: 0, other: 0 };
+  for (const frame of log) {
+    if (frame === self || frame.gotAt > gotAt || frame.at > at || frame.gotAt + clock.offset <= at) continue;
+    if (frame.owner === owner) behind.same += frame.bytes;
+    else behind.other += frame.bytes;
   }
-  if (bytes >= LARGE_FRAME_BYTES) log.push({ owner, bytes, at, gotAt });
   return behind;
 }
 
-/** A stream's frame from its connection: at most one event sample per connection per EVENT_SAMPLE_MS (one behind another session's frame always), then to the tab. */
+/**
+ * A stream's frame from its connection, then to the tab: at most one event sample per connection per EVENT_SAMPLE_MS
+ * (one behind another session's large frame always). Before the worker's first clock (in SSE the first probe answers
+ * after the first snapshot) the connection's first frame is held and recorded with that clock (recordHeldEvents).
+ */
 function deliver(subscription, conn, data, at) {
   const { channel } = subscription;
   const gotAt = Date.now();
-  const behind = frameArrived(conn, channel.kind === "session" ? channel.sessionId : "app", data.length, at, gotAt);
+  const owner = channel.kind === "session" ? channel.sessionId : "app";
+  const entry = logFrame(conn, owner, data.length, at, gotAt);
   endReconnect(conn, gotAt);
-  if (behind && (behind.other > 0 || gotAt - conn.lastEventSampleAt >= EVENT_SAMPLE_MS)) {
-    const clock = conn.clock ?? bestClock;
-    conn.lastEventSampleAt = gotAt;
-    record({
-      metric: "event",
-      socket: conn.key,
-      channel: channel.kind,
-      at,
-      gotAt,
-      offset: clock.offset,
-      offsetRtt: clock.rtt,
-      bytes: data.length,
-      behindSameBytes: behind.same,
-      behindOtherBytes: behind.other,
-    });
+  if (Number.isFinite(at)) {
+    const clock = currentClock(gotAt);
+    if (clock) {
+      const behind = behindFrames(conn.largeFrames, owner, at, gotAt, clock, entry);
+      if (behind.other > 0 || gotAt - conn.lastEventSampleAt >= EVENT_SAMPLE_MS) eventSample(conn, channel.kind, at, gotAt, data.length, clock, behind);
+    } else if (conn.lastEventSampleAt === -Infinity) {
+      conn.lastEventSampleAt = gotAt;
+      conn.heldEvent = { channel: channel.kind, owner, at, gotAt, bytes: data.length, entry };
+    }
   }
   post(subscription.client, { id: subscription.streamId, type: "message", data });
+}
+
+function eventSample(conn, channel, at, gotAt, bytes, clock, behind) {
+  conn.lastEventSampleAt = gotAt;
+  record({
+    metric: "event",
+    socket: conn.key,
+    channel,
+    at,
+    gotAt,
+    offset: clock.offset,
+    offsetRtt: clock.rtt,
+    bytes,
+    behindSameBytes: behind.same,
+    behindOtherBytes: behind.other,
+  });
+}
+
+/** The worker's first clock: the frames held for it are recorded with it. */
+function recordHeldEvents() {
+  const clock = currentClock(Date.now());
+  const release = (conn) => {
+    const held = conn.heldEvent;
+    if (!held) return;
+    conn.heldEvent = null;
+    eventSample(conn, held.channel, held.at, held.gotAt, held.bytes, clock, behindFrames(conn.largeFrames, held.owner, held.at, held.gotAt, clock, held.entry));
+  };
+  eachSocket(release);
+  release(sseConn);
+}
+
+/** A tab's sample. An HTTP action's reply shared the SSE stream's HTTP/2 connection: measured against its frame log. */
+function recordTabSample(sample) {
+  if (sample.metric === "action" && sample.via === "http" && sample.replyBehindOtherBytes === null && Number.isFinite(sample.repliedAt) && Number.isFinite(sample.gotAt)) {
+    const clock = currentClock(Date.now());
+    const behind = clock && behindFrames(sseConn.largeFrames, sample.session, sample.repliedAt, sample.gotAt, clock, null);
+    if (behind) sample = { ...sample, replyBehindOtherBytes: behind.other };
+  }
+  record(sample);
 }
 
 /** A connection dropped (spec D6 `reconnect`): its outage runs from the first drop until a stream gets a frame after the next hello. */
@@ -1127,11 +1212,12 @@ function effectiveType() {
   return self.navigator.connection?.effectiveType ?? null;
 }
 
-/** The tags a sample lacks; an action sample (the tab's) also gets the worker's best clock. */
+/** The tags a sample lacks; an action sample (the tab's) also gets the worker's clock. */
 function stamp(sample) {
   const socket = sample.socket ?? "worker";
   let visible = false;
   for (const client of clients) visible = visible || client.visible === true;
+  const clock = sample.metric === "action" ? currentClock(Date.now()) : null;
   return {
     transport: state.transport,
     pool: state.transport === "ws-pool" ? poolSize : null,
@@ -1141,7 +1227,7 @@ function stamp(sample) {
     clientId,
     effectiveType: effectiveType(),
     visible,
-    ...(sample.metric === "action" ? { offset: bestClock?.offset ?? null, offsetRtt: bestClock?.rtt ?? null } : {}),
+    ...(sample.metric === "action" ? { offset: clock ? clock.offset : null, offsetRtt: clock ? clock.rtt : null } : {}),
     ...sample,
   };
 }
@@ -1149,9 +1235,14 @@ function stamp(sample) {
 function record(sample) {
   samples.push(stamp(sample));
   trimSamples();
-  // Reaching the count flushes; a failed POST leaves more than that, which then waits for the timer instead of retrying per sample.
-  if (samples.length === METRICS_FLUSH_COUNT) flushSamples();
-  else scheduleFlush();
+  // Reaching the count flushes right after this task, off the path that recorded it (a frame's delivery); a failed POST
+  // leaves more than that, which then waits for the timer instead of retrying per sample.
+  if (samples.length === METRICS_FLUSH_COUNT) {
+    clearTimeout(flushTimer);
+    flushTimer = setTimeout(flushSamples, 0);
+  } else {
+    scheduleFlush();
+  }
 }
 
 function trimSamples() {
@@ -1219,7 +1310,7 @@ function attach(port) {
         wake(message.reason);
         break;
       case "metric":
-        if (message.sample && typeof message.sample === "object") record(message.sample);
+        if (message.sample && typeof message.sample === "object") recordTabSample(message.sample);
         break;
       case "cmd":
         queueCommand(client, message);
