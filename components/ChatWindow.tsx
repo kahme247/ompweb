@@ -3,11 +3,12 @@ import { sendAgentCommand } from "@/lib/agent-client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { ArrowDown, ChevronDown, ChevronUp, Paperclip, Square } from "lucide-react";
-import type { AgentMessage, AssistantMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
+import type { AgentMessage, AssistantMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
 import { collectToolResults, isGroupAnchor, planTranscriptRows, type TranscriptRow } from "@/lib/chat-transcript-plan";
 import { resolveForkTargets } from "@/lib/chat-fork";
 import { renderTranscriptGroupRow } from "./ChatWindow-transcript-group-row";
+import { ChatLiveTail } from "./ChatWindow-live-tail";
 import { MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ExtensionDialog } from "./ExtensionDialog";
@@ -1228,54 +1229,20 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
               sentinelRef={sentinelRef}
               handleLoadMoreClick={handleLoadMoreClick}
             />
-            {/* Also while held: a finished reply stays until its saved row
-                replaces it in the same render (useAgentSession-stream). */}
-            {streamState.streamingMessage && (
-              <MessageView
-                key={streamState.streamingMessage.timestamp ?? "stream"}
-                message={streamState.streamingMessage as AgentMessage}
-                modelNames={modelNames}
-                cwd={messageCwd}
-                onOpenFile={onOpenFile}
-                toolResults={toolResultsWithLive}
-                toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
-                expandThinkingByDefault={expandThinkingByDefault}
-                hideThinking={hideThinkingBlock}
-                liveTokensPerSecond={streamState.isStreaming ? tokensPerSecond : undefined}
-              />
-            )}
-
-            {toolCallsDefaultCollapsed && pendingToolHeaders.map((tool) => (
-              <div
-                key={tool.id}
-                role="status"
-                aria-label={t("chatWindow.runningNamed", { names: tool.name })}
-                style={{
-                  display: "flex", alignItems: "center", gap: 7,
-                  marginBottom: 8, padding: "6px 10px",
-                  border: "1px solid color-mix(in srgb, var(--status-success) 25%, transparent)",
-                  borderRadius: "var(--radius-control)",
-                  background: "color-mix(in srgb, var(--status-success) 4%, transparent)",
-                  color: "var(--text-muted)", fontSize: 12,
-                }}
-              >
-                <span aria-hidden className="live-status-dot live-pulse inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
-                <span style={{ color: "var(--status-success)", fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 11 }}>{tool.name}</span>
-              </div>
-            ))}
-
-
-            {pendingBash && (
-              <MessageView
-                message={{
-                  role: "bashExecution",
-                  command: pendingBash.command,
-                  output: "",
-                  excludeFromContext: pendingBash.excludeFromContext,
-                } as BashExecutionMessage}
-                sessionId={session?.id ?? sessionIdRef.current ?? undefined}
-              />
-            )}
+            <ChatLiveTail
+              streamingMessage={streamState.streamingMessage}
+              liveTokensPerSecond={streamState.isStreaming ? tokensPerSecond : undefined}
+              pendingToolHeaders={pendingToolHeaders}
+              pendingBash={pendingBash}
+              toolResults={toolResultsWithLive}
+              modelNames={modelNames}
+              cwd={messageCwd}
+              onOpenFile={onOpenFile}
+              sessionId={session?.id ?? sessionIdRef.current ?? undefined}
+              toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
+              expandThinkingByDefault={expandThinkingByDefault}
+              hideThinking={hideThinkingBlock}
+            />
 
             <div ref={messagesEndRef} />
             </div>
