@@ -38,6 +38,8 @@ class Subscription {
   // the FULL accumulated message each time, so latest-wins is safe. Every
   // other frame flushes this first so per-subscription order is preserved.
   pendingUpdate: unknown | null = null;
+  /** Emit time of `pendingUpdate`, the latest coalesced frame's, so the stamp keeps measuring server-to-peer delay. */
+  pendingAt: number | null = null;
 
   constructor(readonly id: string, readonly coalescesMessageUpdates: boolean) {}
 }
@@ -237,9 +239,9 @@ export class EventStreamConnection {
     this.control({ type: "end", sub: subscription.id });
   }
 
-  private write(name: string, data: string): boolean {
+  private write(name: string, data: string, at = Date.now()): boolean {
     if (this.closed) return false;
-    if (this.sink.write(name, Date.now(), data)) return true;
+    if (this.sink.write(name, at, data)) return true;
     this.close();
     return false;
   }
@@ -248,7 +250,7 @@ export class EventStreamConnection {
     this.write(MUX_CONTROL_EVENT, JSON.stringify(frame));
   }
 
-  private writeFrame(subscription: Subscription, data: unknown): boolean {
+  private writeFrame(subscription: Subscription, data: unknown, at?: number): boolean {
     let text: string;
     try {
       text = JSON.stringify(data);
@@ -258,13 +260,15 @@ export class EventStreamConnection {
       this.end(subscription);
       return false;
     }
-    return this.write(subscription.id, text);
+    return this.write(subscription.id, text, at);
   }
 
   private flush(subscription: Subscription): boolean {
     const data = subscription.pendingUpdate;
+    const at = subscription.pendingAt ?? undefined;
     subscription.pendingUpdate = null;
-    return data === null || this.writeFrame(subscription, data);
+    subscription.pendingAt = null;
+    return data === null || this.writeFrame(subscription, data, at);
   }
 
   /** The peer drained: deliver coalesced updates now rather than waiting for the next event or heartbeat. */
@@ -286,6 +290,7 @@ export class EventStreamConnection {
     ) {
       // Coalesce while backpressured; never buffer unboundedly.
       subscription.pendingUpdate = data;
+      subscription.pendingAt = Date.now();
       return;
     }
     if (this.flush(subscription)) this.writeFrame(subscription, data);
