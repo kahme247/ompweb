@@ -85,7 +85,8 @@ export function useComposerSubmit({
 
   /** Run a client builtin. True once handled; the composer is cleared only on
    * success and only if it still holds what was sent (the user may have
-   * started typing or attached files while the command ran). */
+   * started typing or attached files while the command ran). A dictated send
+   * passes its text, which the composer holds once the transcript is inserted. */
   const runBuiltinCommand = useCallback(async (msg: string, overrideText?: string): Promise<boolean> => {
     if (submissionBlockedRef.current || !onBuiltinCommand) return false;
     const sentValue = overrideText ?? valueRef.current;
@@ -93,7 +94,7 @@ export function useComposerSubmit({
     const sentTextFiles = attachedTextFilesRef.current;
     const result = await onBuiltinCommand(msg);
     if (!result.handled) return false;
-    const composerUnchanged = (overrideText !== undefined || valueRef.current === sentValue)
+    const composerUnchanged = valueRef.current === sentValue
       && attachedImagesRef.current === sentImages
       && attachedTextFilesRef.current === sentTextFiles;
     if (!submissionBlockedRef.current && !result.error && !result.retainInput && composerUnchanged) clearInput();
