@@ -72,9 +72,9 @@ export async function register(): Promise<void> {
   // user is away leaves no trace in a terminal that no longer exists (CLI runs
   // are killed with their terminal; pages then show endless loading until the
   // process is restarted). Append fatal errors and event-loop stalls to a file
-  // so the next incident explains itself. Node's default crash semantics are
-  // preserved — this only adds the record before exiting — except for client
-  // aborts, which are journaled and survived (see below).
+  // so the next incident explains itself. An uncaught exception keeps Node's
+  // crash semantics (journal + console record, then exit); client aborts and
+  // unhandled rejections are journaled and survived (see below).
   const logDir = getDiagnosticsDir();
   const logPath = join(logDir, "diagnostics.log");
   const appendDiag = (kind: string, detail: string) => {
@@ -100,14 +100,40 @@ export async function register(): Promise<void> {
       return;
     }
     appendDiag("crash", `uncaughtException ${describe(error)}`);
+    console.error(`[omp-web] uncaught exception — exiting: ${describe(error)}`);
     // An uncaughtException listener suppresses Node's default exit; keep the
-    // crash-visible semantics by exiting explicitly.
+    // crash-visible semantics by exiting explicitly. Unlike a rejection, the
+    // throw escaped a request handler or timer halfway through its work, so the
+    // process state (a half-written session file, a held mutex) is unknown and
+    // there is no safe resume point: staying up would serve corrupted state.
     process.exit(2);
   });
+  // Rejections of fire-and-forget chains are logged and survived: nobody
+  // awaited that promise, so every request path is still intact, and killing
+  // the server for one would take down every chat it serves — the scheduled
+  // task does not restart a server that dies on its own. The journal always
+  // gets the record; the console copy is rate-limited so a tick that rejects
+  // once a second cannot bury it.
+  let rejectionWindowStart = Date.now();
+  let rejectionsLogged = 0;
+  let rejectionsSuppressed = 0;
   process.on("unhandledRejection", (reason) => {
-    appendDiag("crash", `unhandledRejection ${describe(reason)}`);
-    // Same as above: preserve Node's crash-on-unhandled-rejection default.
-    process.exit(2);
+    appendDiag("rejection", `unhandledRejection ${describe(reason)}`);
+    const now = Date.now();
+    if (now - rejectionWindowStart >= 60_000) {
+      if (rejectionsSuppressed > 0) {
+        console.error(`[omp-web] ${rejectionsSuppressed} further unhandled rejection(s) in the last minute were journaled only.`);
+      }
+      rejectionWindowStart = now;
+      rejectionsLogged = 0;
+      rejectionsSuppressed = 0;
+    }
+    if (rejectionsLogged < 10) {
+      rejectionsLogged += 1;
+      console.error(`[omp-web] unhandled rejection (server keeps running): ${describe(reason)}`);
+    } else {
+      rejectionsSuppressed += 1;
+    }
   });
   let lastTick = Date.now();
   let lastCpu = process.cpuUsage();

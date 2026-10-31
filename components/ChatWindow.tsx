@@ -71,6 +71,13 @@ interface Props {
   onOpenProviders?: () => void;
 }
 
+/** Below this a slow phase is merely slow. Past it the status line names how
+ * long omp has been silent (server frame clock): the child can answer
+ * `get_state` for hours while its run sits in an advisor/auto-retry loop, and
+ * "Thinking…" alone then claims progress that is not happening. The liveness
+ * watchdog's five-minute window is what actually ends such a run. */
+const AGENT_SILENT_NOTICE_MS = 3 * 60_000;
+
 function phaseLabel(phase: AgentPhase): string {
   if (phase?.kind === "running_tools") {
     const names = phase.tools.map((tool) => tool.name);
@@ -518,7 +525,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     toolPreset,
     liveModelMeta,
     retryInfo, contextUsage, forkingEntryId, editingEntryId,
-    isCompacting, compactResult, tokensPerSecond, displayModel: displayModelValue, sessionStats,
+    isCompacting, compactResult, tokensPerSecond, agentSilentMs, displayModel: displayModelValue, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages, advisorActive, advisorEnabled, handleAdvisorChange,
     notices, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     skillDiagnostics, setSkillStartupDiagnostics,
@@ -1023,9 +1030,12 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     if (bashRunning && !pendingBash) {
       return t("chatWindow.runningCommand");
     }
-    if (isCompacting || (agentRunning && !streamState.streamingMessage && pendingToolHeaders.length === 0)) {
+    if (agentRunning || isCompacting) {
       return [
         phaseLabel(agentPhase),
+        agentSilentMs != null && agentSilentMs >= AGENT_SILENT_NOTICE_MS
+          ? t("chatWindow.agentSilent", { minutes: Math.max(1, Math.floor(agentSilentMs / 60_000)) })
+          : null,
         activeSubagentCount > 0 ? tn("chatWindow.subagentCount", activeSubagentCount) : null,
         isCompacting ? t("chatWindow.compactingContext") : null,
         currentTodoPhase
@@ -1038,7 +1048,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       ].filter(Boolean).join(" · ");
     }
     return null;
-  }, [bashRunning, pendingBash, isCompacting, agentRunning, streamState.streamingMessage, pendingToolHeaders.length, agentPhase, activeSubagentCount, currentTodoPhase, t, tn]);
+  }, [bashRunning, pendingBash, isCompacting, agentRunning, agentPhase, agentSilentMs, activeSubagentCount, currentTodoPhase, t, tn]);
 
   const askOpen = extensionDialog?.method === "ask";
   const hiddenComposerRef = useRef<HTMLDivElement>(null);

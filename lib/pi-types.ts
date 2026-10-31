@@ -116,6 +116,12 @@ export interface WebSessionState {
   isPromptRunning: boolean;
   isBashRunning: boolean;
   isCompacting: boolean;
+  /** Milliseconds since the child's last frame while a run is marked; `null`
+   * when nothing runs (or before the first frame). `get_state` answers come
+   * from omp's event loop, so a wedged run can keep answering polls for hours
+   * without emitting a single frame — this is what clients show next to the
+   * phase instead of an unqualified "Thinking…". */
+  silentForMs?: number | null;
   /** Web-observed current-run response; not a persisted-history cursor. */
   responseObserved?: boolean;
   autoCompactionEnabled: boolean;

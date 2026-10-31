@@ -212,6 +212,11 @@ export class RpcProcess {
     return !this.exited;
   }
 
+  /** The omp child's OS pid; undefined before spawn resolved or after exit. */
+  get pid(): number | undefined {
+    return this.child.pid;
+  }
+
   get exitDetails(): { code: number | null; signal: NodeJS.Signals | null; stderrTail: string } | null {
     return this.exitInfo ? { ...this.exitInfo, stderrTail: this.stderrTail } : null;
   }
@@ -244,10 +249,12 @@ export class RpcProcess {
 
   /** Send a command and await its response `data`. A failed response rejects
    * with RpcCommandError. No timeout by default — some commands (login,
-   * long prompts via bash) legitimately take minutes, and the session wrapper
-   * reclaims wedged children via idle-kill and dispose(). Callers that want a
-   * cap pass `timeoutMs` (>0); when set, the timer is unref'd so it never
-   * keeps the event loop alive on its own. */
+   * long prompts via bash) legitimately take minutes. A timeout never disposes
+   * the child: the caller's wrapper turns it into `session_slow`, and a child
+   * only dies on process exit, the disconnect reaper (abandoned sessions) or
+   * the stall watchdog for a child with no evidence of life for minutes.
+   * Callers that want a cap pass `timeoutMs` (>0); when set, the timer is
+   * unref'd so it never keeps the event loop alive on its own. */
   sendCommand<T = unknown>(command: { type: string; [key: string]: unknown }, timeoutMs?: number): Promise<T> {
     if (this.exited) {
       return Promise.reject(new Error("omp RPC process has exited"));

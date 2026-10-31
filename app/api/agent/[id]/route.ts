@@ -35,7 +35,7 @@ function commandErrorResponse(error: unknown) {
     return NextResponse.json({ error: "Invalid JSON request body", code: "invalid_json" }, { status: 400 });
   }
   if (error instanceof WebRpcError) {
-    return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
+    return NextResponse.json({ error: error.message, code: error.code, ...error.details }, { status: 400 });
   }
   if (error instanceof RpcCommandError) {
     return NextResponse.json({ error: error.message, code: error.code ?? "rpc_command_failed" }, { status: 400 });
@@ -150,14 +150,39 @@ export async function GET(
   try {
     const session = getRpcSession(id);
     if (!session || !session.isAlive()) {
-      return NextResponse.json({ running: false });
+      return NextResponse.json({ running: false, alive: false });
     }
     try {
       const state = await session.send({ type: "get_state" });
-      return NextResponse.json({ running: true, state });
+      // `running` is the run, `alive` the child. A live omp that is merely idle
+      // (freshly spawned, between turns) must never look like a run in flight,
+      // or every client shows a working state over a chat nobody asked anything.
+      // `get_state` reconciled the wrapper's flags above, so the run state is
+      // authoritative here.
+      return NextResponse.json({ running: session.isRunning(), alive: true, state });
     } catch (error) {
-      if (error instanceof WebRpcError && error.code === "session_unresponsive") {
-        return NextResponse.json({ running: false, recovered: true });
+      // omp being slow is not the run ending: answer 503 so clients retry the
+      // poll instead of treating the session as idle/recovered. 0.6.0's own
+      // get_state timeout reports `session_state_timeout`; native clients know
+      // only one "still running, retry" state, so both codes answer as
+      // `session_slow`.
+      if (error instanceof WebRpcError && (error.code === "session_slow" || error.code === "session_state_timeout")) {
+        // A blocked child answers nothing, so this 503 is the client's only
+        // chance to learn how long the run it still shows has been silent — and
+        // whether that run exists at all: an idle child that is just loading a
+        // large session answers `session_slow` too, and clients must be able to
+        // settle on that instead of keeping the run marked until the next
+        // successful poll.
+        return NextResponse.json({
+          error: error.message,
+          code: "session_slow",
+          ...error.details,
+          running: session.isRunning(),
+          // The timeout that answers this 503 may just have disposed a stalled
+          // child; the body must not advertise a process that is gone.
+          alive: session.isAlive(),
+          silentForMs: session.silentForMs(),
+        }, { status: 503 });
       }
       throw error;
     }

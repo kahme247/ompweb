@@ -15,7 +15,7 @@ import type {
 import { normalizeToolCalls } from "@/lib/normalize";
 import { hasVisibleAssistantContent } from "@/lib/assistant-response";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
-import { sendAgentCommand, setSessionAdvisorSpawn } from "@/lib/agent-client";
+import { AgentCommandError, sendAgentCommand, setSessionAdvisorSpawn } from "@/lib/agent-client";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "@/lib/skill-diagnostics";
 import { clearDraft, getDraft, mergeRecoveredText, recoverDraft, setDraft, toDraftImages, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
 import { formatExitedSessionNotice, translate } from "@/lib/i18n";
@@ -77,6 +77,7 @@ import {
   PROMPT_SETTLE_INITIAL_DELAY_MS,
   PROMPT_SETTLE_MAX_MS,
   PROMPT_SETTLE_POLL_MS,
+  SLOW_STATE_MAX_ANSWERS,
   SCROLL_KEYS,
   SUBAGENT_ACTIVITY_BUFFER_MAX,
   USER_SCROLL_INTENT_MS,
@@ -172,6 +173,68 @@ function readTerminalAgentError(event: AgentEvent): string | null {
     }
   }
   return null;
+}
+
+/** A state GET answers 503 when omp is alive but its event loop is blocked by
+ *  a large session (`session_slow`, and 0.6.0's own `session_state_timeout`).
+ *  That is "still running, retry later" — never a load failure — and the body
+ *  carries the server's frame clock, which is the only silence report a client
+ *  can get while the child answers no poll at all. It also carries the
+ *  server's run state (`running`): an idle child that is merely loading a big
+ *  session answers `session_slow` too, and `running: false` then means there is
+ *  no run to keep marked. `alive` is the child itself: false when the request's
+ *  own timeout disposed a stalled child, so an observer stream must not attach.
+ *  `null` = not that answer; `running`/`alive: null` = an older server that does
+ *  not report it (see `SLOW_STATE_MAX_ANSWERS`). */
+async function readBusySessionResponse(res: Response): Promise<{ silentForMs: number | null; running: boolean | null; alive: boolean | null } | null> {
+  if (res.status !== 503) return null;
+  try {
+    const body = await res.json() as { code?: unknown; silentForMs?: unknown; running?: unknown; alive?: unknown };
+    if (body?.code !== "session_slow" && body?.code !== "session_state_timeout") return null;
+    const silent = body.silentForMs;
+    return {
+      silentForMs: typeof silent === "number" && Number.isFinite(silent) && silent >= 0 ? silent : null,
+      running: typeof body.running === "boolean" ? body.running : null,
+      alive: typeof body.alive === "boolean" ? body.alive : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Consecutive 503 answers that carried no run state, per session. */
+interface SlowStateAnswers {
+  sessionId: string;
+  count: number;
+}
+
+/** Counts a `session_slow` answer without a run state and reports whether the
+ *  bound is exceeded: after `SLOW_STATE_MAX_ANSWERS` consecutive answers the
+ *  "unknown" window is over and the caller must fall back to the authoritative
+ *  running list. Only path for servers that do not report the run state; the
+ *  answer itself decides whenever it does. */
+function noteSlowStateAnswer(answers: SlowStateAnswers | null, sid: string): { next: SlowStateAnswers; exceeded: boolean } {
+  if (!answers || answers.sessionId !== sid) {
+    return { next: { sessionId: sid, count: 1 }, exceeded: false };
+  }
+  answers.count += 1;
+  return { next: answers, exceeded: answers.count >= SLOW_STATE_MAX_ANSWERS };
+}
+
+/** Last resort for a server whose 503 does not say whether a run exists: the
+ *  running list is omp-web's own run registry (`getRunningRpcSessions`), the
+ *  same source the sidebar badge is built from. `null` when it cannot be read —
+ *  a failed lookup must never be read as "nothing is running". */
+async function fetchRunningSessionIds(): Promise<Set<string> | null> {
+  try {
+    const res = await fetch("/api/sessions");
+    if (!res.ok) return null;
+    const body = await res.json() as { runningSessionIds?: unknown };
+    if (!Array.isArray(body.runningSessionIds)) return null;
+    return new Set(body.runningSessionIds.filter((id): id is string => typeof id === "string"));
+  } catch {
+    return null;
+  }
 }
 
 export interface UseAgentSessionOptions {
@@ -273,6 +336,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // omp's own output throughput from get_state. omp reports a number only
   // when it has throughput data (typically around generation); null otherwise.
   const [tokensPerSecond, setTokensPerSecond] = useState<number | null>(null);
+  // Milliseconds the child has been frame-silent while a run is marked. Served
+  // by the server (`silentForMs`, its own frame clock): omp can answer
+  // `get_state` for hours while the run waits in an advisor/auto-retry loop, so
+  // the phase label alone claimed "Thinking…" the whole time. `null` = idle.
+  const [agentSilentMs, setAgentSilentMs] = useState<number | null>(null);
   const [compactError, setCompactError] = useState<string | null>(null);
   const [compactResult, setCompactResult] = useState<CompactResultInfo | null>(null);
   const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
@@ -455,6 +523,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const lastRunErrorRef = useRef<string | null>(null);
   const lastShownExitRef = useRef<string | null>(null);
   const runHadContentRef = useRef(false);
+  // Set when the prompt ack timed out but omp may already hold the frame
+  // (`session_slow` + `maybeStarted`). Suppresses the "stopped without a
+  // response" claim for this run and keeps the send lock until frames or a
+  // successful get_state settle it.
+  const maybeStartedRunRef = useRef(false);
+  // Consecutive 503 `session_slow` answers that carried no run state (older
+  // server), so an unknown state cannot be trusted forever.
+  const slowStateAnswersRef = useRef<SlowStateAnswers | null>(null);
   // Native starts/epoch changes also fence recovery, even without a local send.
   const responseRunVersionRef = useRef(0);
   // Persisted entries preceding a locally submitted run cannot supply its answer.
@@ -786,7 +862,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
       if (!res.ok) return;
-      const agentState = await res.json() as { running: boolean; state?: AgentStateResponse };
+      const agentState = await res.json() as { running: boolean; alive?: boolean; state?: AgentStateResponse };
       if (!hookAliveRef.current || sessionIdRef.current !== sid) return;
       applySkillDiagnosticsSnapshot(skillDiagnosticsRevision, agentState.state?.skillDiagnostics);
       const applied = applyAuthoritativeModel(toThinkingModelMeta(agentState.state?.model), token);
@@ -802,7 +878,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       setFastModeActive(agentState.state?.fastModeActive);
       // No omp process: back to the catalog fallback.
-      setSlowModeSupported(agentState.running ? (agentState.state?.slowModeSupported ?? false) : undefined);
+      setSlowModeSupported(agentState.alive ? (agentState.state?.slowModeSupported ?? false) : undefined);
       setSlowModeEnabled(agentState.state?.slowModeEnabled ?? false);
       setSlowModeScope(agentState.state?.slowModeScope);
       setUsageLimit(agentState.state?.usageLimit);
@@ -815,6 +891,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Best effort; the next loadSession/reconcile re-syncs.
     }
   }, [applyAuthoritativeModel, applySkillDiagnosticsSnapshot, beginAuthoritativeModelSync]);
+
+  // omp answered a state read with 503 `session_slow`: the child is alive, but
+  // its event loop is blocked and `get_state` timed out. A run it still reports
+  // must stay marked so the periodic reconcile poll settles it, and the
+  // observer stream attaches (frames are the completion path once omp answers
+  // again). `running: false` is the server telling us there is no run at all —
+  // an idle child that is only busy loading a large session — and marking it
+  // would show "working" over a chat nobody asked anything; its observer still
+  // attaches, exactly like the 200 mount path does for an idle living child (a
+  // run another client starts must stream here). `alive: false` is the child
+  // gone (the same timeout disposed it): nothing to observe. The on-disk
+  // transcript is already loaded by the caller either way.
+  const markSessionAliveStateUnknown = useCallback((running: boolean | null, alive: boolean | null) => {
+    if (running === false) {
+      if (alive !== false) syncActionsRef.current?.subscribe(false);
+      return;
+    }
+    if (!agentRunningRef.current) {
+      agentRunningRef.current = true;
+      setAgentRunning(true);
+    }
+    syncActionsRef.current?.subscribe(false);
+  }, []);
 
   const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false, fenceRunId?: number) => {
     const requestSeq = ++contextRequestSeqRef.current;
@@ -881,8 +980,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const queueRevision = ++queueSeqRef.current;
         const skillDiagnosticsRevision = ++skillDiagnosticsSeqRef.current;
         const stateRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
-        if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
-        const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse; exited?: ExitedRpcSession };
+        if (!stateRes.ok) {
+          // A busy child (503 `session_slow` / `session_state_timeout`) is not
+          // a failed load: the transcript above is the on-disk copy, and the
+          // state is merely unknown right now. Its body says how long omp has
+          // been frame-silent and whether a run exists at all — an idle child
+          // that is only loading must not be marked as running.
+          const busy = await readBusySessionResponse(stateRes);
+          if (busy) {
+            if (!hookAliveRef.current || sessionIdRef.current !== sid
+              || contextRequestSeqRef.current !== requestSeq || promptRunIdRef.current !== requestRun) {
+              return null;
+            }
+            markSessionAliveStateUnknown(busy.running, busy.alive);
+            setAgentSilentMs(busy.running === false ? null : busy.silentForMs);
+            return { context: d.context, agentState: null };
+          }
+          throw new Error(`HTTP ${stateRes.status}`);
+        }
+        slowStateAnswersRef.current = null;
+        const agentState = await stateRes.json() as { running: boolean; alive?: boolean; state?: AgentStateResponse; exited?: ExitedRpcSession };
         if (!hookAliveRef.current) return null;
         if (sessionIdRef.current !== sid) {
           if (showLoading) setLoading(false);
@@ -897,6 +1014,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
 
         const liveState = agentState.state;
+        // Ownership is part of the live state: a session another omp process
+        // runs is never resumed by this tab, and the composer must say so.
+        // `alive` (the child exists), not `running` (a turn is in flight): an
+        // idle wrapper of ours still owns the session.
         applySkillDiagnosticsSnapshot(skillDiagnosticsRevision, liveState?.skillDiagnostics);
         const modelApplied = applyAuthoritativeModel(toThinkingModelMeta(liveState?.model), token);
         if (liveState) {
@@ -905,7 +1026,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (modelApplied && liveState.thinkingLevel !== undefined) setThinkingLevel(normalizeThinkingLevel(liveState.thinkingLevel));
           if (liveState.fastModeEnabled !== undefined) setFastModeEnabled(liveState.fastModeEnabled);
           setFastModeActive(liveState.fastModeActive);
-          setSlowModeSupported(agentState.running ? (liveState.slowModeSupported ?? false) : undefined);
+          setSlowModeSupported(agentState.alive ? (liveState.slowModeSupported ?? false) : undefined);
           setSlowModeEnabled(liveState.slowModeEnabled ?? false);
           setSlowModeScope(liveState.slowModeScope);
           setUsageLimit(liveState.usageLimit);
@@ -918,7 +1039,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (liveState.extensionWidgets !== undefined) setExtensionWidgets(liveState.extensionWidgets ?? []);
           if (liveState.todoPhases !== undefined) setTodoPhases(liveState.todoPhases ?? []);
           applyQueueStateSnapshot(queueRevision, liveState.queuedMessages);
-        } else if (!agentState.running) {
+        } else if (!agentState.alive) {
           setSlowModeSupported(undefined);
           applyQueueStateSnapshot(queueRevision, null);
         }
@@ -945,7 +1066,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Ensure the flag is cleared even if the pre-state early-return path was taken
       if (showLoading && includeState && !messagesLoaded) initialHydrationPendingRef.current = false;
     }
-  }, [catchUp, refreshSubagentHistory, applyAuthoritativeModel, beginAuthoritativeModelSync, applyQueueStateSnapshot, applySkillDiagnosticsSnapshot]);
+  }, [catchUp, refreshSubagentHistory, applyAuthoritativeModel, beginAuthoritativeModelSync, applyQueueStateSnapshot, applySkillDiagnosticsSnapshot, markSessionAliveStateUnknown]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null, includePreCompaction = false): Promise<boolean> => {
     const seq = ++contextRequestSeqRef.current;
@@ -1589,7 +1710,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [addNotice, opts.chatInputRef]);
 
-  const finishPromptWithoutStream = useCallback(async (sid: string | null = sessionIdRef.current, runId = promptRunIdRef.current) => {
+  /**
+   * Settles a run that no frame ended. `authoritativeIdle` is the caller's own
+   * proof that no run is in flight (a 503 body saying `running:false`, a run
+   * registry that does not name the session): the run ends even when the state
+   * read below fails, because that failure only leaves the *transcript*
+   * unknown, never the run. Without it, a file read that proves nothing keeps
+   * the recovery open (the run may still be answering).
+   */
+  const finishPromptWithoutStream = useCallback(async (sid: string | null = sessionIdRef.current, runId = promptRunIdRef.current, authoritativeIdle = false) => {
     clearTerminalReconcileTimer();
     // Bail out before loadSession too: a stale finish for a previous run
     // must not overwrite the messages of the run currently streaming.
@@ -1636,8 +1765,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       hadContent ||= runHadContentRef.current;
       runError = lastRunErrorRef.current ?? runError;
       // File success alone cannot prove an empty answer when state failed.
-      // Keep recovery active unless visible content or an explicit error settled it.
-      if (!recoveryLoaded && !hadContent && !runError && !quotaMessage && !allowEmptyResponse) return;
+      // Keep recovery active unless visible content or an explicit error settled
+      // it — or the caller holds the server's own "no run" answer, which proves
+      // the run ended even though this client cannot read what it produced.
+      if (!recoveryLoaded && !hadContent && !runError && !quotaMessage && !allowEmptyResponse
+        && !authoritativeIdle) return;
       if (!agentRunningRef.current) return;
       if (runError) {
         addNotice({ type: "error", message: runError });
@@ -1650,14 +1782,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // Silent stop: no assistant bubble to stamp — the shelf notice is the
         // in-chat message. Mid-run quota already toasted via the notice path.
         addNotice({ type: "error", message: quotaMessage });
+      } else if (authoritativeIdle && !recoveryLoaded && !hadContent && !allowEmptyResponse) {
+        // The server ended the run while its state read stayed unreadable, so
+        // this client cannot tell whether the turn produced an answer. Claiming
+        // a failure would be a guess; the run still ends (the spinner is not
+        // left standing), and the send path's hint says what is uncertain.
+        addNotice({ type: "warning", message: translate("agentSession.maybeStarted") });
       } else if (!hadContent && !allowEmptyResponse) {
         // Fallback for silent stops with no visible content and no explicit
         // error — never leave the user with a disappeared spinner and no
         // explanation. Builtin slash commands are allowed to complete without
         // an assistant message, hence allowEmptyResponse above.
-        const message = translate("agentSession.responseFailed");
-        addNotice({ type: "error", message });
-        toast.error("Request failed", message, { timeout: 10000 });
+        // A prompt whose ack timed out may have started late: do not claim it
+        // failed, repeat the localized hint instead (no error toast).
+        const message = maybeStartedRunRef.current
+          ? translate("agentSession.maybeStarted")
+          : translate("agentSession.responseFailed");
+        addNotice({ type: maybeStartedRunRef.current ? "warning" : "error", message });
+        if (!maybeStartedRunRef.current) toast.error("Request failed", message, { timeout: 10000 });
       }
       catchUp.invalidate();
       eventCoalescer.reset();
@@ -1680,7 +1822,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       runHadContentRef.current = false;
       lastQuotaErrorRef.current = null;
       lastRunErrorRef.current = null;
+      maybeStartedRunRef.current = false;
       slashCommandRunRef.current = false;
+      slowStateAnswersRef.current = null;
       onAgentEnd?.();
     }
   }, [addNotice, catchUp, eventCoalescer, clearLiveToolResults, clearTerminalReconcileTimer, loadSession, onAgentEnd, refreshSubagentHistory, resetSubagentActivityState, surfaceQuotaOnStream]);
@@ -1759,8 +1903,49 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const queueRevision = ++queueSeqRef.current;
       const skillDiagnosticsRevision = ++skillDiagnosticsSeqRef.current;
       const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
-      if (!res.ok) return;
-      const data = await res.json() as { running?: boolean; state?: AgentStateResponse };
+      if (!res.ok) {
+        // A busy child (503 `session_slow`) is alive; whether a run is in
+        // flight is in the body. `running: false` is the server saying the
+        // child is only blocked (a large transcript, a fresh spawn), so the run
+        // this client still shows is over — settle it instead of keeping a
+        // "working" state that no frame will ever end.
+        const busy = await readBusySessionResponse(res);
+        if (!busy || !hookAliveRef.current || sessionIdRef.current !== sid
+          || promptRunIdRef.current !== runId || responseRunVersionRef.current !== responseVersion) return;
+        if (busy.running === false) {
+          slowStateAnswersRef.current = null;
+          setAgentSilentMs(null);
+          // Authoritative: the settlement's own state read may fail on the same
+          // blocked child, and that must not keep the ended run marked.
+          await finishPromptWithoutStream(sid, runId, true);
+          return;
+        }
+        markSessionAliveStateUnknown(busy.running, busy.alive);
+        setAgentSilentMs(busy.silentForMs);
+        if (busy.running === null) {
+          // An older server does not report the run state on its 503. Bound
+          // the "unknown" window: a run that is never confirmed must not hold
+          // the UI in "working" for hours. The running list is the server's
+          // own registry, so it decides once the bound is exceeded.
+          const answers = noteSlowStateAnswer(slowStateAnswersRef.current, sid);
+          slowStateAnswersRef.current = answers.next;
+          if (answers.exceeded) {
+            const runningIds = await fetchRunningSessionIds();
+            // Either way the window restarts, so the next slow answers cannot
+            // re-ask on every poll. Only a readable list that does not name
+            // this session ends the run; an unreadable one proves nothing.
+            slowStateAnswersRef.current = null;
+            if (runningIds && !runningIds.has(sid) && sessionIdRef.current === sid) {
+              // The registry is the server's own run state, so its "not
+              // running" ends the run even if the transcript read fails.
+              await finishPromptWithoutStream(sid, runId, true);
+            }
+          }
+        }
+        return;
+      }
+      slowStateAnswersRef.current = null;
+      const data = await res.json() as { running?: boolean; alive?: boolean; state?: AgentStateResponse };
       // A slow response can straddle a run boundary (previous run finished
       // and the user already started the next one while this request was in
       // flight) — everything in it is stale, drop it.
@@ -1807,7 +1992,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         void reconcileAgentState(sid);
       }
     }
-  }, [applyQueueStateSnapshot, applySkillDiagnosticsSnapshot, finishPromptWithoutStream, refreshSubagentRoster]);
+  }, [applyQueueStateSnapshot, applySkillDiagnosticsSnapshot, finishPromptWithoutStream, refreshSubagentRoster, markSessionAliveStateUnknown]);
 
   // Recovery net for missed SSE events: while the agent is running, verify
   // against the server periodically and whenever the tab returns to the
@@ -1864,6 +2049,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return () => clearInterval(timer);
   }, [externalRunActive, catchUp]);
 
+
   // Sample omp's own tokensPerSecond (get_state) at a gauge-friendly cadence
   // while a run is active; the 15s reconcile above is too slow for a gauge.
   // On run end take one trailing sample: omp publishes its final throughput
@@ -1882,6 +2068,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const tps = data?.state?.tokensPerSecond;
           setTokensPerSecond(typeof tps === "number" && Number.isFinite(tps) && tps > 0 ? tps : null);
           if (data?.state) setUsageLimit(data.state.usageLimit);
+          // The run is over: there is no silence to report over an idle chat.
+          setAgentSilentMs(null);
         })
         .catch(() => {});
       return () => { cancelled = true; };
@@ -1900,6 +2088,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // The usage-limit badge changes per provider response (lane entry, % left).
           if (data?.state) setUsageLimit(data.state.usageLimit);
           setTokensPerSecond(typeof tps === "number" && Number.isFinite(tps) && tps > 0 ? tps : null);
+          // Same sample carries the server's frame clock: a run omp keeps
+          // answering for while it emits nothing is a silent run, and the
+          // status line says since when instead of a bare "Thinking…".
+          // A 503 carries no state at all — keep the value the reconcile poll
+          // set rather than clearing it between two of its answers.
+          if (!data) return;
+          const silentForMs = data.state?.silentForMs;
+          setAgentSilentMs(typeof silentForMs === "number" && Number.isFinite(silentForMs) && silentForMs >= 0 ? silentForMs : null);
         })
         .catch(() => {});
     }, 2000);
@@ -1909,6 +2105,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // A different session starts from a clean slate — no stale gauge carry-over.
   useEffect(() => {
     setTokensPerSecond(null);
+  }, [data?.sessionId]);
+
+  // Same for the frame-silence report, but only on a real switch: the first
+  // hydration of a session must not wipe the number a busy state answer just
+  // delivered (that answer *is* the only report a blocked child produces).
+  const silenceSessionRef = useRef<string | null>(null);
+  useEffect(() => {
+    const sid = data?.sessionId ?? null;
+    const previous = silenceSessionRef.current;
+    silenceSessionRef.current = sid;
+    if (!sid || !previous || previous === sid) return;
+    setAgentSilentMs(null);
   }, [data?.sessionId]);
 
   // Counts runs that ended (any client's), so a delayed Stop can tell that
@@ -2027,6 +2235,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         runHadContentRef.current = false;
         lastQuotaErrorRef.current = null;
         lastRunErrorRef.current = null;
+        maybeStartedRunRef.current = false;
         break;
       case "agent_end": {
         // isTerminal === false means an async delivery resumes this run soon.
@@ -2096,6 +2305,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         runHadContentRef.current = false;
         lastQuotaErrorRef.current = null;
         lastRunErrorRef.current = null;
+        maybeStartedRunRef.current = false;
         slashCommandRunRef.current = false;
         if (endedSid) {
           void loadSession(endedSid, false, false, endedRunId);
@@ -2733,6 +2943,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     runHadContentRef.current = false;
     lastQuotaErrorRef.current = null;
     lastRunErrorRef.current = null;
+    maybeStartedRunRef.current = false;
     runPreviousEntryIdsRef.current = sessionIdRef.current ? null : [];
     agentRunningRef.current = true;
     slashCommandRunRef.current = isSlashCommandPrompt;
@@ -2847,7 +3058,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (promptRunIdRef.current !== promptRunId) return { status: "superseded" };
       promptDispatchPendingRef.current = false;
       console.error("Failed to send message:", e);
-      // Every failure here (stream connect, startup, set_model, or the prompt
+      // The prompt frame may already sit in omp's stdin (ack timed out while
+      // omp was busy). Not an undo: keep the optimistic turn, keep reporting
+      // the run, and keep sending locked until a frame or the next successful
+      // get_state settles it. A later rollback would contradict the hint.
+      if (e instanceof AgentCommandError && e.code === "session_slow" && e.maybeStarted) {
+        maybeStartedRunRef.current = true;
+        addNotice({ type: "warning", message: translate("agentSession.maybeStarted") });
+        return { status: "accepted" };
+      }
+      // Every other failure here (stream connect, startup, set_model, or the prompt
       // POST itself) means the prompt never started, so roll back the optimistic bubble.
       setOptimisticUserMessage(null);
       addNotice({
@@ -2926,6 +3146,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (promptRunIdRef.current !== promptRunId || sessionIdRef.current !== sid) return false;
       promptDispatchPendingRef.current = false;
       console.error("Failed to interrupt and reply:", e);
+      // The abort_and_prompt frame may already sit in omp's stdin (same rule as
+      // handleSend): it aborts the old turn and may already run the new prompt.
+      // Keep the optimistic bubble, keep the pending-interrupt guard so the old
+      // turn's agent_end cannot end the replacement, and keep the run reporting
+      // until a frame or a successful get_state settles it. Handing the text
+      // back would let the user send it a second time.
+      if (e instanceof AgentCommandError && e.code === "session_slow" && e.maybeStarted) {
+        maybeStartedRunRef.current = true;
+        addNotice({ type: "warning", message: translate("agentSession.maybeStarted") });
+        return true;
+      }
       if (promptRunIdRef.current === promptRunId && sessionIdRef.current === sid) {
         runPreviousEntryIdsRef.current = previousRunEntryIds;
       }
@@ -2990,16 +3221,33 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     let restoredQueue: RestoredQueue | null | undefined;
     let unsupported = false;
     let failures = 0;
+    let abortUnconfirmed = false;
     // A failure after omp already withdrew would lose the texts on the
     // per-entry path (the queue is empty by then). Retrying the same command
     // is safe instead: omp returns whatever is still queued.
-    for (let attempt = 0; attempt < 2 && restoredQueue === undefined && !unsupported && (attempt === 0 || sameRun()); attempt++) {
+    for (let attempt = 0; attempt < 2 && restoredQueue === undefined && !unsupported && !abortUnconfirmed && (attempt === 0 || sameRun()); attempt++) {
       try {
         restoredQueue = (await sendAgentCommand<RestoredQueue>(sid, { type: "abort_and_restore_queue" })) ?? null;
       } catch (error) {
         unsupported = error instanceof Error && error.message.includes("Unknown command");
         if (!unsupported) failures += 1;
+        // A stop omp never confirmed (too busy to answer) is not a stopped run:
+        // the frame may sit in its stdin and the run may still execute. Nothing
+        // is known about the queue either, so this attempt is not retried —
+        // a second 30-second window on a child that is still busy only keeps
+        // the Stop pending longer.
+        if (error instanceof AgentCommandError && error.code === "session_slow" && error.abortUnconfirmed) {
+          abortUnconfirmed = true;
+        }
       }
+    }
+    if (abortUnconfirmed) {
+      // Nothing is known about the queue, so neither the composer nor the queue
+      // chips may be rewritten on a guess.
+      if (hookAliveRef.current && sessionIdRef.current === sid) {
+        addNotice({ type: "warning", message: translate("agentSession.abortUnconfirmed") });
+      }
+      return;
     }
     if (!unsupported) {
       const steering = Array.isArray(restoredQueue?.steering) ? restoredQueue.steering : [];
@@ -3082,6 +3330,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         await sendAgentCommand(sid, { type: "abort" });
       } catch (e) {
         console.error("Failed to abort:", e);
+        if (e instanceof AgentCommandError && e.code === "session_slow" && e.abortUnconfirmed
+          && hookAliveRef.current && sessionIdRef.current === sid) {
+          addNotice({ type: "warning", message: translate("agentSession.abortUnconfirmed") });
+        }
       }
     }
     // From here only late recovery remains: a new run's Stop must not wait on it.
@@ -3237,6 +3489,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         onSessionForked?.(newSessionId);
       }
     } catch (e) {
+      // The fork spawns a resume child, so the ownership gate applies here too.
       console.error("Fork failed:", e);
     } finally {
       forkInFlightRef.current = false;
@@ -3717,6 +3970,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return true;
     } catch (e) {
       console.error("Failed to steer:", e);
+      // The frame may already be in omp's stdin (see handleSend): the message
+      // may still be delivered, so do not claim it failed nor hand the text back.
+      // No run marker here: a steer does not start the run, and the marker
+      // classifies how *this turn* ends (see `finishPromptWithoutStream`).
+      if (e instanceof AgentCommandError && e.code === "session_slow" && e.maybeStarted) {
+        addNotice({ type: "warning", message: translate("agentSession.maybeStarted") });
+        return true;
+      }
       addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
       return false;
     }
@@ -3743,6 +4004,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return true;
     } catch (e) {
       console.error("Failed to queue prompt:", e);
+      if (e instanceof AgentCommandError && e.code === "session_slow" && e.maybeStarted) {
+        maybeStartedRunRef.current = true;
+        addNotice({ type: "warning", message: translate("agentSession.maybeStarted") });
+        return true;
+      }
       addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
       return false;
     }
@@ -3761,6 +4027,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return true;
     } catch (e) {
       console.error("Failed to follow up:", e);
+      // Delivered or not, this frame does not start the turn: the run-wide
+      // maybe-started marker would replace the turn's own `responseFailed`
+      // report, so it stays with the prompt acks (see handleSend).
+      if (e instanceof AgentCommandError && e.code === "session_slow" && e.maybeStarted) {
+        addNotice({ type: "warning", message: translate("agentSession.maybeStarted") });
+        return true;
+      }
       addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
       return false;
     }
@@ -3875,7 +4148,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             });
           }
         }
-        if (agentState?.running && !eventSourceRef.current) {
+        // Attach for a living child, not only for a live run: `alive` (the omp
+        // process exists) is the fact that keeps frames coming — a run another
+        // client starts, roster/queue updates — so an idle wrapper is watched
+        // too. `running` is only the fallback for a server that predates the
+        // split (its `running:true` still meant "a child answers"); the run
+        // marking below stays gated on the state flags, never on attachment.
+        if ((agentState?.alive ?? agentState?.running) && !eventSourceRef.current) {
           void connectEvents(session.id);
           if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
             agentRunningRef.current = true;
@@ -4094,7 +4373,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     agentRunning, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel, fastModeEnabled, fastModeActive, slowModeSupported, slowModeEnabled, slowModeScope, usageLimit, autoRetryEnabled, interruptMode, autoCompactionEnabled, steeringMode, followUpMode,
     liveModelMeta,
     retryInfo, contextUsage, systemPrompt, skillDiagnostics, forkingEntryId, editingEntryId,
-    isCompacting, compactError, compactResult, tokensPerSecond, currentModel, displayModel, isAutoModelSelection: !displayModel, sessionStats, agentPhase,
+    isCompacting, compactError, compactResult, tokensPerSecond, agentSilentMs, currentModel, displayModel, isAutoModelSelection: !displayModel, sessionStats, agentPhase,
     slashCommands, slashCommandsLoading, queuedMessages,
     notices: noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     advisorActive: advisorActiveAt > 0, advisorEnabled, handleAdvisorChange,

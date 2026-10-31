@@ -35,6 +35,11 @@ function sessionsErrorResponse(error: unknown): NextResponse {
   if (error instanceof WebRpcError && error.code === "session_busy") {
     return NextResponse.json({ error: error.message, code: error.code }, { status: 409 });
   }
+  // Same "still running, retry" answer as the state polls: omp did not confirm
+  // the command within its bound, so the caller must not treat it as done.
+  if (error instanceof WebRpcError && (error.code === "session_slow" || error.code === "session_state_timeout")) {
+    return NextResponse.json({ error: error.message, code: "session_slow" }, { status: 503 });
+  }
   if (error instanceof SessionFileTooLargeError) {
     return NextResponse.json(
       { error: "Session file is too large to open in omp-web", code: "session_file_too_large" },
@@ -234,18 +239,23 @@ export async function GET(
     // ?includeState=1 inlines the wrapper's live agent state (same shape as
     // GET /api/agent/[id]) so the client's post-turn refresh is one request
     // instead of two. On a get_state failure the field is omitted entirely —
-    // callers treat a missing `agent` as "fetch it separately".
-    let agent: { running: boolean; state?: unknown } | undefined;
+    // callers treat a missing `agent` as "fetch it separately"; a child that is
+    // gone answers `{ running: false, alive: false }` like the other routes.
+    let agent: { running: boolean; alive: boolean; state?: unknown } | undefined;
     if (includeState) {
       const rpc = getRpcSession(id);
       if (rpc?.isAlive()) {
         try {
-          agent = { running: true, state: await rpc.send({ type: "get_state" }) };
+          // Same split as GET /api/agent/[id]: `running` is the run in flight,
+          // `alive` the child (an idle wrapper is alive, not running).
+          const state = await rpc.send({ type: "get_state" });
+          agent = { running: rpc.isRunning(), alive: true, state };
         } catch {
           // Leave agent unset; the session payload is still valid without it.
         }
       } else {
-        agent = { running: false };
+        // Same shape as GET /api/agent/[id]: a dead/absent child is not a run.
+        agent = { running: false, alive: false };
       }
     }
 
@@ -285,8 +295,16 @@ export async function PATCH(
         await rpc.send({ type: "set_session_name", name: name.trim() });
         renamed = true;
       } catch (error) {
-        if (error instanceof WebRpcError && error.code === "session_busy") throw error;
-        // Fall back to the on-disk title slot below.
+        // A timeout was never confirmed by omp: it still holds the old name in
+        // memory and would clobber a file write on its next flush. Answer
+        // "busy, try again" instead of reporting a rename that did not happen.
+        if (error instanceof WebRpcError
+          && (error.code === "session_busy" || error.code === "session_slow" || error.code === "session_state_timeout")) {
+          throw error;
+        }
+        // The child answered with an error (it rejected the command, nothing was
+        // applied) or went away before answering: with no live writer left, the
+        // on-disk title slot below is safe.
       }
     }
     if (!renamed) {

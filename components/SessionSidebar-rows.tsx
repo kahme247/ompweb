@@ -3,6 +3,7 @@
 import { memo, useCallback, useRef, useState } from "react";
 import type { AgentMessage, ExitedRpcSession, ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
 import { formatExitedSessionNotice, useI18n } from "@/lib/i18n";
+import { formatApiError } from "@/lib/i18n/api-error";
 import { ChevronDown, ChevronRight, Folder, GitBranch, MoreHorizontal, Pin } from "lucide-react";
 import { Tooltip } from "./ui/primitives";
 import { ConfirmDialog } from "./ui/field";
@@ -645,7 +646,15 @@ const SessionItem = memo(function SessionItem({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name }),
       });
-      if (!response.ok) throw new Error("Session rename failed");
+      if (!response.ok) {
+        // 503 means omp is busy and did not confirm the rename: the old title
+        // stays, so say "busy, try again" instead of failing silently.
+        if (response.status === 503) {
+          const payload = await response.json().catch(() => null) as { code?: string; error?: string } | null;
+          toast.error(formatApiError(payload));
+        }
+        return;
+      }
       onRenamed?.();
     } catch {
       // The next refresh remains authoritative if the rename fails.
