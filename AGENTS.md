@@ -327,6 +327,37 @@ errors surface as failed RPC responses plus `notice` events.
 New frame types (`turn_start/end`, `notice`, `todo_reminder`, ...) must be
 handled or safely ignored.
 
+### Slash commands are omp's (`lib/web-slash-commands.ts`)
+Full behavior and rationale: `docs/specs/2026-10-29-native-slash-commands-and-goal-mode.md`.
+- `get_available_commands` is authoritative. Every source it reports —
+  `builtin`, `extension`, `custom`, `mcp_prompt`, `file`, `skill` — runs
+  through `prompt`; never expand, hide, or shadow a name the catalog owns. The
+  palette shows all of them (`toSlashCommandInfo`), with `input.hint` as the
+  argument hint.
+- Client-dispatched names are only the ones omp has no slash equivalent for:
+  `goal` (native `goal` RPC), `btw`, `reload`, `name`, `copy`. Web prompt
+  expansions (`plan`, `fix`, `test`, `explain`, `simplify`, `commit`, `loop`)
+  are used only when omp does not report the same name, so an extension or
+  skill command always wins. Catalog names and aliases always win over a
+  client entry, including the client-only names. Client-only commands refuse
+  attachments and keep the draft. `/compact`, `/session`, `/review`,
+  `/advisor` are omp commands; the top-bar compact button and context ring
+  remain the web entry points for those panels.
+- `/goal` is native goal mode: `{type:"goal",op:"create",objective}` plus
+  `goal_updated`/`get_state.goal`; pause/resume/drop send the matching op. No
+  `sessionStorage` goal state. When idle, `/goal <objective>` also sends the
+  objective as the first prompt (TUI parity); while a run is active it only
+  creates the goal. Goal snapshots are sequenced so a slow
+  `get_state` cannot overwrite a newer `goal_updated` (same idea as the queue).
+- TUI-only builtins (`guided-goal`, `vibe`, `budget`, and `/plan`/`/loop` when
+  absent from the catalog) have no RPC handler. `/plan`'s spec has only
+  `handleTui`, and `acp-builtins.ts` publishes only specs with a text-mode
+  `handle`. Hooks cannot call it either: hook `ctx` exposes a read-only
+  `sessionManager`, and extension `ctx.sessionModes` is undefined in
+  RPC/ACP. The hook warns once and still delivers the text. The only true
+  parity paths are an upstream text-mode `handle`/`set_mode` RPC or an embedded
+  PTY TUI.
+
 ### Queued messages are omp-owned
 The queue panel renders omp's snapshot only: `get_state.queuedMessages` on
 load/reconcile/stream open and live `queue_update` frames. Never track chips

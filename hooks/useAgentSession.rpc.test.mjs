@@ -1014,7 +1014,7 @@ test("ISSUE #167 a command missing from omp's roster is reported, not run silent
   assert.equal(isUnknownSlashCommand("/Goal", known), true, "matching is case-insensitive both ways");
   assert.equal(isUnknownSlashCommand("/todo", known), false);
   assert.equal(isUnknownSlashCommand("/compact now", known), false);
-  // Builtins are hidden from the palette but still executed by omp.
+  // Builtins are shown in the palette and executed by omp.
   assert.equal(isUnknownSlashCommand("/shake", [...known, "shake"]), false);
   // No roster yet (or a failed fetch) is not evidence that anything is unknown.
   assert.equal(isUnknownSlashCommand("/guided-goal", []), false);
@@ -1025,6 +1025,242 @@ test("ISSUE #167 a command missing from omp's roster is reported, not run silent
   }
   assert.equal(slashCommandName("  /guided-goal ship it  "), "guided-goal");
   assert.equal(slashCommandName("/todo"), "todo");
+});
+
+const GOAL = {
+  id: "g1",
+  objective: "ship the export",
+  status: "active",
+  tokensUsed: 0,
+  timeUsedSeconds: 0,
+  createdAt: 1000,
+  updatedAt: 1000,
+};
+const goalState = (goal = GOAL) => ({ enabled: goal.status === "active", mode: "active", goal });
+
+test("GOAL /goal creates the goal and sends the objective as the first prompt", async () => {
+  resetWorld();
+  primeSession("goal-create", [userMsg("u0", "loaded question")]);
+  const w = await mountSession("goal-create");
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "goal",
+    produce: () => ({ value: { success: true, data: { goal: GOAL, state: goalState() } } }),
+  });
+
+  let command;
+  await act(async () => {
+    command = w.latest.handleBuiltinSlashCommand("/goal ship the export");
+    await sleep(30);
+  });
+  let result;
+  await act(async () => {
+    lastEs().open();
+    result = await command;
+  });
+  assert.equal(result.handled, true);
+  const goalCalls = world.calls.filter((call) => call.body?.type === "goal");
+  assert.deepEqual(goalCalls.map((call) => call.body), [{ type: "goal", op: "create", objective: "ship the export" }]);
+  const promptCalls = world.calls.filter((call) => call.body?.type === "prompt");
+  assert.deepEqual(promptCalls.map((call) => call.body), [{ type: "prompt", message: "ship the export" }]);
+  assert.equal(w.latest.goalState?.goal?.id, "g1");
+});
+
+for (const status of ["active", "paused", "dropped", "cleared", "replaced"]) {
+  test(`GOAL a delayed create reply respects the newer ${status} event`, async () => {
+    resetWorld();
+    const sid = `goal-create-race-${status}`;
+    primeSession(sid, [userMsg("u0", "loaded question")]);
+    const w = await mountSession(sid);
+    let release;
+    world.holds.push({
+      match: (method, _url, body) => method === "POST" && body?.type === "goal",
+      produce: () => new Promise((resolve) => {
+        release = () => resolve({ value: { success: true, data: { goal: GOAL, state: goalState() } } });
+      }),
+    });
+    let command;
+    await act(async () => {
+      command = w.latest.handleBuiltinSlashCommand("/goal ship the export");
+      await sleep(20);
+    });
+    const nextGoal = status === "cleared" ? null : {
+      ...GOAL,
+      id: status === "replaced" ? "g2" : GOAL.id,
+      status: status === "replaced" ? "active" : status,
+      updatedAt: 2000,
+    };
+    const nextState = nextGoal ? goalState(nextGoal) : null;
+    // Deliver the event and old reply in one React batch: dispatch must use
+    // the latest wire state, not the state captured by the last render.
+    await act(async () => {
+      w.latest.handleAgentEventRef.current({ type: "goal_updated", goal: nextGoal, state: nextState });
+      release();
+      await sleep(30);
+      lastEs()?.open();
+      await command;
+    });
+    assert.deepEqual(w.latest.goalState, nextState);
+    assert.deepEqual(
+      world.calls.filter((call) => call.body?.type === "prompt").map((call) => call.body.message),
+      status === "active" ? ["ship the export"] : [],
+      "only the still-active created goal may start its objective",
+    );
+  });
+}
+
+test("GOAL get_state and goal_updated both feed the banner", async () => {
+  resetWorld();
+  primeSession("goal-restore", [userMsg("u0", "loaded question")]);
+  world.agents.set("goal-restore", { running: false, state: { goal: goalState() } });
+  const w = await mountSession("goal-restore");
+  assert.equal(w.latest.goalState?.goal?.objective, "ship the export", "restored from get_state");
+
+  const paused = { ...GOAL, status: "paused", updatedAt: 2000 };
+  await act(async () => w.latest.handleAgentEventRef.current({ type: "goal_updated", goal: paused, state: goalState(paused) }));
+  assert.equal(w.latest.goalState?.goal?.status, "paused");
+
+  await act(async () => w.latest.handleAgentEventRef.current({ type: "goal_updated", goal: null, state: null }));
+  assert.equal(w.latest.goalState, null, "a cleared goal hides the banner");
+});
+
+test("GOAL a failed create reports omp's error and keeps the existing goal", async () => {
+  resetWorld();
+  primeSession("goal-conflict", [userMsg("u0", "loaded question")]);
+  world.agents.set("goal-conflict", { running: false, state: { goal: goalState() } });
+  const w = await mountSession("goal-conflict");
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "goal",
+    produce: () => ({ status: 400, value: { error: "A goal is already active. Drop it before creating another." } }),
+  });
+
+  const result = await act(async () => w.latest.handleBuiltinSlashCommand("/goal another"));
+  assert.equal(result.handled, true);
+  assert.match(result.error, /already active/);
+  assert.equal(w.latest.goalState?.goal?.id, "g1");
+});
+
+test("GOAL an empty create reply reports a failure and keeps the existing goal", async () => {
+  resetWorld();
+  primeSession("goal-empty", [userMsg("u0", "loaded question")]);
+  world.agents.set("goal-empty", { running: false, state: { goal: goalState() } });
+  const w = await mountSession("goal-empty");
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "goal",
+    produce: () => ({ value: { success: true, data: { goal: null, state: null } } }),
+  });
+
+  const result = await act(async () => w.latest.handleBuiltinSlashCommand("/goal ship the export"));
+  assert.equal(result.message, undefined, "no start notice without a goal");
+  assert.ok(result.error, "an empty create reply reports a failure");
+  assert.equal(w.latest.goalState?.goal?.id, "g1");
+});
+
+test("GOAL a success reply with no data does not announce a started goal", async () => {
+  resetWorld();
+  primeSession("goal-no-data", [userMsg("u0", "loaded question")]);
+  const w = await mountSession("goal-no-data");
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "goal",
+    produce: () => ({ value: { success: true } }),
+  });
+
+  const result = await act(async () => w.latest.handleBuiltinSlashCommand("/goal ship the export"));
+  assert.equal(result.message, undefined, "no start notice without data");
+  assert.ok(result.error, "a reply without data reports a failure");
+});
+
+test("GOAL a malformed goal_updated does not clear the banner", async () => {
+  resetWorld();
+  primeSession("goal-malformed", [userMsg("u0", "loaded question")]);
+  world.agents.set("goal-malformed", { running: false, state: { goal: goalState() } });
+  const w = await mountSession("goal-malformed");
+
+  await act(async () => w.latest.handleAgentEventRef.current({ type: "goal_updated", goal: null, state: { enabled: true } }));
+  assert.equal(w.latest.goalState?.goal?.id, "g1");
+});
+
+test("GOAL an omp command named goal wins over the client dispatch", async () => {
+  resetWorld();
+  primeSession("goal-shadow", [userMsg("u0", "loaded question")]);
+  const w = await mountSession("goal-shadow");
+  await act(async () => w.latest.handleAgentEventRef.current({
+    type: "available_commands_update",
+    commands: [{ name: "goal", source: "extension", description: "extension goal" }],
+  }));
+
+  const result = await act(async () => w.latest.handleBuiltinSlashCommand("/goal ship it"));
+  assert.deepEqual(result, { handled: false });
+  assert.equal(world.calls.some((call) => call.body?.type === "goal"), false, "no native goal RPC");
+});
+
+test("GOAL pause, resume and drop send the matching RPC and update the banner", async () => {
+  resetWorld();
+  primeSession("goal-actions", [userMsg("u0", "loaded question")]);
+  world.agents.set("goal-actions", { running: false, state: { goal: goalState() } });
+  const w = await mountSession("goal-actions");
+
+  const paused = { ...GOAL, status: "paused", updatedAt: 2000 };
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "goal",
+    produce: () => ({ value: { success: true, data: { goal: paused, state: goalState(paused) } } }),
+  });
+  await act(async () => w.latest.handleGoalAction("pause"));
+  assert.equal(w.latest.goalState?.goal?.status, "paused");
+
+  const resumed = { ...GOAL, updatedAt: 3000 };
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "goal",
+    produce: () => ({ value: { success: true, data: { goal: resumed, state: goalState(resumed) } } }),
+  });
+  await act(async () => w.latest.handleGoalAction("resume"));
+  assert.equal(w.latest.goalState?.goal?.status, "active");
+
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "goal",
+    produce: () => ({ value: { success: true, data: { goal: null, state: null } } }),
+  });
+  await act(async () => w.latest.handleGoalAction("drop"));
+  assert.equal(w.latest.goalState, null);
+
+  assert.deepEqual(
+    world.calls.filter((call) => call.body?.type === "goal").map((call) => call.body.op),
+    ["pause", "resume", "drop"],
+  );
+});
+
+test("GOAL an action reply cannot overwrite a newer goal_updated", async () => {
+  resetWorld();
+  primeSession("goal-action-race", [userMsg("u0", "loaded question")]);
+  world.agents.set("goal-action-race", { running: false, state: { goal: goalState() } });
+  const w = await mountSession("goal-action-race");
+
+  let release;
+  const responseGoal = { ...GOAL, updatedAt: 2000 };
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "goal",
+    produce: () => new Promise((resolve) => {
+      release = () => resolve({
+        value: { success: true, data: { goal: responseGoal, state: goalState(responseGoal) } },
+      });
+    }),
+  });
+  let action;
+  await act(async () => {
+    action = w.latest.handleGoalAction("pause");
+    await sleep(20);
+  });
+
+  const paused = { ...GOAL, status: "paused", updatedAt: 2000 };
+  await act(async () => {
+    w.latest.handleAgentEventRef.current({ type: "goal_updated", goal: paused, state: goalState(paused) });
+  });
+  await act(async () => {
+    release();
+    await action;
+  });
+
+  assert.equal(w.latest.goalState?.goal?.status, "paused");
+  assert.equal(w.latest.goalState?.goal?.updatedAt, 2000);
 });
 
 test("ISSUE #167 sending a TUI-only command warns once and still delivers the text", async () => {
