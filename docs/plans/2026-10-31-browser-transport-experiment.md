@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A server-side switch `browserTransport: "sse" | "websocket"` that moves the browser's channel frames, channel (un)subscribe and the `POST /api/agent/[id]` command path onto one general WebSocket plus one WebSocket per session, with the same latency/reconnect instrumentation in both modes stored server-side and summarized by a script.
+**Goal:** A server-side switch `browserTransport: "sse" | "ws-client" | "ws-session" | "ws-pool"` that moves the browser's channel frames, channel (un)subscribe and the `POST /api/agent/[id]` command path onto WebSockets assigned per browser, per session, or to a pool sized from the active sessions, with the same latency/reconnect/isolation instrumentation in every transport stored server-side and summarized by a script.
 
-**Architecture:** The SharedWorker (`public/event-stream-worker.js`) gains a WebSocket mode next to its EventSource; the server gets `/api/events/ws` (gated like every API route, upgraded in `handle()`), a transport-agnostic `EventStreamConnection` (SSE or socket sink), and `runAgentCommand()` shared by the HTTP route and the socket. Tabs keep `openEventStream()`/`sendAgentCommand()`; `sendAgentCommand` asks the worker when the mode is `websocket`. Samples go tab → worker → `POST /api/transport-metrics` → JSONL; `scripts/transport-metrics.ts` prints p50/p95 per transport.
+**Architecture:** The SharedWorker (`public/event-stream-worker.js`) gains WebSocket modes next to its EventSource; the server gets `/api/events/ws` (gated like every API route, upgraded in `handle()`), a transport-agnostic `EventStreamConnection` (SSE or socket sink), and `runAgentCommand()` shared by the HTTP route and the socket. Every socket carries any session (commands name their session), so the three WebSocket modes are one worker-side policy `socketKeyFor(sessionId | null)`; policy changes move subscriptions make-before-break. Tabs keep `openEventStream()`/`sendAgentCommand()`; `sendAgentCommand` asks the worker in any WebSocket mode. Samples go tab → worker → `POST /api/transport-metrics` → JSONL; `scripts/transport-metrics.ts` prints p50/p95 per transport.
 
 **Tech Stack:** Bun 1.4.4 (`Bun.serve` `routes` + `websocket`, `bun test`), TypeScript, React 19, plain-script worker run in `node:vm` by its tests.
 
@@ -15,23 +15,23 @@
 - Work only in `/root/git/.ompweb_worktrees/browser-ws` on `feat/browser-ws`. The worktree has no `node_modules`: Task 1 runs `npm ci` (never `bun install`, never a `bun.lock`). One commit per task with the message given.
 - Ports: 0 or 30300–30399. Never start, stop or restart a systemd/launchd/tray service, never run `ompweb-deploy`, never touch the real `~/.omp` (temp `HOME` and `PI_CODING_AGENT_DIR`, `OMP_WEB_OMP_BIN=/nonexistent/omp` for any server you start).
 - No new npm dependency. No new `EventSource`. `public/event-stream-worker.js` stays one plain script (its content hash versions the SharedWorker, `server/client-env.ts`); every global it uses (`WebSocket`, `Date`, `setInterval`, `location`, `navigator.connection`) must be injectable in the `vm` context of `lib/event-stream-worker.test.mjs`.
-- SSE path behaviour unchanged: with `browserTransport` absent or `"sse"` the worker opens no WebSocket, and every existing test passes; the only edited existing assertions are the extended `hello` (Task 2) and the five full-object `deepEqual`s in `lib/web-settings.test.mjs` (Task 2). A `hello` without `transport` keeps the worker's current mode.
+- SSE path behaviour unchanged: with the settings absent or `browserTransport: "sse"` the worker opens no WebSocket, and every existing test passes; the only edited existing assertions are the extended `hello` (Tasks 2, 8), the full-object settings `deepEqual`s (Tasks 2, 8), the session binding the upgrade drops (Task 7) and the `"websocket"` value Task 8 replaces. A `hello` without `transport` keeps the worker's current mode.
 - Browser compat (client code: `components/`, `hooks/`, `lib/event-stream.ts`, `lib/agent-client.ts`, the worker): no `AbortSignal.timeout`, `AbortSignal.any`, `Promise.withResolvers`; no `crypto.randomUUID` in new code (insecure LAN origins): ids are `Math.random().toString(36).slice(2, 12) + Date.now().toString(36)`; the WebSocket URL is absolute (`new URL(path, self.location.href)`, `http`→`ws`).
 - The hook tests' fetch fakes return `{ ok, status, json }` without `headers`: read response headers as `res.headers?.get?.(…) ?? null`.
-- Constants (spec values, names fixed): `WS_HEARTBEAT_MS = 10_000`, `WS_SILENCE_MS = 25_000`, `VISIBLE_PROBE_MS = 3_000`, ack timeout `10_000 + Math.ceil(bytes / 32)` ms, `SEND_DEADLINE_MS = 15_000`, `SESSION_LINGER_MS = 30_000`, reconnect 1 s doubling to 30 s (existing `RECONNECT_MIN_MS`/`RECONNECT_MAX_MS`), `DEDUPE_WINDOW_MS = 120_000`, `DEDUPE_MAX = 500`, `WS_COALESCE_BYTES = 256 * 1024`, `MAX_COMMAND_FRAME_BYTES = MAX_AGENT_COMMAND_REQUEST_BYTES + 64 * 1024`, `METRICS_FLUSH_MS = 30_000`, `METRICS_FLUSH_COUNT = 200`, `METRICS_BUFFER_MAX = 2_000`, `EVENT_SAMPLE_MS = 1_000`, `WAKE_WINDOW_MS = 60_000`, `BATCH_WINDOW_MS = 2_000`, `SSE_CLOCK_PROBES = 3`; metrics POST ≤ 256 KiB and ≤ 1 000 samples, sample JSON ≤ 4 096 bytes, `metric` ≤ 32 chars, `ua` ≤ 200 chars, JSONL rotated to `.1` above 20 MiB.
+- Constants (spec values, names fixed): `WS_HEARTBEAT_MS = 10_000`, `WS_SILENCE_MS = 25_000`, `VISIBLE_PROBE_MS = 3_000`, ack timeout `10_000 + Math.ceil(bytes / 32)` ms, `SEND_DEADLINE_MS = 15_000`, `SESSION_LINGER_MS = 30_000` (also the pool's shrink delay), reconnect 1 s doubling to 30 s (existing `RECONNECT_MIN_MS`/`RECONNECT_MAX_MS`), `DEDUPE_WINDOW_MS = 120_000`, `DEDUPE_MAX = 500`, `WS_COALESCE_BYTES = 256 * 1024`, `MAX_COMMAND_FRAME_BYTES = MAX_AGENT_COMMAND_REQUEST_BYTES + 64 * 1024`, `METRICS_FLUSH_MS = 30_000`, `METRICS_FLUSH_COUNT = 200`, `METRICS_BUFFER_MAX = 2_000`, `EVENT_SAMPLE_MS = 1_000`, `WAKE_WINDOW_MS = 60_000`, `BATCH_WINDOW_MS = 2_000`, `SSE_CLOCK_PROBES = 3`, `LARGE_FRAME_BYTES = 64 * 1024`, `LARGE_FRAME_LOG_MS = 30_000`; settings `browserTransportPerSocket` integer 1–64 default 4, `browserTransportMaxSockets` integer 1–16 default 16; metrics POST ≤ 256 KiB and ≤ 1 000 samples, sample JSON ≤ 4 096 bytes, `metric` ≤ 32 chars, `ua` ≤ 200 chars, JSONL rotated to `.1` above 20 MiB.
 - Idempotent commands: `type.startsWith("get_") || type === "predict_word"`. A command's `bytes` is the string length of its JSON body (one `JSON.stringify` in the tab). Close codes on browser sockets: 1007 bad frame, 1009 oversize, 1011 handler failure, 4000 client-side forced reconnect.
-- New UI strings in `lib/i18n/locales/en.json`, `ja.json`, `zh-CN.json` (flat keys): `settingsConfig.browserTransport` "Browser connection (experiment)", `settingsConfig.browserTransportDesc` "How browsers receive live updates and send chat commands. Server-sent events + HTTP is the default. WebSocket opens one connection for the app and one per open session. Every open browser switches within a few seconds.", `settingsConfig.browserTransportSse` "Server-sent events + HTTP (default)", `settingsConfig.browserTransportWebSocket` "WebSocket", `settingsConfig.browserTransportSaveFailed` "Could not save the connection setting", `errors.transport_unavailable` "Not sent: no connection to omp-web. Try again.", `errors.transport_lost` "The connection to omp-web dropped before the answer arrived. The command may have run; check before sending it again."
+- New UI strings in `lib/i18n/locales/en.json`, `ja.json`, `zh-CN.json` (flat keys): `settingsConfig.browserTransport` "Browser connection (experiment)", `settingsConfig.browserTransportDesc` "How browsers receive live updates and send chat commands. Server-sent events + HTTP is the default. The WebSocket options differ in how many connections a browser opens. Every open browser switches within a few seconds.", `settingsConfig.browserTransportSse` "Server-sent events + HTTP (default)", `settingsConfig.browserTransportWsClient` "WebSocket: one connection per browser", `settingsConfig.browserTransportWsSession` "WebSocket: one connection per open session", `settingsConfig.browserTransportWsPool` "WebSocket: shared pool", `settingsConfig.browserTransportPerSocket` "Sessions per connection", `settingsConfig.browserTransportMaxSockets` "Most connections", `settingsConfig.browserTransportPoolDesc` "The pool opens one connection for every this many open sessions, up to the maximum, and closes extra connections 30 seconds after they are no longer needed.", `settingsConfig.browserTransportSaveFailed` "Could not save the connection setting", `errors.transport_unavailable` "Not sent: no connection to omp-web. Try again.", `errors.transport_lost` "The connection to omp-web dropped before the answer arrived. The command may have run; check before sending it again."
 - Green bar: every task ends with `npm run typecheck && npm run lint && npm test` green. Line numbers are hints; locate code by symbol.
 
 ## Review Focus
 
-1. **A network switch on the phone with several sockets open** (general + 2 sessions, dedicated worker): `online` closes and redials every socket at once, each resubscribes its own streams and gets the snapshot, a late frame from a replaced socket is ignored, and each socket yields one `reconnect` sample with `batch` 3 (Task 5 "wake online…", Task 7 reconnect sample test).
-2. **Stop during an image upload in the same session:** the abort queues behind the ~8 MB prompt on that socket, is sent exactly once, and its sample has `behindBytes > 0`; the prompt's ack timer allows `10 000 + 250 000` ms for 8 000 000 bytes, so a slow upload is not a hang (Task 6 "an abort behind a large prompt…").
-3. **The server restarts between send and reply:** a non-idempotent command is never sent to a second `serverId` (answers `transport_lost`), `get_state` is resent, a known `rid` runs once on one server (Task 3 dedupe test, Task 6 resend test).
-4. **Flipping the mode with streams and commands in flight:** every tab stream ends OPEN on the new transport exactly once (no duplicate `sub`), pending socket commands settle on their retiring socket, a `cmd` reaching an SSE-mode worker falls back to HTTP, and an old worker script ignores the new control frames (Task 5 switch tests, Task 6 fallback test, Task 2 hello test).
-5. **Garbage on a browser socket:** malformed JSON, unknown `t`, oversize frames, a failing channel open or a throwing handler close only that socket and never reach `uncaughtException` or the host links; unauthenticated and cross-origin upgrades never get a socket (Task 3 unit and `server/app.test.ts` tests).
+1. **A network switch on the phone with several sockets open**, in every WebSocket mode (`ws-session` general + 2 sessions, `ws-pool` N = 2, `ws-client` 1; dedicated worker): `online` closes and redials every socket at once, each resubscribes its own streams and gets the snapshot, a late frame from a replaced socket is ignored, and each socket yields one `reconnect` sample whose `batch` equals the sockets redialed (Task 5 "wake online…", Task 10 reconnect sample test).
+2. **An upload blocking a shared socket:** Stop during an image upload in the same session queues behind the ~8 MB prompt, is sent once and has `behindBytes > 0` (Task 6); in `ws-client` and `ws-pool` another session's command queues behind it too and records `behindOtherBytes`, while `ws-session` shows 0; the ack timer counts the bytes ahead (`10 000 + 250 000` ms for 8 000 000 bytes), so a slow upload is not a hang (Task 6 "an abort behind a large prompt…", Task 10 uplink isolation test).
+3. **The server restarts between send and reply:** a non-idempotent command is never sent to a second `serverId` (answers `transport_lost`), `get_state` is resent, a known `(session, rid)` runs once on one server even when the resend arrives on another socket (Task 3 dedupe test, Task 6 resend test, Task 7 per-session dedupe test).
+4. **Policy changes with streams and commands in flight** (a ws→ws mode flip, a pool resize, `sse` ↔ ws): every tab stream ends OPEN on its new socket exactly once with the old socket delivering until then (make-before-break, no duplicate `sub`), sent commands are answered on their old socket and unsent ones move, the pool never flaps (30 s shrink hysteresis), a resize moves only the sessions whose top-ranked socket changed, and an old worker script ignores the new control frames (Tasks 5, 8, 9 switch/move/resize tests, Task 2 hello test).
+5. **Garbage on a browser socket:** malformed JSON, unknown `t`, a `cmd` without a valid `session`, oversize frames, a failing channel open or a throwing handler affect only that socket (a bad `session` only that command) and never reach `uncaughtException` or the host links; unauthenticated and cross-origin upgrades never get a socket (Task 3 unit and `server/app.test.ts` tests, Task 7 session test).
 
-## Inventory (counts at `03a3b2d8`, over `components/ hooks/ lib/ app/ server/ scripts/ public/`)
+## Inventory (counts at `03a3b2d8` for Tasks 1–6; at `177afdfa` plus Task 6's working tree for Tasks 7–11 — re-count when Task 6 lands; over `components/ hooks/ lib/ app/ server/ scripts/ public/`)
 
 | Surface | Hits | Files | Task |
 |---|---|---|---|
@@ -50,8 +50,13 @@
 | Full-object settings `deepEqual`s | 5 | `lib/web-settings.test.mjs` | 2 |
 | `hello` shape assertions | 1 `deepEqual` + 1 regex | `lib/event-stream-hub.test.mjs` (`connect`), `server/app.test.ts` | 2 |
 | Other `EventSource` | 1 (login SSE, unchanged) | `components/ModelsConfig.tsx` | — |
+| `"websocket"` setting value (excl. `lib/hosts/`) | 63 | `public/event-stream-worker.js` 8, `lib/event-stream.ts` 1, `lib/agent-client.ts` 1, `lib/event-stream-protocol.ts` 2, `lib/web-settings.ts` 2, `app/api/web-settings/route.ts` 1; tests `agent-client.test.mjs` 3, `api-contract.test.mjs` 5, `event-stream-hub.test.mjs` 2, `event-stream-worker.test.mjs` 4, `event-stream.test.mjs` 2, `web-settings.test.mjs` 2, `scripts/transport-metrics.test.ts` 30 (sample labels: the summary is label-agnostic, they may stay) | 8 |
+| Mode checks `=== "websocket"` / `!== "websocket"` (→ `isWebSocketTransport`) | 8 | worker 5 (`setMode` ×2, `open`, `queueCommand`, `attach`), `lib/event-stream.ts` 1 (`sendSessionCommand`), route 1, `lib/web-settings.ts` 1 | 8 |
+| Session binding of a socket (`?session=`, `searchParams.get("session")`, `BrowserSocketData.sessionId`, `ws.data.sessionId`) | 12 | `lib/browser-socket.ts` 3 + the interface field, `lib/browser-socket.test.mjs` 4 (upgrade test), worker 2 (header comment, `dial`), `event-stream-worker.test.mjs` 3 (dial URLs) | 7 |
+| Worker key policy (`connFor(` building `general` / `session:<id>`, `conn.sessionId` in `dial`/`idle`) | 1 function + 2 uses | `public/event-stream-worker.js` | 8 |
+| Summary sections (`SECTION_ORDER`) and the `conn` grouping | 1 + 2 | `scripts/transport-metrics.ts` | 10 |
 
-Order: 1 → 2 → 3 → 5 → 6 → 7 → 8; Task 4 depends on nothing and may run beside 1–3 (it and Task 3 each add one `ROUTE_MODULES` entry: rebase, keep both).
+Order: 1 → 2 → 3 → 5 → 6 → 7 → 8 → 9 → 10 → 11; Task 4 depends on nothing and may run beside 1–3 (it and Task 3 each add one `ROUTE_MODULES` entry: rebase, keep both). Tasks 1–5 are done as written; Task 6 is in progress as written; Tasks 7–11 are the socket-assignment amendment.
 
 ---
 
@@ -214,51 +219,164 @@ Behaviour: spec D5 "Commands" and "Resend". The session socket stays open while 
 - [ ] **Step 4: Run** `bun test lib/event-stream-worker.test.mjs lib/agent-client.test.mjs hooks/useAgentSession.rpc.test.mjs && npm run typecheck && npm run lint && npm test` — PASS.
 - [ ] **Step 5: Commit** `feat(worker): agent commands over the session socket`.
 
-### Task 7: Instrument both transports
+### Task 7: Every browser socket carries any session
+
+Wire change at both ends, so the app keeps working between tasks; the worker still assigns sockets as `ws-session` does until Task 8.
 
 **Files:**
-- Modify: `public/event-stream-worker.js`, `lib/event-stream.ts`, `lib/agent-client.ts`
-- Test: `lib/event-stream-worker.test.mjs`, `lib/agent-client.test.mjs`
+- Modify: `lib/browser-socket.ts`, `public/event-stream-worker.js`, `lib/event-stream-protocol.ts` (header comment)
+- Test: `lib/browser-socket.test.mjs`, `lib/event-stream-worker.test.mjs`
 
 **Interfaces:**
-- Consumes: Task 4 endpoint; Task 5 `Conn`/`sseConn`, `wake`; Task 6 `CommandReply`.
-- Produces: tab → worker `{ op: "metric", sample: object }`; `lib/event-stream.ts` `export function recordTransportSample(sample: Record<string, unknown>): void` (posts only when a transport exists; never constructs one). Sample schema and derived values: spec D6. The worker stamps `transport`, `clientId`, `effectiveType`, `visible` on every sample that lacks them, and `offset`/`offsetRtt` (best current clock) on `action` samples.
+- Consumes: Task 3 `browserSocket`, `runOnce`; Task 6 command queue.
+- Produces:
+  - `BrowserSocketData = { kind: "browser"; connection: EventStreamConnection | null }`; `handleBrowserSocketUpgrade` reads no query (426 when `upgrade` returns false, nothing else).
+  - Client → server `{ t: "cmd", rid, session, advisor, command }`: acked, then a `session` that is not a string of 1–512 chars is answered `reply` 400 `invalid_event_stream_request` (socket stays); otherwise `runOnce(JSON.stringify([session, rid]), …)` with `runAgentCommand(session, command, advisor)`.
+  - Worker: `dial` opens `/api/events/ws` with no query; the command frame is `{"t":"cmd","rid":<JSON req>,"session":<JSON sessionId>,"advisor":…,"command":` + body + `}`.
+
+- [ ] **Step 1: Write the failing tests**
+  - `"one socket runs commands of several sessions, each against its own session"`: fake wrappers `a`, `b`; `cmd` for `a` (`rid: "r1"`) and `b` (`rid: "r2"`) on one socket → each wrapper's `send` saw only its own body; two replies matched by `rid`.
+  - `"dedupe is per session: the same rid in two sessions runs twice, the same (session, rid) once"`.
+  - `"a cmd without a valid session is acked and answered 400; the socket stays"`: `session` missing, `""`, `"x".repeat(513)` → `reply { status: 400, body: { code: "invalid_event_stream_request" } }`, no `close`.
+  - Replace `"cmd on the general socket is 400 invalid_event_stream_request"` (deleted) and the upgrade test: any query upgrades with data `{ kind: "browser", connection: null }`.
+  - Worker: the three dial-URL assertions become `"wss://example.test/api/events/ws"`; `"a command frame names its session"` (the frame parses to `{ t: "cmd", rid, session: "a", advisor: false, command }`).
+- [ ] **Step 2: Run** `bun test lib/browser-socket.test.mjs lib/event-stream-worker.test.mjs` — FAIL.
+- [ ] **Step 3: Implement** the Interfaces block; `MAX_SESSION_ID_LENGTH` moves from the upgrade check to the frame check.
+- [ ] **Step 4: Run** `bun test lib/browser-socket.test.mjs lib/event-stream-worker.test.mjs server/app.test.ts && npm run typecheck && npm run lint && npm test` — PASS.
+- [ ] **Step 5: Commit** `feat(events): every browser socket carries any session`.
+
+### Task 8: Transport modes, the key policy and make-before-break moves
+
+**Files:**
+- Modify: `lib/event-stream-protocol.ts`, `lib/web-settings.ts`, `app/api/web-settings/route.ts`, `lib/event-stream-hub.ts`, `public/event-stream-worker.js`, `lib/event-stream.ts`, `lib/agent-client.ts`
+- Test: `lib/web-settings.test.mjs`, `lib/api-contract.test.mjs`, `lib/event-stream-hub.test.mjs`, `lib/event-stream-worker.test.mjs`, `lib/event-stream.test.mjs`, `lib/agent-client.test.mjs` (every `"websocket"` value in the Inventory row)
+
+**Interfaces:**
+- Consumes: Task 7 multi-session sockets; Task 5 `Conn`, `join`, `idle`, `retire`, `redial`; Task 6 `pending`, `lost`, `sendWaiting`.
+- Produces:
+  - `lib/event-stream-protocol.ts`: `export type BrowserTransport = "sse" | "ws-client" | "ws-session" | "ws-pool";` `export const BROWSER_TRANSPORTS: readonly BrowserTransport[]`; `export function isWebSocketTransport(transport: BrowserTransport): boolean`; `export interface BrowserTransportState { transport: BrowserTransport; perSocket: number; maxSockets: number }`; `hello` = `{ type: "hello"; connectionId; serverId } & BrowserTransportState`; `transport` = `{ type: "transport" } & BrowserTransportState`.
+  - `lib/web-settings.ts`: `browserTransportPerSocket: number`, `browserTransportMaxSockets: number` (Global Constraints ranges; anything else reads as the default; `browserTransport` outside the four reads as `"sse"`); `export function browserTransportState(settings = loadWebServerSettings()): BrowserTransportState`.
+  - `lib/event-stream-hub.ts`: `broadcastBrowserTransport(state: BrowserTransportState): void`; hello spreads `browserTransportState()`.
+  - `PUT /api/web-settings`: each of the three keys validated when present (400 `invalid_settings`, the message names the key and its range); broadcasts once when `browserTransportState()` differs before/after, never otherwise.
+  - Worker: `state` (`{ transport, perSocket, maxSockets }`, replaces `mode`); `setTransport(next)` (false when equal); `socketKeyFor(sessionId | null)` per spec D2 (`ws-pool`: `pool:0` for everything until Task 9 sizes the pool, a valid N = 1 pool); `keyValid(key)`; `move(subscription, conn)` and `rebalance(reason)` per spec D2 "Moves"; worker → tab `{ transport }` carries the four-valued mode.
+  - `lib/event-stream.ts` / `lib/agent-client.ts`: commands go through the worker when `transportMode() !== "sse"`.
+
+Exact behaviour (spec D2, D5): `sse` ↔ ws keeps Task 5/6's switch. Between ws modes `rebalance("mode")`:
+- every subscription whose `socketKeyFor` changed gets `subscription.moving = connFor(newKey)` and a `sub` there; `handleControl` on `open` from `moving`: tab `{ error, readyState: 0 }` then `{ open }`, `subscription.conn = moving`, `unsub` on the old socket, `moving = null`; `refused`/`end` from `moving`: `moving = null`, `unsub` there, nothing else;
+- if the old socket drops while a move is pending, the subscription switches to `moving` at once (CONNECTING now, OPEN on its `open`);
+- unsent commands (`attempts === 0`, not in flight) move to their session's new socket; sent ones stay; `lost()` resends on `connFor(socketKeyFor(session))` (same resend rules);
+- afterwards every conn with no subscription, no move and no pending command closes at once when `!keyValid(key)` or `key === "general"`, else lingers `SESSION_LINGER_MS`.
+
+- [ ] **Step 1: Write the failing tests**
+  - Settings: the full-object `deepEqual`s gain `browserTransportPerSocket: 4, browserTransportMaxSockets: 16`; `test("transport values and pool numbers round-trip; out-of-range reads as the default")`: the four values round-trip, `"websocket"` → `"sse"`, per-socket `8` round-trips while `0`, `65`, `2.5`, `"8"` read as 4, max-sockets `17` reads as 16.
+  - Route: `PUT {"browserTransportPerSocket":0}` and `{"browserTransportMaxSockets":17}` and `{"browserTransport":"websocket"}` → 400 `invalid_settings`; `PUT {"browserTransport":"ws-pool","browserTransportPerSocket":2}` → one `transport` frame `{ transport: "ws-pool", perSocket: 2, maxSockets: 16 }` on an open connection; the same PUT again → no frame.
+  - Hub `connect()`: hello deep-equals `{ type: "hello", connectionId, serverId, transport: "sse", perSocket: 4, maxSockets: 16 }`.
+  - Worker: `"ws-client puts every channel and every session on one socket"` (running, file, session a, b → one socket `client`, four `sub`s, commands of a and b on it); `"ws-session keeps a general socket and one per session"` (the existing tests, values renamed); `"switching ws-session → ws-client moves make-before-break"` (old sockets deliver until each `open` on `client`; then the tab gets error 0 + open; `unsub` on the old socket; a later frame there is ignored; `general` and `session:*` close once empty; a command in flight on `session:a` is answered there; an unsent one is sent on `client`); `"a refused move keeps the subscription on its old socket"`; `"an equal transport frame changes nothing"` (no dial, no frame); `"a sent command whose socket drops after a move is resent on the session's current socket"`.
+  - `lib/event-stream.test.mjs` / `lib/agent-client.test.mjs`: each `ws-*` mode routes commands through the worker; `sse` uses fetch.
+- [ ] **Step 2: Run** `bun test lib/web-settings.test.mjs lib/api-contract.test.mjs lib/event-stream-hub.test.mjs lib/event-stream-worker.test.mjs lib/event-stream.test.mjs lib/agent-client.test.mjs` — FAIL.
+- [ ] **Step 3: Implement** the Interfaces block and the behaviour above; replace every `"websocket"` value and mode check in the Inventory rows.
+- [ ] **Step 4: Run** the Step 2 files plus `hooks/useAgentSession.rpc.test.mjs`, then `npm run typecheck && npm run lint && npm test` — PASS.
+- [ ] **Step 5: Commit** `feat(worker): ws-client, ws-session and ws-pool modes with make-before-break moves`.
+
+### Task 9: ws-pool sized from active sessions, rendezvous buckets
+
+**Files:**
+- Modify: `public/event-stream-worker.js`
+- Test: `lib/event-stream-worker.test.mjs` (`loadWorker` also returns the `vm` context: top-level `function` declarations are its properties)
+
+**Interfaces:**
+- Consumes: Task 8 `state`, `socketKeyFor`, `rebalance`, `move`, `keyValid`.
+- Produces (worker top level): `function poolRank(sessionId, n)` → index in `[0, n)`; `function activeSessions()` → `Set` of session ids with a `session` subscription (current or moving) or a pending command on any conn; `let poolSize` (N, 1 outside `ws-pool`); `function resizePool(reason)` (`"grow" | "shrink" | "setting" | "mode"`); `rebalance(reason)` returns `{ fromPool, toPool, fromSockets, toSockets, active, moved, movedOther }` for Task 10. `socketKeyFor` in `ws-pool`: `null` → `pool:0`, a session → `pool:${poolRank(id, poolSize)}`; `keyValid("pool:i")` ⇔ `i < poolSize`.
+
+The ranking (spec D2; the hash is fixed so every worker ranks the same):
+
+```js
+function fnv1a(text) {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 0x01000193);
+  return hash >>> 0;
+}
+function fmix32(hash) {
+  hash = Math.imul(hash ^ (hash >>> 16), 0x85ebca6b);
+  hash = Math.imul(hash ^ (hash >>> 13), 0xc2b2ae35);
+  return (hash ^ (hash >>> 16)) >>> 0;
+}
+function poolRank(sessionId, n) {
+  let best = 0;
+  let bestScore = -1;
+  for (let i = 0; i < n; i++) {
+    const score = fmix32(fnv1a(`${i}:${sessionId}`));
+    if (score > bestScore) { best = i; bestScore = score; }
+  }
+  return best;
+}
+```
+
+Sizing: `target = Math.min(Math.max(Math.ceil(activeSessions().size / state.perSocket), 1), state.maxSockets)`, recomputed when a `session` subscription opens or is released, a command is queued or settled, and on `setTransport`. `target > poolSize` → `poolSize = target`, `rebalance("grow")`, clear `shrinkTimer`. `target < poolSize` → start `shrinkTimer` (`SESSION_LINGER_MS`) unless running; when it fires recompute and, if still below, `poolSize = target`, `rebalance("shrink")`. `target === poolSize` → clear `shrinkTimer`. A `setTransport` that changes `perSocket` or `maxSockets` in `ws-pool` sets `poolSize = target` at once (`"setting"`); entering `ws-pool` from another ws mode → `"mode"`.
+
+- [ ] **Step 1: Write the failing tests**
+  - `"poolRank spreads sessions and moves only the minimum when N changes"`: ids `s0`…`s999`: at N = 4 each bucket holds 200–300; 4 → 5: every moved id now ranks 4, 150–250 moved; 5 → 4: exactly the ids that ranked 4 move; `0 ≤ rank < N` always.
+  - `"the pool grows at once with the active sessions"`: `ws-pool`, perSocket 2, max 16; running + sessions `a`, `b` → `poolSize` 1, one socket `pool:0`; opening session `c` → `poolSize` 2 in the same tick; only sessions with `poolRank(id, 2) === 1` move (pick ids with `context.poolRank` so at least one does); `pool:1` is dialed only then.
+  - `"the pool shrinks only after 30 s below target, and going back above cancels it"`: close `c` → `poolSize` 2 at +29 999 ms; reopen at +10 000 → no shrink at +30 000; close again → `poolSize` 1 at +30 000 after that close; the sessions on `pool:1` move make-before-break to `pool:0`; `pool:1` closes once its sent commands are answered.
+  - `"maxSockets caps the pool and a setting change resizes at once"`: perSocket 1, max 2, five sessions → `poolSize` 2; a `transport` frame with `maxSockets: 4` → `poolSize` 4 in the same tick.
+  - `"non-session channels stay on pool:0"`; `"a command keeps its session active until answered"` (a command for `z` with no subscription counts; after its reply the shrink timer starts).
+- [ ] **Step 2: Run** `bun test lib/event-stream-worker.test.mjs` — FAIL.
+- [ ] **Step 3: Implement** the ranking, sizing and the `rebalance` return value.
+- [ ] **Step 4: Run** `bun test lib/event-stream-worker.test.mjs && npm run typecheck && npm run lint && npm test` — PASS.
+- [ ] **Step 5: Commit** `feat(worker): ws-pool sized from active sessions with rendezvous buckets`.
+
+### Task 10: Instrument every transport
+
+**Files:**
+- Modify: `public/event-stream-worker.js`, `lib/event-stream.ts`, `lib/agent-client.ts`, `scripts/transport-metrics.ts`
+- Test: `lib/event-stream-worker.test.mjs`, `lib/agent-client.test.mjs`, `scripts/transport-metrics.test.ts`
+
+**Interfaces:**
+- Consumes: Task 4 endpoint and script; Task 5 `Conn`/`sseConn`, `wake`; Task 6 `CommandReply`; Task 8 `state`, `rebalance`; Task 9 `poolSize`, the `rebalance` result.
+- Produces: tab → worker `{ op: "metric", sample: object }`; `lib/event-stream.ts` `export function recordTransportSample(sample: Record<string, unknown>): void` (posts only when a transport exists; never constructs one). `CommandReply` gains `socket: string` (the key; `"http"` for HTTP) and `behindSameBytes`, `behindOtherBytes`, `replyBehindOtherBytes` (numbers or `null`). Sample schema and derived values: spec D6. The worker stamps `transport`, `pool`, `socket`, `conn`, `sockets`, `clientId`, `effectiveType`, `visible` on every sample that lacks them, and `offset`/`offsetRtt` (best current clock) on `action` samples.
 
 Exact rules:
 - Clock: WS `pong` → `offset = at − (c + now) / 2`, `rtt = now − c`, keep the min-RTT sample per `Conn`; the client sends `{t:"ping", c}` on `open` and on every server `ping`. SSE: after each `hello`, `SSE_CLOCK_PROBES` sequential `fetch("/api/transport-metrics")`.
-- Event: SSE `Number(event.lastEventId)`, WS the frame's `at`; at most one per connection per `EVENT_SAMPLE_MS`; the connection's clock, else the worker's best (min RTT across `conns` and `sseConn`); none before any clock exists.
+- Tags: `conn` = the key's prefix (`general`, `session`, `client`, `pool`), `sse` for the EventSource, `http` for an HTTP command, `worker` for `rebalance`/`dropped`; `sockets` = conns holding a `ws`; `pool` = `poolSize` in `ws-pool`, else `null`.
+- Event: SSE `Number(event.lastEventId)`, WS the frame's `at`; at most one per connection per `EVENT_SAMPLE_MS`, except frames with `behindOtherBytes > 0` (always); the connection's clock, else the worker's best (min RTT across `conns` and `sseConn`); none before any clock exists.
+- Downlink isolation: per connection a log of received frames with `data.length ≥ LARGE_FRAME_BYTES` as `{ owner, bytes, at, gotAt }`, pruned after `LARGE_FRAME_LOG_MS`; owner = the subscription's `channel.sessionId` for a `session` channel, the command's session for a `reply`, else `"app"`. `behindOtherBytes`/`behindSameBytes` per spec D6; a `reply`'s sum is `replyBehindOtherBytes`.
+- Uplink isolation: WS at send, over this conn's pending commands that are in flight without `recvAt` (sent, not yet acked): same-session and other-session body bytes, each `Math.min(…, behindBytes)`. HTTP in `agent-client`: this tab's unanswered POSTs, same session → `behindBytes` = `behindSameBytes`, others → `behindOtherBytes`.
 - Reconnect: `dropAt` when the drop is noticed (EventSource `onerror`, socket `close`, silence, missed ack, forced wake), `startAt` = latest wake within `WAKE_WINDOW_MS` before `dropAt`, else `dropAt`; ends at the first `open` control or channel frame after the new `hello`; `batch` = reconnect starts within `BATCH_WINDOW_MS` of this one (worker-wide list of recent starts).
+- Rebalance: one `rebalance` sample per `rebalance()` that moved anything or changed `poolSize`, with its result, the reason and `settledMs` (written when its last move completes or is cancelled).
 - Hang: WS in the Task 6 ack timer; HTTP in `agent-client` with the same formula, once per request, not aborting the fetch.
-- `behindBytes`: WS `ws.bufferedAmount` at send (Task 6); HTTP the summed body bytes of this tab's unanswered POSTs for the same session.
 - Flush: `POST /api/transport-metrics` every `METRICS_FLUSH_MS` or at `METRICS_FLUSH_COUNT`; on failure keep; above `METRICS_BUFFER_MAX` drop the oldest and add one `{ metric: "dropped", count }` to the next batch.
+- Summary (`scripts/transport-metrics.ts`): add sections `isolation event ms`, `isolation action ms` (keys `other` / `same` / `clear`, spec D6), `sockets` and `pool size` (p50/p95/max of the tags per transport), `rebalance moved` and `rebalance settledMs` (keyed by reason); event and reconnect rows key on `conn` kind; `SECTION_ORDER` lists them after `reconnect fromDropMs`.
 
 - [ ] **Step 1: Write the failing tests**
   - `"a pong sets the min-RTT clock and event samples measure gotAt + offset − at"`: server clock 5 000 ms ahead, RTT 40 then 10 → `offset` from the 10 ms sample; a frame stamped `at` 5 ms before receipt (server time) → `ms` 5.
-  - `"SSE: three clock probes after hello, then lastEventId gives event samples"`.
-  - `"at most one event sample per connection per second"`.
-  - `"a reconnect sample runs from the wake to the first open after resubscribe, with batch = sockets redialed together"`: wake online with 3 sockets → three samples, `batch: 3`, `startAt` = wake time.
-  - `"samples flush at 200 or every 30 s, survive a failed POST, cap at 2 000 and report dropped"`.
-  - `"every sample carries transport, clientId, effectiveType and visible"` (`navigator.connection = { effectiveType: "3g" }`; a tab `wake` with `visible: false`).
-  - `lib/agent-client.test.mjs`: `"an HTTP action sample uses the timing headers and counts behindBytes of the same session"`; `"an HTTP command slower than the ack formula records one hang, then its action"`; `"a socket action sample carries attempts, deduped, recvAt and repliedAt"`.
-- [ ] **Step 2: Run** `bun test lib/event-stream-worker.test.mjs lib/agent-client.test.mjs` — FAIL.
+  - `"SSE: three clock probes after hello, then lastEventId gives event samples"`; `"at most one event sample per connection per second"`.
+  - `"every sample carries transport, pool, socket, conn and sockets"`: `ws-pool` with `poolSize` 2 → `{ transport: "ws-pool", pool: 2, socket: "pool:1", conn: "pool", sockets: 2 }` on a frame of a session ranked 1; SSE → `{ socket: "sse", conn: "sse", sockets: 1, pool: null }`.
+  - `"an event behind another session's large frame records behindOtherBytes and is sampled despite the 1/s limit"`: `ws-client`, offset 0; session `a` gets a 100 000-char frame `at` 1 000 received at 1 050; session `b`'s frame `at` 1 010 right after → `behindOtherBytes: 100000`, `behindSameBytes: 0`; the same in SSE mode via `lastEventId`; in `ws-session` (separate sockets) → 0.
+  - `"a command behind another session's unacked upload records behindOtherBytes"`: `ws-client`; a 200 000-char prompt for `a` sent, no ack; a command for `b` with `bufferedAmount` 150 000 → `behindOtherBytes: 150000`; in `ws-session` → 0.
+  - `"a reconnect sample runs from the wake to the first open after resubscribe; batch counts the sockets redialed together"`: `ws-pool` with three sockets, wake online → three samples, `batch: 3`, `sockets: 3`, `startAt` = wake time.
+  - `"a resize records one rebalance with its churn and settledMs"`: grow 1 → 2 moving two sessions → `{ metric: "rebalance", reason: "grow", fromPool: 1, toPool: 2, moved: 2, movedOther: 0 }`, `settledMs` = time to the second `open`.
+  - `"samples flush at 200 or every 30 s, survive a failed POST, cap at 2 000 and report dropped"`; `"every sample carries clientId, effectiveType and visible"` (`navigator.connection = { effectiveType: "3g" }`; a tab `wake` with `visible: false`).
+  - `lib/agent-client.test.mjs`: `"an HTTP action sample uses the timing headers and splits in-flight POSTs by session"`; `"an HTTP command slower than the ack formula records one hang, then its action"`; `"a socket action sample carries socket, attempts, deduped, recvAt, repliedAt and the isolation bytes"`.
+  - `scripts/transport-metrics.test.ts`: a fixture with all four transports → `isolation event ms` rows `other`/`same`/`clear` per transport; `rebalance moved` keyed `grow`/`shrink` with p50 of `moved`; `pool size` only for `ws-pool`; `sockets` per transport.
+- [ ] **Step 2: Run** `bun test lib/event-stream-worker.test.mjs lib/agent-client.test.mjs scripts/transport-metrics.test.ts` — FAIL.
 - [ ] **Step 3: Implement** the rules above.
-- [ ] **Step 4: Run** `bun test lib/event-stream-worker.test.mjs lib/agent-client.test.mjs hooks/useAgentSession.rpc.test.mjs && npm run typecheck && npm run lint && npm test` — PASS.
-- [ ] **Step 5: Commit** `feat(metrics): instrument both browser transports`.
+- [ ] **Step 4: Run** the Step 2 files plus `hooks/useAgentSession.rpc.test.mjs`, then `npm run typecheck && npm run lint && npm test` — PASS.
+- [ ] **Step 5: Commit** `feat(metrics): instrument every browser transport`.
 
-### Task 8: Settings control, docs and an end-to-end run
+### Task 11: Settings control, docs and an end-to-end run over every mode
 
 **Files:**
-- Modify: `components/SettingsConfig.tsx` (a `SETTINGS` entry `{ id: "browser-transport", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", … scope: "UI" }` and a `BrowserTransportSetting` rendered in Interface & Behavior), `lib/i18n/locales/{en,ja,zh-CN}.json` (the five `settingsConfig.browserTransport*` keys), `AGENTS.md`
+- Modify: `components/SettingsConfig.tsx` (a `SETTINGS` entry `{ id: "browser-transport", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", … scope: "UI" }` and a `BrowserTransportSetting` rendered in Interface & Behavior), `lib/i18n/locales/{en,ja,zh-CN}.json` (the ten `settingsConfig.browserTransport*` keys), `AGENTS.md`
 - Test: `components/SettingsConfig.browser-transport.test.mjs`
 
 **Interfaces:**
-- Consumes: Task 2 `GET`/`PUT /api/web-settings`.
-- Produces: `BrowserTransportSetting` — a `<select>` (`nativeSelectStyle`, like `word-completion`) with `sse`/`websocket`, loaded from `GET /api/web-settings` (disabled until loaded), `PUT { browserTransport }` on change, restore + `toast.error(t("settingsConfig.browserTransportSaveFailed"), …)` on failure (the `AutoResumeSessionsSetting` pattern).
+- Consumes: Task 8 `GET`/`PUT /api/web-settings`.
+- Produces: `BrowserTransportSetting` — a `<select>` (`nativeSelectStyle`, like `word-completion`) with the four modes, loaded from `GET /api/web-settings` (disabled until loaded), `PUT { browserTransport }` on change; while `ws-pool` is selected, two `<input type="number">` (per socket `min=1 max=64`, most connections `min=1 max=16`) under `browserTransportPoolDesc`, each saving `PUT { browserTransportPerSocket }` / `{ browserTransportMaxSockets }` on change when the value is an integer in range; a failed save restores the previous value and calls `toast.error(t("settingsConfig.browserTransportSaveFailed"), …)` (the `AutoResumeSessionsSetting` pattern).
 
-- [ ] **Step 1: Write the failing test** `"the browser transport select shows the saved value and saves a change"`: fetch fake answers `{ browserTransport: "sse" }`; select value `sse`; choosing `websocket` sends one `PUT` with `{"browserTransport":"websocket"}`; a 500 answer restores `sse`.
+- [ ] **Step 1: Write the failing test** `"the browser transport control shows the saved mode, saves changes and shows pool numbers only for ws-pool"`: fetch fake answers `{ browserTransport: "sse", browserTransportPerSocket: 4, browserTransportMaxSockets: 16 }`; select `sse`, no number inputs; choosing `ws-pool` sends one `PUT` `{"browserTransport":"ws-pool"}` and shows both inputs with 4 and 16; setting per socket to 8 sends `{"browserTransportPerSocket":8}`; 0 sends nothing; a 500 answer restores the previous value.
 - [ ] **Step 2: Run** `bun test components/SettingsConfig.browser-transport.test.mjs` — FAIL.
 - [ ] **Step 3: Implement** the control and the locale keys (en copy from Global Constraints; ja and zh-CN translated).
-- [ ] **Step 4: Docs.** AGENTS.md "Live event stream": a "WebSocket mode (experiment)" bullet list — the switch and the exact flip command (spec D1), general vs session sockets and linger, `/api/events/ws` gated in `handle()`, the frame format, `runAgentCommand` as the one command path, dedupe and the resend rule, the SSE `id:` emit time and the extended `hello`, the metrics file and `bun scripts/transport-metrics.ts`. File map: `lib/agent-command.ts`, `lib/browser-socket.ts`, `lib/transport-metrics.ts`, `app/api/events/ws/route.ts`, `app/api/transport-metrics/route.ts`, `scripts/transport-metrics.ts`.
-- [ ] **Step 5: End to end** (temp `HOME` and `PI_CODING_AGENT_DIR`, `OMP_WEB_OMP_BIN=/nonexistent/omp`, no password; no daemon, so no sessions are listed): `npm run build && bun server/main.ts -H 127.0.0.1 -p 30331`. In Chromium (the eval `browser`), open `http://127.0.0.1:30331/`; `ss -Htn state established '( sport = :30331 )' | wc -l` notes the count. `curl -sS -X PUT http://127.0.0.1:30331/api/web-settings -H 'content-type: application/json' -d '{"browserTransport":"websocket"}'`; within 5 s the page shows no error, the sidebar and Settings → Hosts still load, and the count changes (the EventSource is gone, the general socket is up). The session path, against the same server from a Bun one-liner: `new WebSocket("ws://127.0.0.1:30331/api/events/ws?session=e2e")`, after its `hello` send `{"t":"cmd","rid":"e2e-1","advisor":false,"command":{"type":"predict_word","text":"he","cursor":2}}` → `ack` then `reply` with `{"status":200,"body":{"success":true,"data":{"suffix":null}}}` (a no-spawn reply, no omp needed); the same `rid` again → `"deduped":true`. Emulate offline → online in the page (CDP `Network.emulateNetworkConditions`); after 30 s `bun scripts/transport-metrics.ts --since 10m --file $PI_CODING_AGENT_DIR/omp-web/transport-metrics.jsonl` prints `event` and `reconnect` rows for `websocket` (trigger `online`). Flip back to `sse`: the page resubscribes over one EventSource and no socket remains. Stop the server.
+- [ ] **Step 4: Docs.** AGENTS.md "Live event stream": a "WebSocket transports (experiment)" bullet list — the four modes and the exact flip command (spec D1), multi-session sockets and `socketKeyFor`, the pool's sizing, rendezvous ranking and 30 s shrink hysteresis, make-before-break moves, linger, `/api/events/ws` gated in `handle()`, the frame format, `runAgentCommand` as the one command path, `(session, rid)` dedupe and the resend rule, the SSE `id:` emit time and the extended `hello`, the metrics file, the isolation fields and `bun scripts/transport-metrics.ts`. File map: `lib/agent-command.ts`, `lib/browser-socket.ts`, `lib/transport-metrics.ts`, `app/api/events/ws/route.ts`, `app/api/transport-metrics/route.ts`, `scripts/transport-metrics.ts`.
+- [ ] **Step 5: End to end** (temp `HOME` and `PI_CODING_AGENT_DIR`, `OMP_WEB_OMP_BIN=/nonexistent/omp`, no password; no daemon, so the page lists no sessions and every mode holds one socket for the non-session channels): `npm run build && bun server/main.ts -H 127.0.0.1 -p 30331`. In Chromium (the eval `browser`), open `http://127.0.0.1:30331/`; `ss -Htn state established '( sport = :30331 )' | wc -l` notes the count. For each of `{"browserTransport":"ws-client"}`, `{"browserTransport":"ws-session"}`, `{"browserTransport":"ws-pool","browserTransportPerSocket":1,"browserTransportMaxSockets":2}`: `curl -sS -X PUT http://127.0.0.1:30331/api/web-settings -H 'content-type: application/json' -d '<body>'`; within 5 s the page shows no error, the sidebar and Settings → Hosts still load, and the count shows one browser socket and no EventSource; then emulate offline → online in the page (CDP `Network.emulateNetworkConditions`). Sessions on one socket, from a Bun one-liner against the same server: `new WebSocket("ws://127.0.0.1:30331/api/events/ws")`, after its `hello` send `{"t":"cmd","rid":"r1","session":"e2e-a","advisor":false,"command":{"type":"predict_word","text":"he","cursor":2}}` and the same with `"rid":"r2","session":"e2e-b"` → two `ack`/`reply` pairs with `{"status":200,"body":{"success":true,"data":{"suffix":null}}}` (no-spawn replies, no omp needed); `rid` `r1` for `e2e-a` again → `"deduped":true`; `rid` `r1` for `e2e-b` → not deduped. After 30 s `bun scripts/transport-metrics.ts --since 15m --file $PI_CODING_AGENT_DIR/omp-web/transport-metrics.jsonl` prints `event`, `reconnect` (trigger `online`), `sockets` and isolation rows for `ws-client`, `ws-session` and `ws-pool` (pool resizing needs sessions: Task 9's tests cover it). Flip back to `sse`: the page resubscribes over one EventSource and no socket remains. Stop the server.
 - [ ] **Step 6: Run** `npm run typecheck && npm run lint && npm test && npm run smoke` — PASS.
-- [ ] **Step 7: Commit** `feat(settings): browser transport switch; document the experiment`.
+- [ ] **Step 7: Commit** `feat(settings): browser transport modes in Settings; document the experiment`.
