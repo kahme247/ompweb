@@ -2,18 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createJiti } from "jiti";
 
-const jiti = createJiti(import.meta.url, {
-  jsx: { runtime: "automatic" },
-  tsconfigPaths: true,
-});
 const {
   ProviderUsageBar,
   nextUsageDisplayWindow,
   displayWindowForReport,
   displaySummary,
-} = await jiti.import("./ProviderUsageBar.tsx");
+} = await import("./ProviderUsageBar.tsx");
 
 const report = (overrides) => ({
   provider: "anthropic",

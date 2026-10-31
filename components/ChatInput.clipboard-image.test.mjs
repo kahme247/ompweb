@@ -2,15 +2,10 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { after, afterEach } from "node:test";
 import React from "react";
-import { act, cleanup, render, screen } from "@testing-library/react";
-import { createJiti } from "jiti";
+const { act, cleanup, render, screen } = await import("@testing-library/react");
 
-const jiti = createJiti(import.meta.url, {
-  jsx: { runtime: "automatic" },
-  tsconfigPaths: true,
-});
-const { ChatInput } = await jiti.import("./ChatInput.tsx");
-const { MAX_ATTACHED_IMAGE_BYTES } = await jiti.import("@/lib/image-attachments");
+const { ChatInput } = await import("./ChatInput.tsx");
+const { MAX_ATTACHED_IMAGE_BYTES } = await import("@/lib/image-attachments");
 
 // jsdom implements neither object URLs nor the async Clipboard API, so both are
 // modeled here. The object-URL stub records the composer/blob lifetime the way

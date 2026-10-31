@@ -218,8 +218,13 @@ export function hideProject(registry: ProjectRegistryFile, path: string): Projec
  *  entries. A hidden registry entry suppresses re-discovery, so hiding a
  *  project keeps its sessions off the sidebar until it is added again.
  *  Registered projects come first in most-recently-added order; discovered
- *  projects follow sorted by path. */
-export function mergeProjects(registry: ProjectRegistryFile, discovered: Iterable<string>): ManagedProject[] {
+ *  projects follow sorted by path. `canonical` resolves discovered paths on
+ *  this machine; another host's paths pass through unchanged. */
+export function mergeProjects(
+  registry: ProjectRegistryFile,
+  discovered: Iterable<string>,
+  canonical: (path: string) => string = canonicalProjectPath,
+): ManagedProject[] {
   const hidden = new Set(
     registry.projects.filter((p) => p.hidden).map((p) => comparableProjectPath(p.path)),
   );
@@ -240,7 +245,7 @@ export function mergeProjects(registry: ProjectRegistryFile, discovered: Iterabl
   }
   const extra: ManagedProject[] = [];
   const extraSeen = new Set<string>();
-  for (const raw of new Set([...discovered].filter(Boolean).map(canonicalProjectPath))) {
+  for (const raw of new Set([...discovered].filter(Boolean).map(canonical))) {
     const key = comparableProjectPath(raw);
     if (hidden.has(key) || registeredSeen.has(key) || extraSeen.has(key)) continue;
     extraSeen.add(key);

@@ -41,8 +41,8 @@ import { sessionPathKey } from "../paths";
  * Pure-Node reader/writer for oh-my-pi's session JSONL files (format v3).
  * Ported from oh-my-pi packages/coding-agent/src/session/ (session-entries,
  * session-title-slot, session-listing, session-loader, session-migrations,
- * blob-store) because the @oh-my-pi packages are Bun-only and cannot run
- * inside the Node-hosted Next.js server.
+ * blob-store) because the @oh-my-pi packages are Bun-only and the server ran
+ * on Node (Next.js) when this was written.
  *
  * File layout: optional fixed-width 256-byte title-slot line, then the
  * {"type":"session"} header line, then entries forming a tree via
@@ -392,7 +392,7 @@ const SESSION_READ_CHUNK_BYTES = 1024 * 1024;
  * Ceiling on the on-disk size omp-web will materialize into memory. omp streams
  * sessions, so this is not an omp limit — it is the point past which parsing a
  * session into JS objects (and serializing it into one HTTP response) would OOM
- * the whole Next.js server. Refusing loudly beats taking the process down.
+ * the whole server. Refusing loudly beats taking the process down.
  */
 export const MAX_SESSION_LOAD_BYTES = 1024 * 1024 * 1024;
 

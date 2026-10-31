@@ -2,11 +2,9 @@ import assert from "node:assert/strict";
 import "../tests/setup-dom.mjs";
 import test, { afterEach } from "node:test";
 import React from "react";
-import { cleanup, fireEvent, render, waitFor } from "@testing-library/react/pure.js";
-import { createJiti } from "jiti";
+const { cleanup, fireEvent, render, waitFor } = await import("@testing-library/react/pure.js");
 
-const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
-const { FileViewer } = await jiti.import("./FileViewer.tsx");
+const { FileViewer } = await import("./FileViewer.tsx");
 
 const originalFetch = globalThis.fetch;
 const originalWorker = globalThis.Worker;

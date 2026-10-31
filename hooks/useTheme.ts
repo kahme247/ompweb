@@ -1,6 +1,6 @@
 "use client";
 
-import { createElement, useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 
 export type LightTheme = "light" | "one-light" | "catppuccin-latte" | "rose-pine-dawn";
 export type DarkTheme =
@@ -103,15 +103,6 @@ export function nextThemePreference(preference: ThemePreference): ThemePreferenc
   if (preference === "omp") return "system";
   if (preference === "system") return "light";
   return isDarkTheme(preference as Theme) ? "light" : "dark";
-}
-
-export function ThemeColor() {
-  // React matches hoisted metadata by content during hydration. Adopt the
-  // pre-paint value so it reuses this node instead of adding a fallback copy.
-  const color = typeof document === "undefined"
-    ? null
-    : document.querySelector('meta[name="theme-color"]')?.getAttribute("content");
-  return createElement("meta", { name: "theme-color", content: color || "#000000" });
 }
 
 export function applyDomTheme(theme: Theme): void {

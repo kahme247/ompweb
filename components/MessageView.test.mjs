@@ -2,18 +2,13 @@ import assert from "node:assert/strict";
 import "../tests/setup-dom.mjs";
 import test, { afterEach } from "node:test";
 import React from "react";
-import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react/pure.js";
+const { act, cleanup, fireEvent, render, waitFor } = await import("@testing-library/react/pure.js");
 import { renderToStaticMarkup } from "react-dom/server";
-import { createJiti } from "jiti";
 
-const jiti = createJiti(import.meta.url, {
-  jsx: { runtime: "automatic" },
-  tsconfigPaths: true,
-});
-const { MessageView, SafeMarkdownBody, TaskResultPanel, isInterruptedMessage } = await jiti.import("./MessageView.tsx");
-const { CodeBlock } = await jiti.import("./MermaidBlock.tsx");
-const { buildSessionContext } = await jiti.import("../lib/session-reader.ts");
-const { collectToolResults, planTranscriptRows } = await jiti.import("../lib/chat-transcript-plan.ts");
+const { MessageView, SafeMarkdownBody, TaskResultPanel, isInterruptedMessage } = await import("./MessageView.tsx");
+const { CodeBlock } = await import("./MermaidBlock.tsx");
+const { buildSessionContext } = await import("../lib/session-reader.ts");
+const { collectToolResults, planTranscriptRows } = await import("../lib/chat-transcript-plan.ts");
 afterEach(cleanup);
 
 test("sent messages without timestamps or branch metadata still offer copy", () => {

@@ -1,10 +1,9 @@
 import { readFile } from "node:fs/promises";
-import { createThumbnail, existingThumbnail, imageMimeType, mediaFilePath } from "@/lib/media-cache";
+import { fetchMediaFromHosts } from "@/lib/hosts/session-index";
+import { createThumbnail, existingThumbnail, imageMimeType, mediaFilePath, storeMediaCopy } from "@/lib/media-cache";
 
-export const dynamic = "force-dynamic";
-
-function image(body: Buffer, type: string, immutable = true): Response {
-  // A view, not a copy: these buffers come from readFile/sharp, never a SharedArrayBuffer.
+function image(body: Uint8Array, type: string, immutable = true): Response {
+  // A view, not a copy: these buffers come from readFile/Bun.Image, never a SharedArrayBuffer.
   return new Response(new Uint8Array(body.buffer as ArrayBuffer, body.byteOffset, body.byteLength), {
     headers: {
       "Content-Type": type,
@@ -40,9 +39,19 @@ export async function GET(req: Request, { params }: { params: Promise<{ hash: st
     if (!file) break;
     bytes = await readIfPresent(file);
   }
+  // A remote session's image: ask the linked hosts (only bytes that hash to `hash` come back).
+  const remote = bytes ? null : await fetchMediaFromHosts(hash);
+  if (remote) bytes = Buffer.from(remote.buffer, remote.byteOffset, remote.byteLength);
   if (!bytes) return new Response("Not found", { status: 404 });
   const type = imageMimeType(bytes);
   if (!type) return new Response("Not an image", { status: 415 });
+  if (remote) {
+    try {
+      storeMediaCopy(hash, remote);
+    } catch {
+      // Disk trouble: still serve it, the next request asks again.
+    }
+  }
   if (thumb) {
     const preview = await createThumbnail(hash, bytes);
     if (preview) return image(preview, "image/webp");

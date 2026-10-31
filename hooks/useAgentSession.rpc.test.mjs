@@ -2,9 +2,9 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
 import React from "react";
-import { fileURLToPath } from "node:url";
-import { createJiti } from "jiti";
-import { act, cleanup, fireEvent, render, renderHook, within } from "@testing-library/react/pure.js";
+import { existsSync } from "node:fs";
+import { mock } from "bun:test";
+const { act, cleanup, fireEvent, render, renderHook, within } = await import("@testing-library/react/pure.js");
 
 // useAgentSession is the chat state machine. These tests drive it through a
 // controllable fake shared-worker event stream + fetch router mounted via React
@@ -269,26 +269,30 @@ afterEach(async () => {
   }
 });
 
-// The hook chain includes components/ui/toast.tsx, whose JSX jiti cannot parse
-// in this environment and whose DOM toasts must never fire inside Node tests.
-const jiti = createJiti(import.meta.url, {
-  tryNative: false,
-  jsx: { runtime: "automatic" },
-  alias: {
-    "@/components/ui/toast": fileURLToPath(new URL("./__fixtures__/toast-stub.mjs", import.meta.url)),
-    "@/": fileURLToPath(new URL("../", import.meta.url)),
-  },
-});
-const { useAgentSession } = await jiti.import("../hooks/useAgentSession.ts");
-const { selectSessionHistory } = await jiti.import("@/lib/session-sync");
-const { publishSessionsChanged } = await jiti.import("@/lib/session-change-bus");
-const { AgentSessionWrapper } = await jiti.import("@/lib/rpc-manager");
-const { isUnknownSlashCommand, slashCommandName, runHostTool } = await jiti.import("@/hooks/useAgentSession-stream");
-const { toastCalls } = await jiti.import("@/components/ui/toast");
-const { MessageView } = await jiti.import("@/components/MessageView");
-const { translate } = await jiti.import("@/lib/i18n");
-const { ChatWindow } = await jiti.import("@/components/ChatWindow");
-const { SESSION_EDIT_COMMAND, SESSION_EDIT_RESPONSE_PREFIX } = await jiti.import("@/lib/omp/session-edit-extension.mjs");
+// The hook chain includes components/ui/toast.tsx, whose DOM toasts must never fire in tests.
+mock.module("@/components/ui/toast", () => import("./__fixtures__/toast-stub.mjs"));
+const { useAgentSession } = await import("../hooks/useAgentSession.ts");
+const { selectSessionHistory } = await import("@/lib/session-sync");
+const { publishSessionsChanged } = await import("@/lib/session-change-bus");
+const { AgentSessionWrapper } = await import("@/lib/rpc-manager");
+// Wrappers built directly need an online host: this machine's, as its daemon answers, minus spawning.
+const onlineHost = {
+  id: "local",
+  label: "This machine",
+  sessionOps: {},
+  status: () => "online",
+  onStatus: () => () => {},
+  spawnRpc: async () => { throw new Error("this test never spawns"); },
+  sessionFileExists: async (path) => existsSync(path),
+  invalidateSessionLists() {},
+  autoApproveExtension: () => false,
+};
+const { isUnknownSlashCommand, slashCommandName, runHostTool } = await import("@/hooks/useAgentSession-stream");
+const { toastCalls } = await import("@/components/ui/toast");
+const { MessageView } = await import("@/components/MessageView");
+const { translate } = await import("@/lib/i18n");
+const { ChatWindow } = await import("@/components/ChatWindow");
+const { SESSION_EDIT_COMMAND, SESSION_EDIT_RESPONSE_PREFIX } = await import("@/lib/omp/session-edit-extension.mjs");
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -569,7 +573,7 @@ test("a promotion answered after navigation does not notify the new session", as
 // queued steer as soon as an abort lands (#130 saw follow-ups replay after the
 // next reply). Withdraw first, like the TUI's Esc, and hand the text back.
 test("Stop withdraws pending queued messages into the session draft before aborting", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   resetWorld();
   clearDraft("abort-withdraw");
   primeSession("abort-withdraw", [userMsg("u0", "loaded question")]);
@@ -594,7 +598,7 @@ test("Stop withdraws pending queued messages into the session draft before abort
 });
 
 test("a slow withdrawal does not hold Stop, and its late answer still recovers the text", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   resetWorld();
   clearDraft("abort-slow");
   primeSession("abort-slow", [userMsg("u0", "loaded question")]);
@@ -618,7 +622,7 @@ test("a slow withdrawal does not hold Stop, and its late answer still recovers t
 });
 
 test("Stop saves confirmed text early and still restores the queue in order", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   resetWorld();
   clearDraft("abort-mixed");
   primeSession("abort-mixed", [userMsg("u0", "loaded question")]);
@@ -646,7 +650,7 @@ test("Stop saves confirmed text early and still restores the queue in order", as
 });
 
 test("Stop withdraws a follow-up that a concurrent promotion already moved to steering", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   resetWorld();
   clearDraft("abort-promoted");
   primeSession("abort-promoted", [userMsg("u0", "loaded question")]);
@@ -2123,7 +2127,7 @@ function attachNativeWrapper(t, sid) {
     },
     sendFrame() {},
     async dispose() {},
-  }, process.cwd());
+  }, process.cwd(), null, false, "", undefined, onlineHost);
   wrapper.start();
   world.wrappers.set(sid, wrapper);
   t.after(() => wrapper.destroyAndWait());
@@ -2516,13 +2520,13 @@ test("forking carries the advisor choice to the child's next native command", as
   await act(async () => { await w.latest.handleFork("e0", false); });
   assert.deepEqual(forked, ["advisor-child"]);
   assert.equal(localStorage.getItem("omp-advisor-enabled:advisor-child"), "true");
-  const { sendAgentCommand } = await jiti.import("@/lib/agent-client");
+  const { sendAgentCommand } = await import("@/lib/agent-client");
   await sendAgentCommand("advisor-child", { type: "get_state" });
   assert.ok(world.calls.some((call) => call.url === "/api/agent/advisor-child?advisor=1"));
 });
 
 test("an edit-and-resend fork puts the branched prompt into the child's composer", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   for (const [editPrompt, child] of [[true, "edit-child"], [false, "keep-child"]]) {
     resetWorld();
     primeSession("fork-parent", [userMsg("u0", "q")]);
@@ -2742,7 +2746,7 @@ async function attachEditableWrapper(t, native, { holdHistory = false } = {}) {
     },
     sendFrame() {},
     async dispose() { listeners.clear(); },
-  }, process.cwd());
+  }, process.cwd(), null, false, "", undefined, onlineHost);
   t.after(() => wrapper.destroyAndWait());
   native.onMove = () => emitNative({ type: "notice", source: "session-persistence", level: "warning", message: "Session moved to a sibling file because another process owns the original" });
   wrapper.onIdentityChange((oldId, newId, options) => {
@@ -2816,7 +2820,7 @@ async function mountMovableChat(initialId) {
 }
 
 async function mountEditableSession(sid, options = {}) {
-  const { getDraft, setDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft } = await import("@/lib/draft-store");
   const session = sessionInfo(sid);
   const chatInputRef = options.chatInputRef ?? React.createRef();
   let latest;
@@ -2876,7 +2880,7 @@ async function mountObservedEditableSession(sid, options = {}) {
 for (const order of ["identity/history before HTTP", "HTTP before history delivery"]) {
   test(`native Edit relocation keeps the prefix, composer and resend (${order})`, async (t) => {
     resetWorld();
-    const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+    const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
     const sid = `edit-move-${order.startsWith("identity") ? "early" : "late"}`;
     const target = `${sid}-owned`;
     for (const id of [sid, target]) clearDraft(id);
@@ -2973,7 +2977,7 @@ for (const order of ["identity/history before HTTP", "HTTP before history delive
 
 test("relocation merges existing target attachments and preserves typing added while reload awaits", async (t) => {
   resetWorld();
-  const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
   const sid = "edit-move-new-typing", target = `${sid}-owned`;
   t.after(() => { clearDraft(sid); clearDraft(target); });
   const sourceImage = { data: "AAAA", mimeType: "image/png" };
@@ -3004,9 +3008,12 @@ test("relocation merges existing target attachments and preserves typing added w
   await until(() => getDraft(sid)?.files.length === 2, "attachment reads completed during the reload must join the moved draft");
   await act(async () => { release(); });
   await until(() => w.selectedId === target, "the confirmed move must transition its composer");
+  // Bun appends ";charset=utf-8" to a text File's type, so the type is pinned by its prefix.
+  const mimeType = getDraft(target)?.files[1]?.mimeType ?? "";
+  assert.ok(mimeType.startsWith("text/plain"), mimeType);
   assert.deepEqual(getDraft(target), {
     value: "new source typing\n\nexisting target draft", images: [sourceImage, targetImage],
-    files: [sourceFile, { name: "new.txt", mimeType: "text/plain", content: "new file while waiting", size: 22 }, targetFile],
+    files: [sourceFile, { name: "new.txt", mimeType, content: "new file while waiting", size: 22 }, targetFile],
   });
   assert.equal(w.view.getByRole("textbox").value, "new source typing\n\nexisting target draft");
   assert.equal(getDraft(sid), null);
@@ -3014,7 +3021,7 @@ test("relocation merges existing target attachments and preserves typing added w
 
 test("relocation adopts existing target text without prefilling over it", async (t) => {
   resetWorld();
-  const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
   const sid = "edit-move-target-text", target = `${sid}-owned`;
   t.after(() => { clearDraft(sid); clearDraft(target); });
   const sourceImage = { data: "AAAA", mimeType: "image/png" };
@@ -3038,7 +3045,7 @@ test("relocation adopts existing target text without prefilling over it", async 
 
 test("relocation at draft capacity preserves every unrelated draft and its attachments", async (t) => {
   resetWorld();
-  const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
   const sid = "edit-move-full-drafts", target = `${sid}-owned`;
   const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
   const unrelated = Array.from({ length: 49 }, (_, index) => {
@@ -3086,7 +3093,7 @@ test("relocation at draft capacity preserves every unrelated draft and its attac
 for (const phase of ["HTTP response", "target reload"]) {
 test(`navigation during a moved Edit's ${phase} is not hijacked or prefilled`, async (t) => {
   resetWorld();
-  const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
   const sid = `edit-move-leave-${phase.startsWith("HTTP") ? "http" : "reload"}`, target = `${sid}-owned`, other = `${sid}-other`;
   t.after(() => { for (const id of [sid, target, other]) clearDraft(id); });
   setDraft(sid, { value: "origin draft", images: [], files: [] });
@@ -3133,7 +3140,7 @@ test(`navigation during a moved Edit's ${phase} is not hijacked or prefilled`, a
 
 test("a moved conversation whose reload fails preserves attachments without prefilling and reports failure", async (t) => {
   resetWorld();
-  const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
   const sid = "edit-move-load-failed", target = `${sid}-owned`;
   t.after(() => { clearDraft(sid); clearDraft(target); });
   const draft = { value: "", images: [{ data: "AAAA", mimeType: "image/png" }],
@@ -3158,7 +3165,7 @@ test("a moved conversation whose reload fails preserves attachments without pref
 
 test("observed edit-time persistence errors preserve the real composer and complete draft", async (t) => {
   resetWorld();
-  const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
   const sid = "edit-native-disk-error";
   t.after(() => clearDraft(sid));
   const draft = { value: "keep unsent text", images: [{ data: "AAAA", mimeType: "image/png" }],
@@ -3183,7 +3190,7 @@ test("observed edit-time persistence errors preserve the real composer and compl
 
 test("Edit rewinds and resends in the same persisted session while retaining the old branch", async (t) => {
   resetWorld();
-  const { clearDraft } = await jiti.import("@/lib/draft-store");
+  const { clearDraft } = await import("@/lib/draft-store");
   const sid = "edit-same-session";
   clearDraft(sid);
   t.after(() => clearDraft(sid));
@@ -3270,7 +3277,7 @@ test("Edit rewinds and resends in the same persisted session while retaining the
 for (const order of ["HTTP first", "SSE first"]) {
   test(`a handled Edit echo preserves a later historical selection (${order})`, async (t) => {
     resetWorld();
-    const { clearDraft } = await jiti.import("@/lib/draft-store");
+    const { clearDraft } = await import("@/lib/draft-store");
     const sid = `edit-echo-branch-${order === "HTTP first" ? "http" : "sse"}`;
     clearDraft(sid);
     t.after(() => clearDraft(sid));
@@ -3332,7 +3339,7 @@ for (const order of ["HTTP first", "SSE first"]) {
 }
 
 test("an HTTP-first Edit echo cannot reset the next replacement prompt", async (t) => {
-  const { clearDraft } = await jiti.import("@/lib/draft-store");
+  const { clearDraft } = await import("@/lib/draft-store");
   for (const phase of ["dispatch pending", "streaming"]) {
     await t.test(phase, async (t) => {
       resetWorld();
@@ -3404,7 +3411,7 @@ test("an HTTP-first Edit echo cannot reset the next replacement prompt", async (
 });
 
 test("history notifications received during an unsuccessful Edit remain effective", async (t) => {
-  const { clearDraft } = await jiti.import("@/lib/draft-store");
+  const { clearDraft } = await import("@/lib/draft-store");
   for (const outcome of ["cancelled", "error", "wrong-session"]) {
     await t.test(outcome, async (t) => {
       resetWorld();
@@ -3473,7 +3480,7 @@ test("history notifications received during an unsuccessful Edit remain effectiv
 });
 
 test("cancelled and failed Edits preserve history selection and draft, then release the guard", async (t) => {
-  const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
   for (const outcome of ["cancelled", "error"]) {
     await t.test(outcome, async (t) => {
       resetWorld();
@@ -3518,7 +3525,7 @@ test("cancelled and failed Edits preserve history selection and draft, then rele
 
 test("an Edit completed after unmount cannot fill the current composer or change its view", async (t) => {
   resetWorld();
-  const { clearDraft } = await jiti.import("@/lib/draft-store");
+  const { clearDraft } = await import("@/lib/draft-store");
   const sid = "edit-abandoned";
   const currentSid = "edit-current-view";
   for (const id of [sid, currentSid]) clearDraft(id);
@@ -4425,7 +4432,7 @@ test("REVIEW a 404 boundary on a live session (unreadable file / wrapper died) s
 // withdrew it and omp ran it as a new turn after the abort. omp's atomic Esc
 // takes back everything it holds, listed here or not.
 test("Stop takes queued input back through omp in one step, including a steer the snapshot missed", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   resetWorld();
   clearDraft("abort-atomic");
   primeSession("abort-atomic", [userMsg("u0", "loaded question")]);
@@ -4453,7 +4460,7 @@ test("Stop takes queued input back through omp in one step, including a steer th
 const isAtomicStop = (method, _url, body) => method === "POST" && body?.type === "abort_and_restore_queue";
 
 test("a failed atomic Stop is retried once and restores what omp still held", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   resetWorld();
   clearDraft("abort-atomic-retry");
   primeSession("abort-atomic-retry", [userMsg("u0", "loaded question")]);
@@ -4514,7 +4521,7 @@ test("a failed atomic Stop never retries into a run started after the click", as
 });
 
 test("overlapping Stops share one atomic withdrawal; an image-only entry does not come back as text", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   resetWorld();
   clearDraft("abort-atomic-twice");
   primeSession("abort-atomic-twice", [userMsg("u0", "loaded question")]);
@@ -4905,4 +4912,173 @@ test("a failed HTTP response overtaken by a completed turn and newer send is sup
   assert.deepEqual(receipt, { status: "superseded" });
   assert.equal(w.latest.agentRunning, true, "the stale response cannot reset the newer run");
   assert.equal(w.latest.notices.some((notice) => notice.message.includes("late failed response")), false);
+});
+
+test("host_status frames report the session's host going offline and coming back", async () => {
+  resetWorld();
+  primeSession("remote-link", [userMsg("u0", "q")]);
+  const { w, es } = await startRun("remote-link", "hello");
+  assert.equal(w.latest.hostStatus, null, "no change reported yet");
+  await act(() => es.emit({ type: "host_status", hostId: "h1", status: "offline" }));
+  assert.equal(w.latest.hostStatus, "offline");
+  assert.equal(w.latest.agentRunning, true, "the run continues on the host while its link is down");
+  await act(() => es.emit({ type: "host_status", hostId: "h1", status: "online" }));
+  assert.equal(w.latest.hostStatus, "online");
+});
+
+test("a send to an offline host toasts and leaves the draft to the composer without an error notice", async () => {
+  resetWorld();
+  toastCalls.length = 0;
+  world.holds.push({
+    match: (method, url) => method === "POST" && url.includes("/api/agent/remote-off"),
+    produce: async () => ({ status: 503, value: { error: "Build box is offline", code: "host_offline", hostOffline: true } }),
+  });
+  const w = await mountSession("remote-off");
+  let receipt;
+  await act(async () => { receipt = await w.latest.handleSend("keep me"); await sleep(30); });
+  assert.deepEqual(receipt, { status: "rejected", recoveryKey: "remote-off" });
+  assert.equal(w.latest.agentRunning, false);
+  assert.deepEqual(toastCalls, [["error", translate("agentSession.hostOfflineSend", { detail: "Build box is offline" })]]);
+  assert.equal(w.latest.notices.length, 0, "the toast replaces the chat notice");
+});
+
+test("a fresh chat on a remote host creates its session there and toasts when that host is offline", async () => {
+  resetWorld();
+  toastCalls.length = 0;
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ status: 503, value: { error: "Build box is offline", code: "host_offline", hostOffline: true } }),
+  });
+  const w = await mountSession(null, undefined, { newSessionCwd: "/remote/work", newSessionHostId: "h1" });
+  let receipt;
+  await act(async () => { receipt = await w.latest.handleSend("first"); await sleep(30); });
+  // Drafts for one path on two hosts must not share a composer key.
+  assert.deepEqual(receipt, { status: "rejected", recoveryKey: "new:h1:/remote/work" });
+  assert.deepEqual(callsTo("POST", "/api/agent/new").map((call) => [call.body.cwd, call.body.hostId]), [["/remote/work", "h1"]]);
+  assert.equal(toastCalls[0]?.[0], "error");
+  assert.equal(w.latest.notices.length, 0);
+});
+
+test("a fresh chat whose host drops after the spawn adopts the kept session, so a retry starts no second one", async () => {
+  resetWorld();
+  toastCalls.length = 0;
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ status: 503, value: { error: "Build box is offline", code: "host_offline", hostOffline: true, delivery: "refused", sessionId: "kept-remote" } }),
+  });
+  const w = await mountSession(null, undefined, { newSessionCwd: "/remote/work", newSessionHostId: "h1", onSessionCreated: () => {} });
+  let first;
+  await act(async () => { first = await w.latest.handleSend("first"); await sleep(30); });
+  assert.equal(first.status, "rejected");
+  assert.equal(toastCalls[0]?.[0], "error");
+  let retry;
+  await act(async () => { retry = w.latest.handleSend("first"); await sleep(30); });
+  await act(async () => { lastEs()?.open(); retry = await retry; });
+  w.unmount();
+  assert.equal(retry.status, "accepted");
+  assert.equal(callsTo("POST", "/api/agent/new").length, 1, "the retry reuses the kept session");
+  assert.equal(callsTo("POST", "/api/agent/kept-remote").some((call) => call.body?.type === "prompt"), true);
+});
+
+test("a fresh local chat sends no host id and keeps the pre-hosts draft key", async () => {
+  resetWorld();
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ status: 500, value: { error: "stop here" } }),
+  });
+  const w = await mountSession(null, undefined, { newSessionCwd: "/workspace" });
+  let receipt;
+  await act(async () => { receipt = await w.latest.handleSend("first"); await sleep(30); });
+  assert.equal("hostId" in callsTo("POST", "/api/agent/new")[0].body, false);
+  assert.deepEqual(receipt, { status: "rejected", recoveryKey: "new:/workspace" });
+});
+
+for (const [name, method, command] of [["steer", "handleSteer", "steer"], ["follow-up", "handleFollowUp", "follow_up"], ["streaming-behavior prompt", "handlePromptWithStreamingBehavior", "prompt"]]) {
+  test(`a ${name} to an offline host toasts and reports the refusal so the composer keeps its draft`, async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession(`remote-queue-${command}`, [userMsg("u0", "q")]);
+    const w = await mountSession(`remote-queue-${command}`);
+    world.holds.push({
+      match: (httpMethod, url, body) => httpMethod === "POST" && url.includes(`/api/agent/remote-queue-${command}`) && body?.type === command,
+      produce: async () => ({ status: 503, value: { error: "Build box is offline", code: "host_offline", hostOffline: true } }),
+    });
+    let accepted;
+    await act(async () => {
+      accepted = method === "handlePromptWithStreamingBehavior"
+        ? await w.latest[method]("queued text", "steer")
+        : await w.latest[method]("queued text");
+      await sleep(30);
+    });
+    assert.equal(accepted, false);
+    assert.deepEqual(toastCalls, [["error", translate("agentSession.hostOfflineSend", { detail: "Build box is offline" })]]);
+    assert.equal(w.latest.notices.length, 0);
+  });
+}
+
+test("a prompt the dropped link may have delivered toasts that it may still run and leaves no draft to restore", async () => {
+  resetWorld();
+  toastCalls.length = 0;
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url.includes("/api/agent/remote-maybe") && body?.type === "prompt",
+    produce: async () => ({ status: 503, value: { error: "Build box is offline", code: "host_offline", hostOffline: true, delivery: "unknown" } }),
+  });
+  const w = await mountSession("remote-maybe");
+  let receipt;
+  await act(async () => { receipt = w.latest.handleSend("maybe sent"); await sleep(30); });
+  await act(async () => { lastEs()?.open(); receipt = await receipt; });
+  w.unmount();
+  assert.notEqual(receipt.status, "rejected", "the composer must not bring the text back: it may run twice");
+  assert.equal(w.latest.agentRunning, false);
+  assert.deepEqual(toastCalls, [["info", translate("agentSession.hostOfflineMaybeSent", { detail: "Build box is offline" })]]);
+  assert.equal(w.latest.notices.length, 0);
+});
+
+test("a streaming-behavior prompt the dropped link may have delivered is reported as taken", async () => {
+  resetWorld();
+  toastCalls.length = 0;
+  primeSession("remote-maybe-queue", [userMsg("u0", "q")]);
+  const w = await mountSession("remote-maybe-queue");
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url.includes("/api/agent/remote-maybe-queue") && body?.type === "prompt",
+    produce: async () => ({ status: 503, value: { error: "Build box is offline", code: "host_offline", hostOffline: true, delivery: "unknown" } }),
+  });
+  let accepted;
+  await act(async () => { accepted = await w.latest.handlePromptWithStreamingBehavior("queued text", "followUp"); await sleep(30); });
+  assert.equal(accepted, true);
+  assert.deepEqual(toastCalls, [["info", translate("agentSession.hostOfflineMaybeSent", { detail: "Build box is offline" })]]);
+});
+
+test("the hosts channel decides the offline banner; a frame only speaks before its first snapshot", async () => {
+  resetWorld();
+  primeSession("remote-banner", [userMsg("u0", "q")]);
+  world.agents.set("remote-banner", { running: true, state: {} }); // a running chat attaches its stream on load
+  const bannerText = translate("hosts.offlineBanner", { host: "Build box" });
+  const mount = async (hostStatus) => {
+    const view = ownRoot(render(React.createElement(ChatWindow, {
+      session: { ...sessionInfo("remote-banner"), hostId: "h1" }, newSessionCwd: null, hostLabel: "Build box", ...(hostStatus ? { hostStatus } : {}),
+    }), { wrapper: TestRoot }));
+    await settle();
+    await act(async () => { lastEs()?.open(); });
+    await settle();
+    return view;
+  };
+  const withChannel = await mount("online");
+  await act(async () => { lastEs().emit({ type: "host_status", hostId: "h1", status: "offline" }); });
+  assert.equal(withChannel.queryByText(bannerText), null, "a frame cannot override the channel's online status");
+  withChannel.unmount();
+
+  resetWorld();
+  primeSession("remote-banner", [userMsg("u0", "q")]);
+  world.agents.set("remote-banner", { running: true, state: {} }); // a running chat attaches its stream on load
+  const beforeSnapshot = await mount(undefined);
+  await act(async () => { lastEs().emit({ type: "host_status", hostId: "h1", status: "offline" }); });
+  assert.ok(beforeSnapshot.queryByText(bannerText), "without a channel snapshot the frame shows the banner");
+  beforeSnapshot.unmount();
+
+  resetWorld();
+  primeSession("remote-banner", [userMsg("u0", "q")]);
+  world.agents.set("remote-banner", { running: true, state: {} }); // a running chat attaches its stream on load
+  const offlineChannel = await mount("offline");
+  assert.ok(offlineChannel.queryByText(bannerText), "a chat opened during an outage shows the banner from the channel");
 });

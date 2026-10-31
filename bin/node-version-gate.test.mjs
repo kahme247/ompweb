@@ -14,7 +14,7 @@ writeFileSync(preload, `Object.defineProperty(process, "versions", { value: { ..
 
 for (const [name, script] of Object.entries(bin)) {
   test(`${name} refuses an unsupported Node.js before doing anything`, () => {
-    const result = spawnSync(process.execPath, ["--require", preload, join(root, script), "--help"], { encoding: "utf8", timeout: 20_000, env: { ...process.env, HOME: tmpdir() } });
+    const result = spawnSync("node", ["--require", preload, join(root, script), "--help"], { encoding: "utf8", timeout: 20_000, env: { ...process.env, HOME: tmpdir() } });
     assert.equal(result.status, 1, result.stdout + result.stderr);
     assert.match(result.stderr, /requires Node\.js 24\.0\.0 or newer/);
   });

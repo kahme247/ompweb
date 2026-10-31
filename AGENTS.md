@@ -3,12 +3,14 @@
 ## Quick Start
 
 ```bash
-npm run dev   # port 30178
+npm run dev     # Bun server with hot reload (HMR for the SPA), port 30178
+npm run build   # bundle the SPA into dist/ (scripts/build-client.ts)
+npm start       # serve dist/ + the API, port 30177
+npm test        # bun test --parallel
+npm run smoke   # start the built server and `ompweb host` (or a packed install: -- --package <dir>; a binary: -- --binary <path>) and check them
+npm run build:binary [-- --target bun-<os>-<arch>]   # build, then compile release/ompweb-<os>-<arch>/ and its .tar.gz/.zip (scripts/build-binary.ts)
+npm run typecheck && npm run lint
 ```
-
-Typecheck: `node_modules/.bin/tsc --noEmit`  
-Lint: `npm run lint`  
-**Never run `next build` during dev** — pollutes `.next/` and breaks `npm run dev`.
 
 The dev server needs the `omp` binary installed (on `PATH`, or set `OMP_WEB_OMP_BIN`).
 All live-agent features go through it; session browsing works without it.
@@ -17,12 +19,12 @@ All live-agent features go through it; session browsing works without it.
 
 ## Architecture
 
-omp-web never imports `@oh-my-pi/*` or `@earendil-works/*` packages (they are
-Bun-only and cannot run inside Node/Next). See `DESIGN.md` for the full porting
-contract.
+omp-web never imports `@oh-my-pi/*` or `@earendil-works/*` packages, even
+though the server now runs on Bun: live work goes through the installed `omp`
+child. See `DESIGN.md` for the full porting contract.
 
 ```
-Browser                Next.js Server                    omp child process
+Browser              Bun server (server/app.ts)          omp child process
   │                        │                                    │
   ├─ GET /api/sessions ────▶ reads ~/.omp/agent/sessions/       │
   ├─ GET /api/sessions/[id] reads .jsonl file directly          │
@@ -38,11 +40,22 @@ Browser                Next.js Server                    omp child process
   │◀── event: s<n> data: {...} ──│                               │
 ```
 
+The launcher (`bin/omp-web.js`) and the host daemon (`bin/omp-web-host.js`)
+and tray run on Node. The launcher spawns `bun server/main.ts` (Bun resolved by
+`bin/bun-runtime.js`: the npm `@oven/bun-*` binary, else `bun` on `PATH`), which
+serves the SPA from `dist/`, the API routes and the password gate in one
+process. Nothing in the daemon or tray may use a Bun API. The compiled binary
+(`server/binary.ts`) is the exception: one Bun program that runs the server in
+its own process (no launcher), `ompweb host` and `ompweb hash-password`.
+
 **Session browsing** (read-only): pure-Node parsing of omp session `.jsonl`
 files via `lib/session-reader.ts` — no child process involved.  
-**Sending a message**: `startRpcSession()` in `lib/rpc-manager.ts` spawns
-`omp --mode rpc-ui` (one process per active session) through
-`lib/omp/rpc-process.ts`.
+**Sending a message**: `startRpcSession()` in `lib/rpc-manager.ts` asks the
+session's `Host` (`lib/hosts/host.ts`; `localHost` in `lib/hosts/local-host.ts`)
+to spawn `omp --mode rpc-ui` (one process per active session) and runs
+`lib/omp/rpc-process.ts` over the returned transport. Every machine-local
+action of a session wrapper (spawn, session-file checks, list invalidation)
+goes through that host.
 
 Shared foundations in `lib/omp/`:
 
@@ -51,6 +64,9 @@ Shared foundations in `lib/omp/`:
 - `omp-cli.ts` — locate/probe the installed `omp` binary (`resolveOmpBin`,
   `getOmpVersion`).
 - `rpc-process.ts` — process + NDJSON protocol layer (`RpcProcess`).
+- `rpc-transport.ts` — `RpcTransport`: the byte pipe under `RpcProcess`
+  (`spawnLocalRpcTransport` for a local child; `RemoteRpcTransport` in
+  `lib/hosts/hub.ts` for a remote one).
 - `auth-gateway.ts` — shared, idle-killed `omp auth-gateway stdio` child:
   omp's own credentials and models behind JSON-line gateway requests.
 
@@ -59,6 +75,18 @@ Shared foundations in `lib/omp/`:
 ## File Map
 
 ```
+server/
+  main.ts             production entry: sets NODE_ENV, then `startProduction` (app.ts); prints the `Ready on` line the launcher waits for
+  binary.ts           the compiled `ompweb` (scripts/build-binary.ts): the launcher's checks (`checkLaunchSecurity`) and `startProduction` in-process, `host` (lib/hosts/host-cli.ts), `hash-password`; refuses tray/service commands
+  dev.ts              dev entry (`bun --hot`): serves the HTML import with HMR; re-runs itself once with OMP_WEB_PUBLIC_* set so `bunfig.toml` can inline them
+  app.ts              `startServer`: `Bun.serve` + route table + gate + SPA fallback; `startProduction` (listen, `register()`, Ready line); `parseListenArgs`
+  routes.ts           the API route table (see "Adding an API route"); `routePattern`, `dispatch`
+  http.ts             `finalizeResponse` (security headers, gzip for pages and static files, never `/api/`), `serveFile` (dist/, public/, KaTeX), `renderIndex`
+  client-env.ts       build-time constants for the browser bundle (app version, event-stream worker hash)
+app/
+  index.html          the SPA shell, the bundler entry; #root holds static copies of RouteLoadingFallback and (swapped in on /login by an inline script) LoginForm's first render, painted before the bundle runs
+  client.tsx          browser entry: renders `LoginForm` on `/login`, else `AppShell` (a path check, no router)
+  boot.ts             runs first in client.tsx: installs the sidebar history bridge before AppShell registers popstate listeners
 app/api/
   sessions/route.ts               GET  list all sessions
   sessions/search/route.ts        GET ?q= — NDJSON { scores } batches (titles + transcripts); closing the request stops the scan
@@ -68,6 +96,8 @@ app/api/
   agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? }
   agent/[id]/route.ts             GET state | POST any RPC command
   events/route.ts                 GET multiplexed SSE | POST subscribe/unsubscribe channels
+  hosts/route.ts                  GET hosts (this machine first) | POST { label } → token once + login command | PATCH { id, label?, allowAgentStart? } (`local`: label only, empty resets to "This machine") | DELETE ?id= revoke (registry first, then close the link); 503 if hosts.json is unreadable
+  hosts/link/route.ts             GET WebSocket upgrade (the `ompweb host` daemon; bearer checked before the upgrade, skipped by the `proxy.ts` gate) | POST 426 for pre-WebSocket daemons
   notifications/devices/route.ts  GET VAPID key + subscribed | PUT { deviceId, prefs, subscription? }
   notifications/presence/route.ts POST { clientId, deviceId, visible, sessionId, seq }
   notifications/test/route.ts     POST { deviceId } send a test push (502 on push-service refusal)
@@ -97,7 +127,21 @@ app/api/
   worktrees/route.ts              GET/POST/DELETE git worktrees
 
 lib/
+  dynamic.tsx          `dynamic()` over `React.lazy` + `Suspense`
+  navigation.ts        `useRouter`/`useSearchParams` over the History API
   omp/                 shared omp foundations (paths, CLI probe, RpcProcess)
+  hosts/               hosts and the local daemon (see "Remote hosts"); none of the daemon-loaded files may import `@/` (the daemon runs on Node through `jiti`)
+    host.ts            `Host` interface, `HostStatus`, `isLinkUp`
+    local-host.ts      `localHost`, the daemon's side: spawn + file checks on the daemon's machine; `resolveSpawnCwdResult`; `SESSION_EDIT_EXTENSION_PATH` (from the module's own location: the daemon runs in HOME). Never imported by main, nor is `daemon.ts` (`no-direct-local.test.mjs`)
+    local-bootstrap.ts web server side of the local link: `localLinkUrl`, `ensureLocalHostLink` (the `local` record + `host.json`)
+    host-login.ts      `host.json` (`loginHost`, `readHostLogin`) and `isLoopbackHost`, shared by the daemon and local-bootstrap
+    session-ops.ts     file-reading half of the session/project routes, run on the owning host's daemon (this machine's too)
+    link-protocol.ts   link messages, codec, binary blob frames, close codes, size limits, `HOST_OP_NAMES`, `SeqWindow`/`Outbox`
+    hub.ts             main side: the link's upgrade and `websocket` handler (`handleLinkUpgrade`, `hostLinkSocket`), `RemoteHost`, `getHost`, `listHosts`, adoption of live children (`reattach`/`adopt`), orphans, `freezeHostLinks`, `hosts` change events
+    daemon.ts          daemon side: `runHostDaemon` (reconnect, buffering, op dispatch, hello with each child's `{sessionId, cwd, pending}`; follows a `host.json` url or token change when a dial fails; loopback redials at most 3 s apart)
+    pending-requests.ts daemon side: `PendingRequests`, a channel's still-open blocking requests and current session id for the hello
+    registry.ts        `<agent dir>/omp-web/hosts.json`: create/update/revoke, token hashing and lookup; the `local` record (`rotateLocalHostToken`, `customLocalLabel`)
+    session-index.ts   sessions and projects across hosts, cached per host; `hostForSessionId`, `sessionSpawnTarget`, `invalidateLocalSessionLists`
   provider-accounts.ts distinct omp accounts per provider from `omp usage` reports (Models → provider detail)
   agent-client.ts      typed fetch helper for /api/agent commands
   btw.ts               /btw side-question records + pure frame/snapshot merge (order-safe)
@@ -123,7 +167,7 @@ lib/
   notification-store.ts  server: SQLite store for VAPID keys, devices and the notification history
   notification-history.ts  browser: mirror of the server's notification history (Notifications tab)
   notification-client.ts  browser: device id, prefs store, service worker + push subscription
-  rpc-manager.ts       session registry + startRpcSession over RpcProcess
+  rpc-manager.ts       session registry + startRpcSession over RpcProcess (spawn via a Host)
   session-reader.ts    session .jsonl parsing + path cache + buildSessionContext
   session-search.ts    shared fuzzy/phrase query scorer for sidebar search (title weights ≫ transcript)
   session-content-search.ts  server: per-file transcript text cache (size+mtime) + searchSessions()
@@ -142,7 +186,7 @@ lib/
 
 components/
   AppShell.tsx        layout + URL state + tab management
-  SessionSidebar.tsx  session tree + FileExplorer
+  SessionSidebar.tsx  session tree + FileExplorer; with a linked host the workspaces group per host (`HostGroup`), keyed by `hostProjectKey` (`lib/project-ordering.ts`: bare path on this machine, `<hostId>:<path>` elsewhere)
   ChatWindow.tsx      chat composition + completion sound wrapper
   ChatInput.tsx       input bar + model/thinking/tools/compact controls
   ComposerPanels.tsx  composer-attached /btw + todo + subagent panels (collapsible, live states)
@@ -159,6 +203,9 @@ components/
   MarkdownBody.tsx    markdown renderer
   ModelsConfig.tsx    modal for models/auth configuration
   McpConfig.tsx       project MCP server editor (Settings → MCP tab)
+  HostsConfig.tsx     linked hosts: add (token shown once), rename, revoke, allowAgentStart (Settings → Hosts tab)
+  LocalDaemonBanner.tsx  production-only hint with the install command while no local daemon has linked (90 s grace)
+  host-status.ts      host name, status text and dot colour shared by Settings → Hosts and the sidebar
   PluginsConfig.tsx   modal for installed plugins
   SkillsConfig.tsx    modal for loaded/search/installable skills
   FileExplorer.tsx    file tree inside sidebar
@@ -170,6 +217,7 @@ components/
 
 hooks/
   useAgentSession.ts       messages + streaming + SSE + fork/navigate/reconciliation logic
+  useHostRows.ts           the `hosts` channel as React state (status of every host; sidebar, new-session picker, Settings → Hosts)
   useAudio.ts              completion sound + browser AudioContext unlock
   useNotifications.ts      presence reports, toast/system delivery, notification clicks
   useDragDrop.ts           shared drag/drop state
@@ -179,15 +227,57 @@ hooks/
   useNavigationHistory.ts  in-app back/forward stack (record/peek/commit/drop) for visited chat views
   useWordPrediction.ts     debounced omp predict_word ghost text + feedback
   useBtw.ts                /btw records/active panel/history dialog fed by btw_* SSE frames
+
+bin/
+  bun-runtime.js      resolves the Bun binary (npm `@oven/bun-*`, else PATH, minimum version check); used by the launcher, scripts and nix
+  omp-web-host.js     `ompweb host [login]`: loads lib/hosts/host-cli.ts through jiti; token read from stdin, never argv. `omp-web.js host` requires it in-process (no child) so SIGTERM/SIGINT reach the daemon's stop
+
+scripts/
+  build-client.ts     `npm run build`: bundles app/index.html into dist/ (Bun.build + tailwind-plugin.ts; fonts emitted as /assets files)
+  tailwind-plugin.ts  bun-plugin-tailwind minus Tailwind's color-mix() polyfill (Bun 1.4.4 drops repeated @supports rules); build and dev
+  smoke.ts            `npm run smoke`: starts the built server (or `--binary <path>`) and `ompweb host` with a throwaway HOME; checks the SPA, an asset, the API, a session listed through the daemon and SSE
+  build-binary.ts     `npm run build:binary`: compiles server/binary.ts (NODE_ENV define, no .env/bunfig autoload) into release/ompweb-<os>-<arch>/ beside dist/, public/, the KaTeX files, the session-edit extension and the licenses; archives it
+  licenses.ts         the release's `licenses/`: license files of every npm package the server and client bundles hold (Bun.build metafiles; build-client.ts writes build/client-packages.json) and `bun-LICENSE-<version>.md`, the vendored license of the embedded Bun runtime. Bumping Bun: vendor its LICENSE.md for the new version, or build-binary.ts stops
+
+dist/                 build output (git-ignored, shipped in the package); the production server reads index.html and assets from here
+bunfig.toml           Bun dev-server bundling: tailwind plugin and the OMP_WEB_PUBLIC_* inlining
 ```
 
 ---
 
 ## Key Design Decisions & Traps
 
+### Adding an API route
+1. Create `app/api/<path>/route.ts` exporting `GET`/`POST`/`PUT`/`PATCH`/`DELETE` handlers (plain `Request` → `Response`; dynamic segments `[id]`, catch-all `[...path]`).
+2. Add one `import * as x from "@/app/api/<path>/route"` and one entry to `ROUTE_MODULES` in `server/routes.ts`; the key is the directory under `app/api` (`"sessions/[id]"`).
+3. `server/routes.test.ts` fails when the table and the files on disk differ, and when a route module exports anything but method handlers.
+
+The table is static imports, not a runtime glob, so `bun build --compile` (`scripts/build-binary.ts`) bundles every handler. `dispatch` answers HEAD from `GET`, OPTIONS and a missing method (405 with `allow`), passes `params` as a promise (plus `disableIdleTimeout`, below), and turns a throw into a 500 JSON body.
+
+### Bun server (`server/`)
+- Bun's 10 s `idleTimeout` stays on: it reaps sockets that stall before or during a request, and it also cuts a handler still working after 10 s. So `handle` (`server/app.ts`) calls `server.timeout(request, 0)` for an `/api/` request that `proxy()` reports as `"authenticated"` (never `"public"`) and puts the 10 s back once the handler returns or throws: the setting outlives the response on a keep-alive socket. A handler whose response stays open without traffic (SSE `/api/events`, the login SSE, the clone/search/bash-output/file streams) calls `disableIdleTimeout` from the route context (`dispatch`, `server/routes.ts`) to keep it off until that stream ends or is cancelled; a new stream must do the same, or it is cut after 10 s idle. The host link is no longer an idle-lift stream: it is a WebSocket, and an upgraded socket is outside the HTTP idle timeout. `server/app.ts` passes `upgrade` in the route context (`server.upgrade(request, { data })`) and `Bun.serve({ websocket: hostLinkSocket })`; a handler that upgraded returns `undefined`, which `dispatch` and `handle` pass through without `finalizeResponse` or the idle-timeout restore. `maxRequestBodySize` is left at Bun's 128 MiB default, above the 101 MB upload cap; do not lower it.
+- Bun's router matches the **raw** path, while `request.url` is normalized (`..` and `%2e%2e` resolved). The gate and handlers read `request.url`, so each route re-matches the normalized path against its own `URLPattern` after the gate and answers 404 if it no longer matches. Never serve a gated route under an ungated path.
+- Redirects carry a relative `Location` (`request.url` is always `http://` under Bun, so an absolute URL would leave https behind a TLS proxy).
+- `Response.redirect()` headers are immutable; `finalizeResponse` (`server/http.ts`) copies every answer into a fresh `Response` to set the security headers and gzip. Do not mutate a handler's response headers elsewhere.
+- `globalThis` state survives `bun --hot` re-evaluation, and `register()` (`instrumentation.node.ts`) runs once per process behind a `globalThis` guard in `server/dev.ts`. New server singletons use the `globalThis` registry pattern of `rpc-manager.ts`.
+- Dev (`npm run dev`) serves the SPA from the HTML import with HMR, bundled in memory, and re-runs itself once with `OMP_WEB_PUBLIC_*` set because `bunfig.toml` inlines them from the environment Bun started with. Dev pages carry `script-src blob:` in their CSP (HMR updates run as blob scripts); production does not.
+- `OMP_WEB_PACKAGE_DIR` (set by the launcher) is the root for `dist/`, `public/` and KaTeX; `process.cwd()` is the fallback for dev and tests. The compiled binary sets it to its own directory (unless set) before any server module loads, so every runtime file must come from that root: a module's `import.meta.url` in the binary is Bun's virtual `/$bunfs/`, which no other process can read. A new file the server or daemon reads at runtime also goes into `scripts/build-binary.ts`'s copy list.
+- The binary needs `process.env.NODE_ENV` defined as `"production"` at build time (`scripts/build-binary.ts`): a plain `bun build --compile` inlines `"development"`, and the server then never writes the daemon's link. `npm run smoke -- --binary` catches that (no session lists).
+- `Bun.serve` turns on `SO_REUSEPORT` when `development` is false, so a second omp-web would share the port instead of failing; `startServer` passes `reusePort: false`, and `startProduction` (`server/app.ts`) reports an `EADDRINUSE` in one line.
+- The in-app update worker runs on Node (`OMP_WEB_NODE_BIN`, the launcher's `process.execPath`), not Bun. The compiled binary has no in-app update: `Bun.isStandaloneExecutable` turns it off (`lib/self-update.ts`) and `/api/app-update` names the release page (`installMethod: "binary"`).
+- Bun's `fs.watch` drops an event that follows the previous one within ~2 ms, so the file channel (`openFileChannel`, `lib/event-stream-hub.ts`) re-stats the file ~50 ms after every event.
+- `bun:sqlite` `.get()` returns `null` for no row (not `undefined`).
+- `bun:sqlite` `close()` keeps the database file open while prepared statements are alive (until GC), so Windows cannot remove or replace it: the stores close with `close(true)`, which finalizes them (`closeNotificationStore`, `closeUsageDatabase`).
+- `readSttConfig` lives in server-only `lib/stt-jobs.ts`; the browser bundle must never import it.
+- Browser code must not import `next/*`: use `lib/dynamic.tsx` and `lib/navigation.ts`.
+
+### Tests (`bun test`)
+- DOM tests import `tests/setup-dom.mjs` first and then import Testing Library dynamically, so its queries bind to that document. `bun test --parallel` gives every file a fresh global; nothing is torn down.
+- A module under test that must see a fake builtin is imported with a fresh query (`?fresh=N`) after `mockBuiltin(t, name, overrides)` (`tests/mock-builtin.mjs`, built on `mock.module`; Bun's `mock.restore()` does not undo `mock.module`, so the helper restores by hand).
+
 ### RPC session lifecycle (`lib/rpc-manager.ts`)
 - One wrapper per session id, keyed in a `globalThis` registry.
-- `globalThis` survives Next.js hot-reload; plain module-level Map does not.
+- `globalThis` survives `bun --hot` re-evaluation; a plain module-level Map does not.
 - Idle sessions are disposed after a timeout; concurrent `startRpcSession()`
   calls must share a single start promise.
 - Two cleanup backstops, both unref'd so they never hold the event loop:
@@ -211,14 +301,174 @@ hooks/
   overwrites sessions the other is running. Startup claims a list only when its
   pid is dead or the file predates the last boot, plus the legacy unsuffixed
   list. Same-boot pid reuse or a zombie writer leaves that list unresumed.
-- A service stop signals every process at once, so an omp child can die
-  before omp-web's own SIGTERM handler runs. A session whose process died
-  therefore stays listed for `EXIT_GRACE_MS`; the shutdown handler freezes the
-  list (`markShuttingDown`) so those deaths count as interrupted, while a
-  crash with omp-web still up is dropped after the window.
+- The omp children run under the daemon, so stopping the web service does not
+  reach them: the next server adopts the ones still running and drops their
+  entries from this list (`adoptedChild`, see "Local daemon"). Only sessions
+  whose child died (daemon restart, crash, failed adoption) resume, after the
+  daemon's hello (`resumeOnHostLink`). A session whose process died stays
+  listed for `EXIT_GRACE_MS`; the shutdown handler freezes the list
+  (`markShuttingDown`) so deaths during a shutdown count as interrupted, while
+  a crash with omp-web still up is dropped after the window.
 - Only session ids are stored; paths are re-resolved on resume.
 - Known limit: resume does not detect a terminal `omp --resume <id>` started
   on the same session while omp-web was down; both would write the file.
+
+### Remote hosts (`lib/hosts/`, `app/api/hosts/`, `bin/omp-web-host.js`)
+- **Host seam** (`lib/hosts/host.ts`). Every host, this machine included, is
+  reached over the link: `getHost(id)` (`hub.ts`) returns a `RemoteHost` whose
+  calls go to a daemon. `getHost("local")` is the link of this machine's own
+  `ompweb host` daemon (see "Local daemon"); there is no direct spawn or file path
+  on main. `localHost` (`id: "local"`, `local-host.ts`) is the daemon's side: it spawns
+  and reads files on the machine the daemon runs on. `startRpcSession(..., host)`
+  asks `host.spawnRpc` for an `RpcTransport`; `RpcProcess`, the wrapper, the
+  event hub, notifications, the queue and `/btw` never see where omp runs.
+  Session and project file reads are `host.sessionOps` (`session-ops.ts`, run in
+  the daemon), addressed by session id, never by path: routes use `resolveSessionHostOr404`
+  (`lib/api-utils.ts`) and the host resolves the file itself. New route code
+  must not open a session file on main for a session that may be remote or local.
+  `SessionInfo.hostId` and `ManagedProject.hostId` carry the host; sidebar and
+  project state key on `hostProjectKey` (bare path on this machine, `<hostId>:<path>`).
+- **Link = one WebSocket per host, dialled by the daemon** (`/api/hosts/link`;
+  design `docs/specs/2026-10-31-websocket-link-design.md`). **Text frames**
+  carry the messages (hub → daemon one per frame; daemon → hub newline-separated
+  batches flushed every 16 ms or at 256 KB), **binary frames** carry large op
+  results (daemon → hub, before the `res` naming them). Every line except
+  `hello`/`welcome`/`ack`/`ping`/`pong` has a per-direction `seq`; `ack {ack}`
+  is a message: the first line of every daemon frame, and the hub answers every
+  uplink frame with exactly one. One uplink frame is in flight at a time. The
+  `hello` is the first text frame of a socket. Each `hello.channels`
+  entry carries `pending`: the raw stdout lines of that child's
+  still-open `host_tool_call`s, `host_uri_request`s and blocking `extension_ui_request`s
+  (`PendingRequests`), or null past `LINK_LIMITS.pendingBytes`. Each side keeps unacked
+  lines, resends after a reconnect and drops any `seq` it already applied. The
+  hub decodes a whole frame before applying any of it (a bad line closes 1007).
+  `hello.ack === 0` means a fresh daemon: main restarts that host's uplink
+  window. The hub paces the downlink from its outbox (`drain`): the 16 MiB send
+  buffer limit (`closeOnBackpressureLimit`) is only a backstop, and the outbox
+  holds the unacked backlog in server memory. Known slow-link limit: a single
+  multi-MiB line that takes longer than `offlineMs` to arrive is retried
+  (roughly below 280 KiB/s for an 8 MiB downlink line; a full 16 MiB uplink
+  batch likewise needs more than about 560 KiB/s). Close codes: 1000 revoke,
+  1001 freeze (a real SIGTERM exits first, so daemons usually see 1006 or
+  ECONNREFUSED), 1007 bad frame, 1008 bad first frame, 1009 too big, 4409
+  replaced,
+  4426 version (`LINK_CLOSE`). Wire shapes and size limits live in
+  `lib/hosts/link-protocol.ts` (one op allow-list, `HOST_OP_NAMES`, shared by
+  both sides); the summary spec is `docs/specs/2026-10-28-remote-hosts-design.md`.
+- **Link protocol versions** (spec "Protocol versions and compatibility"). A
+  released `LINK_PROTOCOL_VERSION` changes only compatibly: an added optional
+  field or a message type receivers skip is fine; a changed type or meaning, or
+  a newly required field, needs a new version. Receivers skip unknown message
+  types (acking their `seq`) and answer unknown ops 501 `unknown_op`, from v3 on.
+  v4 (the WebSocket link) dropped v3 before any release, so
+  `MIN_LINK_PROTOCOL_VERSION` and `LINK_PROTOCOL_VERSION` are both 4 (literal
+  one-liners: the deploy script parses them with `sed`); from the next version
+  on main keeps at least N-1, and dropping one is an explicit decision (a hello
+  outside the range gets close 4426 with `{"serverVersion":N}`, a pre-WebSocket
+  daemon's POST gets 426; an update-only mode is planned). Upgrade order: web app
+  first, then hosts; a daemon need not support a newer main (it gets 4426). A v4
+  daemon dialing an older server keeps redialing with a hint.
+- **One socket per host.** A new hello on a new socket of the same token closes
+  the old socket 4409 (the old daemon exits 0); two daemons must never run
+  competing `omp --resume` children on one agent dir. A frame belongs to the
+  socket it arrived on: the hub ignores frames from a socket that is no longer
+  the host's link, so no nonce is needed. A revoked host is refused at the
+  upgrade (401) and at the hello (close 1000).
+- **Transport down is not exited.** While the link is down the omp child keeps
+  running on its machine. A wrapper on a host whose `isLinkUp(status)` is false
+  is "transport down": no `process_exit`, idle and disconnect timers paused
+  until the link returns; frames carry `host_status` for the offline banner;
+  sends answer 503 `{hostOffline: true, delivery}`: `"refused"` when nothing
+  left (the composer keeps the draft), `"unknown"` when the link dropped after
+  the command was sent (it may still run; the composer drops the draft so it
+  is never sent twice). A fresh chat adopts the `sessionId` a 503 from
+  `/api/agent/new` carries. A child missing from `hello.channels`
+  gets a synthesized `process_exit`. Use `isLinkUp` (`host.ts`, client-safe) as
+  the one link predicate; do not compare `status === "online"` (an `omp-missing`
+  host is linked).
+- **A failed op never runs later.** An op that times out (504) or whose
+  downlink ends or host goes offline (503, at once, not at the 30 s timeout)
+  drops its `req` from the outbox (`failOp` in `hub.ts`), so a delete the user
+  saw fail is never applied after a redial. `destroyAndWait` returns once the
+  session's host is offline (`untilHostDown`); the kill stays queued for the
+  link. A wrapper therefore stays in the registry until its child really exits
+  (a resume whose handshake failed is registered in the catch for this), so a
+  retry awaits its `destroyPromise` instead of spawning a second `--resume`
+  child. A reload (`restart`) waits for the old child the same way: if the
+  host drops first, it fails `host_offline`, the wrapper answers
+  `host_offline` until that child's exit arrives (or `lost` on the next
+  hello) and is then destroyed; no replacement spawns beside it.
+  `restartAllRpcSessions` (omp update) restarts local sessions only.
+  Remote-only transport members (`onResync`, `lost`) are optional on
+  `RpcTransport` and duck-typed. There is one module graph, but live objects on
+  `globalThis` outlive a `bun --hot` re-evaluation, which may re-create the
+  `RemoteRpcTransport` class (not verified); duck typing holds either way, so
+  never `instanceof RemoteRpcTransport`.
+- **Live-link recycle rule.** A prompt, history-edit or MCP command that times
+  out normally recycles the child. On a remote host it does so only if the host
+  sent uplink traffic after the command was dispatched (`lastUplinkAt`,
+  `linkLostDuring` in `rpc-manager.ts`); a quiet or dropped link answers
+  `host_offline` (503), queues no kill and leaves the run to
+  `reconcileAfterGap`. A kill through a dead link only waits in the outbox.
+- **Orphans and resume.** On `hello`, listed channels with no wrapper are children
+  of a previous server run: they are adopted (see "Local daemon"), and killed
+  (`kill`, escalating to force after 5 s, registered until their `exit`) only when
+  adoption is impossible. A cold spawn for a session
+  awaits `orphanExit(hostId, sessionId)` first so two children never write one
+  file; the wait rejects 503 as soon as the link goes down. A buffer overflow on
+  the daemon (8 MB per channel) sends `resync {ch}` and main reruns the
+  `get_state` reconcile. With `autoResumeSessions` on, an interrupted session
+  resumes after its host's hello (`resumeOnHostLink`,
+  `lib/session-resume.ts`), once, after the orphan's exit.
+- **Proxy exclusion.** The `proxy.ts` gate lets exactly `/api/hosts/link` through
+  (the `UNGATED` pattern names that path, no subpaths): the daemon has no
+  session cookie, so it authenticates with its bearer token instead. The hub
+  verifies the `Authorization: Bearer <host token>` header before the upgrade
+  (401 unknown token, 503 unreadable `hosts.json` or frozen server). Keep
+  `/api/hosts` itself behind the proxy.
+- **Remote paths never reach `allowFileRoot`** or any other main-side
+  filesystem check: they mean nothing on main. `startNewRpcSession` calls
+  `allowFileRoot` and the local session-list invalidation only for the local
+  host; remote cwd validation is the host's `validateCwd` op. Daemon input is
+  untrusted: blob hashes must match `^[0-9a-f]{64}$`, results are shape-checked
+  in `hub.ts`, and `sessionFileExists`/`spawn` accept only paths under the
+  daemon's sessions directory. A remote session export is always served as an
+  attachment: inline, its HTML would run on main's origin.
+- **Daemon-loaded modules must not import `@/` or use Bun APIs.** `bin/omp-web-host.js`
+  loads `lib/hosts/daemon.ts` through plain `jiti` on the Node runtime, which does
+  not resolve the `@/` alias and has no `Bun` global (the tray modules likewise). That covers everything the daemon pulls in
+  (`daemon.ts`, `link-protocol.ts`, `local-host.ts`, `session-ops.ts`,
+  `host.ts`, and their `lib/` imports). Use relative imports there.
+- **Registry.** `<agent dir>/omp-web/hosts.json` (0600, atomic write) stores
+  only `sha256(token)`; the token is shown once. Mutations use the strict
+  reader and throw `HostRegistryUnreadableError` (503) instead of rewriting a
+  file they could not parse. Revoke deletes the record first, then closes the
+  link (the daemon sees 401 and stops its children). The `hosts` event channel
+  carries the `GET /api/hosts` body. A missing `hosts.json` (an agent-dir
+  mismatch, say) answers 401 to every daemon, and a daemon told its token is
+  unknown stops all its omp children: check `PI_CODING_AGENT_DIR` before
+  starting main.
+- **Agent tools.** Calls carry the caller's host (`sourceHostId`);
+  `new_session`'s `host` defaults to it. A host with `allowAgentStart` off asks
+  a server-owned `confirm` through the normal extension-UI path
+  (`confirmFromServer`). Local callers never ask for this machine. A remote
+  caller asks before any other host unless that host allows agent starts, and
+  always before this machine, for `new_session` and `send_to_session` alike.
+- **Not yet remote:** Explorer, Git, Worktrees, the Skills/Plugins/Agents/MCP
+  settings tabs and directory browsing show "Not available on remote hosts
+  yet". Sub-projects 2 and 3 of the spec add ops for them.
+
+#### Local daemon (`docs/specs/2026-10-29-local-daemon-design.md`)
+- **Two services.** `ompweb` (web) and `ompweb-host` (`ompweb host`, the daemon) are installed together by `ompweb systemd install`, `ompweb launchd install` and the Windows tray install; uninstall removes both, `ompweb systemd restart` restarts the web unit only. The daemon owns this machine's omp children, so a web restart, update or redeploy leaves runs going; restarting the daemon ends them (auto-resume then resumes the sessions that were running). An upgrade restarts the daemon only when the running daemon's link version is outside the new release's `[MIN_LINK_PROTOCOL_VERSION, LINK_PROTOCOL_VERSION]` range (it would get 4426 or 426 and exit); a daemon inside the range keeps running.
+- **Local link bootstrap** (`lib/hosts/local-bootstrap.ts`, called from `instrumentation.node.ts`). `localLinkUrl()` builds the daemon's URL from `OMP_WEB_PORT`/`OMP_WEB_HOSTNAME` (set by the `ompweb` launcher; wildcard binds map to `127.0.0.1`, a non-loopback bind gets no link and a console warning). `ensureLocalHostLink()` makes sure the `local` record exists (`registry.ts`, `rotateLocalHostToken`) and writes `<agent dir>/omp-web/host.json` (`{url, token}`, 0600). A `host.json` whose token the registry still accepts and whose url matches is left alone, so a web restart does not make the daemon redial. It throws, and startup only logs, when `host.json` points to a non-loopback server (a remote-host login on this machine): it is never overwritten. The daemon re-reads `host.json` when its link gets 401 and exits only if the file still holds the rejected token.
+- **Dev mode does not take the daemon.** With `NODE_ENV=development` `ensureLocalHostLink` is skipped, so the daemon stays linked to production and the dev server shows "This machine" offline. The local row of `GET /api/hosts` carries `daemonManaged: false` there, which hides the install banner.
+- **`local` is a registry record like any host**, with three exceptions: it is listed first, `PATCH` takes `label` only (`allowAgentStart` is fixed), and it cannot be revoked. Renaming "This machine" is a `PATCH /api/hosts {id: "local", label}`; an empty label resets it (`registry.ts` stores `""`; `customLocalLabel()` / `DEFAULT_LOCAL_LABEL` map it). `getHost("local")` works without the record: it is the daemon link, offline while none is linked, and "needs upgrade" on a protocol mismatch (`hostVersion` in the row is the daemon's).
+- **Adoption on hello** (`reattach`/`adopt` in `hub.ts`, `adoptRpcSession` in `rpc-manager.ts`). Each listed `{ch, sessionId, cwd, pending}` channel that has no transport on this server is a child of a previous server and is taken over by a new `AgentSessionWrapper` (`adopted: true`, `RpcProcess` option `adopted`). There is no session-list lookup: the spawn `cwd` comes from the hello, and the session identity from the child's own `get_state` (`applyIdentity`), so a new session whose file is not written yet is adoptable. The daemon names each child's current session in the hello (`PendingRequests.sessionId`: the file's header id at spawn, then the last successful `get_state`). Re-sync (`AgentSessionWrapper.adopt`): `negotiate_protocol`, `set_subagent_subscription`, `set_ask_dialog`, `get_state`, `get_subagents`, `get_btw_history`, then `replay` of the `pending` lines and `release` of the frames held meanwhile. Every command is bounded by `GET_STATE_TIMEOUT_MS`.
+- **The daemon replays open blocking requests** (`pending-requests.ts`): `host_tool_call`, `host_uri_request` and blocking `extension_ui_request` lines, until answered or cancelled, capped at `LINK_LIMITS.pendingBytes` per channel. An adopted wrapper feeds them through `handleFrame` (`replaying`; agent tools are not re-run), so dialogs reappear and browser tool calls wait for the next tab (`hostToolsUnknown`, `parkHostTool`). A request opened while the old server stopped is also resent unacked: `RpcProcess.release` skips held requests the replay already delivered, so it is handled once. The hello also carries `autoApproveExtension`, which an adopted run has no spawn result for.
+- **A child is killed only when it cannot be adopted:** its hello entry has no session id or lost its `pending` lines to the cap (`killOrphan`), or a re-sync command times out or the child exits, its held output overflows, or its real session (after `get_state`) is already started on this server (`adoptRpcSession` kills it: its wrapper's dispose). Auto-resume (`resumeOnHostLink`) first awaits `adoptedChild()` and resumes a session only if it was not adopted.
+- **Shutdown freezes the links and never kills daemon children.** The `cleanup` in `rpc-manager.ts` runs `markShuttingDown()` and `freezeHostLinks()`: link sockets are closed 1001 and from then on a link neither sends nor applies anything (no kill, no rejection of open host tool calls as tabs close); new upgrades get 503 "omp-web is shutting down". A real SIGTERM exits in the same tick (`process.exit` in `instrumentation.node.ts`), before Bun writes the close frame, so daemons usually see 1006 or ECONNREFUSED rather than 1001 and redial the same way. The daemon keeps the output unacked and redials for the next server. An adoption that fails after the freeze leaves its child to the next server instead of killing it.
+- **Install banner** (`components/LocalDaemonBanner.tsx`). In production, when the local row stays offline with `hostVersion === null` (no daemon has linked since this server started) for 90 s of a page view (well past the daemon's redial wait, at most 3 s on loopback, so a restarting daemon does not trip it), it shows the platform's install command and, for a foreground `ompweb` (terminal or npx, no service), `ompweb host` to keep running in another terminal; Settings → Hosts shows both for an offline local row. Dismissal is kept in `localStorage`. Main never installs services or starts the daemon.
+- **No direct local path.** `local-host.ts` is the daemon's; `lib/hosts/no-direct-local.test.mjs` fails when anything outside its allow-list spawns omp or imports it. The utility omp (`rpc-utility.ts`, login) is the one deliberate exception: it is not a session.
 
 ### Session moves (omp >= 18.5 ownership) and title generation
 - Only the first omp process to write a session file owns it; a non-owner moves
@@ -316,8 +566,9 @@ wait for that commit:
   route serves the copy until the blob has the copy's size. A daily sweep (run
   on the next media write) deletes copies omp now holds and files older than
   30 days.
-- `ToolCallBlock` shows `?thumb=1` (480px WebP made once with `sharp` and cached
-  next to the copies; full image if sharp is unavailable) and opens the full
+- `ToolCallBlock` shows `?thumb=1` (480px WebP made once with `Bun.Image`, which
+  applies EXIF orientation, and cached next to the copies; full image if the
+  bytes do not decode) and opens the full
   image in the lightbox. The route serves only PNG/JPEG/GIF/WebP by magic bytes.
 
 ### Event protocol differences vs pi
@@ -376,7 +627,7 @@ during the wait.
   EventSource and multiplexes every tab's subscriptions: frames arrive as
   `event: <subId>`, control frames as `event: mux` (`hello`/`open`/`end`).
   Subscriptions are attached with `POST /api/events`. Its URL carries a
-  content hash (`next.config.ts`) so a changed worker never serves stale tabs.
+  content hash (`server/client-env.ts`) so a changed worker never serves stale tabs.
 - Tabs use `openEventStream(channel)` (`lib/event-stream.ts`), which keeps
   EventSource semantics: `onerror` + CONNECTING = reconnecting on its own,
   CLOSED = fatal (e.g. 409 for a wrapper-less session; the chat hook then
@@ -384,7 +635,8 @@ during the wait.
   MessagePort has no close event.
 - Channels (`lib/event-stream-hub.ts`): `running` (sidebar badges +
   session-list hints), `notifications` (one tab's toasts and in-page system
-  notifications, keyed by its `clientId`), `host-tools` (cross-session
+  notifications, keyed by its `clientId`), `hosts` (the `GET /api/hosts` body on
+  subscribe and on every link or registry change), `host-tools` (cross-session
   `open_url`/`notify`/`open_file` calls), `session` (observer-only, never
   spawns omp; keeps the latest-wins `message_update` coalescing under
   backpressure), `file` (viewer watch, same allow-list as `/api/files`). A
@@ -561,13 +813,13 @@ during the wait.
   disconnect cancels and cleans up too. An existing target is refused (409).
 
 ### File access allow-list
-- `/api/files` is intentionally not a general filesystem browser. Allowed roots come from session cwds, their resolved project roots, `~/omp-cwd-*`, and roots explicitly added with `allowFileRoot()`.
+- `/api/files` is intentionally not a general filesystem browser. Allowed roots come from this machine's session cwds and their resolved project roots (as its daemon lists them: `hostSessions("local")`, the last list while the daemon is offline), `~/omp-cwd-*`, and roots explicitly added with `allowFileRoot()`. Other hosts' paths never reach it.
 - `/api/cwd/validate`, `/api/default-cwd`, and `/api/worktrees` call `allowFileRoot()` when they make a new location browsable.
+- The session-id → file path cache (`cacheSessionPath`, `lib/session-reader.ts`) on main is filled by main's own scans and by wrappers on the local host; it only serves the readers listed under "Session list caching".
 
 ### Session list caching — new sessions must appear immediately
-- `listAllSessions()` (sidebar, command palette) is cached twice: a 30s TTL
-  list cache in `lib/session-reader.ts` plus an mtime-keyed directory walk in
-  `lib/omp/session-files.ts` (`listSessionFiles`).
+- The sidebar and command palette list sessions per host: `listSessionsAllHosts()` (`lib/hosts/session-index.ts`) calls each host's `listSessions` op and caches it 30 s per host (`LIST_TTL_MS`, the daemon's own TTL). **This machine's list is its daemon's**; a host that fails or is offline keeps its last list. Nothing on main parses session files to build it.
+- The daemon's `listSessions` is `listAllSessions()` (`lib/session-reader.ts`): a 30 s TTL list cache plus an mtime-keyed directory walk in `lib/omp/session-files.ts` (`listSessionFiles`), both in the daemon process.
 - The walk cache keys on the **sessions root** mtime. On Windows/NTFS a new
   `.jsonl` inside an existing project subdirectory does NOT bump the root
   mtime, so the walk stays stale indefinitely.
@@ -575,6 +827,8 @@ during the wait.
   compaction, renames) must therefore ALSO clear the walk cache via
   `invalidateSessionFileListCache()` — never add a session-mutation path that
   forgets this. Regression test: `session-reader.test.mjs`.
+- A mutation that main triggers calls `invalidateLocalSessionLists()`: it clears main's per-host entry and sends the daemon `invalidateSessionLists` (the daemon runs the invalidation above). A route that changes this machine's session files and does not call it leaves the sidebar stale for up to 30 s.
+- **Still read on main, from this machine's own files** (main and the daemon share a machine, so these see the same sessions): transcript search (`session-content-search.ts`, `/api/sessions/search`), the session file watcher (`session-watcher.ts`), archive list/restore (`/api/sessions/archive`), import (`/api/sessions/import`), usage (`usage-db.ts`), and the bash-output, subagent-history and file-reference readers (`session-file-references.ts`, `subagent-history.ts`). They use main's own copies of `session-reader` and its caches, so they are invalidated separately (`invalidateSessionListCache()`); a new reader of session files on main for a session that may be remote is a bug.
 
 ### Chat scroll-follow
 - `useAgentSession` follows the conversation: the effect depends on both
@@ -615,7 +869,7 @@ during the wait.
 
 ### Update notifications (`/api/omp-update`, `/api/app-update`)
 - Automatic in-app self-updating has been removed in favor of explicit user notifications and manual terminal commands.
-- `GET /api/app-update` queries the npm registry for `@kahme247/ompweb` updates, detects the install manager (`bun` vs `npm` via `detectInstallMethod`), and returns `updateAvailable` plus the exact terminal command (e.g. `npm install -g @kahme247/ompweb` or `bun add -g @kahme247/ompweb`).
+- `GET /api/app-update` queries the npm registry for `@kahme247/ompweb` updates, detects the install (`installMethod`: `bun` vs `npm` via `detectInstallMethod`, `binary` for the compiled release), and returns `updateAvailable` plus the exact terminal command (e.g. `npm install -g @kahme247/ompweb` or `bun add -g @kahme247/ompweb`; for `binary`, the release page, which Settings shows under a download message).
 - `POST /api/omp-update` (`action: "check"`) runs `omp update --check` and returns `updateAvailable` plus `updateCommand: "omp update"`.
 - `POST /api/omp-update` (`action: "restart"`) restarts active OMP sessions after a manual CLI update.
 - Notifications in `AppShell` and settings cards in `SettingsConfig` present the update notification alongside copyable terminal update commands.
@@ -680,7 +934,8 @@ during the wait.
   recording in memory and starts a job; the hook polls `GET /api/stt/[jobId]`
   (proxies with ~30s timeouts would otherwise return HTML 504s). Job failures
   are 200 payloads for the same reason.
-- Jobs carry the composer scope (`draftKey`: session id or `new:<cwd>`). The
+- Jobs carry the composer scope (`draftKey`: session id, or `newChatDraftKey`:
+  `new:<cwd>` here, `new:<hostId>:<cwd>` for a fresh chat on a remote host). The
   hook adopts the newest job for its scope on mount, focus, visibility and
   every 4s while visible and idle, so another browser can play (`/audio`),
   retry (`POST`) or discard it. Leaving the scope stops following without
@@ -868,13 +1123,3 @@ buttons, links and expandable text, ignoring drags and text selection, or Enter
 on the focused card. There is no separate action button).
 Icons come from `lucide-react` — do not add new inline SVGs. The command
 palette (`components/CommandPalette.tsx`, ⌘K/Ctrl+K) is built on `cmdk`.
-
-<!-- BEGIN:nextjs-agent-rules -->
-
-# This is NOT the Next.js you know
-
-This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
-
-This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
-
-<!-- END:nextjs-agent-rules -->

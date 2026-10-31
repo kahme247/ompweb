@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createJiti } from "jiti";
 
 // The navigate back/forward buttons live in the sidebar header, first in the
 // quiet-utilities group (before Archived Sessions) and disabled per the
@@ -10,11 +9,7 @@ import { createJiti } from "jiti";
 // undefined case only covers any future host that renders the sidebar
 // standalone.
 
-const jiti = createJiti(import.meta.url, {
-  jsx: { runtime: "automatic" },
-  tsconfigPaths: true,
-});
-const { SessionSidebar } = await jiti.import("./SessionSidebar.tsx");
+const { SessionSidebar } = await import("./SessionSidebar.tsx");
 
 const noop = () => {};
 const baseProps = {

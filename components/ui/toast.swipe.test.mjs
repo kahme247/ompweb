@@ -2,11 +2,9 @@ import "../../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach, before } from "node:test";
 import React from "react";
-import { act, cleanup, render } from "@testing-library/react/pure.js";
-import { createJiti } from "jiti";
+const { act, cleanup, render } = await import("@testing-library/react/pure.js");
 
-const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tryNative: false, tsconfigPaths: true });
-const { ToastProvider, toast } = await jiti.import("./toast.tsx");
+const { ToastProvider, toast } = await import("./toast.tsx");
 
 before(() => {
   globalThis.AbortController = window.AbortController;
