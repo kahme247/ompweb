@@ -277,8 +277,9 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
 - `readSttConfig` lives in server-only `lib/stt-jobs.ts`; the browser bundle must never import it.
 - Browser code must not import `next/*`: use `lib/dynamic.tsx` and `lib/navigation.ts`.
 
-### Tests (`bun test`)
-- DOM tests import `tests/setup-dom.mjs` first and then import Testing Library dynamically, so its queries bind to that document. `bun test --parallel` gives every file a fresh global; nothing is torn down.
+### Tests (`npm test`, or `bun test --parallel`)
+- `--parallel` is required, not just faster: Bun gives each file a fresh global/module registry. The transport singleton (`lib/event-stream.ts`) and each file's `SharedWorker`/fetch/DOM fakes otherwise leak into the next file; a shared-process run can send commands to another file's fake worker. These fixtures are deliberately file-isolated rather than reset between files. Use `--parallel` even for a multi-file subset.
+- DOM tests import `tests/setup-dom.mjs` first and then import Testing Library dynamically, so its queries bind to that document. Nothing is torn down.
 - A module under test that must see a fake builtin is imported with a fresh query (`?fresh=N`) after `mockBuiltin(t, name, overrides)` (`tests/mock-builtin.mjs`, built on `mock.module`; Bun's `mock.restore()` does not undo `mock.module`, so the helper restores by hand).
 
 ### RPC session lifecycle (`lib/rpc-manager.ts`)
@@ -742,7 +743,10 @@ during the wait.
   - **Limits** (spec "Limitations"): a socket stays authorized after logout until it closes; command order
     is not kept across a WebSocket → SSE → WebSocket round trip while a command is still on a draining
     socket; two policy changes that return within one round trip (A→B→A) can open a stream twice (its
-    snapshot replays twice); each worker sizes its own pool.
+    snapshot replays twice); each worker sizes its own pool; on a slow link a large downlink frame can
+    fire `silence` or `hang` on a healthy socket (the summary keeps those reconnects in their own rows;
+    chunking server frames above 256 KiB is the fix if they show up); HTTP uplink isolation counts only
+    this tab's POSTs.
 
 ### Running state + reconciliation
 - The sidebar subscribes to the `running` channel, backed by `subscribeRunningSessions()` in `lib/rpc-manager.ts`, so running badges update without polling.

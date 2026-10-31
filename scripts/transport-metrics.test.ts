@@ -88,6 +88,10 @@ test("an abort behind an upload lands in its own row", () => {
   const rows = summarize(fixture, {});
   assert.equal(row(rows, "abort behind upload", "websocket", "yes")?.max, 900);
   assert.equal(row(rows, "abort behind upload", "websocket", "no")?.max, 50);
+  for (const behindBytes of [1_000, 65_535, 65_536]) {
+    const boundary = summarize([{ ...at(1), metric: "action", transport: "sse", type: "abort", req: "a", outcome: "ok", behindBytes, sentAt: 0, gotAt: 70, offset: 0 }], {});
+    assert.equal(row(boundary, "abort behind upload", "sse", behindBytes < 65_536 ? "no" : "yes")?.max, 70, `blocking starts at 64 KiB, not at ${behindBytes} bytes`);
+  }
 });
 
 test("a hang stays answered later when its reply is outside the filter, and a hang without req never is", () => {
@@ -184,7 +188,7 @@ test("a WS hang is a stall; an HTTP hang is a stall only when the transport alon
   assert.deepEqual(["total", "stalled", "slow command"].map((key) => row(rows, "hang", "ws-client", key)?.count), [1, 1, undefined]);
 });
 
-test("reconnect rows group triggers by family, split network wakes by a changed effective type, and the clock RTT is printed", () => {
+test("reconnect rows group triggers by family, keep silence and hang apart, split network wakes by a changed effective type, and the clock RTT is printed", () => {
   const reconnect = (transport: string, trigger: string, effectiveTypeBefore = "4g", effectiveType = "4g") =>
     ({ ...at(1), metric: "reconnect", transport, conn: transport === "sse" ? "sse" : "client", trigger, dropAt: 0, startAt: 0, firstFrameAt: 100, batch: 1, effectiveTypeBefore, effectiveType });
   const rows = summarize(
@@ -203,7 +207,10 @@ test("reconnect rows group triggers by family, split network wakes by a changed 
     {},
   );
   assert.equal(row(rows, "reconnect ms", "sse", "error/close")?.count, 1);
-  assert.equal(row(rows, "reconnect ms", "ws-client", "error/close")?.count, 3, "silence and hang are how a socket notices what EventSource reports as error");
+  assert.equal(row(rows, "reconnect ms", "ws-client", "error/close")?.count, 1);
+  // A socket's own detectors can fire behind a large downlink frame on a slow link: kept apart so they show.
+  assert.equal(row(rows, "reconnect ms", "ws-client", "silence")?.count, 1);
+  assert.equal(row(rows, "reconnect ms", "ws-client", "hang")?.count, 1);
   assert.equal(row(rows, "reconnect ms", "ws-client", "network (type changed)")?.count, 1);
   assert.equal(row(rows, "reconnect fromDropMs", "ws-client", "network (same type)")?.count, 1);
   assert.equal(row(rows, "reconnect ms", "ws-client", "online/visible")?.count, 2);
