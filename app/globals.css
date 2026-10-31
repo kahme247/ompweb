@@ -3236,6 +3236,20 @@ html[data-touch-targets="accessible"] .chat-scroll-bottom {
   align-items: center;
   gap: 3px;
 }
+/* Per-message action buttons (copy, markdown, read aloud, edit, fork) stay
+   hidden until the pointer is over the message or focus is inside it. Opacity
+   keeps the layout stable; touch screens have no hover, so they always show. */
+.message-actions-row {
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out-warm);
+}
+.message-hover-scope:hover .message-actions-row,
+.message-hover-scope:focus-within .message-actions-row {
+  opacity: 1;
+}
+@media (hover: none) {
+  .message-actions-row { opacity: 1; }
+}
 .message-copy-action {
   display: inline-flex;
   align-items: center;

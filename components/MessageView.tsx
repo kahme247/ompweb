@@ -371,6 +371,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
 
   return (
     <div
+      className="message-hover-scope"
       style={{ marginBottom: 18, display: "flex", flexDirection: "column", alignItems: "flex-end", paddingRight: 6 }}
     >
       <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", maxWidth: "85%", minWidth: 0 }}>
@@ -436,7 +437,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
 
         {/* Bottom row: action buttons + timestamp — inside the bubble's column,
             spanning its width, so the timestamp aligns with its right edge. */}
-          <div style={{
+          <div className="message-actions-row" style={{
             display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "flex-end",
             gap: 6, marginTop: 3, width: "100%",
           }}>
@@ -643,7 +644,7 @@ function AssistantMessageView({
 
   return (
     <div
-      className="chat-message"
+      className="chat-message message-hover-scope"
       data-live={isStreaming ? "true" : undefined}
       style={{ marginBottom: 6 }}
     >
@@ -763,7 +764,7 @@ function AssistantMessageView({
 
       {!isStreaming && (texts.some((text) => text.trim()) || time || canFork || (ttsSupported && speakableText.trim().length > 0)) && (
         <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 6, marginTop: 3 }}>
-          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 3 }}>
+          <div className="message-actions-row" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 3 }}>
             <MessageCopyActions texts={texts} bodyRef={bodyRef} />
             {ttsSupported && speakableText.trim().length > 0 && (
               <Tooltip content={isThisSpeaking ? t("messageView.stopSpeech") : t("messageView.readAloud")}>

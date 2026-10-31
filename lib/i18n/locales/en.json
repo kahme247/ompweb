@@ -1327,6 +1327,8 @@
   "settingsConfig.hideToolActivityDesc": "Fold a running turn's tool calls into one Process details row, the same way a finished turn folds them. Expand the row to see each call and its result.",
   "settingsConfig.expandThinkingByDefault": "Expand thinking blocks by default",
   "settingsConfig.expandThinkingByDefaultDesc": "Open each thinking block as it appears, including while it streams, so reasoning is readable without clicking every one. Collapsing a block by hand still works.",
+  "settingsConfig.expandProcessDetails": "Expand process details by default",
+  "settingsConfig.expandProcessDetailsDesc": "Open the Process details row of each turn, so thinking, intermediate replies and tool calls are visible without clicking. Collapsing a row by hand still works.",
   "settingsConfig.openUrlAutomatically": "Open agent links without asking",
   "settingsConfig.openUrlAutomaticallyDesc": "Links the agent opens from the session you are viewing open in a new tab right away. Links from other sessions always ask first. Your browser may still block pop-ups.",
   "settingsConfig.scopeNativeSelectAll": "Scope native Select All (experimental)",

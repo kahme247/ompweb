@@ -11,11 +11,12 @@ import type { AgentMessage, AssistantContentBlock, AssistantMessage, CustomMessa
  * Rows are appended in transcript order; a row is either:
  * - { kind: "message", index } — one message rendered standalone (messages
  *   before the first anchor, or a turn with nothing to fold)
- * - { kind: "group", userIndex, endIndex, segments } — one anchored turn. Like
- *   the omp TUI, agent text is never hidden: the turn renders as its anchor
- *   followed by `segments` in order, where each run of activity (thinking,
- *   tool calls, notices) between two pieces of text folds into one collapsed
- *   row. A turn stays one row so the render-window math is unchanged.
+ * - { kind: "group", userIndex, endIndex, segments } — one anchored turn. DSH
+ *   style: the turn renders as its anchor, one collapsed row holding everything
+ *   in between (thinking, tool calls, notices, intermediate text), then the
+ *   final answer. A provider error on an intermediate message keeps the turn
+ *   unfolded so the error stays visible (see `foldToFinalAnswer`). A turn stays
+ *   one row so the render-window math is unchanged.
  */
 
 /** A folded activity entry: the listed blocks of an assistant message, or a whole non-assistant message. */
@@ -117,7 +118,54 @@ export function planTurnSegments(
     // Text that ends its message carries the message's usage and error.
     if (lastText && segments.at(-1) === lastText) (lastText as Extract<TranscriptSegment, { kind: "text" }>).last = true;
   }
-  return segments;
+  return foldToFinalAnswer(messages, segments);
+}
+
+/**
+ * DSH-style fold: everything between the anchor and the final answer (thinking,
+ * tool calls, notices and the agent's intermediate text) collapses into ONE
+ * activity segment; only the final answer stays visible.
+ *
+ * - The final answer is the last text segment, unless tool calls follow it: a
+ *   turn that ends in tool calls has no answer yet, so it folds completely.
+ * - A provider error on an intermediate message disables the fold for the turn,
+ *   so the failure stays visible in place instead of hiding inside the fold.
+ */
+function foldToFinalAnswer(messages: AgentMessage[], segments: TranscriptSegment[]): TranscriptSegment[] {
+  let finalIdx = -1;
+  for (let i = segments.length - 1; i >= 0; i--) {
+    if (segments[i].kind === "text") { finalIdx = i; break; }
+  }
+  if (finalIdx >= 0 && segments.slice(finalIdx + 1).some((s) => s.kind === "activity" && s.toolCallCount > 0)) finalIdx = -1;
+
+  const head = finalIdx >= 0 ? segments.slice(0, finalIdx) : segments;
+  const final = finalIdx >= 0 ? segments[finalIdx] : null;
+  const tail = finalIdx >= 0 ? segments.slice(finalIdx + 1) : [];
+
+  const pieces: ActivityPiece[] = [];
+  let toolCallCount = 0;
+  const addPiece = (piece: ActivityPiece) => {
+    const prev = pieces.at(-1);
+    // Blocks of one message that were split into text/activity runs render as one entry again.
+    if (prev?.blocks && piece.blocks && prev.index === piece.index) {
+      pieces[pieces.length - 1] = { index: prev.index, blocks: [...prev.blocks, ...piece.blocks] };
+    } else {
+      pieces.push(piece);
+    }
+  };
+  for (const segment of head) {
+    if (segment.kind === "activity") {
+      for (const piece of segment.pieces) addPiece(piece);
+      toolCallCount += segment.toolCallCount;
+      continue;
+    }
+    if ((messages[segment.index] as AssistantMessage).errorMessage?.trim()) return segments;
+    if (segment.blocks.length > 0) addPiece({ index: segment.index, blocks: segment.blocks });
+  }
+  if (pieces.length === 0) return segments;
+
+  const folded: TranscriptSegment = { kind: "activity", pieces, stepCount: pieces.length, toolCallCount };
+  return final ? [folded, final, ...tail] : [folded];
 }
 
 /**
