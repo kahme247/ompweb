@@ -124,6 +124,26 @@ function saveProjectSortMode(mode: ProjectSortMode): void {
     // ignore storage quota / privacy-mode errors
   }
 }
+const PINNED_SESSIONS_COLLAPSED_STORAGE_KEY = "omp-web:pinned-sessions-collapsed";
+
+function loadPinnedSessionsCollapsed(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(PINNED_SESSIONS_COLLAPSED_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function savePinnedSessionsCollapsed(collapsed: boolean): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (collapsed) window.localStorage.setItem(PINNED_SESSIONS_COLLAPSED_STORAGE_KEY, "1");
+    else window.localStorage.removeItem(PINNED_SESSIONS_COLLAPSED_STORAGE_KEY);
+  } catch {
+    // ignore storage quota / privacy-mode errors
+  }
+}
 /** Substitute the home dir prefix with ~ (no path truncation — see PathLabel) */
 function displayCwd(cwd: string, homeDir?: string): string {
   return (homeDir && cwd.startsWith(homeDir)) ? "~" + cwd.slice(homeDir.length) : cwd;
@@ -213,11 +233,13 @@ export {
   displayCwd,
   formatRelativeTime,
   loadExpandedProjects,
+  loadPinnedSessionsCollapsed,
   loadProjectSortMode,
   loadUnreadSessionIds,
   normalizeProjectKey,
   projectLabel,
   saveExpandedProjects,
+  savePinnedSessionsCollapsed,
   saveProjectSortMode,
   saveUnreadSessionIds,
   type SessionTreeNode,

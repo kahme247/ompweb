@@ -11,6 +11,7 @@ import { Tooltip } from "./ui/primitives";
 import { toast } from "./ui/toast";
 import { clearLastOpenSession, setLastOpenSession, workspaceKeyOf } from "@/lib/workspace-memory";
 import { groupSessionsByProject, nextPinOrder, orderProjects, projectActivityCounts, type ProjectSortMode } from "@/lib/project-ordering";
+import { partitionPinnedSessions, restoreSessionPin, withSessionPinned } from "@/lib/session-pins";
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { compileSearchQuery, FIRST_MESSAGE_WEIGHT, scoreSearchFields, searchField, TITLE_WEIGHT } from "@/lib/session-search";
 import { Archive, ArrowDownUp, ArrowLeft, ArrowRight, Check, ChevronRight, FileUp, Loader2, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, X } from "lucide-react";
@@ -32,11 +33,13 @@ import {
   MAX_PROJECT_SESSIONS,
   buildSessionTree,
   loadExpandedProjects,
+  loadPinnedSessionsCollapsed,
   loadProjectSortMode,
   loadUnreadSessionIds,
   normalizeProjectKey,
   projectLabel,
   saveExpandedProjects,
+  savePinnedSessionsCollapsed,
   saveProjectSortMode,
   saveUnreadSessionIds,
   type WorktreeContext,
@@ -44,7 +47,7 @@ import {
   type WorktreeState,
 } from "./SessionSidebar-helpers";
 import { OmpWebTitle, SIDEBAR_BUTTON_TRANSITION, SidebarIconButton, SidebarPortalMenu } from "./SessionSidebar-chrome";
-import { ProjectRow } from "./SessionSidebar-rows";
+import { PinnedSessionsGroup, ProjectRow } from "./SessionSidebar-rows";
 
 /** Deadline for one /api/sessions fetch. A wedged-but-listening server never
  * answers; without this the initial spinner would pend forever. */
@@ -113,6 +116,15 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
 
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
+  // Pinned session ids in sidebar order (server-side, shared by every device).
+  // The ref mirrors every write so the optimistic toggle can read the current
+  // list outside a state updater; write only through commitPinnedSessionIds.
+  const [pinnedSessionIds, setPinnedSessionIds] = useState<readonly string[]>([]);
+  const pinnedSessionIdsRef = useRef<readonly string[]>([]);
+  const commitPinnedSessionIds = useCallback((next: readonly string[]) => {
+    pinnedSessionIdsRef.current = next;
+    setPinnedSessionIds(next);
+  }, []);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedCwd, setSelectedCwd] = useState<string | null>(null);
@@ -184,6 +196,8 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   // The sidebar is server-rendered: start at "none" and read storage after mount.
   const [projectSortMode, setProjectSortMode] = useState<ProjectSortMode>("none");
   useEffect(() => setProjectSortMode(loadProjectSortMode()), []);
+  const [pinnedCollapsed, setPinnedCollapsed] = useState(false);
+  useEffect(() => setPinnedCollapsed(loadPinnedSessionsCollapsed()), []);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const sortButtonRef = useRef<HTMLButtonElement>(null);
   const closeSortMenu = useCallback(() => setSortMenuOpen(false), []);
@@ -218,8 +232,11 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const etag = res.headers.get("ETag");
       if (etag) sessionsEtagRef.current = etag;
-      const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[]; runningSessions?: Array<{ id: string; cwd: string }> };
+      const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[]; runningSessions?: Array<{ id: string; cwd: string }>; pinnedSessionIds?: string[] };
       setAllSessions(data.sessions);
+      const pins = data.pinnedSessionIds ?? [];
+      const currentPins = pinnedSessionIdsRef.current;
+      if (currentPins.length !== pins.length || currentPins.some((id, index) => id !== pins[index])) commitPinnedSessionIds(pins);
       if (data.runningSessions) {
         for (const rs of data.runningSessions) {
           if (rs.id && rs.cwd) knownRunningCwdsRef.current.set(rs.id, rs.cwd);
@@ -258,7 +275,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       initialLoadedRef.current = true;
       if (showLoading) setLoading(false);
     }
-  }, [t]);
+  }, [t, commitPinnedSessionIds]);
 
   const initialLoadDone = useRef(false);
   useEffect(() => {
@@ -764,15 +781,6 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   useEffect(() => {
     onWorkspaceOptionsChange?.(sortedProjects, selectedProject, selectedCwd);
   }, [onWorkspaceOptionsChange, sortedProjects, selectedProject, selectedCwd]);
-  const sessionsByProject = useMemo(
-    () => groupSessionsByProject(sortedProjects, visibleSessions),
-    [sortedProjects, visibleSessions],
-  );
-  const projectActivity = useMemo(
-    () => projectActivityCounts(visibleSessions, runningSessionIds, unreadSessionIds, exitedSessions.keys()),
-    [visibleSessions, runningSessionIds, unreadSessionIds, exitedSessions],
-  );
-
   // Client-side filtering (Workspaces header: search + "running only").
   // While a filter is active, workspaces with no matching sessions are hidden
   // so the list reads as a genuine result set; at rest every workspace stays.
@@ -782,6 +790,26 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const deferredSearchQuery = useDeferredValue(searchQuery);
   const trimmedSearchQuery = deferredSearchQuery.trim();
   const filtersActive = searchOpen || runningOnly || trimmedSearchQuery.length > 0;
+  // At rest, pinned sessions leave their workspace for the Pinned group; while
+  // filtering they stay in place so results read as one ranked list.
+  const pinnedSessionSet = useMemo(() => new Set(pinnedSessionIds), [pinnedSessionIds]);
+  const parentSessionIds = useMemo(
+    () => new Set(visibleSessions.flatMap((session) => (session.parentSessionId ? [session.parentSessionId] : []))),
+    [visibleSessions],
+  );
+  const { pinned: pinnedSessions, rest: workspaceSessions } = useMemo(
+    () => (filtersActive ? { pinned: NO_SESSIONS, rest: visibleSessions } : partitionPinnedSessions(visibleSessions, pinnedSessionIds)),
+    [filtersActive, visibleSessions, pinnedSessionIds],
+  );
+  const sessionsByProject = useMemo(
+    () => groupSessionsByProject(sortedProjects, workspaceSessions),
+    [sortedProjects, workspaceSessions],
+  );
+  const projectActivity = useMemo(
+    () => projectActivityCounts(workspaceSessions, runningSessionIds, unreadSessionIds, exitedSessions.keys()),
+    [workspaceSessions, runningSessionIds, unreadSessionIds, exitedSessions],
+  );
+
   // Transcript matches stream from the server; title matches are scored locally
   // so results appear on the first keystroke and never wait on a full scan.
   // Stop (or a new query) aborts the stream; hits found so far stay.
@@ -1083,6 +1111,39 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       orderWriteBusyRef.current = false;
     }
   }, [sortedProjects, handleUpdateProjectPresentation]);
+
+  /** Pin a session to the end of the Pinned group, or unpin it. The list
+   *  updates at once and reverts if the server refuses. */
+  const handleToggleSessionPin = useCallback(async (session: SessionInfo, pinned: boolean) => {
+    const before = pinnedSessionIdsRef.current;
+    commitPinnedSessionIds(withSessionPinned(before, session.id, pinned));
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pinned }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    } catch {
+      // Undo this toggle at once (keeping any other toggle made meanwhile and a
+      // failed unpin's old place), then let the server decide: another device
+      // may have changed the same pin, and a refresh committed since then would
+      // answer 304 to a conditional request, so this one goes without the ETag.
+      commitPinnedSessionIds(restoreSessionPin(pinnedSessionIdsRef.current, before, session.id));
+      toast.error(t("sessionSidebar.pinFailed"));
+      sessionsEtagRef.current = null;
+      void loadSessions();
+      return;
+    }
+    void loadSessions();
+  }, [commitPinnedSessionIds, loadSessions, t]);
+
+  const togglePinnedCollapsed = useCallback(() => {
+    setPinnedCollapsed((collapsed) => {
+      savePinnedSessionsCollapsed(!collapsed);
+      return !collapsed;
+    });
+  }, []);
 
   // The menu closes itself on a menu item click and returns focus to the trigger.
   const chooseProjectSortMode = useCallback((mode: ProjectSortMode) => {
@@ -1626,6 +1687,26 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
             </div>
           )}
 
+          {!loading && pinnedSessions.length > 0 && (
+            <PinnedSessionsGroup
+              sessions={pinnedSessions}
+              collapsed={pinnedCollapsed}
+              onToggleCollapsed={togglePinnedCollapsed}
+              selectedSessionId={selectedSessionId}
+              runningSessionIds={runningSessionIds}
+              unreadSessionIds={unreadSessionIds}
+              exitedSessions={exitedSessions}
+              recentlyCompletedIds={effectiveRecentCompletedSet}
+              relativeTimeNow={relativeTimeNow}
+              onSelectSession={handleSelectSessionFromList}
+              onRenamed={loadSessions}
+              onSessionDeleted={handleSessionDeleted}
+              pinnedSessionIds={pinnedSessionSet}
+              onToggleSessionPin={handleToggleSessionPin}
+              parentSessionIds={parentSessionIds}
+            />
+          )}
+
           {visibleProjectEntries.map(({ project, sessions }) => {
             const tree = treesByProject.get(project.path) ?? buildSessionTree(sessions);
             // Sessions group under a project through the case-folded comparable
@@ -1664,6 +1745,9 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                 onSelectSession={handleSelectSessionFromList}
                 onRenamed={loadSessions}
                 onSessionDeleted={handleSessionDeleted}
+                pinnedSessionIds={pinnedSessionSet}
+                onToggleSessionPin={handleToggleSessionPin}
+                parentSessionIds={parentSessionIds}
               />
             );
           })}

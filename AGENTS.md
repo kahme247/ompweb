@@ -60,9 +60,9 @@ Shared foundations in `lib/omp/`:
 
 ```
 app/api/
-  sessions/route.ts               GET  list all sessions
+  sessions/route.ts               GET  list all sessions (+ pinnedSessionIds)
   sessions/search/route.ts        GET ?q= — NDJSON { scores } batches (titles + transcripts); closing the request stops the scan
-  sessions/[id]/route.ts          GET/PATCH/DELETE session
+  sessions/[id]/route.ts          GET/PATCH ({ name } rename, { pinned } pin)/DELETE session
   sessions/[id]/context/route.ts  GET ?leafId= — context for a specific leaf
   sessions/[id]/export/route.ts   GET exported HTML for a session
   agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? }
@@ -127,6 +127,8 @@ lib/
   session-reader.ts    session .jsonl parsing + path cache + buildSessionContext
   session-search.ts    shared fuzzy/phrase query scorer for sidebar search (title weights ≫ transcript)
   session-content-search.ts  server: per-file transcript text cache (size+mtime) + searchSessions()
+  session-pins.ts      pure pinned-session helpers: parse, pin/unpin, failed-toggle restore, Pinned-group partition (client + tests)
+  session-pin-registry.ts  on-disk pinned sessions (~/.omp/agent/omp-web/session-pins.json)
   session-resume.ts    running-session list for auto-resume after a restart
   web-auth.ts          password-hash check + session cookie signing
   web-auth-secret.ts   per-installation session-signing key (~/.omp/agent/omp-web/web-auth-secret.json)
@@ -547,6 +549,31 @@ during the wait.
 - Each project's session tree is capped at 5 roots with a show-more toggle;
   project rows are cards matching the session items' height/margins/accent
   treatment. Rows show no worktree/branch selector (see the Worktrees tab).
+
+### Pinned sessions (`lib/session-pins.ts`, `lib/session-pin-registry.ts`)
+- Pins are an ordered list of session ids in `~/.omp/agent/omp-web/session-pins.json`
+  (temp-file + rename), never a field in the session file: omp owns that file.
+  Server-side so every browser and device sees the same pins.
+- `GET /api/sessions` carries `pinnedSessionIds` (pin file read on every
+  request, filtered to listed sessions), so a pin from another device shows on
+  the next poll and the ETag changes with it. `PATCH /api/sessions/[id]`
+  `{ pinned }` pins (append) or unpins; pinning needs the session on disk or
+  live, unpinning always succeeds so stale pins stay clearable. `DELETE` and
+  archive drop the pin, so a session restored from the archive comes back unpinned.
+- At rest the sidebar shows a **Pinned** group above the workspaces (pin order,
+  flat rows; collapsed state in `localStorage` `omp-web:pinned-sessions-collapsed`)
+  and leaves pinned sessions out of their workspace's tree and activity counts,
+  so the group renders whenever the workspace rows do (also under a refresh
+  error banner, which keeps the last list). Pinned rows get the same row props
+  (unread, running, recently completed) as workspace rows.
+  While a search or the running filter is active, pinned sessions stay in their
+  workspaces so results read as one ranked list. Pin/Unpin sits first in the
+  session row menu; the toggle is optimistic and reverts on failure (a failed
+  write leaves the server ETag unchanged, so a refresh alone would not). The
+  revert (`restoreSessionPin`) undoes only that session, back in its old place,
+  and reads the list from a ref mirrored on every write, never from a state
+  updater. The failed toggle then refetches the list without `If-None-Match`,
+  so the server's pins win if another device changed the same pin meanwhile.
 
 ### Clone a repository as a new workspace (`/api/projects/clone`)
 - The Add-workspace `DirectoryPicker` takes an optional Git URL; "Clone here"

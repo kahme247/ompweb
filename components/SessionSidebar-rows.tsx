@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useRef, useState } from "react";
+import { memo, useCallback, useMemo, useRef, useState } from "react";
 import type { AgentMessage, ExitedRpcSession, ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
 import { formatExitedSessionNotice, useI18n } from "@/lib/i18n";
 import { ChevronDown, ChevronRight, Folder, GitBranch, MoreHorizontal, Pin } from "lucide-react";
@@ -33,6 +33,10 @@ import {
 const SIDEBAR_STATUS_SLOT = 12;
 const SIDEBAR_STATUS_GAP = 2;
 
+/** Deadline for an archive request, error body included: a stalled answer
+ *  would otherwise leave the row dimmed with no failure toast. */
+const ARCHIVE_TIMEOUT_MS = 15_000;
+
 interface ProjectRowProps {
   project: ManagedProject;
   isActive: boolean;
@@ -63,6 +67,10 @@ interface ProjectRowProps {
   onSelectSession: (s: SessionInfo) => void;
   onRenamed?: () => void;
   onSessionDeleted?: (id: string) => void;
+  pinnedSessionIds: Set<string>;
+  onToggleSessionPin: (session: SessionInfo, pinned: boolean) => void;
+  /** Ids of sessions that have forks anywhere in the list, including the Pinned group. */
+  parentSessionIds: Set<string>;
 }
 
 /** One project in the sidebar: a card row matching the session items' visual
@@ -96,6 +104,9 @@ function ProjectRow({
   onSelectSession,
   onRenamed,
   onSessionDeleted,
+  pinnedSessionIds,
+  onToggleSessionPin,
+  parentSessionIds,
 }: ProjectRowProps) {
   const { t } = useI18n();
   const [hovered, setHovered] = useState(false);
@@ -406,6 +417,9 @@ function ProjectRow({
                   onSelectSession={onSelectSession}
                   onRenamed={onRenamed}
                   onSessionDeleted={onSessionDeleted}
+                  pinnedSessionIds={pinnedSessionIds}
+                  onToggleSessionPin={onToggleSessionPin}
+                  parentSessionIds={parentSessionIds}
                   depth={0}
                 />
               ))}
@@ -446,6 +460,99 @@ function ProjectRow({
     </section>
   );
 }
+interface PinnedSessionsGroupProps {
+  /** Pinned sessions in pin order. */
+  sessions: SessionInfo[];
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
+  selectedSessionId: string | null;
+  runningSessionIds: Set<string>;
+  unreadSessionIds: Set<string>;
+  recentlyCompletedIds: Set<string>;
+  exitedSessions: Map<string, ExitedRpcSession>;
+  relativeTimeNow: number;
+  onSelectSession: (s: SessionInfo) => void;
+  onRenamed?: () => void;
+  onSessionDeleted?: (id: string) => void;
+  pinnedSessionIds: Set<string>;
+  onToggleSessionPin: (session: SessionInfo, pinned: boolean) => void;
+  /** Ids of sessions that have forks; pinned rows list none but must not archive. */
+  parentSessionIds: Set<string>;
+}
+
+/** The Pinned group above the workspaces: pinned sessions from any workspace,
+ *  in pin order, as flat rows (a pinned session's forks stay in its workspace). */
+function PinnedSessionsGroup({
+  sessions,
+  collapsed,
+  onToggleCollapsed,
+  selectedSessionId,
+  runningSessionIds,
+  unreadSessionIds,
+  recentlyCompletedIds,
+  exitedSessions,
+  relativeTimeNow,
+  onSelectSession,
+  onRenamed,
+  onSessionDeleted,
+  pinnedSessionIds,
+  onToggleSessionPin,
+  parentSessionIds,
+}: PinnedSessionsGroupProps) {
+  const { t } = useI18n();
+  const [hovered, setHovered] = useState(false);
+  const nodes = useMemo(() => sessions.map((session): SessionTreeNode => ({ session, children: [] })), [sessions]);
+  const label = t("sessionSidebar.pinnedSessions");
+  return (
+    <section className="sidebar-project sidebar-pinned-sessions" style={{ marginBottom: 12 }}>
+      <div
+        className="sidebar-project-header"
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        style={{ display: "flex", alignItems: "center", minHeight: 30, borderRadius: "var(--radius-control)", background: hovered ? "var(--bg-hover)" : "transparent", transition: SIDEBAR_BUTTON_TRANSITION }}
+      >
+        <button
+          type="button"
+          onClick={onToggleCollapsed}
+          aria-expanded={!collapsed}
+          aria-label={collapsed ? t("projects.expandProject", { name: label }) : t("projects.collapseProject", { name: label })}
+          style={{ flex: 1, minWidth: 0, alignSelf: "stretch", display: "flex", alignItems: "center", gap: 7, padding: "0 6px 0 10px", border: "none", background: "none", color: hovered ? "var(--text)" : "var(--text-muted)", cursor: "pointer", textAlign: "left" }}
+        >
+          <Pin size={14} strokeWidth={1.9} style={{ flexShrink: 0, color: "var(--accent)" }} aria-hidden="true" />
+          <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 600, letterSpacing: "-0.01em", lineHeight: 1.25 }}>
+            {label}
+          </span>
+          <span style={{ flexShrink: 0, color: "var(--text-dim)", fontSize: 10.5, fontVariantNumeric: "tabular-nums" }}>{sessions.length}</span>
+          <ChevronRight size={13} strokeWidth={1.8} style={{ flexShrink: 0, color: "var(--text-dim)", transform: collapsed ? "none" : "rotate(90deg)", transition: "transform var(--dur-fast) var(--ease-out-warm)" }} aria-hidden="true" />
+        </button>
+      </div>
+      {!collapsed && (
+        <div className="sidebar-project-sessions" style={{ margin: "2px 0 0" }}>
+          {nodes.map((node) => (
+            <SessionTreeItem
+              key={node.session.id}
+              node={node}
+              selectedSessionId={selectedSessionId}
+              runningSessionIds={runningSessionIds}
+              unreadSessionIds={unreadSessionIds}
+              exitedSessions={exitedSessions}
+              recentlyCompletedIds={recentlyCompletedIds}
+              relativeTimeNow={relativeTimeNow}
+              onSelectSession={onSelectSession}
+              onRenamed={onRenamed}
+              onSessionDeleted={onSessionDeleted}
+              pinnedSessionIds={pinnedSessionIds}
+              onToggleSessionPin={onToggleSessionPin}
+              hasForksElsewhere={parentSessionIds.has(node.session.id)}
+              depth={0}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 const SessionTreeItem = memo(function SessionTreeItem({
   node,
   selectedSessionId,
@@ -457,6 +564,10 @@ const SessionTreeItem = memo(function SessionTreeItem({
   onSelectSession,
   onRenamed,
   onSessionDeleted,
+  pinnedSessionIds,
+  onToggleSessionPin,
+  hasForksElsewhere = false,
+  parentSessionIds,
   depth,
 }: {
   node: SessionTreeNode;
@@ -469,6 +580,12 @@ const SessionTreeItem = memo(function SessionTreeItem({
   onSelectSession: (s: SessionInfo) => void;
   onRenamed?: () => void;
   onSessionDeleted?: (id: string) => void;
+  pinnedSessionIds: Set<string>;
+  onToggleSessionPin: (session: SessionInfo, pinned: boolean) => void;
+  /** The session has forks that are listed in its workspace, not under this row. */
+  hasForksElsewhere?: boolean;
+  /** Ids of sessions that have forks anywhere; a fork moved to Pinned still blocks archive. */
+  parentSessionIds?: Set<string>;
   depth: number;
 }) {
   const [collapsed, setCollapsed] = useState(false);
@@ -482,6 +599,8 @@ const SessionTreeItem = memo(function SessionTreeItem({
   const isUnread = unreadSessionIds.has(sessionId);
   const isRecentlyCompleted = !isRunning && (recentlyCompletedIds?.has(sessionId) ?? false);
   const exited = exitedSessions.get(sessionId);
+  const isPinned = pinnedSessionIds.has(sessionId);
+  const archiveBlocked = hasChildren || hasForksElsewhere || (parentSessionIds?.has(sessionId) ?? false);
 
   // Stable callbacks: depend only on primitives / stable parent callbacks so
   // SessionItem's React.memo stays effective across re-renders.
@@ -494,6 +613,9 @@ const SessionTreeItem = memo(function SessionTreeItem({
   const handleToggleCollapse = useCallback(() => {
     setCollapsed((v) => !v);
   }, []);
+  const handleTogglePin = useCallback((pinned: boolean) => {
+    onToggleSessionPin(node.session, pinned);
+  }, [onToggleSessionPin, node.session]);
 
   return (
     <div>
@@ -522,8 +644,11 @@ const SessionTreeItem = memo(function SessionTreeItem({
           onDeleted={handleDeleted}
           depth={depth}
           hasChildren={hasChildren}
+          archiveBlocked={archiveBlocked}
           collapsed={collapsed}
           onToggleCollapse={handleToggleCollapse}
+          pinned={isPinned}
+          onTogglePin={handleTogglePin}
         />
       </div>
       {hasChildren && !collapsed && (
@@ -541,6 +666,9 @@ const SessionTreeItem = memo(function SessionTreeItem({
               onSelectSession={onSelectSession}
               onRenamed={onRenamed}
               onSessionDeleted={onSessionDeleted}
+              pinnedSessionIds={pinnedSessionIds}
+              onToggleSessionPin={onToggleSessionPin}
+              parentSessionIds={parentSessionIds}
               depth={depth + 1}
             />
           ))}
@@ -568,11 +696,25 @@ const SessionTreeItem = memo(function SessionTreeItem({
     const id = prev.node.session.id;
     if (prev.unreadSessionIds.has(id) !== next.unreadSessionIds.has(id)) return false;
   }
+  if (prev.pinnedSessionIds !== next.pinnedSessionIds) {
+    // Forks render under this node, so any pin change in the set may matter.
+    if (prev.node.children.length > 0) return false;
+    const id = prev.node.session.id;
+    if (prev.pinnedSessionIds.has(id) !== next.pinnedSessionIds.has(id)) return false;
+  }
+  if (prev.parentSessionIds !== next.parentSessionIds) {
+    // Descendants read the set too, so any change matters when this node has forks below.
+    if (prev.node.children.length > 0) return false;
+    const id = prev.node.session.id;
+    if ((prev.parentSessionIds?.has(id) ?? false) !== (next.parentSessionIds?.has(id) ?? false)) return false;
+  }
   if (prev.exitedSessions !== next.exitedSessions) return false;
   if (prev.relativeTimeNow !== next.relativeTimeNow) return false;
   if (prev.onSelectSession !== next.onSelectSession
     || prev.onRenamed !== next.onRenamed
-    || prev.onSessionDeleted !== next.onSessionDeleted) return false;
+    || prev.onSessionDeleted !== next.onSessionDeleted
+    || prev.onToggleSessionPin !== next.onToggleSessionPin
+    || prev.hasForksElsewhere !== next.hasForksElsewhere) return false;
   return true;
 });
 const SessionItem = memo(function SessionItem({
@@ -590,6 +732,9 @@ const SessionItem = memo(function SessionItem({
   collapsed = false,
   relativeTimeNow,
   onToggleCollapse,
+  pinned = false,
+  onTogglePin,
+  archiveBlocked = false,
 }: {
   session: SessionInfo;
   isSelected: boolean;
@@ -605,6 +750,10 @@ const SessionItem = memo(function SessionItem({
   relativeTimeNow: number;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
+  pinned?: boolean;
+  onTogglePin?: (pinned: boolean) => void;
+  /** Archive needs a leaf session; the server refuses parents of forks. */
+  archiveBlocked?: boolean;
 }) {
   const { t, locale } = useI18n();
   const exitTitle = exited ? formatExitedSessionNotice(exited) : "";
@@ -652,17 +801,27 @@ const SessionItem = memo(function SessionItem({
     }
   }, [renameValue, session.id, session.name, onRenamed]);
 
- const handleArchive = useCallback(async () => {
- setDeleting(true);
- try {
- const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/archive`, { method: "POST" });
- if (!response.ok) throw new Error("Session archive failed");
- onDeleted?.(session.id);
- } catch {
- setDeleting(false);
- toast.error(t("sessionSidebar.archiveFailed"));
- }
- }, [session.id, onDeleted, t]);
+  const handleArchive = useCallback(async () => {
+    setDeleting(true);
+    // The signal also ends the error-body read, so a stalled body fails like the request.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new DOMException("Session archive request timed out", "TimeoutError")), ARCHIVE_TIMEOUT_MS);
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(session.id)}/archive`, { method: "POST", signal: controller.signal });
+      if (!response.ok) {
+        const body = await response.json().catch(() => null) as { code?: unknown } | null;
+        setDeleting(false);
+        toast.error(t(body?.code === "session_has_children" ? "sessionSidebar.archiveLeafOnly" : "sessionSidebar.archiveFailed"));
+        return;
+      }
+      onDeleted?.(session.id);
+    } catch {
+      setDeleting(false);
+      toast.error(t("sessionSidebar.archiveFailed"));
+    } finally {
+      clearTimeout(timeout);
+    }
+  }, [session.id, onDeleted, t]);
 
   const handleDelete = useCallback(async () => {
     if (deleting) return;
@@ -778,7 +937,8 @@ const SessionItem = memo(function SessionItem({
                   <MoreHorizontal size={14} strokeWidth={2} aria-hidden="true" />
                 </button>
                 <SidebarPortalMenu anchor={menuButtonRef} open={actionMenuOpen} onClose={() => setActionMenuOpen(false)} placement="below" minWidth={128}>
- <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleArchive(); }} disabled={hasChildren} title={hasChildren ? t("sessionSidebar.archiveLeafOnly") : t("sessionSidebar.archive")} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: hasChildren ? "var(--text-dim)" : "var(--text-muted)", cursor: hasChildren ? "not-allowed" : "pointer", textAlign: "left", fontSize: 11, opacity: hasChildren ? 0.55 : 1 }}>{t("sessionSidebar.archive")}</button>
+                  {onTogglePin && <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); onTogglePin(!pinned); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{pinned ? t("sessionSidebar.unpin") : t("sessionSidebar.pin")}</button>}
+ <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleArchive(); }} disabled={archiveBlocked} title={archiveBlocked ? t("sessionSidebar.archiveLeafOnly") : t("sessionSidebar.archive")} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: archiveBlocked ? "var(--text-dim)" : "var(--text-muted)", cursor: archiveBlocked ? "not-allowed" : "pointer", textAlign: "left", fontSize: 11, opacity: archiveBlocked ? 0.55 : 1 }}>{t("sessionSidebar.archive")}</button>
                   <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { startRename(event); setActionMenuOpen(false); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.rename")}</button>
                   <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleCopyTranscript(); }} disabled={copyingTranscript} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: copyingTranscript ? "default" : "pointer", textAlign: "left", fontSize: 11, opacity: copyingTranscript ? 0.55 : 1 }}>{t("sessionSidebar.copyTranscript")}</button>
                   <button type="button" role="menuitem" className="sidebar-menu-item" disabled={deleting} onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); setConfirmDelete(true); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--status-error)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.delete")}</button>
@@ -804,6 +964,7 @@ const SessionItem = memo(function SessionItem({
   );
 });
 export {
+  PinnedSessionsGroup,
   ProjectRow,
   SessionItem,
   SessionTreeItem,

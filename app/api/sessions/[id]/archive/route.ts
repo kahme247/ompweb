@@ -7,6 +7,7 @@ import {
 } from "@/lib/session-reader";
 import { resolveSessionPathOr404 } from "@/lib/api-utils";
 import { clearExitedRpcSession, getRpcSession } from "@/lib/rpc-manager";
+import { forgetSessionPins } from "@/lib/session-pin-registry";
 
 /** POST /api/sessions/[id]/archive — stop the live child, then archive the
  * native OMP JSONL and its sibling artifacts using OMP's gc layout. */
@@ -38,6 +39,8 @@ export async function POST(
     invalidateSessionPathCache(id);
     // The file is gone: full flush is correct (drops its caches + refreshes list).
     invalidateSessionListCache();
+    // Restoring from the archive brings the session back unpinned.
+    forgetSessionPins([id]);
     return NextResponse.json({ ok: true, archived: true, archivedPath });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

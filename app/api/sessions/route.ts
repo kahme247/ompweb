@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createHash } from "crypto";
 import { listAllSessions } from "@/lib/session-reader";
 import { getRunningRpcSessions } from "@/lib/rpc-manager";
+import { loadSessionPins } from "@/lib/session-pin-registry";
 
 // The session list mixes on-disk sessions with the live runningSessionIds set,
 // which changes on every agent turn, so it must never be cached by proxies or
@@ -18,7 +19,12 @@ export async function GET(req: Request) {
     const sessions = await listAllSessions();
     const runningSessions = getRunningRpcSessions();
     const runningSessionIds = runningSessions.map((s) => s.id);
-    const body = { sessions, runningSessionIds, runningSessions };
+    // Pins are read fresh (a tiny file) so a pin made on another device shows on
+    // the next poll. Pins whose session is gone (deleted or archived elsewhere)
+    // are left out; live sessions not yet flushed to disk keep theirs.
+    const listedIds = new Set([...sessions.map((s) => s.id), ...runningSessionIds]);
+    const pinnedSessionIds = loadSessionPins().filter((id) => listedIds.has(id));
+    const body = { sessions, runningSessionIds, runningSessions, pinnedSessionIds };
     const bodyJson = JSON.stringify(body);
     const etag = `"${createHash("sha1").update(bodyJson).digest("hex").slice(0, 16)}"`;
     if (req.headers.get("if-none-match") === etag) {

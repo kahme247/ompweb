@@ -23,11 +23,13 @@ import {
   buildSessionContext,
   readSessionHeader,
   SessionFileTooLargeError,
+  listAllSessions,
 } from "@/lib/session-reader";
 import { resolveSessionPathOr404 } from "@/lib/api-utils";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { sessionPathKey } from "@/lib/paths";
-import { clearExitedRpcSession, getRpcSession, WebRpcError } from "@/lib/rpc-manager";
+import { clearExitedRpcSession, getRpcSession, getRunningRpcSessions, WebRpcError } from "@/lib/rpc-manager";
+import { forgetSessionPins, SessionPinLimitError, setSessionPinned } from "@/lib/session-pin-registry";
 
 /** Stable, client-safe error body for catch-all handlers: details go to the
  *  server log only, never to the browser. */
@@ -46,6 +48,9 @@ function sessionsErrorResponse(error: unknown): NextResponse {
   }
   if (error instanceof SyntaxError) {
     return NextResponse.json({ error: "Invalid JSON request body", code: "invalid_json" }, { status: 400 });
+  }
+  if (error instanceof SessionPinLimitError) {
+    return NextResponse.json({ error: error.message, code: error.code }, { status: 409 });
   }
   console.error("[api/sessions]", error);
   return NextResponse.json({ error: "Session request failed", code: "session_request_failed" }, { status: 500 });
@@ -263,16 +268,37 @@ export async function GET(
   }
 }
 
-// PATCH /api/sessions/[id]  body: { name: string }
+// PATCH /api/sessions/[id]  body: { name?: string, pinned?: boolean } (at least one)
 export async function PATCH(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
   try {
-    const { name } = await parseJsonWithinLimit<{ name?: string }>(req, 64 * 1024);
-    if (typeof name !== "string" || !name.trim()) {
-      return NextResponse.json({ error: "name is required", code: "session_name_required" }, { status: 400 });
+    const body = await parseJsonWithinLimit<{ name?: unknown; pinned?: unknown }>(req, 64 * 1024);
+    const pinned = body.pinned;
+    if (pinned !== undefined && typeof pinned !== "boolean") {
+      return NextResponse.json({ error: "pinned must be a boolean", code: "invalid_session_pinned" }, { status: 400 });
+    }
+    // name is optional only in a pin-only request.
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    if (body.name !== undefined || pinned === undefined) {
+      if (!name) return NextResponse.json({ error: "name is required", code: "session_name_required" }, { status: 400 });
+    }
+    if (pinned !== undefined) {
+      // Unpinning always succeeds so a stale pin can be cleared; pinning needs
+      // a session that exists (on disk, or live before its first flush).
+      if (pinned) {
+        if (!getRpcSession(id)?.isAlive?.()) {
+          const resolved = await resolveSessionPathOr404(id);
+          if ("response" in resolved) return resolved.response;
+        }
+        const existing = new Set([id, ...(await listAllSessions()).map((s) => s.id), ...getRunningRpcSessions().map((s) => s.id)]);
+        setSessionPinned(id, true, (pin) => existing.has(pin));
+      } else {
+        setSessionPinned(id, false);
+      }
+      if (!name) return NextResponse.json({ ok: true, pinned });
     }
     // A running omp process owns its session file; route the rename through it
     // so the in-memory title cannot clobber ours on the next flush. This runs
@@ -282,7 +308,7 @@ export async function PATCH(
     const rpc = getRpcSession(id);
     if (rpc?.isAlive?.() && typeof rpc.send === "function") {
       try {
-        await rpc.send({ type: "set_session_name", name: name.trim() });
+        await rpc.send({ type: "set_session_name", name });
         renamed = true;
       } catch (error) {
         if (error instanceof WebRpcError && error.code === "session_busy") throw error;
@@ -298,7 +324,7 @@ export async function PATCH(
       if (getRpcSession(id)?.isEditingHistory()) {
         throw new WebRpcError("Wait for the history edit to finish", "session_busy");
       }
-      setSessionTitle(filePath, name.trim(), "user");
+      setSessionTitle(filePath, name, "user");
       invalidateSessionCaches(filePath);
       return NextResponse.json({ ok: true });
     }
@@ -434,6 +460,7 @@ export async function DELETE(
     clearExitedRpcSession(id);
     invalidateSessionPathCache(id);
     invalidateSessionCaches(); // deletion drops the file: full flush is correct
+    forgetSessionPins([id, deletedHeader?.id]);
     return NextResponse.json({
       ok: true,
       ...(skippedChildren.length > 0 ? { skippedChildren } : {}),
