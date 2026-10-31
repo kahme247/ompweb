@@ -29,6 +29,13 @@ export class HostOfflineError extends Error {
   }
 }
 
+/** 503 `transport_lost`: the session socket dropped after the command left and
+ *  before its answer (lib/event-stream.ts), so it may have run; the caller must
+ *  not offer it again. */
+export class TransportLostError extends Error {
+  readonly mayHaveRun = true;
+}
+
 export function setSessionAdvisorSpawn(sessionId: string, enabled: boolean) {
   if (enabled) advisorSpawnSessions.add(sessionId);
   else advisorSpawnSessions.delete(sessionId);
@@ -55,7 +62,9 @@ export async function sendAgentCommand<T = unknown>(
     // Routes attach a stable `code` for well-known failures; these messages are
     // surfaced to the user as notices, so localize before throwing.
     const message = body.error || body.code ? formatApiError(body) : `HTTP ${reply.status}`;
-    throw reply.status === 503 && body.hostOffline ? new HostOfflineError(message, body.delivery === "unknown") : new Error(message);
+    if (reply.status === 503 && body.hostOffline) throw new HostOfflineError(message, body.delivery === "unknown");
+    if (reply.status === 503 && body.code === "transport_lost") throw new TransportLostError(message);
+    throw new Error(message);
   }
   return body.data as T;
 }

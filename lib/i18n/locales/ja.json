@@ -1290,6 +1290,7 @@
   "hosts.remotePathHint": "{host} 上のフォルダーのパスを上に入力してから選択してください。",
   "agentSession.hostOfflineSend": "{detail}（送信されませんでした。メッセージは入力欄に残っています。）",
   "agentSession.hostOfflineMaybeSent": "{detail}（接続が切れる前にメッセージが届いている可能性があります。その場合、ホストの再接続時に実行されます。）",
+  "agentSession.transportLostMaybeSent": "送信中に接続が切れました。メッセージは届いている可能性があります。もう一度送信する前に会話を確認してください。",
   "hostsConfig.lastSeen": "最終接続 {time}",
   "hostsConfig.neverSeen": "未接続",
   "hostsConfig.allowAgentStart": "エージェントが確認なしでここにセッションを開始できる",

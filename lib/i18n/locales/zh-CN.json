@@ -1290,6 +1290,7 @@
   "hosts.remotePathHint": "请先在上方输入 {host} 上的文件夹路径，再选择它。",
   "agentSession.hostOfflineSend": "{detail}（未发送：消息仍保留在输入框中。）",
   "agentSession.hostOfflineMaybeSent": "{detail}（连接断开前消息可能已送达；若已送达，主机重新连接后会运行。）",
+  "agentSession.transportLostMaybeSent": "发送时连接中断，消息可能已送达。再次发送前请先查看对话。",
   "hostsConfig.lastSeen": "最近在线 {time}",
   "hostsConfig.neverSeen": "从未连接",
   "hostsConfig.allowAgentStart": "智能体可在此无需确认即启动会话",

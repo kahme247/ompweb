@@ -1331,6 +1331,7 @@
   "hosts.remotePathHint": "Type the folder's path on {host} above, then select it.",
   "agentSession.hostOfflineSend": "{detail} (Not sent: your message is still in the composer.)",
   "agentSession.hostOfflineMaybeSent": "{detail} (Your message may have reached it before the link dropped; if so, it runs when the host reconnects.)",
+  "agentSession.transportLostMaybeSent": "Connection lost while sending; the message may have been delivered. Check the conversation before sending it again.",
   "hostsConfig.lastSeen": "last seen {time}",
   "hostsConfig.neverSeen": "never connected",
   "hostsConfig.allowAgentStart": "Agents can start sessions here without asking",
