@@ -227,10 +227,11 @@ hooks/
   `followSessionMove()`: the pending flag makes the next `applyIdentity` treat
   the id change as the same conversation (stream/run state kept, **old id kept
   as a registry alias**, new id registered via `onIdentityChange({keepOldId})`).
-  Branch/new/switch still drop the old key. `startRpcSession` also reuses any
+  Branch/new/switch drop every key the wrapper had (aliases included), since it now serves another conversation. `startRpcSession` also reuses any
   live wrapper reporting the requested session file instead of spawning a second
-  `--resume` child (which would fork again). `onDestroy` removes every key that
-  points at the wrapper.
+  `--resume` child (which would fork again). A move during startup (before the
+  first `get_state`) is aliased too, so the requested id stays routable.
+  `onDestroy` removes every key that points at the wrapper.
 - `POST /api/sessions/[id]/auto-name` asks omp to generate the title
   (`AgentSessionWrapper.generateTitle()`: native `generate_title`, else
   argument-less `/rename`, never while a run is in flight). Only when omp cannot

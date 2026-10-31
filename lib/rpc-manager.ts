@@ -1322,6 +1322,11 @@ export class AgentSessionWrapper {
     this.onDestroyCallback = cb;
   }
 
+  /** Record an id this conversation was reached by before omp moved it; tabs still on it are still viewing it. */
+  keepMovedFromId(id: string): void {
+    if (!this.movedFromIds.includes(id)) this.movedFromIds.push(id);
+  }
+
   /**
    * Wait for the next `terminalEndsNeeded` terminal turn ends after this
    * call (terminal agent_end, prompt_result, or prompt_error). The caller
@@ -2654,11 +2659,17 @@ export async function startRpcSession(
       // Drop every key (current id, original id, moved-from aliases).
       for (const [key, wrapper] of registry) if (wrapper === created) registry.delete(key);
     });
-    created.onIdentityChange((oldId, newId, options) => {
-      if (!options?.keepOldId && registry.get(oldId) === created) registry.delete(oldId);
+    created.onIdentityChange((_oldId, newId, options) => {
+      // A move keeps the old ids routable; a branch/new/switch serves another conversation, so every old key goes.
+      if (!options?.keepOldId) for (const [key, wrapper] of registry) if (wrapper === created) registry.delete(key);
       registry.set(newId, created);
     });
     registry.set(realSessionId, created);
+    // omp can move a resumed session during startup, before identity is known; keep the requested id routable.
+    if (sessionFile && realSessionId !== sessionId) {
+      registry.set(sessionId, created);
+      created.keepMovedFromId(sessionId);
+    }
     // A successful respawn supersedes the crash record.
     clearExitedRpcSession(sessionId);
     if (realSessionId !== sessionId) clearExitedRpcSession(realSessionId);

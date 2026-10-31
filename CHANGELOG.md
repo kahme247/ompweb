@@ -11,6 +11,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 - **In-app updates work when ompweb runs as a systemd service.** The update worker ran inside the service's cgroup, so stopping the server killed the worker too: nothing was installed, the service could stay down (`Restart=on-failure` does not restart a clean SIGTERM exit), and every page load reopened the update dialog at "Stop ompweb-managed sessions". The worker now runs in its own transient scope (`systemd-run --scope`) and stops, updates and starts the unit through `systemctl`, starting it again if the install fails.
 - **An update whose worker died is reported as failed.** A running update whose worker process is gone, or whose lease has expired, now becomes a failed attempt the dialog can show and clean up, instead of waiting forever.
 - **The Provider Usage header stays put while its list scrolls.** Scrolling a long provider list in the sidebar also scrolled the section header (title, window toggle, refresh) out of view, on desktop and mobile. Only the list scrolls now.
+- **Sending to a session another omp process has open no longer leaves a dead fork.** When omp moved the resumed session to a new file during startup, the tab kept the old id, the event stream failed with "Failed to connect to the agent event stream", the prompt never went, and the forked session was reaped two minutes later. The requested id now stays routable alongside the new one.
 
 ---
 
