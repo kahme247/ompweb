@@ -39,24 +39,23 @@ export async function GET(
   _req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const receivedAt = Date.now();
   const { id } = await params;
 
   try {
     const session = getRpcSession(id);
     if (!session || !session.isAlive()) {
-      return timed(receivedAt, Response.json({ running: false }));
+      return Response.json({ running: false });
     }
     try {
       const state = await session.send({ type: "get_state" });
-      return timed(receivedAt, Response.json({ running: true, state }));
+      return Response.json({ running: true, state });
     } catch (error) {
       if (error instanceof WebRpcError && error.code === "session_unresponsive") {
-        return timed(receivedAt, Response.json({ running: false, recovered: true }));
+        return Response.json({ running: false, recovered: true });
       }
       throw error;
     }
   } catch (error) {
-    return timed(receivedAt, commandErrorResponse(error));
+    return commandErrorResponse(error);
   }
 }
