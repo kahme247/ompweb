@@ -285,7 +285,7 @@ test("Bun's idle timeout spares the event stream, the browser socket and the hos
     link.addEventListener("message", ({ data }) => String(data).includes('"type":"ping"') && ping.resolve());
     link.addEventListener("close", ({ code }) => ping.reject(new Error(`the host link was closed while idle (${code})`)));
 
-    // The browser's WebSocket transport: a hello on open, and the server's own pings while idle.
+    // The browser's WebSocket transport: a hello on open, and the server's own ping every WS_HEARTBEAT_MS (10 s).
     const browser = new WebSocket(url("/api/events/ws").href.replace(/^http/, "ws"), { headers: signedIn } as unknown as string[]);
     t.after(() => browser.close());
     const browserFrames: string[] = [];
@@ -321,10 +321,12 @@ test("Bun's idle timeout spares the event stream, the browser socket and the hos
     ]);
     assert.deepEqual([...open], []);
 
-    // The ping proves the socket outlived the idle timeout; so has the event stream, opened before it.
+    // The ping proves the socket outlived the idle timeout; so has the event stream, opened before it. The link's
+    // ping comes 15 s after it opened, so the browser socket, opened just after it, has had its 10 s ping by now.
     await ping.promise;
     assert.equal(link.readyState, WebSocket.OPEN);
     assert.equal(browser.readyState, WebSocket.OPEN, "the browser socket was closed while idle");
+    assert.ok(browserFrames.some((frame) => /^ping \d+\n\{\}$/.test(frame)), `no server ping while idle: ${browserFrames.join(" | ")}`);
     browser.send(JSON.stringify({ t: "sub", id: "s1", channel: { kind: "hosts" } }));
     await browserFrameMatching(/^mux \d+\n\{"type":"open","sub":"s1"\}$/);
     const subscribe = await fetch(url("/api/events"), {
