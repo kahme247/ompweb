@@ -65,6 +65,7 @@ import * as skillsUpdate from "@/app/api/skills/update/route";
 import * as sttJobIdAudio from "@/app/api/stt/[jobId]/audio/route";
 import * as sttJobId from "@/app/api/stt/[jobId]/route";
 import * as stt from "@/app/api/stt/route";
+import * as transportMetrics from "@/app/api/transport-metrics/route";
 import * as usage from "@/app/api/usage/route";
 import * as webAuthSession from "@/app/api/web-auth/session/route";
 import * as webSettings from "@/app/api/web-settings/route";
@@ -155,6 +156,7 @@ export const ROUTE_MODULES: Record<string, RouteModule> = {
   "stt/[jobId]/audio": sttJobIdAudio,
   "stt/[jobId]": sttJobId,
   "stt": stt,
+  "transport-metrics": transportMetrics,
   "usage": usage,
   "web-auth/session": webAuthSession,
   "web-settings": webSettings,
