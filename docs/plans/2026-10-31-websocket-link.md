@@ -29,7 +29,7 @@
 2. **Half-open sockets (laptop sleep, NAT timeout):** with no frame for `offlineMs` the daemon closes the socket and redials while its omp children keep running (Task 3 watchdog test), and the hub flips the host offline (existing hub test). A given-up socket stays inert: every daemon handler first checks it is still the current socket (code review; a late 4409 on a dead socket cannot be produced reliably in a test).
 3. **A drop between apply and ack:** no frame lost or duplicated, in both directions (Task 5 streaming test with its three faults; Task 4 resend tests).
 4. **A v3 daemon (the Mac) against the new server:** its hello POST gets 426 with `hostVersion 3, serverVersion 4`, it exits telling the user to update the host, and Settings shows needs upgrade without disturbing a healthy link (Task 4 tests).
-5. **A peer that stops reading:** the daemon never has more than one uplink text frame unacked; the hub's socket closes at its backpressure limit instead of buffering, and the outbox resends after the redial (Task 3 flow-control test; Task 4 asserts the handler's limits; probe rows in the spec).
+5. **A peer that stops reading:** the daemon never has more than one uplink text frame unacked; the hub paces its downlink from the outbox (one sequenced line in Bun's buffer, the rest on `drain`), so a daemon that stops reading is waited for, not closed or buffered for; the backpressure-limit close is a backstop, and the outbox resends after any redial (Task 3 flow-control test; hub pacing test; Task 5 SIGSTOP test; spec D6).
 
 ## Inventory (counts at `51e40f47`, `rg` over code, tests and docs)
 
