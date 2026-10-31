@@ -222,7 +222,7 @@ messages go again after the redial.
 | `kill {ch, force}` | down | Stop a child: `force: false` terminates its process tree, `true` kills it. |
 | `exit {ch, code, signal}` | up | Child exited. |
 | `resync {ch}` | up | Buffered output for `ch` was dropped. |
-| `stats {samples[{session, bytes, bytesAhead, ackMs, at}]}` | up | Head-of-line samples of acked uplink messages (at most `LINK_LIMITS.statsSamples`); main writes them as `metric: "link"` samples. A compatible addition: an older main skips the type. Queued under its own sender key, so it waits its turn and the unacked window like any message. |
+| `stats {samples[{session, bytes, bytesAhead, ackMs, at}]}` | up | Head-of-line samples of acked uplink messages (at most `LINK_LIMITS.statsSamples`); main writes them as `metric: "link"` samples. Advisory: a malformed sample is dropped (logged once per host), never fails the frame; past 8 × `statsSamples` per host per `statsFlushMs` the rest is dropped and counted. A compatible addition: an older main skips the type. Queued under its own sender key, so it waits its turn and the unacked window like any message. |
 | `req {id, op, args}` | down | Host op request. |
 | `res {id, ok, result \| error}`; `res {id, ok: true, blob: {bytes}}` | up | Host op result; the second form names bytes sent earlier in a binary frame. |
 | `ack {ack}` | both | Highest `seq` applied from the other side; unsequenced. |

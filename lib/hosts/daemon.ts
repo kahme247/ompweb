@@ -71,14 +71,14 @@ interface Queued {
   bytes: number;
   /** Bytes this ack takes out of `unackedBytes`: the line's own, plus on a `res` the result bytes sent ahead of it. */
   unacked: number;
-  /** Its link sample, set on the line that completes a message (a whole line, or its last part). Null for a `stats`
-   * message and for a part before the last. */
-  sample: LinkStatSample | null;
+  /** Its link sample, set on the line that completes a message (a whole line, or its last part), with `t`, its queue
+   * time on the monotonic clock. Null for a `stats` message and for a part before the last. */
+  sample: (Omit<LinkStatSample, "ackMs"> & { t: number }) | null;
 }
 
-/** A message's link sample as taken when it is queued: the time, the bytes of a result queued ahead of this `res`
+/** A message's link sample as taken when it is queued: the time (wall and monotonic), the bytes of a result queued ahead of this `res`
  * (else 0), the bytes queued or unacked ahead of it, and the session it serves. */
-type UpSample = { at: number; blob: number; bytesAhead: number; session: string | null };
+type UpSample = { at: number; t: number; blob: number; bytesAhead: number; session: string | null };
 
 /** `counted`: child output, held against its channel's buffer until acked. */
 type Pending = Extract<SendItem, { line: string }> & { counted: boolean; sample: UpSample | null } | Extract<SendItem, { blob: Uint8Array }>;
@@ -212,7 +212,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     const size = Buffer.byteLength(line);
     // Ahead of it: what is unacked and what is queued to go (counters, no scan; a queued line counts at its size before
     // its seq is filled in). A `stats` message is not measured itself: its sample would need another one.
-    const sample = body.type === "stats" ? null : { at: Date.now(), blob, bytesAhead: ahead ?? unackedBytes + sender.queuedBytes, session };
+    const sample = body.type === "stats" ? null : { at: Date.now(), t: performance.now(), blob, bytesAhead: Math.max(0, ahead ?? unackedBytes + sender.queuedBytes), session };
     sender.push(key, { line, size, counted, sample });
     unsentBytes += size;
     scheduleFlush();
@@ -243,16 +243,23 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
 
   function acked(ack: number): void {
     ackedUp = Math.max(ackedUp, ack);
-    const now = Date.now();
+    // Monotonic: a wall-clock step (time sync, a VM resuming) never makes a negative or inflated ackMs.
+    const now = performance.now();
     for (const item of outbox.ack(ack)) {
       const channel = channels.get(item.key);
       if (channel) channel.buffered -= item.bytes;
       unackedBytes -= item.unacked;
       // One sample per message: a split one carries it on its last part, acked with the whole message.
-      if (item.sample) samples.push({ ...item.sample, ackMs: now - item.sample.at });
+      if (item.sample) {
+        const { t, ...sample } = item.sample;
+        samples.push({ ...sample, ackMs: Math.max(0, Math.round(now - t)) });
+      }
     }
     if (samples.length >= LINK_LIMITS.statsSamples) sendStats();
-    else if (samples.length > 0) statsTimer ??= setTimeout(sendStats, LINK_LIMITS.statsFlushMs);
+    else if (samples.length > 0 && !statsTimer) {
+      statsTimer = setTimeout(sendStats, LINK_LIMITS.statsFlushMs);
+      statsTimer.unref?.();
+    }
   }
 
   /** The samples so far, as `stats` messages of at most statsSamples each (one ack can cover more), queued under their
@@ -294,7 +301,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     const sentBlob = unit.done ? sentResult.get(unit.key) ?? 0 : 0;
     if (sentBlob) sentResult.delete(unit.key);
     const sample = unit.done && item.sample
-      ? { session: item.sample.session, bytes: unit.messageBytes + item.sample.blob, bytesAhead: item.sample.bytesAhead, ackMs: 0, at: item.sample.at }
+      ? { session: item.sample.session, bytes: unit.messageBytes + item.sample.blob, bytesAhead: item.sample.bytesAhead, at: item.sample.at, t: item.sample.t }
       : null;
     outbox.push({ seq: unit.seq, line: unit.line, key: unit.key, bytes, unacked: size + sentBlob, sample });
     unackedBytes += size;
@@ -678,6 +685,11 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   }
 
   function shutdown(code: number): Promise<void> {
+    // Best effort: the samples so far go in one last frame, when the unacked window lets them.
+    if (!stopped && linked && samples.length > 0) {
+      sendStats();
+      flush();
+    }
     stopped = true;
     stopping ??= (async () => {
       stopSignal.abort();

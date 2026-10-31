@@ -86,10 +86,12 @@ interface Sent {
   sample: DownSample | null;
 }
 
-/** What a downlink message's link sample needs, taken when it is queued: the time, its UTF-8 size, the bytes queued
+/** What a downlink message's link sample needs, taken when it is queued: the time (wall and monotonic), its UTF-8 size, the bytes queued
  * or unacked ahead of it then, and the session it serves. */
 interface DownSample {
   at: number;
+  /** `at` on the monotonic clock, for ackMs. */
+  t: number;
   bytes: number;
   bytesAhead: number;
   session: string | null;
@@ -125,11 +127,24 @@ interface Link {
   parts: PartJoiner;
   /** What this link has already logged about messages it skipped. */
   unknownLog: UnknownMessageLog;
+  /** This link's `up` samples in the current statsFlushMs window (STATS_BUDGET_FACTOR × statsSamples at most) and those
+   * dropped past it; `start` is a monotonic time. */
+  statsWindow: { start: number; used: number; dropped: number };
+  /** A malformed `stats` sample was logged on this link (once per link). */
+  statsWarned: boolean;
   pending: Map<string, PendingOp>;
   channels: Map<string, RemoteRpcTransport>;
   pingTimer: NodeJS.Timeout | undefined;
   offlineTimer: NodeJS.Timeout | undefined;
   statusListeners: Set<(status: HostStatus) => void>;
+}
+
+/** Link samples (metric "link") waiting to be written, and the file they go to, resolved when the batch started so a
+ * later flush never re-resolves the agent dir (a test's may be gone by then). */
+interface LinkSampleBatch {
+  samples: Record<string, unknown>[];
+  file: string;
+  timer: NodeJS.Timeout | undefined;
 }
 
 interface HubState {
@@ -138,6 +153,7 @@ interface HubState {
   helloListeners: Set<(hostId: string, channels: HelloChannel[]) => void>;
   /** This server is shutting down (freezeHostLinks): links neither send nor apply anything. */
   frozen: boolean;
+  linkSamples: LinkSampleBatch;
 }
 
 declare global {
@@ -146,7 +162,13 @@ declare global {
 
 // globalThis, like the rpc-manager registry: survives a `bun --hot` re-evaluation.
 function hub(): HubState {
-  globalThis.__ompHostHub ??= { links: new Map(), changeListeners: new Set(), helloListeners: new Set(), frozen: false };
+  globalThis.__ompHostHub ??= {
+    links: new Map(),
+    changeListeners: new Set(),
+    helloListeners: new Set(),
+    frozen: false,
+    linkSamples: { samples: [], file: "", timer: undefined },
+  };
   return globalThis.__ompHostHub;
 }
 
@@ -174,6 +196,8 @@ function linkFor(id: string): Link {
       up: new SeqWindow(),
       parts: new PartJoiner(),
       unknownLog: new UnknownMessageLog("daemon"),
+      statsWindow: { start: 0, used: 0, dropped: 0 },
+      statsWarned: false,
       pending: new Map(),
       channels: new Map(),
       pingTimer: undefined,
@@ -281,7 +305,7 @@ function sendDown(link: Link, body: Unsequenced<DownMessage>, key: string): void
   const line = encodeQueued(body);
   const size = Buffer.byteLength(line);
   // Ahead of it: what is queued or unacked on this link (counters, no scan); fairness may send it before some of that.
-  const sample = { at: Date.now(), bytes: size, bytesAhead: link.outboxBytes + link.sender.queuedBytes, session: sessionOf(link, body) };
+  const sample = { at: Date.now(), t: performance.now(), bytes: size, bytesAhead: link.outboxBytes + link.sender.queuedBytes, session: sessionOf(link, body) };
   link.sender.push(key, { line, size, sample });
   flush(link);
 }
@@ -292,48 +316,68 @@ function sessionOf(link: Link, body: Unsequenced<DownMessage>): string | null {
   return isRecord(body.args) && typeof body.args.id === "string" && isValidSessionId(body.args.id) ? body.args.id : null;
 }
 
-/** Link samples (metric "link") waiting to be written, at most LINK_LIMITS.statsSamples: written at that count, after
- * statsFlushMs or when the hub stops. The file is resolved when a batch starts, so a later flush never re-resolves the
- * agent dir (a test's may be gone by then). */
-const linkSamples: Record<string, unknown>[] = [];
-let linkSampleFile = "";
-let linkSampleTimer: NodeJS.Timeout | undefined;
-
+/** Batch link samples: written at LINK_LIMITS.statsSamples, after statsFlushMs, or when the hub stops. */
 function recordLinkSamples(samples: Record<string, unknown>[]): void {
+  const batch = hub().linkSamples;
   for (const sample of samples) {
-    if (linkSamples.length === 0) {
-      linkSampleFile = transportMetricsPath();
-      linkSampleTimer = setTimeout(flushLinkSamples, LINK_LIMITS.statsFlushMs);
-      linkSampleTimer.unref?.();
+    if (batch.samples.length === 0) {
+      batch.file = transportMetricsPath();
+      batch.timer = setTimeout(flushLinkSamples, LINK_LIMITS.statsFlushMs);
+      batch.timer.unref?.();
     }
-    linkSamples.push(sample);
-    if (linkSamples.length >= LINK_LIMITS.statsSamples) flushLinkSamples();
+    batch.samples.push(sample);
+    if (batch.samples.length >= LINK_LIMITS.statsSamples) flushLinkSamples();
   }
 }
 
 /** Write the batch now. Measurement only: a failed write is logged and dropped, never touches a link. */
 export function flushLinkSamples(): void {
-  clearTimeout(linkSampleTimer);
-  linkSampleTimer = undefined;
-  if (linkSamples.length === 0) return;
+  const batch = hub().linkSamples;
+  clearTimeout(batch.timer);
+  batch.timer = undefined;
+  if (batch.samples.length === 0) return;
   try {
-    appendTransportSamples(linkSamples.splice(0), null, linkSampleFile);
+    appendTransportSamples(batch.samples.splice(0), null, batch.file);
   } catch (error) {
     console.warn(`[omp-web] could not write host link samples: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
 /** The daemon applied the downlink through `ack`: each message it acks now (a split one at its last part) becomes a
- * `down` sample; the lines leave the outbox and the unacked window. */
+ * `down` sample; the lines leave the outbox and the unacked window. `ackMs` is monotonic: a wall-clock step between
+ * queueing and ack does not show in it. */
 function ackDown(link: Link, ack: number): void {
-  const now = Date.now();
+  const now = performance.now();
   const samples: Record<string, unknown>[] = [];
   const acked = link.outbox.ack(ack);
   for (const { sample } of acked) {
-    if (sample) samples.push({ metric: "link", dir: "down", host: link.id, session: sample.session, bytes: sample.bytes, bytesAhead: sample.bytesAhead, ackMs: now - sample.at, at: sample.at });
+    if (sample) samples.push({ metric: "link", dir: "down", host: link.id, session: sample.session, bytes: sample.bytes, bytesAhead: sample.bytesAhead, ackMs: Math.max(0, Math.round(now - sample.t)), at: sample.at });
   }
   released(link, acked);
   recordLinkSamples(samples);
+}
+
+/** `up` samples one link may write per statsFlushMs, in multiples of statsSamples (a daemon reports about one `stats`
+ * per window): a daemon cannot flood the shared metrics file. */
+const STATS_BUDGET_FACTOR = 8;
+
+/** A daemon's `stats`: valid samples within the link's budget become `up` samples; the excess is dropped and written as
+ * one `{dropped}` sample when the next window starts. Malformed samples (already dropped by decodeUp) are logged once. */
+function applyStats(link: Link, message: Extract<UpMessage, { type: "stats" }>): void {
+  if (message.invalid && !link.statsWarned) {
+    link.statsWarned = true;
+    console.warn(`[omp-web] ${labelOf(link.id)}: dropped ${message.invalid} malformed link samples (not logged again for this host)`);
+  }
+  const window = link.statsWindow;
+  const now = performance.now();
+  if (now - window.start >= LINK_LIMITS.statsFlushMs) {
+    if (window.dropped > 0) recordLinkSamples([{ metric: "link", dir: "up", host: link.id, dropped: window.dropped, at: Date.now() }]);
+    Object.assign(window, { start: now, used: 0, dropped: 0 });
+  }
+  const taken = message.samples.slice(0, Math.max(0, STATS_BUDGET_FACTOR * LINK_LIMITS.statsSamples - window.used));
+  window.used += taken.length;
+  window.dropped += message.samples.length - taken.length;
+  recordLinkSamples(taken.map((sample) => ({ ...sample, metric: "link", dir: "up", host: link.id })));
 }
 
 /** Fail an op for good: a `req` not yet acked is never resent, nor the rest of one going in parts (one already
@@ -716,7 +760,7 @@ function applyUp(link: Link, message: UpMessage | UnknownMessage, joined = false
     case "res":
       return settle(link, message);
     case "stats":
-      return recordLinkSamples(message.samples.map((sample) => ({ metric: "link", dir: "up", host: link.id, ...sample })));
+      return applyStats(link, message);
   }
 }
 

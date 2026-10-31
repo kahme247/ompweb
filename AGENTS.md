@@ -387,11 +387,17 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   sent in parts at its last part, with the joined size; a `res` counts its result bytes as its own. The hub writes
   its `down` samples; the daemon reports its `up` ones in sequenced `stats` messages of at most
   `LINK_LIMITS.statsSamples`, queued under their own sender key (fair and inside the unacked window like any
-  message), which the hub validates strictly. Both sides batch (`statsSamples` or `statsFlushMs`,
-  30 s); the hub resolves the file when a batch starts and writes what it holds in `freezeHostLinks`. `ackMs` is a
-  round trip: a v5 daemon acks the downlink within `flushMs` (an ack-only frame if need be) and the hub's
-  ack rides the downlink. `bun scripts/link-hol-probe.ts` makes the load; `scripts/transport-metrics.ts` prints
-  `link small ackMs` (`clear` vs `behind-large`, 64 KiB ahead) and `link bytesAhead` per host and direction.
+  message). The samples are advisory: the hub keeps the valid ones, drops a malformed one (logged once per host) without
+  failing the frame, and writes at most 8 × `statsSamples` `up` samples per host per `statsFlushMs` (the excess is
+  written as one `{dropped}` record when the next window starts). `ackMs` is monotonic (`performance.now()`) on both
+  sides, `at` the wall clock. Both sides batch (`statsSamples` or `statsFlushMs`, 30 s): the hub's batch lives in its
+  `globalThis` state, resolves its file when it starts and is written in `freezeHostLinks`; the daemon queues what it
+  holds when it stops (best effort). Tests that drive the hub call
+  `flushLinkSamples()` before they restore `PI_CODING_AGENT_DIR`. `ackMs` is a round trip: a v5 daemon acks the
+  downlink within `flushMs` (an ack-only frame if need be) and the hub's ack rides the downlink.
+  `bun scripts/link-hol-probe.ts` makes the load; `scripts/transport-metrics.ts` prints `link small ackMs` (`clear`
+  vs `behind-large`, 64 KiB ahead), `link bytesAhead` and `link dropped` per host and direction (`--session` for one
+  session's link samples).
 - **Link protocol versions** (spec "Protocol versions and compatibility"). A
   released `LINK_PROTOCOL_VERSION` changes only compatibly: an added optional
   field or a message type receivers skip is fine; a changed type or meaning, or
