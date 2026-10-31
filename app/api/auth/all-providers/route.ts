@@ -1,8 +1,6 @@
 import { readModelsConfig } from "@/lib/omp/models-config";
 import { type OmpLoginProvider, type OmpModel, runUtilityCommand } from "@/lib/omp/rpc-utility";
 
-export const dynamic = "force-dynamic";
-
 // omp exposes no "all known providers" query over RPC, and API keys live in
 // its SQLite credential store which omp-web must not touch. What we CAN see is
 // which providers currently resolve models (env keys, stored keys, models.yml)

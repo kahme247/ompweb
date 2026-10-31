@@ -1,14 +1,20 @@
-import { NextResponse } from "next/server";
+import { broadcastBrowserTransport } from "@/lib/event-stream-hub";
+import { BROWSER_TRANSPORTS } from "@/lib/event-stream-protocol";
 import { syncInterruptibleSessions } from "@/lib/rpc-manager";
 import { parseAgentEnvText, sanitizeAgentEnvValues, type AgentEnvParseResult } from "@/lib/omp/agent-env";
-import { loadWebServerSettings, saveWebServerSettings, type WebServerSettings } from "@/lib/web-settings";
+import {
+  BROWSER_TRANSPORT_RANGES,
+  browserTransportState,
+  inBrowserTransportRange,
+  loadWebServerSettings,
+  saveWebServerSettings,
+  type WebServerSettings,
+} from "@/lib/web-settings";
 import { isRecord } from "@/lib/type-guards";
-
-export const dynamic = "force-dynamic";
 
 /** GET/PUT /api/web-settings - omp-web's own server-side settings. */
 export async function GET() {
-  return NextResponse.json(readSettings());
+  return Response.json(readSettings());
 }
 
 /** Never surface a variable lib/omp/agent-env.ts would refuse to spawn with. */
@@ -22,12 +28,12 @@ export async function PUT(req: Request) {
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "Invalid JSON request body", code: "invalid_json" }, { status: 400 });
+    return Response.json({ error: "Invalid JSON request body", code: "invalid_json" }, { status: 400 });
   }
   if (!isRecord(body)) {
-    return NextResponse.json({ error: "Request body must be a settings object", code: "invalid_settings" }, { status: 400 });
+    return Response.json({ error: "Request body must be a settings object", code: "invalid_settings" }, { status: 400 });
   }
-  const payload = body as { autoResumeSessions?: unknown; agentToolsEnabled?: unknown; agentEnv?: unknown };
+  const payload = body as Partial<Record<keyof WebServerSettings, unknown>>;
   const patch: Partial<WebServerSettings> = {};
 
   // Both keys are optional so a caller can update one without reading the other;
@@ -35,7 +41,7 @@ export async function PUT(req: Request) {
   let resumeProvided = false;
   if (payload.autoResumeSessions !== undefined) {
     if (typeof payload.autoResumeSessions !== "boolean") {
-      return NextResponse.json({ error: "autoResumeSessions must be a boolean", code: "invalid_settings" }, { status: 400 });
+      return Response.json({ error: "autoResumeSessions must be a boolean", code: "invalid_settings" }, { status: 400 });
     }
     patch.autoResumeSessions = payload.autoResumeSessions;
     resumeProvided = true;
@@ -43,9 +49,27 @@ export async function PUT(req: Request) {
 
   if (payload.agentToolsEnabled !== undefined) {
     if (typeof payload.agentToolsEnabled !== "boolean") {
-      return NextResponse.json({ error: "agentToolsEnabled must be a boolean", code: "invalid_settings" }, { status: 400 });
+      return Response.json({ error: "agentToolsEnabled must be a boolean", code: "invalid_settings" }, { status: 400 });
     }
     patch.agentToolsEnabled = payload.agentToolsEnabled;
+  }
+
+  if (payload.browserTransport !== undefined) {
+    const transport = BROWSER_TRANSPORTS.find((value) => value === payload.browserTransport);
+    if (!transport) {
+      return Response.json({ error: `browserTransport must be one of ${BROWSER_TRANSPORTS.map((value) => `"${value}"`).join(", ")}`, code: "invalid_settings" }, { status: 400 });
+    }
+    patch.browserTransport = transport;
+  }
+
+  for (const key of ["browserTransportPerSocket", "browserTransportMaxSockets"] as const) {
+    const value = payload[key];
+    if (value === undefined) continue;
+    if (!inBrowserTransportRange(key, value)) {
+      const [min, max] = BROWSER_TRANSPORT_RANGES[key];
+      return Response.json({ error: `${key} must be an integer from ${min} to ${max}`, code: "invalid_settings" }, { status: 400 });
+    }
+    patch[key] = value;
   }
 
   if (payload.agentEnv !== undefined) {
@@ -56,13 +80,13 @@ export async function PUT(req: Request) {
     } else if (isRecord(payload.agentEnv)) {
       parsed = sanitizeAgentEnvValues(payload.agentEnv);
     } else {
-      return NextResponse.json(
+      return Response.json(
         { error: "agentEnv must be KEY=VALUE text or an object of variables", code: "invalid_agent_env" },
         { status: 400 },
       );
     }
     if (parsed.errors.length > 0) {
-      return NextResponse.json(
+      return Response.json(
         { error: "agentEnv contains invalid or reserved variable names", code: "invalid_agent_env", errors: parsed.errors },
         { status: 400 },
       );
@@ -70,9 +94,13 @@ export async function PUT(req: Request) {
     patch.agentEnv = parsed.values;
   }
 
+  const previousTransport = JSON.stringify(browserTransportState());
   const settings = saveWebServerSettings(patch);
   // Apply to sessions that are already running, not only the next run. Only when the
   // flag was part of this save — an agentEnv-only write must not touch live sessions.
   if (resumeProvided) syncInterruptibleSessions();
-  return NextResponse.json({ ...settings, agentEnv: sanitizeAgentEnvValues(settings.agentEnv).values });
+  // Every open browser converges on the new state; an unchanged one is not sent (the worker ignores it anyway).
+  const transport = browserTransportState(settings);
+  if (JSON.stringify(transport) !== previousTransport) broadcastBrowserTransport(transport);
+  return Response.json({ ...settings, agentEnv: sanitizeAgentEnvValues(settings.agentEnv).values });
 }

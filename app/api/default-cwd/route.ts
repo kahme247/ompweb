@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import { apiErrorResponse } from "@/lib/api-utils";
 import { mkdirSync } from "fs";
 import { homedir } from "os";
@@ -13,7 +12,7 @@ export async function POST() {
     const dir = join(homedir(), `omp-cwd-${date}`);
     mkdirSync(dir, { recursive: true });
     allowFileRoot(dir);
-    return NextResponse.json({ cwd: dir });
+    return Response.json({ cwd: dir });
   } catch (error) {
     return apiErrorResponse(error);
   }

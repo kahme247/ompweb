@@ -3,7 +3,8 @@ import { homedir } from "os";
 import path from "path";
 import { getAgentDir, getConfigRoot } from "./omp/paths";
 import { isWindowsAbsolutePath } from "./paths";
-import { listAllSessions } from "./session-reader";
+import { hostSessions } from "./hosts/session-index";
+import { LOCAL_HOST_ID } from "./hosts/registry";
 
 export { isWindowsAbsolutePath } from "./paths";
 
@@ -96,7 +97,8 @@ export async function getAllowedFileRoots(): Promise<Set<string>> {
   const now = Date.now();
   const cached = globalThis.__piAllowedRootsCache;
   if (cached && cached.expiresAt > now) return cached.roots;
-  const sessions = await listAllSessions();
+  // This machine's sessions, as its daemon lists them (the last list while it is offline).
+  const sessions = await hostSessions(LOCAL_HOST_ID);
   const roots = new Set<string>();
   for (const s of sessions) {
     if (s.cwd) roots.add(normalizeSlashes(s.cwd));

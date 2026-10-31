@@ -1,9 +1,9 @@
 "use client";
 
-import { memo, useCallback, useRef, useState } from "react";
+import { memo, useCallback, useId, useRef, useState, type ReactNode } from "react";
 import type { AgentMessage, ExitedRpcSession, ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
 import { formatExitedSessionNotice, useI18n } from "@/lib/i18n";
-import { ChevronDown, ChevronRight, Folder, GitBranch, MoreHorizontal, Pin } from "lucide-react";
+import { ChevronDown, ChevronRight, Folder, GitBranch, MoreHorizontal, Pin, Plus } from "lucide-react";
 import { Tooltip } from "./ui/primitives";
 import { ConfirmDialog } from "./ui/field";
 import { copyText } from "@/lib/clipboard";
@@ -20,6 +20,7 @@ import {
   RecentlyCompletedIndicator,
   RunningSessionIndicator,
   SIDEBAR_BUTTON_TRANSITION,
+  SidebarIconButton,
   SidebarPortalMenu,
   UnreadSessionIndicator,
 } from "./SessionSidebar-chrome";
@@ -32,6 +33,61 @@ import {
  */
 const SIDEBAR_STATUS_SLOT = 12;
 const SIDEBAR_STATUS_GAP = 2;
+
+/** One host's workspaces: a collapsible header (name, status dot) around the
+ *  usual project list. An unreachable host keeps its last list, dimmed, with
+ *  the reason in a tooltip; adding a workspace there is disabled. */
+function HostGroup({ name, color, statusText, unavailableReason, collapsed, onToggle, onAdd, empty, children }: {
+  name: string;
+  color: string | undefined;
+  statusText: string | null;
+  unavailableReason: string | null;
+  collapsed: boolean;
+  onToggle: () => void;
+  onAdd: () => void;
+  /** Shown instead of the list when the host has no workspaces. */
+  empty: string | null;
+  children: ReactNode;
+}) {
+  const { t } = useI18n();
+  // The tooltip is invisible to keyboards and screen readers: say it in text too.
+  const reasonId = useId();
+  return (
+    <section aria-label={name} style={{ marginBottom: 6 }}>
+      {unavailableReason && <span id={reasonId} style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", clip: "rect(0, 0, 0, 0)", whiteSpace: "nowrap" }}>{unavailableReason}</span>}
+      <div style={{ display: "flex", alignItems: "center", gap: 2, padding: "4px 0 2px" }} title={unavailableReason ?? undefined}>
+        <button
+          type="button"
+          className="ui-focus-ring"
+          aria-expanded={!collapsed}
+          aria-describedby={unavailableReason ? reasonId : undefined}
+          aria-label={t(collapsed ? "hosts.expandGroup" : "hosts.collapseGroup", { host: name })}
+          onClick={onToggle}
+          style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 6, padding: "3px 4px", border: "none", borderRadius: 6, background: "none", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", opacity: unavailableReason ? 0.7 : 1 }}
+        >
+          <ChevronRight size={12} strokeWidth={2.2} aria-hidden="true" style={{ flexShrink: 0, transform: collapsed ? undefined : "rotate(90deg)", transition: "transform var(--dur-fast) var(--ease-out-warm)" }} />
+          <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: "50%", flexShrink: 0, background: color ?? "var(--text-dim)" }} />
+          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11, fontWeight: 600, letterSpacing: "0.04em", textTransform: "uppercase" }}>{name}</span>
+          {statusText && <span style={{ flexShrink: 0, fontSize: 10.5, color: "var(--text-dim)", textTransform: "none", letterSpacing: 0 }}>{statusText}</span>}
+        </button>
+        <SidebarIconButton label={t("hosts.addWorkspaceOn", { host: name })} onClick={onAdd} disabled={unavailableReason !== null}>
+          <Plus size={14} strokeWidth={1.9} aria-hidden="true" />
+        </SidebarIconButton>
+      </div>
+      {!collapsed && (
+        <div
+          role="group"
+          aria-label={name}
+          aria-describedby={unavailableReason ? reasonId : undefined}
+          title={unavailableReason ?? undefined}
+          style={{ opacity: unavailableReason ? 0.55 : 1 }}
+        >
+          {empty ? <div style={{ padding: "6px 4px", color: "var(--text-dim)", fontSize: 11.5 }}>{empty}</div> : children}
+        </div>
+      )}
+    </section>
+  );
+}
 
 interface ProjectRowProps {
   project: ManagedProject;
@@ -47,14 +103,14 @@ interface ProjectRowProps {
   recentlyCompletedIds?: Set<string>;
   exitedSessions: Map<string, ExitedRpcSession>;
   relativeTimeNow: number;
-  onActivate: (path: string) => void;
-  onToggleExpand: (path: string) => void;
-  onRemoveProject: (path: string) => void;
+  onActivate: (project: ManagedProject) => void;
+  onToggleExpand: (project: ManagedProject) => void;
+  onRemoveProject: (project: ManagedProject) => void;
   onEditLaunchConfig: (project: ManagedProject) => void;
-  onUpdatePresentation: (path: string, updates: { alias?: string | null; sortOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }) => void;
-  onDragPathChange: (path: string | null) => void;
-  onDropProject: (path: string) => void;
-  onMoveProject: (path: string, delta: -1 | 1) => void;
+  onUpdatePresentation: (project: ManagedProject, updates: { alias?: string | null; sortOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }) => void;
+  onDragProjectChange: (project: ManagedProject | null) => void;
+  onDropProject: (project: ManagedProject) => void;
+  onMoveProject: (project: ManagedProject, delta: -1 | 1) => void;
   /** A sort is active: show the pin toggle; only pinned rows reorder by hand. */
   pinnable: boolean;
   onTogglePin: (project: ManagedProject) => Promise<void>;
@@ -86,7 +142,7 @@ function ProjectRow({
   onRemoveProject,
   onEditLaunchConfig,
   onUpdatePresentation,
-  onDragPathChange,
+  onDragProjectChange,
   onDropProject,
   onMoveProject,
   pinnable,
@@ -123,8 +179,8 @@ function ProjectRow({
     const alias = aliasValue.trim();
     setAliasEditing(false);
     if (alias === (project.alias ?? "")) return;
-    void onUpdatePresentation(project.path, { alias });
-  }, [aliasValue, project.alias, project.path, onUpdatePresentation]);
+    void onUpdatePresentation(project, { alias });
+  }, [aliasValue, project, onUpdatePresentation]);
   const label = project.alias ?? projectLabel(project.path);
   const pinned = pinnable && project.pinOrder !== undefined;
   const canReorder = !pinnable || pinned;
@@ -147,16 +203,16 @@ function ProjectRow({
         onConfirm={() => {
           if (removeBusy) return;
           setConfirmRemove(false);
-          onRemoveProject(project.path);
+          onRemoveProject(project);
         }}
       />
       <div
         className="sidebar-project-header"
         draggable={!aliasEditing && canReorder}
-        onDragStart={(event) => { event.dataTransfer.setData("text/plain", project.path); event.dataTransfer.effectAllowed = "move"; onDragPathChange(project.path); }}
+        onDragStart={(event) => { event.dataTransfer.setData("text/plain", project.path); event.dataTransfer.effectAllowed = "move"; onDragProjectChange(project); }}
         onDragOver={(event) => { if (isDragTarget) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }}
-        onDrop={(event) => { event.preventDefault(); onDropProject(project.path); }}
-        onDragEnd={() => onDragPathChange(null)}
+        onDrop={(event) => { event.preventDefault(); onDropProject(project); }}
+        onDragEnd={() => onDragProjectChange(null)}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
         onKeyDown={(event) => {
@@ -237,7 +293,7 @@ function ProjectRow({
             >
             <button
               className="sidebar-project-identity"
-              onClick={() => onActivate(project.path)}
+              onClick={() => onActivate(project)}
               aria-current={isActive ? "true" : undefined}
               title={project.path}
               style={{
@@ -348,10 +404,10 @@ function ProjectRow({
             </button>
             {canReorder && (
               <>
-                <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { setActionMenuOpen(false); void onMoveProject(project.path, -1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
+                <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { setActionMenuOpen(false); void onMoveProject(project, -1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
                   {t("projects.moveUp")}
                 </button>
-                <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { setActionMenuOpen(false); void onMoveProject(project.path, 1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
+                <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { setActionMenuOpen(false); void onMoveProject(project, 1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
                   {t("projects.moveDown")}
                 </button>
               </>
@@ -363,7 +419,7 @@ function ProjectRow({
         </div>
         <button
           className="sidebar-project-toggle"
-          onClick={() => onToggleExpand(project.path)}
+          onClick={() => onToggleExpand(project)}
           aria-label={isExpanded ? t("projects.collapseProject", { name: label }) : t("projects.expandProject", { name: label })}
           aria-expanded={isExpanded}
           title={isExpanded ? t("projects.collapseProjectTitle", { path: project.path }) : t("projects.expandProjectTitle", { path: project.path })}
@@ -804,6 +860,7 @@ const SessionItem = memo(function SessionItem({
   );
 });
 export {
+  HostGroup,
   ProjectRow,
   SessionItem,
   SessionTreeItem,

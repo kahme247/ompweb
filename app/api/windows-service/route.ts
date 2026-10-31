@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import {
   getWebServiceStatus,
   installTrayShortcuts,
@@ -7,10 +6,7 @@ import {
   startTrayService,
   stopTrayService,
   restartTrayService,
-  WebServiceStatus,
 } from "@/lib/windows-service";
-
-export const dynamic = "force-dynamic";
 
 interface WindowsServiceRequestBody {
   action?: "install" | "uninstall" | "toggle-autostart" | "start" | "stop" | "restart";
@@ -22,20 +18,20 @@ interface WindowsServiceRequestBody {
   cleanConfig?: boolean;
 }
 
-export async function GET(): Promise<NextResponse<WebServiceStatus>> {
+export async function GET(): Promise<Response> {
   const status = await getWebServiceStatus();
-  return NextResponse.json(status, {
+  return Response.json(status, {
     headers: { "Cache-Control": "no-store" },
   });
 }
 
-export async function POST(request: Request): Promise<NextResponse> {
+export async function POST(request: Request): Promise<Response> {
   try {
     const body = (await request.json()) as WindowsServiceRequestBody;
     const { action } = body;
 
     if (!action) {
-      return NextResponse.json(
+      return Response.json(
         { error: "Missing required 'action' parameter.", code: "missing_action" },
         { status: 400 }
       );
@@ -79,7 +75,7 @@ export async function POST(request: Request): Promise<NextResponse> {
         break;
 
       default:
-        return NextResponse.json(
+        return Response.json(
           { error: `Unknown action '${String(action)}'.`, code: "invalid_action" },
           { status: 400 }
         );
@@ -88,7 +84,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     const updatedStatus = await getWebServiceStatus();
 
     if (!result.success) {
-      return NextResponse.json(
+      return Response.json(
         {
           error: result.message || `Action '${action}' failed.`,
           code: "action_failed",
@@ -98,13 +94,13 @@ export async function POST(request: Request): Promise<NextResponse> {
       );
     }
 
-    return NextResponse.json({
+    return Response.json({
       success: true,
       message: result.message,
       status: updatedStatus,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return NextResponse.json({ error: message, code: "server_error" }, { status: 500 });
+    return Response.json({ error: message, code: "server_error" }, { status: 500 });
   }
 }

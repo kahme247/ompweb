@@ -4,20 +4,13 @@
 // registered here; unknown fence languages fall back to plain text without
 // console noise (the highlighter catches the unknown-language error itself).
 //
-// IMPORTANT: every grammar is registered EAGERLY via static imports. The old
-// design lazy-loaded rarer grammars with `() => import(...)`; Turbopack split
-// those ESM-only refractor chains into async chunks and intermittently failed
-// with:
-//
-//   Module .../languages/prism/c.js [app-client] (ecmascript) was instantiated
-//   because it was required from module .../lib/syntax-highlight.ts <locals>,
-//   but the module factory is not available.
-//
-// The async grammar chunk either raced with HMR or referenced a module factory
-// in a chunk that was never evaluated, taking down the whole page. Static
-// imports keep every grammar in the main client chunk, so no split/race
-// exists. Grammars are small regex-based objects, so the eager cost is a few
-// KB on top of what the core set already shipped.
+// IMPORTANT: every grammar is registered EAGERLY via static imports. An earlier
+// design lazy-loaded the rarer grammars with `() => import(...)`; under the
+// former Next.js (Turbopack) build those ESM-only refractor chains were split into async
+// chunks that intermittently failed to instantiate ("module factory is not
+// available"), taking down the whole page. Static imports keep every grammar in
+// the entry chunk: nothing is split, so nothing can race. Grammars are small
+// regex-based objects, so the eager cost is a few KB on top of the core set.
 import type { CSSProperties } from "react";
 import createSyntaxElement from "react-syntax-highlighter/dist/esm/create-element";
 import PrismLight from "react-syntax-highlighter/dist/esm/prism-light";

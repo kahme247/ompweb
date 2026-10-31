@@ -9,7 +9,18 @@
 // Stream framing (SSE):
 //   event: mux      data: MuxControlFrame       connection/subscription control
 //   event: <subId>  data: <channel payload>     one subscription's frames
+// Every frame also carries `id: <server ms at emit>`, read as `lastEventId`.
 // Subscriptions are added/removed with POST /api/events (EventStreamRequest).
+//
+// Stream framing (WebSocket, `browserTransport` "ws-client" | "ws-session" | "ws-pool"; lib/browser-socket.ts):
+// sockets at GET /api/events/ws (no query); any socket carries any channel and any session's commands,
+// and the mode only picks which socket the worker uses for what (public/event-stream-worker.js `socketKeyFor`).
+//   server -> client  text "<name> <server ms>\n<json>", split at the first newline:
+//                     mux (MuxControlFrame) | s<n> (one subscription's frame) |
+//                     ack {rid} | reply {rid, status, body, deduped?} | ping {} (10 s) | pong {c}
+//   client -> server  one JSON object per frame: {t:"sub", id, channel} | {t:"unsub", id} |
+//                     {t:"cmd", rid, session, advisor, command} | {t:"ping", c}
+// Every hello and the `transport` control frame carry the setting; the worker switches on it.
 //
 // public/event-stream-worker.js is a plain script (not bundled) and mirrors
 // these constants; keep the two in sync.
@@ -29,12 +40,33 @@ export type EventStreamChannel =
   | { kind: "session"; sessionId: string }
   | { kind: "file"; path: string; sessionId: string | null }
   /** Host tool calls (open_url, notify, open_file) from sessions no tab is watching. */
-  | { kind: "host-tools" };
+  | { kind: "host-tools" }
+  /** Settings → Hosts: the `GET /api/hosts` body on subscribe and after every change. */
+  | { kind: "hosts" };
+
+/** How the browser's shared worker reaches `/api/events`: SSE + HTTP POST, or WebSockets assigned per client, per session or from a pool. */
+export type BrowserTransport = "sse" | "ws-client" | "ws-session" | "ws-pool";
+
+export const BROWSER_TRANSPORTS: readonly BrowserTransport[] = ["sse", "ws-client", "ws-session", "ws-pool"];
+
+export function isWebSocketTransport(transport: BrowserTransport): boolean {
+  return transport !== "sse";
+}
+
+/** The setting every hello and `transport` frame carries; `perSocket`/`maxSockets` size the ws-pool. */
+export interface BrowserTransportState {
+  transport: BrowserTransport;
+  perSocket: number;
+  maxSockets: number;
+}
 
 export type MuxControlFrame =
-  | { type: "hello"; connectionId: string }
+  | ({ type: "hello"; connectionId: string; serverId: string } & BrowserTransportState)
   | { type: "open"; sub: string }
-  | { type: "end"; sub: string };
+  | { type: "end"; sub: string }
+  | { type: "refused"; sub: string; status: number; error: string; code: string }
+  /** The setting changed; the worker switches transport or reassigns its sockets. */
+  | ({ type: "transport" } & BrowserTransportState);
 
 export type EventStreamRequest =
   | { connectionId: string; subscribe: { id: string; channel: EventStreamChannel } }
@@ -57,6 +89,8 @@ export function parseEventStreamChannel(value: unknown): EventStreamChannel | nu
       return isValidNotificationId(channel.clientId) ? { kind: "notifications", clientId: channel.clientId } : null;
     case "host-tools":
       return { kind: "host-tools" };
+    case "hosts":
+      return { kind: "hosts" };
     case "session":
       return isBoundedString(channel.sessionId, MAX_ID_LENGTH) ? { kind: "session", sessionId: channel.sessionId } : null;
     case "file": {

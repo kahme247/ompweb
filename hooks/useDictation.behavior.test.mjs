@@ -1,9 +1,7 @@
 import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
-import { fileURLToPath } from "node:url";
-import { createJiti } from "jiti";
-import { act, cleanup, renderHook } from "@testing-library/react/pure.js";
+const { act, cleanup, renderHook } = await import("@testing-library/react/pure.js");
 
 // These tests execute the dictation state machine against fake
 // getUserMedia/MediaRecorder/AudioContext implementations. They assert the
@@ -11,11 +9,7 @@ import { act, cleanup, renderHook } from "@testing-library/react/pure.js";
 // isReviewing, live analyser, active-time accounting, blob-URL lifetime) —
 // the states the composer and RecordingDeck actually read.
 
-const jiti = createJiti(import.meta.url, {
-  tryNative: false,
-  alias: { "@/": fileURLToPath(new URL("../", import.meta.url)) },
-});
-const { useDictation } = await jiti.import("../hooks/useDictation.ts");
+const { useDictation } = await import("../hooks/useDictation.ts");
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /** Settles until `condition` holds; fails after `timeoutMs` instead of racing a fixed sleep. */

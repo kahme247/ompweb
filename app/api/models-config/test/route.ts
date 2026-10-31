@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -10,8 +9,6 @@ import {
 } from "@/lib/omp/models-config";
 import { type OmpModel, runIsolatedUtilityCommand } from "@/lib/omp/rpc-utility";
 import { isRecord } from "@/lib/type-guards";
-
-export const dynamic = "force-dynamic";
 
 // Registry resolution (spawn + model discovery), not a completion round-trip:
 // omp-web cannot send test prompts without going through a full agent session.
@@ -27,12 +24,12 @@ export async function POST(req: Request) {
   try {
     const body = await req.json() as { providerName?: unknown; provider?: unknown; model?: unknown };
     const providerName = typeof body.providerName === "string" ? body.providerName.trim() : "";
-    if (!providerName) return NextResponse.json({ ok: false, error: "providerName is required", code: "provider_name_required" }, { status: 400 });
-    if (!isRecord(body.provider)) return NextResponse.json({ ok: false, error: "provider is required", code: "provider_required" }, { status: 400 });
-    if (!isRecord(body.model)) return NextResponse.json({ ok: false, error: "model is required", code: "model_required" }, { status: 400 });
+    if (!providerName) return Response.json({ ok: false, error: "providerName is required", code: "provider_name_required" }, { status: 400 });
+    if (!isRecord(body.provider)) return Response.json({ ok: false, error: "provider is required", code: "provider_required" }, { status: 400 });
+    if (!isRecord(body.model)) return Response.json({ ok: false, error: "model is required", code: "model_required" }, { status: 400 });
 
     const modelId = typeof body.model.id === "string" ? body.model.id.trim() : "";
-    if (!modelId) return NextResponse.json({ ok: false, error: "Model ID is required", code: "model_id_required" }, { status: 400 });
+    if (!modelId) return Response.json({ ok: false, error: "Model ID is required", code: "model_id_required" }, { status: 400 });
 
     const config = {
       providers: {
@@ -45,7 +42,7 @@ export async function POST(req: Request) {
     try {
       validateModelsConfig(config);
     } catch (error) {
-      return NextResponse.json({ ok: false, error: errorMessage(error) });
+      return Response.json({ ok: false, error: errorMessage(error) });
     }
 
     // Isolated throwaway agent dir: the spawned omp sees only this candidate
@@ -68,7 +65,7 @@ export async function POST(req: Request) {
 
     const found = models.find((m) => m.provider === providerName && m.id === modelId);
     if (!found) {
-      return NextResponse.json({
+      return Response.json({
         ok: false,
         error: `Model ${providerName}/${modelId} did not resolve — check the API key and provider config`,
         code: "model_test_unresolved",
@@ -76,13 +73,13 @@ export async function POST(req: Request) {
       });
     }
 
-    return NextResponse.json({
+    return Response.json({
       ok: true,
       latencyMs,
         responseText: `${found.provider}/${found.id} resolved (configuration only; credentials were not contacted)`,
     });
   } catch (error) {
-    return NextResponse.json({ ok: false, error: errorMessage(error) }, { status: 500 });
+    return Response.json({ ok: false, error: errorMessage(error) }, { status: 500 });
   } finally {
     if (tempDir) rmSync(tempDir, { recursive: true, force: true });
   }

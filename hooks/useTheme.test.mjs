@@ -1,11 +1,9 @@
 import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
-import { act, cleanup, renderHook } from "@testing-library/react/pure.js";
-import { createJiti } from "jiti";
+const { act, cleanup, renderHook } = await import("@testing-library/react/pure.js");
 
-const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
-const { nextThemePreference, resolveTheme, isDarkTheme, LIGHT_THEMES, DARK_THEMES, useTheme } = await jiti.import("./useTheme.ts");
+const { nextThemePreference, resolveTheme, isDarkTheme, LIGHT_THEMES, DARK_THEMES, useTheme } = await import("./useTheme.ts");
 
 afterEach(cleanup);
 

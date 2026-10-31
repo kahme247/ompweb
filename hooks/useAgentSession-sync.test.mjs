@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createJiti } from "jiti";
-import { fileURLToPath } from "node:url";
 
-const jiti = createJiti(import.meta.url, { alias: { "@/": fileURLToPath(new URL("../", import.meta.url)) } });
-const { createSessionCatchUp } = await jiti.import("./useAgentSession-sync.ts");
+const { createSessionCatchUp } = await import("./useAgentSession-sync.ts");
 
 test("a newer user delivery cannot block recovery of an unrelated assistant partial", async (t) => {
   const timeoutDescriptor = Object.getOwnPropertyDescriptor(AbortSignal, "timeout");

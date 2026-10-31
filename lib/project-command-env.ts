@@ -2,8 +2,8 @@
  * Remove variables owned by the omp-web host before starting any child
  * process. Two groups are stripped:
  *
- *  - Host runtime variables (PORT, NODE_ENV, NEXT_*): these describe the
- *    Next.js server, not the selected project, and can make project commands
+ *  - Host runtime variables (PORT, NODE_ENV): these describe the
+ *    omp-web server, not the selected project, and can make project commands
  *    behave as if they were running inside the web app.
  *  - omp-web's own secrets. Every `omp` session inherits this environment, so
  *    an agent that runs `env` would otherwise print the web password hash into
@@ -31,9 +31,6 @@ export const OMP_WEB_SECRET_ENV_VARS: readonly string[] = [
   "OMP_WEB_TRUSTED_HEADER_SHA256",
 ];
 
-/** Prefixes that never reach a child process. */
-const HOST_RUNTIME_PREFIXES: readonly string[] = ["NEXT_"];
-
 function comparableName(name: string, platform: NodeJS.Platform): string {
   return platform === "win32" ? name.toUpperCase() : name;
 }
@@ -45,9 +42,7 @@ function matches(name: string, candidates: readonly string[], platform: NodeJS.P
 
 /** True when the variable belongs to the omp-web host rather than the child. */
 export function isHostRuntimeVariable(name: string, platform: NodeJS.Platform = process.platform): boolean {
-  const comparable = comparableName(name, platform);
-  return matches(name, HOST_RUNTIME_NAMES, platform)
-    || HOST_RUNTIME_PREFIXES.some((prefix) => comparable.startsWith(prefix));
+  return matches(name, HOST_RUNTIME_NAMES, platform);
 }
 
 /** True when the variable is one of omp-web's secrets. */

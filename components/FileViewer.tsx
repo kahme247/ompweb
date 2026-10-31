@@ -536,7 +536,6 @@ function ImageViewer({ filePath, cwd, sourceSessionId, active = true }: Props) {
             <button type="button" className="load-retry-button" onClick={retry} style={{ minHeight: 32, padding: "5px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>{t("chatWindow.retry")}</button>
           </div>
         ) : (
-          // eslint-disable-next-line @next/next/no-img-element
           <img
             src={src}
             alt={filePath}
@@ -676,7 +675,7 @@ function AudioViewer({ filePath, cwd, sourceSessionId, active = true }: Props) {
   );
 }
 
-function DocumentViewer({ filePath, cwd, sourceSessionId, active = true }: Props) {
+function DocumentViewer({ filePath, sourceSessionId, active = true }: Props) {
   const { t } = useI18n();
   const [watching, setWatching] = useState(false);
   const [bust, setBust] = useState(0);
@@ -1243,7 +1242,6 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
                     ? getFileApiUrl(imagePath, "read", sourceSessionId)
                     : src;
                   // Dynamic local paths are served directly by the file API.
-                  // eslint-disable-next-line @next/next/no-img-element
                   return <img src={imageSrc} alt={alt ?? ""} loading="lazy" {...props} />;
                 },
               }}

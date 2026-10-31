@@ -2,13 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createJiti } from "jiti";
 
-const jiti = createJiti(import.meta.url, {
-  jsx: { runtime: "automatic" },
-  tsconfigPaths: true,
-});
-const { ChatMinimap, extractPreviewText, getBarWidth, getTooltipTopPx, railIndexForPointer, railOverflows } = await jiti.import("./ChatMinimap.tsx");
+const { ChatMinimap, extractPreviewText, getBarWidth, getTooltipTopPx, railIndexForPointer, railOverflows } = await import("./ChatMinimap.tsx");
 
 test("extractPreviewText extracts clean text from user string content", () => {
   const preview = extractPreviewText({

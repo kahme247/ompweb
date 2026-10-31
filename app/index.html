@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en" translate="no" class="notranslate">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
+    <title>omp web</title>
+    <meta name="description" content="Web UI for the oh-my-pi (omp) coding agent" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="omp web" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="format-detection" content="telephone=no" />
+    <meta name="google" content="notranslate" />
+    <link rel="icon" href="../public/icon.svg" type="image/svg+xml" sizes="any" />
+    <link rel="icon" href="../public/favicon.ico" sizes="any" />
+    <meta name="theme-color" content="#000000" />
+    <script>(function(){try{var t;try{t=localStorage.getItem("omp-theme")}catch(e){}var d=matchMedia("(prefers-color-scheme: dark)").matches;var dt={"dark":1,"omp":1,"dracula":1,"harbor":1,"one-dark-pro":1,"rose-pine":1,"catppuccin-mocha":1,"gruvbox-dark":1,"nord":1,"tokyo-night":1};var lt={"light":1,"one-light":1,"catppuccin-latte":1,"rose-pine-dawn":1};var res=t==="system"?(d?"dark":"light"):(!t?"omp":t);if(!dt[res]&&!lt[res]&&res!=="omp")res="omp";var dark=!!dt[res]&&res!=="omp";if(dark)document.documentElement.classList.add("dark");if(res==="omp"){document.documentElement.classList.add("omp")}else{document.documentElement.classList.add("theme-"+res)}document.documentElement.setAttribute("data-theme",res);var m=document.querySelector('meta[name="theme-color"]'),c=getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();if(m&&c)m.setAttribute("content",c);}catch(e){}})();</script>
+    <script>(function(){try{var l=localStorage.getItem("omp-lang");if(l!=="en"&&l!=="zh-CN"&&l!=="ja"){var n=(navigator.language||"").toLowerCase();l=n.indexOf("zh")===0?"zh-CN":n.indexOf("ja")===0?"ja":"en"}document.documentElement.lang=l}catch(e){}})();</script>
+    <script>(function(){try{var f=localStorage.getItem("omp-font-size");if(f==="sm"||f==="md"||f==="lg"||f==="xl")document.documentElement.setAttribute("data-font-size",f)}catch(e){}})();</script>
+    <script>(function(){try{var s=localStorage.getItem("omp-ui-scale");if(s==="compact"||s==="standard"||s==="comfortable"||s==="large")document.documentElement.setAttribute("data-ui-scale",s)}catch(e){}})();</script>
+    <script>(function(){try{var t=localStorage.getItem("omp-touch-targets");if(t==="auto"||t==="compact"||t==="accessible")document.documentElement.setAttribute("data-touch-targets",t)}catch(e){}})();</script>
+    <link rel="stylesheet" href="./globals.css" />
+  </head>
+  <body translate="no" class="notranslate" style="height: 100%; max-height: 100%; overflow: hidden; display: flex; flex-direction: column">
+    <!-- Static copies of components/RouteLoadingFallback.tsx and of LoginForm's first render, painted before the bundle
+         runs; createRoot replaces them. RouteLoadingFallback.test.mjs and LoginForm.test.mjs keep them in sync. -->
+    <div id="root" style="display: contents">
+      <div class="route-fallback" role="status" aria-busy="true" aria-label="Loading omp web">
+        <aside class="route-fallback-sidebar" aria-hidden="true">
+          <div class="skeleton route-fallback-sidebar-title"></div>
+          <div class="skeleton route-fallback-sidebar-button"></div>
+          <div class="route-fallback-sidebar-list">
+            <div class="skeleton route-fallback-sidebar-row"></div>
+            <div class="skeleton route-fallback-sidebar-row"></div>
+            <div class="skeleton route-fallback-sidebar-row"></div>
+          </div>
+        </aside>
+        <main class="route-fallback-main" aria-hidden="true">
+          <div class="route-fallback-topbar">
+            <div class="skeleton route-fallback-topbar-control"></div>
+            <div class="skeleton route-fallback-topbar-title"></div>
+            <div class="skeleton route-fallback-topbar-control"></div>
+          </div>
+          <div class="route-fallback-content">
+            <div class="skeleton route-fallback-line route-fallback-line-short"></div>
+            <div class="skeleton route-fallback-line"></div>
+            <div class="skeleton route-fallback-line"></div>
+            <div class="skeleton route-fallback-composer"></div>
+          </div>
+        </main>
+      </div>
+      <!-- The sign-in page shows the form, as Next rendered it there, not the workspace silhouette. -->
+      <template id="login-shell">
+        <main style="flex:1;display:grid;place-items:center;padding:max(20px, env(safe-area-inset-top)) 20px max(20px, env(safe-area-inset-bottom));background:var(--bg)">
+          <section aria-labelledby="login-title" style="width:min(100%, 380px);padding:clamp(24px, 7vw, 32px);background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--radius-modal);box-shadow:var(--shadow-modal)">
+            <div style="width:40px;height:40px;display:grid;place-items:center;border-radius:50%;background:var(--user-bg);color:var(--accent);margin-bottom:20px">
+              <svg xmlns="http://www.w3.org/2000/svg" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-lock-keyhole" aria-hidden="true">
+                <circle cx="12" cy="16" r="1"></circle>
+                <rect x="3" y="10" width="18" height="12" rx="2"></rect>
+                <path d="M7 10V7a5 5 0 0 1 10 0v3"></path>
+              </svg>
+            </div>
+            <h1 id="login-title" class="display-serif" style="margin:0;font-size:28px;line-height:1.1;color:var(--text)">Welcome back</h1>
+            <p style="margin:10px 0 24px;color:var(--text-muted);font-size:13px;line-height:1.5">Enter the password for this omp web workspace.</p>
+            <form style="display:grid;gap:14px">
+              <label for="web-password" style="display:grid;gap:6px;color:var(--text-muted);font-size:12px;font-weight:600">Password<input id="web-password" class="ui-focus-ring" type="password" autoComplete="current-password" autofocus="" required="" style="width:100%;min-height:44px;padding:9px 10px;border:1px solid var(--border);border-radius:var(--radius-control);background:var(--bg);color:var(--text);font-size:14px;transition:border-color var(--dur-fast) var(--ease-out-warm), box-shadow var(--dur-fast) var(--ease-out-warm)" value=""/></label>
+              <button type="submit" class="ui-focus-ring" style="min-height:44px;border:0;border-radius:var(--radius-control);background:var(--accent-strong);color:var(--on-accent);font-weight:600;cursor:pointer;opacity:1">Unlock workspace</button>
+            </form>
+          </section>
+        </main>
+      </template>
+      <!-- Until the bundle runs, Enter must not reload the page (and drop ?next=); client.tsx carries a typed password over. -->
+      <script>if(location.pathname==="/login"){document.querySelector(".route-fallback").replaceWith(document.getElementById("login-shell").content);document.querySelector("#root form").addEventListener("submit",function(e){e.preventDefault()})}</script>
+    </div>
+    <script type="module" src="./client.tsx"></script>
+  </body>
+</html>

@@ -8,8 +8,8 @@ import { useEffect } from "react";
  * so inputs can keep the chat font size. iOS/iPadOS only: Chrome on Android
  * honors maximum-scale (users would lose pinch-zoom) and does not focus-zoom.
  *
- * Next streams the viewport meta and React may mount a fresh copy after
- * hydration, so a one-shot edit is lost. Watch <head> and re-apply instead.
+ * Anything that replaces the viewport meta would drop a one-shot edit, so
+ * watch <head> and re-apply.
  */
 export function IosFocusZoomGuard() {
   useEffect(() => {
