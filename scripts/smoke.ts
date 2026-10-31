@@ -1,10 +1,11 @@
 // `npm run smoke [-- --package <dir> | --binary <path>]`: starts ompweb (`node <dir>/bin/omp-web.js`, or the compiled
 // binary) on a free port with a throwaway HOME, then `ompweb host` from the same install, and checks the shipped
-// bundle, the SPA, a hashed asset, the API, a session listed through the daemon and the SSE stream, then stops both.
+// bundle, the SPA, a hashed asset, the API, a session listed through the daemon, the session-edit extension the daemon
+// hands omp (a stand-in omp records its arguments) and the SSE stream, then stops both.
 // <dir>: the repo root (after `npm run build`) or a packed install; <path>: release/ompweb-<os>-<arch>/ompweb, whose
 // directory holds the static files. Prints one `ok <step>` / `FAIL <step>: <detail>` line per step.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
@@ -76,13 +77,29 @@ writeFileSync(path.join(agentDir, "sessions", "-project", `2026-01-01_${SESSION_
   { type: "message", id: "m0", parentId: null, timestamp: "2026-01-01T00:00:01.000Z", message: { role: "user", content: "hello" } },
   { type: "message", id: "m1", parentId: "m0", timestamp: "2026-01-01T00:00:02.000Z", message: { role: "assistant", content: [{ type: "text", text: "hi" }] } },
 ].map((line) => `${JSON.stringify(line)}\n`).join(""));
+// A stand-in omp: answers the version and update checks, records every run's arguments and fails any other run.
+const ompRuns = path.join(temp, "omp-runs.jsonl");
+const fakeOmp = path.join(temp, process.platform === "win32" ? "omp.cmd" : "omp");
+const fakeOmpSource = `const args = process.argv.slice(2);
+require("node:fs").appendFileSync(${JSON.stringify(ompRuns)}, JSON.stringify(args) + "\\n");
+if (args[0] === "--version") console.log("14.0.0-smoke");
+else if (args[0] === "update") console.log("Current version: 14.0.0-smoke");
+else process.exitCode = 1;
+`;
+// Windows cannot spawn a shebang script: a .cmd runs it, as in lib/hosts/link-integration.test.mjs.
+if (process.platform === "win32") {
+  writeFileSync(`${fakeOmp}.cjs`, fakeOmpSource);
+  writeFileSync(fakeOmp, `@"${process.execPath.replaceAll("%", "%%")}" "${fakeOmp.replaceAll("%", "%%")}.cjs" %*\r\n`);
+} else {
+  writeFileSync(fakeOmp, `#!${process.execPath}\n${fakeOmpSource}`, { mode: 0o755 });
+}
 // USERPROFILE: os.homedir() on Windows, so the real ~/.omp stays untouched there too.
 const env: Record<string, string | undefined> = {
   ...process.env,
   HOME: home,
   USERPROFILE: home,
   PI_CODING_AGENT_DIR: agentDir,
-  OMP_WEB_OMP_BIN: path.join(temp, "missing-omp"),
+  OMP_WEB_OMP_BIN: fakeOmp,
 };
 for (const name of ["OMP_WEB_PASSWORD", "OMP_WEB_PASSWORD_HASH"]) delete env[name];
 
@@ -154,8 +171,7 @@ try {
       const deadline = Date.now() + 30_000;
       for (;;) {
         const { hosts } = await (await fetch(`${base}/api/hosts`)).json() as { hosts: { id: string; status: string }[] };
-        // Linked: "omp-missing" rather than "online", as OMP_WEB_OMP_BIN names no omp.
-        if (hosts.find((host) => host.id === "local")?.status === "omp-missing") break;
+        if (hosts.find((host) => host.id === "local")?.status === "online") break;
         assert(child.exitCode === null, `ompweb host exited with ${child.exitCode}`);
         assert(Date.now() < deadline, "this machine is not linked 30 s after `ompweb host` started");
         await Bun.sleep(200);
@@ -170,11 +186,27 @@ try {
       assert(sessions.some((session) => session.id === SESSION_ID), `listed: ${sessions.map((session) => session.id).join(", ") || "none"}`);
     });
 
+    // In the binary the daemon's modules live in Bun's virtual filesystem, which omp cannot read: the extension it
+    // hands omp must be the install's own file.
+    await step("omp starts with the session-edit extension this install ships", async () => {
+      const response = await fetch(`${base}/api/agent/${SESSION_ID}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "get_state" }) });
+      // An error answer: the stand-in omp exits at once.
+      await response.arrayBuffer();
+      const runs = readFileSync(ompRuns, "utf8").trim().split("\n").map((line) => JSON.parse(line) as string[]);
+      const run = runs.find((args) => args.includes("--extension"));
+      assert(run, `no omp run had --extension: ${JSON.stringify(runs)}`);
+      const extension = run[run.indexOf("--extension") + 1];
+      assert(existsSync(extension), `${extension} does not exist`);
+      assert(realpathSync(extension) === realpathSync(path.join(dir, "lib", "omp", "session-edit-extension.mjs")), `${extension} is not this install's`);
+    });
+
     if (binary) {
-      await step("the binary points updates at the release page and refuses in-app updates", async () => {
+      await step("the binary points updates at the release page and offers no in-app update", async () => {
         const update = await (await fetch(`${base}/api/app-update`)).json() as { installMethod?: string; selfUpdateSupported?: boolean; updateCommand?: string };
         assert(update.installMethod === "binary" && update.selfUpdateSupported === false, JSON.stringify(update));
         assert(update.updateCommand?.startsWith("https://github.com/kahme247/ompweb/releases"), `updateCommand ${update.updateCommand}`);
+        const ompCheck = await (await fetch(`${base}/api/omp-update`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "check" }) })).json() as { selfUpdateSupported?: boolean };
+        assert(ompCheck.selfUpdateSupported === false, `omp update check: ${JSON.stringify(ompCheck)}`);
         // Started, the worker would run on this binary: a second ompweb, not the update.
         const response = await fetch(`${base}/api/omp-update`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "update" }) });
         assert(response.status === 409, `POST /api/omp-update update: status ${response.status}`);
