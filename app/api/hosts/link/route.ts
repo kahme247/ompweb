@@ -1,16 +1,14 @@
-import { handleLinkGet, handleLinkPost } from "@/lib/hosts/hub";
+import { handleLinkUpgrade, handleOutdatedLinkPost, type LinkSocketData } from "@/lib/hosts/hub";
 
 // The `ompweb host` daemon's link (lib/hosts/hub.ts). proxy.ts does not run
-// for this path: the hub checks the host's bearer token before reading a body,
-// and only then lifts Bun's idle timeout (disableIdleTimeout, server/app.ts).
-type Context = { disableIdleTimeout: () => void };
+// for this path: the hub checks the host's bearer token before it upgrades.
 
-// GET /api/hosts/link — downlink: a long-lived NDJSON stream, server → daemon.
-export function GET(req: Request, { disableIdleTimeout }: Context) {
-  return handleLinkGet(req, disableIdleTimeout);
+// GET /api/hosts/link — the link's WebSocket; undefined once upgraded (server/app.ts).
+export function GET(req: Request, { upgrade }: { upgrade: (data: LinkSocketData) => boolean }) {
+  return handleLinkUpgrade(req, upgrade);
 }
 
-// POST /api/hosts/link — uplink: a batch of NDJSON messages, daemon → server.
-export function POST(req: Request, { disableIdleTimeout }: Context) {
-  return handleLinkPost(req, disableIdleTimeout);
+// POST /api/hosts/link — only refuses a daemon from before the WebSocket (its hello POST) with 426.
+export function POST(req: Request) {
+  return handleOutdatedLinkPost(req);
 }

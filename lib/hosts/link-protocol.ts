@@ -2,12 +2,12 @@
 // Pure: no I/O and no Next or `@/` imports, so both sides share it.
 import type { SessionOps } from "./session-ops";
 
-/** 2: the hello moved from a GET header into a POST body (a v1 daemon gets 426).
- * 3: hello channels carry `pending`, the raw lines of their open blocking requests.
+/** 4: the link is one WebSocket: text frames carry the messages, binary frames large results, `ack` messages replace
+ * the ack header and the POST answer; `replaced` and `welcome.nonce` are gone.
  * Rules for changing it: docs/specs/2026-10-28-remote-hosts-design.md, "Protocol versions and compatibility". */
-export const LINK_PROTOCOL_VERSION = 3;
-/** The oldest daemon protocol the server still links (older ones get 426). Dropping one is an explicit decision. */
-export const MIN_LINK_PROTOCOL_VERSION = 2;
+export const LINK_PROTOCOL_VERSION = 4;
+/** The oldest daemon protocol the server still links (older ones get close 4426). Dropping one is an explicit decision. */
+export const MIN_LINK_PROTOCOL_VERSION = 4;
 
 export const LINK_LIMITS = {
   pingMs: 15_000,
@@ -26,15 +26,6 @@ export const LINK_LIMITS = {
 
 /** WebSocket close codes the link uses. */
 export const LINK_CLOSE = { goingAway: 1001, invalidData: 1007, policy: 1008, tooBig: 1009, replaced: 4409, versionMismatch: 4426 } as const;
-
-/** A POST carrying this header (value `1`) is the daemon's `hello`, in its body;
- * main answers `{helloId}`, and the downlink GET names that id in this header. */
-export const LINK_HELLO_HEADER = "x-omp-web-hello";
-/** Every uplink POST carries the highest downlink `seq` the daemon applied. */
-export const LINK_ACK_HEADER = "x-omp-web-ack";
-/** Uplink POSTs and blob uploads name the link (`welcome.nonce`) they belong to;
- * main refuses one from a link that was replaced since. */
-export const LINK_NONCE_HEADER = "x-omp-web-link";
 
 /** Named `req.args` keys for each session op, in parameter order. Named, not
  * positional, so an omitted optional argument never turns into `null`. */
@@ -77,12 +68,11 @@ export class HostOpError extends Error {
 }
 
 export type DownMessage =
-  | { type: "welcome"; v: number; hostId: string; nonce: string }
+  | { type: "welcome"; v: number; hostId: string }
   | { type: "stdin"; seq: number; ch: string; line: string }
   | { type: "kill"; seq: number; ch: string; force: boolean }
   /** `op` is whatever the sender named: the daemon answers one it does not know with 501 `unknown_op`. */
   | { type: "req"; seq: number; id: string; op: string; args: unknown }
-  | { type: "replaced"; seq: number }
   | { type: "ping" }
   | { type: "pong" }
   /** Unsequenced: the highest uplink `seq` the hub applied. */
@@ -193,7 +183,7 @@ export function isHostOp(name: string): name is HostOpName {
   return (HOST_OP_NAMES as readonly string[]).includes(name);
 }
 
-const DOWN_TYPES: readonly string[] = ["welcome", "stdin", "kill", "req", "replaced", "ping", "pong", "ack"];
+const DOWN_TYPES: readonly string[] = ["welcome", "stdin", "kill", "req", "ping", "pong", "ack"];
 const UP_TYPES: readonly string[] = ["hello", "stdout", "stderr", "exit", "resync", "res", "ping", "pong", "ack"];
 
 /** `otherDirection`: the types only the other direction decodes; one of those arrived on the wrong way. */
@@ -255,15 +245,13 @@ export function decodeDown(line: string): DownMessage | UnknownMessage {
   const o = parseLine(line);
   switch (o.type) {
     case "welcome":
-      return { type: "welcome", v: int(o, "v"), hostId: str(o, "hostId"), nonce: str(o, "nonce") };
+      return { type: "welcome", v: int(o, "v"), hostId: str(o, "hostId") };
     case "stdin":
       return { type: "stdin", seq: seqNum(o, "seq"), ch: str(o, "ch"), line: str(o, "line") };
     case "kill":
       return { type: "kill", seq: seqNum(o, "seq"), ch: str(o, "ch"), force: bool(o, "force") };
     case "req":
       return { type: "req", seq: seqNum(o, "seq"), id: str(o, "id"), op: str(o, "op"), args: "args" in o ? o.args : fail("args must be present") };
-    case "replaced":
-      return { type: "replaced", seq: seqNum(o, "seq") };
     case "ping":
       return { type: "ping" };
     case "pong":
@@ -275,15 +263,12 @@ export function decodeDown(line: string): DownMessage | UnknownMessage {
   }
 }
 
-/** A v2 hello's channels carry no `cwd` or `pending`: decoded with `pending: null`, which reattach kills instead of adopting. */
-function channels(o: Obj, v2: boolean): HelloChannel[] {
+function channels(o: Obj): HelloChannel[] {
   const list = o.channels;
   if (!Array.isArray(list)) fail("channels must be an array");
   return list.map((c: unknown) => {
     if (!isObj(c)) fail("channel must be an object");
-    const ch = str(c, "ch");
-    const sessionId = nullable(c, "sessionId", str);
-    return v2 ? { ch, sessionId, cwd: "", pending: null } : { ch, sessionId, cwd: str(c, "cwd"), pending: nullable(c, "pending", strings) };
+    return { ch: str(c, "ch"), sessionId: nullable(c, "sessionId", str), cwd: str(c, "cwd"), pending: nullable(c, "pending", strings) };
   });
 }
 
@@ -317,20 +302,17 @@ function res(o: Obj): UpMessage {
 export function decodeUp(line: string): UpMessage | UnknownMessage {
   const o = parseLine(line);
   switch (o.type) {
-    case "hello": {
-      const v = int(o, "v");
+    case "hello":
       return {
         type: "hello",
-        v,
+        v: int(o, "v"),
         ompVersion: nullable(o, "ompVersion", str),
         platform: str(o, "platform"),
         home: str(o, "home"),
-        // A v2 hello does not say: off until a spawn result reports it.
-        autoApproveExtension: v === 2 ? false : bool(o, "autoApproveExtension"),
+        autoApproveExtension: bool(o, "autoApproveExtension"),
         ack: seqNum(o, "ack"),
-        channels: channels(o, v === 2),
+        channels: channels(o),
       };
-    }
     case "stdout":
       return { type: "stdout", seq: seqNum(o, "seq"), ch: str(o, "ch"), line: str(o, "line") };
     case "stderr":
