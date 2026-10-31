@@ -345,7 +345,7 @@ async function detectSystemdService(launcherPid: number): Promise<SystemdService
   return Number(stdout.trim()) === launcherPid ? service : null;
 }
 export function getSelfUpdateSupport(): { supported: boolean; reason?: string; packageDir: string } {
-  const packageDir = process.env.OMP_WEB_PACKAGE_DIR ?? resolve(join(import.meta ? dirname(new URL(import.meta.url).pathname) : process.cwd(), ".."));
+  const packageDir = process.env.OMP_WEB_PACKAGE_DIR ?? process.cwd();
   if (isUpdateDisabled()) {
     return { supported: false, reason: `Updates are disabled by ${DISABLE_AUTOUPDATE_ENV_VAR}`, packageDir };
   }
