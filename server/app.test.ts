@@ -252,7 +252,7 @@ function stall(head: string): Promise<void> {
   return promise;
 }
 
-test("Bun's idle timeout spares the event stream and the host link, and only them", { timeout: 30_000 }, async (t) => {
+test("Bun's idle timeout spares the event stream, the browser socket and the host link, and only them", { timeout: 30_000 }, async (t) => {
   process.env.OMP_WEB_PASSWORD_HASH = hashPassword("pw", { logN: 12 });
   process.env.OMP_WEB_TRUSTED_HEADER_SHA256 = new Bun.CryptoHasher("sha256").update("trusted").digest("hex");
   t.after(() => {
@@ -285,6 +285,23 @@ test("Bun's idle timeout spares the event stream and the host link, and only the
     link.addEventListener("message", ({ data }) => String(data).includes('"type":"ping"') && ping.resolve());
     link.addEventListener("close", ({ code }) => ping.reject(new Error(`the host link was closed while idle (${code})`)));
 
+    // The browser's WebSocket transport: a hello on open, and the server's own pings while idle.
+    const browser = new WebSocket(url("/api/events/ws").href.replace(/^http/, "ws"), { headers: signedIn } as unknown as string[]);
+    t.after(() => browser.close());
+    const browserFrames: string[] = [];
+    let browserFrame = Promise.withResolvers<void>();
+    browser.addEventListener("message", ({ data }) => {
+      browserFrames.push(String(data));
+      browserFrame.resolve();
+    });
+    const browserFrameMatching = async (pattern: RegExp) => {
+      while (!browserFrames.some((frame) => pattern.test(frame))) {
+        browserFrame = Promise.withResolvers<void>();
+        await browserFrame.promise;
+      }
+    };
+    await browserFrameMatching(/^mux \d+\n\{"type":"hello"/);
+
     // No caller without a session or a host token holds a socket open, wherever it stalls, and a signed-in
     // keep-alive socket is closed once its JSON answer, or a stream that lifted the timeout, went out.
     const stalled = {
@@ -307,6 +324,9 @@ test("Bun's idle timeout spares the event stream and the host link, and only the
     // The ping proves the socket outlived the idle timeout; so has the event stream, opened before it.
     await ping.promise;
     assert.equal(link.readyState, WebSocket.OPEN);
+    assert.equal(browser.readyState, WebSocket.OPEN, "the browser socket was closed while idle");
+    browser.send(JSON.stringify({ t: "sub", id: "s1", channel: { kind: "hosts" } }));
+    await browserFrameMatching(/^mux \d+\n\{"type":"open","sub":"s1"\}$/);
     const subscribe = await fetch(url("/api/events"), {
       method: "POST",
       headers: { ...signedIn, "content-type": "application/json" },
@@ -321,13 +341,21 @@ test("Bun's idle timeout spares the event stream and the host link, and only the
   }
 });
 
-test("the host link refuses an unauthenticated upgrade with 401 and answers 426 to a request that does not upgrade", async (t) => {
+test("the host link and the browser socket refuse an unauthenticated upgrade with 401 and answer 426 to a request that does not upgrade", async (t) => {
   const created = await fetch(url("/api/hosts"), { method: "POST", body: JSON.stringify({ label: "refusing" }) });
   const bearer = { authorization: `Bearer ${(await created.json()).token}` };
   process.env.OMP_WEB_PASSWORD_HASH = hashPassword("pw", { logN: 12 });
+  process.env.OMP_WEB_TRUSTED_HEADER_SHA256 = new Bun.CryptoHasher("sha256").update("trusted").digest("hex");
   t.after(() => {
     delete process.env.OMP_WEB_PASSWORD_HASH;
+    delete process.env.OMP_WEB_TRUSTED_HEADER_SHA256;
   });
+
+  // The gate runs before the upgrade route: no session, or a foreign origin, never reaches the 426.
+  const signedIn = { "x-omp-web-auth": "trusted" };
+  assert.equal((await fetch(url("/api/events/ws"))).status, 401);
+  assert.equal((await fetch(url("/api/events/ws"), { headers: { ...signedIn, origin: "http://evil.example" } })).status, 403);
+  assert.equal((await fetch(url("/api/events/ws"), { headers: signedIn })).status, 426);
 
   const refused = new WebSocket(url("/api/hosts/link").href.replace(/^http/, "ws"));
   const events: string[] = [];
