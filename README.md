@@ -211,9 +211,9 @@ Each [release](https://github.com/kahme247/ompweb/releases/latest) also ships
 ompweb as one compiled program with the files it serves beside it:
 `ompweb-linux-x64.tar.gz`, `ompweb-linux-arm64.tar.gz`, `ompweb-darwin-x64.tar.gz`,
 `ompweb-darwin-arm64.tar.gz` and `ompweb-windows-x64.zip`. It needs no Node, npm
-or Bun; only omp must be installed. The x64 builds also run on CPUs without AVX2
-(Bun's baseline runtime), and `ompweb-darwin-x64` under Rosetta 2. Each archive
-carries the licenses of what it bundles in `licenses/`.
+or Bun; only omp must be installed. The x64 builds use Bun's baseline runtime, so
+they also run on CPUs without AVX2. Each archive carries the licenses of what it
+bundles in `licenses/`.
 
 ```bash
 tar -xzf ompweb-linux-x64.tar.gz -C ~/.local/share   # unpacks ompweb-linux-x64/
