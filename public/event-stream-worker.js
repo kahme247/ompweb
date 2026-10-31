@@ -39,6 +39,9 @@ const SESSION_LINGER_MS = 30000;
 const WS_SILENCE_MS = 25000;
 const SILENCE_CHECK_MS = 1000;
 const VISIBLE_PROBE_MS = 3000;
+// Every tab forwards the same network or visibility event: a dial younger than
+// this without a hello is the one an earlier tab's wake just started.
+const WAKE_REDIAL_GAP_MS = 1000;
 const FORCED_RECONNECT_CODE = 4000;
 
 /** @type {EventSource | null} */
@@ -305,6 +308,7 @@ function connFor(sessionId) {
       subs: new Set(),
       pending: new Map(),
       lastFrameAt: 0,
+      dialedAt: 0,
       reconnectDelayMs: RECONNECT_MIN_MS,
       reconnectTimer: undefined,
       lingerTimer: undefined,
@@ -314,7 +318,7 @@ function connFor(sessionId) {
       reconnect: null,
     };
     conns.set(key, conn);
-    silenceTimer ??= setInterval(checkSilence, SILENCE_CHECK_MS);
+    if (silenceTimer === undefined) silenceTimer = setInterval(checkSilence, SILENCE_CHECK_MS);
     dial(conn);
   }
   clearTimeout(conn.lingerTimer);
@@ -360,7 +364,7 @@ function dial(conn) {
   if (conn.sessionId !== null) url.searchParams.set("session", conn.sessionId);
   const ws = new WebSocket(url.href.replace(/^http/, "ws"));
   conn.ws = ws;
-  conn.lastFrameAt = Date.now();
+  conn.dialedAt = conn.lastFrameAt = Date.now();
   // Events of a socket this Conn replaced (late frames, its close) are ignored.
   ws.onmessage = (event) => {
     if (conn.ws === ws) onSocketFrame(conn, event.data);
@@ -435,7 +439,9 @@ function checkSilence() {
 
 /** A tab saw the network change or the page come back (SSE mode has no sockets: EventSource reconnects on its own). */
 function wake(reason) {
+  const now = Date.now();
   for (const conn of conns.values()) {
+    if (conn.ws && !conn.connectionId && now - conn.dialedAt < WAKE_REDIAL_GAP_MS) continue;
     if (reason === "online" || reason === "network") {
       redial(conn, 0);
     } else if (reason === "visible") {
