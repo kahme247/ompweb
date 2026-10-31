@@ -1,5 +1,6 @@
 // Wire format between the main omp-web server and the `ompweb host` daemon.
 // Pure: no I/O and no Next or `@/` imports, so both sides share it.
+import { isValidSessionId } from "../session-file-references-core";
 import type { SessionOps } from "./session-ops";
 
 /** 4: the link is one WebSocket: text frames carry the messages, binary frames large results, `ack` messages replace
@@ -22,6 +23,10 @@ export const LINK_LIMITS = {
   maxLineBytes: 8 * 1024 * 1024,
   /** Per channel: open blocking requests past this are not replayed (the channel is not adoptable). */
   pendingBytes: 1024 * 1024,
+  /** Link head-of-line samples (metric "link"): each side writes or reports them at this count, else after statsFlushMs.
+   * Also the most one `stats` message may carry, which bounds it to about 40 KB. */
+  statsSamples: 256,
+  statsFlushMs: 30_000,
 };
 
 /** WebSocket close codes the link uses. */
@@ -82,6 +87,10 @@ export type DownMessage =
  * daemon spawned it; `pending`: raw stdout lines of its open blocking requests, or null when over `pendingBytes`. */
 export type HelloChannel = { ch: string; sessionId: string | null; cwd: string; pending: string[] | null };
 
+/** One uplink message the daemon measured: enqueued at `at` (its clock) with `bytesAhead` bytes unacked ahead of it
+ * (messages and result blobs), `bytes` its own size (with its blob), acked by the hub `ackMs` later. */
+export type LinkStatSample = { session: string | null; bytes: number; bytesAhead: number; ackMs: number; at: number };
+
 export type UpMessage =
   | {
       type: "hello";
@@ -98,6 +107,8 @@ export type UpMessage =
   | { type: "stderr"; seq: number; ch: string; chunk: string }
   | { type: "exit"; seq: number; ch: string; code: number | null; signal: string | null }
   | { type: "resync"; seq: number; ch: string }
+  /** The daemon's link samples, at most LINK_LIMITS.statsSamples; a hub that predates it skips the type. */
+  | { type: "stats"; seq: number; samples: LinkStatSample[] }
   | { type: "res"; seq: number; id: string; ok: true; result?: unknown; blob?: { bytes: number } }
   | {
       type: "res";
@@ -150,7 +161,7 @@ function str(o: Obj, key: string): string {
   return v;
 }
 
-/** A `seq` or `ack`: a safe non-negative integer, so one line cannot push a window out of reach of every later message. */
+/** A `seq`, an `ack` or a count: a safe non-negative integer, so one line cannot push a window out of reach of every later message. */
 function seqNum(o: Obj, key: string): number {
   const v = o[key];
   if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0) fail(`${key} must be a non-negative safe integer`);
@@ -184,7 +195,7 @@ export function isHostOp(name: string): name is HostOpName {
 }
 
 const DOWN_TYPES: readonly string[] = ["welcome", "stdin", "kill", "req", "ping", "pong", "ack"];
-const UP_TYPES: readonly string[] = ["hello", "stdout", "stderr", "exit", "resync", "res", "ping", "pong", "ack"];
+const UP_TYPES: readonly string[] = ["hello", "stdout", "stderr", "exit", "resync", "stats", "res", "ping", "pong", "ack"];
 
 /** `otherDirection`: the types only the other direction decodes; one of those arrived on the wrong way. */
 function unknownMessage(o: Obj, otherDirection: readonly string[]): UnknownMessage {
@@ -272,6 +283,18 @@ function channels(o: Obj): HelloChannel[] {
   });
 }
 
+/** Strict: a bad sample fails the line, so the hub writes only what it can vouch for. Extra fields are dropped. */
+function statSamples(o: Obj): LinkStatSample[] {
+  const list = o.samples;
+  if (!Array.isArray(list) || list.length > LINK_LIMITS.statsSamples) fail(`samples must be an array of at most ${LINK_LIMITS.statsSamples}`);
+  return list.map((s: unknown) => {
+    if (!isObj(s)) fail("sample must be an object");
+    const session = nullable(s, "session", str);
+    if (session !== null && !isValidSessionId(session)) fail("session must be a session id or null");
+    return { session, bytes: seqNum(s, "bytes"), bytesAhead: seqNum(s, "bytesAhead"), ackMs: seqNum(s, "ackMs"), at: seqNum(s, "at") };
+  });
+}
+
 function res(o: Obj): UpMessage {
   const seq = seqNum(o, "seq");
   const id = str(o, "id");
@@ -327,6 +350,8 @@ export function decodeUp(line: string): UpMessage | UnknownMessage {
       };
     case "resync":
       return { type: "resync", seq: seqNum(o, "seq"), ch: str(o, "ch") };
+    case "stats":
+      return { type: "stats", seq: seqNum(o, "seq"), samples: statSamples(o) };
     case "res":
       return res(o);
     case "ping":

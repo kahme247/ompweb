@@ -201,6 +201,7 @@ messages go again after the redial.
 | `kill {ch, force}` | down | Stop a child: `force: false` terminates its process tree, `true` kills it. |
 | `exit {ch, code, signal}` | up | Child exited. |
 | `resync {ch}` | up | Buffered output for `ch` was dropped. |
+| `stats {samples[{session, bytes, bytesAhead, ackMs, at}]}` | up | Head-of-line samples of acked uplink messages (at most `LINK_LIMITS.statsSamples`); main writes them as `metric: "link"` samples. Added within v4: an older main skips the type. |
 | `req {id, op, args}` | down | Host op request. |
 | `res {id, ok, result \| error}`; `res {id, ok: true, blob: {bytes}}` | up | Host op result; the second form names bytes sent earlier in a binary frame. |
 | `ack {ack}` | both | Highest `seq` applied from the other side; unsequenced. |

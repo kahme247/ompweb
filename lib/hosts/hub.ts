@@ -7,6 +7,7 @@ import { readBodyWithinLimit } from "../bounded-form-data";
 import type { RpcTransport } from "../omp/rpc-transport";
 import type { ProjectRegistryEntry } from "../project-registry";
 import { isValidSessionId } from "../session-file-references-core";
+import { appendTransportSamples, transportMetricsPath } from "../transport-metrics";
 import { isRecord } from "../type-guards";
 import type { SessionInfo } from "../types";
 import { isLinkUp, type Host, type HostStatus, type SpawnRequest, type SpawnResult } from "./host";
@@ -84,7 +85,7 @@ interface Link {
   socket: LinkSocket | null;
   /** Last downlink seq handed out. Lines stay in `outbox` until the daemon acks them. */
   downSeq: number;
-  outbox: Outbox<{ seq: number; line: string }>;
+  outbox: Outbox<DownLine>;
   /** Highest outbox seq written to the current socket; `flush` sends what is past it. */
   sentSeq: number;
   /** Bun queued the last line over the socket's buffered data: the rest waits for its `drain`. */
@@ -97,6 +98,17 @@ interface Link {
   pingTimer: NodeJS.Timeout | undefined;
   offlineTimer: NodeJS.Timeout | undefined;
   statusListeners: Set<(status: HostStatus) => void>;
+}
+
+/** A sequenced downlink line kept until acked, with what its link sample needs: when it was pushed, its UTF-8 size,
+ * the bytes of the earlier lines still unacked then, and the session it serves. */
+interface DownLine {
+  seq: number;
+  line: string;
+  at: number;
+  bytes: number;
+  bytesAhead: number;
+  session: string | null;
 }
 
 interface HubState {
@@ -204,9 +216,60 @@ function sendDown(link: Link, body: Unsequenced<DownMessage>): number {
   const seq = link.downSeq + 1;
   const line = encodeLine({ ...body, seq } as DownMessage);
   link.downSeq = seq;
-  link.outbox.push({ seq, line });
+  let bytesAhead = 0;
+  for (const ahead of link.outbox.pending()) bytesAhead += ahead.bytes;
+  link.outbox.push({ seq, line, at: Date.now(), bytes: Buffer.byteLength(line), bytesAhead, session: sessionOf(link, body) });
   flush(link);
   return seq;
+}
+
+/** The session a downlink message serves: a session op's `id`, else its channel's child's; null for host ops. */
+function sessionOf(link: Link, body: Unsequenced<DownMessage>): string | null {
+  if (body.type !== "req") return link.channels.get(body.ch)?.session ?? null;
+  return isRecord(body.args) && typeof body.args.id === "string" && isValidSessionId(body.args.id) ? body.args.id : null;
+}
+
+/** Link samples (metric "link") waiting to be written, at most LINK_LIMITS.statsSamples: written at that count, after
+ * statsFlushMs or when the hub stops. The file is resolved when a batch starts, so a later flush never re-resolves the
+ * agent dir (a test's may be gone by then). */
+const linkSamples: Record<string, unknown>[] = [];
+let linkSampleFile = "";
+let linkSampleTimer: NodeJS.Timeout | undefined;
+
+function recordLinkSamples(samples: Record<string, unknown>[]): void {
+  for (const sample of samples) {
+    if (linkSamples.length === 0) {
+      linkSampleFile = transportMetricsPath();
+      linkSampleTimer = setTimeout(flushLinkSamples, LINK_LIMITS.statsFlushMs);
+      linkSampleTimer.unref?.();
+    }
+    linkSamples.push(sample);
+    if (linkSamples.length >= LINK_LIMITS.statsSamples) flushLinkSamples();
+  }
+}
+
+/** Write the batch now. Measurement only: a failed write is logged and dropped, never touches a link. */
+export function flushLinkSamples(): void {
+  clearTimeout(linkSampleTimer);
+  linkSampleTimer = undefined;
+  if (linkSamples.length === 0) return;
+  try {
+    appendTransportSamples(linkSamples.splice(0), null, linkSampleFile);
+  } catch (error) {
+    console.warn(`[omp-web] could not write host link samples: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** The daemon applied the downlink through `ack`: each line it acks now becomes a `down` sample, then leaves the outbox. */
+function ackDown(link: Link, ack: number): void {
+  const now = Date.now();
+  const samples: Record<string, unknown>[] = [];
+  for (const { seq, at, bytes, bytesAhead, session } of link.outbox.pending()) {
+    if (seq > ack) break;
+    samples.push({ metric: "link", dir: "down", host: link.id, session, bytes, bytesAhead, ackMs: now - at, at });
+  }
+  link.outbox.ack(ack);
+  recordLinkSamples(samples);
 }
 
 /** Fail an op for good: a `req` not yet acked is never resent (one already written may still run). */
@@ -290,6 +353,8 @@ const stopping = () => json({ error: "omp-web is shutting down" }, 503);
 export function freezeHostLinks(): void {
   hub().frozen = true;
   for (const link of hub().links.values()) link.socket?.close(LINK_CLOSE.goingAway, "omp-web is restarting");
+  // The process exits next: keep what was measured.
+  flushLinkSamples();
 }
 
 /** GET /api/hosts/link: the daemon's WebSocket. The token is checked before the upgrade, so no unknown caller gets a
@@ -472,7 +537,7 @@ function onFrame(link: Link, ws: LinkSocket, data: string | Uint8Array): void {
     return ws.close(LINK_CLOSE.invalidData, "Malformed uplink frame");
   }
   for (const message of messages) {
-    if (message.type === "ack") link.outbox.ack(message.ack);
+    if (message.type === "ack") ackDown(link, message.ack);
     else applyUp(link, message);
   }
   // One answer per frame, also to one with nothing sequenced in it: the daemon sends its next frame only after it.
@@ -566,6 +631,8 @@ function applyUp(link: Link, message: UpMessage | UnknownMessage): void {
     }
     case "res":
       return settle(link, message);
+    case "stats":
+      return recordLinkSamples(message.samples.map((sample) => ({ metric: "link", dir: "up", host: link.id, ...sample })));
   }
 }
 
@@ -723,6 +790,8 @@ export class RemoteRpcTransport implements RpcTransport {
   }
   /** Set for a child of a previous run the daemon listed in `hello` (the session it runs); null for children this server spawned. */
   readonly sessionId: string | null;
+  /** The session the child last named in a get_state answer, else `sessionId`: tags its link samples. */
+  session: string | null;
   /** The daemon confirmed the spawn (or listed the channel); until then a `hello` without it is not a loss. */
   spawned = false;
   /** The daemon stopped listing this child: it died while the link was down. Set before the synthesized exit. */
@@ -746,6 +815,7 @@ export class RemoteRpcTransport implements RpcTransport {
     this.hostId = hostId;
     this.ch = ch;
     this.sessionId = sessionId;
+    this.session = sessionId;
   }
 
   write(line: string, callback: (error?: Error | null) => void): void {
@@ -806,6 +876,7 @@ export class RemoteRpcTransport implements RpcTransport {
   }
 
   deliverLine(line: string): void {
+    if (line.includes('"get_state"')) this.noteSession(line);
     if (this.orphaned) return;
     if (this.lineListeners.length > 0) return notify(this.lineListeners, line);
     const bytes = this.holdable(line);
@@ -831,6 +902,19 @@ export class RemoteRpcTransport implements RpcTransport {
     if (this.exitInfo) return;
     this.exitInfo = [code, signal];
     notify(this.exitListeners, code, signal);
+  }
+
+  private noteSession(line: string): void {
+    let frame: unknown;
+    try {
+      frame = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (isRecord(frame) && frame.type === "response" && frame.command === "get_state" && frame.success === true && isRecord(frame.data)) {
+      const { sessionId } = frame.data;
+      if (typeof sessionId === "string" && isValidSessionId(sessionId)) this.session = sessionId;
+    }
   }
 }
 

@@ -12,8 +12,9 @@ export function transportMetricsPath(): string {
   return join(getAgentDir(), "omp-web", "transport-metrics.jsonl");
 }
 
-/** Appends the valid samples (stamped with the server clock and user agent) as JSONL; returns how many were kept. */
-export function appendTransportSamples(samples: unknown[], ua: string | null): number {
+/** Appends the valid samples (stamped with the server clock and user agent) as JSONL to `file`; returns how many were
+ * kept. A caller that batches passes the path it resolved when the batch started. */
+export function appendTransportSamples(samples: unknown[], ua: string | null, file = transportMetricsPath()): number {
   const serverAt = Date.now();
   const userAgent = ua?.slice(0, MAX_UA_CHARS) ?? null;
   const lines: string[] = [];
@@ -24,7 +25,6 @@ export function appendTransportSamples(samples: unknown[], ua: string | null): n
   }
   if (lines.length === 0) return 0;
 
-  const file = transportMetricsPath();
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   try {
     if (statSync(file).size > ROTATE_BYTES) renameSync(file, `${file}.1`);

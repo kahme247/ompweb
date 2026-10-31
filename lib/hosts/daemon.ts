@@ -10,6 +10,7 @@ import { getSessionsDir } from "../omp/paths";
 import type { RpcTransport } from "../omp/rpc-transport";
 import { readSessionHeaderSync } from "../omp/session-files";
 import { ProjectPathError } from "../project-registry";
+import { isValidSessionId } from "../session-file-references-core";
 import { isRecord } from "../type-guards";
 import { isLoopbackHost, readHostLogin } from "./host-login";
 import {
@@ -27,6 +28,7 @@ import {
   SeqWindow,
   SESSION_OP_PARAMS,
   type DownMessage,
+  type LinkStatSample,
   type UnknownMessage,
   UnknownMessageLog,
   type UpMessage,
@@ -61,6 +63,9 @@ interface Queued {
   bytes: number;
   /** Set for child output, which an overflow may drop. */
   ch: string | null;
+  /** Its link sample: when it was queued, the bytes of earlier unacked messages and result blobs then, the bytes of
+   * the result blob sent ahead of this `res` (else 0) and the session it serves. Null for a `stats` message. */
+  sample: { at: number; bytesAhead: number; blob: number; session: string | null } | null;
 }
 
 /** How a socket closed; `opened` is false for a dial the server refused or never answered. A string instead: why
@@ -149,9 +154,15 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   let stopping: Promise<void> | undefined;
   const stopSignal = new AbortController();
   const { promise: done, resolve: finish } = Promise.withResolvers<number>();
+  /** Bytes of the unacked outbox messages and of the result blobs sent ahead of them. */
+  let unackedBytes = 0;
+  /** Link samples of acked messages, waiting for their `stats` message. */
+  const samples: LinkStatSample[] = [];
+  let statsTimer: NodeJS.Timeout | undefined;
 
-  /** Number and keep an uplink message; its byte size, or null when it exceeds the line limit. */
-  function queue(body: Unsequenced<UpMessage>, ch: string | null = null): number | null {
+  /** Number and keep an uplink message; its byte size, or null when it exceeds the line limit. `session` and `blob`
+   * (the bytes of the result frame sent ahead of this `res`) go into its link sample. */
+  function queue(body: Unsequenced<UpMessage>, ch: string | null = null, session: string | null = null, blob = 0): number | null {
     let line: string;
     try {
       line = encodeLine({ ...body, seq: upSeq + 1 } as UpMessage);
@@ -161,7 +172,10 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     }
     upSeq += 1;
     const bytes = Buffer.byteLength(line);
-    outbox.push({ seq: upSeq, line, bytes, ch });
+    // A `stats` message is not measured itself: its sample would need another one.
+    const sample = body.type === "stats" ? null : { at: Date.now(), bytesAhead: unackedBytes, blob, session };
+    outbox.push({ seq: upSeq, line, bytes, ch, sample });
+    unackedBytes += bytes + blob;
     unsentBytes += bytes;
     scheduleFlush();
     return bytes;
@@ -170,7 +184,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   function output(ch: string, body: Unsequenced<Extract<UpMessage, { type: "stdout" | "stderr" }>>): void {
     const channel = channels.get(ch);
     if (!channel) return;
-    const bytes = queue(body, ch);
+    const bytes = queue(body, ch, channel.pending.sessionId);
     if (bytes === null) {
       // One line over the link limit: drop it and let main reconcile.
       queue({ type: "resync", ch });
@@ -181,18 +195,36 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       // The uplink lags too far: drop this child's backlog. The resync goes
       // out with the first frame that gets through, ahead of later output.
       outbox.drop((item) => item.ch === ch);
+      // `buffered` is exactly the bytes of its messages still in the outbox.
+      unackedBytes -= channel.buffered;
       channel.buffered = 0;
       queue({ type: "resync", ch });
     }
   }
 
   function acked(ack: number): void {
+    const now = Date.now();
     for (const item of outbox.pending()) {
       if (item.seq > ack) break;
       const channel = item.ch ? channels.get(item.ch) : undefined;
       if (channel) channel.buffered -= item.bytes;
+      const blob = item.sample?.blob ?? 0;
+      unackedBytes -= item.bytes + blob;
+      if (item.sample) {
+        const { at, bytesAhead, session } = item.sample;
+        samples.push({ session, bytes: item.bytes + blob, bytesAhead, ackMs: now - at, at });
+      }
     }
     outbox.ack(ack);
+    if (samples.length >= LINK_LIMITS.statsSamples) sendStats();
+    else if (samples.length > 0) statsTimer ??= setTimeout(sendStats, LINK_LIMITS.statsFlushMs);
+  }
+
+  /** The samples so far, as `stats` messages of at most statsSamples each (one ack can cover more). */
+  function sendStats(): void {
+    clearTimeout(statsTimer);
+    statsTimer = undefined;
+    while (samples.length > 0 && !stopped) queue({ type: "stats", samples: samples.splice(0, LINK_LIMITS.statsSamples) });
   }
 
   function scheduleFlush(): void {
@@ -325,19 +357,21 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   }
 
   async function answer(id: string, op: string, args: unknown): Promise<void> {
+    // A session op names its session `id`; host ops serve none.
+    const session = isRecord(args) && typeof args.id === "string" && isValidSessionId(args.id) ? args.id : null;
     try {
       const result = await runOp(op, args);
       const media = op === "readMedia" && isRecord(result) && result.ok === true && result.value instanceof Uint8Array ? result.value : null;
       const json = media ? undefined : JSON.stringify(result);
       const blob = media ?? (json !== undefined && Buffer.byteLength(json) > LINK_LIMITS.inlineResultBytes ? Buffer.from(json) : null);
       if (!blob) {
-        queue({ type: "res", id, ok: true, result });
+        queue({ type: "res", id, ok: true, result }, null, session);
         return;
       }
       if (blob.byteLength > LINK_LIMITS.blobBytes) throw new HostOpError(413, "result_too_large", "The result is too large for the host link");
       // The bytes go ahead of their `res` on the same socket. With no link the hub usually has already failed the op and the `res` goes alone; a half-open socket the hub replaced keeps its pending ops, so there a `res` without its bytes fails 502 host_blob_missing.
       linked?.send(encodeBlobFrame(id, blob));
-      queue({ type: "res", id, ok: true, blob: { bytes: blob.byteLength } });
+      queue({ type: "res", id, ok: true, blob: { bytes: blob.byteLength } }, null, session, linked ? blob.byteLength : 0);
     } catch (error) {
       const failure = error instanceof HostOpError
         ? { status: error.status, code: error.code, message: error.message }
@@ -345,7 +379,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         : error instanceof ProjectPathError
           ? { status: 400, code: error.code, message: error.message }
           : { status: 500, code: "host_op_failed", message: reason(error) };
-      queue({ type: "res", id, ok: false, error: failure });
+      queue({ type: "res", id, ok: false, error: failure }, null, session);
     }
   }
 
@@ -529,6 +563,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       stopSignal.abort();
       socket?.close();
       clearTimeout(flushTimer);
+      clearTimeout(statsTimer);
       const live = [...channels.values()].map(({ transport }) => transport);
       const exits = live.map((transport) => {
         const { promise, resolve } = Promise.withResolvers<void>();
