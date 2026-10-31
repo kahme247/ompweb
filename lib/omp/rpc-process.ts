@@ -1,5 +1,6 @@
 import type { spawn } from "child_process";
 import { sanitizeProjectCommandEnvironment } from "../project-command-env";
+import { isRecord } from "../type-guards";
 import { resolveOmpBin } from "./omp-cli";
 import { type RpcTransport, spawnLocalRpcTransport } from "./rpc-transport";
 import { encodeRpcCommand, RpcFrameDecoder, type RpcFrameRecord, type RpcProtocolVersion } from "./rpc-frame";
@@ -133,7 +134,13 @@ export class RpcProcess {
     const exitDeferred = Promise.withResolvers<void>();
     this.exitedPromise = exitDeferred.promise;
 
-    const decoder = new RpcFrameDecoder();
+    let decoder = new RpcFrameDecoder();
+    // A linked host dropped lines (resync): the half-read sequence is gone, and the next lines may be another's tail.
+    let midSequence = false;
+    this.transport.onResync?.(() => {
+      decoder = new RpcFrameDecoder();
+      midSequence = true;
+    });
     this.transport.onLine((line) => {
       const trimmed = line.trim();
       if (!trimmed) return;
@@ -144,6 +151,8 @@ export class RpcProcess {
         // omp guards stdout in RPC mode, but never let a stray line kill the reader.
         return;
       }
+      if (midSequence && isRecord(parsed) && parsed.type === "rpc_chunk" && parsed.index !== 0) return;
+      midSequence = false;
       let frame: RpcFrameRecord;
       try {
         if (parsed && typeof parsed === "object" && (parsed as { type?: unknown }).type === "rpc_chunk" && this.protocolVersion !== 2) {
