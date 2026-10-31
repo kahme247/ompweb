@@ -88,6 +88,9 @@ app/api/
   plugins/route.ts                GET/POST plugin management (shells out to `omp plugin`)
   projects/route.ts               GET registered+discovered projects | POST add | DELETE hide
   projects/clone/route.ts         POST clone a git URL into a new workspace (NDJSON progress) | DELETE cancel
+  scheduled-tasks/route.ts        GET tasks (+nextRunAt, running) + runs + server timeZone | POST create
+  scheduled-tasks/[id]/route.ts   PATCH (partial ScheduledTaskInput, e.g. { enabled }) / DELETE a task
+  scheduled-tasks/[id]/run/route.ts  POST run now → 202 { run } once the prompt is accepted; 409 while running
   skills/route.ts                 GET/PATCH loaded skills and disable-model-invocation
   skills/install/route.ts         POST install skills through npx skills add
   skills/search/route.ts          GET/POST skills.sh search
@@ -127,6 +130,10 @@ lib/
   session-reader.ts    session .jsonl parsing + path cache + buildSessionContext
   session-search.ts    shared fuzzy/phrase query scorer for sidebar search (title weights ≫ transcript)
   session-content-search.ts  server: per-file transcript text cache (size+mtime) + searchSessions()
+  scheduled-tasks.ts   pure scheduled-task types, validation and slot arithmetic (client + server + tests)
+  scheduled-task-store.ts  on-disk tasks + run history (~/.omp/agent/omp-web/scheduled-tasks.json) and per-slot claim files
+  scheduled-task-runner.ts  in-process scheduler (30 s tick) running each task as a normal omp session
+  scheduled-task-api.ts  shared route helpers for /api/scheduled-tasks (error mapping, body limit)
   session-resume.ts    running-session list for auto-resume after a restart
   web-auth.ts          password-hash check + session cookie signing
   web-auth-secret.ts   per-installation session-signing key (~/.omp/agent/omp-web/web-auth-secret.json)
@@ -159,6 +166,7 @@ components/
   MarkdownBody.tsx    markdown renderer
   ModelsConfig.tsx    modal for models/auth configuration
   McpConfig.tsx       project MCP server editor (Settings → MCP tab)
+  ScheduledTasksConfig.tsx  Settings → Scheduled Tasks: task list, run history, create/edit form
   PluginsConfig.tsx   modal for installed plugins
   SkillsConfig.tsx    modal for loaded/search/installable skills
   FileExplorer.tsx    file tree inside sidebar
@@ -219,6 +227,73 @@ hooks/
 - Only session ids are stored; paths are re-resolved on resume.
 - Known limit: resume does not detect a terminal `omp --resume <id>` started
   on the same session while omp-web was down; both would write the file.
+
+### Scheduled tasks (`lib/scheduled-task-*.ts`, Settings → Scheduled Tasks)
+- The scheduler lives in the omp-web server: `instrumentation.node.ts` starts
+  it, a 30 s unref'd tick (on `globalThis`, so hot reload keeps one) fires due
+  slots. Times are the server's local time zone (the list reports it); the UI
+  must not reinterpret them in the browser's zone. Nothing runs while omp-web
+  is down.
+- Each task keeps a watermark `lastSlotAt`; a slot fires only if it is newer.
+  Creating a task, changing its schedule or re-enabling it sets the watermark
+  to now, so a slot already past never fires. The first tick after boot runs
+  the newest missed slot once (`trigger: "catch-up"`); older misses collapse
+  into it. Interval schedules count from `anchorAt`, reset with the schedule.
+- A run is an ordinary session started through `startRpcSession` (fresh
+  spawn, `set_session_name` "<task> · <time>", optional `set_model` /
+  `set_thinking_level`, then `prompt`), so it shows in the sidebar like any
+  other. `continue` mode sends the run to `lastSessionId` instead, and skips
+  the run when that session is busy rather than steering the user's turn. A
+  run that would overlap the task's own in-flight run is recorded `skipped`.
+  Completion is `waitForTurnEnd` (registered before the prompt) with a 6 h
+  cap; a timeout only stops waiting (the run is `failed`), the session keeps
+  going, and until that session goes idle the instance that ran it counts it
+  as the task's run: later runs there are `skipped` and **Run now** is 409
+  (checked on the live session object, never by resuming a session).
+- Several instances may share the agent dir (an installed service plus
+  `npm run dev`). Lock and lease owner files hold "<pid> <token> <expiresAt>
+  <heldUntil>", written to a temp file and hard-linked into place (never
+  empty, never replaced); a file is reclaimed once its owner process is gone
+  or its hold has ended on the monotonic clock (`process.hrtime`: one clock
+  for every process on the host, never stepped with the wall clock), never
+  sooner, so setting the time never frees a live owner's file. A hold never
+  outlasts the longest legitimate one (the store lock 60 s, a run lease the
+  6 h turn cap plus 10 min), so a pid reused after a crash or reboot cannot
+  keep a file forever; a hold ending further ahead than that was taken before
+  a reboot. `<expiresAt>` (wall clock) is only for older builds: a file
+  without `<heldUntil>` is judged by its pid alone, and is stale when that
+  pid is ours. Every removal of an owner file, a reclaimer's and the owner's
+  own release alike, is made by the holder of `<file>.reclaim-<token hash>`
+  (itself an owner file) and only while the file still holds that token, so
+  two reclaimers cannot both take it and no removal deletes a newer owner's
+  file:
+  - each slot fires only in the instance that creates its claim
+    `omp-web/scheduled-task-claims/<task>@<slotMs>` (kept; pruned after 30 d),
+    and only that instance advances the watermark: a loser that wrote it
+    first would leave the winner finding the slot taken, so it fired nowhere.
+    A tick whose watermark write fails gives its claim back so the next tick
+    fires the slot;
+  - a run lease `omp-web/scheduled-task-leases/<task>` is held while a run of
+    that task is in flight in any instance, so a scheduled run is `skipped`
+    and **Run now** is 409 there too; a run's final record is written (with
+    retries) before its lease is released, and one that still fails is kept
+    in memory and written by the next `reconcileRuns` instead of `interrupted`;
+  - every store read-modify-write runs under `scheduled-tasks.json.lock` and
+    re-reads inside it.
+  Running runs carry the owner `pid`; one whose owner died, that its own
+  process forgot, or that started longer ago than the longest run (a reused
+  pid) is shown `interrupted`. `OMP_WEB_DISABLE_SCHEDULER=1` stops
+  an instance from firing slots; editing and **Run now** still work there.
+- A store file that cannot be read or parsed is an error (the list route
+  returns 500 with the path), never an empty store that the next write would
+  save over the user's tasks. Malformed entries inside a valid file are left
+  out of the store; the first write that would drop them copies the file to
+  `scheduled-tasks.json.dropped-<ms>` first (and writes nothing if the copy
+  fails). `startRun`'s `done` never rejects: a failed
+  history write at run end is logged, because `instrumentation.node.ts` exits
+  the server on unhandled rejections.
+- Tool approvals follow the user's approval mode: an unattended run can sit on
+  an approval prompt until someone answers it in the session.
 
 ### Session moves (omp >= 18.5 ownership) and title generation
 - Only the first omp process to write a session file owns it; a non-owner moves

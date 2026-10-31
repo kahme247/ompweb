@@ -68,6 +68,19 @@ export async function register(): Promise<void> {
     }
   })();
 
+  // Scheduled tasks (Settings → Scheduled Tasks): the first tick catches up a
+  // slot missed while omp-web was down. Fire-and-forget like the resume above,
+  // and imported lazily like every boot task here so a failing module never
+  // blocks startup.
+  void (async () => {
+    try {
+      const { startScheduledTaskScheduler } = await import("@/lib/scheduled-task-runner");
+      await startScheduledTaskScheduler();
+    } catch (error) {
+      console.warn(`[omp-web] scheduled task scheduler failed to start: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  })();
+
   // Crash/stall journal: a long-running server that dies or wedges while the
   // user is away leaves no trace in a terminal that no longer exists (CLI runs
   // are killed with their terminal; pages then show endless loading until the

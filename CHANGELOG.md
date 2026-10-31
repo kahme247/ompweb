@@ -6,6 +6,10 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ## [Unreleased]
 
+### Added
+
+- **Scheduled tasks.** **Settings → Scheduled Tasks** runs a saved prompt in a workspace on a schedule: every N minutes, daily at a time, or on chosen weekdays at a time, in the server's time zone. Each run is a normal session (named after the task and the run time) that appears in the sidebar and can be opened, steered or continued; a task can start a fresh session every run or keep sending runs to one session. The panel shows the next run, the run history with each run's session, and lets you pause, edit, delete or **Run now** a task. Runs happen while omp-web is running: a slot missed while it was down runs once when it starts again (several missed slots collapse into one run), and a run that would overlap the task's previous, still-running run is skipped. Several omp-web instances on one agent dir never fire the same slot twice or run one task twice at once; `OMP_WEB_DISABLE_SCHEDULER=1` keeps an instance (for example `npm run dev`) from firing scheduled runs at all.
+
 ### Fixes & Improvements
 
 - **In-app updates work when ompweb runs as a systemd service.** The update worker ran inside the service's cgroup, so stopping the server killed the worker too: nothing was installed, the service could stay down (`Restart=on-failure` does not restart a clean SIGTERM exit), and every page load reopened the update dialog at "Stop ompweb-managed sessions". The worker now runs in its own transient scope (`systemd-run --scope`) and stops, updates and starts the unit through `systemctl`, starting it again if the install fails.
