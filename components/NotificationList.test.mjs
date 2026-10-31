@@ -69,7 +69,7 @@ test("short, mostly vertical, curved-into-vertical, mouse, and button-started dr
   drag(description(), [[100, 50], [180, 52], [140, 52]]);
   drag(description(), [[200, 50], [80, 52], [140, 52]]);
   drag(description(), [[100, 50], [150, 51], [200, 52]], { pointerType: "mouse" });
-  drag(row().querySelector("button"), [[100, 50], [150, 51], [200, 52]]);
+  drag(row().querySelector("button[aria-label='Dismiss notification']"), [[100, 50], [150, 51], [200, 52]]);
   await settle();
   assert.equal(notificationHistory.get().length, 1);
   assert.equal(row().style.transform, "");
@@ -122,10 +122,10 @@ test("clicking or pressing Enter on a row marks it read and opens its session, b
     window.getSelection().selectAllChildren(row().querySelector(".display-serif"));
     act(() => row().querySelector(".display-serif").click());
     window.getSelection().removeAllRanges();
-    enter(row().querySelector("button"));
+    enter(row().querySelector("button[aria-label='Dismiss notification']"));
     assert.equal(opened.length, 2);
     // The dismiss button removes the entry without opening it.
-    act(() => row().querySelector("button").click());
+    act(() => row().querySelector("button[aria-label='Dismiss notification']").click());
     assert.equal(opened.length, 2);
     assert.equal(notificationHistory.get().length, 0);
   } finally {
@@ -152,4 +152,24 @@ test("an entry without a session is not focusable or clickable", () => {
   const row = render(React.createElement(NotificationList)).container.querySelector("li");
   assert.equal(row.hasAttribute("tabindex"), false);
   assert.equal(row.style.cursor, "");
+});
+
+test("pressing Space on a row marks it read and opens its session, but not from its controls", () => {
+  const opened = [];
+  const onOpen = (event) => opened.push(event.detail);
+  window.addEventListener(OPEN_SESSION_EVENT, onOpen);
+  try {
+    const { row } = mount();
+    const space = (target) => act(() => { target.dispatchEvent(new window.KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true })); });
+    space(row());
+    assert.deepEqual(opened, ["n1-session"]);
+    assert.equal(notificationHistory.get()[0].read, true);
+    // Space on the expandable description or the dismiss button must not open the session.
+    const description = row().querySelector("[aria-expanded]");
+    space(description);
+    space(row().querySelector("button[aria-label='Dismiss notification']"));
+    assert.equal(opened.length, 1);
+  } finally {
+    window.removeEventListener(OPEN_SESSION_EVENT, onOpen);
+  }
 });

@@ -3,12 +3,14 @@ import assert from "node:assert/strict";
 import test, { afterEach, before } from "node:test";
 import React from "react";
 import { act, cleanup, render, renderHook } from "@testing-library/react/pure.js";
+import userEvent from "@testing-library/user-event";
 import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tryNative: false, tsconfigPaths: true });
 // Same specifiers as useNotifications' own imports: on Windows a relative path
 // can load a second toast module, whose manager the rendered provider never sees.
 const { ClampedDescription, ToastProvider, toast } = await jiti.import("@/components/ui/toast");
+const { setLocale } = await jiti.import("@/lib/i18n");
 const { useNotifications } = await jiti.import("@/hooks/useNotifications");
 const { notificationHistory } = await jiti.import("@/lib/notification-history");
 
@@ -173,5 +175,35 @@ test("a push the service worker showed reloads the list from the server; other m
     globalThis.fetch = previousFetch;
     delete window.navigator.serviceWorker;
     act(() => notificationHistory.clear());
+  }
+});
+
+test("clamped description is a keyboard-operable button: Tab focuses it, Space/Enter expand it", async () => {
+  render(React.createElement(ClampedDescription, null, "line1\nline2\nline3\nline4"));
+  const button = document.querySelector("button[aria-expanded]");
+  assert.ok(button, "clamped description renders as a focusable button");
+  assert.equal(button.getAttribute("aria-expanded"), "false");
+  const user = userEvent.setup();
+  await user.tab();
+  assert.equal(document.activeElement, button);
+  await user.keyboard(" ");
+  assert.equal(button.getAttribute("aria-expanded"), "true");
+  await user.keyboard(" ");
+  assert.equal(button.getAttribute("aria-expanded"), "false");
+  await user.keyboard("{Enter}");
+  assert.equal(button.getAttribute("aria-expanded"), "true");
+});
+
+test("toast close button uses the localized dismiss label, not hardcoded English", () => {
+  // In English the localized value happens to equal the old hardcoded
+  // "Dismiss", so this test switches to Japanese: pre-fix it sees the
+  // hardcoded English label, post-fix the Japanese one.
+  act(() => { setLocale("ja"); });
+  try {
+    render(React.createElement(ToastProvider, null));
+    act(() => { toast.info("Saved"); });
+    assert.equal(document.querySelector(".toast-close-button").getAttribute("aria-label"), "閉じる");
+  } finally {
+    act(() => { setLocale("en"); });
   }
 });

@@ -99,6 +99,7 @@
   "appShell.notificationsEmpty": "最近の通知はありません",
   "appShell.notificationsClear": "すべてクリア",
   "appShell.notificationDismiss": "通知を閉じる",
+  "toast.dismiss": "閉じる",
   "appShell.notificationsMarkRead": "すべて既読にする",
   "appShell.notificationUnread": "未読",
   "appShell.notificationsUnreadCount": "未読 {count} 件",

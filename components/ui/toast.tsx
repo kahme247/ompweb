@@ -14,6 +14,7 @@ import { Toast } from "@base-ui/react/toast";
 import { AlertCircle, Check, Info, X } from "lucide-react";
 import { useRef, useState } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useI18n } from "@/lib/i18n";
 import type React from "react";
 
 type ToastKind = "success" | "error" | "info";
@@ -114,15 +115,30 @@ export function clampDescriptionStyle(expanded: boolean): React.CSSProperties {
  */
 export function ClampedDescription({ children }: { children: React.ReactNode }) {
   const [expanded, setExpanded] = useState(false);
+  // A real button, not a clickable span: keyboard-only users must be able to
+  // focus and expand it with Enter/Space, like any other control. It keeps
+  // aria-expanded so the toast card's and notification row's click guards
+  // (which skip [aria-expanded] targets) still treat it as expandable text
+  // rather than the row/card action.
   return (
-    <span
+    <button
+      type="button"
       onClick={() => setExpanded((v) => !v)}
       aria-expanded={expanded}
       title={expanded ? undefined : "Click to expand"}
-      style={clampDescriptionStyle(expanded)}
+      style={{
+        ...clampDescriptionStyle(expanded),
+        width: "100%",
+        padding: 0,
+        border: 0,
+        background: "transparent",
+        color: "inherit",
+        font: "inherit",
+        textAlign: "left",
+      }}
     >
       {children}
-    </span>
+    </button>
   );
 }
 
@@ -196,6 +212,8 @@ export function createSwipeTracker(startX: number): SwipeTracker {
 }
 
 function Toaster() {
+  // Aliased: the toasts.map() below binds each toast item as `t`.
+  const { t: tr } = useI18n();
   const { toasts } = Toast.useToastManager<ToastData>();
   const isMobile = useIsMobile();
   const clickGuard = useDragClickGuard();
@@ -310,7 +328,7 @@ function Toaster() {
             </Toast.Content>
             <Toast.Close
               className="toast-close-button"
-              aria-label="Dismiss"
+              aria-label={tr("toast.dismiss")}
               style={dismissButtonStyle}
             >
               <X size={12} strokeWidth={2} aria-hidden />

@@ -41,3 +41,43 @@ test("MCP management cannot mutate configuration without a selected session", as
   assert.equal((await screen.findByRole("switch", { name: "Enable demo" })).disabled, true);
   assert.equal(screen.getByRole("button", { name: "Reload MCP" }).disabled, true);
 });
+
+function mcpServers(cwd) {
+  if (cwd === "/proj-a") return [{ name: "alpha", config: { type: "stdio", command: "alpha-cmd", args: [] } }];
+  if (cwd === "/proj-b") return [{ name: "beta", config: { type: "stdio", command: "beta-cmd", args: [] } }];
+  return [];
+}
+
+test("MCP editor must not keep project A's server after switching to project B", async (t) => {
+  t.mock.method(globalThis, "fetch", async (url) => {
+    const cwd = new URL(String(url), "http://x").searchParams.get("cwd");
+    return Response.json({ servers: mcpServers(cwd), path: cwd ? `${cwd}/.omp/mcp.json` : null });
+  });
+  const view = render(createElement(McpConfig, { cwd: "/proj-a" }));
+  await screen.findByText("alpha");
+  await userEvent.setup().click(screen.getByText("alpha"));
+  assert.equal(screen.getByDisplayValue("alpha").tagName, "INPUT");
+  view.rerender(createElement(McpConfig, { cwd: "/proj-b" }));
+  await screen.findByText("beta");
+  // No server is selected in project B, so the editor must be blank; the
+  // stale name/JSON from project A must not survive the workspace switch
+  // (saving it would create project A's server verbatim in project B).
+  const nameInput = document.querySelector("input.mcp-config-input");
+  assert.equal(nameInput.value, "");
+  assert.equal(document.querySelector("textarea.mcp-config-input").value.includes("alpha-cmd"), false);
+});
+
+test("MCP editor blanks when the selected server disappears from the same workspace", async (t) => {
+  let servers = mcpServers("/proj-a");
+  t.mock.method(globalThis, "fetch", async () => Response.json({ servers, path: "/proj-a/.omp/mcp.json" }));
+  render(createElement(McpConfig, { cwd: "/proj-a" }));
+  await screen.findByText("alpha");
+  await userEvent.setup().click(screen.getByText("alpha"));
+  assert.equal(screen.getByDisplayValue("alpha").tagName, "INPUT");
+  // The server was deleted elsewhere; a refresh must not leave its editor
+  // behind to be saved back into the project.
+  servers = [];
+  await userEvent.setup().click(screen.getByRole("button", { name: "Refresh live MCP status" }));
+  await waitFor(() => assert.equal(document.querySelector("input.mcp-config-input").value, ""));
+  assert.equal(document.querySelector("textarea.mcp-config-input").value.includes("alpha-cmd"), false);
+});

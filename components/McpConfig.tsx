@@ -44,6 +44,11 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
   const [liveError, setLiveError] = useState<string | null>(null);
   const [path, setPath] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  // Mirror of `selected` for load(): the editor must be blanked when the
+  // selected server disappears (workspace switch or external delete), but a
+  // fresh "add server" draft (selected === null) survives a plain refresh.
+  const selectedRef = useRef<string | null>(null);
+  const loadedCwdRef = useRef<string | null | undefined>(undefined);
   const [name, setName] = useState("");
   const [source, setSource] = useState(newServer);
   const [loading, setLoading] = useState(true);
@@ -89,7 +94,20 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
       setInventory(Array.isArray(data.inventory) ? data.inventory : null);
       setLiveError(data.liveError ?? null);
       setPath(data.path ?? null);
-      setSelected((current) => current && data.servers?.some((server) => server.name === current) ? current : null);
+      // A workspace switch always blanks the editor: a name/source typed for
+      // the old project must never be saved into the new one. Otherwise,
+      // only a dropped selection blanks it — a server deleted elsewhere
+      // while it was selected leaves the same stale editor behind.
+      const workspaceChanged = loadedCwdRef.current !== undefined && loadedCwdRef.current !== cwd;
+      loadedCwdRef.current = cwd;
+      const kept = workspaceChanged ? null : (selectedRef.current && data.servers?.some((server) => server.name === selectedRef.current) ? selectedRef.current : null);
+      const dropped = selectedRef.current !== null && kept === null;
+      selectedRef.current = kept;
+      setSelected(kept);
+      if (workspaceChanged || dropped) {
+        setName("");
+        setSource(newServer());
+      }
 
       // Live status can start or reuse an OMP child and wait for /mcp list.
       // Keep it off the initial paint path; the static inventory is already
@@ -130,6 +148,7 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
   };
 
   const choose = (server: McpServer) => {
+    selectedRef.current = server.name;
     setSelected(server.name);
     setName(server.name);
     setSource(JSON.stringify(server.config, null, 2));
@@ -137,6 +156,7 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
   };
 
   const add = () => {
+    selectedRef.current = null;
     setSelected(null);
     setName("");
     setSource(newServer());
@@ -179,6 +199,7 @@ export function McpConfig({ cwd, sessionId }: { cwd: string | null; sessionId?: 
       const response = await fetch("/api/mcp", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cwd, name, previousName: selected ?? undefined, server }) });
       const data = await response.json() as { error?: string };
       if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+      selectedRef.current = name;
       setSelected(name);
       toast.success(t("mcpConfig.serverSaved", { name }));
       await load();

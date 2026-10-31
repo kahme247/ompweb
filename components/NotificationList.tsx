@@ -104,7 +104,7 @@ function NotificationRow({ entry }: { entry: NotificationHistoryEntry }) {
       tabIndex={open ? 0 : undefined}
       className={open ? "ui-focus-ring" : undefined}
       onKeyDown={open ? (event) => {
-        if (event.key !== "Enter" || event.target !== event.currentTarget) return;
+        if ((event.key !== "Enter" && event.key !== " ") || event.target !== event.currentTarget) return;
         event.preventDefault();
         open();
       } : undefined}
@@ -114,7 +114,10 @@ function NotificationRow({ entry }: { entry: NotificationHistoryEntry }) {
         // leftover (a pen lifted outside the row) is simply replaced.
         if (drag.current?.claimed || leaving || event.pointerType === "mouse" || event.button !== 0) return;
         drag.current = null;
-        if (event.target instanceof Element && event.target.closest("button, a, input, textarea, select")) return;
+        // The expandable description is text, not a control: a swipe starting
+        // on it dismisses the row exactly as it did when it was a span. Only
+        // real controls (e.g. the dismiss button) opt out of starting a drag.
+        if (event.target instanceof Element && event.target.closest("button:not([aria-expanded]), a, input, textarea, select")) return;
         drag.current = { id: event.pointerId, x: event.clientX, y: event.clientY, claimed: false, tracker: createSwipeTracker(event.clientX) };
       }}
       onPointerMove={(event) => {

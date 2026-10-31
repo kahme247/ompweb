@@ -99,6 +99,7 @@
   "appShell.notificationsEmpty": "No recent notifications",
   "appShell.notificationsClear": "Clear all",
   "appShell.notificationDismiss": "Dismiss notification",
+  "toast.dismiss": "Dismiss",
   "appShell.notificationsMarkRead": "Mark all as read",
   "appShell.notificationUnread": "Unread",
   "appShell.notificationsUnreadCount": "{count} unread",

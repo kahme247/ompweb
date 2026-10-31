@@ -284,6 +284,10 @@ function SearchResultsList({ results, query, onSelect }: { results: SearchResult
 function AutoResumeSessionsSetting() {
   const { t } = useI18n();
   const [enabled, setEnabled] = useState<boolean | null>(null);
+  // While a save is in flight the toggle is disabled, like the notification
+  // toggles below: two overlapping PUTs can resolve out of order and leave
+  // the UI showing the opposite of the server value.
+  const [saving, setSaving] = useState(false);
   useEffect(() => {
     let alive = true;
     fetch("/api/web-settings")
@@ -293,8 +297,10 @@ function AutoResumeSessionsSetting() {
     return () => { alive = false; };
   }, []);
   const change = async (next: boolean) => {
+    if (saving) return;
     const previous = enabled;
     setEnabled(next);
+    setSaving(true);
     try {
       const res = await fetch("/api/web-settings", {
         method: "PUT",
@@ -305,11 +311,13 @@ function AutoResumeSessionsSetting() {
     } catch (error) {
       setEnabled(previous);
       toast.error(t("settingsConfig.autoResumeSessionsSaveFailed"), error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
     }
   };
   return (
     <NativeSetting searchId="auto-resume-sessions" label={t("settingsConfig.autoResumeSessions")} description={t("settingsConfig.autoResumeSessionsDesc")}>
-      <ToggleSwitch checked={enabled === true} disabled={enabled === null} onChange={(next) => void change(next)} />
+      <ToggleSwitch checked={enabled === true} disabled={enabled === null || saving} onChange={(next) => void change(next)} />
     </NativeSetting>
   );
 }
@@ -319,6 +327,13 @@ function AutoResumeSessionsSetting() {
 function AgentToolsSetting() {
   const { t } = useI18n();
   const [enabled, setEnabled] = useState<boolean | null>(null);
+  // While a save is in flight the toggle is disabled, like the notification
+  // toggles below: two overlapping PUTs can resolve out of order and leave
+  // the UI showing the opposite of the server value. This one is a security
+  // boundary — a user who believes they turned cross-session agent tools off
+  // while the server left them on has silently granted agents those tools —
+  // so a second click must wait for the first save to settle.
+  const [saving, setSaving] = useState(false);
   useEffect(() => {
     let alive = true;
     fetch("/api/web-settings")
@@ -328,8 +343,10 @@ function AgentToolsSetting() {
     return () => { alive = false; };
   }, []);
   const change = async (next: boolean) => {
+    if (saving) return;
     const previous = enabled;
     setEnabled(next);
+    setSaving(true);
     try {
       const res = await fetch("/api/web-settings", {
         method: "PUT",
@@ -340,11 +357,13 @@ function AgentToolsSetting() {
     } catch (error) {
       setEnabled(previous);
       toast.error(t("settingsConfig.agentToolsSaveFailed"), error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
     }
   };
   return (
     <NativeSetting searchId="agent-tools-cross-session" label={t("settingsConfig.agentTools")} description={t("settingsConfig.agentToolsDesc")}>
-      <ToggleSwitch checked={enabled === true} disabled={enabled === null} onChange={(next) => void change(next)} />
+      <ToggleSwitch checked={enabled === true} disabled={enabled === null || saving} onChange={(next) => void change(next)} />
     </NativeSetting>
   );
 }
@@ -1694,7 +1713,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                     </NativeSetting>
                   </div>
                 )}
-                <McpConfig cwd={cwd} sessionId={sessionId} />
+                <McpConfig key={cwd ?? ""} cwd={cwd} sessionId={sessionId} />
                 {!cwd && <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>{t("settingsConfig.selectWorkspaceForMcp")}</p>}
               </div>
             )}

@@ -99,6 +99,7 @@
   "appShell.notificationsEmpty": "暂无最近通知",
   "appShell.notificationsClear": "全部清除",
   "appShell.notificationDismiss": "关闭通知",
+  "toast.dismiss": "关闭",
   "appShell.notificationsMarkRead": "全部标为已读",
   "appShell.notificationUnread": "未读",
   "appShell.notificationsUnreadCount": "{count} 条未读",
