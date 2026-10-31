@@ -19,7 +19,11 @@ const advisorSpawnSessions = new Set<string>();
 // The worker's ack timeout (public/event-stream-worker.js): 10 s plus 1 ms per 32 bytes to upload first.
 const ACK_TIMEOUT_MS = 10_000;
 
-/** This tab's unanswered POSTs, for a later one's isolation bytes (spec D6 "Uplink"). */
+/**
+ * This tab's unanswered POSTs, for a later one's isolation bytes (spec D6 "Uplink"). fetch reports no upload progress
+ * and the server's receive time arrives only with the response, so a POST counts until answered, even once its body is
+ * in; the summary's LARGE_FRAME_BYTES floor keeps a small command the server is still running from reading as blocking.
+ */
 const inFlightPosts = new Set<{ sessionId: string; bytes: number }>();
 
 /** 503 `{hostOffline: true}`: the session's host has no link right now. With
@@ -56,10 +60,11 @@ export async function sendAgentCommand<T = unknown>(
   const req = Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
   const json = JSON.stringify(command);
   // Every command's `action` sample (spec D6); the worker adds the tags and its clock.
-  const sample = { metric: "action", req, type: command.type, session: sessionId, bytes: json.length, sentAt: Date.now() };
+  const type = typeof command.type === "string" ? command.type : "";
+  const sample = { metric: "action", req, type, session: sessionId, bytes: json.length, sentAt: Date.now() };
   let reply: CommandReply;
   try {
-    reply = (await sendSessionCommand(sessionId, req, json, advisor)) ?? (await postAgentCommand(sessionId, json, advisor, req, command.type));
+    reply = (await sendSessionCommand(sessionId, req, json, advisor, type)) ?? (await postAgentCommand(sessionId, json, advisor, req, type));
   } catch (error) {
     // The POST got no answer at all (offline, connection reset).
     recordTransportSample({ ...sample, via: "http", socket: "http", status: 0, outcome: "error", gotAt: Date.now() });
@@ -104,7 +109,7 @@ export async function sendAgentCommand<T = unknown>(
   return body.data as T;
 }
 
-async function postAgentCommand(sessionId: string, body: string, advisor: boolean, req: string, type: unknown): Promise<CommandReply> {
+async function postAgentCommand(sessionId: string, body: string, advisor: boolean, req: string, type: string): Promise<CommandReply> {
   let behindSameBytes = 0;
   let behindOtherBytes = 0;
   for (const other of inFlightPosts) {
