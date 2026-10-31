@@ -1034,3 +1034,35 @@ for (const holdUpload of [false, true]) {
     await waitFor(() => assert.equal(getDraft(targetKey), null));
   });
 }
+
+for (const typeWhileRunning of [false, true]) {
+  test(`a dictated builtin clears the composer on success ${typeWhileRunning ? "except text typed while it ran" : "including its transcript"}`, async () => {
+    window.HTMLElement.prototype.scrollIntoView = () => {};
+    const dictation = installPendingDictation();
+    const user = userEvent.setup();
+    let finishBuiltin;
+    const builtins = [];
+    render(React.createElement(ChatInput, {
+      draftKey: KEY, isStreaming: false, onAbort() {},
+      onSend: async () => ({ status: "accepted" }),
+      onBuiltinCommand: (text) => {
+        builtins.push(text);
+        return new Promise((resolve) => { finishBuiltin = () => resolve({ handled: true }); });
+      },
+    }));
+    await user.type(screen.getByRole("textbox"), "/compact");
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Start dictation" }));
+    await user.click(await screen.findByTitle("Transcribe and send"));
+    dictation.complete();
+    await waitFor(() => assert.deepEqual(builtins, ["/compact transcribed words"]), { timeout: 3000 });
+    if (typeWhileRunning) {
+      await user.click(screen.getByRole("textbox"));
+      await user.keyboard("{End} typed meanwhile");
+    }
+    await act(async () => finishBuiltin());
+    const expected = typeWhileRunning ? "/compact transcribed words typed meanwhile" : "";
+    await waitFor(() => assert.equal(screen.getByRole("textbox").value, expected));
+    delete window.HTMLElement.prototype.scrollIntoView;
+  });
+}

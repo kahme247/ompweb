@@ -9,14 +9,12 @@ import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
 import { toast } from "@/components/ui/toast";
 import { ConfirmDialog } from "@/components/ui/field";
 import { useDictation } from "@/hooks/useDictation";
-import { toastBtwError } from "@/hooks/useBtw";
 import type { GenerationSpeedInfo, SessionStatsInfo, SlowModeScope, UsageLimitState } from "@/lib/pi-types";
 import type { SttAfter } from "@/lib/stt";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { ContextDetailPanel } from "./ComposerPanels";
 import { RecordingDeck } from "./RecordingDeck";
 import { clearDraft, getDraft, mergeRecoveredText, recoverDraft, setDraft, subscribeDraftRecovery, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
-import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import type { AttachedImage, AttachedTextFile } from "./ChatInput-draft-attachments";
 import {
   draftFilesToAttachedFiles,
@@ -46,9 +44,9 @@ import {
 } from "./ChatInput-model-options";
 import { ModelPickerPanel } from "./ChatInput-model-picker";
 import { ComposerModeStatus, ModelErrorBanner, QueuedActionButton } from "./ChatInput-banners";
+import { useComposerSubmit } from "./ChatInput-submit";
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
 import {
-  composeMessageWithTextAttachments,
   describeTextAttachmentSkip,
   formatAttachmentBytes,
   MAX_ATTACHED_TEXT_FILES,
@@ -57,7 +55,6 @@ import {
 import {
   MAX_ATTACHED_IMAGE_BYTES,
   MAX_ATTACHED_IMAGES,
-  validateOutgoingPrompt,
 } from "@/lib/image-attachments";
 import {
   buildEntriesFromFiles, buildAtInsertText, extractAtQuery, filterFileEntries,
@@ -923,75 +920,24 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     };
   }, []);
 
-  /** The routes reject an oversized prompt with 413, but the session hook has
-   * already shown the optimistic user bubble and Waiting for model by then, and
-   * the composer has been cleared. Refuse here instead, keeping text and
-   * images so the user can trim the message.
-   *
-   * The check owns the banner it raises: a dispatch that now fits clears it,
-   * because a text-only prompt has no attachment chip whose removal would. */
-  const rejectsOversizedPrompt = useCallback((message: string, images: AttachedImage[]): boolean => {
-    const error = validateOutgoingPrompt(message, images);
-    setAttachError(error);
-    return error !== null;
-  }, []);
-
-  /** Run a client builtin. True once handled; the composer is cleared only on
-   * success and only if it still holds what was sent (the user may have
-   * started typing while the command ran). */
-  const runBuiltinCommand = useCallback(async (msg: string, overrideText?: string): Promise<boolean> => {
-    if (submissionBlockedRef.current || !onBuiltinCommand) return false;
-    const sentValue = overrideText ?? valueRef.current;
-    const result = await onBuiltinCommand(msg);
-    if (!result.handled) return false;
-    if (!submissionBlockedRef.current && !result.error && !result.retainInput && (overrideText !== undefined || valueRef.current === sentValue)) clearInput();
-    return true;
-  }, [onBuiltinCommand, clearInput]);
-
-  /** `/btw` asks a side question beside any run: never a prompt, never
-   * queued. Attachments cannot ride along, so refuse and keep the draft
-   * rather than drop them. False when `msg` is not `/btw`. */
-  const sendSideQuestion = useCallback((msg: string, overrideText?: string): boolean => {
-    if (!/^\/btw(\s|$)/.test(msg) || !onBuiltinCommand) return false;
-    if (attachedImagesRef.current.length || attachedTextFilesRef.current.length) {
-      toast.error(t("btw.attachmentsUnsupported"));
-      return true;
-    }
-    runBuiltinCommand(msg, overrideText).catch(toastBtwError);
-    return true;
-  }, [onBuiltinCommand, runBuiltinCommand, t]);
-
-  const handleSend = useCallback(async (overrideText?: string) => {
-    const raw = overrideText ?? value;
-    const msg = raw.trim();
-    if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length) return;
-    if (submissionBlockedRef.current || isStreaming) return;
-    onAudioUnlock?.();
-    if (sendSideQuestion(msg, overrideText)) return;
-    const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFilesRef.current);
-    if (!attachedImagesRef.current.length && !attachedTextFilesRef.current.length && msg.startsWith("/") && onBuiltinCommand) {
-      const expansion = expandWebSlashCommand(msg);
-      if (expansion.kind === "expand" && rejectsOversizedPrompt(expansion.prompt, attachedImagesRef.current)) return;
-      if (await runBuiltinCommand(msg, overrideText)) return;
-    }
-    if (submissionBlockedRef.current) return;
-    if (rejectsOversizedPrompt(composedMessage, attachedImagesRef.current)) return;
-    const key = draftKeyRef.current;
-    const images = attachedImagesRef.current.length ? attachedImagesRef.current : undefined;
-    const recovery = { text: composedMessage, images: images?.map(imageToDraftImage) };
-    const pending = onSend(composedMessage, images);
-    clearInput();
-    try {
-      const result = await pending;
-      if (result.status === "rejected") {
-        const destination = result.recoveryKey ?? key;
-        if (destination) recoverDraft(destination, recovery);
-      }
-    } catch (error) {
-      if (key) recoverDraft(key, recovery);
-      throw error;
-    }
-  }, [value, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, rejectsOversizedPrompt, runBuiltinCommand, sendSideQuestion]);
+  const { handleSend, sendQueued } = useComposerSubmit({
+    value,
+    valueRef,
+    imagesRef: attachedImagesRef,
+    textFilesRef: attachedTextFilesRef,
+    draftKeyRef,
+    submissionBlockedRef,
+    isStreaming,
+    advisorEnabled,
+    clearInput,
+    setAttachError,
+    onSend,
+    onSteer,
+    onFollowUp,
+    onPromptWithStreamingBehavior,
+    onBuiltinCommand,
+    onAudioUnlock,
+  });
   const {
     isRecording,
     isPaused,
@@ -1427,68 +1373,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     });
   }, [slashMatch, value]);
 
-  const sendQueued = useCallback((mode: "steer" | "followup", overrideText?: string) => {
-    if (submissionBlockedRef.current) return;
-    const raw = overrideText ?? value;
-    const msg = raw.trim();
-    if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length) return;
-    if (sendSideQuestion(msg, overrideText)) return;
-    const images = attachedImagesRef.current.length ? attachedImagesRef.current : undefined;
-    // The queue callbacks resolve false when omp refused the message: it goes
-    // back, text and images together, to the draft it was sent from, even if
-    // the user has typed or switched sessions since.
-    const key = draftKeyRef.current;
-    const keptImages = images?.map(imageToDraftImage);
-    const recoverOnFailure = (queued: Promise<boolean>, text: string) => {
-      void Promise.resolve(queued).then((ok) => {
-        if (ok === false && key) recoverDraft(key, { text, images: keptImages });
-      });
-    };
-    const files = attachedTextFilesRef.current;
-    onAudioUnlock?.();
-    const streamingBehavior = mode === "steer" ? "steer" : "followUp";
-    if (msg.startsWith("/") && onPromptWithStreamingBehavior) {
-      const commandName = msg.slice(1).split(/\s+/)[0];
-      // Same gate as the direct path (useAgentSession refuses /advisor while
-      // disabled): queueing must not become a bypass around the toggle.
-      if (commandName === "advisor" && !advisorEnabled) {
-        toast.error(t("agentSession.advisorDisabled"));
-        return;
-      }
-      // Web commands must be expanded even when queued: the raw slash text
-      // would otherwise reach omp as a literal message (its /goal //plan are
-      // TUI-only). Action commands (compact/...) keep the raw text so omp's
-      // own ACP handlers can run them.
-      const expansion = expandWebSlashCommand(msg);
-      if (expansion.kind === "expand") {
-        const prompt = composeMessageWithTextAttachments(expansion.prompt, files);
-        if (rejectsOversizedPrompt(prompt, attachedImagesRef.current)) return;
-        recoverOnFailure(onPromptWithStreamingBehavior(prompt, streamingBehavior, images), prompt);
-        clearInput();
-        return;
-      }
-      if (expansion.kind === "usage-error") {
-        toast.error(t("chatInput.commandUsageTitle"), t("agentSession.commandRequiresArgs", {
-          command: expansion.command,
-          usage: t(expansion.argumentHintKey),
-        }));
-        return;
-      }
-      const prompt = composeMessageWithTextAttachments(msg, files);
-      if (rejectsOversizedPrompt(prompt, attachedImagesRef.current)) return;
-      recoverOnFailure(onPromptWithStreamingBehavior(prompt, streamingBehavior, images), prompt);
-      clearInput();
-      return;
-    }
-    const composedMessage = composeMessageWithTextAttachments(msg, files);
-    if (rejectsOversizedPrompt(composedMessage, attachedImagesRef.current)) return;
-    if (mode === "steer" && onSteer) {
-      recoverOnFailure(onSteer(composedMessage, images), composedMessage);
-    } else if (mode === "followup" && onFollowUp) {
-      recoverOnFailure(onFollowUp(composedMessage, images), composedMessage);
-    }
-    clearInput();
-  }, [value, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, t, advisorEnabled, rejectsOversizedPrompt, sendSideQuestion]);
   // A typed message or attachment during a run is a queued follow-up — and so
   // is a dictation in progress: the primary button must take the same state it
   // would have if the composer already held text. Keep Stop as the action
