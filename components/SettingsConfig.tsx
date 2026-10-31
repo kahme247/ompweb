@@ -395,23 +395,6 @@ function BrowserTransportSetting() {
       toast.error(t("settingsConfig.browserTransportSaveFailed"), error instanceof Error ? error.message : String(error));
     }
   };
-  // The route's ranges (BROWSER_TRANSPORT_RANGES, lib/web-settings.ts, server-only); anything else is not saved.
-  const poolNumber = (key: "browserTransportPerSocket" | "browserTransportMaxSockets", max: number, label: string) => (
-    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: "var(--text-sm)", color: "var(--text-muted)" }}>
-      {label}
-      <input
-        type="number"
-        min={1}
-        max={max}
-        value={settings?.[key] ?? ""}
-        onChange={(event) => {
-          const value = Number(event.target.value);
-          if (Number.isInteger(value) && value >= 1 && value <= max) void change({ [key]: value });
-        }}
-        style={{ width: 64, height: "var(--control-height)", padding: "0 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: "var(--text-sm)" }}
-      />
-    </label>
-  );
   return (
     <>
       <NativeSetting searchId="browser-transport" label={t("settingsConfig.browserTransport")} description={t("settingsConfig.browserTransportDesc")} scope="UI">
@@ -431,13 +414,40 @@ function BrowserTransportSetting() {
       </NativeSetting>
       {settings?.browserTransport === "ws-pool" && (
         <NativeSetting searchId="browser-transport-pool" label={t("settingsConfig.browserTransportWsPool")} description={t("settingsConfig.browserTransportPoolDesc")} scope="UI">
+          {/* The route's ranges (BROWSER_TRANSPORT_RANGES, lib/web-settings.ts, server-only); anything else is not saved. */}
           <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-            {poolNumber("browserTransportPerSocket", 64, t("settingsConfig.browserTransportPerSocket"))}
-            {poolNumber("browserTransportMaxSockets", 16, t("settingsConfig.browserTransportMaxSockets"))}
+            <PoolNumberInput label={t("settingsConfig.browserTransportPerSocket")} max={64} value={settings.browserTransportPerSocket} onSave={(value) => void change({ browserTransportPerSocket: value })} />
+            <PoolNumberInput label={t("settingsConfig.browserTransportMaxSockets")} max={16} value={settings.browserTransportMaxSockets} onSave={(value) => void change({ browserTransportMaxSockets: value })} />
           </div>
         </NativeSetting>
       )}
     </>
+  );
+}
+
+/** Every save resizes each open browser's pool, so a number is saved once, on blur or Enter, never per keystroke. */
+function PoolNumberInput({ label, max, value, onSave }: { label: string; max: number; value: number; onSave: (value: number) => void }) {
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => setDraft(String(value)), [value]);
+  const commit = () => {
+    const next = Number(draft);
+    if (Number.isInteger(next) && next >= 1 && next <= max && next !== value) onSave(next);
+    else setDraft(String(value));
+  };
+  return (
+    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: "var(--text-sm)", color: "var(--text-muted)" }}>
+      {label}
+      <input
+        type="number"
+        min={1}
+        max={max}
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => { if (event.key === "Enter") commit(); }}
+        style={{ width: 64, height: "var(--control-height)", padding: "0 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: "var(--text-sm)" }}
+      />
+    </label>
   );
 }
 

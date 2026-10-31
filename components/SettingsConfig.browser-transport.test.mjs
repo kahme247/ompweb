@@ -56,12 +56,32 @@ test("the browser transport control shows the saved mode, saves changes and show
 
   fireEvent.change(perSocket(), { target: { value: "8" } });
   await settle();
-  assert.deepEqual(puts.slice(1), ['{"browserTransportPerSocket":8}']);
+  assert.equal(puts.length, 1, "typing alone saves nothing");
   assert.equal(perSocket()?.value, "8");
-
-  fireEvent.change(perSocket(), { target: { value: "0" } });
+  fireEvent.blur(perSocket());
   await settle();
-  assert.equal(puts.length, 2, "an out-of-range number is not saved");
+  assert.deepEqual(puts.slice(1), ['{"browserTransportPerSocket":8}'], "leaving the field saves once");
+  fireEvent.blur(perSocket());
+  await settle();
+  assert.equal(puts.length, 2, "an unchanged number is not saved again");
+
+  fireEvent.change(perSocket(), { target: { value: "" } });
+  assert.equal(perSocket()?.value, "", "the field can be emptied while typing");
+  for (const value of ["", "0", "1.5", "65"]) {
+    fireEvent.change(perSocket(), { target: { value } });
+    fireEvent.blur(perSocket());
+    await settle();
+    assert.equal(puts.length, 2, `${JSON.stringify(value)} is not saved`);
+    assert.equal(perSocket()?.value, "8", "the field shows the saved number again");
+  }
+
+  fireEvent.change(maxSockets(), { target: { value: "2" } });
+  fireEvent.keyDown(maxSockets(), { key: "Enter" });
+  await settle();
+  assert.deepEqual(puts.slice(2), ['{"browserTransportMaxSockets":2}'], "Enter saves");
+  fireEvent.blur(maxSockets());
+  await settle();
+  assert.equal(puts.length, 3, "and the blur after it does not save again");
 
   putStatus = 500;
   fireEvent.change(select, { target: { value: "ws-client" } });
