@@ -1,5 +1,5 @@
-import type { ChatDraftFile, ChatDraftImage } from "@/lib/draft-store";
-import type { AttachedTextFileData } from "@/lib/chat-attachments";
+import type { ChatDraftFile, ChatDraftImage, ChatDraftReference } from "@/lib/draft-store";
+import { isAttachmentReferenceData, type AttachedTextFileData, type AttachmentReferenceData } from "@/lib/chat-attachments";
 import { isBase64ImageWithinLimits } from "@/lib/image-attachments";
 
 export interface AttachedImage {
@@ -9,6 +9,7 @@ export interface AttachedImage {
 }
 
 export type AttachedTextFile = AttachedTextFileData;
+export type AttachedReference = AttachmentReferenceData;
 
 export function imageToDraftImage(image: AttachedImage): ChatDraftImage {
   return { data: image.data, mimeType: image.mimeType };
@@ -43,6 +44,11 @@ export function draftFilesToAttachedFiles(files: ChatDraftFile[] | undefined): A
     && typeof file.content === "string"
     && Number.isFinite(file.size)
     && file.size >= 0);
+}
+
+/** Uploaded paths are plain data; keep every well-formed one. */
+export function draftReferencesToAttachedReferences(references: ChatDraftReference[] | undefined): AttachedReference[] {
+  return (references ?? []).filter(isAttachmentReferenceData);
 }
 
 export function revokeImagePreview(image: AttachedImage): void {

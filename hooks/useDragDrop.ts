@@ -1,12 +1,15 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect } from "react";
+import { splitDroppedItems, type FolderAttachmentSource } from "@/lib/attachment-upload";
 
+// Any dragged file or folder can be attached: text inline, images as images,
+// everything else as an uploaded path reference.
 function isAttachableDragItem(item: DataTransferItem): boolean {
-  return item.type.startsWith("image/") || item.type === "text/plain" || item.type === "text/markdown";
+  return item.kind === "file";
 }
 
-export function useDragDrop(onDrop: (files: File[]) => void) {
+export function useDragDrop(onDrop: (files: File[], folders: FolderAttachmentSource[]) => void) {
   const [isDragOver, setIsDragOver] = useState(false);
   const counterRef = useRef(0);
 
@@ -53,8 +56,9 @@ export function useDragDrop(onDrop: (files: File[]) => void) {
     e.preventDefault();
     counterRef.current = 0;
     setIsDragOver(false);
-    const files = Array.from(e.dataTransfer.files);
-    onDrop(files);
+    // Directory entries are only readable during the drop event itself.
+    const { files, folders } = splitDroppedItems(e.dataTransfer);
+    onDrop(files, folders);
   }, [onDrop]);
 
   return { isDragOver, handleDragEnter, handleDragOver, handleDragLeave, handleDrop };

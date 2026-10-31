@@ -2980,8 +2980,10 @@ test("relocation merges existing target attachments and preserves typing added w
   const targetImage = { data: "BBBB", mimeType: "image/webp" };
   const sourceFile = { name: "source.txt", mimeType: "text/plain", content: "source", size: 6 };
   const targetFile = { name: "target.txt", mimeType: "text/plain", content: "target", size: 6 };
-  setDraft(sid, { value: "initial source draft", images: [sourceImage], files: [sourceFile] });
-  setDraft(target, { value: "existing target draft", images: [targetImage], files: [targetFile] });
+  const sourceReference = { batchId: "11111111-1111-4111-8111-111111111111", kind: "file", name: "source.pdf", path: "/srv/attachments/1/source.pdf", size: 6, fileCount: 1 };
+  const targetReference = { batchId: "22222222-2222-4222-8222-222222222222", kind: "folder", name: "target-data", path: "/srv/attachments/2/target-data", size: 9, fileCount: 2 };
+  setDraft(sid, { value: "initial source draft", images: [sourceImage], files: [sourceFile], references: [sourceReference] });
+  setDraft(target, { value: "existing target draft", images: [targetImage], files: [targetFile], references: [targetReference] });
   const native = primeEditableHistory(sid);
   native.moveTo = target;
   await attachEditableWrapper(t, native);
@@ -3007,8 +3009,11 @@ test("relocation merges existing target attachments and preserves typing added w
   assert.deepEqual(getDraft(target), {
     value: "new source typing\n\nexisting target draft", images: [sourceImage, targetImage],
     files: [sourceFile, { name: "new.txt", mimeType: "text/plain", content: "new file while waiting", size: 22 }, targetFile],
+    references: [sourceReference, targetReference],
   });
   assert.equal(w.view.getByRole("textbox").value, "new source typing\n\nexisting target draft");
+  assert.ok(w.view.getByText("source.pdf"), "the moved composer keeps the source's uploaded reference chip");
+  assert.ok(w.view.getByText("target-data/"), "and adopts the target's");
   assert.equal(getDraft(sid), null);
 });
 
@@ -3058,6 +3063,7 @@ test("relocation at draft capacity preserves every unrelated draft and its attac
     value: "",
     images: [{ data: png, mimeType: "image/png" }],
     files: [{ name: "source.txt", mimeType: "text/plain", content: "Source context", size: 14 }],
+    references: [{ batchId: "33333333-3333-4333-8333-333333333333", kind: "folder", name: "dataset", path: "/srv/attachments/3/dataset", size: 9, fileCount: 2 }],
   };
   setDraft(sid, source);
   const native = primeEditableHistory(sid);

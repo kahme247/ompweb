@@ -1,3 +1,5 @@
+import type { AttachmentReferenceData } from "./chat-attachments";
+
 export interface ChatDraftImage {
   data: string;
   mimeType: string;
@@ -10,10 +12,15 @@ export interface ChatDraftFile {
   size: number;
 }
 
+/** An uploaded file or folder the prompt refers to by path. */
+export type ChatDraftReference = AttachmentReferenceData;
+
 export interface ChatDraft {
   value: string;
   images: ChatDraftImage[];
   files: ChatDraftFile[];
+  /** Omitted when empty, so drafts without uploads keep their plain shape. */
+  references?: ChatDraftReference[];
 }
 
 /** Content to put back in a composer. `replace` merges a later recovery with
@@ -97,15 +104,21 @@ export function subscribeDraftRecovery(listener: (key: string, recovery: DraftRe
 }
 
 function cloneDraft(draft: ChatDraft): ChatDraft {
+  const references = draft.references?.map((reference) => ({ ...reference })) ?? [];
   return {
     value: draft.value,
     images: draft.images.map((image) => ({ ...image })),
     files: draft.files.map((file) => ({ ...file })),
+    ...(references.length > 0 ? { references } : {}),
   };
 }
 
+function hasDraftAttachments(draft: ChatDraft): boolean {
+  return draft.images.length > 0 || draft.files.length > 0 || (draft.references?.length ?? 0) > 0;
+}
+
 function isEmptyDraft(draft: ChatDraft): boolean {
-  return !draft.value && draft.images.length === 0 && draft.files.length === 0;
+  return !draft.value && !hasDraftAttachments(draft);
 }
 
 export function getDraft(key: string): ChatDraft | null {
@@ -132,7 +145,7 @@ export function getDraftSummary(key: string): { text: string; hasAttachments: bo
   if (!draft) return { text: "", hasAttachments: false };
   return {
     text: draft.value,
-    hasAttachments: draft.images.length > 0 || draft.files.length > 0,
+    hasAttachments: hasDraftAttachments(draft),
   };
 }
 

@@ -67,6 +67,8 @@ app/api/
   sessions/[id]/export/route.ts   GET exported HTML for a session
   agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? }
   agent/[id]/route.ts             GET state | POST any RPC command
+  attachments/route.ts            POST { kind, name, files: [{ path, size }] } → 201 { batchId } (composer path attachments)
+  attachments/[batchId]/route.ts  PUT multipart (path, offset, data) chunks | POST complete → { path, kind, name, size, fileCount }
   events/route.ts                 GET multiplexed SSE | POST subscribe/unsubscribe channels
   notifications/devices/route.ts  GET VAPID key + subscribed | PUT { deviceId, prefs, subscription? }
   notifications/presence/route.ts POST { clientId, deviceId, visible, sessionId, seq }
@@ -100,6 +102,9 @@ lib/
   omp/                 shared omp foundations (paths, CLI probe, RpcProcess)
   provider-accounts.ts distinct omp accounts per provider from `omp usage` reports (Models → provider detail)
   agent-client.ts      typed fetch helper for /api/agent commands
+  attachment-store.ts  server: composer upload batches under <agent dir>/omp-web/attachments (path validation, caps, pruning)
+  attachment-upload.ts browser: chunked upload to /api/attachments + folder pick/drop traversal
+  chat-attachments.ts  pure composer attachment rules: inline text budget, caps, prompt composition (Attached paths block)
   btw.ts               /btw side-question records + pure frame/snapshot merge (order-safe)
   draft-store.ts       local draft persistence helpers
   event-stream.ts      tab-side EventSource-shaped streams over the shared worker
@@ -563,6 +568,21 @@ during the wait.
 ### File access allow-list
 - `/api/files` is intentionally not a general filesystem browser. Allowed roots come from session cwds, their resolved project roots, `~/omp-cwd-*`, and roots explicitly added with `allowFileRoot()`.
 - `/api/cwd/validate`, `/api/default-cwd`, and `/api/worktrees` call `allowFileRoot()` when they make a new location browsable.
+
+### Composer path attachments (`lib/attachment-store.ts`, `/api/attachments`)
+- Small text files are inlined, images go as RPC `images`; everything else
+  (binary, past the inline budget or slots, folders) is uploaded and the prompt
+  ends with an `Attached paths` list (`composeMessageWithAttachments`). The
+  model reads those absolute paths with its own tools.
+- One batch = one chip: declared first (every relative path validated and the
+  2,000-file / 200 MB caps checked before any byte), then filled by ordered
+  ≤ 8 MiB multipart chunks, then completed. Chunking is required: while
+  `proxy.ts` runs, Next buffers at most 10 MB of a request body
+  (`proxyClientMaxBodySize`) and silently truncates the rest.
+- Batches older than 30 days are pruned on batch creation (at most hourly).
+  Removing a chip leaves its batch for pruning. References live in the draft
+  store (memory-only, like other attachment payloads) and are folded into the
+  prompt text, so queue recovery restores them with the text.
 
 ### Session list caching — new sessions must appear immediately
 - `listAllSessions()` (sidebar, command palette) is cached twice: a 30s TTL

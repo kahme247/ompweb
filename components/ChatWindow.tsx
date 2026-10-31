@@ -23,6 +23,7 @@ import { useAudio } from "@/hooks/useAudio";
 import { useSpeechSynthesis, SpeechSynthesisProvider } from "@/hooks/useSpeechSynthesis";
 import { GithubRepoContext } from "@/lib/github-refs";
 import { useDragDrop } from "@/hooks/useDragDrop";
+import type { FolderAttachmentSource } from "@/lib/attachment-upload";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import type { SessionStatsInfo, GenerationSpeedInfo } from "@/lib/pi-types";
@@ -843,8 +844,9 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
   useEffect(() => () => { onSessionStatsChange?.(null); }, [onSessionStatsChange]);
 
 
-  const onDrop = useCallback((files: File[]) => {
-    composerRef.current?.addFiles(files);
+  const onDrop = useCallback((files: File[], folders: FolderAttachmentSource[]) => {
+    if (files.length) composerRef.current?.addFiles(files);
+    if (folders.length) composerRef.current?.addFolders(folders);
   }, [composerRef]);
 
   const { isDragOver, handleDragEnter, handleDragOver, handleDragLeave, handleDrop } = useDragDrop(onDrop);

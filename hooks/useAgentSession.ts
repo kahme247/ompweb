@@ -3174,10 +3174,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // Free the source slot before inserting an absent target: moving a
         // draft at capacity must not evict an unrelated conversation's draft.
         clearDraft(sid);
+        const references = [...(draft.references ?? []), ...(destination?.references ?? [])];
         setDraft(edit.sessionId, {
           value: loaded && !value.trim() ? content : value,
           images: destination ? [...draft.images, ...destination.images] : draft.images,
           files: destination ? [...draft.files, ...destination.files] : draft.files,
+          ...(references.length > 0 ? { references } : {}),
         });
         onSessionMoved?.(sid, edit.sessionId, draft);
       }

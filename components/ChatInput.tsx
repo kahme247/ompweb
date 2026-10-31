@@ -2,7 +2,7 @@
 
 import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, ClipboardPaste, CornerDownRight, ListChecks, Loader2, Mic, Paperclip, Plus, RotateCw, Shrink, Snail, Sparkles, Wrench, X, Zap } from "lucide-react";
+import { ChevronDown, ClipboardPaste, CornerDownRight, FolderPlus, ListChecks, Loader2, Mic, Paperclip, Plus, RotateCw, Shrink, Snail, Sparkles, Wrench, X, Zap } from "lucide-react";
 import { getSubmitDuringRunBehavior, isWordCompletionEnabled } from "@/lib/composer-prefs";
 import type { BuiltinSlashCommandResult, CompactResultInfo, PromptSubmissionResult, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
@@ -17,10 +17,11 @@ import { ContextDetailPanel } from "./ComposerPanels";
 import { RecordingDeck } from "./RecordingDeck";
 import { clearDraft, getDraft, mergeRecoveredText, recoverDraft, setDraft, subscribeDraftRecovery, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
-import type { AttachedImage, AttachedTextFile } from "./ChatInput-draft-attachments";
+import type { AttachedImage, AttachedReference, AttachedTextFile } from "./ChatInput-draft-attachments";
 import {
   draftFilesToAttachedFiles,
   draftImagesToAttachedImages,
+  draftReferencesToAttachedReferences,
   imageToDraftImage,
   revokeImagePreview,
   textFileToDraftFile,
@@ -48,12 +49,24 @@ import { ModelPickerPanel } from "./ChatInput-model-picker";
 import { ComposerModeStatus, ModelErrorBanner, QueuedActionButton } from "./ChatInput-banners";
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
 import {
-  composeMessageWithTextAttachments,
-  describeTextAttachmentSkip,
+  composeMessageWithAttachments,
+  exceededAttachmentBatchLimit,
   formatAttachmentBytes,
+  formatReferenceBytes,
+  isBinaryText,
   MAX_ATTACHED_TEXT_FILES,
+  MAX_ATTACHMENT_BATCH_BYTES,
+  MAX_ATTACHMENT_BATCH_FILES,
   selectTextAttachments,
+  type AttachmentReferenceKind,
 } from "@/lib/chat-attachments";
+import {
+  AttachmentUploadError,
+  foldersFromDirectoryInput,
+  uploadAttachment,
+  type AttachmentUploadEntry,
+  type FolderAttachmentSource,
+} from "@/lib/attachment-upload";
 import {
   MAX_ATTACHED_IMAGE_BYTES,
   MAX_ATTACHED_IMAGES,
@@ -248,10 +261,24 @@ export interface ChatInputHandle {
   insertIfEmpty: (text: string) => void;
   prependText: (text: string) => void;
   addFiles: (files: File[]) => void;
+  /** Upload folders (picked or dropped) as path references. */
+  addFolders: (folders: FolderAttachmentSource[]) => void;
   openContextPanel: () => void;
   /** Retarget captured queue recoveries before a confirmed move can render. */
   retargetPendingRecovery: (from: string, to: string) => void;
 }
+
+/** A file or folder upload in flight (`/api/attachments`). Counts are null
+ *  until a dropped folder has been walked. */
+interface PendingReferenceUpload {
+  id: number;
+  kind: AttachmentReferenceKind;
+  name: string;
+  fileCount: number | null;
+  size: number | null;
+  uploaded: number;
+}
+
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
 
 // The history / slash / @ menus are absolutely positioned relative to the
@@ -423,9 +450,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [attachedTextFiles, setAttachedTextFiles] = useState<AttachedTextFile[]>(() => (
     draftKey ? draftFilesToAttachedFiles(getDraft(draftKey)?.files) : []
   ));
+  const [attachedReferences, setAttachedReferences] = useState<AttachedReference[]>(() => (
+    draftKey ? draftReferencesToAttachedReferences(getDraft(draftKey)?.references) : []
+  ));
+  // Uploads still in flight: shown as chips, and they hold back sending.
+  const [pendingReferences, setPendingReferences] = useState<PendingReferenceUpload[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
   const trimmedValue = value.trimStart();
-  const bashMode = attachedImages.length === 0 && attachedTextFiles.length === 0 && trimmedValue.startsWith("!");
+  const hasAttachments = attachedImages.length > 0 || attachedTextFiles.length > 0 || attachedReferences.length > 0;
+  const bashMode = !hasAttachments && trimmedValue.startsWith("!");
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
@@ -457,6 +490,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const slashMenuRef = useRef<HTMLDivElement>(null);
   const atMenuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const isComposingRef = useRef(false);
   const lastCompositionEndAtRef = useRef(0);
   const slashCommandsRequestedRef = useRef(false);
@@ -476,6 +510,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const valueRef = useRef(value);
   const attachedImagesRef = useRef(attachedImages);
   const attachedTextFilesRef = useRef(attachedTextFiles);
+  const attachedReferencesRef = useRef(attachedReferences);
+  const nextPendingReferenceIdRef = useRef(0);
+  // Upload id → the attachment revision it started in. Counted synchronously
+  // so a send right after a pick is held back before the chip has rendered;
+  // uploads from a cleared or navigated-away composer no longer count.
+  const pendingReferenceRevisionsRef = useRef(new Map<number, number>());
   // Bumped whenever the user clears/sends the composer: in-flight FileReader
   // and file.text() reads must not re-append their results afterwards.
   const attachmentRevisionRef = useRef(0);
@@ -487,6 +527,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
   attachedTextFilesRef.current = attachedTextFiles;
+  attachedReferencesRef.current = attachedReferences;
 
   const insertTextAtCursor = useCallback((text: string) => {
     const ta = textareaRef.current;
@@ -553,6 +594,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     insertText: insertTextAtCursor,
     addFiles(files: File[]) {
       processFiles(files);
+    },
+    addFolders(folders: FolderAttachmentSource[]) {
+      attachFolders(folders);
     },
     openContextPanel() {
       setContextOpen(true);
@@ -629,26 +673,90 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     }
   }, []);
 
+  /** Upload one file or folder as a path reference. Its chip shows while it
+   *  uploads. A clear/send/navigation (revision bump) drops the result and
+   *  leaves the server batch for pruning; an Edit move keeps it, like reads. */
+  const uploadReference = useCallback(async (
+    kind: AttachmentReferenceKind,
+    name: string,
+    listEntries: () => Promise<AttachmentUploadEntry[]>,
+  ) => {
+    const revision = attachmentRevisionRef.current;
+    const id = nextPendingReferenceIdRef.current++;
+    const updatePending = (changes: Partial<PendingReferenceUpload>) => {
+      setPendingReferences((prev) => prev.map((item) => (item.id === id ? { ...item, ...changes } : item)));
+    };
+    const limitMessage = (code: string | undefined) => {
+      if (code === "attachment_too_many_files") return t("chatInput.attachmentTooManyFiles", { name, count: MAX_ATTACHMENT_BATCH_FILES });
+      if (code === "attachment_batch_too_large") return t("chatInput.attachmentTooLarge", { name, size: formatAttachmentBytes(MAX_ATTACHMENT_BATCH_BYTES) });
+      return null;
+    };
+    pendingReferenceRevisionsRef.current.set(id, revision);
+    setPendingReferences((prev) => [...prev, { id, kind, name, fileCount: null, size: null, uploaded: 0 }]);
+    try {
+      const entries = await listEntries();
+      if (attachmentRevisionRef.current !== revision) return;
+      if (entries.length === 0) {
+        setAttachError(t("chatInput.attachmentFolderEmpty", { name }));
+        return;
+      }
+      const size = entries.reduce((total, entry) => total + entry.file.size, 0);
+      const limit = exceededAttachmentBatchLimit(entries.length, size);
+      if (limit) {
+        setAttachError(limitMessage(limit.code));
+        return;
+      }
+      updatePending({ fileCount: entries.length, size });
+      const reference = await uploadAttachment({ kind, name, entries }, {
+        onProgress: (uploaded) => updatePending({ uploaded }),
+      });
+      if (attachmentRevisionRef.current !== revision) return;
+      setAttachedReferences((prev) => [...prev, reference]);
+    } catch (error) {
+      if (attachmentRevisionRef.current !== revision) return;
+      if (!(error instanceof AttachmentUploadError)) {
+        setAttachError(t("chatInput.attachmentUploadFailed", { name, error: error instanceof Error ? error.message : String(error) }));
+        return;
+      }
+      setAttachError(limitMessage(error.code) ?? t("chatInput.attachmentUploadFailed", {
+        name,
+        error: error.serverError ?? (error.status === undefined
+          ? t("chatInput.attachmentUploadBadResponse")
+          : t("chatInput.attachmentUploadHttpStatus", { status: error.status })),
+      }));
+    } finally {
+      pendingReferenceRevisionsRef.current.delete(id);
+      setPendingReferences((prev) => prev.filter((item) => item.id !== id));
+      // The "still uploading" refusal is stale once this composer has no
+      // upload left; any other message (a failure, a limit) stays.
+      if (![...pendingReferenceRevisionsRef.current.values()].includes(attachmentRevisionRef.current)) {
+        const pendingMessage = t("chatInput.attachmentUploadsPending");
+        setAttachError((current) => (current === pendingMessage ? null : current));
+      }
+    }
+  }, [t]);
+
+  const attachFileReferences = useCallback((files: readonly File[]) => {
+    for (const file of files) void uploadReference("file", file.name, async () => [{ path: file.name, file }]);
+  }, [uploadReference]);
+
+  const attachFolders = useCallback((folders: readonly FolderAttachmentSource[]) => {
+    for (const folder of folders) {
+      void uploadReference("folder", folder.name, () => folder.entries(MAX_ATTACHMENT_BATCH_FILES));
+    }
+  }, [uploadReference]);
+
+  /** Small text files are inlined; anything else (too large, over the
+   *  message budget or slots, or binary) is uploaded as a path reference. */
   const processTextFiles = useCallback(async (files: File[]) => {
-    const remaining = Math.max(
-      0,
-      MAX_ATTACHED_TEXT_FILES - attachedTextFilesRef.current.length - pendingTextFileCountRef.current,
-    );
     // In-flight batches reserve their bytes too, so two overlapping drops
     // cannot each fit under the aggregate budget on their own.
-    const { accepted: textFiles, tooLarge, overBudget } = selectTextAttachments(files, {
+    const { accepted: textFiles, overflow } = selectTextAttachments(files, {
       usedBytes: attachedTextFilesRef.current.reduce((total, file) => total + file.size, 0) + pendingTextFileBytesRef.current,
       usedSlots: attachedTextFilesRef.current.length + pendingTextFileCountRef.current,
     });
-    // Report every dropped candidate, not just an entirely rejected batch: a
-    // drop of several files can lose some to the budget while accepting others.
-    const limitMessage = remaining === 0 && files.length > 0
-      ? t("chatInput.attachmentTextFilesLimit", { count: MAX_ATTACHED_TEXT_FILES })
-      : describeTextAttachmentSkip({ tooLarge, overBudget });
-    if (!textFiles.length) {
-      if (files.length > 0) setAttachError(limitMessage ?? t("chatInput.attachmentFilesSkipped", { count: files.length }));
-      return;
-    }
+    attachFileReferences(overflow);
+    if (!textFiles.length) return;
     const revision = attachmentRevisionRef.current;
     const identityRevision = attachmentIdentityRevisionRef.current;
     pendingTextFileCountRef.current += textFiles.length;
@@ -665,30 +773,21 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       // The composer was cleared/sent while the reads were in flight —
       // drop the batch instead of re-appending stale attachments.
       if (attachmentRevisionRef.current !== revision) return;
-      // Binary content cannot be inlined into the prompt: NUL bytes, or
-      // U+FFFD replacement characters left by mis-decoded binary (e.g.
-      // UTF-16 text read as UTF-8).
-      const newFiles = readFiles.filter(
-        (file) => !file.content.includes("\u0000") && !file.content.includes("\uFFFD"),
-      );
-      const skipped = textFiles.length - newFiles.length;
+      const newFiles = readFiles.filter((file) => !isBinaryText(file.content));
+      attachFileReferences(textFiles.filter((_, index) => isBinaryText(readFiles[index].content)));
       setAttachedTextFiles((prev) => [
         ...prev,
         ...(identityRevision !== attachmentIdentityRevisionRef.current
           ? newFiles
           : newFiles.slice(0, Math.max(0, MAX_ATTACHED_TEXT_FILES - prev.length))),
       ]);
-      setAttachError(
-        limitMessage
-          ?? (skipped > 0 ? t("chatInput.attachmentBinarySkipped", { count: skipped }) : null),
-      );
     } catch {
       setAttachError(t("chatInput.attachmentTextReadFailed"));
     } finally {
       pendingTextFileCountRef.current -= textFiles.length;
       pendingTextFileBytesRef.current -= textFiles.reduce((total, file) => total + file.size, 0);
     }
-  }, []);
+  }, [attachFileReferences, t]);
 
   const processFiles = useCallback((files: File[]) => {
     const imageFiles = files.filter((file) => file.type.startsWith("image/"));
@@ -763,15 +862,17 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     setAttachError(null);
   }, []);
 
+  // The uploaded batch stays on the server until pruning removes it.
+  const removeReference = useCallback((index: number) => {
+    setAttachedReferences((prev) => prev.filter((_, referenceIndex) => referenceIndex !== index));
+    setAttachError(null);
+  }, []);
+
   const clearImages = useCallback(() => {
     setAttachedImages((prev) => {
       prev.forEach(revokeImagePreview);
       return [];
     });
-  }, []);
-
-  const clearTextFiles = useCallback(() => {
-    setAttachedTextFiles([]);
   }, []);
 
   const clearInput = useCallback(() => {
@@ -782,24 +883,27 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (draftKey) clearDraft(draftKey);
     if (draftKeyRef.current && draftKeyRef.current !== draftKey) clearDraft(draftKeyRef.current);
     clearImages();
-    clearTextFiles();
-    // Invalidate any attachment reads still in flight.
+    setAttachedTextFiles([]);
+    setAttachedReferences([]);
+    setPendingReferences([]);
+    // Invalidate any attachment reads and uploads still in flight.
     attachmentRevisionRef.current += 1;
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
-  }, [clearImages, clearTextFiles, draftKey]);
+  }, [clearImages, draftKey]);
 
   useLayoutEffect(() => {
     if (!draftKey || draftKeyRef.current !== draftKey) return;
-    const draft = {
+    const draft: ChatDraft = {
       value,
       images: attachedImages.map(imageToDraftImage),
       files: attachedTextFiles.map(textFileToDraftFile),
+      ...(attachedReferences.length > 0 ? { references: attachedReferences } : {}),
     };
     persistedDraftRef.current = draft;
     setDraft(draftKey, draft);
-  }, [attachedImages, attachedTextFiles, draftKey, value]);
+  }, [attachedImages, attachedReferences, attachedTextFiles, draftKey, value]);
 
   useLayoutEffect(() => {
     const previousDraftKey = draftKeyRef.current;
@@ -847,6 +951,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         });
         return [...draftFilesToAttachedFiles(draft?.files), ...added];
       });
+      setAttachedReferences((current) => {
+        const remaining = [...(source?.references ?? [])];
+        const added = current.filter((reference) => {
+          const index = remaining.findIndex((item) => item.batchId === reference.batchId);
+          if (index === -1) return Boolean(source);
+          remaining.splice(index, 1);
+          return false;
+        });
+        return [...draftReferencesToAttachedReferences(draft?.references), ...added];
+      });
       setQueuedDeleteTarget(null);
       return;
     }
@@ -860,10 +974,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     setQueuedDeleteTarget(null);
 
     if (previousDraftKey) {
+      const references = attachedReferencesRef.current;
       setDraft(previousDraftKey, {
         value: valueRef.current,
         images: attachedImagesRef.current.map(imageToDraftImage),
         files: attachedTextFilesRef.current.map(textFileToDraftFile),
+        ...(references.length > 0 ? { references } : {}),
       });
     }
 
@@ -878,6 +994,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       return draftImagesToAttachedImages(draft?.images);
     });
     setAttachedTextFiles(draftFilesToAttachedFiles(draft?.files));
+    setAttachedReferences(draftReferencesToAttachedReferences(draft?.references));
+    setPendingReferences([]);
   }, [draftKey, draftIdentityMove]);
 
   useLayoutEffect(() => subscribeDraftRecovery((key, recovery) => {
@@ -936,6 +1054,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     return error !== null;
   }, []);
 
+  /** An upload still running would be missing from the prompt: hold the send
+   *  (draft and chips kept) until it lands. */
+  const refusesWhileUploading = useCallback((): boolean => {
+    const revision = attachmentRevisionRef.current;
+    if (![...pendingReferenceRevisionsRef.current.values()].includes(revision)) return false;
+    setAttachError(t("chatInput.attachmentUploadsPending"));
+    return true;
+  }, [t]);
+
   /** Run a client builtin. True once handled; the composer is cleared only on
    * success and only if it still holds what was sent (the user may have
    * started typing while the command ran). */
@@ -953,7 +1080,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
    * rather than drop them. False when `msg` is not `/btw`. */
   const sendSideQuestion = useCallback((msg: string, overrideText?: string): boolean => {
     if (!/^\/btw(\s|$)/.test(msg) || !onBuiltinCommand) return false;
-    if (attachedImagesRef.current.length || attachedTextFilesRef.current.length) {
+    if (attachedImagesRef.current.length || attachedTextFilesRef.current.length || attachedReferencesRef.current.length) {
       toast.error(t("btw.attachmentsUnsupported"));
       return true;
     }
@@ -964,12 +1091,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const handleSend = useCallback(async (overrideText?: string) => {
     const raw = overrideText ?? value;
     const msg = raw.trim();
-    if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length) return;
+    if (refusesWhileUploading()) return;
+    const hasAttachedContent = attachedImagesRef.current.length > 0
+      || attachedTextFilesRef.current.length > 0
+      || attachedReferencesRef.current.length > 0;
+    if (!msg && !hasAttachedContent) return;
     if (submissionBlockedRef.current || isStreaming) return;
     onAudioUnlock?.();
     if (sendSideQuestion(msg, overrideText)) return;
-    const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFilesRef.current);
-    if (!attachedImagesRef.current.length && !attachedTextFilesRef.current.length && msg.startsWith("/") && onBuiltinCommand) {
+    const composedMessage = composeMessageWithAttachments(msg, attachedTextFilesRef.current, attachedReferencesRef.current);
+    if (!hasAttachedContent && msg.startsWith("/") && onBuiltinCommand) {
       const expansion = expandWebSlashCommand(msg);
       if (expansion.kind === "expand" && rejectsOversizedPrompt(expansion.prompt, attachedImagesRef.current)) return;
       if (await runBuiltinCommand(msg, overrideText)) return;
@@ -991,7 +1122,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (key) recoverDraft(key, recovery);
       throw error;
     }
-  }, [value, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, rejectsOversizedPrompt, runBuiltinCommand, sendSideQuestion]);
+  }, [value, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, refusesWhileUploading, rejectsOversizedPrompt, runBuiltinCommand, sendSideQuestion]);
   const {
     isRecording,
     isPaused,
@@ -1431,7 +1562,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (submissionBlockedRef.current) return;
     const raw = overrideText ?? value;
     const msg = raw.trim();
-    if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length) return;
+    if (refusesWhileUploading()) return;
+    if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedReferencesRef.current.length) return;
     if (sendSideQuestion(msg, overrideText)) return;
     const images = attachedImagesRef.current.length ? attachedImagesRef.current : undefined;
     // The queue callbacks resolve false when omp refused the message: it goes
@@ -1445,6 +1577,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       });
     };
     const files = attachedTextFilesRef.current;
+    const references = attachedReferencesRef.current;
     onAudioUnlock?.();
     const streamingBehavior = mode === "steer" ? "steer" : "followUp";
     if (msg.startsWith("/") && onPromptWithStreamingBehavior) {
@@ -1461,7 +1594,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       // own ACP handlers can run them.
       const expansion = expandWebSlashCommand(msg);
       if (expansion.kind === "expand") {
-        const prompt = composeMessageWithTextAttachments(expansion.prompt, files);
+        const prompt = composeMessageWithAttachments(expansion.prompt, files, references);
         if (rejectsOversizedPrompt(prompt, attachedImagesRef.current)) return;
         recoverOnFailure(onPromptWithStreamingBehavior(prompt, streamingBehavior, images), prompt);
         clearInput();
@@ -1474,13 +1607,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }));
         return;
       }
-      const prompt = composeMessageWithTextAttachments(msg, files);
+      const prompt = composeMessageWithAttachments(msg, files, references);
       if (rejectsOversizedPrompt(prompt, attachedImagesRef.current)) return;
       recoverOnFailure(onPromptWithStreamingBehavior(prompt, streamingBehavior, images), prompt);
       clearInput();
       return;
     }
-    const composedMessage = composeMessageWithTextAttachments(msg, files);
+    const composedMessage = composeMessageWithAttachments(msg, files, references);
     if (rejectsOversizedPrompt(composedMessage, attachedImagesRef.current)) return;
     if (mode === "steer" && onSteer) {
       recoverOnFailure(onSteer(composedMessage, images), composedMessage);
@@ -1488,7 +1621,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       recoverOnFailure(onFollowUp(composedMessage, images), composedMessage);
     }
     clearInput();
-  }, [value, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, t, advisorEnabled, rejectsOversizedPrompt, sendSideQuestion]);
+  }, [value, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, t, advisorEnabled, refusesWhileUploading, rejectsOversizedPrompt, sendSideQuestion]);
   // A typed message or attachment during a run is a queued follow-up — and so
   // is a dictation in progress: the primary button must take the same state it
   // would have if the composer already held text. Keep Stop as the action
@@ -1496,7 +1629,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const dictationCapturing = isRecording || isPaused || isReviewing;
   const primaryActionQueuesMessage =
     isStreaming
-    && (Boolean(value.trim()) || attachedImages.length > 0 || attachedTextFiles.length > 0 || dictationCapturing)
+    && (Boolean(value.trim()) || hasAttachments || dictationCapturing)
     && Boolean(onFollowUp);
   // The button follows the same Settings choice as Enter: soft keyboards have no
   // Enter to submit with, so this button is how touch devices steer.
@@ -1777,12 +1910,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   );
 
 
+  // Pasted files (an image, or files copied in a file manager) attach like
+  // picked ones; plain-text pastes stay ordinary typing.
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     const items = Array.from(e.clipboardData?.items ?? []);
-    const imageItems = items.filter((item) => item.type.startsWith("image/"));
-    if (!imageItems.length) return;
+    const fileItems = items.filter((item) => item.kind === "file" || item.type.startsWith("image/"));
+    if (!fileItems.length) return;
     e.preventDefault();
-    const files = imageItems.map((item) => item.getAsFile()).filter((f): f is File => f !== null);
+    const files = fileItems.map((item) => item.getAsFile()).filter((f): f is File => f !== null);
     processFiles(files);
   }, [processFiles]);
 
@@ -2012,6 +2147,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     background: "transparent", color: "var(--text-muted)",
     cursor: "pointer", fontSize: 12, textAlign: "left",
   };
+  const attachmentChipStyle: React.CSSProperties = {
+    display: "flex", alignItems: "center", gap: 7,
+    maxWidth: 260, height: 30,
+    padding: "0 6px 0 9px",
+    border: "1px solid var(--border)",
+    borderRadius: 6,
+    background: "var(--bg-panel)",
+    fontSize: 12,
+    color: "var(--text)",
+  };
 
   return (
     <div
@@ -2048,15 +2193,29 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       <input
         ref={fileInputRef}
         type="file"
-        // Accept every file type: the handler below reads any non-image file
-        // as text (rejecting binary content), so restricting the picker would
-        // only hide files the app can attach (code, config, logs, ...).
+        // Accept every file type: small text files are inlined, images sent as
+        // images, and everything else is uploaded as a path reference.
         accept="*/*"
         multiple
         style={{ display: "none" }}
         onChange={(e) => {
           const files = Array.from(e.target.files ?? []);
           processFiles(files);
+          e.target.value = "";
+        }}
+      />
+      {/* Hidden folder input: each picked folder is uploaded as one reference. */}
+      <input
+        ref={folderInputRef}
+        type="file"
+        multiple
+        // Not in React's input typings; every current desktop browser supports it.
+        {...{ webkitdirectory: "" }}
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const { folders, looseFiles } = foldersFromDirectoryInput(Array.from(e.target.files ?? []));
+          attachFolders(folders);
+          if (looseFiles.length) processFiles(looseFiles);
           e.target.value = "";
         }}
       />
@@ -2158,21 +2317,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             ))}
           </div>
         )}
-        {attachedTextFiles.length > 0 && (
+        {(attachedTextFiles.length > 0 || attachedReferences.length > 0 || pendingReferences.length > 0) && (
           <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
             {attachedTextFiles.map((file, i) => (
               <div
                 key={i}
-                style={{
-                  display: "flex", alignItems: "center", gap: 7,
-                  maxWidth: 260, height: 30,
-                  padding: "0 6px 0 9px",
-                  border: "1px solid var(--border)",
-                  borderRadius: 6,
-                  background: "var(--bg-panel)",
-                  fontSize: 12,
-                  color: "var(--text)",
-                }}
+                style={attachmentChipStyle}
               >
                 <span style={{ flexShrink: 0, display: "flex", color: "var(--text-muted)" }}>
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -2212,6 +2362,75 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
                   </svg>
                 </button>
+              </div>
+            ))}
+            {attachedReferences.map((reference, i) => (
+              <div
+                key={reference.batchId}
+                data-attachment-kind={reference.kind}
+                title={reference.path}
+                style={attachmentChipStyle}
+              >
+                <span style={{ flexShrink: 0, display: "flex", color: "var(--text-muted)" }}>
+                  {reference.kind === "folder" ? <FolderIcon size={13} /> : getFileIcon(reference.name, 13)}
+                </span>
+                <span
+                  style={{
+                    minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    fontFamily: "var(--font-mono)", fontSize: 11.5,
+                  }}
+                >
+                  {reference.kind === "folder" ? `${reference.name}/` : reference.name}
+                </span>
+                <span style={{ flexShrink: 0, fontSize: 10, color: "var(--text-dim)" }}>
+                  {reference.kind === "folder"
+                    ? `${tn("chatInput.referenceFileCount", reference.fileCount)} · ${formatReferenceBytes(reference.size)}`
+                    : formatReferenceBytes(reference.size)}
+                </span>
+                <button
+                  className="attachment-remove-button"
+                  onClick={() => removeReference(i)}
+                  title={t("chatInput.removeReference")}
+                  aria-label={t("chatInput.removeReference")}
+                  style={{
+                    flexShrink: 0, width: 18, height: 18,
+                    borderRadius: "50%",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    background: "transparent", border: "none",
+                    cursor: "pointer", padding: 0, color: "var(--text-muted)",
+                    transition: "color var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm)",
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "transparent"; }}
+                >
+                  <svg width="9" height="9" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                    <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
+                  </svg>
+                </button>
+              </div>
+            ))}
+            {pendingReferences.map((pending) => (
+              <div
+                key={`pending-${pending.id}`}
+                role="status"
+                aria-label={t("chatInput.attachmentUploading", { name: pending.name })}
+                style={{ ...attachmentChipStyle, color: "var(--text-muted)", paddingRight: 9 }}
+              >
+                <Loader2 size={13} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0, animation: "spin 0.8s linear infinite" }} />
+                <span
+                  style={{
+                    minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    fontFamily: "var(--font-mono)", fontSize: 11.5,
+                  }}
+                >
+                  {pending.kind === "folder" ? `${pending.name}/` : pending.name}
+                </span>
+                <span style={{ flexShrink: 0, fontSize: 10, color: "var(--text-dim)" }}>
+                  {pending.size === null || pending.fileCount === null
+                    ? t("chatInput.attachmentPreparing")
+                    : `${pending.kind === "folder" ? `${tn("chatInput.referenceFileCount", pending.fileCount)} · ` : ""}${
+                      pending.size > 0 ? Math.floor((pending.uploaded / pending.size) * 100) : 100}%`}
+                </span>
               </div>
             ))}
           </div>
@@ -2980,6 +3199,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     <Paperclip size={12} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden="true" />
                     <span style={{ flex: 1 }}>{t("chatInput.attachFile")}</span>
                   </button>
+                  <button
+                    role="menuitem"
+                    type="button"
+                    onClick={() => { setPlusMenuOpen(false); folderInputRef.current?.click(); }}
+                    title={t("chatInput.attachFolderTitle")}
+                    style={attachmentMenuItemStyle}
+                  >
+                    <FolderPlus size={12} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden="true" />
+                    <span style={{ flex: 1 }}>{t("chatInput.attachFolder")}</span>
+                  </button>
                   {canReadClipboardImages && (
                     <button
                       role="menuitem"
@@ -3597,18 +3826,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 type="button"
                 className="composer-primary-action"
                 onClick={isRecording || isPaused || isReviewing ? () => stopAndFinishDictation("send") : () => void handleSend()}
-                disabled={submissionBlocked || isTranscribing || !(isRecording || isPaused || isReviewing || value.trim() || attachedImages.length || attachedTextFiles.length)}
+                disabled={submissionBlocked || isTranscribing || !(isRecording || isPaused || isReviewing || value.trim() || hasAttachments)}
                 title={isRecording || isPaused || isReviewing ? t("chatInput.sendDictation") : t("chatInput.send")}
                 style={{
                   display: "flex", alignItems: "center", gap: 6,
-                  background: (isRecording || isPaused || isReviewing || isTranscribing || value.trim() || attachedImages.length || attachedTextFiles.length) ? "var(--accent-strong)" : "var(--bg-panel)",
+                  background: (isRecording || isPaused || isReviewing || isTranscribing || value.trim() || hasAttachments) ? "var(--accent-strong)" : "var(--bg-panel)",
                   border: "none",
                   borderRadius: 8,
-                  color: (isRecording || isPaused || isReviewing || isTranscribing || value.trim() || attachedImages.length || attachedTextFiles.length) ? "var(--on-accent)" : "var(--text-dim)",
-                  cursor: submissionBlocked ? "not-allowed" : isTranscribing ? "wait" : (isRecording || isPaused || isReviewing || value.trim() || attachedImages.length || attachedTextFiles.length) ? "pointer" : "not-allowed",
+                  color: (isRecording || isPaused || isReviewing || isTranscribing || value.trim() || hasAttachments) ? "var(--on-accent)" : "var(--text-dim)",
+                  cursor: submissionBlocked ? "not-allowed" : isTranscribing ? "wait" : (isRecording || isPaused || isReviewing || value.trim() || hasAttachments) ? "pointer" : "not-allowed",
                   fontSize: 12,
                   fontWeight: 600,
-                  boxShadow: (isRecording || isPaused || isReviewing || isTranscribing || value.trim() || attachedImages.length || attachedTextFiles.length) ? "var(--shadow-card)" : "none",
+                  boxShadow: (isRecording || isPaused || isReviewing || isTranscribing || value.trim() || hasAttachments) ? "var(--shadow-card)" : "none",
                   transition: "background var(--dur-fast) var(--ease-out-warm), box-shadow var(--dur-fast) var(--ease-out-warm)",
                 }}
               >
