@@ -96,6 +96,8 @@ app/api/
   agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? }
   agent/[id]/route.ts             GET state | POST any RPC command
   events/route.ts                 GET multiplexed SSE | POST subscribe/unsubscribe channels
+  events/ws/route.ts              GET WebSocket upgrade: the browser transport's socket (lib/browser-socket.ts); gated like every API route, 426 without an upgrade
+  transport-metrics/route.ts      GET { now } (the SSE clock probe) | POST { samples } → <agent dir>/omp-web/transport-metrics.jsonl
   hosts/route.ts                  GET hosts (this machine first) | POST { label } → token once + login command | PATCH { id, label?, allowAgentStart? } (`local`: label only, empty resets to "This machine") | DELETE ?id= revoke (registry first, then close the link); 503 if hosts.json is unreadable
   hosts/link/route.ts             GET WebSocket upgrade (the `ompweb host` daemon; bearer checked before the upgrade, skipped by the `proxy.ts` gate) | POST 426 for pre-WebSocket daemons
   notifications/devices/route.ts  GET VAPID key + subscribed | PUT { deviceId, prefs, subscription? }
@@ -113,7 +115,7 @@ app/api/
   models-config/route.ts          GET/PUT — read/write ~/.omp/agent/models.yml
   models-config/test/route.ts     POST test a configured model/provider
   omp-settings/route.ts           GET/PUT native config.yml settings (allow-listed)
-  web-settings/route.ts           GET/PUT omp-web's own server settings (auto-resume)
+  web-settings/route.ts           GET/PUT omp-web's own server settings (auto-resume, agent tools, agent env, browser transport; a transport change is pushed to every open browser)
   mcp/route.ts                    GET/POST/PUT/DELETE project MCP servers
   plugins/route.ts                GET/POST plugin management (shells out to `omp plugin`)
   projects/route.ts               GET registered+discovered projects | POST add | DELETE hide
@@ -143,11 +145,13 @@ lib/
     registry.ts        `<agent dir>/omp-web/hosts.json`: create/update/revoke, token hashing and lookup; the `local` record (`rotateLocalHostToken`, `customLocalLabel`)
     session-index.ts   sessions and projects across hosts, cached per host; `hostForSessionId`, `sessionSpawnTarget`, `invalidateLocalSessionLists`
   provider-accounts.ts distinct omp accounts per provider from `omp usage` reports (Models → provider detail)
-  agent-client.ts      typed fetch helper for /api/agent commands
+  agent-client.ts      agent commands from the tab: POST /api/agent/[id], or the worker's socket in a `ws-*` transport; records each command's `action` sample
+  agent-command.ts     `runAgentCommand`: the one command path behind POST /api/agent/[id] and a browser socket's `cmd`
+  browser-socket.ts    `/api/events/ws`: Bun `websocket` handler for browser sockets (frames, commands, `(session, rid)` dedupe)
   btw.ts               /btw side-question records + pure frame/snapshot merge (order-safe)
   draft-store.ts       local draft persistence helpers
   event-stream.ts      tab-side EventSource-shaped streams over the shared worker
-  event-stream-hub.ts  server connections + running/session/file channels for /api/events
+  event-stream-hub.ts  server connections + running/session/file channels for /api/events (SSE) and /api/events/ws (`FrameSink`); `broadcastBrowserTransport`
   event-stream-protocol.ts  wire contract shared by hub, route, and facade
   file-access.ts       allowed file roots for /api/files and worktrees
   file-authorization.ts  single allow-list gate for /api/files and the file channel
@@ -176,6 +180,7 @@ lib/
   web-auth-secret.ts   per-installation session-signing key (~/.omp/agent/omp-web/web-auth-secret.json)
   web-password-hash.ts typed view of bin/omp-web-password-hash.js (the scrypt hash format)
   web-settings.ts      omp-web server settings (~/.omp/agent/omp-web-settings.json)
+  transport-metrics.ts transport samples → `<agent dir>/omp-web/transport-metrics.jsonl` (renamed to `.jsonl.1` above 20 MiB)
   skills-service.ts    skill listing via `omp skill list --json`; pure-Node replica scan as fallback
   tool-presets.ts      PRESET_NONE/DEFAULT/FULL + getToolNamesForPreset()
   types.ts             shared TypeScript types
@@ -236,6 +241,7 @@ scripts/
   build-client.ts     `npm run build`: bundles app/index.html into dist/ (Bun.build + tailwind-plugin.ts; fonts emitted as /assets files)
   tailwind-plugin.ts  bun-plugin-tailwind minus Tailwind's color-mix() polyfill (Bun 1.4.4 drops repeated @supports rules); build and dev
   smoke.ts            `npm run smoke`: starts the built server (or `--binary <path>`) and `ompweb host` with a throwaway HOME; checks the SPA, an asset, the API, a session listed through the daemon and SSE
+  transport-metrics.ts `bun scripts/transport-metrics.ts [--since 2h|<ISO>] [--until <ISO>] [--client <id>] [--file <path>]`: per-transport summary of the browser transport samples (default: the last 24 h of the agent dir's file)
   build-binary.ts     `npm run build:binary`: compiles server/binary.ts (NODE_ENV define, no .env/bunfig autoload) into release/ompweb-<os>-<arch>/ beside dist/, public/, the KaTeX files, the session-edit extension and the licenses; archives it
   licenses.ts         the release's `licenses/`: license files of every npm package the server and client bundles hold (Bun.build metafiles; build-client.ts writes build/client-packages.json) and `bun-LICENSE-<version>.md`, the vendored license of the embedded Bun runtime. Bumping Bun: vendor its LICENSE.md for the new version, or build-binary.ts stops
 
@@ -255,7 +261,7 @@ bunfig.toml           Bun dev-server bundling: tailwind plugin and the OMP_WEB_P
 The table is static imports, not a runtime glob, so `bun build --compile` (`scripts/build-binary.ts`) bundles every handler. `dispatch` answers HEAD from `GET`, OPTIONS and a missing method (405 with `allow`), passes `params` as a promise (plus `disableIdleTimeout`, below), and turns a throw into a 500 JSON body.
 
 ### Bun server (`server/`)
-- Bun's 10 s `idleTimeout` stays on: it reaps sockets that stall before or during a request, and it also cuts a handler still working after 10 s. So `handle` (`server/app.ts`) calls `server.timeout(request, 0)` for an `/api/` request that `proxy()` reports as `"authenticated"` (never `"public"`) and puts the 10 s back once the handler returns or throws: the setting outlives the response on a keep-alive socket. A handler whose response stays open without traffic (SSE `/api/events`, the login SSE, the clone/search/bash-output/file streams) calls `disableIdleTimeout` from the route context (`dispatch`, `server/routes.ts`) to keep it off until that stream ends or is cancelled; a new stream must do the same, or it is cut after 10 s idle. The host link is no longer an idle-lift stream: it is a WebSocket, and an upgraded socket is outside the HTTP idle timeout. `server/app.ts` passes `upgrade` in the route context (`server.upgrade(request, { data })`) and `Bun.serve({ websocket: hostLinkSocket })`; a handler that upgraded returns `undefined`, which `dispatch` and `handle` pass through without `finalizeResponse` or the idle-timeout restore. `maxRequestBodySize` is left at Bun's 128 MiB default, above the 101 MB upload cap; do not lower it.
+- Bun's 10 s `idleTimeout` stays on: it reaps sockets that stall before or during a request, and it also cuts a handler still working after 10 s. So `handle` (`server/app.ts`) calls `server.timeout(request, 0)` for an `/api/` request that `proxy()` reports as `"authenticated"` (never `"public"`) and puts the 10 s back once the handler returns or throws: the setting outlives the response on a keep-alive socket. A handler whose response stays open without traffic (SSE `/api/events`, the login SSE, the clone/search/bash-output/file streams) calls `disableIdleTimeout` from the route context (`dispatch`, `server/routes.ts`) to keep it off until that stream ends or is cancelled; a new stream must do the same, or it is cut after 10 s idle. The host link is no longer an idle-lift stream: it is a WebSocket, and an upgraded socket is outside the HTTP idle timeout (so is the browser's `/api/events/ws`). `server/app.ts` passes `upgrade` in the route context (`server.upgrade(request, { data })`) and one `websocket` handler: a socket whose `ws.data.kind` is `"browser"` goes to `browserSocket` (`lib/browser-socket.ts`), any other to `hostLinkSocket`. Bun's WebSocket limits (`maxPayloadLength`, `backpressureLimit`, `idleTimeout`) are per server, so browser sockets share the link's; `browserSocket` caps its own frames. A handler that upgraded returns `undefined`, which `dispatch` and `handle` pass through without `finalizeResponse` or the idle-timeout restore. `maxRequestBodySize` is left at Bun's 128 MiB default, above the 101 MB upload cap; do not lower it.
 - Bun's router matches the **raw** path, while `request.url` is normalized (`..` and `%2e%2e` resolved). The gate and handlers read `request.url`, so each route re-matches the normalized path against its own `URLPattern` after the gate and answers 404 if it no longer matches. Never serve a gated route under an ungated path.
 - Redirects carry a relative `Location` (`request.url` is always `http://` under Bun, so an absolute URL would leave https behind a TLS proxy).
 - `Response.redirect()` headers are immutable; `finalizeResponse` (`server/http.ts`) copies every answer into a fresh `Response` to set the security headers and gzip. Do not mutate a handler's response headers elsewhere.
@@ -646,6 +652,97 @@ during the wait.
   never piggyback a frame type on another consumer's channel. `notifications`
   and `host-tools` are subscribed from `AppShell`, so they outlive the sidebar
   (which unmounts while Settings is open).
+- **WebSocket transports (experiment)** (`docs/specs/2026-10-31-browser-transport-experiment-design.md`).
+  The server's `browserTransport` setting (`omp-web-settings.json`, `lib/web-settings.ts`) picks the
+  worker's connections. With `sse` (the default; any unknown value reads as `sse`) everything above holds
+  unchanged and the worker opens no WebSocket.
+  - **Modes** are only the worker's `socketKeyFor(sessionId | null)` (`null` = every non-session channel):
+    `ws-client` one socket `client`; `ws-session` `general` plus `session:<id>` per active session;
+    `ws-pool` `pool:0` for the non-session channels and `pool:<rank>` per session. Every socket carries any
+    channel and any session's commands. Active sessions: a live `session` stream or an unanswered command
+    in this worker. Reconcile polls (`GET /api/agent/[id]`), `POST /api/agent/new`, files, settings and the
+    metrics POST stay HTTP in every mode.
+  - **Switching.** Settings → Interface & Behavior → "Browser connection (experiment)"
+    (`BrowserTransportSetting`), or `PUT /api/web-settings` with any of `browserTransport`,
+    `browserTransportPerSocket` (integer 1–64, default 4) and `browserTransportMaxSockets` (1–16, default
+    16). A PUT that changes them calls `broadcastBrowserTransport`: a `transport` control frame on every
+    open SSE and socket connection. Every `hello` carries the same fields, so a worker that missed the
+    frame converges on its next hello; a frame equal to the current state is ignored. A worker always
+    starts in SSE and switches on its first hello. Editing the file takes effect only after a restart
+    (cached in `globalThis`). The flip from a shell (example for operators and agents: production on
+    127.0.0.1:30185, the trusted header from the pr-watcher env file; a request without `Origin` skips
+    the origin check):
+    ```bash
+    curl -sS -X PUT http://127.0.0.1:30185/api/web-settings \
+      -H "x-omp-web-auth: $(sed -n 's/^OMP_WEB_TRUSTED_HEADER_SECRET=//p' /opt/omp-deployment/pr-watcher.env)" \
+      -H 'content-type: application/json' \
+      -d '{"browserTransport":"ws-pool","browserTransportPerSocket":4,"browserTransportMaxSockets":16}'
+    # or {"browserTransport":"sse"} / {"browserTransport":"ws-client"} / {"browserTransport":"ws-session"}
+    ```
+    The answer is the saved settings object.
+  - **ws-pool sizing.** N = clamp(ceil(active / perSocket), 1, maxSockets). It grows at once and shrinks
+    only after the target stayed below N for 30 s (`SESSION_LINGER_MS`; a recompute at ≥ N cancels the
+    timer); a settings change applies its N at once. `poolRank` is rendezvous hashing
+    (`fmix32(fnv1a(i + ":" + s))`, the lowest index on a tie), so a resize moves only the sessions whose
+    top-ranked index changed. Sessions ranked 0 share `pool:0` with the non-session channels.
+  - **Moves are make-before-break** (`rebalance`). On a policy change every stream whose key changed is
+    `sub`bed on its new socket while the old one keeps delivering; on the new socket's `open` the tab
+    gets CONNECTING then OPEN (the snapshot replays) and the old socket gets `unsub`. A `refused` or `end`
+    there cancels the move. A session's unanswered commands sit on one socket (`connForCommand`), so they
+    reach omp in order across a move: unsent ones move together, and a sent one keeps the session's later
+    commands behind it until answered. `sse` ↔ a WebSocket mode is a plain switch, not a move: to SSE,
+    sockets take no new commands (an unsent one answers `{http: true}` and the tab POSTs it) and close
+    once their sent commands settle.
+  - **Linger.** A socket with no stream and no unanswered command closes at once if it is `general` or
+    the policy no longer produces its key; any other lingers 30 s, so a tab switch back reuses it.
+  - **Server.** `/api/events/ws` goes through `handle()` like every gated route, so the password gate
+    and the origin check run before `upgrade()` (426 without an upgrade); authorization is checked only
+    then. Each socket is one `EventStreamConnection` over a `FrameSink`: the same channels, coalescing
+    (here above 256 KiB buffered) and per-subscription failure isolation as SSE. A throw in a browser
+    socket handler closes that socket (1011) and never reaches `uncaughtException` or the host links.
+  - **Frames.** Server → client text `"<name> <server ms>\n<json>"`: `mux` (`hello`/`open`/`end`/
+    `refused`/`transport`), `s<n>` (a subscription's frame, the SSE `data:` payload), `ack {rid}`,
+    `reply {rid, status, body, deduped?}`, `ping` (every 10 s), `pong {c}`. Client → server one JSON object
+    per frame: `{t:"sub", id, channel}`, `{t:"unsub", id}`, `{t:"cmd", rid, session, advisor, command}`,
+    `{t:"ping", c}`. Bad JSON, an unknown `t` or a bad `rid` close 1007, a frame above
+    `MAX_AGENT_COMMAND_REQUEST_BYTES` + 64 KiB closes 1009; a `cmd` without a valid `session` gets
+    `reply` 400 and the socket stays. 4000 is the worker's own forced reconnect.
+  - **One command path.** `runAgentCommand` (`lib/agent-command.ts`) is what `POST /api/agent/[id]` runs
+    after parsing and what a socket `cmd` runs, so both answer identically. Command logic goes there,
+    never into the route or the socket handler.
+  - **Dedupe and resend.** The server remembers `(session, rid)` (`globalThis.__ompBrowserCommands`, 120 s
+    after settling, at most 500): a known key joins the run or replays its reply with `deduped: true`, on
+    any socket of that process. The worker resends a lost command at most once, same `rid`, on the
+    session's current socket: idempotent ones (`get_*`, `predict_word`) always, others only when the new
+    `hello.serverId` equals the one it was sent under; otherwise 503 `transport_lost` (it may have run;
+    `TransportLostError`). Not sent within 15 s: 503 `transport_unavailable`. A missed ack
+    (10 s + 1 ms per 32 bytes to upload, this command's and those buffered ahead) is a hang: recorded,
+    and the socket reconnects.
+  - **Liveness.** A socket with no frame for 25 s reconnects (backoff 1 s doubling to 30 s, reset by
+    `hello`, which resubscribes its streams). Tabs forward wakes: `online` and a `navigator.connection`
+    change redial every socket at once; `visible` pings each and redials one silent for 3 s.
+  - **SSE additions.** Every SSE frame carries `id: <server ms>` (its emit time, `event.lastEventId`), and
+    `hello` carries `serverId`, `transport`, `perSocket` and `maxSockets`. An old worker ignores the
+    `transport` frame.
+  - **Metrics** (every transport, spec D6). Tabs and the worker record `action`, `event`, `reconnect`,
+    `rebalance`, `hang` and `dropped` samples; the worker buffers them and POSTs them to
+    `/api/transport-metrics` every 30 s or 200 samples, over HTTP in every mode. The route appends JSONL
+    to `<agent dir>/omp-web/transport-metrics.jsonl` (renamed to `.jsonl.1` above 20 MiB). One
+    worker-wide clock (the lowest-RTT of the last 20 socket pings and SSE probes, at most 5 min old) times
+    every sample. The isolation fields `behindBytes`, `behindSameBytes`, `behindOtherBytes` and
+    `replyBehindOtherBytes` count the bytes ahead on the same pipe; the summary calls a sample blocked
+    from 64 KiB. `bun scripts/transport-metrics.ts --since 2h` prints the per-transport summary (also
+    `--until`, `--client`, `--file`; default the last 24 h of the agent dir's file).
+  - **Worker rules.** `public/event-stream-worker.js` stays one plain script (its content hash versions the
+    SharedWorker), and every global it uses (`WebSocket`, `Date`, timers, `location`,
+    `navigator.connection`) must be injectable into the `vm` context of `lib/event-stream-worker.test.mjs`.
+    Socket URLs are absolute (`new URL(path, self.location.href)`, `http`→`ws`). Ids are
+    `Math.random().toString(36).slice(2, 12) + Date.now().toString(36)`: insecure LAN origins have no
+    `crypto.randomUUID`.
+  - **Limits** (spec "Limitations"): a socket stays authorized after logout until it closes; command order
+    is not kept across a WebSocket → SSE → WebSocket round trip while a command is still on a draining
+    socket; two policy changes that return within one round trip (A→B→A) can open a stream twice (its
+    snapshot replays twice); each worker sizes its own pool.
 
 ### Running state + reconciliation
 - The sidebar subscribes to the `running` channel, backed by `subscribeRunningSessions()` in `lib/rpc-manager.ts`, so running badges update without polling.
