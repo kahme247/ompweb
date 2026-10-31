@@ -1,4 +1,5 @@
-// Client-side helper for POST /api/agent/[id].
+// Client-side helper for agent commands: POST /api/agent/[id], or the session's
+// WebSocket when the browser transport is "websocket" (lib/event-stream.ts).
 //
 // Every /api/agent/[id] route returns one of:
 //   { success: true, data: <result> }
@@ -7,6 +8,7 @@
 // Call sites previously repeated the same 5-line fetch block 13× in
 // hooks/useAgentSession.ts. This helper collapses that down to one line.
 
+import { sendSessionCommand, type CommandReply } from "@/lib/event-stream";
 import { formatApiError } from "@/lib/i18n/api-error";
 
 // Sessions whose per-chat advisor toggle is on: their lazily spawned omp
@@ -36,13 +38,12 @@ export async function sendAgentCommand<T = unknown>(
   sessionId: string,
   command: Record<string, unknown>,
 ): Promise<T> {
-  const query = advisorSpawnSessions.has(sessionId) ? "?advisor=1" : "";
-  const res = await fetch(`/api/agent/${encodeURIComponent(sessionId)}${query}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(command),
-  });
-  const body = (await res.json().catch(() => ({}))) as {
+  const advisor = advisorSpawnSessions.has(sessionId);
+  // The session socket's dedupe key; no crypto.randomUUID (insecure LAN origins lack it).
+  const req = Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
+  const json = JSON.stringify(command);
+  const reply = (await sendSessionCommand(sessionId, req, json, advisor)) ?? (await postAgentCommand(sessionId, json, advisor));
+  const body = reply.body as {
     success?: boolean;
     data?: T;
     error?: string;
@@ -50,11 +51,34 @@ export async function sendAgentCommand<T = unknown>(
     hostOffline?: boolean;
     delivery?: string;
   };
-  if (!res.ok || body.error) {
+  if (reply.status < 200 || reply.status >= 300 || body.error) {
     // Routes attach a stable `code` for well-known failures; these messages are
     // surfaced to the user as notices, so localize before throwing.
-    const message = body.error || body.code ? formatApiError(body) : `HTTP ${res.status}`;
-    throw res.status === 503 && body.hostOffline ? new HostOfflineError(message, body.delivery === "unknown") : new Error(message);
+    const message = body.error || body.code ? formatApiError(body) : `HTTP ${reply.status}`;
+    throw reply.status === 503 && body.hostOffline ? new HostOfflineError(message, body.delivery === "unknown") : new Error(message);
   }
   return body.data as T;
+}
+
+async function postAgentCommand(sessionId: string, body: string, advisor: boolean): Promise<CommandReply> {
+  const res = await fetch(`/api/agent/${encodeURIComponent(sessionId)}${advisor ? "?advisor=1" : ""}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+  });
+  // The route's receive/reply times; test fetch fakes carry no headers.
+  const time = (name: string) => {
+    const value = res.headers?.get?.(name);
+    return value ? Number(value) : null;
+  };
+  return {
+    status: res.status,
+    body: await res.json().catch(() => ({})),
+    via: "http",
+    recvAt: time("x-omp-received-at"),
+    repliedAt: time("x-omp-replied-at"),
+    attempts: 1,
+    deduped: false,
+    behindBytes: 0,
+  };
 }

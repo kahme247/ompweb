@@ -723,6 +723,8 @@
   "errors.skill_update_unsupported": "此技能无法自动更新",
   "errors.source_required": "需要提供插件来源",
   "errors.thinking_block_not_found": "未找到思考块",
+  "errors.transport_lost": "收到响应前与 omp-web 的连接已断开。该命令可能已执行，请先确认再重新发送。",
+  "errors.transport_unavailable": "未发送：无法连接到 omp-web。请重试。",
   "errors.upload_conflict": "一个或多个文件已存在",
   "errors.upload_directory_not_found": "未找到上传目录",
   "errors.upload_file_too_large": "单个上传文件不能超过 25MB",

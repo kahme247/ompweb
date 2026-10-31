@@ -34,6 +34,21 @@ type WorkerMessage =
 /** The worker's transport, on attach once known and on every change. */
 type TransportMessage = { transport: BrowserTransport };
 
+/** An agent command's answer: the server's (over the session socket or HTTP) or a local 413/503 from the worker. */
+export interface CommandReply {
+  status: number;
+  body: unknown;
+  via: "ws" | "http";
+  recvAt: number | null;
+  repliedAt: number | null;
+  attempts: number;
+  deduped: boolean;
+  behindBytes: number;
+}
+
+/** The worker's answer to a `cmd`; `http` when it is in SSE mode, so the tab POSTs the command itself. */
+type CommandMessage = { cmd: number; http: true } | ({ cmd: number } & Omit<CommandReply, "via">);
+
 type WakeReason = "init" | "visible" | "hidden" | "online" | "network";
 
 interface WorkerPort {
@@ -65,12 +80,14 @@ function transportClientId(): string {
 class Transport {
   private nextId = 1;
   private readonly streams = new Map<number, MultiplexedEventStream>();
+  private readonly commands = new Map<number, (reply: CommandReply | null) => void>();
   mode: BrowserTransport = "sse";
 
   constructor(private readonly port: WorkerPort) {
     port.onmessage = (event) => {
-      const message = event.data as WorkerMessage | TransportMessage;
+      const message = event.data as WorkerMessage | TransportMessage | CommandMessage;
       if ("transport" in message) this.mode = message.transport;
+      else if ("cmd" in message) this.answer(message);
       else this.streams.get(message.id)?.receive(message);
     };
     this.holdLifetimeLock();
@@ -105,6 +122,20 @@ class Transport {
     this.streams.delete(id);
   }
 
+  command(sessionId: string, req: string, body: string, advisor: boolean): Promise<CommandReply | null> {
+    return new Promise((resolve) => {
+      const n = this.nextId++;
+      this.commands.set(n, resolve);
+      this.port.postMessage({ op: "cmd", n, req, sessionId, advisor, body });
+    });
+  }
+
+  private answer({ cmd, ...reply }: CommandMessage): void {
+    const resolve = this.commands.get(cmd);
+    this.commands.delete(cmd);
+    resolve?.("http" in reply ? null : { ...reply, via: "ws" });
+  }
+
   /** The worker script failed to load/run: fail every stream (fatal), so the
    * next openEventStream starts a fresh worker instead of hanging silently. */
   fail(): void {
@@ -112,6 +143,20 @@ class Transport {
     const streams = [...this.streams.values()];
     this.streams.clear();
     for (const stream of streams) stream.receive({ id: stream.id, type: "error", readyState: EVENT_STREAM_CLOSED });
+    // The dead worker may have sent them: answered like a socket that dropped before the reply.
+    for (const resolve of this.commands.values()) {
+      resolve({
+        status: 503,
+        body: { error: "The connection to omp-web dropped before the answer arrived; the command may have run.", code: "transport_lost" },
+        via: "ws",
+        recvAt: null,
+        repliedAt: null,
+        attempts: 1,
+        deduped: false,
+        behindBytes: 0,
+      });
+    }
+    this.commands.clear();
   }
 
   /** Workers cannot see a tab close; a Web Lock held for the tab's lifetime
@@ -199,4 +244,10 @@ export function openEventStream(channel: EventStreamChannel): EventStream {
 /** How the worker reaches omp-web: SSE until it says otherwise, and without a transport. */
 export function transportMode(): BrowserTransport {
   return transport?.mode ?? "sse";
+}
+
+/** Sends an agent command over its session's socket: null (or a promise of null, when the worker turns out to be
+ * in SSE mode) means the caller POSTs it instead. */
+export function sendSessionCommand(sessionId: string, req: string, body: string, advisor: boolean): Promise<CommandReply | null> | null {
+  return transport?.mode === "websocket" ? transport.command(sessionId, req, body, advisor) : null;
 }
