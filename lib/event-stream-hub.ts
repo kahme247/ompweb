@@ -18,7 +18,19 @@ import {
 // the browser's shared worker.
 
 // Heartbeat keeps the socket alive through proxies (Next.js idles ~120-150s).
+// A native client may ask for a longer one per connection (`/api/events?heartbeat=`).
 const HEARTBEAT_MS = 30_000;
+export const MIN_HEARTBEAT_SECONDS = 15;
+export const MAX_HEARTBEAT_SECONDS = 110;
+
+/** `?heartbeat=<seconds>` in [15, 110]; anything else keeps the 30 s default. */
+export function parseHeartbeatSeconds(value: string | null | undefined): number {
+  if (typeof value !== "string" || !/^\d{1,4}$/.test(value.trim())) return HEARTBEAT_MS / 1000;
+  const seconds = Number(value.trim());
+  if (seconds < MIN_HEARTBEAT_SECONDS || seconds > MAX_HEARTBEAT_SECONDS) return HEARTBEAT_MS / 1000;
+  return seconds;
+}
+
 const encoder = new TextEncoder();
 
 export type SubscribeResult =
@@ -77,7 +89,7 @@ export class EventStreamConnection {
   private readonly subscriptions = new Map<string, Subscription>();
   private readonly signal: AbortSignal | undefined;
 
-  constructor(signal?: AbortSignal) {
+  constructor(signal?: AbortSignal, heartbeatMs: number = HEARTBEAT_MS) {
     this.signal = signal;
     this.stream = new ReadableStream<Uint8Array>({
       start: (controller) => {
@@ -86,7 +98,7 @@ export class EventStreamConnection {
         this.control({ type: "hello", connectionId: this.id });
         this.heartbeat = setInterval(() => {
           if (this.flushAll()) this.write(":\n\n");
-        }, HEARTBEAT_MS);
+        }, heartbeatMs);
       },
       // A slow consumer resumed reading: deliver coalesced updates now rather
       // than waiting for the next event or heartbeat.
