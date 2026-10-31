@@ -44,6 +44,13 @@ export interface CommandReply {
   attempts: number;
   deduped: boolean;
   behindBytes: number;
+  /** The socket key it went over (`session:<id>`, `pool:<n>`, …), `"http"` for a POST. */
+  socket: string;
+  /** Bytes queued ahead of it at send that were this or other sessions' commands (spec D6 "Uplink"); null when never sent. */
+  behindSameBytes: number | null;
+  behindOtherBytes: number | null;
+  /** Other sessions' large frames its reply arrived behind (spec D6 "Downlink"); null without a measure. */
+  replyBehindOtherBytes: number | null;
 }
 
 /** The worker's answer to a `cmd`; `http` when it is in SSE mode, so the tab POSTs the command itself. */
@@ -114,7 +121,7 @@ class Transport {
     return stream;
   }
 
-  post(message: { op: "open"; id: number; channel: EventStreamChannel } | { op: "close"; id: number }): void {
+  post(message: { op: "open"; id: number; channel: EventStreamChannel } | { op: "close"; id: number } | { op: "metric"; sample: Record<string, unknown> }): void {
     this.port.postMessage(message);
   }
 
@@ -154,6 +161,10 @@ class Transport {
         attempts: 1,
         deduped: false,
         behindBytes: 0,
+        socket: "worker",
+        behindSameBytes: null,
+        behindOtherBytes: null,
+        replyBehindOtherBytes: null,
       });
     }
     this.commands.clear();
@@ -244,6 +255,11 @@ export function openEventStream(channel: EventStreamChannel): EventStream {
 /** How the worker reaches omp-web: SSE until it says otherwise, and without a transport. */
 export function transportMode(): BrowserTransport {
   return transport?.mode ?? "sse";
+}
+
+/** Hands a transport sample (spec D6) to the worker, which tags and stores it; without a transport it is dropped. */
+export function recordTransportSample(sample: Record<string, unknown>): void {
+  transport?.post({ op: "metric", sample });
 }
 
 /** Sends an agent command over the worker's socket for its session (any `ws-*` transport): null (or a promise of null,

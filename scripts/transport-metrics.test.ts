@@ -114,6 +114,45 @@ test("the report keeps one section order whatever the order of the samples", () 
   );
 });
 
+test("isolation, sockets, pool size and rebalance rows per transport", () => {
+  const transports = ["sse", "ws-client", "ws-session", "ws-pool"];
+  const samples = transports.flatMap((transport, index) => {
+    const tagged = (fields: Record<string, unknown>) => ({ ...at(1_000), transport, pool: transport === "ws-pool" ? 2 : null, sockets: index + 1, ...fields });
+    // event ms = gotAt + offset − at; action ms = gotAt − sentAt
+    const event = (gotAt: number, behindSameBytes: number, behindOtherBytes: number) =>
+      tagged({ metric: "event", conn: "session", channel: "session", at: 0, gotAt, offset: 0, behindSameBytes, behindOtherBytes });
+    const action = (gotAt: number, behind: Record<string, unknown>) => tagged({ metric: "action", type: "prompt", outcome: "ok", sentAt: 0, gotAt, ...behind });
+    return [
+      event(10, 70_000, 70_000),
+      event(4, 70_000, 0),
+      event(1, 0, 0),
+      action(300, { behindSameBytes: 0, behindOtherBytes: 0, replyBehindOtherBytes: 80_000 }),
+      action(200, { behindSameBytes: 5, behindOtherBytes: 0, replyBehindOtherBytes: null }),
+      action(100, { behindSameBytes: 0, behindOtherBytes: 0, replyBehindOtherBytes: null }),
+      // never sent: nothing measured, no isolation row
+      action(15_000, { behindSameBytes: null, behindOtherBytes: null, replyBehindOtherBytes: null }),
+    ];
+  });
+  const rebalance = (reason: string, moved: number, settledMs: number) => ({ ...at(1_000), metric: "rebalance", transport: "ws-pool", pool: 2, sockets: 2, reason, moved, settledMs });
+  const rows = summarize([...samples, rebalance("grow", 1, 50), rebalance("grow", 3, 150), rebalance("shrink", 2, 20)], {});
+
+  for (const [index, transport] of transports.entries()) {
+    assert.deepEqual(["other", "same", "clear"].map((key) => row(rows, "isolation event ms", transport, key)?.p50), [10, 4, 1], transport);
+    assert.deepEqual(["other", "same", "clear"].map((key) => row(rows, "isolation action ms", transport, key)?.p50), [300, 200, 100], transport);
+    assert.equal(row(rows, "isolation action ms", transport, "clear")?.count, 1, "the never-sent command is in no isolation row");
+    assert.equal(row(rows, "sockets", transport, "all")?.max, index + 1);
+    assert.equal(row(rows, "pool size", transport, "all")?.p50, transport === "ws-pool" ? 2 : undefined);
+  }
+  const grow = row(rows, "rebalance moved", "ws-pool", "grow");
+  assert.deepEqual([grow?.count, grow?.p50, grow?.max], [2, 1, 3]);
+  assert.equal(row(rows, "rebalance moved", "ws-pool", "shrink")?.p50, 2);
+  assert.equal(row(rows, "rebalance settledMs", "ws-pool", "grow")?.max, 150);
+  assert.deepEqual(
+    [...new Set(rows.filter((r) => r.transport === "ws-pool").map((r) => r.section))],
+    ["action totalMs", "event ms", "isolation event ms", "isolation action ms", "sockets", "pool size", "rebalance moved", "rebalance settledMs", "outcome"],
+  );
+});
+
 test("since, until and client filter on serverAt and clientId", () => {
   const eventRows = (options: Parameters<typeof summarize>[1]) => row(summarize(fixture, options), "event ms", "websocket", "general running");
   assert.equal(eventRows({})?.count, 2);

@@ -18,12 +18,14 @@
 //                 { op: "bye" }         (pagehide: drop this tab's streams)
 //                 { op: "wake", reason, visible, clientId }  (reason: init | visible | hidden | online | network)
 //                 { op: "cmd", n, req, sessionId, advisor, body }  (an agent command; body: its JSON text)
+//                 { op: "metric", sample }  (a transport sample of the tab's: tagged, buffered and POSTed here)
 // Worker -> tab:  { id, type: "open" }
 //                 { id, type: "message", data }   (raw JSON string)
 //                 { id, type: "error", readyState: 0 | 2 }  (EventSource semantics)
 //                 { transport: "sse" | "ws-client" | "ws-session" | "ws-pool" }  (on attach once known, and on every change)
 //                 { cmd: n, http: true }  (SSE mode: the tab POSTs the command itself)
-//                 { cmd: n, status, body, recvAt, repliedAt, attempts, deduped, behindBytes }
+//                 { cmd: n, status, body, recvAt, repliedAt, attempts, deduped, behindBytes,
+//                   socket, behindSameBytes, behindOtherBytes, replyBehindOtherBytes }
 "use strict";
 
 const EVENT_STREAM_PATH = "/api/events";
@@ -55,6 +57,17 @@ const SEND_DEADLINE_MS = 15000;
 const ACK_TIMEOUT_MS = 10000;
 const TRANSPORT_UNAVAILABLE = { error: "Not sent: no connection to omp-web.", code: "transport_unavailable" };
 const TRANSPORT_LOST = { error: "The connection to omp-web dropped before the answer arrived; the command may have run.", code: "transport_lost" };
+// Transport samples (spec D6): POSTed in batches to the metrics route, whose GET is the SSE clock probe.
+const METRICS_PATH = "/api/transport-metrics";
+const METRICS_FLUSH_MS = 30000;
+const METRICS_FLUSH_COUNT = 200;
+const METRICS_BUFFER_MAX = 2000;
+const EVENT_SAMPLE_MS = 1000;
+const WAKE_WINDOW_MS = 60000;
+const BATCH_WINDOW_MS = 2000;
+const SSE_CLOCK_PROBES = 3;
+const LARGE_FRAME_BYTES = 64 * 1024;
+const LARGE_FRAME_LOG_MS = 30000;
 
 /** @type {EventSource | null} */
 let source = null;
@@ -81,13 +94,28 @@ const conns = new Map();
 /** Retired Conns whose sockets stay open until the commands sent on them are answered (see retire). */
 const draining = new Set();
 /** SSE subscriptions' `conn`: the EventSource's per-connection state, shaped like a Conn's. */
-const sseConn = { clock: null, lastEventSampleAt: 0, reconnect: null };
+const sseConn = { key: "sse", clock: null, lastEventSampleAt: -Infinity, reconnect: null, largeFrames: [] };
 /** @type {ReturnType<typeof setInterval> | undefined} */
 let silenceTimer;
 /** ws-pool's size N (spec D2 "ws-pool sizing"); 1 outside ws-pool. */
 let poolSize = 1;
 /** Running while the pool's target is below N (see sizePool). @type {ReturnType<typeof setTimeout> | undefined} */
 let shrinkTimer;
+/** Samples waiting for the next flush, oldest first, and how many overflow dropped since the last one. */
+let samples = [];
+let droppedSamples = 0;
+let flushing = false;
+/** @type {ReturnType<typeof setTimeout> | undefined} */
+let flushTimer;
+/** The min-RTT clock sample of any connection: `serverNow = clientNow + offset`. @type {{ offset: number, rtt: number } | null} */
+let bestClock = null;
+/** From the tabs' wakes: this browser's id, and the effective connection type as of the latest one. */
+let clientId = null;
+let knownEffectiveType = null;
+/** The latest online, network or visible wake (once per burst from every tab), and the effective type before it. */
+let lastWake = null;
+/** dropAt of the reconnects that a running one may still count in its `batch`. */
+let recentDrops = [];
 
 function post(client, message) {
   try {
@@ -119,6 +147,7 @@ function closeSource() {
 function scheduleReconnect() {
   closeSource();
   markConnecting(subscriptions.values());
+  dropped(sseConn, "error");
   clearTimeout(reconnectTimer);
   const delay = reconnectDelayMs;
   reconnectDelayMs = Math.min(delay * 2, RECONNECT_MAX_MS);
@@ -155,6 +184,7 @@ function ensureSource() {
     // re-subscribes everything on the fresh connection.
     connectionId = null;
     markConnecting(subscriptions.values());
+    dropped(sseConn, "error");
   };
 }
 
@@ -173,12 +203,18 @@ function handleControl(frame, conn = sseConn) {
       // Switched to sockets: the switch moved every subscription off this EventSource.
       if (isWebSocketTransport(state.transport)) return;
       connectionId = frame.connectionId;
+      probeSseClock(source);
     } else {
       conn.reconnectDelayMs = RECONNECT_MIN_MS;
       // Retired by the switch (to SSE, or emptied by a move and no key of the new mode).
       if (conn.retiring) return;
       conn.connectionId = frame.connectionId;
       conn.serverId = frame.serverId;
+    }
+    if (conn.reconnect) {
+      conn.reconnect.hello = true;
+      // No stream, no frame to end its outage (and nothing was being delivered).
+      if (!carriesStream(conn)) conn.reconnect = null;
     }
     for (const subscription of subscriptions.values()) {
       if (subscription.conn === conn) subscribe(subscription);
@@ -187,6 +223,7 @@ function handleControl(frame, conn = sseConn) {
     if (conn !== sseConn) sendWaiting(conn);
     return;
   }
+  if (frame.type === "open") endReconnect(conn, Date.now());
   const subscription = subscriptions.get(frame.sub);
   if (subscription?.moving === conn) {
     if (frame.type !== "open") {
@@ -208,6 +245,7 @@ function handleControl(frame, conn = sseConn) {
   if (frame.type === "open") {
     subscription.state = OPEN;
     post(subscription.client, { id: subscription.streamId, type: "open" });
+    settleMove(subscription);
   } else if (frame.type === "end") {
     // The server ended this subscription (watcher died, unserializable
     // frame): reconnect it like EventSource would reconnect a closed stream.
@@ -253,12 +291,14 @@ function setTransport(next) {
     clearTimeout(reconnectTimer);
     reconnectTimer = undefined;
     closeSource();
+    sseConn.reconnect = null;
     for (const subscription of subscriptions.values()) join(subscription);
   } else {
     // Before retiring: a socket a move still points at would never count as idle.
     for (const subscription of subscriptions.values()) {
       subscription.conn = sseConn;
       subscription.moving = null;
+      settleMove(subscription);
     }
     for (const conn of conns.values()) retire(conn);
     ensureSource();
@@ -370,20 +410,24 @@ function subscriptionKey(subscription) {
  * changed moves make-before-break; a session's commands move to its new socket together and only while none of
  * them was sent (a sent one is answered on its socket, and the session's later ones wait behind it there); then
  * sockets left with nothing close (at once when the policy no longer produces their key) or linger.
- * Returns the change for its `rebalance` sample (spec D6): `fromPool`/`toPool` are N in ws-pool, else null;
- * `fromSockets` the sockets held before, `toSockets` those held after that the policy still produces; `moved` the
- * sessions whose socket changed; `movedOther` the non-session streams moved. `joining` (a grow's new session) is
- * active and its socket dialed here, so a grow's sample counts both.
+ * Returns the change, which is also its `rebalance` sample (spec D6): `fromPool`/`toPool` are N in ws-pool, else
+ * null; `fromSockets` the sockets held before, `toSockets` those held after that the policy still produces; `moved`
+ * the sessions whose socket changed; `movedOther` the non-session streams moved. `joining` (a grow's new session)
+ * is active and its socket dialed here, so a grow's sample counts both. A change that moved something or resized
+ * the pool is recorded once its last moved stream is open on its new socket or its move is off (settleMove).
  */
 function rebalance(reason, fromPool, joining) {
   const fromSockets = heldSockets(false);
   const moved = new Set();
   let movedOther = 0;
+  const settling = { sample: null, left: 0, startedAt: Date.now() };
   for (const subscription of subscriptions.values()) {
     const key = subscriptionKey(subscription);
     if (subscription.moving && subscription.moving.key !== key) cancelMove(subscription);
     if (subscription.conn.key === key || subscription.moving) continue;
     move(subscription, connFor(key));
+    subscription.rebalance = settling;
+    settling.left += 1;
     if (subscription.channel.kind === "session") moved.add(subscription.channel.sessionId);
     else movedOther += 1;
   }
@@ -398,7 +442,21 @@ function rebalance(reason, fromPool, joining) {
   if (joining !== undefined) connFor(socketKeyFor(joining));
   for (const conn of [...conns.values()]) idle(conn);
   const toPool = state.transport === "ws-pool" ? poolSize : null;
-  return { reason, fromPool, toPool, fromSockets, toSockets: heldSockets(true), active: activeSessions(joining).size, moved: moved.size, movedOther };
+  const result = { reason, fromPool, toPool, fromSockets, toSockets: heldSockets(true), active: activeSessions(joining).size, moved: moved.size, movedOther };
+  if (moved.size > 0 || movedOther > 0 || fromPool !== toPool) {
+    settling.sample = { metric: "rebalance", ...result };
+    if (settling.left === 0) record({ ...settling.sample, settledMs: 0 });
+  }
+  return result;
+}
+
+/** A stream a rebalance moved is open on its new socket, or its move is off: the last one records the sample. */
+function settleMove(subscription) {
+  const settling = subscription.rebalance;
+  if (!settling) return;
+  subscription.rebalance = null;
+  settling.left -= 1;
+  if (settling.left === 0) record({ ...settling.sample, settledMs: Date.now() - settling.startedAt });
 }
 
 /** Sockets this worker holds (open or dialing); `policyOnly`: only those whose key the current policy still produces. */
@@ -418,6 +476,7 @@ function cancelMove(subscription) {
   const target = subscription.moving;
   if (!target) return;
   subscription.moving = null;
+  settleMove(subscription);
   if (target.connectionId) sendFrame(target, { t: "unsub", id: subscription.id });
   idle(target);
 }
@@ -470,6 +529,7 @@ function release(subscription) {
   subscriptions.delete(subscription.id);
   subscription.client.streams.delete(subscription.streamId);
   cancelMove(subscription);
+  settleMove(subscription);
   if (subscription.conn !== sseConn) leave(subscription.conn, subscription);
   if (subscription.channel.kind === "session") sizePool();
   source?.removeEventListener(subscription.id, subscription.listener);
@@ -478,6 +538,7 @@ function release(subscription) {
     clearTimeout(reconnectTimer);
     reconnectTimer = undefined;
     closeSource();
+    sseConn.reconnect = null;
   }
 }
 
@@ -495,7 +556,10 @@ function open(client, streamId, channel) {
     conn: sseConn,
     /** The Conn this stream is moving to (make-before-break), or null. */
     moving: null,
-    listener: (event) => post(client, { id: streamId, type: "message", data: event.data }),
+    /** The rebalance whose sample waits for this stream's move to settle (settleMove), or null. */
+    rebalance: null,
+    // The EventSource's: every frame's `id:` line is its emit time.
+    listener: (event) => deliver(subscription, sseConn, event.data, event.lastEventId ? Number(event.lastEventId) : NaN),
   };
   subscriptions.set(subscription.id, subscription);
   client.streams.set(streamId, subscription);
@@ -545,8 +609,9 @@ function connFor(key) {
       lingerTimer: undefined,
       retiring: false,
       clock: null,
-      lastEventSampleAt: 0,
+      lastEventSampleAt: -Infinity,
       reconnect: null,
+      largeFrames: [],
     };
     conns.set(key, conn);
     if (silenceTimer === undefined) silenceTimer = setInterval(checkSilence, SILENCE_CHECK_MS);
@@ -623,12 +688,15 @@ function dial(conn) {
   conn.ws = ws;
   conn.dialedAt = conn.lastFrameAt = Date.now();
   // Events of a socket this Conn replaced (late frames, its close) are ignored.
+  ws.onopen = () => {
+    if (conn.ws === ws) clockPing(conn);
+  };
   ws.onmessage = (event) => {
     if (conn.ws === ws) onSocketFrame(conn, event.data);
   };
   // `error` is always followed by `close`.
   ws.onclose = () => {
-    if (conn.ws === ws) redial(conn, backoff(conn));
+    if (conn.ws === ws) redial(conn, backoff(conn), "close");
   };
 }
 
@@ -639,8 +707,11 @@ function backoff(conn) {
   return delay;
 }
 
-/** Gives up on the socket and dials again after `delay` ms (0: now); the next hello re-subscribes its streams and resends its commands. */
-function redial(conn, delay) {
+/**
+ * Gives up on the socket and dials again after `delay` ms (0: now); the next hello re-subscribes its streams and
+ * resends its commands. `trigger`: the `reconnect` sample's (spec D6).
+ */
+function redial(conn, delay, trigger) {
   const ws = conn.ws;
   conn.ws = null;
   conn.connectionId = null;
@@ -663,6 +734,7 @@ function redial(conn, delay) {
     retire(conn);
     return;
   }
+  dropped(conn, trigger);
   clearTimeout(conn.reconnectTimer);
   conn.reconnectTimer = undefined;
   if (delay === 0) {
@@ -681,12 +753,19 @@ function sendFrame(conn, frame) {
 
 /** Server frames are "<name> <server ms>\n<json>": split at the first newline, the payload passed on unparsed. */
 function onSocketFrame(conn, text) {
-  conn.lastFrameAt = Date.now();
+  const now = Date.now();
+  conn.lastFrameAt = now;
   const space = text.indexOf(" ");
   const newline = text.indexOf("\n");
   const name = text.slice(0, space);
+  const at = Number(text.slice(space + 1, newline));
   const data = text.slice(newline + 1);
-  if (name === MUX_CONTROL_EVENT || name === "ack" || name === "reply") {
+  if (name === "ping") {
+    // The server's heartbeat: answered with a clock ping (spec D5), whose pong is a clock sample.
+    clockPing(conn);
+    return;
+  }
+  if (name === MUX_CONTROL_EVENT || name === "ack" || name === "reply" || name === "pong") {
     let frame;
     try {
       frame = JSON.parse(data);
@@ -694,12 +773,12 @@ function onSocketFrame(conn, text) {
       return;
     }
     if (name === MUX_CONTROL_EVENT) handleControl(frame, conn);
-    else onCommandFrame(conn, name, Number(text.slice(space + 1, newline)), frame);
+    else if (name === "pong") clockSample(conn, frame.c, at, now);
+    else onCommandFrame(conn, name, at, frame, data.length);
     return;
   }
-  // A subscription's frame; `ping` and `pong` only prove the socket is alive.
   const subscription = subscriptions.get(name);
-  if (subscription?.conn === conn) subscription.listener({ data });
+  if (subscription?.conn === conn) deliver(subscription, conn, data, at);
 }
 
 // Agent commands (spec D5 "Commands", "Resend"): each rides its session's socket, keyed by the tab's request id.
@@ -723,6 +802,10 @@ function queueCommand(client, message) {
     serverId: null,
     recvAt: null,
     behindBytes: 0,
+    // The reply's socket key, and the bytes queued ahead of the last send (null: never sent).
+    socket: socketKeyFor(message.sessionId),
+    behindSameBytes: null,
+    behindOtherBytes: null,
     deadline: undefined,
     ackTimer: undefined,
   };
@@ -767,6 +850,7 @@ function moveCommands(conn, session) {
 
 /** Not sent within SEND_DEADLINE_MS: unavailable if it never left the browser, lost if it was sent before. */
 function waitToSend(conn, command) {
+  command.socket = conn.key;
   command.deadline = setTimeout(() => {
     settle(conn, command, failure(command, command.attempts === 0 ? TRANSPORT_UNAVAILABLE : TRANSPORT_LOST));
   }, SEND_DEADLINE_MS);
@@ -774,17 +858,31 @@ function waitToSend(conn, command) {
 
 function sendCommand(conn, command) {
   clearTimeout(command.deadline);
-  // Commands sent before it and not yet acked: their bytes go first even once they left the browser's buffer.
-  const ahead = Math.max(conn.ws.bufferedAmount, unackedBytes(conn));
+  // Commands sent before it and not yet acked, by session: their bytes go first even once they left the browser's buffer.
+  let same = 0;
+  let other = 0;
+  for (const earlier of conn.pending.values()) {
+    if (!earlier.inFlight || earlier.recvAt !== null) continue;
+    if (earlier.session === command.session) same += earlier.body.length;
+    else other += earlier.body.length;
+  }
+  const ahead = Math.max(conn.ws.bufferedAmount, same + other);
   command.attempts += 1;
   command.inFlight = true;
   command.serverId = conn.serverId;
   command.recvAt = null;
+  command.socket = conn.key;
   command.behindBytes = conn.ws.bufferedAmount;
+  // Spec D6 "Uplink": what of the buffer is another session's (or this one's) earlier commands.
+  command.behindSameBytes = Math.min(same, command.behindBytes);
+  command.behindOtherBytes = Math.min(other, command.behindBytes);
   conn.ws.send(command.frame);
   // No ack in time is a silent hang: the socket is dead even if it never closed.
   const timeout = ACK_TIMEOUT_MS + Math.ceil((ahead + command.body.length) / 32);
-  command.ackTimer = setTimeout(() => redial(conn, backoff(conn)), timeout);
+  command.ackTimer = setTimeout(() => {
+    record({ metric: "hang", socket: conn.key, req: command.req, type: JSON.parse(command.body).type, via: "ws", bytes: command.body.length, waitedMs: timeout });
+    redial(conn, backoff(conn), "hang");
+  }, timeout);
 }
 
 /** Bytes of the commands on this socket that the server has not acked yet. */
@@ -818,19 +916,34 @@ function lost(conn, command) {
   else waitToSend(conn, command);
 }
 
-function onCommandFrame(conn, name, at, frame) {
+/** `bytes`: the frame's payload length, for a reply's downlink isolation. */
+function onCommandFrame(conn, name, at, frame, bytes) {
   const command = conn.pending.get(frame.rid);
   if (!command) return;
   if (name === "ack") {
     clearTimeout(command.ackTimer);
     command.recvAt = at;
   } else {
-    settle(conn, command, reply(command, frame.status, frame.body, at, frame.deduped === true));
+    const behind = frameArrived(conn, command.session, bytes, at, Date.now());
+    settle(conn, command, reply(command, frame.status, frame.body, at, frame.deduped === true, behind && behind.other));
   }
 }
 
-function reply(command, status, body, repliedAt = null, deduped = false) {
-  return { cmd: command.n, status, body, recvAt: command.recvAt, repliedAt, attempts: command.attempts, deduped, behindBytes: command.behindBytes };
+function reply(command, status, body, repliedAt = null, deduped = false, replyBehindOtherBytes = null) {
+  return {
+    cmd: command.n,
+    status,
+    body,
+    recvAt: command.recvAt,
+    repliedAt,
+    attempts: command.attempts,
+    deduped,
+    behindBytes: command.behindBytes,
+    socket: command.socket,
+    behindSameBytes: command.behindSameBytes,
+    behindOtherBytes: command.behindOtherBytes,
+    replyBehindOtherBytes,
+  };
 }
 
 function failure(command, body) {
@@ -855,22 +968,31 @@ function eachSocket(fn) {
 function checkSilence() {
   const now = Date.now();
   eachSocket((conn) => {
-    if (conn.ws && now - conn.lastFrameAt >= WS_SILENCE_MS) redial(conn, backoff(conn));
+    if (conn.ws && now - conn.lastFrameAt >= WS_SILENCE_MS) redial(conn, backoff(conn), "silence");
   });
 }
 
-/** A tab saw the network change or the page come back (SSE mode has no sockets: EventSource reconnects on its own). */
+/**
+ * A tab saw the network change or the page come back (SSE mode has no sockets: EventSource reconnects on its own).
+ * Every wake but `hidden` and `init` may start a reconnect sample's outage (spec D6 `startAt`).
+ */
 function wake(reason) {
   const now = Date.now();
+  const type = effectiveType();
+  // Every tab forwards the same event: the first of a burst keeps the type from before it.
+  if (reason !== "hidden" && reason !== "init" && !(lastWake && now - lastWake.at < WAKE_REDIAL_GAP_MS)) {
+    lastWake = { at: now, effectiveType: knownEffectiveType ?? type };
+  }
+  knownEffectiveType = type;
   const justDialed = (conn) => conn.ws && !conn.connectionId && now - conn.dialedAt < WAKE_REDIAL_GAP_MS;
   if (reason === "online" || reason === "network") {
     eachSocket((conn) => {
-      if (!justDialed(conn)) redial(conn, 0);
+      if (!justDialed(conn)) redial(conn, 0, reason);
     });
   } else if (reason === "visible") {
     for (const conn of conns.values()) {
       if (justDialed(conn)) continue;
-      if (conn.reconnectTimer !== undefined) redial(conn, 0);
+      if (conn.reconnectTimer !== undefined) redial(conn, 0, reason);
       // A pong cannot overtake an upload still ahead of it: the ack timer watches such a socket.
       else if (conn.connectionId && unackedBytes(conn) === 0) probe(conn);
     }
@@ -883,8 +1005,194 @@ function probe(conn) {
   const sentAt = Date.now();
   sendFrame(conn, { t: "ping", c: sentAt });
   setTimeout(() => {
-    if (conn.ws === ws && conn.lastFrameAt < sentAt) redial(conn, 0);
+    if (conn.ws === ws && conn.lastFrameAt < sentAt) redial(conn, 0, "visible");
   }, VISIBLE_PROBE_MS);
+}
+
+function clockPing(conn) {
+  sendFrame(conn, { t: "ping", c: Date.now() });
+}
+
+/** A clock sample (spec D6, NTP-style) from a ping sent at `c` and answered at the server's `at`; the lowest RTT wins. */
+function clockSample(conn, c, at, now) {
+  if (!Number.isFinite(c) || !Number.isFinite(at)) return;
+  const sample = { offset: at - (c + now) / 2, rtt: now - c };
+  if (!conn.clock || sample.rtt < conn.clock.rtt) conn.clock = sample;
+  if (!bestClock || sample.rtt < bestClock.rtt) bestClock = sample;
+}
+
+/** After an SSE hello: SSE_CLOCK_PROBES reads of the server clock, one after another, while this EventSource lasts. */
+async function probeSseClock(current) {
+  for (let i = 0; i < SSE_CLOCK_PROBES && source === current; i++) {
+    const c = Date.now();
+    try {
+      const response = await fetch(METRICS_PATH, { cache: "no-store" });
+      const body = await response.json();
+      clockSample(sseConn, c, body.now, Date.now());
+    } catch {
+      return;
+    }
+  }
+}
+
+/**
+ * Logs a frame of LARGE_FRAME_BYTES or more and returns the bytes of the logged frames it arrived behind, by owner
+ * (spec D6 "Cross-session blocking"): those written before it and still arriving when it was written. Null without a clock.
+ */
+function frameArrived(conn, owner, bytes, at, gotAt) {
+  const clock = conn.clock ?? bestClock;
+  const log = conn.largeFrames;
+  while (log.length > 0 && gotAt - log[0].gotAt > LARGE_FRAME_LOG_MS) log.shift();
+  if (!Number.isFinite(at)) return null;
+  let behind = null;
+  if (clock) {
+    behind = { same: 0, other: 0 };
+    for (const frame of log) {
+      if (frame.at <= at && frame.gotAt + clock.offset > at) behind[frame.owner === owner ? "same" : "other"] += frame.bytes;
+    }
+  }
+  if (bytes >= LARGE_FRAME_BYTES) log.push({ owner, bytes, at, gotAt });
+  return behind;
+}
+
+/** A stream's frame from its connection: at most one event sample per connection per EVENT_SAMPLE_MS (one behind another session's frame always), then to the tab. */
+function deliver(subscription, conn, data, at) {
+  const { channel } = subscription;
+  const gotAt = Date.now();
+  const behind = frameArrived(conn, channel.kind === "session" ? channel.sessionId : "app", data.length, at, gotAt);
+  endReconnect(conn, gotAt);
+  if (behind && (behind.other > 0 || gotAt - conn.lastEventSampleAt >= EVENT_SAMPLE_MS)) {
+    const clock = conn.clock ?? bestClock;
+    conn.lastEventSampleAt = gotAt;
+    record({
+      metric: "event",
+      socket: conn.key,
+      channel: channel.kind,
+      at,
+      gotAt,
+      offset: clock.offset,
+      offsetRtt: clock.rtt,
+      bytes: data.length,
+      behindSameBytes: behind.same,
+      behindOtherBytes: behind.other,
+    });
+  }
+  post(subscription.client, { id: subscription.streamId, type: "message", data });
+}
+
+/** A connection dropped (spec D6 `reconnect`): its outage runs from the first drop until a stream gets a frame after the next hello. */
+function dropped(conn, trigger) {
+  if (conn.reconnect) return;
+  const dropAt = Date.now();
+  const woke = lastWake !== null && dropAt - lastWake.at <= WAKE_WINDOW_MS;
+  conn.reconnect = { trigger, dropAt, startAt: woke ? lastWake.at : dropAt, effectiveTypeBefore: woke ? lastWake.effectiveType : effectiveType(), hello: false };
+  // A drop is kept while an outage within BATCH_WINDOW_MS of it may still end and count it.
+  let oldest = dropAt;
+  eachSocket((other) => {
+    if (other.reconnect) oldest = Math.min(oldest, other.reconnect.dropAt);
+  });
+  if (sseConn.reconnect) oldest = Math.min(oldest, sseConn.reconnect.dropAt);
+  recentDrops = recentDrops.filter((at) => at >= oldest - BATCH_WINDOW_MS);
+  recentDrops.push(dropAt);
+}
+
+/** The first open or stream frame after the hello: the reconnect sample, `batch` counting the drops within BATCH_WINDOW_MS of this one. */
+function endReconnect(conn, now) {
+  const reconnect = conn.reconnect;
+  if (!reconnect?.hello) return;
+  conn.reconnect = null;
+  let batch = 0;
+  for (const at of recentDrops) if (Math.abs(at - reconnect.dropAt) <= BATCH_WINDOW_MS) batch += 1;
+  record({
+    metric: "reconnect",
+    socket: conn.key,
+    trigger: reconnect.trigger,
+    dropAt: reconnect.dropAt,
+    startAt: reconnect.startAt,
+    firstFrameAt: now,
+    batch,
+    effectiveTypeBefore: reconnect.effectiveTypeBefore,
+  });
+}
+
+/** Whether a stream is on this connection or moving onto it. */
+function carriesStream(conn) {
+  for (const subscription of subscriptions.values()) if (subscription.conn === conn || subscription.moving === conn) return true;
+  return false;
+}
+
+// Samples (spec D6): tagged here, buffered (METRICS_BUFFER_MAX, the oldest dropped and counted) and POSTed over HTTP in every mode.
+
+function effectiveType() {
+  return self.navigator.connection?.effectiveType ?? null;
+}
+
+/** The tags a sample lacks; an action sample (the tab's) also gets the worker's best clock. */
+function stamp(sample) {
+  const socket = sample.socket ?? "worker";
+  let visible = false;
+  for (const client of clients) visible = visible || client.visible === true;
+  return {
+    transport: state.transport,
+    pool: state.transport === "ws-pool" ? poolSize : null,
+    socket,
+    conn: socket.split(":")[0],
+    sockets: heldSockets(false) + (source ? 1 : 0),
+    clientId,
+    effectiveType: effectiveType(),
+    visible,
+    ...(sample.metric === "action" ? { offset: bestClock?.offset ?? null, offsetRtt: bestClock?.rtt ?? null } : {}),
+    ...sample,
+  };
+}
+
+function record(sample) {
+  samples.push(stamp(sample));
+  trimSamples();
+  // Reaching the count flushes; a failed POST leaves more than that, which then waits for the timer instead of retrying per sample.
+  if (samples.length === METRICS_FLUSH_COUNT) flushSamples();
+  else scheduleFlush();
+}
+
+function trimSamples() {
+  const over = samples.length - METRICS_BUFFER_MAX;
+  if (over <= 0) return;
+  samples.splice(0, over);
+  droppedSamples += over;
+}
+
+function scheduleFlush() {
+  if (flushTimer === undefined && samples.length > 0) flushTimer = setTimeout(flushSamples, METRICS_FLUSH_MS);
+}
+
+/** POSTs the oldest METRICS_FLUSH_COUNT samples (and a `dropped` count); a failure keeps them for the next flush. */
+function flushSamples() {
+  clearTimeout(flushTimer);
+  flushTimer = undefined;
+  if (flushing || samples.length === 0) return;
+  const batch = samples.splice(0, METRICS_FLUSH_COUNT);
+  const droppedCount = droppedSamples;
+  droppedSamples = 0;
+  flushing = true;
+  fetch(METRICS_PATH, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ samples: droppedCount > 0 ? batch.concat(stamp({ metric: "dropped", count: droppedCount })) : batch }),
+  })
+    .then((response) => response.ok, () => false)
+    .then((ok) => {
+      flushing = false;
+      if (ok && samples.length >= METRICS_FLUSH_COUNT) {
+        flushSamples();
+        return;
+      }
+      if (!ok) {
+        samples = batch.concat(samples);
+        droppedSamples += droppedCount;
+        trimSamples();
+      }
+      scheduleFlush();
+    });
 }
 
 function attach(port) {
@@ -906,7 +1214,12 @@ function attach(port) {
         dropClient(client);
         break;
       case "wake":
+        client.visible = message.visible === true;
+        if (typeof message.clientId === "string") clientId = message.clientId;
         wake(message.reason);
+        break;
+      case "metric":
+        if (message.sample && typeof message.sample === "object") record(message.sample);
         break;
       case "cmd":
         queueCommand(client, message);
