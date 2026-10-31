@@ -63,7 +63,8 @@ interface Queued {
   ch: string | null;
 }
 
-/** How a socket closed; `opened` is false for a dial the server refused or never answered. */
+/** How a socket closed; `opened` is false for a dial the server refused or never answered. A string instead: why
+ * the daemon gave the socket up itself. */
 interface SocketEnd {
   opened: boolean;
   code: number;
@@ -403,9 +404,9 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     return { cwd: spawned.cwd, fellBack: resolved.fellBack || spawned.fellBack, launchAdvisor: spawned.launchAdvisor, autoApproveExtension: localHost.autoApproveExtension() };
   }
 
-  /** One socket from dial to close; null when the watchdog gave it up. */
-  function connect(sent: string, hello: string): Promise<SocketEnd | null> {
-    const { promise, resolve } = Promise.withResolvers<SocketEnd | null>();
+  /** One socket from dial to close. */
+  function connect(sent: string, hello: string): Promise<SocketEnd | string> {
+    const { promise, resolve } = Promise.withResolvers<SocketEnd | string>();
     // This repo's DOM typing has no init argument; Node's and Bun's WebSocket take `{ headers }`.
     const ws = new WebSocket(linkUrl.replace(/^http/, "ws"), { headers: { authorization: sent } } as unknown as string[]);
     ws.binaryType = "arraybuffer";
@@ -413,20 +414,21 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     let opened = false;
     let watchdog: NodeJS.Timeout | undefined;
     // Once given up, a socket stays inert: a late 4409 on it never stops a daemon that already redialed.
-    const end = (closed: SocketEnd | null) => {
+    const end = (closed: SocketEnd | string) => {
       clearTimeout(watchdog);
       socket = null;
       linked = null;
       inFlight = false;
       resolve(closed);
     };
+    const giveUp = (why: string) => {
+      end(why);
+      ws.close();
+    };
     // Main pings every pingMs: silence for offlineMs is a dead link (a laptop that slept, a NAT that forgot it).
     const alive = () => {
       clearTimeout(watchdog);
-      watchdog = setTimeout(() => {
-        end(null);
-        ws.close();
-      }, LINK_LIMITS.offlineMs);
+      watchdog = setTimeout(() => giveUp("no traffic from the server"), LINK_LIMITS.offlineMs);
     };
     alive();
     ws.onopen = () => {
@@ -437,8 +439,13 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     ws.onmessage = ({ data }: MessageEvent) => {
       if (socket !== ws) return;
       alive();
-      // One message per text frame; the hub sends no binary frames.
-      if (typeof data === "string") handleDown(data);
+      try {
+        // One message per text frame; the hub sends no binary frames.
+        if (typeof data === "string") handleDown(data);
+      } catch (error) {
+        // A failure handling one message drops this socket, never the daemon: the redial resends what is unacked.
+        giveUp(reason(error));
+      }
     };
     ws.onclose = (event) => {
       if (socket === ws) end({ opened, code: event.code, reason: event.reason });
@@ -469,14 +476,16 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
           // Too many channels near the pending cap for one line: none replays (all take the kill-and-resume path) rather than never relinking.
           hello = encodeHello(false);
         }
+        // stop() may have come while the hello was being built.
+        if (stopped) return;
         const closed = await connect(sent, hello);
         if (stopped) return;
-        if (closed?.code === LINK_CLOSE.replaced) {
+        if (typeof closed === "string") log(`link lost (${closed}); redialing`);
+        else if (closed.code === LINK_CLOSE.replaced) {
           log("another ompweb host linked with this token; exiting");
           void shutdown(0);
           return;
-        }
-        if (closed?.code === LINK_CLOSE.versionMismatch) {
+        } else if (closed.code === LINK_CLOSE.versionMismatch) {
           // The reason carries the server's newest version: below this daemon's, the server is the outdated side.
           let serverVersion: unknown;
           try {
@@ -491,9 +500,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
           );
           void shutdown(1);
           return;
-        }
-        if (!closed) log("link lost (no traffic from the server); redialing");
-        else if (closed.opened) log(`link lost (code ${closed.code}${closed.reason ? `: ${closed.reason}` : ""}); redialing`);
+        } else if (closed.opened) log(`link lost (code ${closed.code}${closed.reason ? `: ${closed.reason}` : ""}); redialing`);
         else {
           // Neither Node's nor Bun's WebSocket shows a refused upgrade's status: a plain GET with the same token does.
           const { status, body } = await fetch(linkUrl, {
