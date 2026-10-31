@@ -1,11 +1,12 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
+import { browserSocket, type BrowserSocketData } from "@/lib/browser-socket";
 import { hostLinkSocket, type LinkSocketData } from "@/lib/hosts/hub";
 import { proxy } from "@/proxy";
 import { register } from "../instrumentation.node";
 import { finalizeResponse, INDEX_CACHE, renderIndex, serveFile, stylesheetFirst } from "./http";
-import { dispatch, ROUTE_MODULES, routePattern } from "./routes";
+import { dispatch, ROUTE_MODULES, routePattern, type ServerSocketData } from "./routes";
 
 export function parseListenArgs(argv: string[], defaultPort: number): { port: number; hostname: string } {
   const { values } = parseArgs({
@@ -18,6 +19,14 @@ export function parseListenArgs(argv: string[], defaultPort: number): { port: nu
 const text = (body: string, status: number) => new Response(body, { status, headers: { "content-type": "text/plain; charset=utf-8" } });
 // Seconds; Bun's default, passed explicitly because handle() puts it back.
 const IDLE_TIMEOUT = 10;
+
+type ServerSocket = Bun.ServerWebSocket<ServerSocketData>;
+/** Browser sockets and host links share Bun's one `websocket` handler; `ws.data` tells them apart. */
+function isBrowserSocket(ws: ServerSocket): ws is Bun.ServerWebSocket<BrowserSocketData> {
+  return "kind" in ws.data && ws.data.kind === "browser";
+}
+// Not a browser socket: a host link (the only other upgrade).
+const asLink = (ws: ServerSocket) => ws as Bun.ServerWebSocket<LinkSocketData>;
 
 function decodable(pathname: string): boolean {
   try {
@@ -40,7 +49,7 @@ function decodable(pathname: string): boolean {
  */
 async function handle(
   request: Request,
-  server: Bun.Server<LinkSocketData>,
+  server: Bun.Server<ServerSocketData>,
   respond: (context: { gate: "public" | "authenticated"; disableIdleTimeout: () => void }) => Response | undefined | Promise<Response | undefined>,
 ): Promise<Response | undefined> {
   let pathname: string;
@@ -99,7 +108,7 @@ function untilEnd(body: ReadableStream<Uint8Array>, end: () => void): ReadableSt
 // It is the same public shell that /login serves without a session.
 const DEV_INDEX = "/__omp_dev_index";
 
-async function devIndex(server: Bun.Server<LinkSocketData>): Promise<string> {
+async function devIndex(server: Bun.Server<ServerSocketData>): Promise<string> {
   const url = new URL(DEV_INDEX, server.url);
   // A wildcard bind answers on loopback.
   if (url.hostname === "0.0.0.0") url.hostname = "127.0.0.1";
@@ -108,12 +117,12 @@ async function devIndex(server: Bun.Server<LinkSocketData>): Promise<string> {
   return stylesheetFirst(await (await fetch(url, { proxy: false })).text());
 }
 
-export function startServer(options: { port: number; hostname: string; dev: boolean; root: string; html?: Bun.HTMLBundle }): Bun.Server<LinkSocketData> {
+export function startServer(options: { port: number; hostname: string; dev: boolean; root: string; html?: Bun.HTMLBundle }): Bun.Server<ServerSocketData> {
   const { dev, root, html } = options;
   // Dev serves the SPA from the HTML import (`html`) and never reads dist/.
   const index = dev ? null : readFileSync(path.join(root, "dist", "index.html"), "utf8");
 
-  const routes: Record<string, Bun.HTMLBundle | ((request: Bun.BunRequest, server: Bun.Server<LinkSocketData>) => Promise<Response | undefined>)> = {};
+  const routes: Record<string, Bun.HTMLBundle | ((request: Bun.BunRequest, server: Bun.Server<ServerSocketData>) => Promise<Response | undefined>)> = {};
   for (const [key, mod] of Object.entries(ROUTE_MODULES)) {
     const { pattern, rest } = routePattern(key);
     const matcher = new URLPattern({ pathname: pattern });
@@ -141,7 +150,16 @@ export function startServer(options: { port: number; hostname: string; dev: bool
     reusePort: false,
     idleTimeout: IDLE_TIMEOUT,
     routes,
-    websocket: hostLinkSocket,
+    // Bun's limits are per server: browser sockets inherit the link's (lib/browser-socket.ts caps its own frames).
+    websocket: {
+      ...hostLinkSocket,
+      open: (ws: ServerSocket) => {
+        if (isBrowserSocket(ws)) browserSocket.open(ws);
+      },
+      message: (ws: ServerSocket, data: string | Uint8Array) => (isBrowserSocket(ws) ? browserSocket.message(ws, data) : hostLinkSocket.message(asLink(ws), data)),
+      drain: (ws: ServerSocket) => (isBrowserSocket(ws) ? browserSocket.drain(ws) : hostLinkSocket.drain(asLink(ws))),
+      close: (ws: ServerSocket) => (isBrowserSocket(ws) ? browserSocket.close(ws) : hostLinkSocket.close(asLink(ws))),
+    },
     fetch: async (request, server) => {
       const response = await handle(request, server, async ({ gate }) => {
         const { pathname, search } = new URL(request.url);
@@ -178,8 +196,8 @@ export function startServer(options: { port: number; hostname: string; dev: bool
  * Run by server/main.ts and by the compiled binary (server/binary.ts) once NODE_ENV is "production". A taken port
  * prints why and exits 1.
  */
-export async function startProduction(listen: { port: number; hostname: string }): Promise<Bun.Server<LinkSocketData>> {
-  let server: Bun.Server<LinkSocketData>;
+export async function startProduction(listen: { port: number; hostname: string }): Promise<Bun.Server<ServerSocketData>> {
+  let server: Bun.Server<ServerSocketData>;
   try {
     server = startServer({ ...listen, dev: false, root: process.env.OMP_WEB_PACKAGE_DIR ?? process.cwd() });
   } catch (error) {
