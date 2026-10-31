@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
 import { resolve } from "path";
 import { getAgentDir } from "./omp/paths";
+import type { BrowserTransport } from "./event-stream-protocol";
 import { isRecord } from "./type-guards";
 
 /** omp-web's own server-side settings (omp's config.yml stays omp's). */
@@ -21,9 +22,11 @@ export interface WebServerSettings {
    * re-checks every name before handing it to a spawn.
    */
   agentEnv: Record<string, string>;
+  /** Live-event transport the browser uses; "sse" unless the file says "websocket". */
+  browserTransport: BrowserTransport;
 }
 
-const DEFAULTS: WebServerSettings = { autoResumeSessions: false, agentToolsEnabled: false, agentEnv: {} };
+const DEFAULTS: WebServerSettings = { autoResumeSessions: false, agentToolsEnabled: false, agentEnv: {}, browserTransport: "sse" };
 
 /** String-valued entries only — the allow-list lives in lib/omp/agent-env.ts. */
 function readAgentEnvRecord(value: unknown): Record<string, string> {
@@ -57,6 +60,7 @@ export function loadWebServerSettings(): WebServerSettings {
           autoResumeSessions: raw.autoResumeSessions === true,
           agentToolsEnabled: raw.agentToolsEnabled === true,
           agentEnv: readAgentEnvRecord(raw.agentEnv),
+          browserTransport: raw.browserTransport === "websocket" ? "websocket" : "sse",
         };
       }
     }

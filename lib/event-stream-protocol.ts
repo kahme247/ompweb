@@ -9,6 +9,7 @@
 // Stream framing (SSE):
 //   event: mux      data: MuxControlFrame       connection/subscription control
 //   event: <subId>  data: <channel payload>     one subscription's frames
+// Every frame also carries `id: <server ms at emit>`, read as `lastEventId`.
 // Subscriptions are added/removed with POST /api/events (EventStreamRequest).
 //
 // public/event-stream-worker.js is a plain script (not bundled) and mirrors
@@ -33,10 +34,16 @@ export type EventStreamChannel =
   /** Settings → Hosts: the `GET /api/hosts` body on subscribe and after every change. */
   | { kind: "hosts" };
 
+/** How the browser's shared worker reaches `/api/events`: SSE + HTTP POST, or one WebSocket. */
+export type BrowserTransport = "sse" | "websocket";
+
 export type MuxControlFrame =
-  | { type: "hello"; connectionId: string }
+  | { type: "hello"; connectionId: string; serverId: string; transport: BrowserTransport }
   | { type: "open"; sub: string }
-  | { type: "end"; sub: string };
+  | { type: "end"; sub: string }
+  | { type: "refused"; sub: string; status: number; error: string; code: string }
+  /** The setting changed; the worker switches transport. */
+  | { type: "transport"; transport: BrowserTransport };
 
 export type EventStreamRequest =
   | { connectionId: string; subscribe: { id: string; channel: EventStreamChannel } }
