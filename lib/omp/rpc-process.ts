@@ -227,11 +227,14 @@ export class RpcProcess {
     return Promise.race([this.readyPromise, timeout]);
   }
 
-  /** Enables bounded protocol-v2 framing when the ready frame advertises it. */
-  async negotiateProtocol(ready: RpcFrame): Promise<RpcProtocolVersion> {
+  /** Enables bounded protocol-v2 framing when the ready frame advertises it.
+   * Pass a timeout for startup callers: a child that accepts the frame but
+   * never answers must fail startup instead of hanging it forever. Callers
+   * without a timeout keep the previous unbounded behavior. */
+  async negotiateProtocol(ready: RpcFrame, timeoutMs?: number): Promise<RpcProtocolVersion> {
     const supported = Array.isArray(ready.supportedProtocolVersions) ? ready.supportedProtocolVersions : [];
     if (!supported.includes(2)) return this.protocolVersion;
-    const response = await this.sendCommand<{ protocolVersion?: unknown }>({ type: "negotiate_protocol", protocolVersion: 2 });
+    const response = await this.sendCommand<{ protocolVersion?: unknown }>({ type: "negotiate_protocol", protocolVersion: 2 }, timeoutMs);
     if (response?.protocolVersion !== 2) throw new Error("OMP rejected RPC protocol v2 negotiation");
     this.protocolVersion = 2;
     return this.protocolVersion;

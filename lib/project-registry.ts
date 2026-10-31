@@ -63,11 +63,39 @@ function canonicalProjectPath(value: string): string {
 
 /** Launch args the web UI manages itself; a workspace config must never carry
  *  them (bare or `--flag=value`), or a stored config could hijack the session
- *  boundary (`--cwd`/`--resume`) or the rpc-ui mode. */
-const RESERVED_LAUNCH_ARGS: Record<string, true> = { "--mode": true, "rpc-ui": true, "--cwd": true, "--resume": true };
-const RESERVED_LAUNCH_ARG_PREFIXES = ["--mode=", "--cwd=", "--resume="];
+ *  boundary (`--cwd`/`--resume`) or the rpc-ui mode. `--extension`/`--hook`
+ *  (and `-e`) are reserved too: omp loads extension/hook files (multiple
+ *  allowed, headless in rpc-ui mode), and rpc-manager appends its own
+ *  session-edit extension after these args — a config-carried one would
+ *  load arbitrary extension code into every spawn for that workspace. */
+const RESERVED_LAUNCH_ARGS: Record<string, true> = {
+  "--mode": true, "rpc-ui": true, "--cwd": true, "--resume": true,
+  "--extension": true, "--hook": true, "-e": true,
+};
+const RESERVED_LAUNCH_ARG_PREFIXES = ["--mode=", "--cwd=", "--resume=", "--extension=", "--hook=", "-e="];
 export function isReservedLaunchArg(arg: string): boolean {
   return RESERVED_LAUNCH_ARGS[arg] === true || RESERVED_LAUNCH_ARG_PREFIXES.some((prefix) => arg.startsWith(prefix));
+}
+
+/** Reserved flags that take a separate value token (`--cwd <dir>`). */
+const RESERVED_VALUE_FLAGS = new Set(["--mode", "--cwd", "--resume", "--extension", "--hook", "-e"]);
+
+/** Drop reserved args from a launch-arg list, including the value token
+ * following a bare reserved value-flag — otherwise the value survives as a
+ * stray positional (e.g. a config `--extension` path left behind after its
+ * flag was filtered). `--flag=value` forms are already caught by
+ * isReservedLaunchArg. */
+export function stripReservedLaunchArgs(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (!isReservedLaunchArg(arg)) {
+      out.push(arg);
+      continue;
+    }
+    if (RESERVED_VALUE_FLAGS.has(arg) && i + 1 < args.length && !args[i + 1].startsWith("-")) i++;
+  }
+  return out;
 }
 
 /** Parse the on-disk registry's launch config; invalid fields are safely ignored. */
@@ -78,7 +106,7 @@ function parseLaunchConfig(item: Record<string, unknown>): ProjectLaunchConfig |
   const profile = typeof value.profile === "string" && value.profile.trim() && !value.profile.trim().startsWith("-") ? value.profile.trim() : undefined;
   const advisor = value.advisor === true ? true : undefined;
   const extraArgs = Array.isArray(value.extraArgs)
-    ? value.extraArgs.filter((arg): arg is string => typeof arg === "string" && arg.length > 0 && arg.length <= 256 && !isReservedLaunchArg(arg)).slice(0, 32)
+    ? stripReservedLaunchArgs(value.extraArgs.filter((arg): arg is string => typeof arg === "string" && arg.length > 0 && arg.length <= 256)).slice(0, 32)
     : undefined;
   if (!profile && advisor === undefined && (!extraArgs || extraArgs.length === 0)) return undefined;
   return { profile, advisor, extraArgs };

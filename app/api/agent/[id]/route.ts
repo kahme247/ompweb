@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { readSessionHeader } from "@/lib/session-reader";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
-import { startRpcSession, getRpcSession, resolveSpawnCwdResult, WebRpcError } from "@/lib/rpc-manager";
+import { startRpcSession, getRpcSession, launchConfigForCwd, resolveSpawnCwdResult, WebRpcError } from "@/lib/rpc-manager";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "@/lib/image-attachments";
@@ -69,7 +69,12 @@ export async function POST(
     const noSpawn = Object.hasOwn(NO_SPAWN_REPLIES, body.type);
     const liveOnly = LIVE_SESSION_ONLY.has(body.type);
     if (existing?.isAlive()) {
-      if (noSpawn || liveOnly || existing.advisorSpawned === advisor || existing.isRunning() || existing.isEditingHistory()) {
+      // Same effective-advisor union startRpcSession uses: a workspace
+      // whose launch config forces --advisor comes back advisorSpawned
+      // even with the per-chat toggle off, so comparing against the raw
+      // toggle would destroy+respawn the idle child on every command.
+      const effectiveAdvisor = advisor || launchConfigForCwd(existing.cwd)?.advisor === true;
+      if (noSpawn || liveOnly || existing.advisorSpawned === effectiveAdvisor || existing.isRunning() || existing.isEditingHistory()) {
         const result = await existing.send(body);
         return NextResponse.json({ success: true, data: result });
       }

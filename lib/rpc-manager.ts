@@ -35,7 +35,7 @@ import { isRecord } from "./type-guards";
 import { BLOCKING_UI_METHODS, createNotificationDetector } from "./notification-events";
 import { publishNotification } from "./notification-hub";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./skill-diagnostics";
-import { isReservedLaunchArg, loadProjectRegistry } from "./project-registry";
+import { loadProjectRegistry, stripReservedLaunchArgs } from "./project-registry";
 import { eventWithToolResultImageUrls } from "./media-cache";
 import type {
   BashResultInfo,
@@ -256,7 +256,7 @@ export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[],
   // args and dash-leading profiles at the spawn boundary even though the
   // API validates them on write.
   if (launchConfig?.profile && !launchConfig.profile.startsWith("-")) args.push("--profile", launchConfig.profile);
-  if (launchConfig?.extraArgs) args.push(...launchConfig.extraArgs.filter((arg) => !isReservedLaunchArg(arg)));
+  if (launchConfig?.extraArgs) args.push(...stripReservedLaunchArgs(launchConfig.extraArgs));
   return args;
 }
 
@@ -329,6 +329,12 @@ interface IdentityChangeOptions {
 
 export class AgentSessionWrapper {
   private listeners: EventListener[] = [];
+  /** Server-side waiters (waitForTurnEnd and future internal subscribers).
+   * They receive events through emit() but are NOT UI listeners: they must
+   * not count toward listeners.length in host-tool/host-URI routing,
+   * hasSubscribers(), or the last-listener detach side effects, or a
+   * server-side waiter would hijack routing for a session no tab watches. */
+  private internalListeners: EventListener[] = [];
   private pendingUiRequests = new Map<string, UnsequencedAgentEvent>();
   private uiExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private extensionStatuses = new Map<string, string>();
@@ -380,6 +386,12 @@ export class AgentSessionWrapper {
    *  concurrent callers can never both enter (the waiter/promptRunning
    *  bookkeeping alone is not an atomic gate). */
   private mcpListInFlight = false;
+  /** The /mcp list waiter timed out, but the child may still deliver the
+   * command's output later. While set, command_output frames are swallowed
+   * instead of leaking into the chat stream; the next prompt boundary
+   * (agent_start / agent_end / prompt_result / prompt_error, or a fresh
+   * runMcpCommand) clears it. */
+  private mcpListOutputDiscarded = false;
   private _alive = true;
   /** Host tools the web UI registered via set_host_tools (agent-callable). */
   private hostToolNames: Set<string> = new Set();
@@ -563,11 +575,13 @@ export class AgentSessionWrapper {
     this.handshaking = true;
     try {
       const ready = await this.proc.waitReady(READY_TIMEOUT_MS);
-      await this.proc.negotiateProtocol(ready);
+      await this.proc.negotiateProtocol(ready, GET_STATE_TIMEOUT_MS);
       // Subscribe to subagent lifecycle/progress/event frames so the UI can show
       // a live subagent roster. Older omp builds may not know the command —
       // degrade silently (the UI falls back to no subagent info).
-      await this.proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
+      // Bounded like set_ask_dialog below so a child that never answers
+      // cannot stall startup (and hold the start lock) forever.
+      await this.proc.sendCommand({ type: "set_subagent_subscription", level: "events" }, GET_STATE_TIMEOUT_MS).catch(() => {});
       // Opt into omp's all-questions ask dialog; older omp rejects the command
       // and keeps the per-question select/editor fallback.
       // Bounded like get_state so a child that never answers cannot stall startup.
@@ -804,6 +818,11 @@ export class AgentSessionWrapper {
           notifyRunningChange();
           return;
         }
+        // The /mcp waiter timed out, but the child may still deliver the
+        // command's output later. Swallow it instead of leaking a Settings
+        // command's output into the chat stream; the flag clears at the
+        // next prompt boundary (see emit()).
+        if (this.mcpListOutputDiscarded) return;
         // The output of a background `/rename` (see autoTitle) is not chat content.
         if (Date.now() < this.quietRenameUntil && typeof event.text === "string" && RENAME_OUTPUT_RE.test(event.text)) {
           this.quietRenameUntil = 0;
@@ -886,6 +905,16 @@ export class AgentSessionWrapper {
         // versions omit `command` on that second response, so the active run
         // is also a terminal-failure signal. Otherwise this frame would be
         // ignored and the UI would stop with no explanation.
+        // Exception: a failed response for a routine poll like get_state
+        // that reaches here was never awaited — an awaited failure is
+        // delivered to its caller by RpcProcess and never reaches frame
+        // listeners. An unsolicited poll failure is therefore stale by
+        // construction (a poll that timed out, then retried fine), so
+        // emitting it would toast an error for a command that succeeded.
+        // Other commands still surface here (including async prompt
+        // failures), and late successful responses still reach listeners
+        // per the RpcProcess contract — only this poll failure is dropped.
+        if (event.success === false && event.command === "get_state") return;
         if (event.success === false) {
           const promptFailure =
             event.command === "prompt" ||
@@ -1211,6 +1240,17 @@ export class AgentSessionWrapper {
         if (typeof event.toolCallId === "string") this.liveToolEvents.delete(event.toolCallId);
         break;
     }
+    // A discarded /mcp list output is swallowed in handleFrame, but the flag
+    // itself clears here, at the next prompt boundary, so a later genuine
+    // command_output is not swallowed with it.
+    if (
+      event.type === "agent_start" ||
+      event.type === "agent_end" ||
+      event.type === "prompt_result" ||
+      event.type === "prompt_error"
+    ) {
+      this.mcpListOutputDiscarded = false;
+    }
     event.web = { streamId: this.streamId, sequence: ++this.streamSequence };
     for (const l of this.listeners) {
       try {
@@ -1219,6 +1259,14 @@ export class AgentSessionWrapper {
         // A throwing subscriber (SSE encode failure, UI handler bug) must not
         // starve the remaining subscribers — same isolation RpcProcess and
         // notifyRunningChange apply to their listener sets.
+      }
+    }
+    for (const l of this.internalListeners) {
+      try {
+        l(event as AgentEvent);
+      } catch {
+        // Same isolation as UI listeners: a throwing waiter must not starve
+        // the remaining subscribers.
       }
     }
   }
@@ -1289,6 +1337,20 @@ export class AgentSessionWrapper {
     this.idleTimer.unref?.();
   }
 
+  /** Server-side event subscription (waitForTurnEnd and future internal
+   * waiters). Internal listeners receive every emitted event but are not
+   * UI subscribers: attaching one must not route host tools/URIs to this
+   * session, must not count in hasSubscribers(), must not replay pending
+   * UI dialogs, and detaching one must not reject pending host tools or
+   * arm the disconnect reap clock. */
+  onInternalEvent(listener: EventListener): () => void {
+    this.internalListeners.push(listener);
+    return () => {
+      const i = this.internalListeners.indexOf(listener);
+      if (i !== -1) this.internalListeners.splice(i, 1);
+    };
+  }
+
   onEvent(listener: EventListener): () => void {
     this.listeners.push(listener);
     this.noteActivity();
@@ -1337,7 +1399,10 @@ export class AgentSessionWrapper {
       let endsSeen = 0;
       const timer = setTimeout(() => finish(new Error("Timed out waiting for the target session's response.")), timeoutMs);
       timer.unref?.();
-      const detach = this.onEvent((event) => {
+      // Internal listener, not a UI subscription: a waiter must not make
+      // host-tool routing treat this session as tab-attached (see
+      // onInternalEvent).
+      const detach = this.onInternalEvent((event) => {
         if (event.type === "agent_end" && event.isTerminal === false) return;
         if (event.type === "agent_end" || event.type === "prompt_result") {
           endsSeen += 1;
@@ -1426,6 +1491,9 @@ export class AgentSessionWrapper {
     // would steal the waiter so the first hangs to timeout (or receives the
     // other's output). This flag is checked+set before any await.
     this.mcpListInFlight = true;
+    // A fresh waiter owns the next command_output; a previous timeout's
+    // orphan flag must not swallow it.
+    this.mcpListOutputDiscarded = false;
     this.historyMutationPendingCount += 1;
 
     this.promptRunning = true;
@@ -1448,6 +1516,10 @@ export class AgentSessionWrapper {
     waiter.timer = setTimeout(() => {
         if (this.mcpListWaiter !== waiter) return;
         this.mcpListWaiter = null;
+        // The child may still deliver this command's output later; mark it
+        // orphaned so handleFrame swallows it instead of leaking it into
+        // the chat stream (cleared at the next prompt boundary).
+        this.mcpListOutputDiscarded = true;
         rejectOutput(new WebRpcError("Timed out while loading MCP servers", "mcp_list_timeout"));
       }, MCP_LIST_TIMEOUT_MS);
     // Don't pin the event loop if the caller never awaits (route aborted): the
@@ -1745,10 +1817,13 @@ export class AgentSessionWrapper {
       this.unsubscribeFrames = proc.onFrame((frame) => this.handleFrame(frame));
       try {
         const ready = await proc.waitReady(READY_TIMEOUT_MS);
-        await proc.negotiateProtocol(ready);
+        await proc.negotiateProtocol(ready, GET_STATE_TIMEOUT_MS);
         // The replacement process starts with subscriptions disabled; restore
         // the live roster/transcript event stream before reading its state.
-        await proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
+        // Bounded like the startup handshake so a wedged child cannot leave
+        // restarting === true forever (later commands would all fail with
+        // session_restarting).
+        await proc.sendCommand({ type: "set_subagent_subscription", level: "events" }, GET_STATE_TIMEOUT_MS).catch(() => {});
         await proc.sendCommand({ type: "set_ask_dialog", enabled: true }, GET_STATE_TIMEOUT_MS).catch(() => {});
         const state = await proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS);
         this.applyIdentity(state);
@@ -2428,8 +2503,10 @@ export async function resumeInterruptedSessions(): Promise<void> {
   }));
 }
 
-/** Look up the workspace-registered launch config; unregistered projects attach none. */
-function launchConfigForCwd(cwd: string): ProjectLaunchConfig | undefined {
+/** Look up the workspace-registered launch config; unregistered projects attach none.
+ * Exported for the agent route's fast-path advisor gate, which must compare
+ * against the same effective advisor value startRpcSession uses. */
+export function launchConfigForCwd(cwd: string): ProjectLaunchConfig | undefined {
   let canonical = cwd;
   try { canonical = realpathSync(cwd); } catch {}
   const key = comparableProjectPath(canonical);
