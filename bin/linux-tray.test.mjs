@@ -86,7 +86,7 @@ test("readTrayConfig falls back to defaults without a config file", () => {
 test("buildMenuItems reflects running state and service availability", () => {
   const running = buildMenuItems({ running: true, version: "0.4.2", autostart: true, hasService: true, exposed: false, hasDialogTool: true });
   assert.equal(itemById(running, 2).label, "  Status: Running");
-  assert.equal(itemById(running, 7).label, "Stop Server");
+  assert.equal(itemById(running, 7).label, "Stop Server (omp runs keep going)");
   assert.equal(itemById(running, 12).label, "Expose to Network");
   assert.equal(itemById(running, 12).state, 0);
   assert.equal(itemById(running, 16).label, "Start with Plasma");
@@ -107,6 +107,13 @@ test("buildMenuItems reflects running state and service availability", () => {
   assert.equal(itemById(noDialog, 12).enabled, false);
   assert.equal(itemById(noDialog, 13).enabled, false);
   assert.equal(itemById(noDialog, 14).enabled, false);
+
+  // The ompweb-host daemon state sits under the web status.
+  assert.equal(itemById(running, 19).label, "  Daemon: Not installed");
+  assert.equal(itemById(running, 19).enabled, false);
+  const withDaemon = buildMenuItems({ running: true, version: "0.4.2", autostart: false, hasService: true, exposed: false, hasDialogTool: true, daemon: "running" });
+  assert.equal(itemById(withDaemon, 19).label, "  Daemon: Running");
+  assert.equal(withDaemon.findIndex((item) => item.id === 19), withDaemon.findIndex((item) => item.id === 2) + 1);
 
   // Inert rows and separators.
   assert.equal(itemById(running, 1).enabled, false);

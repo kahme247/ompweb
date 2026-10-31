@@ -40,9 +40,12 @@ Browser                Next.js Server                    omp child process
 
 **Session browsing** (read-only): pure-Node parsing of omp session `.jsonl`
 files via `lib/session-reader.ts` — no child process involved.  
-**Sending a message**: `startRpcSession()` in `lib/rpc-manager.ts` spawns
-`omp --mode rpc-ui` (one process per active session) through
-`lib/omp/rpc-process.ts`.
+**Sending a message**: `startRpcSession()` in `lib/rpc-manager.ts` asks the
+session's `Host` (`lib/hosts/host.ts`; `localHost` in `lib/hosts/local-host.ts`)
+to spawn `omp --mode rpc-ui` (one process per active session) and runs
+`lib/omp/rpc-process.ts` over the returned transport. Every machine-local
+action of a session wrapper (spawn, session-file checks, list invalidation)
+goes through that host.
 
 Shared foundations in `lib/omp/`:
 
@@ -51,6 +54,9 @@ Shared foundations in `lib/omp/`:
 - `omp-cli.ts` — locate/probe the installed `omp` binary (`resolveOmpBin`,
   `getOmpVersion`).
 - `rpc-process.ts` — process + NDJSON protocol layer (`RpcProcess`).
+- `rpc-transport.ts` — `RpcTransport`: the byte pipe under `RpcProcess`
+  (`spawnLocalRpcTransport` for a local child; `RemoteRpcTransport` in
+  `lib/hosts/hub.ts` for a remote one).
 - `auth-gateway.ts` — shared, idle-killed `omp auth-gateway stdio` child:
   omp's own credentials and models behind JSON-line gateway requests.
 
@@ -68,6 +74,9 @@ app/api/
   agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? }
   agent/[id]/route.ts             GET state | POST any RPC command
   events/route.ts                 GET multiplexed SSE | POST subscribe/unsubscribe channels
+  hosts/route.ts                  GET hosts (this machine first) | POST { label } → token once + login command | PATCH { id, label?, allowAgentStart? } (`local`: label only, empty resets to "This machine") | DELETE ?id= revoke (registry first, then close the link); 503 if hosts.json is unreadable
+  hosts/link/route.ts             GET downlink (NDJSON stream) | POST uplink (NDJSON batch) — the `ompweb host` daemon; bearer-token auth, skipped by `proxy.ts`
+  hosts/link/blob/[reqId]/route.ts  POST raw bytes for a large op result (daemon → main)
   notifications/devices/route.ts  GET VAPID key + subscribed | PUT { deviceId, prefs, subscription? }
   notifications/presence/route.ts POST { clientId, deviceId, visible, sessionId, seq }
   notifications/test/route.ts     POST { deviceId } send a test push (502 on push-service refusal)
@@ -98,6 +107,18 @@ app/api/
 
 lib/
   omp/                 shared omp foundations (paths, CLI probe, RpcProcess)
+  hosts/               hosts and the local daemon (see "Remote hosts"); none of the daemon-loaded files may import `next/*` or `@/`
+    host.ts            `Host` interface, `HostStatus`, `isLinkUp`
+    local-host.ts      `localHost`, the daemon's side: spawn + file checks on the daemon's machine; `resolveSpawnCwdResult`; `SESSION_EDIT_EXTENSION_PATH` (from the module's own location: the daemon runs in HOME). Never imported by main, nor is `daemon.ts` (`no-direct-local.test.mjs`)
+    local-bootstrap.ts web server side of the local link: `localLinkUrl`, `ensureLocalHostLink` (the `local` record + `host.json`)
+    host-login.ts      `host.json` (`loginHost`, `readHostLogin`) and `isLoopbackHost`, shared by the daemon and local-bootstrap
+    session-ops.ts     file-reading half of the session/project routes, run on the owning host's daemon (this machine's too)
+    link-protocol.ts   link messages, codec, size limits, `HOST_OP_NAMES`, `SeqWindow`/`Outbox`
+    hub.ts             main side: link GET/POST/blob handlers, `RemoteHost`, `getHost`, `listHosts`, adoption of live children (`reattach`/`adopt`), orphans, `freezeHostLinks`, `hosts` change events
+    daemon.ts          daemon side: `runHostDaemon` (reconnect, buffering, op dispatch, hello with each child's `{sessionId, cwd, pending}`; follows a `host.json` url or token change when a dial fails; loopback redials at most 3 s apart)
+    pending-requests.ts daemon side: `PendingRequests`, a channel's still-open blocking requests and current session id for the hello
+    registry.ts        `<agent dir>/omp-web/hosts.json`: create/update/revoke, token hashing and lookup; the `local` record (`rotateLocalHostToken`, `customLocalLabel`)
+    session-index.ts   sessions and projects across hosts, cached per host; `hostForSessionId`, `sessionSpawnTarget`, `invalidateLocalSessionLists`
   provider-accounts.ts distinct omp accounts per provider from `omp usage` reports (Models → provider detail)
   agent-client.ts      typed fetch helper for /api/agent commands
   btw.ts               /btw side-question records + pure frame/snapshot merge (order-safe)
@@ -123,7 +144,7 @@ lib/
   notification-store.ts  server: SQLite store for VAPID keys, devices and the notification history
   notification-history.ts  browser: mirror of the server's notification history (Notifications tab)
   notification-client.ts  browser: device id, prefs store, service worker + push subscription
-  rpc-manager.ts       session registry + startRpcSession over RpcProcess
+  rpc-manager.ts       session registry + startRpcSession over RpcProcess (spawn via a Host)
   session-reader.ts    session .jsonl parsing + path cache + buildSessionContext
   session-search.ts    shared fuzzy/phrase query scorer for sidebar search (title weights ≫ transcript)
   session-content-search.ts  server: per-file transcript text cache (size+mtime) + searchSessions()
@@ -142,7 +163,7 @@ lib/
 
 components/
   AppShell.tsx        layout + URL state + tab management
-  SessionSidebar.tsx  session tree + FileExplorer
+  SessionSidebar.tsx  session tree + FileExplorer; with a linked host the workspaces group per host (`HostGroup`), keyed by `hostProjectKey` (`lib/project-ordering.ts`: bare path on this machine, `<hostId>:<path>` elsewhere)
   ChatWindow.tsx      chat composition + completion sound wrapper
   ChatInput.tsx       input bar + model/thinking/tools/compact controls
   ComposerPanels.tsx  composer-attached /btw + todo + subagent panels (collapsible, live states)
@@ -159,6 +180,9 @@ components/
   MarkdownBody.tsx    markdown renderer
   ModelsConfig.tsx    modal for models/auth configuration
   McpConfig.tsx       project MCP server editor (Settings → MCP tab)
+  HostsConfig.tsx     linked hosts: add (token shown once), rename, revoke, allowAgentStart (Settings → Hosts tab)
+  LocalDaemonBanner.tsx  production-only hint with the install command while no local daemon has linked (90 s grace)
+  host-status.ts      host name, status text and dot colour shared by Settings → Hosts and the sidebar
   PluginsConfig.tsx   modal for installed plugins
   SkillsConfig.tsx    modal for loaded/search/installable skills
   FileExplorer.tsx    file tree inside sidebar
@@ -170,6 +194,7 @@ components/
 
 hooks/
   useAgentSession.ts       messages + streaming + SSE + fork/navigate/reconciliation logic
+  useHostRows.ts           the `hosts` channel as React state (status of every host; sidebar, new-session picker, Settings → Hosts)
   useAudio.ts              completion sound + browser AudioContext unlock
   useNotifications.ts      presence reports, toast/system delivery, notification clicks
   useDragDrop.ts           shared drag/drop state
@@ -179,6 +204,9 @@ hooks/
   useNavigationHistory.ts  in-app back/forward stack (record/peek/commit/drop) for visited chat views
   useWordPrediction.ts     debounced omp predict_word ghost text + feedback
   useBtw.ts                /btw records/active panel/history dialog fed by btw_* SSE frames
+
+bin/
+  omp-web-host.js     `ompweb host [login]`: daemon CLI; token read from stdin, never argv. `omp-web.js host` requires it in-process (no child) so SIGTERM/SIGINT reach the daemon's stop
 ```
 
 ---
@@ -211,14 +239,168 @@ hooks/
   overwrites sessions the other is running. Startup claims a list only when its
   pid is dead or the file predates the last boot, plus the legacy unsuffixed
   list. Same-boot pid reuse or a zombie writer leaves that list unresumed.
-- A service stop signals every process at once, so an omp child can die
-  before omp-web's own SIGTERM handler runs. A session whose process died
-  therefore stays listed for `EXIT_GRACE_MS`; the shutdown handler freezes the
-  list (`markShuttingDown`) so those deaths count as interrupted, while a
-  crash with omp-web still up is dropped after the window.
+- The omp children run under the daemon, so stopping the web service does not
+  reach them: the next server adopts the ones still running and drops their
+  entries from this list (`adoptedChild`, see "Local daemon"). Only sessions
+  whose child died (daemon restart, crash, failed adoption) resume, after the
+  daemon's hello (`resumeOnHostLink`). A session whose process died stays
+  listed for `EXIT_GRACE_MS`; the shutdown handler freezes the list
+  (`markShuttingDown`) so deaths during a shutdown count as interrupted, while
+  a crash with omp-web still up is dropped after the window.
 - Only session ids are stored; paths are re-resolved on resume.
 - Known limit: resume does not detect a terminal `omp --resume <id>` started
   on the same session while omp-web was down; both would write the file.
+
+### Remote hosts (`lib/hosts/`, `app/api/hosts/`, `bin/omp-web-host.js`)
+- **Host seam** (`lib/hosts/host.ts`). Every host, this machine included, is
+  reached over the link: `getHost(id)` (`hub.ts`) returns a `RemoteHost` whose
+  calls go to a daemon. `getHost("local")` is the link of this machine's own
+  `ompweb host` daemon (see "Local daemon"); there is no direct spawn or file path
+  on main. `localHost` (`id: "local"`, `local-host.ts`) is the daemon's side: it spawns
+  and reads files on the machine the daemon runs on. `startRpcSession(..., host)`
+  asks `host.spawnRpc` for an `RpcTransport`; `RpcProcess`, the wrapper, the
+  event hub, notifications, the queue and `/btw` never see where omp runs.
+  Session and project file reads are `host.sessionOps` (`session-ops.ts`, run in
+  the daemon), addressed by session id, never by path: routes use `resolveSessionHostOr404`
+  (`lib/api-utils.ts`) and the host resolves the file itself. New route code
+  must not open a session file on main for a session that may be remote or local.
+  `SessionInfo.hostId` and `ManagedProject.hostId` carry the host; sidebar and
+  project state key on `hostProjectKey` (bare path on this machine, `<hostId>:<path>`).
+- **Link = two HTTP legs, both dialled by the daemon** (`/api/hosts/link`):
+  `GET` is the downlink (long-lived NDJSON, main → daemon), `POST` the uplink
+  (batched NDJSON, daemon → main). No WebSocket: `next start` route handlers
+  cannot accept upgrades and there is no custom server (and no `ws`). Every
+  line except `hello`/`welcome`/`ping`/`pong` has a per-direction `seq`;
+  `ack` rides the hello and every POST (the `x-omp-web-ack` header on an
+  uplink POST). The hello is a POST body, never a header (proxy header
+  buffers would cap the channels it lists): a POST with `x-omp-web-hello: 1`
+  carries it and answers `{helloId}`, and the downlink GET names that id in
+  `x-omp-web-hello`; main takes the hello at that GET, so it opens one
+  downlink once. A v1 daemon's header hello gets 426. Each `hello.channels`
+  entry carries `pending` (link v3): the raw stdout lines of that child's
+  still-open `host_tool_call`s, `host_uri_request`s and blocking `extension_ui_request`s
+  (`PendingRequests`), or null past `LINK_LIMITS.pendingBytes`. Each side keeps unacked
+  lines, resends after a reconnect and drops any `seq` it already applied.
+  Main decodes a whole POST before applying any of it. `hello.ack === 0`
+  means a fresh daemon: main restarts that host's uplink window. Wire shapes
+  and size limits live in
+  `lib/hosts/link-protocol.ts` (one op allow-list, `HOST_OP_NAMES`, shared by
+  both sides); the spec is `docs/specs/2026-10-28-remote-hosts-design.md`.
+- **Link protocol versions** (spec "Protocol versions and compatibility"). A
+  released `LINK_PROTOCOL_VERSION` changes only compatibly: an added optional
+  field or a message type receivers skip is fine; a changed type or meaning, or
+  a newly required field, needs a new version. Receivers skip unknown message
+  types (acking their `seq`) and answer unknown ops 501 `unknown_op`, from v3 on;
+  a v2 daemon is strict. Main keeps supporting older
+  daemons, at least N-1, from `MIN_LINK_PROTOCOL_VERSION` (2) up; dropping one is
+  an explicit decision (a daemon on a dropped version gets 426; an update-only
+  mode is planned). For an older daemon main decodes its hello into today's shape
+  (`decodeUp`), sends only messages that version understands, and echoes its
+  version in `welcome` and `hostVersion`; a v2 daemon's listed children are
+  killed, never adopted. Upgrade order: web app first, then hosts; a daemon need
+  not support a newer main (it gets 426).
+- **One link per host, and the 409 nonce rule.** A new link with the same token
+  replaces the old one (`replaced` is sent, the old daemon exits); two daemons
+  must never run competing `omp --resume` children on one agent dir. Each
+  `welcome` carries a fresh `nonce`; every uplink POST and blob upload sends it
+  as `x-omp-web-link` and main answers 409 (before reading the body) when it is
+  not the current link's. Without it a replaced daemon's late POST lands in the
+  window a newer daemon's hello just reset and drops that daemon's first
+  messages as duplicates. On 409 the daemon keeps its messages for the next
+  `welcome`.
+- **Transport down is not exited.** While the link is down the omp child keeps
+  running on its machine. A wrapper on a host whose `isLinkUp(status)` is false
+  is "transport down": no `process_exit`, idle and disconnect timers paused
+  until the link returns; frames carry `host_status` for the offline banner;
+  sends answer 503 `{hostOffline: true, delivery}`: `"refused"` when nothing
+  left (the composer keeps the draft), `"unknown"` when the link dropped after
+  the command was sent (it may still run; the composer drops the draft so it
+  is never sent twice). A fresh chat adopts the `sessionId` a 503 from
+  `/api/agent/new` carries. A child missing from `hello.channels`
+  gets a synthesized `process_exit`. Use `isLinkUp` (`host.ts`, client-safe) as
+  the one link predicate; do not compare `status === "online"` (an `omp-missing`
+  host is linked).
+- **A failed op never runs later.** An op that times out (504) or whose
+  downlink ends or host goes offline (503, at once, not at the 30 s timeout)
+  drops its `req` from the outbox (`failOp` in `hub.ts`), so a delete the user
+  saw fail is never applied after a redial. `destroyAndWait` returns once the
+  session's host is offline (`untilHostDown`); the kill stays queued for the
+  link. A wrapper therefore stays in the registry until its child really exits
+  (a resume whose handshake failed is registered in the catch for this), so a
+  retry awaits its `destroyPromise` instead of spawning a second `--resume`
+  child. A reload (`restart`) waits for the old child the same way: if the
+  host drops first, it fails `host_offline`, the wrapper answers
+  `host_offline` until that child's exit arrives (or `lost` on the next
+  hello) and is then destroyed; no replacement spawns beside it.
+  `restartAllRpcSessions` (omp update) restarts local sessions only.
+  Remote-only transport members (`onResync`, `lost`) are optional on
+  `RpcTransport` and duck-typed: route bundles and instrumentation load
+  separate `hub.ts` module instances, so never `instanceof RemoteRpcTransport`.
+- **Live-link recycle rule.** A prompt, history-edit or MCP command that times
+  out normally recycles the child. On a remote host it does so only if the host
+  sent uplink traffic after the command was dispatched (`lastUplinkAt`,
+  `linkLostDuring` in `rpc-manager.ts`); a quiet or dropped link answers
+  `host_offline` (503), queues no kill and leaves the run to
+  `reconcileAfterGap`. A kill through a dead link only waits in the outbox.
+- **Orphans and resume.** On `hello`, listed channels with no wrapper are children
+  of a previous server run: they are adopted (see "Local daemon"), and killed
+  (`kill`, escalating to force after 5 s, registered until their `exit`) only when
+  adoption is impossible. A cold spawn for a session
+  awaits `orphanExit(hostId, sessionId)` first so two children never write one
+  file; the wait rejects 503 as soon as the link goes down. A buffer overflow on
+  the daemon (8 MB per channel) sends `resync {ch}` and main reruns the
+  `get_state` reconcile. With `autoResumeSessions` on, an interrupted session
+  resumes after its host's hello (`resumeOnHostLink`,
+  `lib/session-resume.ts`), once, after the orphan's exit.
+- **Proxy exclusion.** `proxy.ts` does not run for `/api/hosts/link` and its
+  subpaths (its matcher excludes exactly those). Next buffers a proxied request
+  body and silently truncates it past 10 MB, below the link's 16 MB uplink and
+  64 MB blob limits. The hub verifies the `Authorization: Bearer <host token>`
+  header before reading any body (401 unknown token, 503 unreadable
+  `hosts.json`). Keep `/api/hosts` itself behind the proxy.
+- **Remote paths never reach `allowFileRoot`** or any other main-side
+  filesystem check: they mean nothing on main. `startNewRpcSession` calls
+  `allowFileRoot` and the local session-list invalidation only for the local
+  host; remote cwd validation is the host's `validateCwd` op. Daemon input is
+  untrusted: blob hashes must match `^[0-9a-f]{64}$`, results are shape-checked
+  in `hub.ts`, and `sessionFileExists`/`spawn` accept only paths under the
+  daemon's sessions directory. A remote session export is always served as an
+  attachment: inline, its HTML would run on main's origin.
+- **Daemon-loaded modules must not import `next/*` or `@/`.** `bin/omp-web-host.js`
+  loads `lib/hosts/daemon.ts` through plain `jiti`, which does not resolve the
+  `@/` alias and has no Next runtime. That covers everything the daemon pulls in
+  (`daemon.ts`, `link-protocol.ts`, `local-host.ts`, `session-ops.ts`,
+  `host.ts`, and their `lib/` imports). Use relative imports there.
+- **Registry.** `<agent dir>/omp-web/hosts.json` (0600, atomic write) stores
+  only `sha256(token)`; the token is shown once. Mutations use the strict
+  reader and throw `HostRegistryUnreadableError` (503) instead of rewriting a
+  file they could not parse. Revoke deletes the record first, then closes the
+  link (the daemon sees 401 and stops its children). The `hosts` event channel
+  carries the `GET /api/hosts` body. A missing `hosts.json` (an agent-dir
+  mismatch, say) answers 401 to every daemon, and a daemon told its token is
+  unknown stops all its omp children: check `PI_CODING_AGENT_DIR` before
+  starting main.
+- **Agent tools.** Calls carry the caller's host (`sourceHostId`);
+  `new_session`'s `host` defaults to it. A host with `allowAgentStart` off asks
+  a server-owned `confirm` through the normal extension-UI path
+  (`confirmFromServer`). Local callers never ask for this machine. A remote
+  caller asks before any other host unless that host allows agent starts, and
+  always before this machine, for `new_session` and `send_to_session` alike.
+- **Not yet remote:** Explorer, Git, Worktrees, the Skills/Plugins/Agents/MCP
+  settings tabs and directory browsing show "Not available on remote hosts
+  yet". Sub-projects 2 and 3 of the spec add ops for them.
+
+#### Local daemon (`docs/specs/2026-10-29-local-daemon-design.md`)
+- **Two services.** `ompweb` (web) and `ompweb-host` (`ompweb host`, the daemon) are installed together by `ompweb systemd install`, `ompweb launchd install` and the Windows tray install; uninstall removes both, `ompweb systemd restart` restarts the web unit only. The daemon owns this machine's omp children, so a web restart, update or redeploy leaves runs going; restarting the daemon ends them (auto-resume then resumes the sessions that were running). An upgrade restarts the daemon only when the running daemon's link version is outside the new release's `[MIN_LINK_PROTOCOL_VERSION, LINK_PROTOCOL_VERSION]` range (it would get 426 and exit); a daemon inside the range keeps running.
+- **Local link bootstrap** (`lib/hosts/local-bootstrap.ts`, called from `instrumentation.node.ts`). `localLinkUrl()` builds the daemon's URL from `OMP_WEB_PORT`/`OMP_WEB_HOSTNAME` (set by the `ompweb` launcher; wildcard binds map to `127.0.0.1`, a non-loopback bind gets no link and a console warning). `ensureLocalHostLink()` makes sure the `local` record exists (`registry.ts`, `rotateLocalHostToken`) and writes `<agent dir>/omp-web/host.json` (`{url, token}`, 0600). A `host.json` whose token the registry still accepts and whose url matches is left alone, so a web restart does not make the daemon redial. It throws, and startup only logs, when `host.json` points to a non-loopback server (a remote-host login on this machine): it is never overwritten. The daemon re-reads `host.json` when its link gets 401 and exits only if the file still holds the rejected token.
+- **Dev mode does not take the daemon.** With `NODE_ENV=development` `ensureLocalHostLink` is skipped, so the daemon stays linked to production and the dev server shows "This machine" offline. The local row of `GET /api/hosts` carries `daemonManaged: false` there, which hides the install banner.
+- **`local` is a registry record like any host**, with three exceptions: it is listed first, `PATCH` takes `label` only (`allowAgentStart` is fixed), and it cannot be revoked. Renaming "This machine" is a `PATCH /api/hosts {id: "local", label}`; an empty label resets it (`registry.ts` stores `""`; `customLocalLabel()` / `DEFAULT_LOCAL_LABEL` map it). `getHost("local")` works without the record: it is the daemon link, offline while none is linked, and "needs upgrade" on a protocol mismatch (`hostVersion` in the row is the daemon's).
+- **Adoption on hello** (`reattach`/`adopt` in `hub.ts`, `adoptRpcSession` in `rpc-manager.ts`). Each listed `{ch, sessionId, cwd, pending}` channel that has no transport on this server is a child of a previous server and is taken over by a new `AgentSessionWrapper` (`adopted: true`, `RpcProcess` option `adopted`). There is no session-list lookup: the spawn `cwd` comes from the hello, and the session identity from the child's own `get_state` (`applyIdentity`), so a new session whose file is not written yet is adoptable. The daemon names each child's current session in the hello (`PendingRequests.sessionId`: the file's header id at spawn, then the last successful `get_state`). Re-sync (`AgentSessionWrapper.adopt`): `negotiate_protocol`, `set_subagent_subscription`, `set_ask_dialog`, `get_state`, `get_subagents`, `get_btw_history`, then `replay` of the `pending` lines and `release` of the frames held meanwhile. Every command is bounded by `GET_STATE_TIMEOUT_MS`.
+- **The daemon replays open blocking requests** (`pending-requests.ts`): `host_tool_call`, `host_uri_request` and blocking `extension_ui_request` lines, until answered or cancelled, capped at `LINK_LIMITS.pendingBytes` per channel. An adopted wrapper feeds them through `handleFrame` (`replaying`; agent tools are not re-run), so dialogs reappear and browser tool calls wait for the next tab (`hostToolsUnknown`, `parkHostTool`). A request opened while the old server stopped is also resent unacked: `RpcProcess.release` skips held requests the replay already delivered, so it is handled once. The hello also carries `autoApproveExtension`, which an adopted run has no spawn result for.
+- **A child is killed only when it cannot be adopted:** its hello entry has no session id, lost its `pending` lines to the cap, or came from a v2 hello (`killOrphan`), or a re-sync command times out or the child exits, its held output overflows, or its real session (after `get_state`) is already started on this server (`adoptRpcSession` kills it: its wrapper's dispose). Auto-resume (`resumeOnHostLink`) first awaits `adoptedChild()` and resumes a session only if it was not adopted.
+- **Shutdown freezes the links and never kills daemon children.** The `cleanup` in `rpc-manager.ts` runs `markShuttingDown()` and `freezeHostLinks()`: from then on a link neither sends nor applies anything (no kill, no rejection of open host tool calls as tabs close; the daemon's POSTs get 503 "shutting down"). The daemon keeps the output unacked for the next server. An adoption that fails after the freeze leaves its child to the next server instead of killing it.
+- **Install banner** (`components/LocalDaemonBanner.tsx`). In production, when the local row stays offline with `hostVersion === null` (no daemon has linked since this server started) for 90 s of a page view (well past the daemon's redial wait, at most 3 s on loopback, so a restarting daemon does not trip it), it shows the platform's install command and, for a foreground `ompweb` (terminal or npx, no service), `ompweb host` to keep running in another terminal; Settings → Hosts shows both for an offline local row. Dismissal is kept in `localStorage`. Main never installs services or starts the daemon.
+- **No direct local path.** `local-host.ts` is the daemon's; `lib/hosts/no-direct-local.test.mjs` fails when anything outside its allow-list spawns omp or imports it. The utility omp (`rpc-utility.ts`, login) is the one deliberate exception: it is not a session.
 
 ### Session moves (omp >= 18.5 ownership) and title generation
 - Only the first omp process to write a session file owns it; a non-owner moves
@@ -384,7 +566,8 @@ during the wait.
   MessagePort has no close event.
 - Channels (`lib/event-stream-hub.ts`): `running` (sidebar badges +
   session-list hints), `notifications` (one tab's toasts and in-page system
-  notifications, keyed by its `clientId`), `host-tools` (cross-session
+  notifications, keyed by its `clientId`), `hosts` (the `GET /api/hosts` body on
+  subscribe and on every link or registry change), `host-tools` (cross-session
   `open_url`/`notify`/`open_file` calls), `session` (observer-only, never
   spawns omp; keeps the latest-wins `message_update` coalescing under
   backpressure), `file` (viewer watch, same allow-list as `/api/files`). A
@@ -561,13 +744,13 @@ during the wait.
   disconnect cancels and cleans up too. An existing target is refused (409).
 
 ### File access allow-list
-- `/api/files` is intentionally not a general filesystem browser. Allowed roots come from session cwds, their resolved project roots, `~/omp-cwd-*`, and roots explicitly added with `allowFileRoot()`.
+- `/api/files` is intentionally not a general filesystem browser. Allowed roots come from this machine's session cwds and their resolved project roots (as its daemon lists them: `hostSessions("local")`, the last list while the daemon is offline), `~/omp-cwd-*`, and roots explicitly added with `allowFileRoot()`. Other hosts' paths never reach it.
 - `/api/cwd/validate`, `/api/default-cwd`, and `/api/worktrees` call `allowFileRoot()` when they make a new location browsable.
+- The session-id → file path cache (`cacheSessionPath`, `lib/session-reader.ts`) on main is filled by main's own scans and by wrappers on the local host; it only serves the readers listed under "Session list caching".
 
 ### Session list caching — new sessions must appear immediately
-- `listAllSessions()` (sidebar, command palette) is cached twice: a 30s TTL
-  list cache in `lib/session-reader.ts` plus an mtime-keyed directory walk in
-  `lib/omp/session-files.ts` (`listSessionFiles`).
+- The sidebar and command palette list sessions per host: `listSessionsAllHosts()` (`lib/hosts/session-index.ts`) calls each host's `listSessions` op and caches it 30 s per host (`LIST_TTL_MS`, the daemon's own TTL). **This machine's list is its daemon's**; a host that fails or is offline keeps its last list. Nothing on main parses session files to build it.
+- The daemon's `listSessions` is `listAllSessions()` (`lib/session-reader.ts`): a 30 s TTL list cache plus an mtime-keyed directory walk in `lib/omp/session-files.ts` (`listSessionFiles`), both in the daemon process.
 - The walk cache keys on the **sessions root** mtime. On Windows/NTFS a new
   `.jsonl` inside an existing project subdirectory does NOT bump the root
   mtime, so the walk stays stale indefinitely.
@@ -575,6 +758,8 @@ during the wait.
   compaction, renames) must therefore ALSO clear the walk cache via
   `invalidateSessionFileListCache()` — never add a session-mutation path that
   forgets this. Regression test: `session-reader.test.mjs`.
+- A mutation that main triggers calls `invalidateLocalSessionLists()`: it clears main's per-host entry and sends the daemon `invalidateSessionLists` (the daemon runs the invalidation above). A route that changes this machine's session files and does not call it leaves the sidebar stale for up to 30 s.
+- **Still read on main, from this machine's own files** (main and the daemon share a machine, so these see the same sessions): transcript search (`session-content-search.ts`, `/api/sessions/search`), the session file watcher (`session-watcher.ts`), archive list/restore (`/api/sessions/archive`), import (`/api/sessions/import`), usage (`usage-db.ts`), and the bash-output, subagent-history and file-reference readers (`session-file-references.ts`, `subagent-history.ts`). They use main's own copies of `session-reader` and its caches, so they are invalidated separately (`invalidateSessionListCache()`); a new reader of session files on main for a session that may be remote is a bug.
 
 ### Chat scroll-follow
 - `useAgentSession` follows the conversation: the effect depends on both
@@ -680,7 +865,8 @@ during the wait.
   recording in memory and starts a job; the hook polls `GET /api/stt/[jobId]`
   (proxies with ~30s timeouts would otherwise return HTML 504s). Job failures
   are 200 payloads for the same reason.
-- Jobs carry the composer scope (`draftKey`: session id or `new:<cwd>`). The
+- Jobs carry the composer scope (`draftKey`: session id, or `newChatDraftKey`:
+  `new:<cwd>` here, `new:<hostId>:<cwd>` for a fresh chat on a remote host). The
   hook adopts the newest job for its scope on mount, focus, visibility and
   every 4s while visible and idle, so another browser can play (`/audio`),
   retry (`POST`) or discard it. Leaving the scope stops following without

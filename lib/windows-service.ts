@@ -33,6 +33,28 @@ export interface WebServiceStatus {
   configFile: string;
   serviceUrl: string;
   version: string;
+  /** The `ompweb host` daemon task that runs next to the web service. */
+  daemon: HostDaemonStatus;
+}
+
+export interface HostDaemonStatus {
+  isInstalled: boolean;
+  isRunning: boolean;
+}
+
+export interface WindowsServiceDefinition {
+  /** Scheduled Task name (scripts/windows/install-tray.ps1 registers it). */
+  name: string;
+  /** Supervisor script the task runs. */
+  script: string;
+}
+
+/** The two units `ompweb-tray install` sets up: the web service and the `ompweb host` daemon. */
+export function getWindowsServiceDefinitions(repoRoot = getRepoRoot()): { web: WindowsServiceDefinition; host: WindowsServiceDefinition } {
+  return {
+    web: { name: "omp-web", script: path.join(repoRoot, "scripts", "windows", "omp-web-service.ps1") },
+    host: { name: "omp-web-host", script: path.join(repoRoot, "scripts", "windows", "omp-web-host.ps1") },
+  };
 }
 
 export const DEFAULT_WEB_SERVICE_CONFIG: WebServiceConfig = {
@@ -244,6 +266,7 @@ const TRAY_RUNNING_TTL_MS = 3000;
 
 export function invalidateTrayRunningCache(): void {
   trayRunningCache = null;
+  hostDaemonCache = null;
 }
 
 export async function isTrayProcessRunning(): Promise<boolean> {
@@ -274,6 +297,38 @@ export async function isTrayProcessRunning(): Promise<boolean> {
     trayRunningCache = { running: false, expiresAt: Date.now() + TRAY_RUNNING_TTL_MS };
     return false;
   }
+}
+
+let hostDaemonCache: { status: HostDaemonStatus; expiresAt: number } | null = null;
+
+export async function getHostDaemonStatus(): Promise<HostDaemonStatus> {
+  if (process.platform !== "win32") return { isInstalled: false, isRunning: false };
+  if (hostDaemonCache && hostDaemonCache.expiresAt > Date.now()) return hostDaemonCache.status;
+  const env = getWindowsExecutionEnv();
+  const { name } = getWindowsServiceDefinitions().host;
+  const isInstalled = await execFileAsync("schtasks.exe", ["/query", "/tn", name], { timeout: 3000, env, windowsHide: true }).then(() => true, () => false);
+  let isRunning = false;
+  if (isInstalled) {
+    try {
+      const { stdout } = await execFileAsync(
+        resolvePowerShellBin(),
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          '(Get-CimInstance Win32_Process -Filter "Name LIKE \'%powershell%\' OR Name LIKE \'%pwsh%\'" -ErrorAction SilentlyContinue | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like \'*omp-web-host.ps1*\' } | Measure-Object).Count',
+        ],
+        { timeout: 4000, env, windowsHide: true },
+      );
+      isRunning = parseInt(stdout.trim(), 10) > 0;
+    } catch {
+      isRunning = false;
+    }
+  }
+  const status = { isInstalled, isRunning };
+  hostDaemonCache = { status, expiresAt: Date.now() + TRAY_RUNNING_TTL_MS };
+  return status;
 }
 
 export function getAppVersion(): string {
@@ -333,6 +388,7 @@ export async function getWebServiceStatus(): Promise<WebServiceStatus> {
     configFile: getWebServiceConfigPath(),
     serviceUrl,
     version: getAppVersion(),
+    daemon: await getHostDaemonStatus(),
   };
 }
 
@@ -482,6 +538,8 @@ export async function startTrayService(options: { openBrowser?: boolean } = {}):
       await execFileAsync("schtasks.exe", ["/query", "/tn", "omp-web"], { timeout: 3000, env: getWindowsExecutionEnv(), windowsHide: true });
       // Task exists, try to run it (ONLOGON tasks can be triggered via /run even without logon trigger).
       await execFileAsync("schtasks.exe", ["/run", "/tn", "omp-web"], { timeout: 5000, env: getWindowsExecutionEnv(), windowsHide: true });
+      // The daemon follows the web service; its supervisor exits at once when one is already running.
+      await execFileAsync("schtasks.exe", ["/run", "/tn", getWindowsServiceDefinitions().host.name], { timeout: 5000, env: getWindowsExecutionEnv(), windowsHide: true }).catch(() => undefined);
       invalidateTrayRunningCache();
       // Optionally open browser if requested.
       if (options.openBrowser) {

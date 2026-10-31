@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
-import { readSessionHeader } from "@/lib/session-reader";
-import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
-import { startRpcSession, getRpcSession, resolveSpawnCwdResult, WebRpcError } from "@/lib/rpc-manager";
+import { apiErrorResponse, hostOfflineResponse, resolveSessionHostOr404 } from "@/lib/api-utils";
+import { startRpcSession, getRpcSession, WebRpcError } from "@/lib/rpc-manager";
+import { sessionSpawnTarget } from "@/lib/hosts/session-index";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "@/lib/image-attachments";
@@ -34,7 +34,8 @@ function commandErrorResponse(error: unknown) {
   if (error instanceof SyntaxError) {
     return NextResponse.json({ error: "Invalid JSON request body", code: "invalid_json" }, { status: 400 });
   }
-  if (error instanceof WebRpcError) {
+  // host_offline falls through to apiErrorResponse: 503 {hostOffline: true}.
+  if (error instanceof WebRpcError && error.code !== "host_offline") {
     return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
   }
   if (error instanceof RpcCommandError) {
@@ -73,6 +74,9 @@ export async function POST(
         const result = await existing.send(body);
         return NextResponse.json({ success: true, data: result });
       }
+      // Disposing a child behind a down link would wait for the link to return.
+      const offline = hostOfflineResponse(existing.host);
+      if (offline) return offline;
       await existing.destroyAndWait();
     }
     if (noSpawn) return NextResponse.json({ success: true, data: NO_SPAWN_REPLIES[body.type] });
@@ -83,12 +87,13 @@ export async function POST(
       );
     }
 
-    const resolved = await resolveSessionPathOr404(id);
+    const resolved = await resolveSessionHostOr404(id);
     if ("response" in resolved) return resolved.response;
-    const filePath = resolved.filePath;
-
-    const header = readSessionHeader(filePath);
-    const { cwd } = resolveSpawnCwdResult(header?.cwd);
+    const { host } = resolved;
+    const offline = hostOfflineResponse(host);
+    if (offline) return offline;
+    const target = await sessionSpawnTarget(id, host);
+    if (!target) return NextResponse.json({ error: "Session not found", code: "session_not_found" }, { status: 404 });
 
     // A cold set_model must reach omp before the saved model is restored:
     // spawning with only --resume lets omp exit on an unrestorable saved
@@ -109,7 +114,7 @@ export async function POST(
         ? `${body.provider}/${body.modelId}`
         : undefined;
 
-    const { session } = await startRpcSession(id, filePath, cwd, undefined, advisor, header?.cwd, undefined, spawnModel);
+    const { session } = await startRpcSession(id, target.sessionFile, target.cwd, undefined, advisor, target.recordedCwd, spawnModel, host);
     if (spawnModel) {
       // Try the normal RPC first: when it succeeds it also records the new
       // model in the session, so later spawns restore it without an override.

@@ -7,7 +7,7 @@
  * Users only ever get to add variables, never to rewrite the plumbing omp-web itself
  * depends on. Two rules enforce that:
  *   1. `lib/project-command-env.ts` strips PORT / NODE_ENV / NEXT_* from every child
- *      spawn (`sanitizeProjectCommandEnvironment`, called at lib/omp/rpc-process.ts:110
+ *      spawn (`sanitizeProjectCommandEnvironment`, called in `spawnOmpTransport` in lib/omp/rpc-process.ts
  *      AFTER the merge). Letting a user set them would be a silent no-op, so they are
  *      denied here too — the policy is deliberately mirrored, not re-invented.
  *   2. Names that relocate omp's own state (agent dir, config root, home) would make

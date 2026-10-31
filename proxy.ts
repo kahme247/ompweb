@@ -53,4 +53,9 @@ export function proxy(request: NextRequest) {
 // credentials and its embedded installation icons need no separate request.
 // The service worker script holds no data either, and the browser re-fetches
 // it for update checks even after the sign-in cookie expired.
-export const config = { matcher: "/((?!_next/static|_next/image|favicon\\.ico|icon\\.svg|icon\\.png|icon-192\\.png|badge-96\\.png|sw\\.js).*)" };
+// /api/hosts/link and its blob/ subpath (only those: the exclusion is anchored)
+// are excluded too: the proxy buffers and silently truncates request bodies
+// over 10 MB, larger than host link uploads may be, and the route
+// authenticates the host's bearer token itself before it reads any body
+// (lib/hosts/hub.ts).
+export const config = { matcher: "/((?!_next/static|_next/image|favicon\\.ico|icon\\.svg|icon\\.png|icon-192\\.png|badge-96\\.png|sw\\.js|api/hosts/link(?:/|$)).*)" };

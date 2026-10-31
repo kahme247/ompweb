@@ -4,6 +4,7 @@ import { mkdirSync, writeFileSync } from "fs";
 import path from "path";
 import { randomUUID } from "crypto";
 import { getSessionsDir, getSessionDirNameForCwd } from "@/lib/omp/paths";
+import { invalidateLocalSessionLists } from "@/lib/hosts/session-index";
 import { invalidateSessionListCache } from "@/lib/session-reader";
 import { invalidateSessionFileListCache } from "@/lib/omp/session-files";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
@@ -95,6 +96,8 @@ export async function POST(req: Request) {
     // mtime-keyed walk cache (the AGENTS.md-documented Windows/NTFS trap).
     invalidateSessionListCache();
     invalidateSessionFileListCache();
+    // The sidebar lists this machine's sessions through its daemon.
+    invalidateLocalSessionLists();
 
     return NextResponse.json({ success: true, sessionFile });
   } catch (error) {

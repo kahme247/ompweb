@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { apiErrorResponse } from "@/lib/api-utils";
 import { listArchivedSessions, restoreArchivedSession } from "@/lib/omp/archive";
+import { invalidateLocalSessionLists } from "@/lib/hosts/session-index";
 import { invalidateSessionListCache } from "@/lib/session-reader";
 import type { ArchivedSessionInfo } from "@/lib/types";
 
@@ -35,6 +36,7 @@ export async function POST(req: Request) {
     }
     const sessionId = restoreArchivedSession(body.key);
     invalidateSessionListCache();
+    invalidateLocalSessionLists();
     return NextResponse.json({ ok: true, sessionId });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

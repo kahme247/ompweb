@@ -1,12 +1,9 @@
 import { randomUUID } from "node:crypto";
-import path from "node:path";
 import { RpcCommandTimeoutError, type RpcFrame, type RpcProcess } from "./rpc-process";
 import type { RpcAvailableSlashCommand } from "../pi-types";
 import { SESSION_EDIT_COMMAND, SESSION_EDIT_RESPONSE_PREFIX } from "./session-edit-extension.mjs";
 
 export { SESSION_EDIT_COMMAND };
-// Next's dev/start commands and the installed launcher run in the package root.
-export const SESSION_EDIT_EXTENSION_PATH = path.join(process.cwd(), "lib", "omp", "session-edit-extension.mjs");
 const EDIT_TIMEOUT_MS = 15_000;
 
 export interface SessionEditResult {

@@ -23,8 +23,8 @@ Platform notes:
            for the systemd user service this tray manages
 
 Commands:
-  --install, install      Install system tray shortcuts and background service
-  --uninstall, uninstall  Uninstall system tray shortcuts and background service
+  --install, install      Install system tray shortcuts, the background service and the host daemon
+  --uninstall, uninstall  Uninstall system tray shortcuts, the background service and the host daemon
   --start, start          Start the background system tray manager
   --stop, stop            Stop running background system tray and server processes
   --restart, restart      Restart running background system tray and server
@@ -206,6 +206,7 @@ async function runCli(argv = process.argv.slice(2)) {
       console.log(`  Version          : v${status.version}`);
       console.log(`  Installed        : ${status.isInstalled ? "Yes" : "No"}`);
       console.log(`  Running          : ${status.isRunning ? "Yes (Tray Active)" : "No (Stopped)"}`);
+      console.log(`  Host daemon      : ${status.daemon.isInstalled ? (status.daemon.isRunning ? "Running" : "Stopped") : "Not installed"}`);
       console.log(`  Live URL         : ${status.serviceUrl}`);
       console.log(`  Config Mode      : ${status.mode} (Port: ${status.port}, Host: ${status.hostname})`);
       console.log(`  Start with Windows: ${status.autostart ? "Enabled" : "Disabled"}`);
