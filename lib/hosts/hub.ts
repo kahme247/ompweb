@@ -320,24 +320,48 @@ export const hostLinkSocket = {
   backpressureLimit: LINK_LIMITS.uplinkBytes,
   closeOnBackpressureLimit: true as const,
   message(ws: LinkSocket, data: string | Uint8Array): void {
-    // Nothing is applied or answered once this server stops: the daemon keeps it for the next one.
-    if (hub().frozen) return;
-    const link = hub().links.get(ws.data.hostId);
-    if (link?.socket === ws) return onFrame(link, ws, data);
-    // A socket a newer one replaced: what it still sends belongs to no link.
-    if (ws.data.hello) return;
-    onFirstFrame(linkFor(ws.data.hostId), ws, data);
+    guarded(ws, () => {
+      // Nothing is applied or answered once this server stops: the daemon keeps it for the next one.
+      if (hub().frozen || failedSockets.has(ws)) return;
+      const link = hub().links.get(ws.data.hostId);
+      if (link?.socket === ws) return onFrame(link, ws, data);
+      // A socket a newer one replaced: what it still sends belongs to no link.
+      if (ws.data.hello) return;
+      onFirstFrame(ws, data);
+    });
   },
   close(ws: LinkSocket): void {
-    const link = hub().links.get(ws.data.hostId);
-    if (link?.socket === ws) endSocket(link);
+    guarded(ws, () => {
+      const link = hub().links.get(ws.data.hostId);
+      if (link?.socket === ws) endSocket(link);
+    });
   },
 };
 
+/** Sockets whose handler threw: closed, and nothing more they send is applied (it would land past a half-applied frame). */
+const failedSockets = new WeakSet<LinkSocket>();
+
+/** A throw in a websocket handler would reach uncaughtException, which exits the server: it ends that socket instead. */
+function guarded(ws: LinkSocket, handle: () => void): void {
+  try {
+    handle();
+  } catch (error) {
+    failedSockets.add(ws);
+    console.error(`[omp-web] host link of ${ws.data.hostId} failed; closing it: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+    ws.close();
+  }
+}
+
 /** A socket's first frame must be its hello. */
-function onFirstFrame(link: Link, ws: LinkSocket, data: string | Uint8Array): void {
+function onFirstFrame(ws: LinkSocket, data: string | Uint8Array): void {
   const refuse = () => ws.close(LINK_CLOSE.policy, "The first frame must be a hello");
   if (typeof data !== "string") return refuse();
+  // A hello is one line: nothing longer is worth parsing.
+  if (Buffer.byteLength(data) > LINK_LIMITS.maxLineBytes) return ws.close(LINK_CLOSE.tooBig, "Hello too large");
+  // Revoked or deleted since the upgrade, or the registry cannot say: a plain close sends the daemon's redial through
+  // the token check (401 stops its children, 503 redials).
+  if (ws.data.hostId !== LOCAL_HOST_ID && !loadHosts().some((h) => h.id === ws.data.hostId)) return ws.close();
+  const link = linkFor(ws.data.hostId);
   let raw: unknown;
   try {
     raw = JSON.parse(data);
