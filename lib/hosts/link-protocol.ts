@@ -87,8 +87,9 @@ export type DownMessage =
  * daemon spawned it; `pending`: raw stdout lines of its open blocking requests, or null when over `pendingBytes`. */
 export type HelloChannel = { ch: string; sessionId: string | null; cwd: string; pending: string[] | null };
 
-/** One uplink message the daemon measured: enqueued at `at` (its clock) with `bytesAhead` bytes unacked ahead of it
- * (messages and result blobs), `bytes` its own size (with its blob), acked by the hub `ackMs` later. */
+/** One uplink message the daemon measured: enqueued at `at` (its wall clock) with `bytesAhead` bytes unacked ahead of
+ * it (messages and result blobs), `bytes` its own size (with its blob), acked by the hub `ackMs` later (a monotonic
+ * interval). */
 export type LinkStatSample = { session: string | null; bytes: number; bytesAhead: number; ackMs: number; at: number };
 
 export type UpMessage =
@@ -107,8 +108,9 @@ export type UpMessage =
   | { type: "stderr"; seq: number; ch: string; chunk: string }
   | { type: "exit"; seq: number; ch: string; code: number | null; signal: string | null }
   | { type: "resync"; seq: number; ch: string }
-  /** The daemon's link samples, at most LINK_LIMITS.statsSamples; a hub that predates it skips the type. */
-  | { type: "stats"; seq: number; samples: LinkStatSample[] }
+  /** The daemon's link samples, at most LINK_LIMITS.statsSamples; a hub that predates it skips the type. Advisory: the
+   * receiver keeps the valid ones and counts the rest in `invalid` (decodeUp only; a sender leaves it out). */
+  | { type: "stats"; seq: number; samples: LinkStatSample[]; invalid?: number }
   | { type: "res"; seq: number; id: string; ok: true; result?: unknown; blob?: { bytes: number } }
   | {
       type: "res";
@@ -283,16 +285,27 @@ function channels(o: Obj): HelloChannel[] {
   });
 }
 
-/** Strict: a bad sample fails the line, so the hub writes only what it can vouch for. Extra fields are dropped. */
-function statSamples(o: Obj): LinkStatSample[] {
-  const list = o.samples;
-  if (!Array.isArray(list) || list.length > LINK_LIMITS.statsSamples) fail(`samples must be an array of at most ${LINK_LIMITS.statsSamples}`);
-  return list.map((s: unknown) => {
-    if (!isObj(s)) fail("sample must be an object");
-    const session = nullable(s, "session", str);
-    if (session !== null && !isValidSessionId(session)) fail("session must be a session id or null");
-    return { session, bytes: seqNum(s, "bytes"), bytesAhead: seqNum(s, "bytesAhead"), ackMs: seqNum(s, "ackMs"), at: seqNum(s, "at") };
-  });
+/** One sample's fixed fields, or null when one is missing or out of range. Extra fields are dropped. */
+function statSample(s: unknown): LinkStatSample | null {
+  if (!isObj(s)) return null;
+  const { session, bytes, bytesAhead, ackMs, at } = s;
+  const count = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+  if (!(session === null || (typeof session === "string" && isValidSessionId(session)))) return null;
+  return count(bytes) && count(bytesAhead) && count(ackMs) && count(at) ? { session, bytes, bytesAhead, ackMs, at } : null;
+}
+
+/** Samples are advisory: a bad one (or one past statsSamples) is dropped and counted, never fails the line, so a
+ * daemon's measuring bug cannot stop its link. */
+function stats(o: Obj): UpMessage {
+  const seq = seqNum(o, "seq");
+  const list = Array.isArray(o.samples) ? o.samples : null;
+  if (!list) return { type: "stats", seq, samples: [], invalid: 1 };
+  const samples: LinkStatSample[] = [];
+  for (const s of list.slice(0, LINK_LIMITS.statsSamples)) {
+    const sample = statSample(s);
+    if (sample) samples.push(sample);
+  }
+  return { type: "stats", seq, samples, invalid: list.length - samples.length };
 }
 
 function res(o: Obj): UpMessage {
@@ -351,7 +364,7 @@ export function decodeUp(line: string): UpMessage | UnknownMessage {
     case "resync":
       return { type: "resync", seq: seqNum(o, "seq"), ch: str(o, "ch") };
     case "stats":
-      return { type: "stats", seq: seqNum(o, "seq"), samples: statSamples(o) };
+      return stats(o);
     case "res":
       return res(o);
     case "ping":

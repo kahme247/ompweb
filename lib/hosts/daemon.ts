@@ -63,9 +63,10 @@ interface Queued {
   bytes: number;
   /** Set for child output, which an overflow may drop. */
   ch: string | null;
-  /** Its link sample: when it was queued, the bytes of earlier unacked messages and result blobs then, the bytes of
-   * the result blob sent ahead of this `res` (else 0) and the session it serves. Null for a `stats` message. */
-  sample: { at: number; bytesAhead: number; blob: number; session: string | null } | null;
+  /** Its link sample: when it was queued (`at` wall clock, `t` monotonic), the bytes of earlier unacked messages and
+   * result blobs then, the bytes of the result blob sent ahead of this `res` (else 0) and the session it serves. Null
+   * for a `stats` message. */
+  sample: { at: number; t: number; bytesAhead: number; blob: number; session: string | null } | null;
 }
 
 /** How a socket closed; `opened` is false for a dial the server refused or never answered. A string instead: why
@@ -173,7 +174,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     upSeq += 1;
     const bytes = Buffer.byteLength(line);
     // A `stats` message is not measured itself: its sample would need another one.
-    const sample = body.type === "stats" ? null : { at: Date.now(), bytesAhead: unackedBytes, blob, session };
+    const sample = body.type === "stats" ? null : { at: Date.now(), t: performance.now(), bytesAhead: Math.max(0, unackedBytes), blob, session };
     outbox.push({ seq: upSeq, line, bytes, ch, sample });
     unackedBytes += bytes + blob;
     unsentBytes += bytes;
@@ -203,7 +204,8 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   }
 
   function acked(ack: number): void {
-    const now = Date.now();
+    // Monotonic: a wall-clock step (time sync, a VM resuming) never makes a negative or inflated ackMs.
+    const now = performance.now();
     for (const item of outbox.pending()) {
       if (item.seq > ack) break;
       const channel = item.ch ? channels.get(item.ch) : undefined;
@@ -211,13 +213,16 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       const blob = item.sample?.blob ?? 0;
       unackedBytes -= item.bytes + blob;
       if (item.sample) {
-        const { at, bytesAhead, session } = item.sample;
-        samples.push({ session, bytes: item.bytes + blob, bytesAhead, ackMs: now - at, at });
+        const { at, t, bytesAhead, session } = item.sample;
+        samples.push({ session, bytes: item.bytes + blob, bytesAhead, ackMs: Math.max(0, Math.round(now - t)), at });
       }
     }
     outbox.ack(ack);
     if (samples.length >= LINK_LIMITS.statsSamples) sendStats();
-    else if (samples.length > 0) statsTimer ??= setTimeout(sendStats, LINK_LIMITS.statsFlushMs);
+    else if (samples.length > 0 && !statsTimer) {
+      statsTimer = setTimeout(sendStats, LINK_LIMITS.statsFlushMs);
+      statsTimer.unref?.();
+    }
   }
 
   /** The samples so far, as `stats` messages of at most statsSamples each (one ack can cover more). */
@@ -558,6 +563,11 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   }
 
   function shutdown(code: number): Promise<void> {
+    // Best effort: the samples so far go in one last frame, only when no frame is in flight (one at a time, in order).
+    if (!stopped && linked && !inFlight && samples.length > 0) {
+      sendStats();
+      flush();
+    }
     stopped = true;
     stopping ??= (async () => {
       stopSignal.abort();
