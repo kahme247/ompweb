@@ -516,6 +516,16 @@ export interface CrossSessionHostToolCall {
   arguments: Record<string, unknown>;
 }
 
+/** A live omp child that is mid-run (`runningSessions` in /api/sessions and the `running` channel). */
+export interface RunningRpcSession {
+  id: string;
+  cwd: string;
+  /** Present while a dialog the user must answer (select/confirm/input/editor/ask) is pending. */
+  awaitingInput?: true;
+  /** The oldest pending dialog's method, present with awaitingInput. */
+  awaitingInputMethod?: string;
+}
+
 export interface ExitedRpcSession {
   id: string;
   cwd: string;

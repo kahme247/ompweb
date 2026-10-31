@@ -32,7 +32,7 @@ import { PRESET_FULL } from "./tool-presets";
 import { comparableProjectPath } from "./comparable-path";
 import { samePath } from "./paths";
 import { isRecord } from "./type-guards";
-import { BLOCKING_UI_METHODS, createNotificationDetector } from "./notification-events";
+import { BLOCKING_UI_METHODS, createNotificationDetector, DIALOG_UI_METHODS } from "./notification-events";
 import { publishNotification } from "./notification-hub";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./skill-diagnostics";
 import { isReservedLaunchArg, loadProjectRegistry } from "./project-registry";
@@ -45,7 +45,7 @@ import type {
   SessionStatsInfo,
   WebSessionState,
 } from "./pi-types";
-import type { AgentMessage, CrossSessionHostToolCall, ExitedRpcSession, ExtensionWidgetItem, ProjectLaunchConfig } from "./types";
+import type { AgentMessage, CrossSessionHostToolCall, ExitedRpcSession, ExtensionWidgetItem, ProjectLaunchConfig, RunningRpcSession } from "./types";
 import type { SessionLiveSnapshot, SessionLiveToolEvent, SessionStreamCursor } from "./session-sync";
 
 // ============================================================================
@@ -445,6 +445,20 @@ export class AgentSessionWrapper {
     // closes stdin and OMP records "Request was aborted", even without a Stop.
     return this.isAlive() && (this.promptRunning || this.streaming || this.compacting || this.bashRunning
       || this.pendingUiRequests.size > 0 || this.pendingHostTools.size > 0 || this.pendingHostUris.size > 0);
+  }
+
+  /**
+   * Method of the oldest pending dialog the user must answer (select, confirm,
+   * input, editor, ask), or null. `open_url` stays pending for replay but asks
+   * nothing of the user, so it never counts.
+   */
+  awaitingInputMethod(): string | null {
+    if (!this.isAlive()) return null;
+    for (const event of this.pendingUiRequests.values()) {
+      const method = event.method;
+      if (typeof method === "string" && DIALOG_UI_METHODS.has(method)) return method;
+    }
+    return null;
   }
 
   /** Local history navigation is busy control work, not an interruptible model turn. */
@@ -1063,7 +1077,10 @@ export class AgentSessionWrapper {
       const timeout = typeof event.timeout === "number" ? event.timeout : undefined;
       if (timeout && timeout > 0) {
         event.expiresAt = Date.now() + timeout;
-        const timer = setTimeout(() => this.forgetPendingUiRequest(id), timeout);
+        const timer = setTimeout(() => {
+          this.forgetPendingUiRequest(id);
+          notifyRunningChange();
+        }, timeout);
         timer.unref?.();
         this.uiExpiryTimers.set(id, timer);
       }
@@ -1293,14 +1310,17 @@ export class AgentSessionWrapper {
     this.listeners.push(listener);
     this.noteActivity();
     const now = Date.now();
+    let expired = false;
     for (const [id, event] of this.pendingUiRequests) {
       const expiresAt = event.expiresAt as number | undefined;
       if (expiresAt !== undefined && expiresAt <= now) {
         this.forgetPendingUiRequest(id);
+        expired = true;
         continue;
       }
       listener({ ...event, web: { streamId: this.streamId, sequence: ++this.streamSequence } });
     }
+    if (expired) notifyRunningChange();
     return () => {
       const i = this.listeners.indexOf(listener);
       if (i !== -1) this.listeners.splice(i, 1);
@@ -2079,6 +2099,7 @@ export class AgentSessionWrapper {
         const wasPending = this.pendingUiRequests.has(id);
         this.forgetPendingUiRequest(id);
         this.proc.sendFrame({ type: "extension_ui_response", id, ...rest });
+        if (wasPending) notifyRunningChange();
         // omp sends no cancel for an answered dialog; other tabs on this
         // session would keep showing it, so settle it for them here.
         if (wasPending) this.emit({ type: "extension_ui_request", id: `cancel:${id}`, method: "cancel", targetId: id });
@@ -2242,11 +2263,6 @@ export class AgentSessionWrapper {
 // ============================================================================
 // Session registry
 // ============================================================================
-export interface RunningRpcSession {
-  id: string;
-  cwd: string;
-}
-
 export interface RunningSessionUpdate {
   ids: string[];
   runningSessions: RunningRpcSession[];
@@ -2308,14 +2324,17 @@ export function getRpcSession(sessionId: string): AgentSessionWrapper | undefine
 }
 
 export function getRunningRpcSessions(): RunningRpcSession[] {
-  const map = new Map<string, string>();
+  const map = new Map<string, RunningRpcSession>();
   for (const [sessionId, session] of getRegistry()) {
     if (session.isRunning()) {
       const realId = session.sessionId || sessionId;
-      map.set(realId, session.cwd);
+      const method = session.awaitingInputMethod();
+      map.set(realId, method
+        ? { id: realId, cwd: session.cwd, awaitingInput: true, awaitingInputMethod: method }
+        : { id: realId, cwd: session.cwd });
     }
   }
-  return [...map.entries()].map(([id, cwd]) => ({ id, cwd }));
+  return [...map.values()];
 }
 
 export function getRunningRpcSessionIds(): string[] {

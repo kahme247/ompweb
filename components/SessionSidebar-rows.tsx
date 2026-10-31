@@ -15,7 +15,9 @@ import {
   projectLabel,
   type SessionTreeNode,
 } from "./SessionSidebar-helpers";
+import type { ProjectActivity } from "@/lib/project-ordering";
 import {
+  AwaitingInputIndicator,
   ExitedSessionIndicator,
   RecentlyCompletedIndicator,
   RunningSessionIndicator,
@@ -37,12 +39,14 @@ interface ProjectRowProps {
   project: ManagedProject;
   isActive: boolean;
   isExpanded: boolean;
-  activity: { running: number; unread: number; exited: number } | undefined;
+  activity: ProjectActivity | undefined;
   tree: SessionTreeNode[];
   /** Sessions beyond the cap (0 when a filter is active — show all matches). */
   hiddenCount: number;
   selectedSessionId: string | null;
   runningSessionIds: Set<string>;
+  /** Running sessions waiting for the user's answer (subset of runningSessionIds). */
+  awaitingInputSessionIds: Set<string>;
   unreadSessionIds: Set<string>;
   recentlyCompletedIds?: Set<string>;
   exitedSessions: Map<string, ExitedRpcSession>;
@@ -77,6 +81,7 @@ function ProjectRow({
   hiddenCount,
   selectedSessionId,
   runningSessionIds,
+  awaitingInputSessionIds,
   unreadSessionIds,
   recentlyCompletedIds,
   exitedSessions,
@@ -128,7 +133,8 @@ function ProjectRow({
   const label = project.alias ?? projectLabel(project.path);
   const pinned = pinnable && project.pinOrder !== undefined;
   const canReorder = !pinnable || pinned;
-  const hasActivity = Boolean(activity && (activity.running > 0 || activity.unread > 0 || activity.exited > 0));
+  const hasActivity = Boolean(activity && (activity.running > 0 || activity.waiting > 0 || activity.unread > 0 || activity.exited > 0));
+  const activityLabel = t("projects.activity", { running: activity?.running ?? 0, waiting: activity?.waiting ?? 0, unread: activity?.unread ?? 0, exited: activity?.exited ?? 0 });
   const visibleRoots = hiddenCount > 0 && !showAllSessions
     ? tree.slice(0, MAX_PROJECT_SESSIONS)
     : tree;
@@ -280,16 +286,19 @@ function ProjectRow({
           )}
             {hasActivity && (
               <span
-                aria-label={t("projects.activity", { running: activity?.running ?? 0, unread: activity?.unread ?? 0, exited: activity?.exited ?? 0 })}
-                title={t("projects.activity", { running: activity?.running ?? 0, unread: activity?.unread ?? 0, exited: activity?.exited ?? 0 })}
+                aria-label={activityLabel}
+                title={activityLabel}
                 className="sidebar-project-activity"
                 data-running={(activity?.running ?? 0) > 0 ? "true" : "false"}
+                data-waiting={(activity?.waiting ?? 0) > 0 ? "true" : "false"}
                 role="status"
                 aria-live="polite"
                 style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: SIDEBAR_STATUS_SLOT, height: SIDEBAR_STATUS_SLOT, flexShrink: 0, lineHeight: 0 }}
               >
                 {(activity?.exited ?? 0) > 0 ? (
                   <ExitedSessionIndicator title={t("projects.exited", { count: activity?.exited ?? 0 })} size={11} />
+                ) : (activity?.waiting ?? 0) > 0 ? (
+                  <AwaitingInputIndicator title={t("projects.waiting", { count: activity?.waiting ?? 0 })} size={11} />
                 ) : (
                   <span
                     aria-hidden="true"
@@ -399,6 +408,7 @@ function ProjectRow({
                   node={node}
                   selectedSessionId={selectedSessionId}
                   runningSessionIds={runningSessionIds}
+                  awaitingInputSessionIds={awaitingInputSessionIds}
                   unreadSessionIds={unreadSessionIds}
                   exitedSessions={exitedSessions}
                   recentlyCompletedIds={recentlyCompletedIds}
@@ -450,6 +460,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
   node,
   selectedSessionId,
   runningSessionIds,
+  awaitingInputSessionIds,
   unreadSessionIds,
   exitedSessions,
   recentlyCompletedIds,
@@ -462,6 +473,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
   node: SessionTreeNode;
   selectedSessionId: string | null;
   runningSessionIds: Set<string>;
+  awaitingInputSessionIds: Set<string>;
   unreadSessionIds: Set<string>;
   exitedSessions: Map<string, ExitedRpcSession>;
   recentlyCompletedIds?: Set<string>;
@@ -479,6 +491,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
   // check then never re-renders unless this row's flags actually changed.
   const isSelected = sessionId === selectedSessionId;
   const isRunning = runningSessionIds.has(sessionId);
+  const isAwaitingInput = isRunning && awaitingInputSessionIds.has(sessionId);
   const isUnread = unreadSessionIds.has(sessionId);
   const isRecentlyCompleted = !isRunning && (recentlyCompletedIds?.has(sessionId) ?? false);
   const exited = exitedSessions.get(sessionId);
@@ -513,6 +526,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
           session={node.session}
           isSelected={isSelected}
           isRunning={isRunning}
+          isAwaitingInput={isAwaitingInput}
           isUnread={isUnread}
           exited={exited}
           isRecentlyCompleted={isRecentlyCompleted}
@@ -534,6 +548,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
               node={child}
               selectedSessionId={selectedSessionId}
               runningSessionIds={runningSessionIds}
+              awaitingInputSessionIds={awaitingInputSessionIds}
               unreadSessionIds={unreadSessionIds}
               exitedSessions={exitedSessions}
               recentlyCompletedIds={recentlyCompletedIds}
@@ -560,6 +575,10 @@ const SessionTreeItem = memo(function SessionTreeItem({
     const id = prev.node.session.id;
     if (prev.runningSessionIds.has(id) !== next.runningSessionIds.has(id)) return false;
   }
+  if (prev.awaitingInputSessionIds !== next.awaitingInputSessionIds) {
+    const id = prev.node.session.id;
+    if (prev.awaitingInputSessionIds.has(id) !== next.awaitingInputSessionIds.has(id)) return false;
+  }
   if (prev.recentlyCompletedIds !== next.recentlyCompletedIds) {
     const id = prev.node.session.id;
     if ((prev.recentlyCompletedIds?.has(id) ?? false) !== (next.recentlyCompletedIds?.has(id) ?? false)) return false;
@@ -579,6 +598,7 @@ const SessionItem = memo(function SessionItem({
   session,
   isSelected,
   isRunning,
+  isAwaitingInput,
   isUnread,
   exited,
   isRecentlyCompleted,
@@ -594,6 +614,8 @@ const SessionItem = memo(function SessionItem({
   session: SessionInfo;
   isSelected: boolean;
   isRunning?: boolean;
+  /** Running, but paused on a dialog only the user can answer. */
+  isAwaitingInput?: boolean;
   isUnread?: boolean;
   exited?: ExitedRpcSession;
   isRecentlyCompleted?: boolean;
@@ -760,13 +782,15 @@ const SessionItem = memo(function SessionItem({
           <div style={{ display: "flex", alignItems: "center", gap: SIDEBAR_STATUS_GAP, flexShrink: 0 }}>
             {(isRunning || exited || isRecentlyCompleted || isUnread) && (
               <span style={{ display: "flex", alignItems: "center", justifyContent: "center", width: SIDEBAR_STATUS_SLOT, height: SIDEBAR_STATUS_SLOT, flexShrink: 0 }}>
-                {isRunning
-                  ? <RunningSessionIndicator size={12} />
-                  : exited
-                    ? <ExitedSessionIndicator title={exitTitle} size={12} />
-                    : isRecentlyCompleted
-                      ? <RecentlyCompletedIndicator size={12} />
-                      : <UnreadSessionIndicator size={11} />}
+                {isAwaitingInput
+                  ? <AwaitingInputIndicator size={12} />
+                  : isRunning
+                    ? <RunningSessionIndicator size={12} />
+                    : exited
+                      ? <ExitedSessionIndicator title={exitTitle} size={12} />
+                      : isRecentlyCompleted
+                        ? <RecentlyCompletedIndicator size={12} />
+                        : <UnreadSessionIndicator size={11} />}
               </span>
             )}
             <div className="session-item-trailing" style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", flexShrink: 0 }}>

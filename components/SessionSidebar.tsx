@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo, useDeferredValue } from "react";
-import type { ExitedRpcSession, ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
+import type { ExitedRpcSession, ManagedProject, ProjectLaunchConfig, RunningRpcSession, SessionInfo } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { DirectoryPicker } from "./DirectoryPicker";
@@ -51,6 +51,11 @@ import { ProjectRow } from "./SessionSidebar-rows";
 const SESSIONS_FETCH_TIMEOUT_MS = 15_000;
 /** Stable empty list: sort modes that ignore sessions keep their memo inputs fixed. */
 const NO_SESSIONS: SessionInfo[] = [];
+
+/** Ids of running sessions paused on a dialog only the user can answer. */
+function awaitingInputIds(runningSessions: RunningRpcSession[] | undefined): Set<string> {
+  return new Set((runningSessions ?? []).filter((session) => session.awaitingInput).map((session) => session.id));
+}
 
 declare global {
   interface Window {
@@ -136,6 +141,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   const [worktreeStateByProject, setWorktreeStateByProject] = useState<Record<string, WorktreeState>>({});
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
+  const [awaitingInputSessionIds, setAwaitingInputSessionIds] = useState<Set<string>>(() => new Set());
   const [runningSessionCwds, setRunningSessionCwds] = useState<Record<string, string>>({});
   const [exitedSessions, setExitedSessions] = useState<Map<string, ExitedRpcSession>>(() => new Map());
   const knownRunningCwdsRef = useRef<Map<string, string>>(new Map());
@@ -218,7 +224,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const etag = res.headers.get("ETag");
       if (etag) sessionsEtagRef.current = etag;
-      const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[]; runningSessions?: Array<{ id: string; cwd: string }> };
+      const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[]; runningSessions?: RunningRpcSession[] };
       setAllSessions(data.sessions);
       if (data.runningSessions) {
         for (const rs of data.runningSessions) {
@@ -229,6 +235,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       // live it owns this state, so a slow fetch can't revive a stale snapshot.
       if (!sseAuthoritativeRef.current) {
         setRunningSessionIds(new Set(data.runningSessionIds ?? []));
+        setAwaitingInputSessionIds(awaitingInputIds(data.runningSessions));
         if (data.runningSessions) {
           const nextCwds: Record<string, string> = {};
           for (const rs of data.runningSessions) {
@@ -350,7 +357,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
         const data = JSON.parse(e.data) as {
           type?: string;
           runningSessionIds?: string[];
-          runningSessions?: Array<{ id: string; cwd: string }>;
+          runningSessions?: RunningRpcSession[];
           exitedSessions?: ExitedRpcSession[];
           refreshSessionList?: boolean;
           sessionIds?: string[];
@@ -358,6 +365,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
         if (data.type === "running") {
           sseAuthoritativeRef.current = true;
           setRunningSessionIds(new Set(data.runningSessionIds ?? []));
+          setAwaitingInputSessionIds(awaitingInputIds(data.runningSessions));
           setExitedSessions(new Map((data.exitedSessions ?? []).map((session) => [session.id, session])));
           if (data.runningSessions) {
             const nextCwds: Record<string, string> = {};
@@ -769,8 +777,8 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     [sortedProjects, visibleSessions],
   );
   const projectActivity = useMemo(
-    () => projectActivityCounts(visibleSessions, runningSessionIds, unreadSessionIds, exitedSessions.keys()),
-    [visibleSessions, runningSessionIds, unreadSessionIds, exitedSessions],
+    () => projectActivityCounts(visibleSessions, runningSessionIds, unreadSessionIds, exitedSessions.keys(), awaitingInputSessionIds),
+    [visibleSessions, runningSessionIds, unreadSessionIds, exitedSessions, awaitingInputSessionIds],
   );
 
   // Client-side filtering (Workspaces header: search + "running only").
@@ -1645,6 +1653,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                 hiddenCount={filtersActive ? 0 : Math.max(0, tree.length - MAX_PROJECT_SESSIONS)}
                 selectedSessionId={selectedSessionId}
                 runningSessionIds={runningSessionIds}
+                awaitingInputSessionIds={awaitingInputSessionIds}
                 unreadSessionIds={unreadSessionIds}
                 exitedSessions={exitedSessions}
                 recentlyCompletedIds={effectiveRecentCompletedSet}

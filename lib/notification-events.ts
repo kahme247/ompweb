@@ -118,8 +118,15 @@ export function renderNotification(event: NotificationEvent, t: Translate): Rend
 
 const MODEL_SWITCH_NOTICE_SOURCES = new Set(["prewalk", "plan-yolo"]);
 
+/**
+ * Extension UI dialogs the user answers in the chat (omp's rpc.md "Extension UI
+ * Sub-Protocol": dialog methods expect an `extension_ui_response`; `open_url`
+ * is fire-and-forget). A pending one marks the session as waiting for the user.
+ */
+export const DIALOG_UI_METHODS: ReadonlySet<string> = new Set(["select", "confirm", "input", "editor", "ask"]);
+
 /** Extension UI methods that block the agent until the user answers (rpc-manager replays these too). */
-export const BLOCKING_UI_METHODS = new Set(["select", "confirm", "input", "editor", "ask", "open_url"]);
+export const BLOCKING_UI_METHODS = new Set([...DIALOG_UI_METHODS, "open_url"]);
 
 const NOTIFICATION_ID_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
 

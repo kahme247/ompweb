@@ -76,26 +76,41 @@ export function nextPinOrder(projects: ManagedProject[]): number {
   return Math.max(-1, ...projects.map((p) => p.pinOrder ?? -1)) + 1;
 }
 
-/** Running/unread/exit session counts per project, for the activity indicators
- *  on project rows. Keys are the case-folded comparable form of the projectRoot
- *  so casing-only differences (Windows/NTFS) still resolve — callers must
- *  look up with comparableProjectPath(project.path). */
+export interface ProjectActivity {
+  /** Running sessions that are working (not waiting for the user). */
+  running: number;
+  /** Running sessions paused on a dialog only the user can answer. */
+  waiting: number;
+  unread: number;
+  exited: number;
+}
+
+/** Running/waiting/unread/exit session counts per project, for the activity
+ *  indicators on project rows. A running session awaiting input counts as
+ *  waiting, not running. Keys are the case-folded comparable form of the
+ *  projectRoot so casing-only differences (Windows/NTFS) still resolve —
+ *  callers must look up with comparableProjectPath(project.path). */
 export function projectActivityCounts(
   sessions: SessionInfo[],
   runningIds: Iterable<string>,
   unreadIds: Iterable<string>,
   exitedIds: Iterable<string> = [],
-): Map<string, { running: number; unread: number; exited: number }> {
+  awaitingInputIds: Iterable<string> = [],
+): Map<string, ProjectActivity> {
   const running = new Set(runningIds);
   const unread = new Set(unreadIds);
   const exited = new Set(exitedIds);
-  const result = new Map<string, { running: number; unread: number; exited: number }>();
+  const awaiting = new Set(awaitingInputIds);
+  const result = new Map<string, ProjectActivity>();
   for (const session of sessions) {
     const key = workspaceKeyOf(session);
     if (!key) continue;
     const folded = comparableProjectPath(session.projectKey ?? key);
-    const current = result.get(folded) ?? { running: 0, unread: 0, exited: 0 };
-    if (running.has(session.id)) current.running += 1;
+    const current = result.get(folded) ?? { running: 0, waiting: 0, unread: 0, exited: 0 };
+    if (running.has(session.id)) {
+      if (awaiting.has(session.id)) current.waiting += 1;
+      else current.running += 1;
+    }
     if (unread.has(session.id)) current.unread += 1;
     if (exited.has(session.id)) current.exited += 1;
     result.set(folded, current);

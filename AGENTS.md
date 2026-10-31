@@ -397,6 +397,7 @@ during the wait.
 
 ### Running state + reconciliation
 - The sidebar subscribes to the `running` channel, backed by `subscribeRunningSessions()` in `lib/rpc-manager.ts`, so running badges update without polling.
+- `runningSessions` entries (`RunningRpcSession` in `lib/types.ts`; `/api/sessions` and the `running` channel) carry `awaitingInput: true` + `awaitingInputMethod` while a dialog the user must answer is pending — `DIALOG_UI_METHODS` (`select`/`confirm`/`input`/`editor`/`ask`) in `lib/notification-events.ts`, a subset of `BLOCKING_UI_METHODS` without the fire-and-forget `open_url`. The sidebar then shows the amber "Waiting for your answer" bubble instead of the spinner and `projectActivityCounts` counts the session as `waiting`, not `running`. The flag lives in the broadcast snapshot, so every path that settles a pending dialog (answer in `send`, omp `cancel`, expiry timer, replay-time expiry, process exit/destroy/restart) must reach `notifyRunningChange()`.
 - `useAgentSession` still treats its `session` channel as primary for chat events, but while a run is active it periodically calls `GET /api/agent/[id]` and also reconciles on `visibilitychange`/`online`. This fixes missed `agent_end` events from background tabs or half-open connections.
 - Prompt runs use a monotonic run id; late SSE or slow reconciliation responses from an old run must be ignored so they cannot resurrect stale streaming bubbles.
 

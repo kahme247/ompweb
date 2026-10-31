@@ -6,6 +6,10 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ## [Unreleased]
 
+### Added
+
+- **The sidebar shows which sessions are waiting for you.** A session paused on a question or approval (the agent's `ask` tool, a select/confirm/input/editor dialog, an "Allow tool" prompt) now shows an amber question bubble labelled **Waiting for your answer** instead of the running spinner, and its workspace row counts it as waiting rather than running. Open the session to answer; the row returns to the spinner as soon as the answer is sent, the dialog is cancelled or times out, or the omp process exits. Every open browser updates live.
+
 ### Fixes & Improvements
 
 - **In-app updates work when ompweb runs as a systemd service.** The update worker ran inside the service's cgroup, so stopping the server killed the worker too: nothing was installed, the service could stay down (`Restart=on-failure` does not restart a clean SIGTERM exit), and every page load reopened the update dialog at "Stop ompweb-managed sessions". The worker now runs in its own transient scope (`systemd-run --scope`) and stops, updates and starts the unit through `systemctl`, starting it again if the install fails.
