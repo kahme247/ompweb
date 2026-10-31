@@ -1,5 +1,5 @@
-// Client-side helper for agent commands: POST /api/agent/[id], or the session's
-// WebSocket when the browser transport is "websocket" (lib/event-stream.ts).
+// Client-side helper for agent commands: POST /api/agent/[id], or the worker's
+// socket for the session in a `ws-*` browser transport (lib/event-stream.ts).
 //
 // Every /api/agent/[id] route returns one of:
 //   { success: true, data: <result> }

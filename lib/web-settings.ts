@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
 import { resolve } from "path";
 import { getAgentDir } from "./omp/paths";
-import type { BrowserTransport } from "./event-stream-protocol";
+import { BROWSER_TRANSPORTS, type BrowserTransport, type BrowserTransportState } from "./event-stream-protocol";
 import { isRecord } from "./type-guards";
 
 /** omp-web's own server-side settings (omp's config.yml stays omp's). */
@@ -22,11 +22,35 @@ export interface WebServerSettings {
    * re-checks every name before handing it to a spawn.
    */
   agentEnv: Record<string, string>;
-  /** Live-event transport the browser uses; "sse" unless the file says "websocket". */
+  /** Live-event transport the browser uses; "sse" unless the file names another of BROWSER_TRANSPORTS. */
   browserTransport: BrowserTransport;
+  /** ws-pool: sessions per pool socket. */
+  browserTransportPerSocket: number;
+  /** ws-pool: most pool sockets. */
+  browserTransportMaxSockets: number;
 }
 
-const DEFAULTS: WebServerSettings = { autoResumeSessions: false, agentToolsEnabled: false, agentEnv: {}, browserTransport: "sse" };
+const DEFAULTS: WebServerSettings = {
+  autoResumeSessions: false,
+  agentToolsEnabled: false,
+  agentEnv: {},
+  browserTransport: "sse",
+  browserTransportPerSocket: 4,
+  browserTransportMaxSockets: 16,
+};
+
+/** Inclusive integer ranges of the pool numbers; a stored value outside reads as the default. */
+export const BROWSER_TRANSPORT_RANGES = { browserTransportPerSocket: [1, 64], browserTransportMaxSockets: [1, 16] } as const;
+
+export function inBrowserTransportRange(key: keyof typeof BROWSER_TRANSPORT_RANGES, value: unknown): value is number {
+  const [min, max] = BROWSER_TRANSPORT_RANGES[key];
+  return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max;
+}
+
+/** What every hello and `transport` frame tells the browser. */
+export function browserTransportState(settings = loadWebServerSettings()): BrowserTransportState {
+  return { transport: settings.browserTransport, perSocket: settings.browserTransportPerSocket, maxSockets: settings.browserTransportMaxSockets };
+}
 
 /** String-valued entries only — the allow-list lives in lib/omp/agent-env.ts. */
 function readAgentEnvRecord(value: unknown): Record<string, string> {
@@ -60,7 +84,13 @@ export function loadWebServerSettings(): WebServerSettings {
           autoResumeSessions: raw.autoResumeSessions === true,
           agentToolsEnabled: raw.agentToolsEnabled === true,
           agentEnv: readAgentEnvRecord(raw.agentEnv),
-          browserTransport: raw.browserTransport === "websocket" ? "websocket" : "sse",
+          browserTransport: BROWSER_TRANSPORTS.find((transport) => transport === raw.browserTransport) ?? "sse",
+          browserTransportPerSocket: inBrowserTransportRange("browserTransportPerSocket", raw.browserTransportPerSocket)
+            ? raw.browserTransportPerSocket
+            : DEFAULTS.browserTransportPerSocket,
+          browserTransportMaxSockets: inBrowserTransportRange("browserTransportMaxSockets", raw.browserTransportMaxSockets)
+            ? raw.browserTransportMaxSockets
+            : DEFAULTS.browserTransportMaxSockets,
         };
       }
     }

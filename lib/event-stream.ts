@@ -1,6 +1,6 @@
 "use client";
 
-import type { BrowserTransport, EventStreamChannel } from "./event-stream-protocol";
+import { isWebSocketTransport, type BrowserTransport, type EventStreamChannel } from "./event-stream-protocol";
 
 export type { EventStreamChannel } from "./event-stream-protocol";
 
@@ -246,8 +246,8 @@ export function transportMode(): BrowserTransport {
   return transport?.mode ?? "sse";
 }
 
-/** Sends an agent command over its session's socket: null (or a promise of null, when the worker turns out to be
- * in SSE mode) means the caller POSTs it instead. */
+/** Sends an agent command over the worker's socket for its session (any `ws-*` transport): null (or a promise of null,
+ * when the worker turns out to be in SSE mode) means the caller POSTs it instead. */
 export function sendSessionCommand(sessionId: string, req: string, body: string, advisor: boolean): Promise<CommandReply | null> | null {
-  return transport?.mode === "websocket" ? transport.command(sessionId, req, body, advisor) : null;
+  return transport && isWebSocketTransport(transport.mode) ? transport.command(sessionId, req, body, advisor) : null;
 }

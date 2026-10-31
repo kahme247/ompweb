@@ -9,11 +9,11 @@ import { subscribeSessionFileChanges } from "./session-watcher";
 import {
   MUX_CONTROL_EVENT,
   UNKNOWN_CONNECTION_CODE,
-  type BrowserTransport,
+  type BrowserTransportState,
   type EventStreamChannel,
   type MuxControlFrame,
 } from "./event-stream-protocol";
-import { loadWebServerSettings } from "./web-settings";
+import { browserTransportState } from "./web-settings";
 
 // Server half of the multiplexed live-event stream (see event-stream-protocol).
 // One EventStreamConnection = one `/api/events` SSE response = one browser
@@ -67,8 +67,8 @@ export function serverId(): string {
 }
 
 /** Tell every open connection the browser transport setting changed. */
-export function broadcastBrowserTransport(transport: BrowserTransport): void {
-  for (const connection of connections().values()) connection.control({ type: "transport", transport });
+export function broadcastBrowserTransport(state: BrowserTransportState): void {
+  for (const connection of connections().values()) connection.control({ type: "transport", ...state });
 }
 
 /** Where a connection's frames go: an SSE response body or a WebSocket. */
@@ -159,7 +159,7 @@ export class EventStreamConnection {
       this.stream = sse.stream;
     }
     connections().set(this.id, this);
-    this.control({ type: "hello", connectionId: this.id, serverId: serverId(), transport: loadWebServerSettings().browserTransport });
+    this.control({ type: "hello", connectionId: this.id, serverId: serverId(), ...browserTransportState() });
     if (!this.closed) {
       this.heartbeat = setInterval(() => {
         if (this.flushAll() && !this.sink.heartbeat()) this.close();
