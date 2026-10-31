@@ -12,6 +12,8 @@ import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ExtensionDialog } from "./ExtensionDialog";
 import { SubagentTranscriptDialog } from "./SubagentTranscriptDialog";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
+import { ChatOutlineFab } from "./ChatOutlineFab";
+import { useChatMinimapPreference } from "@/hooks/useChatMinimapPreference";
 import { ComposerPanels } from "./ComposerPanels";
 import { SkillDiagnosticsNotice } from "./SkillDiagnostics";
 import { BtwHistoryDialog, type BtwPanelProps } from "./BtwPanel";
@@ -475,6 +477,9 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
   const { t, tn } = useI18n();
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
+  const { desktopMode: minimapDesktopMode, mobileFab: minimapMobileFab } = useChatMinimapPreference();
+  const showDesktopRail = !isMobile && minimapDesktopMode === "rail";
+  const showOutlineFab = isMobile ? minimapMobileFab : minimapDesktopMode === "fab";
   const internalChatInputRef = useRef<ChatInputHandle | null>(null);
   const composerRef = chatInputRef ?? internalChatInputRef;
   const [composerIdentityMove, setComposerIdentityMove] = useState<{ from: string; to: string; sourceDraft?: ChatDraft }>();
@@ -804,6 +809,60 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     loadMoreModeRef.current = "click";
     setVisibleCount((prev) => getNextVisibleCount(prev));
   }, [scrollContainerRef]);
+  const transcriptRows = useMemo<TranscriptRow[]>(
+    () => planTranscriptRows(messages, { hideThinking: hideThinkingBlock }),
+    [messages, hideThinkingBlock]
+  );
+
+  const pendingScrollTargetRef = useRef<{ index: number; smooth: boolean } | null>(null);
+
+  const handleEnsureMessageVisible = useCallback((messageIndex: number, smooth = true) => {
+    const targetRowIdx = transcriptRows.findIndex((row) =>
+      row.kind === "message"
+        ? row.index === messageIndex
+        : row.userIndex <= messageIndex && messageIndex < row.endIndex
+    );
+
+    if (targetRowIdx >= 0) {
+      const neededFromEnd = transcriptRows.length - targetRowIdx + 15;
+      if (neededFromEnd > visibleCount) {
+        pendingScrollTargetRef.current = { index: messageIndex, smooth };
+        setVisibleCount(neededFromEnd);
+        return;
+      }
+    }
+
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const targetEl = container.querySelector(`[data-message-index="${messageIndex}"]`) as HTMLDivElement | null;
+    if (targetEl) {
+      const containerRect = container.getBoundingClientRect();
+      const elRect = targetEl.getBoundingClientRect();
+      const targetScroll = Math.max(0, container.scrollTop + (elRect.top - containerRect.top) - 16);
+      const reduceMotion = typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      container.scrollTo({ top: targetScroll, behavior: smooth && !reduceMotion ? "smooth" : "auto" });
+    }
+  }, [transcriptRows, visibleCount, scrollContainerRef]);
+
+  useEffect(() => {
+    const pending = pendingScrollTargetRef.current;
+    if (pending === null) return;
+    const { index: targetIdx, smooth } = pending;
+    const container = scrollContainerRef.current;
+    if (!container) return;
+
+    requestAnimationFrame(() => {
+      const targetEl = container.querySelector(`[data-message-index="${targetIdx}"]`) as HTMLDivElement | null;
+      if (targetEl) {
+        pendingScrollTargetRef.current = null;
+        const containerRect = container.getBoundingClientRect();
+        const elRect = targetEl.getBoundingClientRect();
+        const targetScroll = Math.max(0, container.scrollTop + (elRect.top - containerRect.top) - 16);
+        const reduceMotion = typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        container.scrollTo({ top: targetScroll, behavior: smooth && !reduceMotion ? "smooth" : "auto" });
+      }
+    });
+  }, [visibleCount, scrollContainerRef]);
 
   const generationSpeedKey = generationSpeed
     ? `${generationSpeed.current ?? "null"}|${generationSpeed.average ?? "null"}`
@@ -1275,16 +1334,16 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
             pointerEvents: "none",
           }}
         >
-          <div style={{ maxWidth: isMobile ? CHAT_COLUMN_MAX_WIDTH : CHAT_COLUMN_MAX_WIDTH_DESKTOP, margin: "0 auto" }}>
+          <div style={{ maxWidth: isMobile || !showDesktopRail ? CHAT_COLUMN_MAX_WIDTH : CHAT_COLUMN_MAX_WIDTH_DESKTOP, margin: "0 auto" }}>
             <NoticeShelf notices={notices} onDismiss={dismissNotice} floating align="right" />
           </div>
         </div>
         {/* Hide the Firefox scrollbar on desktop only: ChatMinimap provides the
             position indicator there, but on mobile there is no minimap and
             users need the scrollbar (Chrome's overlay scrollbar still shows). */}
-        <div ref={scrollContainerRef} data-selection-scope="chat" tabIndex={-1} role="log" aria-live={streamState.isStreaming ? "off" : "polite"} aria-busy={streamState.isStreaming || undefined} aria-relevant="additions text" aria-label={t("chatWindow.conversation")} className={`flex-1 overflow-y-auto pt-6` + (isMobile ? "" : " scrollbar-none [&::-webkit-scrollbar]:hidden")} style={{ minHeight: 0 }}>
+        <div ref={scrollContainerRef} data-selection-scope="chat" tabIndex={-1} role="log" aria-live={streamState.isStreaming ? "off" : "polite"} aria-busy={streamState.isStreaming || undefined} aria-relevant="additions text" aria-label={t("chatWindow.conversation")} className={`flex-1 overflow-y-auto pt-6` + (isMobile || !showDesktopRail ? "" : " scrollbar-none [&::-webkit-scrollbar]:hidden")} style={{ minHeight: 0 }}>
           <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
-            <div style={{ maxWidth: isMobile ? CHAT_COLUMN_MAX_WIDTH : CHAT_COLUMN_MAX_WIDTH_DESKTOP, margin: "0 auto" }}>
+            <div style={{ maxWidth: isMobile || !showDesktopRail ? CHAT_COLUMN_MAX_WIDTH : CHAT_COLUMN_MAX_WIDTH_DESKTOP, margin: "0 auto" }}>
               <ExtensionStatusBar statuses={extensionStatuses} />
               <ExtensionWidgets widgets={aboveEditorWidgets} />
 
@@ -1404,12 +1463,23 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
             <ArrowDown size={15} strokeWidth={1.8} aria-hidden="true" />
           </button>
         )}
-        {isMobile ? null : (
+        {showOutlineFab && (
+          <ChatOutlineFab
+            messages={messages}
+            scrollContainer={scrollContainerRef}
+            messageRefs={messageRefs}
+            nearBottom={nearBottom}
+            isMobile={isMobile}
+            onEnsureVisible={handleEnsureMessageVisible}
+          />
+        )}
+        {showDesktopRail && (
           <div style={{ position: "absolute", top: 0, bottom: 0, right: 0, zIndex: 30, display: "flex", alignItems: "center", pointerEvents: "none" }}>
             <ChatMinimap
               messages={messages}
               scrollContainer={scrollContainerRef}
               messageRefs={messageRefs}
+              onEnsureVisible={handleEnsureMessageVisible}
             />
           </div>
         )}
