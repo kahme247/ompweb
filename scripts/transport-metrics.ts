@@ -22,6 +22,7 @@ type Sample = Record<string, unknown>;
 // The report's section order, fixed so two runs over different data line up.
 const SECTION_ORDER = [
   "action totalMs", "action transportMs", "action upMs", "abort behind upload", "event ms", "reconnect ms", "reconnect fromDropMs",
+  "isolation event ms", "isolation action ms", "sockets", "pool size", "rebalance moved", "rebalance settledMs",
   "hang", "resend", "deduped", "outcome", "client",
 ];
 
@@ -39,6 +40,16 @@ const diff = (a: unknown, b: unknown) => {
   const y = asNumber(b);
   return x === undefined || y === undefined ? undefined : x - y;
 };
+
+/** Spec D6 cross-session blocking: behind another session's bytes, only its own, or neither; undefined when nothing was measured. */
+function isolation(s: Sample): "other" | "same" | "clear" | undefined {
+  const other = asNumber(s.behindOtherBytes);
+  const same = asNumber(s.behindSameBytes);
+  const reply = asNumber(s.replyBehindOtherBytes);
+  if (other === undefined && same === undefined && reply === undefined) return undefined;
+  if ((other ?? 0) > 0 || (reply ?? 0) > 0) return "other";
+  return (same ?? 0) > 0 ? "same" : "clear";
+}
 
 export function summarize(samples: Sample[], options: SummaryOptions): SummaryRow[] {
   const kept = samples.filter((s) => {
@@ -77,6 +88,9 @@ export function summarize(samples: Sample[], options: SummaryOptions): SummaryRo
     client.types.add(asString(s.effectiveType) ?? "null");
     client.ua = asString(s.ua) ?? client.ua;
     clients.set(clientId, client);
+    addValue("sockets", transport, "all", asNumber(s.sockets));
+    addValue("pool size", transport, "all", asNumber(s.pool));
+    const isolated = isolation(s);
 
     if (s.metric === "action") {
       const type = asString(s.type);
@@ -91,17 +105,24 @@ export function summarize(samples: Sample[], options: SummaryOptions): SummaryRo
         if (type) addValue(section, transport, type, value);
       }
       if (type?.startsWith("abort")) addValue("abort behind upload", transport, (asNumber(s.behindBytes) ?? 0) > 0 ? "yes" : "no", totalMs);
+      if (isolated) addValue("isolation action ms", transport, isolated, totalMs);
       add("outcome", transport, asString(s.outcome) ?? "unknown");
       if ((asNumber(s.attempts) ?? 1) > 1) add("resend", transport, "attempts>1");
       if (s.deduped === true) add("deduped", transport, "deduped");
     } else if (s.metric === "event") {
       const ms = diff(s.gotAt, s.at);
       const offset = asNumber(s.offset);
-      addValue("event ms", transport, `${asString(s.conn)} ${asString(s.channel)}`, ms === undefined || offset === undefined ? undefined : ms + offset);
+      const eventMs = ms === undefined || offset === undefined ? undefined : ms + offset;
+      addValue("event ms", transport, `${asString(s.conn)} ${asString(s.channel)}`, eventMs);
+      if (isolated) addValue("isolation event ms", transport, isolated, eventMs);
     } else if (s.metric === "reconnect") {
       const key = `${asString(s.trigger)} ${asString(s.conn)}`;
       addValue("reconnect ms", transport, key, diff(s.firstFrameAt, s.startAt), asNumber(s.batch));
       addValue("reconnect fromDropMs", transport, key, diff(s.firstFrameAt, s.dropAt));
+    } else if (s.metric === "rebalance") {
+      const reason = asString(s.reason) ?? "unknown";
+      addValue("rebalance moved", transport, reason, asNumber(s.moved));
+      addValue("rebalance settledMs", transport, reason, asNumber(s.settledMs));
     } else if (s.metric === "hang") {
       add("hang", transport, "total");
       if (answered.has(s.req)) add("hang", transport, "answered later");
