@@ -140,6 +140,20 @@ test("a row shows the event in the viewer's language, and its session name as th
   assert.match(row.textContent, /Ship it\?/);
 });
 
+test("pressing Space on a row opens its session, like Enter", () => {
+  const opened = [];
+  const onOpen = (event) => opened.push(event.detail);
+  window.addEventListener(OPEN_SESSION_EVENT, onOpen);
+  try {
+    const { row } = mount();
+    act(() => { row().dispatchEvent(new window.KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true })); });
+    assert.deepEqual(opened, ["n1-session"]);
+    assert.equal(notificationHistory.get()[0].read, true);
+  } finally {
+    window.removeEventListener(OPEN_SESSION_EVENT, onOpen);
+  }
+});
+
 test("an entry whose session no longer exists still renders and opens by id", () => {
   act(() => { notificationHistory.add({ type: "error", sessionId: "gone-session", sessionName: null }); });
   const row = render(React.createElement(NotificationList)).container.querySelector("li");

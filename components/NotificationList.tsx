@@ -102,9 +102,13 @@ function NotificationRow({ entry }: { entry: NotificationHistoryEntry }) {
       data-swipe-dismiss
       // With an action the row is the only way to run it (there is no Open link), so keyboard users can focus it.
       tabIndex={open ? 0 : undefined}
+      role={open ? "button" : undefined}
       className={open ? "ui-focus-ring" : undefined}
       onKeyDown={open ? (event) => {
-        if (event.key !== "Enter" || event.target !== event.currentTarget) return;
+        // Space, like Enter, activates the row: without it a keyboard user
+        // on a focused row just scrolls the page instead of opening the
+        // session, and the row was not announced as actionable either.
+        if ((event.key !== "Enter" && event.key !== " ") || event.target !== event.currentTarget) return;
         event.preventDefault();
         open();
       } : undefined}
