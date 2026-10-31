@@ -1,19 +1,25 @@
 // omp-web live-event multiplexer.
 //
 // Runs as a SharedWorker (one per browser profile) — or a dedicated Worker
-// where SharedWorker is unavailable — and holds the ONLY `/api/events`
-// EventSource. Every tab's stream (lib/event-stream.ts) is a subscription on
-// that one socket, so opening more tabs no longer consumes more of the
-// browser's six HTTP/1.1 connections per host.
+// where SharedWorker is unavailable — and carries every tab's stream
+// (lib/event-stream.ts) as a subscription on its own connections, so opening
+// more tabs no longer consumes more of the browser's six HTTP/1.1 connections
+// per host. The server's `browserTransport` setting (every hello and
+// `transport` control frame carry it) picks the connections:
+//   "sse" (default): the ONLY `/api/events` EventSource; POST /api/events subscribes.
+//   "websocket": one general `/api/events/ws` socket for the non-session
+//   channels plus one `/api/events/ws?session=<id>` per session.
 //
 // Plain script, not bundled: mirrors lib/event-stream-protocol.ts.
 //
 // Tab -> worker:  { op: "open", id, channel } | { op: "close", id }
 //                 { op: "lock", name }  (tab holds this Web Lock while alive)
 //                 { op: "bye" }         (pagehide: drop this tab's streams)
+//                 { op: "wake", reason, visible, clientId }  (reason: init | visible | hidden | online | network)
 // Worker -> tab:  { id, type: "open" }
 //                 { id, type: "message", data }   (raw JSON string)
 //                 { id, type: "error", readyState: 0 | 2 }  (EventSource semantics)
+//                 { transport: "sse" | "websocket" }  (on attach once known, and on every change)
 "use strict";
 
 const EVENT_STREAM_PATH = "/api/events";
@@ -26,6 +32,14 @@ const CLOSED = 2;
 const RESUBSCRIBE_DELAY_MS = 3000;
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
+const EVENT_SOCKET_PATH = "/api/events/ws";
+// A socket closes this long after its session's last stream, so a tab switch back reuses it.
+const SESSION_LINGER_MS = 30000;
+// The server pings every 10 s: a socket with no frame for this long is dead.
+const WS_SILENCE_MS = 25000;
+const SILENCE_CHECK_MS = 1000;
+const VISIBLE_PROBE_MS = 3000;
+const FORCED_RECONNECT_CODE = 4000;
 
 /** @type {EventSource | null} */
 let source = null;
@@ -37,6 +51,19 @@ let reconnectDelayMs = RECONNECT_MIN_MS;
 let nextSubscriptionId = 1;
 /** Server subscription id -> subscription. */
 const subscriptions = new Map();
+/** "sse" | "websocket": SSE until a hello or `transport` control frame says otherwise. */
+let mode = "sse";
+/** Every attached tab, told the mode when it changes. */
+const clients = new Set();
+/**
+ * WebSocket mode's sockets: "general" | `session:<id>` -> Conn (see connFor).
+ * Empty in SSE mode, so wakes and silence checks have nothing to act on there.
+ */
+const conns = new Map();
+/** SSE subscriptions' `conn`: the EventSource's per-connection state, shaped like a Conn's. */
+const sseConn = { clock: null, lastEventSampleAt: 0, reconnect: null };
+/** @type {ReturnType<typeof setInterval> | undefined} */
+let silenceTimer;
 
 function post(client, message) {
   try {
@@ -51,9 +78,9 @@ function notifyError(subscription, readyState) {
   post(subscription.client, { id: subscription.streamId, type: "error", readyState });
 }
 
-/** The shared socket dropped: every live subscription is reconnecting. */
-function markAllConnecting() {
-  for (const subscription of subscriptions.values()) {
+/** A connection dropped: its live subscriptions are reconnecting. */
+function markConnecting(list) {
+  for (const subscription of list) {
     clearTimeout(subscription.retryTimer);
     if (subscription.state === OPEN) notifyError(subscription, CONNECTING);
   }
@@ -67,7 +94,7 @@ function closeSource() {
 
 function scheduleReconnect() {
   closeSource();
-  markAllConnecting();
+  markConnecting(subscriptions.values());
   clearTimeout(reconnectTimer);
   const delay = reconnectDelayMs;
   reconnectDelayMs = Math.min(delay * 2, RECONNECT_MAX_MS);
@@ -103,19 +130,33 @@ function ensureSource() {
     // CONNECTING: EventSource reconnects on its own; the next hello
     // re-subscribes everything on the fresh connection.
     connectionId = null;
-    markAllConnecting();
+    markConnecting(subscriptions.values());
   };
 }
 
-function handleControl(frame) {
+/** A control frame from the EventSource (`conn` = sseConn) or from a socket's Conn. */
+function handleControl(frame, conn = sseConn) {
+  if (frame.type === "transport") {
+    setMode(frame.transport);
+    return;
+  }
   if (frame.type === "hello") {
-    connectionId = frame.connectionId;
-    reconnectDelayMs = RECONNECT_MIN_MS;
-    for (const subscription of subscriptions.values()) subscribe(subscription);
+    if (conn === sseConn) {
+      connectionId = frame.connectionId;
+      reconnectDelayMs = RECONNECT_MIN_MS;
+    } else {
+      conn.connectionId = frame.connectionId;
+      conn.serverId = frame.serverId;
+      conn.reconnectDelayMs = RECONNECT_MIN_MS;
+    }
+    // A worker that missed a switch (or just started) converges here: the
+    // switch moves every subscription instead of subscribing them on this one.
+    if (setMode(frame.transport)) return;
+    for (const subscription of conn === sseConn ? subscriptions.values() : conn.subs) subscribe(subscription);
     return;
   }
   const subscription = subscriptions.get(frame.sub);
-  if (!subscription) return;
+  if (!subscription || subscription.conn !== conn) return;
   if (frame.type === "open") {
     subscription.state = OPEN;
     post(subscription.client, { id: subscription.streamId, type: "open" });
@@ -125,7 +166,34 @@ function handleControl(frame) {
     notifyError(subscription, CONNECTING);
     clearTimeout(subscription.retryTimer);
     subscription.retryTimer = setTimeout(() => subscribe(subscription), RESUBSCRIBE_DELAY_MS);
+  } else if (frame.type === "refused") {
+    // A socket's answer to a failed `sub`: fatal, like a refused POST below.
+    release(subscription);
+    notifyError(subscription, CLOSED);
   }
+}
+
+/**
+ * Moves every subscription to `next`'s connections. Idempotent: anything but
+ * a mode (a hello without `transport`) or the current mode (a reconnect's
+ * hello) changes nothing. True when it switched.
+ */
+function setMode(next) {
+  if ((next !== "sse" && next !== "websocket") || next === mode) return false;
+  mode = next;
+  for (const client of clients) post(client, { transport: mode });
+  markConnecting(subscriptions.values());
+  if (mode === "websocket") {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = undefined;
+    closeSource();
+    for (const subscription of subscriptions.values()) join(subscription);
+  } else {
+    for (const conn of conns.values()) retire(conn);
+    for (const subscription of subscriptions.values()) subscription.conn = sseConn;
+    ensureSource();
+  }
+  return true;
 }
 
 function requestServer(body) {
@@ -138,6 +206,12 @@ function requestServer(body) {
 }
 
 function subscribe(subscription) {
+  const conn = subscription.conn;
+  if (conn !== sseConn) {
+    // Before its hello the socket has nothing to send on; the hello re-sends every subscription.
+    if (conn.connectionId) sendFrame(conn, { t: "sub", id: subscription.id, channel: subscription.channel });
+    return;
+  }
   if (!connectionId || subscriptions.get(subscription.id) !== subscription) return;
   const requestedOn = connectionId;
   const stale = () => subscriptions.get(subscription.id) !== subscription || connectionId !== requestedOn;
@@ -165,6 +239,7 @@ function release(subscription) {
   clearTimeout(subscription.retryTimer);
   subscriptions.delete(subscription.id);
   subscription.client.streams.delete(subscription.streamId);
+  if (subscription.conn !== sseConn) leave(subscription.conn, subscription);
   source?.removeEventListener(subscription.id, subscription.listener);
   if (subscriptions.size === 0) {
     // Nothing left to deliver: free the browser's socket until a tab asks again.
@@ -183,10 +258,15 @@ function open(client, streamId, channel) {
     channel,
     state: CONNECTING,
     retryTimer: undefined,
+    conn: sseConn,
     listener: (event) => post(client, { id: streamId, type: "message", data: event.data }),
   };
   subscriptions.set(subscription.id, subscription);
   client.streams.set(streamId, subscription);
+  if (mode === "websocket") {
+    join(subscription);
+    return;
+  }
   // Listen before subscribing: frames may arrive before the POST resolves.
   source?.addEventListener(subscription.id, subscription.listener);
   ensureSource();
@@ -196,9 +276,13 @@ function open(client, streamId, channel) {
 function close(client, streamId) {
   const subscription = client.streams.get(streamId);
   if (!subscription) return;
+  const conn = subscription.conn;
   const wasConnected = connectionId;
   release(subscription);
-  if (wasConnected && connectionId === wasConnected) {
+  if (conn !== sseConn) {
+    // A socket that closed with its last stream, or has no hello yet, holds nothing to drop.
+    if (conn.connectionId) sendFrame(conn, { t: "unsub", id: subscription.id });
+  } else if (wasConnected && connectionId === wasConnected) {
     requestServer({ unsubscribe: subscription.id }).catch(() => {});
   }
 }
@@ -207,8 +291,175 @@ function dropClient(client) {
   for (const streamId of [...client.streams.keys()]) close(client, streamId);
 }
 
+/** The socket for a session's streams, or the general one (sessionId null); dialed on first use. */
+function connFor(sessionId) {
+  const key = sessionId === null ? "general" : `session:${sessionId}`;
+  let conn = conns.get(key);
+  if (!conn) {
+    conn = {
+      key,
+      sessionId,
+      ws: null,
+      serverId: null,
+      connectionId: null,
+      subs: new Set(),
+      pending: new Map(),
+      lastFrameAt: 0,
+      reconnectDelayMs: RECONNECT_MIN_MS,
+      reconnectTimer: undefined,
+      lingerTimer: undefined,
+      retiring: false,
+      clock: null,
+      lastEventSampleAt: 0,
+      reconnect: null,
+    };
+    conns.set(key, conn);
+    silenceTimer ??= setInterval(checkSilence, SILENCE_CHECK_MS);
+    dial(conn);
+  }
+  clearTimeout(conn.lingerTimer);
+  conn.lingerTimer = undefined;
+  return conn;
+}
+
+function join(subscription) {
+  const { channel } = subscription;
+  const conn = connFor(channel.kind === "session" ? channel.sessionId : null);
+  conn.subs.add(subscription);
+  subscription.conn = conn;
+  subscribe(subscription);
+}
+
+function leave(conn, subscription) {
+  conn.subs.delete(subscription);
+  if (conn.subs.size > 0 || conn.pending.size > 0) return;
+  // The general socket goes with its last stream, like the EventSource.
+  if (conn.sessionId === null) retire(conn);
+  else conn.lingerTimer = setTimeout(() => retire(conn), SESSION_LINGER_MS);
+}
+
+/** Done with this socket: forget it and close it. */
+function retire(conn) {
+  conns.delete(conn.key);
+  if (conns.size === 0) {
+    clearInterval(silenceTimer);
+    silenceTimer = undefined;
+  }
+  clearTimeout(conn.lingerTimer);
+  clearTimeout(conn.reconnectTimer);
+  conn.retiring = true;
+  conn.subs.clear();
+  const ws = conn.ws;
+  conn.ws = null;
+  conn.connectionId = null;
+  ws?.close();
+}
+
+function dial(conn) {
+  const url = new URL(EVENT_SOCKET_PATH, self.location.href);
+  if (conn.sessionId !== null) url.searchParams.set("session", conn.sessionId);
+  const ws = new WebSocket(url.href.replace(/^http/, "ws"));
+  conn.ws = ws;
+  conn.lastFrameAt = Date.now();
+  // Events of a socket this Conn replaced (late frames, its close) are ignored.
+  ws.onmessage = (event) => {
+    if (conn.ws === ws) onSocketFrame(conn, event.data);
+  };
+  // `error` is always followed by `close`.
+  ws.onclose = () => {
+    if (conn.ws === ws) redial(conn, backoff(conn));
+  };
+}
+
+/** A failed socket's next delay: 1 s doubling to 30 s, reset by a hello. */
+function backoff(conn) {
+  const delay = conn.reconnectDelayMs;
+  conn.reconnectDelayMs = Math.min(delay * 2, RECONNECT_MAX_MS);
+  return delay;
+}
+
+/** Gives up on the socket and dials again after `delay` ms (0: now); the next hello re-subscribes its streams. */
+function redial(conn, delay) {
+  // A lingering socket has no stream to come back for.
+  if (conn.subs.size === 0 && conn.pending.size === 0) {
+    retire(conn);
+    return;
+  }
+  const ws = conn.ws;
+  conn.ws = null;
+  conn.connectionId = null;
+  ws?.close(FORCED_RECONNECT_CODE);
+  markConnecting(conn.subs);
+  clearTimeout(conn.reconnectTimer);
+  conn.reconnectTimer = undefined;
+  if (delay === 0) {
+    dial(conn);
+    return;
+  }
+  conn.reconnectTimer = setTimeout(() => {
+    conn.reconnectTimer = undefined;
+    dial(conn);
+  }, delay);
+}
+
+function sendFrame(conn, frame) {
+  conn.ws.send(JSON.stringify(frame));
+}
+
+/** Server frames are "<name> <server ms>\n<json>": split at the first newline, the payload passed on unparsed. */
+function onSocketFrame(conn, text) {
+  conn.lastFrameAt = Date.now();
+  const name = text.slice(0, text.indexOf(" "));
+  const data = text.slice(text.indexOf("\n") + 1);
+  if (name === MUX_CONTROL_EVENT) {
+    let frame;
+    try {
+      frame = JSON.parse(data);
+    } catch {
+      return;
+    }
+    handleControl(frame, conn);
+    return;
+  }
+  // A subscription's frame; `ping` and `pong` only prove the socket is alive.
+  const subscription = subscriptions.get(name);
+  if (subscription?.conn === conn) subscription.listener({ data });
+}
+
+function checkSilence() {
+  const now = Date.now();
+  for (const conn of conns.values()) {
+    if (conn.ws && now - conn.lastFrameAt >= WS_SILENCE_MS) redial(conn, backoff(conn));
+  }
+}
+
+/** A tab saw the network change or the page come back (SSE mode has no sockets: EventSource reconnects on its own). */
+function wake(reason) {
+  for (const conn of conns.values()) {
+    if (reason === "online" || reason === "network") {
+      redial(conn, 0);
+    } else if (reason === "visible") {
+      if (conn.reconnectTimer !== undefined) redial(conn, 0);
+      else if (conn.connectionId) probe(conn);
+    }
+  }
+}
+
+/** The server answers a clock ping at once: no frame within VISIBLE_PROBE_MS means the socket died while hidden. */
+function probe(conn) {
+  const ws = conn.ws;
+  const sentAt = Date.now();
+  sendFrame(conn, { t: "ping", c: sentAt });
+  setTimeout(() => {
+    if (conn.ws === ws && conn.lastFrameAt < sentAt) redial(conn, 0);
+  }, VISIBLE_PROBE_MS);
+}
+
 function attach(port) {
   const client = { port, streams: new Map() };
+  clients.add(client);
+  // Tabs assume SSE until told otherwise.
+  if (mode === "websocket") post(client, { transport: mode });
   port.onmessage = (event) => {
     const message = event.data;
     if (!message || typeof message !== "object") return;
@@ -222,11 +473,17 @@ function attach(port) {
       case "bye":
         dropClient(client);
         break;
+      case "wake":
+        wake(message.reason);
+        break;
       case "lock":
         // MessagePort has no close event. The tab holds this lock for its
         // whole life; it is granted to us only once that tab is gone
         // (closed, crashed, discarded), however it died.
-        self.navigator.locks?.request(message.name, () => dropClient(client));
+        self.navigator.locks?.request(message.name, () => {
+          clients.delete(client);
+          dropClient(client);
+        });
         break;
     }
   };

@@ -12,6 +12,16 @@
 // Every frame also carries `id: <server ms at emit>`, read as `lastEventId`.
 // Subscriptions are added/removed with POST /api/events (EventStreamRequest).
 //
+// Stream framing (WebSocket, `browserTransport: "websocket"`; lib/browser-socket.ts):
+// one general socket GET /api/events/ws for the non-session channels, one
+// GET /api/events/ws?session=<id> per session for its `session` channel and its commands.
+//   server -> client  text "<name> <server ms>\n<json>", split at the first newline:
+//                     mux (MuxControlFrame) | s<n> (one subscription's frame) |
+//                     ack {rid} | reply {rid, status, body, deduped?} | ping {} (10 s) | pong {c}
+//   client -> server  one JSON object per frame: {t:"sub", id, channel} | {t:"unsub", id} |
+//                     {t:"cmd", rid, advisor, command} (session sockets only) | {t:"ping", c}
+// Every hello and the `transport` control frame carry the setting; the worker switches on it.
+//
 // public/event-stream-worker.js is a plain script (not bundled) and mirrors
 // these constants; keep the two in sync.
 
