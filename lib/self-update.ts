@@ -414,12 +414,7 @@ export async function prepareSelfUpdate(kind: Kind = "app"): Promise<PrepareResu
   const attemptDir = join(attempts, attemptId);
   mkdirSync(attemptDir, { mode: 0o700, recursive: true });
   secureDirectory(attemptDir);
-  const srcWorker = resolve(join(dirname(new URL(import.meta.url).pathname), "..", "bin", "omp-web-update-worker.js"));
-  // fallback to CWD relative
-  let workerSrc = srcWorker;
-  if (!existsSync(workerSrc)) {
-    workerSrc = resolve(join(process.cwd(), "bin", "omp-web-update-worker.js"));
-  }
+  const workerSrc = join(process.env.OMP_WEB_PACKAGE_DIR ?? process.cwd(), "bin", "omp-web-update-worker.js");
   const destWorker = join(attemptDir, "worker.js");
   if (existsSync(workerSrc)) {
     copyFileSync(workerSrc, destWorker);
