@@ -9,7 +9,7 @@ import { useSpeechContext } from "@/hooks/useSpeechSynthesis";
 import { ClickableImage } from "./ImageLightbox";
 import { translate, useI18n, type Locale } from "@/lib/i18n";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
-import { isEmptyThinkingBlock } from "@/lib/message-display";
+import { isEmptyThinkingBlock, isReplyBlock } from "@/lib/message-display";
 import { isPassiveToolContext } from "@/lib/chat-transcript-plan";
 import { Tooltip, Collapsible, CollapsibleTrigger } from "./ui/primitives";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
@@ -558,7 +558,8 @@ function AssistantMessageView({
     .map((block, index) => ({ block, originalIndex: sourceBlockIndices?.[index] ?? index }))
     .filter(({ block }) => !(hideThinking && block.type === "thinking") && !isEmptyThinkingBlock(block, { isStreaming }));
   const blocks = blockItems.map(({ block }) => block);
-  const hasActivityBlocks = blocks.some((block) => block.type === "thinking" || block.type === "toolCall");
+  // Activity rows stay compact; a row that also carries reply text keeps its model label.
+  const hideHeader = blocks.some((block) => block.type === "thinking" || block.type === "toolCall") && !blocks.some(isReplyBlock);
   const errorMessage = message.errorMessage?.trim() || null;
   const isInterrupted = isInterruptedMessage(errorMessage, message.stopReason);
   const blockItemsRef = useRef(blockItems);
@@ -653,7 +654,7 @@ function AssistantMessageView({
           fontSize: 11,
           color: "var(--text-dim)",
           marginBottom: 4,
-          display: hasActivityBlocks ? "none" : "flex",
+          display: hideHeader ? "none" : "flex",
           alignItems: "center",
           gap: 6,
         }}

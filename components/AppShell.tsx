@@ -97,6 +97,8 @@ const RightPanel = dynamic(() => import("./RightPanel").then((m) => m.RightPanel
 
 const TOOL_CALLS_COLLAPSED_STORAGE_KEY = "omp-web:tool-calls-collapsed";
 const HIDE_TOOL_ACTIVITY_STORAGE_KEY = "omp-web:hide-tool-activity";
+const NEVER_FOLD_ACTIVITY_STORAGE_KEY = "omp-web:never-fold-activity";
+const SHOW_TOOL_CALLS_UNFOLDED_STORAGE_KEY = "omp-web:show-tool-calls-unfolded";
 // Off by default, so the transcript keeps collapsing reasoning until asked.
 const EXPAND_THINKING_STORAGE_KEY = "omp-web:expand-thinking";
 const PROVIDER_USAGE_VISIBLE_STORAGE_KEY = "omp-web:provider-usage-visible";
@@ -142,6 +144,8 @@ export function AppShell({ appName }: { appName: string }) {
   const [sidebarWidth, setSidebarWidth] = useState<number>(SIDEBAR_DEFAULT_WIDTH);
   const [toolCallsDefaultCollapsed, setToolCallsDefaultCollapsed] = useState(true);
   const [hideToolActivity, setHideToolActivity] = useState(true);
+  const [neverFoldActivity, setNeverFoldActivity] = useState(false);
+  const [showToolCallsUnfolded, setShowToolCallsUnfolded] = useState(false);
   // "Expand thinking blocks by default" — like the tool-call preference, a
   // UI-only behavior, so it lives in localStorage rather than omp's config.
   const [expandThinkingByDefault, setExpandThinkingByDefault] = useState(false);
@@ -176,6 +180,8 @@ export function AppShell({ appName }: { appName: string }) {
     try {
       setToolCallsDefaultCollapsed(window.localStorage.getItem(TOOL_CALLS_COLLAPSED_STORAGE_KEY) !== "false");
       setHideToolActivity(window.localStorage.getItem(HIDE_TOOL_ACTIVITY_STORAGE_KEY) !== "false");
+      setNeverFoldActivity(window.localStorage.getItem(NEVER_FOLD_ACTIVITY_STORAGE_KEY) === "true");
+      setShowToolCallsUnfolded(window.localStorage.getItem(SHOW_TOOL_CALLS_UNFOLDED_STORAGE_KEY) === "true");
       setExpandThinkingByDefault(window.localStorage.getItem(EXPAND_THINKING_STORAGE_KEY) === "true");
       setProviderUsageVisible(window.localStorage.getItem(PROVIDER_USAGE_VISIBLE_STORAGE_KEY) !== "false");
       setScopeNativeSelectAll(window.localStorage.getItem(NATIVE_SELECT_ALL_STORAGE_KEY) === "true");
@@ -196,6 +202,22 @@ export function AppShell({ appName }: { appName: string }) {
     setHideToolActivity(hide);
     try {
       window.localStorage.setItem(HIDE_TOOL_ACTIVITY_STORAGE_KEY, String(hide));
+    } catch {
+      // The preference still applies for this page load.
+    }
+  }, []);
+  const handleNeverFoldActivityChange = useCallback((never: boolean) => {
+    setNeverFoldActivity(never);
+    try {
+      window.localStorage.setItem(NEVER_FOLD_ACTIVITY_STORAGE_KEY, String(never));
+    } catch {
+      // The preference still applies for this page load.
+    }
+  }, []);
+  const handleShowToolCallsUnfoldedChange = useCallback((show: boolean) => {
+    setShowToolCallsUnfolded(show);
+    try {
+      window.localStorage.setItem(SHOW_TOOL_CALLS_UNFOLDED_STORAGE_KEY, String(show));
     } catch {
       // The preference still applies for this page load.
     }
@@ -2034,6 +2056,10 @@ export function AppShell({ appName }: { appName: string }) {
             onToolCallsDefaultCollapsedChange={handleToolCallsDefaultCollapsedChange}
             hideToolActivity={hideToolActivity}
             onHideToolActivityChange={handleHideToolActivityChange}
+            neverFoldActivity={neverFoldActivity}
+            onNeverFoldActivityChange={handleNeverFoldActivityChange}
+            showToolCallsUnfolded={showToolCallsUnfolded}
+            onShowToolCallsUnfoldedChange={handleShowToolCallsUnfoldedChange}
             expandThinkingByDefault={expandThinkingByDefault}
             onExpandThinkingByDefaultChange={handleExpandThinkingByDefaultChange}
             onHideThinkingBlockChange={setHideThinkingBlock}
@@ -2537,6 +2563,8 @@ export function AppShell({ appName }: { appName: string }) {
               onOpenProviders={() => setSettingsTab("providers")}
               toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
               hideToolActivity={hideToolActivity}
+              neverFoldActivity={neverFoldActivity}
+              showToolCallsUnfolded={showToolCallsUnfolded}
               expandThinkingByDefault={expandThinkingByDefault}
               hideThinkingBlock={hideThinkingBlock}
             />

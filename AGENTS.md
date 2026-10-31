@@ -284,6 +284,15 @@ wait for that commit:
   finished turn. `AppShell` must pass `hideToolActivity` into `ChatWindow` for
   the switch to do anything. The fold row is the expand affordance, so a hidden
   tool call is one click away rather than gone.
+- Two more UI switches shape the fold, both planned in
+  `planTurnSegments` (`lib/chat-transcript-plan.ts`): `showThinking`
+  (driven by "Expand thinking blocks by default") and `showToolCalls` ("Show
+  tool calls outside Process details", `omp-web:show-tool-calls-unfolded`)
+  treat those blocks like text, so they never fold. A text segment can
+  therefore carry thinking, and `ChatWindow` passes its `sourceBlockIndices`
+  so deferred thinking loads the right block. "Never fold tool activity"
+  (`omp-web:never-fold-activity`) renders every group flat, overriding "Hide
+  tool activity while working".
 - `tool_execution_update` is coalesced per tool call at display rate in
   `lib/message-update-coalescer.ts` (chatty commands emit ~10-100+ frames/s).
   `message_end` drops the pending `message_update` (the committed message
@@ -304,6 +313,9 @@ wait for that commit:
 - Auto-expanded historical blocks are `deferred` (thinking text is fetched on
   demand), so a mount effect loads their content through the same loader the
   click path uses — one request per mount, cached per (session, entry, block).
+- While the preference is on, thinking never folds into **Process details**:
+  a streamed block mounts expanded, and folding it when the step commits would
+  hide it in a closed row, which reads as the block collapsing on its own.
 
 ### Tool-result images (`lib/media-cache.ts`, `/api/media/[hash]`)
 - Tool-result images never reach the browser as base64. History (`deferMedia`)

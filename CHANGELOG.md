@@ -6,8 +6,14 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ## [Unreleased]
 
+### Added
+
+- **Show tool calls outside Process details.** A new setting keeps each tool call's row in the transcript instead of folding it; whether the row opens still follows "Keep tool calls collapsed".
+- **Never fold tool activity.** A new setting renders every turn flat, with no Process details rows at all.
+
 ### Fixes & Improvements
 
+- **Expanded thinking blocks no longer collapse when a step finishes.** With "Expand thinking blocks by default" on, a thinking block opened while streaming, then moved into a closed Process details row as soon as the step committed. Thinking now stays out of the fold while the setting is on.
 - **In-app updates work when ompweb runs as a systemd service.** The update worker ran inside the service's cgroup, so stopping the server killed the worker too: nothing was installed, the service could stay down (`Restart=on-failure` does not restart a clean SIGTERM exit), and every page load reopened the update dialog at "Stop ompweb-managed sessions". The worker now runs in its own transient scope (`systemd-run --scope`) and stops, updates and starts the unit through `systemctl`, starting it again if the install fails.
 - **An update whose worker died is reported as failed.** A running update whose worker process is gone, or whose lease has expired, now becomes a failed attempt the dialog can show and clean up, instead of waiting forever.
 - **The Provider Usage header stays put while its list scrolls.** Scrolling a long provider list in the sidebar also scrolled the section header (title, window toggle, refresh) out of view, on desktop and mobile. Only the list scrolls now.

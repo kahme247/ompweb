@@ -8,6 +8,11 @@ export function isEmptyThinkingBlock(block: AssistantContentBlock, options: Disp
   return block.type === "thinking" && !block.deferred && !options.isStreaming && block.thinking.trim() === "";
 }
 
+/** Reply content (non-blank text or an image), as opposed to thinking and tool activity. */
+export function isReplyBlock(block: AssistantContentBlock): boolean {
+  return block.type === "image" || (block.type === "text" && block.text.trim().length > 0);
+}
+
 export function getDisplayableAssistantBlocks(
   message: AssistantMessage,
   options: DisplayOptions = {},

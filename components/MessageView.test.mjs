@@ -641,6 +641,18 @@ test("thinking blocks stay collapsed by default and open with the expand prefere
   assert.match(html({ expandThinkingByDefault: true, isStreaming: true }), /weighing the options/);
 });
 
+test("the model label hides on activity-only rows but stays on a row that also carries reply text", () => {
+  const html = (content) => renderToStaticMarkup(React.createElement(MessageView, {
+    message: { role: "assistant", provider: "t", model: "label-model", content },
+    modelNames: { "t:label-model": "Label Model" },
+  }));
+  const labelShown = (markup) => /display:flex[^>]*><span>Label Model<\/span>/.test(markup);
+  assert.equal(labelShown(html([{ type: "thinking", thinking: "plan" }])), false);
+  // Unfolded thinking rides in the reply's segment; the reply keeps its attribution.
+  assert.equal(labelShown(html([{ type: "thinking", thinking: "plan" }, { type: "text", text: "Answer" }])), true);
+  assert.equal(labelShown(html([{ type: "text", text: "Answer" }])), true);
+});
+
 test("an expanded thinking block collapses and re-expands by hand", async () => {
   const message = {
     role: "assistant",

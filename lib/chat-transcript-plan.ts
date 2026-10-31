@@ -1,5 +1,5 @@
 import { stripAnsi } from "./ansi";
-import { getDisplayableAssistantBlocks } from "./message-display";
+import { getDisplayableAssistantBlocks, isReplyBlock } from "./message-display";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, CustomMessage, ToolResultMessage } from "./types";
 
 /**
@@ -34,6 +34,10 @@ export type TranscriptRow =
 export interface PlanOptions {
   /** Mirrors omp's `hideThinkingBlock`: drop thinking blocks entirely. */
   hideThinking?: boolean;
+  /** "Expand thinking blocks by default": thinking stays visible like text instead of folding. */
+  showThinking?: boolean;
+  /** "Show tool calls outside Process details": tool call rows stay visible like text. */
+  showToolCalls?: boolean;
 }
 
 // A user message normally anchors a turn. When compaction fires mid-turn, pi
@@ -97,7 +101,7 @@ export function planTurnSegments(
       other = [];
     };
     for (const block of blocks) {
-      if (block.type === "image" || (block.type === "text" && block.text.trim().length > 0)) {
+      if (isReplyBlock(block) || (block.type === "thinking" && options.showThinking) || (block.type === "toolCall" && options.showToolCalls)) {
         flushOther();
         text.push(block);
       } else if (block.type !== "text") {
@@ -254,7 +258,10 @@ export function planTranscriptRows(messages: AgentMessage[], options: PlanOption
       rows.push({ kind: "group", userIndex: userIdx, endIndex: endIdx, segments });
     } else {
       // Nothing to fold: render the anchor and the rest as standalone messages.
-      for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) rows.push({ kind: "message", index: renderIdx });
+      // Tool results render under their tool call, as in the fold, so they get no row.
+      for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
+        if (messages[renderIdx].role !== "toolResult") rows.push({ kind: "message", index: renderIdx });
+      }
     }
     idx = endIdx;
   }
