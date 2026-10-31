@@ -39,7 +39,7 @@ interface Reply {
   body: unknown;
 }
 
-/** A command's run by rid; `expiresAt` is Infinity while it runs. */
+/** A command's run by session and rid; `expiresAt` is Infinity while it runs. */
 interface Remembered {
   result: Promise<Reply>;
   expiresAt: number;
@@ -151,7 +151,9 @@ function onCommand(ws: BrowserSocket, frame: Record<string, unknown>): void {
   const sessionId = ws.data.sessionId;
   // Commands belong to a session: the general socket carries none.
   if (sessionId === null) return send(ws, "reply", { rid, status: 400, body: INVALID_REQUEST });
-  const { result, deduped } = runOnce(rid, async () => {
+  // Scoped to the session, not the socket: a resend comes on the session's next socket, and a rid another session
+  // happens to use never replays this one's reply. JSON keeps the pair unambiguous for any session id.
+  const { result, deduped } = runOnce(JSON.stringify([sessionId, rid]), async () => {
     const response = await runAgentCommand(sessionId, frame.command, frame.advisor === true);
     return { status: response.status, body: await response.json() };
   });
@@ -160,13 +162,13 @@ function onCommand(ws: BrowserSocket, frame: Record<string, unknown>): void {
     .catch((error: unknown) => fail(ws, error));
 }
 
-/** One run per rid: a known rid joins the run in flight or replays its settled reply (a resend after a lost reply). */
-function runOnce(rid: string, run: () => Promise<Reply>): { result: Promise<Reply>; deduped: boolean } {
+/** One run per key: a known key joins the run in flight or replays its settled reply (a resend after a lost reply). */
+function runOnce(key: string, run: () => Promise<Reply>): { result: Promise<Reply>; deduped: boolean } {
   const map = (globalThis.__ompBrowserCommands ??= new Map());
   const now = Date.now();
-  const known = map.get(rid);
+  const known = map.get(key);
   if (known && known.expiresAt > now) return { result: known.result, deduped: true };
-  for (const [key, entry] of map) if (entry.expiresAt <= now) map.delete(key);
+  for (const [stale, entry] of map) if (entry.expiresAt <= now) map.delete(stale);
   if (map.size >= DEDUPE_MAX) {
     // The oldest settled goes first; one in flight (Infinity) only when none has settled.
     let oldest: [string, Remembered] | undefined;
@@ -179,6 +181,6 @@ function runOnce(rid: string, run: () => Promise<Reply>): { result: Promise<Repl
     entry.expiresAt = Date.now() + DEDUPE_WINDOW_MS;
   };
   entry.result.then(settle, settle);
-  map.set(rid, entry);
+  map.set(key, entry);
   return { result: entry.result, deduped: false };
 }
