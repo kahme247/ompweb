@@ -151,6 +151,8 @@ function closeSource() {
   source?.close();
   source = null;
   connectionId = null;
+  // A frame held for the first clock must not be recorded later under whatever mode the worker is in by then.
+  sseConn.heldEvent = null;
 }
 
 function scheduleReconnect() {
