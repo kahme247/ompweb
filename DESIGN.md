@@ -106,10 +106,9 @@ knowing where omp runs. Session routes address a session by id; the owning
 host resolves the file path, so a remote path never reaches the serving
 machine's filesystem.
 
-The link is two HTTP requests that the `ompweb host` daemon opens to the
-server: a long-lived response for server → daemon and batched POSTs for
-daemon → server. There is no WebSocket yet: the route handlers
-are plain `Request` → `Response` functions. The daemon
+The link is one WebSocket that the `ompweb host` daemon opens to the
+server: text frames carry the messages in both directions and binary frames
+carry large op results (daemon → server). The daemon
 forwards omp's NDJSON unchanged and answers a fixed allow-list of host
 operations; there is no generic exec or file-read operation. A host is
 trusted like the serving machine: control of the server or of a host token is
