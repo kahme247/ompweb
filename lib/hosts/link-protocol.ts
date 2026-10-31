@@ -8,7 +8,10 @@ export const LINK_PROTOCOL_VERSION = 2;
 export const LINK_LIMITS = {
   pingMs: 15_000,
   offlineMs: 30_000,
-  channelBufferBytes: 8 * 1024 * 1024,
+  // One prompt's two echoes (message_start, message_end) must fit with no ack on a
+  // slow link: each is up to the 8 MiB command body as base64 rpc_chunk lines
+  // (~10.7 MiB), and the rest is room for the streamed reply.
+  channelBufferBytes: 32 * 1024 * 1024,
   flushMs: 16,
   flushBytes: 256 * 1024,
   uplinkBytes: 16 * 1024 * 1024,

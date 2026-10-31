@@ -210,13 +210,17 @@ On 409 the daemon keeps the messages and sends them after the next
   which receives `replaced`. Two daemons must never run competing
   `omp --resume` children against one agent directory.
 - **Buffering.** While the uplink is down, the daemon buffers each child's
-  output up to 8 MB per channel. On overflow it drops that channel's buffer
+  output up to 32 MB per channel, so one image prompt's two echoes
+  (`message_start`, `message_end`, each up to ~11 MB of `rpc_chunk` lines)
+  fit unacked. On overflow it drops that channel's buffer
   and queues `resync {ch}`, which reaches main with the first uplink POST that
-  gets through, ahead of the channel's later output; main then runs the
-  existing `get_state` reconcile for that session. On main, output that
-  arrives before the session reads its channel is held for it up to the same
-  8 MB; past that main kills the child (`kill {force: true}`) rather than hold
-  more, and what was held is still delivered.
+  gets through, ahead of the channel's later output. The drop may cut an
+  `rpc_chunk` sequence, so main's `RpcProcess` discards any partial chunked
+  frame and skips leftover chunks until the next frame start, then runs the
+  existing `get_state` reconcile for that session. On main, output that arrives before the
+  session reads its channel is held for it up to the same 32 MB; past that
+  main kills the child (`kill {force: true}`) rather than hold more, and what
+  was held is still delivered.
 - **Reattach.** On `hello`, main reattaches every listed `ch` to its
   `AgentSessionWrapper` and kills (`kill`) listed channels it has no wrapper
   for (orphans of a main restart). A wrapper whose channel is missing from

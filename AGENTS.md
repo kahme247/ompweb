@@ -321,10 +321,12 @@ bin/
   and stay registered until their `exit`. A cold remote spawn for a session
   awaits `orphanExit(hostId, sessionId)` first so two children never write one
   file; the wait rejects 503 as soon as the link goes down. A buffer overflow on
-  the daemon (8 MB per channel) sends `resync {ch}` and main reruns the
-  `get_state` reconcile. With `autoResumeSessions` on, an interrupted remote
-  session resumes after its host's hello (`resumeOnHostLink`,
-  `lib/session-resume.ts`), once, after the orphan's exit.
+  the daemon (32 MB per channel, two image-prompt echoes) drops the channel's
+  backlog and sends `resync {ch}`; main's `RpcProcess` discards any partial
+  chunked frame, skips leftover chunks until the next frame start, and reruns
+  the `get_state` reconcile. With `autoResumeSessions` on,
+  an interrupted remote session resumes after its host's hello
+  (`resumeOnHostLink`, `lib/session-resume.ts`), once, after the orphan's exit.
 - **Proxy exclusion.** `proxy.ts` does not run for `/api/hosts/link` and its
   subpaths (its matcher excludes exactly those). Next buffers a proxied request
   body and silently truncates it past 10 MB, below the link's 16 MB uplink and
