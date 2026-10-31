@@ -52,5 +52,8 @@ if (!result.success) process.exit(1);
 for (const [url, source] of fonts) await Bun.write(path.join(outdir, url), Bun.file(source));
 const indexPath = path.join(outdir, "index.html");
 await Bun.write(indexPath, stylesheetFirst(await Bun.file(indexPath).text()));
-await Bun.write(path.join(root, "build", "client-packages.json"), `${JSON.stringify(bundledPackageDirs(result.metafile!, process.cwd()).map((dir) => path.relative(root, dir)), null, 2)}\n`);
+// Tailwind's plugin writes its CSS (preflight included) into the bundle, so the metafile never names tailwindcss.
+const tailwindcss = path.dirname(Bun.resolveSync("tailwindcss/package.json", root));
+const clientPackages = [...new Set([...bundledPackageDirs(result.metafile!, process.cwd()), tailwindcss])].sort();
+await Bun.write(path.join(root, "build", "client-packages.json"), `${JSON.stringify(clientPackages.map((dir) => path.relative(root, dir)), null, 2)}\n`);
 console.log(`built ${result.outputs.length + fonts.size} files into ${path.relative(process.cwd(), outdir) || "."}`);
