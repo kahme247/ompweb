@@ -16,10 +16,13 @@
 //                 { op: "lock", name }  (tab holds this Web Lock while alive)
 //                 { op: "bye" }         (pagehide: drop this tab's streams)
 //                 { op: "wake", reason, visible, clientId }  (reason: init | visible | hidden | online | network)
+//                 { op: "cmd", n, req, sessionId, advisor, body }  (an agent command; body: its JSON text)
 // Worker -> tab:  { id, type: "open" }
 //                 { id, type: "message", data }   (raw JSON string)
 //                 { id, type: "error", readyState: 0 | 2 }  (EventSource semantics)
 //                 { transport: "sse" | "websocket" }  (on attach once known, and on every change)
+//                 { cmd: n, http: true }  (SSE mode: the tab POSTs the command itself)
+//                 { cmd: n, status, body, recvAt, repliedAt, attempts, deduped, behindBytes }
 "use strict";
 
 const EVENT_STREAM_PATH = "/api/events";
@@ -33,7 +36,7 @@ const RESUBSCRIBE_DELAY_MS = 3000;
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 const EVENT_SOCKET_PATH = "/api/events/ws";
-// A socket closes this long after its session's last stream, so a tab switch back reuses it.
+// A session socket closes this long after its last stream and command, so a tab switch back reuses it.
 const SESSION_LINGER_MS = 30000;
 // The server pings every 10 s: a socket with no frame for this long is dead.
 const WS_SILENCE_MS = 25000;
@@ -43,6 +46,13 @@ const VISIBLE_PROBE_MS = 3000;
 // this without a hello is the one an earlier tab's wake just started.
 const WAKE_REDIAL_GAP_MS = 1000;
 const FORCED_RECONNECT_CODE = 4000;
+// Mirrors MAX_AGENT_COMMAND_REQUEST_BYTES (lib/image-attachments.ts): the route answers 413 above this many UTF-8 bytes.
+const MAX_AGENT_COMMAND_REQUEST_BYTES = 8 * 1024 * 1024;
+const SEND_DEADLINE_MS = 15000;
+// Plus 1 ms per 32 bytes the socket must upload before the ack can come (a 32 KB/s floor).
+const ACK_TIMEOUT_MS = 10000;
+const TRANSPORT_UNAVAILABLE = { error: "Not sent: no connection to omp-web.", code: "transport_unavailable" };
+const TRANSPORT_LOST = { error: "The connection to omp-web dropped before the answer arrived; the command may have run.", code: "transport_lost" };
 
 /** @type {EventSource | null} */
 let source = null;
@@ -156,6 +166,7 @@ function handleControl(frame, conn = sseConn) {
     // switch moves every subscription instead of subscribing them on this one.
     if (setMode(frame.transport)) return;
     for (const subscription of conn === sseConn ? subscriptions.values() : conn.subs) subscribe(subscription);
+    if (conn !== sseConn) sendWaiting(conn);
     return;
   }
   const subscription = subscriptions.get(frame.sub);
@@ -336,13 +347,23 @@ function join(subscription) {
 
 function leave(conn, subscription) {
   conn.subs.delete(subscription);
-  if (conn.subs.size > 0 || conn.pending.size > 0) return;
-  // The general socket goes with its last stream, like the EventSource.
-  if (conn.sessionId === null) retire(conn);
-  else conn.lingerTimer = setTimeout(() => retire(conn), SESSION_LINGER_MS);
+  idle(conn);
 }
 
-/** Done with this socket: forget it and close it. */
+/** Closes a socket with no stream and no command left: the general one now (like the EventSource), a session one after the linger. */
+function idle(conn) {
+  if (conn.subs.size > 0 || conn.pending.size > 0) return;
+  if (conn.retiring) {
+    shut(conn);
+  } else if (conn.sessionId === null) {
+    retire(conn);
+  } else {
+    clearTimeout(conn.lingerTimer);
+    conn.lingerTimer = setTimeout(() => retire(conn), SESSION_LINGER_MS);
+  }
+}
+
+/** Done with this socket: forgotten now, closed once the commands sent on it are answered. */
 function retire(conn) {
   conns.delete(conn.key);
   if (conns.size === 0) {
@@ -353,6 +374,14 @@ function retire(conn) {
   clearTimeout(conn.reconnectTimer);
   conn.retiring = true;
   conn.subs.clear();
+  // One waiting to be sent never left the browser, so the tab POSTs it; one waiting for a resend may have run.
+  for (const command of conn.pending.values()) {
+    if (!command.inFlight) settle(conn, command, command.attempts === 0 ? { cmd: command.n, http: true } : failure(command, TRANSPORT_LOST));
+  }
+  idle(conn);
+}
+
+function shut(conn) {
   const ws = conn.ws;
   conn.ws = null;
   conn.connectionId = null;
@@ -382,17 +411,19 @@ function backoff(conn) {
   return delay;
 }
 
-/** Gives up on the socket and dials again after `delay` ms (0: now); the next hello re-subscribes its streams. */
+/** Gives up on the socket and dials again after `delay` ms (0: now); the next hello re-subscribes its streams and resends its commands. */
 function redial(conn, delay) {
-  // A lingering socket has no stream to come back for.
-  if (conn.subs.size === 0 && conn.pending.size === 0) {
-    retire(conn);
-    return;
-  }
   const ws = conn.ws;
   conn.ws = null;
   conn.connectionId = null;
   ws?.close(FORCED_RECONNECT_CODE);
+  for (const command of conn.pending.values()) if (command.inFlight) lost(conn, command);
+  if (conn.retiring) return;
+  // A lingering socket has no stream or command to come back for.
+  if (conn.subs.size === 0 && conn.pending.size === 0) {
+    retire(conn);
+    return;
+  }
   markConnecting(conn.subs);
   clearTimeout(conn.reconnectTimer);
   conn.reconnectTimer = undefined;
@@ -413,21 +444,126 @@ function sendFrame(conn, frame) {
 /** Server frames are "<name> <server ms>\n<json>": split at the first newline, the payload passed on unparsed. */
 function onSocketFrame(conn, text) {
   conn.lastFrameAt = Date.now();
-  const name = text.slice(0, text.indexOf(" "));
-  const data = text.slice(text.indexOf("\n") + 1);
-  if (name === MUX_CONTROL_EVENT) {
+  const space = text.indexOf(" ");
+  const newline = text.indexOf("\n");
+  const name = text.slice(0, space);
+  const data = text.slice(newline + 1);
+  if (name === MUX_CONTROL_EVENT || name === "ack" || name === "reply") {
     let frame;
     try {
       frame = JSON.parse(data);
     } catch {
       return;
     }
-    handleControl(frame, conn);
+    if (name === MUX_CONTROL_EVENT) handleControl(frame, conn);
+    else onCommandFrame(conn, name, Number(text.slice(space + 1, newline)), frame);
     return;
   }
   // A subscription's frame; `ping` and `pong` only prove the socket is alive.
   const subscription = subscriptions.get(name);
   if (subscription?.conn === conn) subscription.listener({ data });
+}
+
+// Agent commands (spec D5 "Commands", "Resend"): each rides its session's socket, keyed by the tab's request id.
+
+function queueCommand(client, message) {
+  const { n, req, body } = message;
+  if (mode !== "websocket") {
+    post(client, { cmd: n, http: true });
+    return;
+  }
+  const command = {
+    n,
+    client,
+    req,
+    body,
+    frame: `{"t":"cmd","rid":${JSON.stringify(req)},"advisor":${message.advisor === true},"command":${body}}`,
+    attempts: 0,
+    inFlight: false,
+    serverId: null,
+    recvAt: null,
+    behindBytes: 0,
+    deadline: undefined,
+    ackTimer: undefined,
+  };
+  // UTF-8 bytes, as the route counts them; a body under a third of the limit cannot reach it.
+  if (body.length * 3 > MAX_AGENT_COMMAND_REQUEST_BYTES && new Blob([body]).size > MAX_AGENT_COMMAND_REQUEST_BYTES) {
+    post(client, reply(command, 413, { error: "Agent command is too large", code: "request_too_large" }));
+    return;
+  }
+  const conn = connFor(message.sessionId);
+  conn.pending.set(req, command);
+  if (conn.connectionId) sendCommand(conn, command);
+  else waitToSend(conn, command);
+}
+
+/** Not sent within SEND_DEADLINE_MS: unavailable if it never left the browser, lost if it was sent before. */
+function waitToSend(conn, command) {
+  command.deadline = setTimeout(() => {
+    settle(conn, command, failure(command, command.attempts === 0 ? TRANSPORT_UNAVAILABLE : TRANSPORT_LOST));
+  }, SEND_DEADLINE_MS);
+}
+
+function sendCommand(conn, command) {
+  clearTimeout(command.deadline);
+  command.attempts += 1;
+  command.inFlight = true;
+  command.serverId = conn.serverId;
+  command.recvAt = null;
+  command.behindBytes = conn.ws.bufferedAmount;
+  conn.ws.send(command.frame);
+  // No ack in time is a silent hang: the socket is dead even if it never closed.
+  const timeout = ACK_TIMEOUT_MS + Math.ceil((command.behindBytes + command.body.length) / 32);
+  command.ackTimer = setTimeout(() => redial(conn, backoff(conn)), timeout);
+}
+
+/** After a hello: a lost command goes again only where it cannot run twice, as an idempotent one or to the server that dedupes its rid. */
+function sendWaiting(conn) {
+  for (const command of conn.pending.values()) {
+    if (command.inFlight) continue;
+    if (command.attempts === 0 || idempotent(command) || command.serverId === conn.serverId) sendCommand(conn, command);
+    else settle(conn, command, failure(command, TRANSPORT_LOST));
+  }
+}
+
+function idempotent(command) {
+  const type = JSON.parse(command.body).type;
+  return typeof type === "string" && (type.startsWith("get_") || type === "predict_word");
+}
+
+/** Its socket dropped before the reply: resent at most once, never from a retiring socket. */
+function lost(conn, command) {
+  command.inFlight = false;
+  clearTimeout(command.ackTimer);
+  if (conn.retiring || command.attempts > 1) settle(conn, command, failure(command, TRANSPORT_LOST));
+  else waitToSend(conn, command);
+}
+
+function onCommandFrame(conn, name, at, frame) {
+  const command = conn.pending.get(frame.rid);
+  if (!command) return;
+  if (name === "ack") {
+    clearTimeout(command.ackTimer);
+    command.recvAt = at;
+  } else {
+    settle(conn, command, reply(command, frame.status, frame.body, at, frame.deduped === true));
+  }
+}
+
+function reply(command, status, body, repliedAt = null, deduped = false) {
+  return { cmd: command.n, status, body, recvAt: command.recvAt, repliedAt, attempts: command.attempts, deduped, behindBytes: command.behindBytes };
+}
+
+function failure(command, body) {
+  return reply(command, 503, body);
+}
+
+function settle(conn, command, message) {
+  clearTimeout(command.deadline);
+  clearTimeout(command.ackTimer);
+  conn.pending.delete(command.req);
+  post(command.client, message);
+  idle(conn);
 }
 
 function checkSilence() {
@@ -481,6 +617,9 @@ function attach(port) {
         break;
       case "wake":
         wake(message.reason);
+        break;
+      case "cmd":
+        queueCommand(client, message);
         break;
       case "lock":
         // MessagePort has no close event. The tab holds this lock for its
