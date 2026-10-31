@@ -51,7 +51,12 @@ import {
   composeMessageWithTextAttachments,
   describeTextAttachmentSkip,
   formatAttachmentBytes,
+  inferImageMimeType,
+  isImageAttachmentFile,
+  MAX_ATTACHED_TEXT_BYTES,
   MAX_ATTACHED_TEXT_FILES,
+  MAX_TOTAL_ATTACHED_TEXT_BYTES,
+  readAttachmentText,
   selectTextAttachments,
 } from "@/lib/chat-attachments";
 import {
@@ -569,7 +574,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       MAX_ATTACHED_IMAGES - attachedImagesRef.current.length - pendingImageCountRef.current,
     );
     const imageFiles = files
-      .filter((file) => file.type.startsWith("image/") && file.size <= MAX_ATTACHED_IMAGE_BYTES)
+      .filter((file) => isImageAttachmentFile(file) && file.size <= MAX_ATTACHED_IMAGE_BYTES)
       .slice(0, remaining);
     if (!imageFiles.length) {
       if (files.length > 0) {
@@ -595,7 +600,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 const result = reader.result as string;
                 // result is "data:<mime>;base64,<data>"
                 const base64 = result.split(",")[1];
-                const image = { data: base64, mimeType: file.type, previewUrl: URL.createObjectURL(file) };
+                const image = { data: base64, mimeType: inferImageMimeType(file), previewUrl: URL.createObjectURL(file) };
                 created.push(image);
                 resolve(image);
               };
@@ -627,7 +632,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     } finally {
       pendingImageCountRef.current -= imageFiles.length;
     }
-  }, []);
+  }, [t]);
 
   const processTextFiles = useCallback(async (files: File[]) => {
     const remaining = Math.max(
@@ -651,48 +656,100 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     }
     const revision = attachmentRevisionRef.current;
     const identityRevision = attachmentIdentityRevisionRef.current;
+    const reservedBytes = textFiles.reduce((total, file) => total + file.size, 0);
     pendingTextFileCountRef.current += textFiles.length;
-    pendingTextFileBytesRef.current += textFiles.reduce((total, file) => total + file.size, 0);
+    pendingTextFileBytesRef.current += reservedBytes;
     try {
+      type ReadCandidate =
+        | { status: "binary" }
+        | { status: "text"; file: AttachedTextFile };
+
       const readFiles = await Promise.all(
-        textFiles.map(async (file): Promise<AttachedTextFile> => ({
-          name: file.name,
-          mimeType: file.type,
-          content: await file.text(),
-          size: file.size,
-        })),
+        textFiles.map(async (file): Promise<ReadCandidate> => {
+          const content = await readAttachmentText(file);
+          if (content === null || content.includes("\u0000") || content.includes("\uFFFD")) {
+            return { status: "binary" };
+          }
+          const contentBytes = new TextEncoder().encode(content).byteLength;
+          return {
+            status: "text",
+            file: {
+              name: file.name,
+              mimeType: file.type,
+              content,
+              size: contentBytes,
+            },
+          };
+        }),
       );
       // The composer was cleared/sent while the reads were in flight —
       // drop the batch instead of re-appending stale attachments.
       if (attachmentRevisionRef.current !== revision) return;
-      // Binary content cannot be inlined into the prompt: NUL bytes, or
-      // U+FFFD replacement characters left by mis-decoded binary (e.g.
-      // UTF-16 text read as UTF-8).
-      const newFiles = readFiles.filter(
-        (file) => !file.content.includes("\u0000") && !file.content.includes("\uFFFD"),
-      );
-      const skipped = textFiles.length - newFiles.length;
-      setAttachedTextFiles((prev) => [
-        ...prev,
-        ...(identityRevision !== attachmentIdentityRevisionRef.current
-          ? newFiles
-          : newFiles.slice(0, Math.max(0, MAX_ATTACHED_TEXT_FILES - prev.length))),
-      ]);
+
+      const binaryCount = readFiles.filter((r) => r.status === "binary").length;
+      const textCandidates = readFiles
+        .filter((r): r is { status: "text"; file: AttachedTextFile } => r.status === "text")
+        .map((r) => r.file);
+
+      const otherInFlightBytes = Math.max(0, pendingTextFileBytesRef.current - reservedBytes);
+      let currentBytes = attachedTextFilesRef.current.reduce((total, file) => total + file.size, 0) + otherInFlightBytes;
+      let extractedTooLarge = 0;
+      let extractedOverBudget = 0;
+      const validTextFiles: AttachedTextFile[] = [];
+
+      for (const candidate of textCandidates) {
+        if (candidate.size > MAX_ATTACHED_TEXT_BYTES) {
+          extractedTooLarge++;
+          continue;
+        }
+        if (currentBytes + candidate.size > MAX_TOTAL_ATTACHED_TEXT_BYTES) {
+          extractedOverBudget++;
+          continue;
+        }
+        currentBytes += candidate.size;
+        validTextFiles.push(candidate);
+      }
+
+      const totalTooLarge = tooLarge + extractedTooLarge;
+      const totalOverBudget = overBudget + extractedOverBudget;
+
+      setAttachedTextFiles((prev) => {
+        if (identityRevision !== attachmentIdentityRevisionRef.current) {
+          return [...prev, ...validTextFiles];
+        }
+        let committedBytes = prev.reduce((total, file) => total + file.size, 0);
+        const accepted = validTextFiles
+          .filter((file) => {
+            if (committedBytes + file.size > MAX_TOTAL_ATTACHED_TEXT_BYTES) return false;
+            committedBytes += file.size;
+            return true;
+          })
+          .slice(0, Math.max(0, MAX_ATTACHED_TEXT_FILES - prev.length));
+        return [...prev, ...accepted];
+      });
+
+      const sizeLimitMessage = describeTextAttachmentSkip({
+        tooLarge: totalTooLarge,
+        overBudget: totalOverBudget,
+      });
+      const effectiveLimitMessage = sizeLimitMessage
+        ?? (binaryCount > 0 ? t("chatInput.attachmentBinarySkipped", { count: binaryCount }) : null);
+
       setAttachError(
-        limitMessage
-          ?? (skipped > 0 ? t("chatInput.attachmentBinarySkipped", { count: skipped }) : null),
+        effectiveLimitMessage
+          ?? (validTextFiles.length === 0 && files.length > 0 ? t("chatInput.attachmentFilesSkipped", { count: files.length }) : null),
       );
     } catch {
       setAttachError(t("chatInput.attachmentTextReadFailed"));
     } finally {
       pendingTextFileCountRef.current -= textFiles.length;
-      pendingTextFileBytesRef.current -= textFiles.reduce((total, file) => total + file.size, 0);
+      pendingTextFileBytesRef.current -= reservedBytes;
     }
-  }, []);
+  }, [t]);
 
   const processFiles = useCallback((files: File[]) => {
-    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
-    const otherFiles = files.filter((file) => !file.type.startsWith("image/"));
+    const imageFiles = files.filter((file) => isImageAttachmentFile(file));
+    const otherFiles = files.filter((file) => !isImageAttachmentFile(file));
     void processImageFiles(imageFiles);
     void processTextFiles(otherFiles);
   }, [processImageFiles, processTextFiles]);

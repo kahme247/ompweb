@@ -1034,3 +1034,50 @@ for (const holdUpload of [false, true]) {
     await waitFor(() => assert.equal(getDraft(targetKey), null));
   });
 }
+
+test("drops candidates expanding beyond per-file and aggregate limits post-read", async () => {
+  const { MAX_ATTACHED_TEXT_BYTES, MAX_TOTAL_ATTACHED_TEXT_BYTES } = await jiti.import("@/lib/chat-attachments");
+  const ref = React.createRef();
+  render(React.createElement(ChatInput, {
+    ref,
+    draftKey: "budget-check-test",
+    isStreaming: false,
+    onSend: async () => ({ status: "accepted" }),
+  }));
+
+  // Mock readAttachmentText expansion behavior by providing a file whose read text expands past MAX_ATTACHED_TEXT_BYTES
+  // In jsdom / test environment, File.text() returns the file content
+  const hugeContent = "A".repeat(MAX_ATTACHED_TEXT_BYTES + 100);
+  const hugeFile = new File([hugeContent], "huge.txt", { type: "text/plain" });
+  // Override size on the File object so it passes initial selectTextAttachments (pre-read)
+  Object.defineProperty(hugeFile, "size", { value: 100, configurable: true });
+
+  await act(async () => {
+    ref.current.addFiles([hugeFile]);
+  });
+
+  await waitFor(() => {
+    const draft = getDraft("budget-check-test");
+    assert.equal(draft?.files?.length ?? 0, 0, "oversized post-read file is rejected");
+  });
+
+  // Now test aggregate budget enforcement post-read
+  const fitsBytes = Math.floor(MAX_TOTAL_ATTACHED_TEXT_BYTES * 0.6);
+  const file1Content = "B".repeat(fitsBytes);
+  const file1 = new File([file1Content], "file1.txt", { type: "text/plain" });
+  Object.defineProperty(file1, "size", { value: 100, configurable: true });
+
+  const file2Content = "C".repeat(fitsBytes);
+  const file2 = new File([file2Content], "file2.txt", { type: "text/plain" });
+  Object.defineProperty(file2, "size", { value: 100, configurable: true });
+
+  await act(async () => {
+    ref.current.addFiles([file1, file2]);
+  });
+
+  await waitFor(() => {
+    const draft = getDraft("budget-check-test");
+    assert.equal(draft?.files?.length, 1, "only file fitting within aggregate limit is retained");
+    assert.equal(draft.files[0].name, "file1.txt");
+  });
+});
