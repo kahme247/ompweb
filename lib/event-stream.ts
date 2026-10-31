@@ -252,11 +252,6 @@ export function openEventStream(channel: EventStreamChannel): EventStream {
   return transport.open(channel);
 }
 
-/** How the worker reaches omp-web: SSE until it says otherwise, and without a transport. */
-export function transportMode(): BrowserTransport {
-  return transport?.mode ?? "sse";
-}
-
 /** Hands a transport sample (spec D6) to the worker, which tags and stores it; without a transport it is dropped. */
 export function recordTransportSample(sample: Record<string, unknown>): void {
   transport?.post({ op: "metric", sample });
