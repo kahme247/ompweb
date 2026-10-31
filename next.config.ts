@@ -4,6 +4,7 @@ import { readFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { PHASE_DEVELOPMENT_SERVER } from "next/constants.js";
+import { MAX_UPLOAD_REQUEST_BYTES } from "./lib/upload-limits";
 
 // The WASM SWC build used on wasm-first targets (e.g. aarch64-linux-android)
 // does not transpile ESM to CJS, so this file loads as ESM there and
@@ -28,6 +29,14 @@ const eventStreamWorkerVersion = createHash("sha256")
 const nextConfig = (phase: string): NextConfig => {
   const isDev = phase === PHASE_DEVELOPMENT_SERVER;
   return {
+    experimental: {
+      // Next buffers every proxied request body up to this many bytes *before*
+      // the proxy can answer 401, so this is an unauthenticated memory budget.
+      // It must cover one upload request (a per-file cap plus multipart
+      // framing) but must not grow with the selection: clients upload a larger
+      // selection as batches, each at most MAX_UPLOAD_REQUEST_FILE_BYTES.
+      proxyClientMaxBodySize: MAX_UPLOAD_REQUEST_BYTES,
+    },
     // Keep standalone/server tracing inside this package. Without this explicit
     // root, Next can choose a parent lockfile on Windows and traverse protected
     // user-profile junctions while compiling.

@@ -23,6 +23,11 @@ import {
   validateUploadFileNames,
 } from "@/lib/file-upload";
 import { parseFormDataWithinLimit, parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
+import {
+  MAX_UPLOAD_FILE_BYTES,
+  MAX_UPLOAD_REQUEST_BYTES,
+  MAX_UPLOAD_REQUEST_FILE_BYTES,
+} from "@/lib/upload-limits";
 
 const IGNORED_NAMES = new Set([
   "node_modules", ".git", ".next", "dist", "build", "__pycache__",
@@ -35,10 +40,6 @@ const IGNORED_SUFFIXES = [".pyc"];
 const FILE_REQUEST_TYPES = ["list", "read", "download", "meta", "preview"] as const;
 type FileRequestType = typeof FILE_REQUEST_TYPES[number];
 const FILE_REQUEST_TYPE_SET = new Set<string>(FILE_REQUEST_TYPES);
-const MAX_UPLOAD_FILE_BYTES = 25 * 1024 * 1024;
-const MAX_UPLOAD_TOTAL_BYTES = 100 * 1024 * 1024;
-// Multipart boundaries and headers are not file bytes, but must be bounded too.
-const MAX_UPLOAD_REQUEST_BYTES = MAX_UPLOAD_TOTAL_BYTES + 1024 * 1024;
 const MAX_UPLOAD_CHECK_REQUEST_BYTES = 1024 * 1024;
 
 const EXT_TO_LANGUAGE: Record<string, string> = {
@@ -159,7 +160,7 @@ export async function POST(
       formData = await parseFormDataWithinLimit(request, MAX_UPLOAD_REQUEST_BYTES);
     } catch (error) {
       if (error instanceof RequestBodyTooLargeError) {
-        return NextResponse.json({ error: "Uploads must total 100MB or less", code: "upload_total_too_large" }, { status: 413 });
+        return NextResponse.json({ error: "Uploads must total 25MB or less per request", code: "upload_total_too_large" }, { status: 413 });
       }
       throw error;
     }
@@ -167,8 +168,10 @@ export async function POST(
     if (files.some((file) => file.size > MAX_UPLOAD_FILE_BYTES)) {
       return NextResponse.json({ error: "Each upload must be 25MB or smaller", code: "upload_file_too_large" }, { status: 413 });
     }
-    if (files.reduce((total, file) => total + file.size, 0) > MAX_UPLOAD_TOTAL_BYTES) {
-      return NextResponse.json({ error: "Uploads must total 100MB or less", code: "upload_total_too_large" }, { status: 413 });
+    // One request carries one batch: a larger selection arrives as several
+    // requests, so the pre-auth body buffer never has to hold all of it.
+    if (files.reduce((total, file) => total + file.size, 0) > MAX_UPLOAD_REQUEST_FILE_BYTES) {
+      return NextResponse.json({ error: "Uploads must total 25MB or less per request", code: "upload_total_too_large" }, { status: 413 });
     }
     const fileNames = files.map((file) => file.name);
     const validationError = validateUploadFileNames(fileNames);

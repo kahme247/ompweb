@@ -28,6 +28,7 @@ import {
 } from "@/lib/file-paths";
 import type { GitFileStatus, GitFileStatusKind, GitStatusResponse } from "@/lib/git-types";
 import { MAX_RESULT_LIMIT, type FileIndexEntry } from "@/lib/file-fuzzy";
+import { batchUploadFiles } from "@/lib/upload-limits";
 import { buildSearchRows } from "@/lib/search-results";
 
 interface FileEntry {
@@ -879,22 +880,54 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     setUploadProgress(0);
     setUploadPhase("uploading");
 
+    // The server buffers one request body before it authenticates it, so a
+    // selection is uploaded as batches of at most MAX_UPLOAD_REQUEST_FILE_BYTES
+    // and the selection total (MAX_UPLOAD_TOTAL_BYTES) never reaches the wire at once.
+    const batches = batchUploadFiles(files);
+    const totalBytes = files.reduce((total, file) => total + file.size, 0);
+    const summary: UploadSummary = { uploaded: [], skipped: [], errors: [] };
+    const merge = (data: UploadResponse) => {
+      summary.uploaded.push(...(data.uploaded ?? []));
+      summary.skipped.push(...(data.skipped ?? []));
+      summary.errors.push(...(data.errors ?? []));
+    };
+    let sentBytes = 0;
+    let sentFiles = 0;
+
     try {
-      const { status, data } = await uploadFiles(cwd, files, strategy, setUploadProgress);
-      if (status === 409 && data.conflicts?.length) {
-        setPendingConflict({
-          files,
-          conflicts: data.conflicts,
-          nonReplaceable: data.nonReplaceable ?? [],
+      for (const batch of batches) {
+        const batchBytes = batch.reduce((total, file) => total + file.size, 0);
+        const { status, data } = await uploadFiles(cwd, batch, strategy, (percent) => {
+          const inFlight = Math.round((batchBytes * percent) / 100);
+          setUploadProgress(totalBytes > 0
+            ? Math.min(99, Math.round(((sentBytes + inFlight) / totalBytes) * 100))
+            : Math.min(99, percent));
         });
-        return;
-      }
-      if (status < 200 || status >= 300) {
-        throw new Error(data.error ?? translate("fileExplorer.uploadFailed", { status }));
+        if (status === 409 && data.conflicts?.length) {
+          // The dialog keeps its meaning. Batches already accepted stay
+          // uploaded, so only the rest of the selection is asked about again.
+          merge(data);
+          applyUploadResult(summary);
+          setPendingConflict({
+            files: files.slice(sentFiles),
+            conflicts: data.conflicts,
+            nonReplaceable: data.nonReplaceable ?? [],
+          });
+          return;
+        }
+        if (status < 200 || status >= 300) {
+          throw new Error(data.error ?? translate("fileExplorer.uploadFailed", { status }));
+        }
+        merge(data);
+        sentBytes += batchBytes;
+        sentFiles += batch.length;
+        setUploadProgress(totalBytes > 0 ? Math.round((sentBytes / totalBytes) * 100) : 100);
       }
       setUploadProgress(100);
-      applyUploadResult(data);
+      applyUploadResult(summary);
     } catch (uploadFailure) {
+      // Whatever earlier batches already wrote stays visible next to the error.
+      if (summary.uploaded.length > 0 || summary.skipped.length > 0 || summary.errors.length > 0) applyUploadResult(summary);
       setUploadError(uploadFailure instanceof Error ? uploadFailure.message : String(uploadFailure));
     } finally {
       setUploadPhase("idle");

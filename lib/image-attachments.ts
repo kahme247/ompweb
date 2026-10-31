@@ -1,11 +1,10 @@
 /**
  * The attachment budget shared by the composer and the agent routes.
  *
- * Next 16.3 buffers a request body in `proxy.ts` before the route handler runs
- * and rejects anything past its 10 MB default, so the whole JSON command has to
- * stay under that ceiling. Everything below is derived from it: the request cap
- * leaves margin under the proxy boundary, and the aggregate image cap leaves
- * room for base64's 4/3 inflation plus the prompt text inside the request cap.
+ * Next 16.3 buffers a request body in `proxy.ts` before the route handler runs;
+ * the ceiling is `experimental.proxyClientMaxBodySize` (`next.config.ts`). This
+ * JSON command stays far below it anyway: the aggregate image cap leaves room
+ * for base64's 4/3 inflation plus the prompt text inside the request cap.
  *
  * Browser-safe by construction (no Node imports): the composer preflights the
  * exact prompt it is about to send with the same numbers the routes enforce.
