@@ -1,7 +1,7 @@
 export type UsageTimeRange = "today" | "7d" | "30d" | "90d" | "month" | "all";
 export type UsageGranularity = "daily" | "monthly" | "projects";
 export type UsageMetricView = "cost" | "tokens";
-export type UsageBreakdownView = "model" | "day" | "project";
+export type UsageBreakdownView = "model" | "day" | "project" | "session";
 export type CostQualityTier = "provider_reported" | "model_priced" | "unpriced";
 
 export interface ModelRates {
@@ -118,6 +118,37 @@ export interface ProjectUsageSummary {
   sessionsCount: number;
 }
 
+/** One model's slice of a conversation's usage. */
+export interface SessionModelUsage {
+  model: string;
+  provider: string;
+  cost: number;
+  tokens: number;
+}
+
+/**
+ * Usage of one conversation (session), including its subagent, advisor and
+ * other artifact transcripts, which are attributed to the owning session.
+ */
+export interface SessionUsageSummary {
+  sessionId: string;
+  /** Session title, else its first message, else the session id. */
+  title: string;
+  project: string; // session cwd
+  projectName: string; // display folder name
+  /** Models used, most expensive first. */
+  models: SessionModelUsage[];
+  cost: number;
+  tokens: number;
+  share: number; // 0-100 percentage
+  requestsCount: number;
+  lastActiveAt: number; // ms timestamp of the newest request in the window
+  /** The session is no longer in the session list (deleted), so it cannot be opened. */
+  deleted: boolean;
+  /** The session file is past omp-web's load ceiling (MAX_SESSION_LOAD_BYTES), so it cannot be opened here. */
+  tooLarge: boolean;
+}
+
 export interface UsageReportScanInfo {
   transcriptsScanned: number;
   transcriptsOutsideWindow: number;
@@ -135,6 +166,8 @@ export interface UsageReport {
   modelBreakdown: ModelUsageSummary[];
   dayBreakdown: DayUsageSummary[];
   projectBreakdown: ProjectUsageSummary[];
+  /** Per conversation, most expensive first. */
+  sessionBreakdown: SessionUsageSummary[];
   scanInfo: UsageReportScanInfo;
 }
 

@@ -6,6 +6,10 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ## [Unreleased]
 
+### Added
+
+- **See what each conversation cost.** Settings → Usage → Breakdown has a **Conversation** tab next to Model / Day / Project: one row per conversation for the selected time range, with its title, project, the models it used, cost, share, tokens, request count and last activity, most expensive first. Subagent and advisor usage counts toward the conversation that started it. The top 50 are listed, with **Show all** for the rest. Clicking a row opens the conversation; one that has since been deleted, or is too large for omp-web to open, is labelled and cannot be opened.
+
 ### Fixes & Improvements
 
 - **In-app updates work when ompweb runs as a systemd service.** The update worker ran inside the service's cgroup, so stopping the server killed the worker too: nothing was installed, the service could stay down (`Restart=on-failure` does not restart a clean SIGTERM exit), and every page load reopened the update dialog at "Stop ompweb-managed sessions". The worker now runs in its own transient scope (`systemd-run --scope`) and stops, updates and starts the unit through `systemctl`, starting it again if the install fails.

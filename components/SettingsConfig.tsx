@@ -740,7 +740,7 @@ function CompactionMethodOrder({ value, onChange, ...aria }: { value: readonly C
   );
 }
 
-export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, hideToolActivity, onHideToolActivityChange, expandThinkingByDefault, onExpandThinkingByDefaultChange, onHideThinkingBlockChange, providerUsageVisible, onProviderUsageVisibleChange, scopeNativeSelectAll, onScopeNativeSelectAllChange, openUrlAutomatically, onOpenUrlAutomaticallyChange, cwd, sessionId, onModelsSaved, onPluginsReloaded, appUpdate, ompUpdateAvailable, ompUpdatesDisabled, onRefreshAppUpdate, onOmpUpdateAvailabilityChange, onRequestAppUpdate, onSelectTab, onClose }: {
+export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, hideToolActivity, onHideToolActivityChange, expandThinkingByDefault, onExpandThinkingByDefaultChange, onHideThinkingBlockChange, providerUsageVisible, onProviderUsageVisibleChange, scopeNativeSelectAll, onScopeNativeSelectAllChange, openUrlAutomatically, onOpenUrlAutomaticallyChange, cwd, sessionId, onModelsSaved, onPluginsReloaded, appUpdate, ompUpdateAvailable, ompUpdatesDisabled, onRefreshAppUpdate, onOmpUpdateAvailabilityChange, onRequestAppUpdate, onSelectTab, onOpenSession, onClose }: {
   activeTab: SettingsTab;
   toolCallsDefaultCollapsed: boolean;
   onToolCallsDefaultCollapsedChange: (collapsed: boolean) => void;
@@ -766,6 +766,8 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   onOmpUpdateAvailabilityChange: (available: boolean) => void;
   onRequestAppUpdate: () => void;
   onSelectTab: (tab: SettingsTab) => void;
+  /** Open a session by id (Usage → conversation rows). */
+  onOpenSession?: (sessionId: string) => void;
   onClose: () => void;
 }) {
   const isMobile = useIsMobile();
@@ -1533,7 +1535,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   padding: isMobile ? "16px 14px 32px" : "32px 24px 64px",
                 }}
               >
-                <UsageConfig />
+                <UsageConfig onOpenSession={onOpenSession} />
               </div>
             )}
 

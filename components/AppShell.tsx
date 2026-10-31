@@ -2054,6 +2054,7 @@ export function AppShell({ appName }: { appName: string }) {
             onOmpUpdateAvailabilityChange={setOmpUpdateAvailable}
             onRequestAppUpdate={requestAppUpdateFromSettings}
             onSelectTab={setSettingsTab}
+            onOpenSession={openSessionById}
             onClose={() => setSettingsTab(null)}
           />
         ) : (

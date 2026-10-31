@@ -34,13 +34,27 @@ function formatCurrency(amount: number): string {
   return `$${amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-export function UsageConfig() {
-  const { t } = useI18n();
+/** Conversations listed before "Show all" in the session breakdown. */
+export const SESSION_PREVIEW_LIMIT = 50;
+
+const BREAKDOWN_VIEWS: Array<{ view: UsageBreakdownView; labelKey: string }> = [
+  { view: "model", labelKey: "usageConfig.model" },
+  { view: "day", labelKey: "usageConfig.day" },
+  { view: "project", labelKey: "usageConfig.project" },
+  { view: "session", labelKey: "usageConfig.session" },
+];
+
+export function UsageConfig({ onOpenSession }: {
+  /** Open a conversation by id (the session list's open-session helper). */
+  onOpenSession?: (sessionId: string) => void;
+} = {}) {
+  const { t, locale } = useI18n();
 
   const [timeRange, setTimeRange] = useState<UsageTimeRange>("30d");
   const [granularity, setGranularity] = useState<UsageGranularity>("daily");
   const [metricView, setMetricView] = useState<UsageMetricView>("cost");
   const [breakdownView, setBreakdownView] = useState<UsageBreakdownView>("model");
+  const [showAllSessions, setShowAllSessions] = useState(false);
 
   const [report, setReport] = useState<UsageReport | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -291,6 +305,8 @@ export function UsageConfig() {
   const modelBreakdown = report?.modelBreakdown || [];
   const dayBreakdown = report?.dayBreakdown || [];
   const projectBreakdown = report?.projectBreakdown || [];
+  const sessionBreakdown = report?.sessionBreakdown || [];
+  const visibleSessions = showAllSessions ? sessionBreakdown : sessionBreakdown.slice(0, SESSION_PREVIEW_LIMIT);
   const scanInfo = report?.scanInfo;
 
   // Active hover point data
@@ -929,7 +945,7 @@ export function UsageConfig() {
           gap: 14,
         }}
       >
-        {/* Left Card: Breakdown Table */}
+        {/* Left Card: Breakdown Table (full row for conversations, which carry more columns) */}
         <div
           style={{
             background: "var(--bg-panel)",
@@ -939,6 +955,7 @@ export function UsageConfig() {
             display: "flex",
             flexDirection: "column",
             gap: 10,
+            gridColumn: breakdownView === "session" ? "1 / -1" : undefined,
           }}
         >
           {/* Breakdown Header & Toggle */}
@@ -957,75 +974,43 @@ export function UsageConfig() {
                 border: "1px solid var(--border)",
               }}
             >
-              <button
-                type="button"
-                aria-pressed={breakdownView === "model"}
-                onClick={() => setBreakdownView("model")}
-                style={{
-                  padding: "3px 8px",
-                  fontSize: 11,
-                  fontWeight: breakdownView === "model" ? 600 : 400,
-                  borderRadius: "calc(var(--radius-control) - 2px)",
-                  border: "none",
-                  background: breakdownView === "model" ? "var(--bg-selected)" : "transparent",
-                  color: breakdownView === "model" ? "var(--text)" : "var(--text-muted)",
-                  cursor: "pointer",
-                }}
-              >
-                {t("usageConfig.model").toUpperCase()}
-              </button>
-              <button
-                type="button"
-                aria-pressed={breakdownView === "day"}
-                onClick={() => setBreakdownView("day")}
-                style={{
-                  padding: "3px 8px",
-                  fontSize: 11,
-                  fontWeight: breakdownView === "day" ? 600 : 400,
-                  borderRadius: "calc(var(--radius-control) - 2px)",
-                  border: "none",
-                  background: breakdownView === "day" ? "var(--bg-selected)" : "transparent",
-                  color: breakdownView === "day" ? "var(--text)" : "var(--text-muted)",
-                  cursor: "pointer",
-                }}
-              >
-                {t("usageConfig.day").toUpperCase()}
-              </button>
-              <button
-                type="button"
-                aria-pressed={breakdownView === "project"}
-                onClick={() => setBreakdownView("project")}
-                style={{
-                  padding: "3px 8px",
-                  fontSize: 11,
-                  fontWeight: breakdownView === "project" ? 600 : 400,
-                  borderRadius: "calc(var(--radius-control) - 2px)",
-                  border: "none",
-                  background: breakdownView === "project" ? "var(--bg-selected)" : "transparent",
-                  color: breakdownView === "project" ? "var(--text)" : "var(--text-muted)",
-                  cursor: "pointer",
-                }}
-              >
-                {t("usageConfig.project").toUpperCase()}
-              </button>
+              {BREAKDOWN_VIEWS.map(({ view, labelKey }) => (
+                <button
+                  key={view}
+                  type="button"
+                  aria-pressed={breakdownView === view}
+                  onClick={() => setBreakdownView(view)}
+                  style={{
+                    padding: "3px 8px",
+                    fontSize: 11,
+                    fontWeight: breakdownView === view ? 600 : 400,
+                    borderRadius: "calc(var(--radius-control) - 2px)",
+                    border: "none",
+                    background: breakdownView === view ? "var(--bg-selected)" : "transparent",
+                    color: breakdownView === view ? "var(--text)" : "var(--text-muted)",
+                    cursor: "pointer",
+                  }}
+                >
+                  {t(labelKey).toUpperCase()}
+                </button>
+              ))}
             </div>
           </div>
 
           {/* Table Container */}
-          <div style={{ maxHeight: 220, overflowY: "auto" }}>
+          <div style={{ maxHeight: breakdownView === "session" ? 420 : 220, overflowY: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
               <thead>
                 <tr style={{ borderBottom: "1px solid var(--border)", color: "var(--text-dim)", textAlign: "left" }}>
                   <th style={{ padding: "6px 4px", fontWeight: 500 }}>
-                    {breakdownView === "model"
-                      ? t("usageConfig.model")
-                      : breakdownView === "day"
-                        ? t("usageConfig.day")
-                        : t("usageConfig.project")}
+                    {t(BREAKDOWN_VIEWS.find((v) => v.view === breakdownView)?.labelKey ?? "usageConfig.model")}
                   </th>
                   <th style={{ padding: "6px 8px", fontWeight: 500, textAlign: "right" }}>{t("usageConfig.cost")}</th>
                   <th style={{ padding: "6px 8px", fontWeight: 500, textAlign: "right" }}>{t("usageConfig.share")}</th>
                   <th style={{ padding: "6px 4px", fontWeight: 500, textAlign: "right" }}>{t("usageConfig.tokens")}</th>
+                  {breakdownView === "session" && (
+                    <th style={{ padding: "6px 4px", fontWeight: 500, textAlign: "right" }}>{t("usageConfig.requests")}</th>
+                  )}
                 </tr>
               </thead>
               <tbody>
@@ -1111,9 +1096,159 @@ export function UsageConfig() {
                       </tr>
                     ))
                   ))}
+
+                {breakdownView === "session" &&
+                  (sessionBreakdown.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} style={{ padding: "16px 4px", textAlign: "center", color: "var(--text-dim)" }}>
+                        {t("usageConfig.emptyTitle")}
+                      </td>
+                    </tr>
+                  ) : (
+                    visibleSessions.map((s) => {
+                      const openable = !s.deleted && !s.tooLarge && Boolean(onOpenSession);
+                      // Why a listed conversation cannot be opened, if it cannot.
+                      const unavailable = s.deleted
+                        ? { label: t("usageConfig.deletedSession"), hint: t("usageConfig.deletedSessionHint") }
+                        : s.tooLarge
+                          ? { label: t("usageConfig.tooLargeSession"), hint: t("errors.session_file_too_large") }
+                          : undefined;
+                      const mainModel = s.models[0]?.model ?? "";
+                      const modelsLabel = s.models.length > 1 ? `${mainModel} +${s.models.length - 1}` : mainModel;
+                      const modelsTitle = s.models.map((m) => `${m.model}: ${formatCurrency(m.cost)}`).join("\n");
+                      const lastActive = new Date(s.lastActiveAt).toLocaleString(locale, {
+                        year: "numeric",
+                        month: "short",
+                        day: "numeric",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      });
+                      return (
+                        <tr
+                          key={s.sessionId}
+                          data-session-id={s.sessionId}
+                          onClick={openable ? (event) => {
+                            // Releasing a drag that selected text in this row (to copy a title) opens nothing.
+                            const selection = window.getSelection();
+                            const row = event.currentTarget;
+                            if (selection && !selection.isCollapsed
+                              && Array.from({ length: selection.rangeCount }, (_, i) => selection.getRangeAt(i)).some((range) => range.intersectsNode(row))) return;
+                            onOpenSession?.(s.sessionId);
+                          } : undefined}
+                          style={{ borderBottom: "1px solid var(--bg-subtle)", cursor: openable ? "pointer" : undefined }}
+                        >
+                          <td style={{ padding: "6px 4px", maxWidth: 0, width: "100%" }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                              {openable ? (
+                                // The keyboard target; its click bubbles to the row, which opens the conversation.
+                                <button
+                                  type="button"
+                                  title={t("usageConfig.openSession", { title: s.title })}
+                                  style={{
+                                    padding: 0,
+                                    border: "none",
+                                    background: "transparent",
+                                    color: "var(--text)",
+                                    fontSize: 12,
+                                    fontWeight: 500,
+                                    textAlign: "left",
+                                    cursor: "pointer",
+                                    minWidth: 0,
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                    whiteSpace: "nowrap",
+                                  }}
+                                >
+                                  {s.title}
+                                </button>
+                              ) : (
+                                <span
+                                  title={unavailable?.hint ?? s.title}
+                                  style={{
+                                    color: unavailable ? "var(--text-muted)" : "var(--text)",
+                                    fontWeight: 500,
+                                    minWidth: 0,
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                    whiteSpace: "nowrap",
+                                  }}
+                                >
+                                  {s.title}
+                                </span>
+                              )}
+                              {unavailable && (
+                                <span
+                                  style={{
+                                    flexShrink: 0,
+                                    fontSize: 10,
+                                    padding: "0 5px",
+                                    borderRadius: 4,
+                                    border: "1px solid var(--border)",
+                                    color: "var(--text-dim)",
+                                  }}
+                                >
+                                  {unavailable.label}
+                                </span>
+                              )}
+                            </div>
+                            <div
+                              style={{
+                                fontSize: 11,
+                                color: "var(--text-dim)",
+                                marginTop: 1,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              <span title={s.project}>{s.projectName}</span>
+                              {" · "}
+                              <span title={modelsTitle}>{modelsLabel}</span>
+                              {" · "}
+                              <span title={t("usageConfig.lastActive")}>{lastActive}</span>
+                            </div>
+                          </td>
+                          <td style={{ padding: "6px 8px", textAlign: "right", color: "var(--text)", fontWeight: 600, verticalAlign: "top" }}>
+                            {formatCurrency(s.cost)}
+                          </td>
+                          <td style={{ padding: "6px 8px", textAlign: "right", color: "var(--text-muted)", verticalAlign: "top" }}>
+                            {s.share.toFixed(1)}%
+                          </td>
+                          <td style={{ padding: "6px 4px", textAlign: "right", color: "var(--text-muted)", verticalAlign: "top" }}>
+                            {formatTokens(s.tokens)}
+                          </td>
+                          <td style={{ padding: "6px 4px", textAlign: "right", color: "var(--text-muted)", verticalAlign: "top" }}>
+                            {s.requestsCount.toLocaleString()}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  ))}
               </tbody>
             </table>
           </div>
+
+          {breakdownView === "session" && sessionBreakdown.length > SESSION_PREVIEW_LIMIT && (
+            <button
+              type="button"
+              aria-expanded={showAllSessions}
+              onClick={() => setShowAllSessions((v) => !v)}
+              style={{
+                alignSelf: "flex-start",
+                padding: "3px 8px",
+                fontSize: 11,
+                borderRadius: "var(--radius-control)",
+                border: "1px solid var(--border)",
+                background: "var(--bg-subtle)",
+                color: "var(--text-muted)",
+                cursor: "pointer",
+              }}
+            >
+              {showAllSessions
+                ? t("usageConfig.showTopSessions", { count: SESSION_PREVIEW_LIMIT })
+                : t("usageConfig.showAllSessions", { count: sessionBreakdown.length })}
+            </button>
+          )}
         </div>
 
         {/* Right Card: Cost Quality */}
