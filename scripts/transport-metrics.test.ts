@@ -90,6 +90,30 @@ test("an abort behind an upload lands in its own row", () => {
   assert.equal(row(rows, "abort behind upload", "websocket", "no")?.max, 50);
 });
 
+test("a hang stays answered later when its reply is outside the filter, and a hang without req never is", () => {
+  const rows = summarize(
+    [
+      { ...at(5_000), metric: "hang", transport: "sse", req: "x", type: "prompt", via: "http", bytes: 1, waitedMs: 1 },
+      { ...at(9_000), metric: "action", transport: "sse", req: "x", type: "prompt", outcome: "ok" },
+      { ...at(5_000), metric: "hang", transport: "websocket", type: "prompt", via: "ws", bytes: 1, waitedMs: 1 },
+      { ...at(5_000), metric: "action", transport: "websocket", type: "prompt", outcome: "ok" },
+    ],
+    { until: 6_000 },
+  );
+  assert.equal(row(rows, "hang", "sse", "answered later")?.count, 1);
+  assert.equal(row(rows, "hang", "websocket", "total")?.count, 1);
+  assert.equal(row(rows, "hang", "websocket", "answered later"), undefined);
+});
+
+test("the report keeps one section order whatever the order of the samples", () => {
+  const forward = summarize(fixture, {});
+  assert.deepEqual(summarize([...fixture].reverse(), {}), forward);
+  assert.deepEqual(
+    [...new Set(forward.filter((r) => r.transport === "websocket").map((r) => r.section))],
+    ["action totalMs", "action transportMs", "action upMs", "abort behind upload", "event ms", "reconnect ms", "reconnect fromDropMs", "hang", "outcome"],
+  );
+});
+
 test("since, until and client filter on serverAt and clientId", () => {
   const eventRows = (options: Parameters<typeof summarize>[1]) => row(summarize(fixture, options), "event ms", "websocket", "general running");
   assert.equal(eventRows({})?.count, 2);

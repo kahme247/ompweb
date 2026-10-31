@@ -19,6 +19,12 @@ export type SummaryRow = {
 export type SummaryOptions = { since?: number; until?: number; client?: string };
 type Sample = Record<string, unknown>;
 
+// The report's section order, fixed so two runs over different data line up.
+const SECTION_ORDER = [
+  "action totalMs", "action transportMs", "action upMs", "abort behind upload", "event ms", "reconnect ms", "reconnect fromDropMs",
+  "hang", "resend", "deduped", "outcome", "client",
+];
+
 /** Nearest-rank percentile. */
 export function percentile(values: number[], p: number): number | null {
   if (values.length === 0) return null;
@@ -56,8 +62,11 @@ export function summarize(samples: Sample[], options: SummaryOptions): SummaryRo
     if (value !== undefined) add(section, transport, key, value, batch);
   };
 
-  // A hang counts as answered later when the same command ended in a reply (ok or error), not a loss.
-  const answered = new Set(kept.filter((s) => s.metric === "action" && (s.outcome === "ok" || s.outcome === "error")).map((s) => s.req));
+  // A hang counts as answered later when the same command ended in a reply (ok or error), not a loss. Built from every
+  // sample, so a since/until/client filter that cuts the reply off does not turn it into a hang that was never answered.
+  const answered = new Set(
+    samples.filter((s) => s.metric === "action" && typeof s.req === "string" && (s.outcome === "ok" || s.outcome === "error")).map((s) => s.req),
+  );
   const clients = new Map<string, { samples: number; types: Set<string>; ua: string }>();
 
   for (const s of kept) {
@@ -113,8 +122,7 @@ export function summarize(samples: Sample[], options: SummaryOptions): SummaryRo
     max: g.values.length ? Math.max(...g.values) : null,
     ...(g.batches.length ? { meanBatch: g.batches.reduce((a, b) => a + b, 0) / g.batches.length } : {}),
   }));
-  const order = [...new Set(rows.map((r) => r.section))];
-  return rows.sort((a, b) => a.transport.localeCompare(b.transport) || order.indexOf(a.section) - order.indexOf(b.section) || a.key.localeCompare(b.key));
+  return rows.sort((a, b) => a.transport.localeCompare(b.transport) || SECTION_ORDER.indexOf(a.section) - SECTION_ORDER.indexOf(b.section) || a.key.localeCompare(b.key));
 }
 
 /** One line per row. */

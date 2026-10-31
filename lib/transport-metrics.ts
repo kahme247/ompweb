@@ -25,12 +25,12 @@ export function appendTransportSamples(samples: unknown[], ua: string | null): n
   if (lines.length === 0) return 0;
 
   const file = transportMetricsPath();
-  mkdirSync(dirname(file), { recursive: true });
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   try {
     if (statSync(file).size > ROTATE_BYTES) renameSync(file, `${file}.1`);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  appendFileSync(file, `${lines.join("\n")}\n`);
+  appendFileSync(file, `${lines.join("\n")}\n`, { mode: 0o600 });
   return lines.length;
 }
