@@ -124,6 +124,12 @@ current turn continues, and omp decides continuation at the next terminal
 `agent_end`. A client-owned command with attachments is refused before any of
 these steps, so a queued `/goal` cannot clear an attached file.
 
+An asynchronous client command clears only its unchanged originating draft on
+success. Dictation's explicit text override does not bypass that check: newer
+typing, changed attachments and pending attachment reads are retained. Text
+insertion updates the command's synchronous view before React commits, while
+functional draft updates preserve same-batch recovery and identity-move merges.
+
 ## 5. Native goal mode
 
 ### 5.1 RPC surface
@@ -214,6 +220,11 @@ A present-but-malformed goal is rejected rather than treated as "no goal".
   goal snapshot.
 - `goal_updated` publishes the event state; a malformed payload is skipped
   instead of being treated as a clear.
+- A synchronous `goalStateRef` mirrors accepted snapshots/events so a command
+  continuation sees updates received before React commits. A create reply is
+  published only if no newer goal event/response arrived; its automatic first
+  prompt requires that the same goal is still active. The normal active create
+  echo does not prevent the initial prompt.
 
 Session switching:
 

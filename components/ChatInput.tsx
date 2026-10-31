@@ -500,7 +500,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const insertTextAtCursor = useCallback((text: string) => {
     const ta = textareaRef.current;
     if (!ta) {
-      setValue((v) => v + (v ? " " : "") + text);
+      const current = valueRef.current;
+      const next = current + (current ? " " : "") + text;
+      valueRef.current = next;
+      setValue((value) => value + (value ? " " : "") + text);
       return;
     }
     const start = ta.selectionStart ?? ta.value.length;
@@ -509,6 +512,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const after = ta.value.slice(end);
     const sep = before.length > 0 && !before.endsWith(" ") ? " " : "";
     const newVal = before + sep + text + after;
+    // A command may finish before this insertion's React commit.
+    valueRef.current = newVal;
     setValue(newVal);
     setAtQuery(null);
     setSlashMatch(null);
@@ -948,9 +953,20 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const runBuiltinCommand = useCallback(async (msg: string, overrideText?: string): Promise<boolean> => {
     if (submissionBlockedRef.current || !onBuiltinCommand) return false;
     const sentValue = overrideText ?? valueRef.current;
+    const revision = attachmentRevisionRef.current;
+    const images = attachedImagesRef.current;
+    const files = attachedTextFilesRef.current;
     const result = await onBuiltinCommand(msg);
     if (!result.handled) return false;
-    if (!submissionBlockedRef.current && !result.error && !result.retainInput && (overrideText !== undefined || valueRef.current === sentValue)) clearInput();
+    // Dictation inserts overrideText in the same batch as dispatch. It still
+    // must match on completion; an override does not own subsequent typing.
+    const unchanged = valueRef.current === sentValue
+      && attachmentRevisionRef.current === revision
+      && attachedImagesRef.current === images
+      && attachedTextFilesRef.current === files
+      && pendingImageCountRef.current === 0
+      && pendingTextFileCountRef.current === 0;
+    if (!submissionBlockedRef.current && !result.error && !result.retainInput && unchanged) clearInput();
     return true;
   }, [onBuiltinCommand, clearInput]);
 

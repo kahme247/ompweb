@@ -360,7 +360,7 @@ test("recovered images past the attachment cap all stay in the composer", async 
 // Keep the real useDictation hook: only browser capture and the STT job API
 // are controlled. Polls expose status; only the owner's claim returns text
 // and the send intent, matching the server job boundary.
-function installPendingDictation({ holdUpload = false, holdClaim = false, after = "send" } = {}) {
+function installPendingDictation({ holdUpload = false, holdClaim = false, after = "send", text = "transcribed words" } = {}) {
   const uploads = [];
   const polls = [];
   const claims = [];
@@ -430,7 +430,7 @@ function installPendingDictation({ holdUpload = false, holdClaim = false, after 
       await claimReady;
       return response({
         status: "done",
-        text: "transcribed words",
+        text,
         after: claim.owner === uploads[0]?.owner ? after : undefined,
       });
     }
@@ -443,6 +443,63 @@ function installPendingDictation({ holdUpload = false, holdClaim = false, after 
     releaseClaim: () => releaseClaim?.(),
     complete: () => { done = true; },
   };
+}
+
+for (const change of ["immediate", "none", "text", "attachments", "pending attachment"]) {
+  test(`a dictated goal only clears its unchanged draft after success: ${change}`, async () => {
+    const dictation = installPendingDictation({ text: "/goal ship it" });
+    const user = userEvent.setup();
+    const commands = [];
+    let release;
+    const { ref, calls } = await renderWithAttachments({
+      attachments: false,
+      onBuiltinCommand: (message) => {
+        commands.push(message);
+        if (change === "immediate") return Promise.resolve({ handled: true });
+        return new Promise((resolve) => { release = () => resolve({ handled: true }); });
+      },
+    });
+    await user.click(screen.getByRole("button", { name: "Start dictation" }));
+    await user.click(screen.getByRole("button", { name: /^Queue$/ }));
+    await waitFor(() => assert.equal(dictation.uploads.length, 1));
+    dictation.complete();
+    await waitFor(() => assert.deepEqual(commands, ["/goal ship it"]), { timeout: 3000 });
+    if (change === "immediate") {
+      await waitFor(() => assert.equal(screen.getByRole("textbox").value, ""));
+      assert.equal(getDraft(KEY), null);
+      assert.deepEqual(calls, []);
+      return;
+    }
+    await waitFor(() => assert.equal(screen.getByRole("textbox").value, "/goal ship it"));
+
+    let finishRead;
+    if (change === "text") await user.type(screen.getByRole("textbox"), " newer draft");
+    if (change === "attachments") {
+      await act(async () => ref.current.addFiles([
+        new File([Buffer.from(PNG, "base64")], "new.png", { type: "image/png" }),
+        new File(["new contents"], "new.txt", { type: "text/plain" }),
+      ]));
+      await waitFor(() => assert.equal(getDraft(KEY)?.files.length, 1));
+    }
+    if (change === "pending attachment") {
+      const file = new File(["pending contents"], "pending.txt", { type: "text/plain" });
+      file.text = () => new Promise((resolve) => { finishRead = () => resolve("pending contents"); });
+      await act(async () => ref.current.addFiles([file]));
+    }
+    const beforeReply = getDraft(KEY);
+    await act(async () => release());
+    if (change === "none") {
+      assert.equal(screen.getByRole("textbox").value, "");
+      assert.equal(getDraft(KEY), null);
+    } else {
+      assert.deepEqual(getDraft(KEY), beforeReply, "success must not clear a changed or still-reading draft");
+      if (finishRead) {
+        await act(async () => finishRead());
+        await waitFor(() => assert.equal(getDraft(KEY)?.files[0]?.content, "pending contents"));
+      }
+    }
+    assert.deepEqual(calls, [], "the command never enters the prompt queue");
+  });
 }
 
 for (const { label, queueCallbacks } of [

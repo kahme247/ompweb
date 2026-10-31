@@ -1065,6 +1065,49 @@ test("GOAL /goal creates the goal and sends the objective as the first prompt", 
   assert.equal(w.latest.goalState?.goal?.id, "g1");
 });
 
+for (const status of ["active", "paused", "dropped", "cleared", "replaced"]) {
+  test(`GOAL a delayed create reply respects the newer ${status} event`, async () => {
+    resetWorld();
+    const sid = `goal-create-race-${status}`;
+    primeSession(sid, [userMsg("u0", "loaded question")]);
+    const w = await mountSession(sid);
+    let release;
+    world.holds.push({
+      match: (method, _url, body) => method === "POST" && body?.type === "goal",
+      produce: () => new Promise((resolve) => {
+        release = () => resolve({ value: { success: true, data: { goal: GOAL, state: goalState() } } });
+      }),
+    });
+    let command;
+    await act(async () => {
+      command = w.latest.handleBuiltinSlashCommand("/goal ship the export");
+      await sleep(20);
+    });
+    const nextGoal = status === "cleared" ? null : {
+      ...GOAL,
+      id: status === "replaced" ? "g2" : GOAL.id,
+      status: status === "replaced" ? "active" : status,
+      updatedAt: 2000,
+    };
+    const nextState = nextGoal ? goalState(nextGoal) : null;
+    // Deliver the event and old reply in one React batch: dispatch must use
+    // the latest wire state, not the state captured by the last render.
+    await act(async () => {
+      w.latest.handleAgentEventRef.current({ type: "goal_updated", goal: nextGoal, state: nextState });
+      release();
+      await sleep(30);
+      lastEs()?.open();
+      await command;
+    });
+    assert.deepEqual(w.latest.goalState, nextState);
+    assert.deepEqual(
+      world.calls.filter((call) => call.body?.type === "prompt").map((call) => call.body.message),
+      status === "active" ? ["ship the export"] : [],
+      "only the still-active created goal may start its objective",
+    );
+  });
+}
+
 test("GOAL get_state and goal_updated both feed the banner", async () => {
   resetWorld();
   primeSession("goal-restore", [userMsg("u0", "loaded question")]);

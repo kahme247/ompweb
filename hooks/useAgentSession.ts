@@ -375,13 +375,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // requested and applies only if no newer frame/response arrived; an older
   // updatedAt never overwrites a newer goal.
   const goalSeqRef = useRef(0);
+  // Event handlers can run before React commits their state. Command
+  // continuations must still observe a pause/drop received in the same batch.
+  const goalStateRef = useRef<GoalModeState | null>(null);
   const applyGoalSnapshot = useCallback((seq: number, value: GoalModeState | null) => {
-    if (seq !== goalSeqRef.current) return;
-    setGoalState((prev) => (isStaleGoalState(prev, value) ? prev : value));
+    if (seq !== goalSeqRef.current || isStaleGoalState(goalStateRef.current, value)) return;
+    goalStateRef.current = value;
+    setGoalState(value);
   }, []);
   const publishGoalState = useCallback((value: GoalModeState | null) => {
     goalSeqRef.current += 1;
-    setGoalState((prev) => (isStaleGoalState(prev, value) ? prev : value));
+    if (isStaleGoalState(goalStateRef.current, value)) return;
+    goalStateRef.current = value;
+    setGoalState(value);
   }, []);
   const [subagents, setSubagents] = useState<SubagentInfo[]>([]);
   const [subagentEvents, setSubagentEvents] = useState<Record<string, SubagentActivityEvent[]>>({});
@@ -625,6 +631,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // conversation, not a switch: keep the goal that was just created.
     if (session?.id && session.id === sessionIdRef.current) return;
     goalSeqRef.current += 1;
+    goalStateRef.current = null;
     setGoalState(null);
   }, [session?.id]);
 
@@ -3668,6 +3675,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (!sid) return complete({ handled: true, error: translate("agentSession.noActiveSession") });
           const objective = args.trim();
           if (!objective) return complete({ handled: true, error: translate("agentSession.goalUsage") });
+          const goalSeq = goalSeqRef.current;
           const result = await sendAgentCommand<GoalCommandResponse>(sid, {
             type: "goal",
             op: "create",
@@ -3678,7 +3686,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (!parsed?.goal) {
             return complete({ handled: true, error: translate("agentSession.goalCreateFailed") });
           }
-          publishGoalState(parsed.state);
+          // The create echo may precede HTTP, but a later pause/drop/replace
+          // must win over the reply and cancel its automatic first prompt.
+          if (goalSeq === goalSeqRef.current) publishGoalState(parsed.state);
+          const currentGoal = goalStateRef.current?.goal;
+          if (currentGoal?.id !== parsed.goal.id || currentGoal.status !== "active") return { handled: true };
           // A goal created on the empty new-chat screen must adopt the real
           // session so a reload opens it instead of a fresh composer.
           promoteNewSession();
