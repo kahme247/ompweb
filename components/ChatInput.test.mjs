@@ -279,7 +279,7 @@ test("keeps editing and deletion but hides Steer for a single queued steer", () 
   assert.doesNotMatch(html, />(Steer|chatInput\.queuedSteerAction)</);
 });
 
-test("renders multiple queued prompts with count and expand action", () => {
+test("renders multiple queued prompts with progress count and expand action", () => {
   const html = renderToStaticMarkup(
     React.createElement(ChatInput, {
       async onSend() { return { status: "accepted" }; },
@@ -292,9 +292,34 @@ test("renders multiple queued prompts with count and expand action", () => {
     }),
   );
 
-  assert.match(html, /\(3\)/);
+  assert.match(html, />(0 of 3 done|chatInput\.queueProgress)</);
   assert.match(html, />(Show all queued prompts|Show all|chatInput\.expandQueued)</);
-  assert.match(html, /First task/);
+  // omp drains steering before follow-ups, so the steer is next.
+  assert.match(html, /Priority steer/);
+});
+
+test("the queue panel lists the server ledger's batch: done, running and pending", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ChatInput, {
+      async onSend() { return { status: "accepted" }; },
+      onAbort() {},
+      isStreaming: true,
+      queuedMessages: { followUp: ["reply four"], steering: [] },
+      queueProgress: {
+        epoch: "e",
+        revision: 3,
+        items: [
+          { id: "1", text: "reply two", queue: "followUp", status: "done", queuedAt: 1, startedAt: 2, finishedAt: 3 },
+          { id: "2", text: "reply three", queue: "followUp", status: "running", queuedAt: 1, startedAt: 3 },
+          { id: "3", text: "reply four", queue: "followUp", status: "queued", queuedAt: 1 },
+        ],
+      },
+    }),
+  );
+
+  assert.match(html, />(1 of 3 done|chatInput\.queueProgress)</);
+  assert.match(html, /reply three/, "the collapsed header previews the running item");
+  assert.match(html, /animate-spin/);
 });
 
 

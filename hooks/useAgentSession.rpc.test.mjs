@@ -4747,6 +4747,48 @@ test("a state snapshot requested before a newer skill update cannot overwrite it
   assert.deepEqual(w.latest.skillDiagnostics, newer, "the late older snapshot is dropped");
 });
 
+test("a state snapshot requested before a newer queue_progress frame cannot replace it with another ledger or none", async () => {
+  const ledger = (epoch, revision, text) => ({ epoch, revision, items: [{ id: `${epoch}-${revision}`, text, queue: "followUp", status: "queued", queuedAt: 1 }] });
+  for (const stale of [{ running: true, state: { queueProgress: ledger("old-process", 9, "stale") } }, { running: false }]) {
+    resetWorld();
+    primeSession("queue-order", [userMsg("u0", "q")]);
+    world.agents.set("queue-order", { running: true, state: { queueProgress: ledger("old-process", 1, "startup") } });
+    const w = await mountSession("queue-order");
+    assert.equal(w.latest.queueProgress?.epoch, "old-process");
+
+    let release;
+    world.holds.push({
+      match: (method, url) => method === "GET" && url === "/api/agent/queue-order",
+      produce: () => new Promise((resolve) => { release = () => resolve({ value: stale }); }),
+    });
+    const newer = ledger("new-process", 1, "fresh");
+    try {
+      await act(async () => {
+        lastEs().open(); // stream attachment requests an authoritative state snapshot
+        await sleep(20);
+      });
+      assert.ok(release, "precondition: the snapshot request is still in flight");
+      await act(() => lastEs().emit({ type: "queue_progress", ...newer }));
+      assert.deepEqual(w.latest.queueProgress, newer);
+    } finally {
+      release?.();
+    }
+    await act(async () => {
+      await sleep(30);
+    });
+    assert.deepEqual(w.latest.queueProgress, newer, "the late older snapshot is dropped");
+
+    // A same-ledger snapshot still orders by revision, whenever it was requested.
+    world.agents.set("queue-order", { running: true, state: { queueProgress: ledger("new-process", 2, "next") } });
+    await act(async () => {
+      await w.latest.retrySession();
+      await sleep(30);
+    });
+    assert.equal(w.latest.queueProgress?.revision, 2);
+    w.unmount();
+  }
+});
+
 test("a fresh chat hydrates and follows skill diagnostics after slash discovery creates its runtime", async () => {
   resetWorld();
   const startup = skillDiagnosticsSnapshot(true, "fresh-startup");

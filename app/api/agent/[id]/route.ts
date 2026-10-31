@@ -7,15 +7,17 @@ import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-fo
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "@/lib/image-attachments";
 
 // Commands that ride whatever child is alive and never spawn or replace one:
-// keystroke predictions, and the side-question reads/cancel omp-web sends in
-// the background (SSE connect, reconcile). Without a live process there is no
-// ghost text, no running side question and nothing to cancel, so the reply is
-// known without omp. Asking (`btw`) and opening the history start omp first.
+// keystroke predictions, the side-question reads/cancel omp-web sends in
+// the background (SSE connect, reconcile), and dismissing the queue-progress
+// summary. Without a live process there is no ghost text, no running side
+// question, nothing to cancel and no queue ledger, so the reply is known
+// without omp. Asking (`btw`) and opening the history start omp first.
 const NO_SPAWN_REPLIES: Record<string, unknown> = {
   predict_word: { suffix: null },
   predict_word_feedback: null,
   get_btw_history: { records: [] },
   btw_cancel: { cancelled: false },
+  dismiss_queue_progress: null,
 };
 
 // Live diagnostics of a skill-resolving omp. A saved or exited session has none,

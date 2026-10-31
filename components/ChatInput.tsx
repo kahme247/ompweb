@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
+import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, useMemo, forwardRef, memo, KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { ChevronDown, ClipboardPaste, CornerDownRight, ListChecks, Loader2, Mic, Paperclip, Plus, RotateCw, Shrink, Snail, Sparkles, Wrench, X, Zap } from "lucide-react";
 import { getSubmitDuringRunBehavior, isWordCompletionEnabled } from "@/lib/composer-prefs";
@@ -11,6 +11,7 @@ import { ConfirmDialog } from "@/components/ui/field";
 import { useDictation } from "@/hooks/useDictation";
 import { toastBtwError } from "@/hooks/useBtw";
 import type { GenerationSpeedInfo, SessionStatsInfo, SlowModeScope, UsageLimitState } from "@/lib/pi-types";
+import { buildQueuePanelItems, type QueueProgressSnapshot } from "@/lib/queue-progress";
 import type { SttAfter } from "@/lib/stt";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { ContextDetailPanel } from "./ComposerPanels";
@@ -45,7 +46,8 @@ import {
   type ModelOption,
 } from "./ChatInput-model-options";
 import { ModelPickerPanel } from "./ChatInput-model-picker";
-import { ComposerModeStatus, ModelErrorBanner, QueuedActionButton } from "./ChatInput-banners";
+import { ComposerModeStatus, ModelErrorBanner } from "./ChatInput-banners";
+import { QueueProgressPanel, type QueuedEntry } from "./QueueProgressPanel";
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
 import {
   composeMessageWithTextAttachments,
@@ -197,6 +199,10 @@ interface Props {
   retryInfo?: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
   onAbortRetry?: () => void;
   queuedMessages?: QueuedMessages | null;
+  /** Server ledger of the current queued batch (done/running/pending/failed/cancelled). */
+  queueProgress?: QueueProgressSnapshot | null;
+  /** Clear the finished items of the queue-progress summary for every tab. */
+  onDismissQueueProgress?: () => void;
   inputHistory?: string[];
   /** True while the advisor model is actively reviewing the running turn. */
   advisorActive?: boolean;
@@ -334,7 +340,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   onAbortCompaction, isCompacting, compactResult,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
   toolPreset, onToolPresetChange,
-  retryInfo, queuedMessages, inputHistory = [], onAbortRetry,
+  retryInfo, queuedMessages, queueProgress, onDismissQueueProgress, inputHistory = [], onAbortRetry,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
   onAudioUnlock,
@@ -1502,16 +1508,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   // Enter to submit with, so this button is how touch devices steer.
   const primaryActionMode = primaryActionQueuesMessage && onSteer && getSubmitDuringRunBehavior() === "steer" ? "steer" : "followup";
 
-  // ── Queued follow-up bar ────────────────────────────────────────────────
-  // Texts are mirrored locally; mutations wait for native acknowledgement.
-  const queuedEntries = [
-    ...(queuedMessages?.followUp ?? []).map((text) => ({ kind: "follow-up" as const, text })),
-    ...(queuedMessages?.steering ?? []).map((text) => ({ kind: "steer" as const, text })),
-  ];
-  const firstQueued = queuedEntries[0] ?? null;
-  const queuedCount = queuedEntries.length;
+  // ── Queue panel ─────────────────────────────────────────────────────────
+  // The server ledger's batch, with omp's snapshot deciding what is editable;
+  // mutations wait for native acknowledgement.
+  const queuePanelItems = useMemo(() => buildQueuePanelItems(queueProgress ?? null, queuedMessages ?? null), [queueProgress, queuedMessages]);
 
-  const [queueExpanded, setQueueExpanded] = useState(false);
   const [queueActionPending, setQueueActionPending] = useState(false);
   const queueActionPendingRef = useRef(false);
   // Invalidate confirmation if delivery or navigation changes the queue.
@@ -1519,7 +1520,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     && queuedDeleteTarget?.queue === queuedMessages ? queuedDeleteTarget : null;
 
   const handleQueueAction = useCallback(async (
-    entry: { kind: "follow-up" | "steer"; text: string },
+    entry: QueuedEntry,
     action: "edit" | "delete" | "steer",
   ) => {
     if (queueActionPendingRef.current || (action === "steer" && submissionBlockedRef.current)) return;
@@ -1548,24 +1549,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     }
   }, [onRemoveQueuedMessage, onPromoteQueuedToSteer]);
 
-  const handleItemDelete = useCallback((entry: { kind: "follow-up" | "steer"; text: string }) => {
+  const handleItemDelete = useCallback((entry: QueuedEntry) => {
     setQueuedDeleteTarget({ ...entry, draftKey, queue: queuedMessages });
   }, [draftKey, queuedMessages]);
-
-  const handleQueuedEdit = useCallback(() => {
-    if (!firstQueued) return;
-    void handleQueueAction(firstQueued, "edit");
-  }, [firstQueued, handleQueueAction]);
-
-  const handleQueuedDelete = useCallback(() => {
-    if (!firstQueued) return;
-    handleItemDelete(firstQueued);
-  }, [firstQueued, handleItemDelete]);
-
-  const handleQueuedSteer = useCallback(() => {
-    if (!firstQueued) return;
-    void handleQueueAction(firstQueued, "steer");
-  }, [firstQueued, handleQueueAction]);
 
   const getNextSlashIndex = useCallback((direction: "up" | "down" | "left" | "right") => {
     const lastIndex = filteredSlashCommands.length - 1;
@@ -2581,211 +2567,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </div>
             );
           })()}
-        {/* Queued prompts panel / bar — attached to composer's top edge.
-            When 1 item: compact single row. When multiple items: compact row with expand toggle, or full list when expanded. */}
-        {queuedCount > 0 && (
-          <div
-            aria-label={t("chatInput.queuedPrompts")}
-            style={{
-              border: "1px solid var(--border)",
-              borderBottom: "none",
-              borderRadius: "var(--radius-card) var(--radius-card) 0 0",
-              background: "var(--bg-panel)",
-              overflow: "hidden",
-            }}
-          >
-            {queuedCount === 1 ? (
-              <div style={{
-                padding: "5px 8px 5px 12px",
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                minWidth: 0,
-              }}>
-                <span style={{
-                  flexShrink: 0,
-                  fontSize: 10,
-                  fontWeight: 600,
-                  letterSpacing: "0.06em",
-                  textTransform: "uppercase",
-                  color: "var(--text-muted)",
-                }}>
-                  {firstQueued?.kind === "steer" ? t("chatInput.queuedSteer") : t("chatInput.queuedFollowUp")}
-                </span>
-                <span
-                  title={firstQueued?.text}
-                  style={{
-                    flex: 1,
-                    minWidth: 0,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                    fontSize: 12,
-                    color: "var(--text-muted)",
-                  }}
-                >
-                  {firstQueued?.text}
-                </span>
-                <QueuedActionButton disabled={queueActionPending || !onRemoveQueuedMessage} onClick={handleQueuedEdit} title={t("chatInput.queuedEditTitle")}>
-                  {t("chatInput.queuedEdit")}
-                </QueuedActionButton>
-                <QueuedActionButton disabled={queueActionPending || !onRemoveQueuedMessage} onClick={handleQueuedDelete} title={t("chatInput.queuedDeleteTitle")}>
-                  {t("chatInput.queuedDelete")}
-                </QueuedActionButton>
-                {firstQueued?.kind === "follow-up" && (
-                  <QueuedActionButton disabled={submissionBlocked || queueActionPending || !onPromoteQueuedToSteer} onClick={handleQueuedSteer} title={t("chatInput.queuedSteerTitle")} accent>
-                    {t("chatInput.queuedSteerAction")}
-                  </QueuedActionButton>
-                )}
-              </div>
-            ) : (
-              <div>
-                <div style={{
-                  padding: "5px 8px 5px 12px",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 8,
-                  borderBottom: queueExpanded ? "1px solid var(--border)" : "none",
-                }}>
-                  <button
-                    type="button"
-                    onClick={() => setQueueExpanded((prev) => !prev)}
-                    aria-expanded={queueExpanded}
-                    title={queueExpanded ? t("chatInput.collapseQueued") : t("chatInput.expandQueued")}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 6,
-                      background: "none",
-                      border: "none",
-                      padding: 0,
-                      cursor: "pointer",
-                      color: "var(--text-muted)",
-                      fontSize: 11,
-                      fontWeight: 600,
-                      letterSpacing: "0.04em",
-                      textTransform: "uppercase",
-                      minWidth: 0,
-                      flex: 1,
-                      textAlign: "left",
-                    }}
-                  >
-                    <ChevronDown
-                      size={13}
-                      strokeWidth={2}
-                      style={{
-                        transform: queueExpanded ? "rotate(0deg)" : "rotate(-90deg)",
-                        transition: "transform var(--dur-fast) var(--ease-out-warm)",
-                        flexShrink: 0,
-                      }}
-                      aria-hidden
-                    />
-                    <span>{t("chatInput.queuedPrompts")}</span>
-                    <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 10 }}>({queuedCount})</span>
-                    {!queueExpanded && firstQueued && (
-                      <span
-                        style={{
-                          marginLeft: 4,
-                          color: "var(--text-dim)",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                          fontSize: 11,
-                          fontWeight: 400,
-                          textTransform: "none",
-                        }}
-                      >
-                        {firstQueued.kind === "steer" ? `[${t("chatInput.queuedSteer")}] ` : ""}{firstQueued.text}
-                      </span>
-                    )}
-                  </button>
-                  <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
-                    <button
-                      type="button"
-                      onClick={() => setQueueExpanded((prev) => !prev)}
-                      style={{
-                        background: "none",
-                        border: "none",
-                        padding: "2px 6px",
-                        cursor: "pointer",
-                        color: "var(--text-dim)",
-                        fontSize: 11,
-                      }}
-                    >
-                      {queueExpanded ? t("chatInput.collapseQueued") : t("chatInput.expandQueued")}
-                    </button>
-                  </div>
-                </div>
-                {queueExpanded && (
-                  <div style={{
-                    maxHeight: 180,
-                    overflowY: "auto",
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: 1,
-                    background: "var(--bg-subtle)",
-                    padding: "4px 0",
-                  }}>
-                    {queuedEntries.map((entry, idx) => (
-                      <div
-                        key={`${entry.kind}:${idx}:${entry.text}`}
-                        style={{
-                          padding: "4px 8px 4px 12px",
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 8,
-                          background: "var(--bg-panel)",
-                          fontSize: 12,
-                        }}
-                      >
-                        <span style={{
-                          flexShrink: 0,
-                          fontSize: 9.5,
-                          fontWeight: 600,
-                          letterSpacing: "0.05em",
-                          textTransform: "uppercase",
-                          padding: "1px 4px",
-                          borderRadius: 4,
-                          background: entry.kind === "steer" ? "color-mix(in srgb, var(--accent) 15%, transparent)" : "var(--bg)",
-                          border: `1px solid ${entry.kind === "steer" ? "var(--accent)" : "var(--border)"}`,
-                          color: entry.kind === "steer" ? "var(--accent)" : "var(--text-muted)",
-                        }}>
-                          {entry.kind === "steer" ? t("chatInput.queuedSteer") : t("chatInput.queuedFollowUp")}
-                        </span>
-                        <span
-                          title={entry.text}
-                          style={{
-                            flex: 1,
-                            minWidth: 0,
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
-                            color: "var(--text)",
-                            fontFamily: "var(--font-mono)",
-                            fontSize: 11.5,
-                          }}
-                        >
-                          {entry.text}
-                        </span>
-                        <QueuedActionButton disabled={queueActionPending || !onRemoveQueuedMessage} onClick={() => void handleQueueAction(entry, "edit")} title={t("chatInput.queuedEditTitle")}>
-                          {t("chatInput.queuedEdit")}
-                        </QueuedActionButton>
-                        <QueuedActionButton disabled={queueActionPending || !onRemoveQueuedMessage} onClick={() => handleItemDelete(entry)} title={t("chatInput.queuedDeleteTitle")}>
-                          {t("chatInput.queuedDelete")}
-                        </QueuedActionButton>
-                        {entry.kind === "follow-up" && (
-                          <QueuedActionButton disabled={submissionBlocked || queueActionPending || !onPromoteQueuedToSteer} onClick={() => void handleQueueAction(entry, "steer")} title={t("chatInput.queuedSteerTitle")} accent>
-                            {t("chatInput.queuedSteerAction")}
-                          </QueuedActionButton>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
+        {/* Queue panel — attached to composer's top edge. */}
+        {queuePanelItems.length > 0 && (
+          <QueueProgressPanel
+            items={queuePanelItems}
+            actionPending={queueActionPending}
+            canRemove={Boolean(onRemoveQueuedMessage)}
+            canPromote={Boolean(onPromoteQueuedToSteer)}
+            promoteBlocked={submissionBlocked}
+            onAction={handleQueueAction}
+            onDelete={handleItemDelete}
+            onDismiss={onDismissQueueProgress}
+          />
         )}
         {/* Live agent status bar — attached to composer's top edge */}
         {statusText && (
@@ -2795,7 +2588,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             style={{
               border: `1px solid ${bashMode ? "var(--tool-bg)" : "color-mix(in srgb, var(--border) 70%, transparent)"}`,
               borderBottom: "none",
-              borderRadius: queuedCount > 0 ? 0 : "var(--radius-card) var(--radius-card) 0 0",
+              borderRadius: queuePanelItems.length > 0 ? 0 : "var(--radius-card) var(--radius-card) 0 0",
               background: "var(--bg-panel)",
               padding: "6px 14px",
               display: "flex",
@@ -2819,7 +2612,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               flexDirection: "column",
               background: "var(--bg)",
               border: `1px solid ${bashMode ? "var(--tool-bg)" : "color-mix(in srgb, var(--border) 70%, transparent)"}`,
-              borderRadius: (queuedCount > 0 || Boolean(statusText)) ? "0 0 var(--radius-card) var(--radius-card)" : "var(--radius-card)",
+              borderRadius: (queuePanelItems.length > 0 || Boolean(statusText)) ? "0 0 var(--radius-card) var(--radius-card)" : "var(--radius-card)",
               padding: "12px 12px 10px",
               boxShadow: "var(--shadow-card)",
             } as React.CSSProperties}

@@ -123,6 +123,7 @@ lib/
   notification-store.ts  server: SQLite store for VAPID keys, devices and the notification history
   notification-history.ts  browser: mirror of the server's notification history (Notifications tab)
   notification-client.ts  browser: device id, prefs store, service worker + push subscription
+  queue-progress.ts    pure ledger of queued prompts (queued/running/done/failed/cancelled) fed by omp frames
   rpc-manager.ts       session registry + startRpcSession over RpcProcess
   session-reader.ts    session .jsonl parsing + path cache + buildSessionContext
   session-search.ts    shared fuzzy/phrase query scorer for sidebar search (title weights ≫ transcript)
@@ -146,6 +147,7 @@ components/
   ChatWindow.tsx      chat composition + completion sound wrapper
   ChatInput.tsx       input bar + model/thinking/tools/compact controls
   ComposerPanels.tsx  composer-attached /btw + todo + subagent panels (collapsible, live states)
+  QueueProgressPanel.tsx composer queue panel: ledger batch, "N of M done", per-item status/actions, dismissible summary
   BtwPanel.tsx        /btw side-question panel (stream, cancel, copy, follow-up) + history dialog
   TodoList.tsx        todo phase grid with preview/show-all (used by ComposerPanels)
   SubagentTranscriptDialog.tsx  task + final output summary dialog (wide, screen-adaptive)
@@ -365,6 +367,45 @@ during the wait.
   and the reply reports it (`{queued:true, queue:"followUp",
   reason:"shellRunning"}`), which the hook surfaces as a notice while rolling
   the phantom optimistic turn back. The chip still comes from omp's snapshot.
+
+### Queued-prompt progress (`lib/queue-progress.ts`, `components/QueueProgressPanel.tsx`)
+- omp's snapshots only list what is still waiting, so `AgentSessionWrapper`
+  keeps a per-process ledger (`queueProgress`) and feeds it frames omp already
+  sends: `queue_update` (and `get_state.queuedMessages`) → queued; an item that
+  leaves the snapshot and then arrives as a user `message_start` → running;
+  a later follow-up delivery in a new `turn_start` finishes earlier items
+  (follow-ups start only when the agent would stop; a steer joins the running
+  turn and finishes nothing); a terminal `agent_end` → done, or failed when its
+  last assistant message stopped with `error`/`aborted` (a failed prompt
+  `response` too); `remove_queued_message` `removed: true` and
+  `abort_and_restore_queue` → cancelled. A confirmed removal also overrides a
+  status the ledger only inferred (started alongside a later delivery, or
+  settled by the run's end) when the reply is handled after those frames. An
+  abort settles only entries that existed when it was sent (`boundary()`).
+  Verified frame order (omp 18.12.6): every follow-up of one prompt runs in
+  ONE agent run (no `agent_end` between them), and the `queue_update` that
+  drops an item precedes its user message.
+- Items are matched by text and order. Snapshot diffs use an LCS that marks
+  the EARLIEST duplicate as the one that left (omp delivers from the front and
+  removes the first match); a departed item whose text never shows up (slash
+  command or template rewrite) takes the run's outcome at the end of the run,
+  or cancelled when the run was aborted. A plain `abort` keeps omp's pending
+  queue, so those items stay queued.
+- Exposure: `get_state.queueProgress` (`{ epoch, revision, items }`) and a
+  `queue_progress` frame after every change, so every tab shows the same list.
+  The hook applies a snapshot only when its revision is newer within the same
+  epoch; an HTTP snapshot with another epoch (or none, which clears it when the
+  session has no live process) is dropped if a `queue_progress` frame arrived
+  while it was in flight. The panel merges the ledger with omp's snapshot
+  (`buildQueuePanelItems`): only items omp still holds get Edit/Delete/Steer,
+  and of identical ones only the first (omp acts on the first match); a
+  departed item (`departed: true`, taken but not yet in the transcript) claims
+  no chip. A new batch starts once nothing is pending;
+  Dismiss sends omp-web's own `dismiss_queue_progress` (never reaches omp,
+  never spawns it). The ledger is in memory only: it starts empty when omp is
+  respawned (`reload`, crash) or omp-web restarts, and resets when the wrapper
+  switches to another conversation. There is no scroll-to-message helper, so
+  rows do not jump to the transcript.
 
 ### Live event stream: one socket per browser (`/api/events`)
 - Browsers cap HTTP/1.1 at **6 connections per host across all tabs**, and an

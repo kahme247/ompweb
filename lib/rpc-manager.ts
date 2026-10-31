@@ -37,6 +37,7 @@ import { publishNotification } from "./notification-hub";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./skill-diagnostics";
 import { isReservedLaunchArg, loadProjectRegistry } from "./project-registry";
 import { eventWithToolResultImageUrls } from "./media-cache";
+import { QueueProgressLedger, queuedTextOfUserMessage, readQueueSnapshot, runOutcomeOfAgentEnd } from "./queue-progress";
 import type {
   BashResultInfo,
   OmpModel,
@@ -389,6 +390,9 @@ export class AgentSessionWrapper {
   private hostUriSchemes: Map<string, { writable?: boolean }> = new Map();
   /** host_uri_request ids awaiting a host_uri_result from the browser. */
   private pendingHostUris: Map<string, UnsequencedAgentEvent> = new Map();
+  /** Progress of the queued prompts in the current batch (lib/queue-progress.ts).
+   *  In memory only: a new omp process or omp-web restart starts empty. */
+  private readonly queueProgress = new QueueProgressLedger({ epoch: randomUUID(), createId: randomUUID });
   /** Resolves once an in-flight destroyAndWait finishes; null when idle. Read
    * by startRpcSession so a replacement spawn awaits the old child's exit. */
   destroyPromise: Promise<void> | null = null;
@@ -610,6 +614,7 @@ export class AgentSessionWrapper {
       this.continuationGraceUntil = 0;
       // A different conversation now: the old one's ids must not suppress its notifications.
       this.movedFromIds.length = 0;
+      this.publishQueueProgress(this.queueProgress.reset());
     }
     this._sessionId = state.sessionId;
     this._sessionFile = state.sessionFile ?? "";
@@ -906,6 +911,7 @@ export class AgentSessionWrapper {
           const promptError = { type: "prompt_error", errorMessage: detail, error: event.error, command: event.command };
           this.publishNotifications(promptError);
           this.emit(promptError);
+          this.publishQueueProgress(this.queueProgress.observeRunEnd("failed", Date.now()));
           notifyRunningChange();
           return;
         }
@@ -1017,6 +1023,7 @@ export class AgentSessionWrapper {
 
     this.publishNotifications(event);
     this.emit(event);
+    this.trackQueueProgress(event);
     notifyRunningChange({ refreshSessionList });
   }
 
@@ -1221,6 +1228,37 @@ export class AgentSessionWrapper {
         // notifyRunningChange apply to their listener sets.
       }
     }
+  }
+
+  /**
+   * Feed omp's frames to the queue-progress ledger. The ledger only reads
+   * frames omp already sends; it never changes what reaches the browser.
+   */
+  private trackQueueProgress(event: UnsequencedAgentEvent): void {
+    const now = Date.now();
+    switch (event.type) {
+      case "queue_update": {
+        const snapshot = readQueueSnapshot(event);
+        if (snapshot) this.publishQueueProgress(this.queueProgress.observeQueue(snapshot, now));
+        break;
+      }
+      case "turn_start":
+        this.queueProgress.observeTurnStart();
+        break;
+      case "message_start": {
+        const text = queuedTextOfUserMessage(event.message);
+        if (text !== null) this.publishQueueProgress(this.queueProgress.observeUserMessage(text, now));
+        break;
+      }
+      case "agent_end":
+        if (event.isTerminal !== false) this.publishQueueProgress(this.queueProgress.observeRunEnd(runOutcomeOfAgentEnd(event), now));
+        break;
+    }
+  }
+
+  /** Broadcast the ledger to every attached tab after a change. */
+  private publishQueueProgress(changed: boolean): void {
+    if (changed) this.emit({ type: "queue_progress", ...this.queueProgress.snapshot() });
   }
 
   private sessionFileSignalTimer: NodeJS.Timeout | null = null;
@@ -1508,6 +1546,8 @@ export class AgentSessionWrapper {
     // Reconcile process-side flags with authoritative child state.
     this.applyIdentity({ ...state, sessionFile: state.sessionFile ?? this._sessionFile });
     this.streamSequence += 1;
+    // Same authoritative queue as `queue_update`, read in stdout order.
+    if (state.queuedMessages) this.publishQueueProgress(this.queueProgress.observeQueue(state.queuedMessages, Date.now()));
 
     const awaitingExpired = !this.awaitingAgentStart || Date.now() >= this.awaitingAgentStartDeadline;
     const hasPendingWork =
@@ -1561,6 +1601,7 @@ export class AgentSessionWrapper {
       messageCount: state.messageCount,
       queuedMessageCount: state.queuedMessageCount,
       queuedMessages: state.queuedMessages ?? { steering: [], followUp: [] },
+      queueProgress: this.queueProgress.snapshot(),
       tokensPerSecond: state.tokensPerSecond ?? null,
       contextUsage: state.contextUsage ?? null,
       systemPrompt: state.systemPrompt?.join("\n\n") ?? "",
@@ -1723,6 +1764,8 @@ export class AgentSessionWrapper {
       this.extensionStatuses.clear();
       this.extensionWidgets.clear();
       this.clearPendingUiRequests();
+      // The replacement process starts with an empty queue.
+      this.publishQueueProgress(this.queueProgress.reset());
       this.promptRunning = false;
       this.promptDispatchPendingCount = 0;
       this.awaitingAgentStart = false;
@@ -1898,8 +1941,18 @@ export class AgentSessionWrapper {
         // Queue mutations are synchronous control operations, like get_state.
         // Expiry must not abort unrelated work or replay a possibly applied mutation.
         const result = await this.proc.sendCommand(command as { type: string }, GET_STATE_TIMEOUT_MS);
+        if (type === "remove_queued_message" && isRecord(result) && result.removed === true
+          && typeof command.message === "string" && (command.queue === "steering" || command.queue === "followUp")) {
+          this.publishQueueProgress(this.queueProgress.observeRemoval(command.message, command.queue, Date.now()));
+        }
         return result ?? null;
       }
+
+      // omp-web's own: clear the finished items of the queue-progress summary
+      // for every tab viewing the session.
+      case "dismiss_queue_progress":
+        this.publishQueueProgress(this.queueProgress.dismissFinished());
+        return null;
 
       // abort_and_restore_queue is omp's Esc: it takes queued user input back
       // atomically, then aborts, and returns the withdrawn messages.
@@ -1907,6 +1960,9 @@ export class AgentSessionWrapper {
       case "abort_and_restore_queue": {
         this.responseObserved = false;
         this.responseRunActive = false;
+        // The abort settles only what was queued before it was sent: a prompt
+        // queued afterwards can reach the ledger before the reply is handled.
+        const queueBoundary = this.queueProgress.boundary();
         const result = await this.withFinalRunningNotification(async () => {
           const response: unknown = await this.proc.sendCommand({ type });
           // If the prompt was aborted before the agent loop started, no
@@ -1923,6 +1979,7 @@ export class AgentSessionWrapper {
           this.clearLiveSnapshots();
           return response;
         });
+        this.publishQueueProgress(this.queueProgress.observeAbort({ restoreQueue: type === "abort_and_restore_queue", boundary: queueBoundary }, Date.now()));
         return type === "abort" ? null : result ?? null;
       }
 

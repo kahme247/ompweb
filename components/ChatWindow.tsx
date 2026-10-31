@@ -519,7 +519,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     liveModelMeta,
     retryInfo, contextUsage, forkingEntryId, editingEntryId,
     isCompacting, compactResult, tokensPerSecond, displayModel: displayModelValue, sessionStats,
-    slashCommands, slashCommandsLoading, queuedMessages, advisorActive, advisorEnabled, handleAdvisorChange,
+    slashCommands, slashCommandsLoading, queuedMessages, queueProgress, advisorActive, advisorEnabled, handleAdvisorChange,
     notices, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     skillDiagnostics, setSkillStartupDiagnostics,
     isAutoModelSelection,
@@ -530,7 +530,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     sessionIdRef, messagesEndRef, scrollContainerRef,
     handleSend, handleAbort, handleFork, handleEdit, handleModelChange, retrySession,
     handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction, handleCompact,
-    removeQueuedMessage, promoteQueuedToSteer,
+    removeQueuedMessage, promoteQueuedToSteer, dismissQueueProgress,
     handleBuiltinSlashCommand, togglePreCompactionHistory,
     handleThinkingLevelChange, handleFastModeChange, handleSlowModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
     handleToolPresetChange,
@@ -1103,6 +1103,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       onAdvisorChange={handleAdvisorChange}
       advisorModel={advisorModelMeta}
       queuedMessages={queuedMessages}
+      queueProgress={queueProgress}
       inputHistory={inputHistory}
       advisorActive={advisorActive}
       onCompact={handleCompact}
@@ -1112,6 +1113,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       generationSpeed={generationSpeed}
       onRemoveQueuedMessage={removeQueuedMessage}
       onPromoteQueuedToSteer={promoteQueuedToSteer}
+      onDismissQueueProgress={dismissQueueProgress}
       slashCommands={slashCommands}
       slashCommandsLoading={slashCommandsLoading}
       onLoadSlashCommands={loadSlashCommands}

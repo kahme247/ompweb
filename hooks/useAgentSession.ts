@@ -36,6 +36,7 @@ import { subscribeSessionsChanged } from "@/lib/session-change-bus";
 import { EVENT_STREAM_CLOSED, EVENT_STREAM_OPEN, openEventStream, type EventStream } from "@/lib/event-stream";
 import { createSessionCatchUp, type SessionCatchUp, type SessionLiveFields } from "./useAgentSession-sync";
 import type { SessionLiveSnapshot } from "@/lib/session-sync";
+import { readQueueProgressSnapshot, readQueueSnapshot, type QueueProgressSnapshot } from "@/lib/queue-progress";
 import {
   mergeSubagentRoster,
   parseSubagentActivityEvent,
@@ -53,7 +54,7 @@ import {
 export type { SubagentInfo } from "@/lib/subagent-types";
 
 // Pure helpers extracted to sibling modules (extraction only — no logic changes).
-import { EMPTY_QUEUE, isQueuedWhileShellRunning, readQueueSnapshot } from "./useAgentSession-queue";
+import { EMPTY_QUEUE, isQueuedWhileShellRunning } from "./useAgentSession-queue";
 import type { QueuedMessages } from "./useAgentSession-queue";
 import {
   NOTICE_ERROR_VISIBLE_MS,
@@ -354,6 +355,27 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     queueAppliedSeqRef.current = seq;
     updateQueuedMessages(readQueueSnapshot(value) ?? EMPTY_QUEUE);
   }, [updateQueuedMessages]);
+  // The server's ledger of the current queued batch. Ordered by its own
+  // revision within one ledger (epoch): HTTP snapshots and SSE frames can
+  // arrive in any order. Absent (no live process) clears it.
+  const [queueProgress, setQueueProgress] = useState<QueueProgressSnapshot | null>(null);
+  const queueProgressRef = useRef<QueueProgressSnapshot | null>(null);
+  // `queue_progress` frames received so far. An HTTP snapshot carries the
+  // count read before its request: revisions cannot order a different ledger
+  // (a replaced process) or none against a frame that arrived meanwhile.
+  const queueProgressFramesRef = useRef(0);
+  const applyQueueProgress = useCallback((value: unknown, framesBeforeRequest?: number) => {
+    const next = readQueueProgressSnapshot(value);
+    const current = queueProgressRef.current;
+    if (next && current && next.epoch === current.epoch) {
+      if (next.revision <= current.revision) return;
+    } else if (framesBeforeRequest !== undefined && framesBeforeRequest !== queueProgressFramesRef.current) {
+      return;
+    }
+    if (!next && !current) return;
+    queueProgressRef.current = next;
+    setQueueProgress(next);
+  }, []);
   // Orders get_state responses, the setter reply, and SSE updates so a response
   // started before a newer frame cannot overwrite it.
   const skillDiagnosticsSeqRef = useRef(0);
@@ -879,6 +901,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // sync that started while this request was in flight.
         const token = beginAuthoritativeModelSync();
         const queueRevision = ++queueSeqRef.current;
+        const queueProgressFrames = queueProgressFramesRef.current;
         const skillDiagnosticsRevision = ++skillDiagnosticsSeqRef.current;
         const stateRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
         if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
@@ -918,9 +941,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (liveState.extensionWidgets !== undefined) setExtensionWidgets(liveState.extensionWidgets ?? []);
           if (liveState.todoPhases !== undefined) setTodoPhases(liveState.todoPhases ?? []);
           applyQueueStateSnapshot(queueRevision, liveState.queuedMessages);
+          applyQueueProgress(liveState.queueProgress, queueProgressFrames);
         } else if (!agentState.running) {
           setSlowModeSupported(undefined);
           applyQueueStateSnapshot(queueRevision, null);
+          applyQueueProgress(null, queueProgressFrames);
         }
         if (showLoading) setLoading(false);
         return { context: d.context, agentState };
@@ -945,7 +970,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Ensure the flag is cleared even if the pre-state early-return path was taken
       if (showLoading && includeState && !messagesLoaded) initialHydrationPendingRef.current = false;
     }
-  }, [catchUp, refreshSubagentHistory, applyAuthoritativeModel, beginAuthoritativeModelSync, applyQueueStateSnapshot, applySkillDiagnosticsSnapshot]);
+  }, [catchUp, refreshSubagentHistory, applyAuthoritativeModel, beginAuthoritativeModelSync, applyQueueStateSnapshot, applyQueueProgress, applySkillDiagnosticsSnapshot]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null, includePreCompaction = false): Promise<boolean> => {
     const seq = ++contextRequestSeqRef.current;
@@ -1127,17 +1152,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const refreshAgentSnapshots = useCallback(async (sid: string) => {
     const queueRevision = ++queueSeqRef.current;
+    const queueProgressFrames = queueProgressFramesRef.current;
     const skillDiagnosticsRevision = ++skillDiagnosticsSeqRef.current;
     try {
       const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
       if (!res.ok || !hookAliveRef.current || sessionIdRef.current !== sid) return;
       const data = await res.json() as { state?: AgentStateResponse };
       applyQueueStateSnapshot(queueRevision, data.state?.queuedMessages);
+      applyQueueProgress(data.state?.queueProgress, queueProgressFrames);
       applySkillDiagnosticsSnapshot(skillDiagnosticsRevision, data.state?.skillDiagnostics);
     } catch {
       // The next live update or state snapshot heals these views.
     }
-  }, [applyQueueStateSnapshot, applySkillDiagnosticsSnapshot]);
+  }, [applyQueueStateSnapshot, applyQueueProgress, applySkillDiagnosticsSnapshot]);
 
   const connectEvents = useCallback((sid: string, restoreWrapper = false): Promise<EventStreamConnectionResult | null> => {
     // An awaited RPC can finish after its chat unmounted. No continuation may
@@ -1757,6 +1784,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (token === null) return;
     try {
       const queueRevision = ++queueSeqRef.current;
+      const queueProgressFrames = queueProgressFramesRef.current;
       const skillDiagnosticsRevision = ++skillDiagnosticsSeqRef.current;
       const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
       if (!res.ok) return;
@@ -1779,6 +1807,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // And the only reliable re-sync for a missed subagent lifecycle frame.
       void refreshSubagentRoster(sid);
       applyQueueStateSnapshot(queueRevision, state?.queuedMessages);
+      applyQueueProgress(state?.queueProgress, queueProgressFrames);
       const busy = data.running && state
         && (state.isStreaming || state.isPromptRunning || state.isCompacting);
       // Mid-run, not after it: context usage grows with every token and the
@@ -1807,7 +1836,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         void reconcileAgentState(sid);
       }
     }
-  }, [applyQueueStateSnapshot, applySkillDiagnosticsSnapshot, finishPromptWithoutStream, refreshSubagentRoster]);
+  }, [applyQueueStateSnapshot, applyQueueProgress, applySkillDiagnosticsSnapshot, finishPromptWithoutStream, refreshSubagentRoster]);
 
   // Recovery net for missed SSE events: while the agent is running, verify
   // against the server periodically and whenever the tab returns to the
@@ -1979,6 +2008,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [addNotice]);
 
+  /** Clear the finished queue-progress items for every tab on the session;
+   *  the panel follows the server's next `queue_progress` frame. */
+  const dismissQueueProgress = useCallback(async () => {
+    const sid = sessionIdRef.current;
+    if (!hookAliveRef.current || !sid) return;
+    try {
+      await sendAgentCommand(sid, { type: "dismiss_queue_progress" });
+    } catch (error) {
+      if (!hookAliveRef.current || sessionIdRef.current !== sid) return;
+      addNotice({ type: "error", message: error instanceof Error ? error.message : String(error) });
+    }
+  }, [addNotice]);
+
   const handleAgentEvent = useCallback((event: AgentEvent) => {
     switch (event.type) {
       case "session_history_changed": {
@@ -2005,6 +2047,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         applySkillDiagnosticsSnapshot(revision, event.data);
         break;
       }
+      case "queue_progress":
+        queueProgressFramesRef.current += 1;
+        applyQueueProgress(event);
+        break;
       case "queue_update": {
         const snapshot = readQueueSnapshot(event);
         if (snapshot) {
@@ -2101,6 +2147,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           void loadSession(endedSid, false, false, endedRunId);
           const endToken = beginAuthoritativeModelSync();
           const queueRevision = ++queueSeqRef.current;
+          const queueProgressFrames = queueProgressFramesRef.current;
           const skillDiagnosticsRevision = ++skillDiagnosticsSeqRef.current;
           fetch(`/api/agent/${encodeURIComponent(endedSid)}`)
             .then((r) => (r.ok ? r.json() as Promise<{ state?: AgentStateResponse }> : null))
@@ -2111,6 +2158,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               // The queue does not depend on a model: an exited wrapper still
               // means nothing is queued.
               applyQueueStateSnapshot(queueRevision, d.state?.queuedMessages);
+              applyQueueProgress(d.state?.queueProgress, queueProgressFrames);
               applySkillDiagnosticsSnapshot(skillDiagnosticsRevision, d.state?.skillDiagnostics);
               if (!d.state?.model) return;
               const applied = applyAuthoritativeModel(toThinkingModelMeta(d.state.model), endToken);
@@ -2587,7 +2635,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-}, [addNotice, catchUp, eventCoalescer, clearLiveToolResults, clearTerminalReconcileTimer, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, reloadActiveSessionHistory, mergeSubagents, onAgentEnd, reconcileAgentState, refreshLiveModelState, resetSubagentActivityState, applyAuthoritativeModel, applySkillDiagnosticsSnapshot, beginAuthoritativeModelSync, setLiveToolResult, surfaceQuotaOnStream, updateQueuedMessages, applyQueueStateSnapshot]);
+}, [addNotice, catchUp, eventCoalescer, clearLiveToolResults, clearTerminalReconcileTimer, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, reloadActiveSessionHistory, mergeSubagents, onAgentEnd, reconcileAgentState, refreshLiveModelState, resetSubagentActivityState, applyAuthoritativeModel, applySkillDiagnosticsSnapshot, beginAuthoritativeModelSync, setLiveToolResult, surfaceQuotaOnStream, updateQueuedMessages, applyQueueStateSnapshot, applyQueueProgress]);
   handleAgentEventRef.current = handleAgentEvent;
   syncActionsRef.current = {
     metadata: (context, version, hasLive = liveModelMeta !== null || currentModelOverride !== null) => {
@@ -4095,7 +4143,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     liveModelMeta,
     retryInfo, contextUsage, systemPrompt, skillDiagnostics, forkingEntryId, editingEntryId,
     isCompacting, compactError, compactResult, tokensPerSecond, currentModel, displayModel, isAutoModelSelection: !displayModel, sessionStats, agentPhase,
-    slashCommands, slashCommandsLoading, queuedMessages,
+    slashCommands, slashCommandsLoading, queuedMessages, queueProgress,
     notices: noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     advisorActive: advisorActiveAt > 0, advisorEnabled, handleAdvisorChange,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
@@ -4109,7 +4157,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     retrySession: () => { const sid = sessionIdRef.current; if (sid) void loadSession(sid, true, true); },
     handleCompact, handleHandoff, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleBuiltinSlashCommand, togglePreCompactionHistory,
-    handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands, removeQueuedMessage, promoteQueuedToSteer, setActiveLeafId, setData, setMessages,
+    handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands, removeQueuedMessage, promoteQueuedToSteer, dismissQueueProgress, setActiveLeafId, setData, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,
     btw, askBtw,
     bashRunning, pendingBash,

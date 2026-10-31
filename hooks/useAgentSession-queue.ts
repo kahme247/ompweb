@@ -7,14 +7,6 @@ export type { QueuedMessages };
 
 export const EMPTY_QUEUE: QueuedMessages = { steering: [], followUp: [] };
 
-/** Parse a queue snapshot from an RPC frame or state; null when absent. */
-export function readQueueSnapshot(value: unknown): QueuedMessages | null {
-  if (!value || typeof value !== "object" || !("steering" in value) || !("followUp" in value)) return null;
-  const [steering, followUp] = [value.steering, value.followUp].map((list) =>
-    Array.isArray(list) ? list.filter((item): item is string => typeof item === "string") : []);
-  return { steering, followUp };
-}
-
 /**
  * `lib/rpc-manager.ts` answers a prompt/steer with this when a `!!` shell
  * command owned the session: it forwarded the message into omp's follow-up

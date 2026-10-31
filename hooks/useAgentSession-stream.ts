@@ -200,6 +200,8 @@ export type AgentStateResponse = {
   extensionStatuses?: ExtensionStatusItem[];
   extensionWidgets?: ExtensionWidgetItem[];
   queuedMessages?: QueuedMessages;
+  /** Untrusted until parsed by readQueueProgressSnapshot. */
+  queueProgress?: unknown;
   /** Untrusted until parsed by parseSkillDiagnosticsSnapshot. */
   skillDiagnostics?: unknown;
   todoPhases?: TodoPhase[];

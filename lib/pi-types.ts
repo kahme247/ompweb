@@ -1,4 +1,5 @@
 import type { SkillDiagnosticsSnapshot } from "./skill-diagnostics";
+import type { QueueProgressSnapshot } from "./queue-progress";
 
 // Local mirrors of the omp shapes used by omp-web. omp's SDK packages are
 // Bun-only, so these types are hand-maintained against
@@ -126,6 +127,8 @@ export interface WebSessionState {
   messageCount: number;
   queuedMessageCount: number;
   queuedMessages: QueuedMessages;
+  /** omp-web's ledger of the current batch of queued prompts (lib/queue-progress.ts). */
+  queueProgress: QueueProgressSnapshot;
   contextUsage: ContextUsage | null;
   systemPrompt: string;
   thinkingLevel: string;
