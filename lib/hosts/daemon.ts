@@ -14,13 +14,12 @@ import { isRecord } from "../type-guards";
 import { isLoopbackHost, readHostLogin } from "./host-login";
 import {
   decodeDown,
+  encodeBlobFrame,
   encodeLine,
   HostOpError,
   isHostOp,
-  LINK_ACK_HEADER,
-  LINK_HELLO_HEADER,
+  LINK_CLOSE,
   LINK_LIMITS,
-  LINK_NONCE_HEADER,
   LINK_PROTOCOL_VERSION,
   LinkLimitError,
   LinkProtocolError,
@@ -62,6 +61,13 @@ interface Queued {
   bytes: number;
   /** Set for child output, which an overflow may drop. */
   ch: string | null;
+}
+
+/** How a socket closed; `opened` is false for a dial the server refused or never answered. */
+interface SocketEnd {
+  opened: boolean;
+  code: number;
+  reason: string;
 }
 
 const trimUrl = (url: string) => url.replace(/\/+$/, "");
@@ -112,56 +118,30 @@ function sessionsPath(value: unknown): string {
   return target;
 }
 
-async function* readLines(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buffered = "";
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) return;
-      buffered += decoder.decode(value, { stream: true });
-      let newline: number;
-      while ((newline = buffered.indexOf("\n")) !== -1) {
-        const line = buffered.slice(0, newline);
-        buffered = buffered.slice(newline + 1);
-        if (line) yield line;
-      }
-      if (buffered.length > LINK_LIMITS.maxLineBytes) throw new LinkLimitError("A downlink line exceeds the link limit");
-    }
-  } finally {
-    // Stops the request when the caller stops reading.
-    void reader.cancel().catch(() => {});
-  }
-}
-
 /** Dial the main server and keep the link up until stopped, revoked (exit 1),
- * outdated (426, exit 1) or replaced by a newer link with this token (exit 0). */
-export function runHostDaemon(options: { url: string; token: string; allowHttp: boolean; fetch?: typeof fetch }): { stop(): Promise<void>; done: Promise<number> } {
+ * outdated (close 4426, exit 1) or replaced by a newer link with this token (close 4409, exit 0). */
+export function runHostDaemon(options: { url: string; token: string; allowHttp: boolean }): { stop(): Promise<void>; done: Promise<number> } {
   if (!dialable(options.url, options.allowHttp)) {
     throw new Error("ompweb host needs an https:// server URL (http:// only for loopback, or with --allow-http)");
   }
-  const fetchLink = options.fetch ?? fetch;
   // Both follow host.json: a 401 finds a newer token there (the web server re-keyed this host), a failed dial a new url or token.
   let serverUrl = trimUrl(options.url);
   let linkUrl = `${serverUrl}/api/hosts/link`;
   let authorization = `Bearer ${options.token}`;
 
   const channels = new Map<string, Channel>();
-  // Uplink messages stay here until main acks them; a failed POST resends them.
+  // Uplink messages stay here until main acks them; a dropped socket resends them after the next welcome.
   const outbox = new Outbox<Queued>();
   const down = new SeqWindow();
   let upSeq = 0;
   let unsentBytes = 0;
   let pongOwed = false;
-  // The current link's `welcome.nonce`, sent with every POST. Null before the
-  // first welcome and after main refused it as replaced; `welcome` settles
-  // once the next one arrives.
-  let nonce: string | null = null;
-  let welcome = Promise.withResolvers<void>();
-  let posting = false;
-  let backingOff = false;
-  let postDelay = FIRST_RETRY_MS;
+  /** The current socket, from dial to close: every handler ignores events from any other. */
+  let socket: WebSocket | null = null;
+  /** `socket` once its welcome arrived: uplink frames go only here. */
+  let linked: WebSocket | null = null;
+  /** One uplink frame waits for the hub's `ack`; the next goes after it. */
+  let inFlight = false;
   let redialDelay = FIRST_RETRY_MS;
   let flushTimer: NodeJS.Timeout | undefined;
   let stopped = false;
@@ -198,7 +178,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     channel.buffered += bytes;
     if (channel.buffered > LINK_LIMITS.channelBufferBytes) {
       // The uplink lags too far: drop this child's backlog. The resync goes
-      // out with the first POST that gets through, ahead of later output.
+      // out with the first frame that gets through, ahead of later output.
       outbox.drop((item) => item.ch === ch);
       channel.buffered = 0;
       queue({ type: "resync", ch });
@@ -215,93 +195,43 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   }
 
   function scheduleFlush(): void {
-    if (!nonce || posting || backingOff || stopped) return;
-    if (unsentBytes >= LINK_LIMITS.flushBytes) void flush();
-    else flushTimer ??= setTimeout(() => void flush(), LINK_LIMITS.flushMs);
+    if (!linked || inFlight || stopped) return;
+    if (unsentBytes >= LINK_LIMITS.flushBytes) flush();
+    else flushTimer ??= setTimeout(flush, LINK_LIMITS.flushMs);
   }
 
-  async function flush(): Promise<void> {
+  /** One uplink frame: the applied downlink's `ack`, an owed pong, then the outbox in `seq` order. */
+  function flush(): void {
     clearTimeout(flushTimer);
     flushTimer = undefined;
-    if (posting || stopped || !nonce) return;
-    const used = nonce;
-    const sent = authorization;
+    if (!linked || inFlight || stopped) return;
+    const head = encodeLine({ type: "ack", ack: down.acked }) + (pongOwed ? PONG_LINE : "");
     const batch: string[] = [];
-    let size = pongOwed ? PONG_LINE.length : 0;
+    let size = head.length;
     for (const item of outbox.pending()) {
-      if (batch.length > 0 && size + item.bytes > LINK_LIMITS.uplinkBytes) break;
+      if (size + item.bytes > LINK_LIMITS.uplinkBytes) break;
       batch.push(item.line);
       size += item.bytes;
     }
     if (batch.length === 0 && !pongOwed) return;
-    const body = (pongOwed ? PONG_LINE : "") + batch.join("");
+    linked.send(head + batch.join(""));
     pongOwed = false;
     unsentBytes = 0;
-    posting = true;
-    try {
-      const response = await fetchLink(linkUrl, {
-        method: "POST",
-        headers: { authorization: sent, "content-type": "application/x-ndjson", [LINK_ACK_HEADER]: String(down.acked), [LINK_NONCE_HEADER]: used },
-        body,
-        signal: AbortSignal.any([stopSignal.signal, AbortSignal.timeout(LINK_LIMITS.offlineMs)]),
-      });
-      if (await fatal(response, sent)) return;
-      if (response.status === 409) {
-        // Sent on a link main has replaced: resend on the current one, now if
-        // its welcome already arrived, else when it does.
-        posting = false;
-        if (nonce === used) forgetLink();
-        else void flush();
-        return;
-      }
-      if (!response.ok) throw new Error(`the server answered ${response.status}`);
-      const { ack } = (await response.json()) as { ack?: unknown };
-      if (typeof ack !== "number" || !Number.isInteger(ack)) throw new Error("the server sent no ack");
-      posting = false;
-      backingOff = false;
-      postDelay = FIRST_RETRY_MS;
-      acked(ack);
-      scheduleFlush();
-    } catch (error) {
-      posting = false;
-      if (stopped) return;
-      log(`uplink failed (${reason(error)}); resending`);
-      backingOff = true;
-      flushTimer = setTimeout(() => {
-        backingOff = false;
-        void flush();
-      }, withJitter(postDelay));
-      postDelay = Math.min(postDelay * 2, MAX_RETRY_MS);
-    }
+    inFlight = true;
   }
 
-  /** 426 (outdated) ends the daemon. So does 401 (revoked) unless host.json already holds a newer token, which the daemon then dials with.
-   * `sent` is the authorization the request carried; true when the daemon is stopping. */
-  async function fatal(response: Response, sent: string): Promise<boolean> {
-    const { status } = response;
-    // A 401 for a token another request already replaced needs nothing more.
-    if (status === 401 && sent === authorization) {
-      const saved = readHostLogin();
-      // Only a host.json for this same server counts: one that names another server is not this daemon's link.
-      if (saved && trimUrl(saved.url) === serverUrl && `Bearer ${saved.token}` !== sent) {
-        authorization = `Bearer ${saved.token}`;
-        log("the server rejected this host's token; using the new one from host.json");
-      } else {
-        log("the server rejected this host's token (revoked?); stopping its omp sessions");
-        void shutdown(1);
-      }
-    }
-    if (status === 426) {
-      // The 426 body carries the server's newest version: below this daemon's, the server is the outdated side.
-      const { serverVersion } = (await response.json().catch(() => ({}))) as { serverVersion?: unknown };
-      log(
-        typeof serverVersion === "number" && serverVersion < LINK_PROTOCOL_VERSION
-          ? "this host's ompweb is newer than the server's: update ompweb on the server"
-          : "the server speaks a different link protocol: update ompweb on this host",
-      );
+  /** A refused dial's 401: revoked (exit 1), unless host.json already holds a newer token for this server, which the
+   * daemon then dials with. `sent` is the authorization the dial carried. */
+  function unauthorized(sent: string): void {
+    const saved = readHostLogin();
+    // Only a host.json for this same server counts: one that names another server is not this daemon's link.
+    if (saved && trimUrl(saved.url) === serverUrl && `Bearer ${saved.token}` !== sent) {
+      authorization = `Bearer ${saved.token}`;
+      log("the server rejected this host's token; using the new one from host.json");
+    } else {
+      log("the server rejected this host's token (revoked?); stopping its omp sessions");
       void shutdown(1);
     }
-    return stopped;
   }
 
   /** host.json names another url or token now (the web server came back on another port): dial with those. */
@@ -314,11 +244,6 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     serverUrl = url;
     linkUrl = `${url}/api/hosts/link`;
     authorization = `Bearer ${saved.token}`;
-  }
-
-  function forgetLink(): void {
-    nonce = null;
-    welcome = Promise.withResolvers<void>();
   }
 
   /** What this link has already logged about messages it skipped. */
@@ -337,20 +262,21 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       case "welcome":
         log(`linked to ${serverUrl}`);
         unknownLog.reset();
-        nonce = message.nonce;
-        welcome.resolve();
-        // A fresh link: resend what main has not acked now, not after the old backoff.
-        backingOff = false;
-        postDelay = FIRST_RETRY_MS;
+        linked = socket;
         redialDelay = FIRST_RETRY_MS;
-        void flush();
+        // A fresh link: resend what main has not acked.
+        flush();
         return;
       case "ping":
         pongOwed = true;
         scheduleFlush();
         return;
       case "pong":
+        return;
       case "ack":
+        inFlight = false;
+        acked(message.ack);
+        scheduleFlush();
         return;
       case "unknown":
         // A newer main's message, or one only the daemon sends: skipped, but its seq is applied so it is acked and never resent.
@@ -375,10 +301,6 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         return;
       case "req":
         void answer(message.id, message.op, message.args);
-        return;
-      case "replaced":
-        log("another ompweb host linked with this token; exiting");
-        void shutdown(0);
         return;
     }
   }
@@ -411,7 +333,9 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         queue({ type: "res", id, ok: true, result });
         return;
       }
-      await uploadBlob(id, blob);
+      if (blob.byteLength > LINK_LIMITS.blobBytes) throw new HostOpError(413, "result_too_large", "The result is too large for the host link");
+      // The bytes go ahead of their `res` on the same socket. With no link the hub has already failed the op: the `res` goes alone.
+      linked?.send(encodeBlobFrame(id, blob));
       queue({ type: "res", id, ok: true, blob: { bytes: blob.byteLength } });
     } catch (error) {
       const failure = error instanceof HostOpError
@@ -421,38 +345,6 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
           ? { status: 400, code: error.code, message: error.message }
           : { status: 500, code: "host_op_failed", message: reason(error) };
       queue({ type: "res", id, ok: false, error: failure });
-    }
-  }
-
-  /** Large results and media go as raw bytes, before their `res` line. */
-  async function uploadBlob(id: string, bytes: Uint8Array): Promise<void> {
-    if (bytes.byteLength > LINK_LIMITS.blobBytes) throw new HostOpError(413, "result_too_large", "The result is too large for the host link");
-    const signal = AbortSignal.any([stopSignal.signal, AbortSignal.timeout(LINK_LIMITS.opTimeoutMs)]);
-    const { promise: aborted, resolve: onAbort } = Promise.withResolvers<void>();
-    signal.addEventListener("abort", () => onAbort(), { once: true });
-    for (;;) {
-      // Main refused the last link as replaced: upload on the next one.
-      while (!nonce) {
-        signal.throwIfAborted();
-        await Promise.race([welcome.promise, aborted]);
-      }
-      const used = nonce;
-      const sent = authorization;
-      const response = await fetchLink(`${linkUrl}/blob/${encodeURIComponent(id)}`, {
-        method: "POST",
-        headers: { authorization: sent, "content-type": "application/octet-stream", [LINK_NONCE_HEADER]: used },
-        body: bytes as Uint8Array<ArrayBuffer>,
-        signal,
-      });
-      if (await fatal(response, sent)) throw new HostOpError(503, "host_stopping", "ompweb host is stopping");
-      // The token was just replaced (or this request carried a replaced one): upload again with the current one.
-      if (response.status === 401) continue;
-      if (response.status === 409) {
-        if (nonce === used) forgetLink();
-        continue;
-      }
-      if (!response.ok) throw new HostOpError(502, "blob_upload_failed", `Uploading the result failed (${response.status})`);
-      return;
     }
   }
 
@@ -511,15 +403,52 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     return { cwd: spawned.cwd, fellBack: resolved.fellBack || spawned.fellBack, launchAdvisor: spawned.launchAdvisor, autoApproveExtension: localHost.autoApproveExtension() };
   }
 
-  async function downlink(): Promise<void> {
+  /** One socket from dial to close; null when the watchdog gave it up. */
+  function connect(sent: string, hello: string): Promise<SocketEnd | null> {
+    const { promise, resolve } = Promise.withResolvers<SocketEnd | null>();
+    // This repo's DOM typing has no init argument; Node's and Bun's WebSocket take `{ headers }`.
+    const ws = new WebSocket(linkUrl.replace(/^http/, "ws"), { headers: { authorization: sent } } as unknown as string[]);
+    ws.binaryType = "arraybuffer";
+    socket = ws;
+    let opened = false;
+    let watchdog: NodeJS.Timeout | undefined;
+    // Once given up, a socket stays inert: a late 4409 on it never stops a daemon that already redialed.
+    const end = (closed: SocketEnd | null) => {
+      clearTimeout(watchdog);
+      socket = null;
+      linked = null;
+      inFlight = false;
+      resolve(closed);
+    };
+    // Main pings every pingMs: silence for offlineMs is a dead link (a laptop that slept, a NAT that forgot it).
+    const alive = () => {
+      clearTimeout(watchdog);
+      watchdog = setTimeout(() => {
+        end(null);
+        ws.close();
+      }, LINK_LIMITS.offlineMs);
+    };
+    alive();
+    ws.onopen = () => {
+      if (socket !== ws) return;
+      opened = true;
+      ws.send(hello);
+    };
+    ws.onmessage = ({ data }: MessageEvent) => {
+      if (socket !== ws) return;
+      alive();
+      // One message per text frame; the hub sends no binary frames.
+      if (typeof data === "string") handleDown(data);
+    };
+    ws.onclose = (event) => {
+      if (socket === ws) end({ opened, code: event.code, reason: event.reason });
+    };
+    return promise;
+  }
+
+  async function keepLinked(): Promise<void> {
     while (!stopped) {
-      const abort = new AbortController();
-      let watchdog: NodeJS.Timeout | undefined;
-      // Main pings every pingMs: silence for offlineMs is a dead link.
-      const alive = () => {
-        clearTimeout(watchdog);
-        watchdog = setTimeout(() => abort.abort(new Error("no traffic from the server")), LINK_LIMITS.offlineMs);
-      };
+      const sent = authorization;
       try {
         const ompVersion = await getOmpVersion();
         const encodeHello = (replay: boolean) => encodeLine({
@@ -540,43 +469,48 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
           // Too many channels near the pending cap for one line: none replays (all take the kill-and-resume path) rather than never relinking.
           hello = encodeHello(false);
         }
-        alive();
-        const sent = authorization;
-        const signal = AbortSignal.any([stopSignal.signal, abort.signal]);
-        // The hello goes in a POST body: as a GET header, proxy header buffers (nginx: 8 KB) capped the channels it lists.
-        const offered = await fetchLink(linkUrl, {
-          method: "POST",
-          headers: { authorization: sent, "content-type": "application/x-ndjson", [LINK_HELLO_HEADER]: "1" },
-          body: hello,
-          signal,
-        });
-        if (await fatal(offered, sent)) return;
-        const { helloId } = (offered.ok ? await offered.json().catch(() => ({})) : {}) as { helloId?: unknown };
-        if (typeof helloId !== "string" || !helloId) {
-          // A v1 main answers a nonce-less POST 409 and has no hello leg: redialing would loop forever.
-          if (offered.ok || [400, 404, 405, 409].includes(offered.status)) {
-            log("the server runs an older ompweb: upgrade it");
-            void shutdown(1);
-            return;
+        const closed = await connect(sent, hello);
+        if (stopped) return;
+        if (closed?.code === LINK_CLOSE.replaced) {
+          log("another ompweb host linked with this token; exiting");
+          void shutdown(0);
+          return;
+        }
+        if (closed?.code === LINK_CLOSE.versionMismatch) {
+          // The reason carries the server's newest version: below this daemon's, the server is the outdated side.
+          let serverVersion: unknown;
+          try {
+            serverVersion = (JSON.parse(closed.reason) as { serverVersion?: unknown } | null)?.serverVersion;
+          } catch {
+            // No version: advise updating this host.
           }
-          throw new Error(`the server answered the hello with ${offered.status}`);
+          log(
+            typeof serverVersion === "number" && serverVersion < LINK_PROTOCOL_VERSION
+              ? "this host's ompweb is newer than the server's: update ompweb on the server"
+              : "the server speaks a different link protocol: update ompweb on this host",
+          );
+          void shutdown(1);
+          return;
         }
-        const response = await fetchLink(linkUrl, { headers: { authorization: sent, [LINK_HELLO_HEADER]: helloId }, signal });
-        if (await fatal(response, sent)) return;
-        if (!response.ok || !response.body) throw new Error(`the server answered ${response.status}`);
-        for await (const line of readLines(response.body)) {
-          alive();
-          handleDown(line);
-          if (stopped) return;
+        if (!closed) log("link lost (no traffic from the server); redialing");
+        else if (closed.opened) log(`link lost (code ${closed.code}${closed.reason ? `: ${closed.reason}` : ""}); redialing`);
+        else {
+          // Neither Node's nor Bun's WebSocket shows a refused upgrade's status: a plain GET with the same token does.
+          const { status, body } = await fetch(linkUrl, {
+            headers: { authorization: sent },
+            signal: AbortSignal.any([stopSignal.signal, AbortSignal.timeout(LINK_LIMITS.offlineMs)]),
+          });
+          void body?.cancel().catch(() => {});
+          if (status === 401) unauthorized(sent);
+          else if (status === 503) log("the server is unavailable (503); redialing");
+          else log(`the server did not accept the WebSocket upgrade (HTTP ${status}): check that a reverse proxy forwards Upgrade and Connection, and that the server runs an ompweb at least as new as this host's`);
         }
-        log("the server closed the link; redialing");
       } catch (error) {
         if (stopped) return;
         log(`link lost (${reason(error)}); redialing`);
-        followLogin();
-      } finally {
-        clearTimeout(watchdog);
       }
+      if (stopped) return;
+      followLogin();
       await sleep(withJitter(redialDelay), undefined, { signal: stopSignal.signal }).catch(() => {});
       redialDelay = nextRedialDelay(redialDelay, serverUrl);
     }
@@ -586,6 +520,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     stopped = true;
     stopping ??= (async () => {
       stopSignal.abort();
+      socket?.close();
       clearTimeout(flushTimer);
       const live = [...channels.values()].map(({ transport }) => transport);
       const exits = live.map((transport) => {
@@ -604,6 +539,6 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     return stopping;
   }
 
-  void downlink();
+  void keepLinked();
   return { stop: () => shutdown(0), done };
 }
