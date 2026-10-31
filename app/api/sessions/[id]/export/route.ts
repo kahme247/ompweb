@@ -36,7 +36,6 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const inline = new URL(req.url).searchParams.get("inline") === "1";
 
   try {
     const resolved = await resolveSessionPathOr404(id);
@@ -54,10 +53,19 @@ export async function GET(
       await exportSession(filePath, outputPath);
 
       const html = readFileSync(outputPath, "utf8");
+      // Attachment-only, even when ?inline=1 is requested: omp embeds
+      // transcript text into the exported HTML without escaping it, so an
+      // attacker-influenced message (event-handler attributes survive
+      // innerHTML parsing) would execute in omp-web's origin if the export
+      // were rendered inline — with the owner's cookies and same-origin API
+      // access. A route-level sandboxed CSP cannot fix this: config-level
+      // headers overwrite same-key route headers (see next.config.ts), so
+      // the global CSP's `unsafe-inline` would win. Downloading keeps the
+      // feature working without ever rendering untrusted HTML as omp-web.
       return new Response(html, {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
-          "Content-Disposition": getContentDisposition(fileName, inline, "session.html"),
+          "Content-Disposition": getContentDisposition(fileName, false, "session.html"),
           "Cache-Control": "no-cache",
         },
       });

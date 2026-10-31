@@ -71,19 +71,34 @@ export function getConfigAgentRoots(): string[] {
  *
  * `~/.omp/agent/agent.db` is omp's credential store (API keys) and `models.yml`
  * can carry an `apiKey` for custom models, so making the config root readable
- * to view a rule file would also hand out secrets over `?type=download`. Both
- * are already reachable through their purpose-built routes
- * (`app/api/auth/api-key/*`, `app/api/models-config/route.ts`) which redact or
- * scope what they return, so nothing legitimate needs the generic path.
+ * to view a rule file would also hand out secrets over `?type=download`. The
+ * same holds for omp-web's own auth material: `web-auth-secret.json` (the
+ * session-signing key), `web-service.env` (the password hash) and
+ * `notifications.db` (the VAPID private key) would each let a holder mint
+ * sessions or forge pushes. The credential stores are already reachable
+ * through their purpose-built routes (`app/api/auth/api-key/*`,
+ * `app/api/models-config/route.ts`) which redact or scope what they return,
+ * so nothing legitimate needs the generic path.
  */
-const CONFIG_ROOT_DENIED_FILES: ReadonlySet<string> = new Set(["agent.db", "models.yml"]);
+const CONFIG_ROOT_DENIED_FILES: ReadonlySet<string> = new Set([
+  "agent.db",
+  "models.yml",
+  "web-auth-secret.json",
+  "web-service.env",
+  "notifications.db",
+]);
 
 export function isConfigRootDeniedFile(filePath: string): boolean {
   const base = normalizeSlashes(filePath);
   const name = base.slice(base.lastIndexOf("/") + 1).toLowerCase();
-  // SQLite sidecars carry the same credentials as the db itself.
   if (CONFIG_ROOT_DENIED_FILES.has(name)) return true;
-  return CONFIG_ROOT_DENIED_FILES.has(name.split(".").slice(0, -1).join(".")) && name.includes(".db");
+  // SQLite sidecars carry the same credentials as the db itself (`agent.db`
+  // plus `agent.db-*` — the old stem check missed these because the stem of
+  // `agent.db-wal` is `agent`, not `agent.db`), and any other sqlite
+  // database under a config root is omp/omp-web state, not a document the
+  // file viewer has business opening.
+  if (name.startsWith("agent.db-")) return true;
+  return name.endsWith(".db");
 }
 
 /** True when `filePath` lives under one of the omp config/agent roots. */

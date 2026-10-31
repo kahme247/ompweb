@@ -65,7 +65,24 @@ export async function authorizeFileAccess(
   // store inside an allowed root. Deny those by name before anything can
   // stat, read or download them. Only paths outside the config roots are
   // exempt, so a workspace that happens to hold an `agent.db` still opens.
-  if (isUnderConfigRoot(filePath, getConfigAgentRoots()) && isConfigRootDeniedFile(filePath)) {
+  //
+  // Resolve symlinks BEFORE the denied check: a workspace symlink named
+  // `link.db` pointing at `<agentDir>/agent.db` otherwise passes the
+  // lexical name check, and the config root it lands in is itself an
+  // allowed root, so every later check passes too. The check runs on both
+  // the lexical and the real path, and before the session-reference
+  // admission below (which skips the existing-path root check), so neither
+  // route can launder a denied file.
+  let realFilePath = filePath;
+  try {
+    realFilePath = normalizeSlashes(fs.realpathSync(filePath));
+  } catch {
+    // Nonexistent: keep the lexical path so the 404 below still fires.
+  }
+  const configRoots = getConfigAgentRoots();
+  const underConfigRoot =
+    isUnderConfigRoot(filePath, configRoots) || isUnderConfigRoot(realFilePath, configRoots);
+  if (underConfigRoot && (isConfigRootDeniedFile(filePath) || isConfigRootDeniedFile(realFilePath))) {
     return ACCESS_DENIED;
   }
   const allowedByRoot = isFilePathAllowed(filePath, allowedRoots);
@@ -85,5 +102,7 @@ export async function authorizeFileAccess(
   if (!allowedBySessionReference && !isExistingFilePathAllowed(filePath, allowedRoots)) {
     return ACCESS_DENIED;
   }
-  return { ok: true, filePath, stat };
+  // Serve the resolved file, not the link: the caller must never observe a
+  // denied target through a differently-named path.
+  return { ok: true, filePath: realFilePath, stat };
 }

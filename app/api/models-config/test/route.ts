@@ -3,8 +3,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
+  MASKED_API_KEY,
   type ModelDefinition,
   type ProviderConfig,
+  readModelsConfigFile,
   serializeModelsConfig,
   validateModelsConfig,
 } from "@/lib/omp/models-config";
@@ -34,10 +36,18 @@ export async function POST(req: Request) {
     const modelId = typeof body.model.id === "string" ? body.model.id.trim() : "";
     if (!modelId) return NextResponse.json({ ok: false, error: "Model ID is required", code: "model_id_required" }, { status: 400 });
 
+    // The editor shows the masked placeholder for a stored key; testing a
+    // provider without retyping its key must still test the real one.
+    const candidate = { ...(body.provider as ProviderConfig) };
+    if (candidate.apiKey === MASKED_API_KEY) {
+      const storedProvider = readModelsConfigFile().config.providers?.[providerName];
+      if (storedProvider?.apiKey) candidate.apiKey = storedProvider.apiKey;
+      else delete candidate.apiKey;
+    }
     const config = {
       providers: {
         [providerName]: {
-          ...(body.provider as ProviderConfig),
+          ...candidate,
           models: [{ ...(body.model as ModelDefinition), id: modelId }],
         },
       },

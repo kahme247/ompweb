@@ -307,6 +307,13 @@ export async function POST(req: Request) {
     }
 
     const source = body.source?.trim();
+    // A source starting with "-" would be parsed as CLI options by
+    // `omp plugin …` instead of a plugin name (e.g. `--scope` consuming
+    // the following `--json` as its value) — the same guard the
+    // skills-install route applies to package names.
+    if (source?.startsWith("-")) {
+      return NextResponse.json({ error: "Invalid plugin source", code: "plugin_source_invalid" }, { status: 400 });
+    }
     const scopeArgs = readScope(body.scope) === "project" ? ["--scope", "project"] : [];
 
     if (body.action === "install") {

@@ -135,6 +135,49 @@ function sanitizeModelsConfig(config: ModelsFileConfig): ModelsFileConfig {
   return { ...config, providers };
 }
 
+/**
+ * Placeholder GET /api/models-config returns in place of a real `apiKey`.
+ * The file API denies models.yml outright on the grounds that the
+ * purpose-built route "redacts what it returns" — returning the key
+ * verbatim defeated that denial, so the route must never emit a real key.
+ * The placeholder is never a valid key: PUT restores the stored key when
+ * it sees it, and drops it when there is nothing stored to restore, so it
+ * can never be persisted to disk.
+ */
+export const MASKED_API_KEY = "••••••••";
+
+/** Copy of a config with every provider `apiKey` replaced by the placeholder. */
+export function maskModelsConfigApiKeys(config: ModelsFileConfig): ModelsFileConfig {
+  if (!isRecord(config.providers)) return config;
+  const providers = Object.fromEntries(Object.entries(config.providers).map(([providerId, provider]) => {
+    if (!isRecord(provider) || typeof provider.apiKey !== "string" || provider.apiKey === "") return [providerId, provider];
+    return [providerId, { ...provider, apiKey: MASKED_API_KEY }];
+  }));
+  return { ...config, providers };
+}
+
+/**
+ * Undo masking on a client-submitted config: a placeholder echoes the stored
+ * key back, a genuinely new value overwrites it, and a placeholder with no
+ * stored key is dropped (validation then rejects providers that need a key
+ * rather than saving the placeholder as one).
+ */
+export function restoreModelsConfigApiKeys(config: ModelsFileConfig, stored: ModelsFileConfig): ModelsFileConfig {
+  if (!isRecord(config.providers)) return config;
+  const storedProviders = isRecord(stored.providers) ? stored.providers : {};
+  const providers = Object.fromEntries(Object.entries(config.providers).map(([providerId, provider]) => {
+    if (!isRecord(provider) || provider.apiKey !== MASKED_API_KEY) return [providerId, provider];
+    const storedProvider = storedProviders[providerId];
+    if (isRecord(storedProvider) && typeof storedProvider.apiKey === "string" && storedProvider.apiKey !== "") {
+      return [providerId, { ...provider, apiKey: storedProvider.apiKey }];
+    }
+    const rest = { ...provider };
+    delete rest.apiKey;
+    return [providerId, rest];
+  }));
+  return { ...config, providers };
+}
+
 /** Read models.yml, reporting rather than swallowing parse failures. */
 export function readModelsConfigFile(): ModelsConfigFile {
   const path = getModelsConfigPath();

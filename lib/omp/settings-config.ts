@@ -179,6 +179,63 @@ export function readNativeSettings(): { path: string; settings: NativeSettings }
   };
 }
 
+/**
+ * The only keys writeNativeSettings may write, per section — mirroring the
+ * read allowlist in readNativeSettings. Validation below type-checks known
+ * keys but used to loop every key of these sections straight into the
+ * document, so an unvalidated key (e.g. `mcp.evilKey`) persisted into omp's
+ * config.yml. Unknown keys are rejected, never silently written.
+ */
+const SECTION_KEYS: Record<string, readonly string[]> = {
+  advisor: ["enabled", "subagents", "syncBacklog", "immuneTurns"],
+  retry: ["enabled", "maxRetries", "modelFallback", "fallbackRevertPolicy", "fallbackChains"],
+  compaction: ["enabled", "midTurnEnabled", "methodOrder", "autoContinue", "keepRecentTokens"],
+  memory: ["backend"],
+  autolearn: ["enabled", "autoContinue", "minToolCalls"],
+  mnemopi: ["scoping", "autoRecall", "autoRetain", "noEmbeddings"],
+  mcp: ["enableProjectConfig", "renderMarkdownResults", "notifications", "notificationDebounceMs"],
+};
+
+function assertSectionKeys(section: string, value: unknown): void {
+  if (value === undefined) return;
+  const allowed = new Set(SECTION_KEYS[section]);
+  for (const key of Object.keys(value as Record<string, unknown>)) {
+    if (!allowed.has(key)) throw new Error(`Unsupported ${section} setting: ${key}`);
+  }
+}
+
+/** Copy of `settings` containing only keys writeNativeSettings may persist. */
+function filteredSettings(settings: NativeSettings): NativeSettings {
+  const out: NativeSettings = {};
+  for (const key of ["defaultThinkingLevel", "hideThinkingBlock", "externalThinking", "textVerbosity", "personality", "enabledModels", "disabledProviders", "modelProviderOrder"] as const) {
+    if (settings[key] !== undefined) (out as Record<string, unknown>)[key] = settings[key];
+  }
+  if (settings.providers?.autoThinkingSource !== undefined) {
+    out.providers = { autoThinkingSource: settings.providers.autoThinkingSource };
+  }
+  for (const section of Object.keys(SECTION_KEYS)) {
+    const value = (settings as Record<string, unknown>)[section];
+    if (!isRecord(value)) continue;
+    const allowed = new Set(SECTION_KEYS[section]);
+    const kept = Object.fromEntries(Object.entries(value).filter(([key]) => allowed.has(key)));
+    if (Object.keys(kept).length > 0) (out as Record<string, unknown>)[section] = kept;
+  }
+  if (settings.tools) {
+    const approval = settings.tools.approval;
+    out.tools = {
+      ...(settings.tools.approvalMode !== undefined ? { approvalMode: settings.tools.approvalMode } : {}),
+      ...(approval && (approval.bash !== undefined || approval.extension !== undefined) ? { approval: {
+        ...(approval.bash !== undefined ? { bash: approval.bash } : {}),
+        ...(approval.extension !== undefined ? { extension: approval.extension } : {}),
+      } } : {}),
+    };
+  }
+  if (settings.skills?.showStartupDiagnostics !== undefined) {
+    out.skills = { showStartupDiagnostics: settings.skills.showStartupDiagnostics };
+  }
+  return out;
+}
+
 /** Validates and applies a reviewed subset of OMP's global config schema. */
 export function writeNativeSettings(settings: NativeSettings): void {
   if (!isRecord(settings)) throw new Error("Settings must be an object");
@@ -244,12 +301,17 @@ export function writeNativeSettings(settings: NativeSettings): void {
   for (const [key, values] of Object.entries({ enabledModels: settings.enabledModels, disabledProviders: settings.disabledProviders, modelProviderOrder: settings.modelProviderOrder })) {
     if (values !== undefined && (!Array.isArray(values) || values.some((value) => typeof value !== "string" || !value.trim()))) throw new Error(`${key} must contain non-empty strings`);
   }
+  for (const section of Object.keys(SECTION_KEYS)) {
+    assertSectionKeys(section, (settings as Record<string, unknown>)[section]);
+  }
 
   const { path, doc } = readDocument();
   mkdirSync(dirname(path), { recursive: true });
   if (doc.contents === null) {
+    // An empty document used to stringify the caller's object verbatim,
+    // persisting every unknown key with it; write only the allowlisted copy.
     const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync(temp, stringify(settings), "utf8");
+    writeFileSync(temp, stringify(filteredSettings(settings)), "utf8");
     renameSync(temp, path);
     return;
   }

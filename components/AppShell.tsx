@@ -1721,11 +1721,15 @@ export function AppShell({ appName }: { appName: string }) {
 
   const handleViewFullHistory = useCallback(() => {
     if (!selectedSession) return;
-    window.open(
-      `/api/sessions/${encodeURIComponent(selectedSession.id)}/export?inline=1`,
-      "_blank",
-      "noopener,noreferrer",
-    );
+    // Exports are always served as attachments (stored-XSS hardening: omp
+    // embeds transcript HTML unescaped), so download the file instead of
+    // opening it in a tab.
+    const link = document.createElement("a");
+    link.href = `/api/sessions/${encodeURIComponent(selectedSession.id)}/export`;
+    link.download = "";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
   }, [selectedSession]);
 
   // Show chat area if a session is selected, or if we have a cwd to start a new session in
