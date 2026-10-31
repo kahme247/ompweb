@@ -378,6 +378,19 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   4426 version (`LINK_CLOSE`). Wire shapes and size limits live in
   `lib/hosts/link-protocol.ts` (one op allow-list, `HOST_OP_NAMES`, shared by
   both sides); the summary spec is `docs/specs/2026-10-28-remote-hosts-design.md`.
+- **Link head-of-line samples** (`metric: "link"` in `<agent dir>/omp-web/transport-metrics.jsonl`, measurement
+  only). Each side samples every sequenced message once, when it is queued: time, UTF-8 size, session (a session
+  op's `id`, else the channel's child as its `get_state` answers name it) and `bytesAhead`, the bytes queued or
+  unacked on that link then (`LinkSender.queuedBytes` plus an unacked counter, never a scan; a queued line counts at
+  its size before its seq is filled in, up to 15 bytes over). The sample is made when the message is acked: a line
+  sent in parts at its last part, with the joined size; a `res` counts its result bytes as its own. The hub writes
+  its `down` samples; the daemon reports its `up` ones in sequenced `stats` messages of at most
+  `LINK_LIMITS.statsSamples`, queued under their own sender key (fair and inside the unacked window like any
+  message), which the hub validates strictly. Both sides batch (`statsSamples` or `statsFlushMs`,
+  30 s); the hub resolves the file when a batch starts and writes what it holds in `freezeHostLinks`. `ackMs` is a
+  round trip: a v5 daemon acks the downlink within `flushMs` (an ack-only frame if need be) and the hub's
+  ack rides the downlink. `bun scripts/link-hol-probe.ts` makes the load; `scripts/transport-metrics.ts` prints
+  `link small ackMs` (`clear` vs `behind-large`, 64 KiB ahead) and `link bytesAhead` per host and direction.
 - **Link protocol versions** (spec "Protocol versions and compatibility"). A
   released `LINK_PROTOCOL_VERSION` changes only compatibly: an added optional
   field or a message type receivers skip is fine; a changed type or meaning, or

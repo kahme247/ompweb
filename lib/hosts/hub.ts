@@ -7,6 +7,7 @@ import { readBodyWithinLimit } from "../bounded-form-data";
 import type { RpcTransport } from "../omp/rpc-transport";
 import type { ProjectRegistryEntry } from "../project-registry";
 import { isValidSessionId } from "../session-file-references-core";
+import { appendTransportSamples, transportMetricsPath } from "../transport-metrics";
 import { isRecord } from "../type-guards";
 import type { SessionInfo } from "../types";
 import { isLinkUp, type Host, type HostStatus, type SpawnRequest, type SpawnResult } from "./host";
@@ -74,7 +75,7 @@ interface PendingOp {
 
 /** A downlink line sent (or to resend) and not acked yet. `key`: the `sender` key it went out under; `bytes`: its
  * UTF-8 size; `part`: a `part` line; `whole`: on the last part of a line, that line as queued, which a v4 daemon gets
- * instead (partsToWhole). */
+ * instead (partsToWhole); `sample`: on the line that completes a message, its link sample. */
 interface Sent {
   seq: number;
   line: string;
@@ -82,6 +83,16 @@ interface Sent {
   bytes: number;
   part: boolean;
   whole: string | null;
+  sample: DownSample | null;
+}
+
+/** What a downlink message's link sample needs, taken when it is queued: the time, its UTF-8 size, the bytes queued
+ * or unacked ahead of it then, and the session it serves. */
+interface DownSample {
+  at: number;
+  bytes: number;
+  bytesAhead: number;
+  session: string | null;
 }
 
 interface Link {
@@ -99,8 +110,10 @@ interface Link {
   /** Last downlink seq handed out. Lines stay in `outbox` until the daemon acks them. */
   downSeq: number;
   /** Downlink messages not numbered yet, per channel or request, sent fair (spec D7). */
-  sender: LinkSender<{ line: string; size: number }>;
+  sender: LinkSender<{ line: string; size: number; sample: DownSample }>;
   outbox: Outbox<Sent>;
+  /** Bytes of the outbox lines, sent or waiting for a resend. */
+  outboxBytes: number;
   /** Highest outbox seq written to the current socket; `flush` sends what is past it. */
   sentSeq: number;
   /** Bytes of the outbox lines written to the current socket: the unacked window (spec D7). */
@@ -154,6 +167,7 @@ function linkFor(id: string): Link {
       downSeq: 0,
       sender: new LinkSender(true),
       outbox: new Outbox(),
+      outboxBytes: 0,
       sentSeq: 0,
       unacked: 0,
       awaitingDrain: false,
@@ -204,7 +218,10 @@ function enqueue(link: Link, line: string): void {
 
 /** Lines that left the outbox (acked or dropped): those written to the current socket leave the unacked window. */
 function released(link: Link, items: Sent[]): void {
-  for (const item of items) if (item.seq <= link.sentSeq) link.unacked -= item.bytes;
+  for (const item of items) {
+    link.outboxBytes -= item.bytes;
+    if (item.seq <= link.sentSeq) link.unacked -= item.bytes;
+  }
 }
 
 /** Send outbox lines past `sentSeq` (a resend after a redial), then the sender's next units, while the unacked window
@@ -235,8 +252,10 @@ function flush(link: Link): void {
     // The hub queues lines only, so every unit is a line.
     if (!unit || !("line" in unit)) return;
     const whole = unit.part && unit.done ? unit.item.line : null;
-    const item: Sent = { seq: unit.seq, line: unit.line, key: unit.key, bytes: Buffer.byteLength(unit.line), part: unit.part, whole };
+    // One sample per message: a split one carries it on its last part.
+    const item: Sent = { seq: unit.seq, line: unit.line, key: unit.key, bytes: Buffer.byteLength(unit.line), part: unit.part, whole, sample: unit.done ? { ...unit.item.sample, bytes: unit.messageBytes } : null };
     link.outbox.push(item);
+    link.outboxBytes += item.bytes;
     if (!write(item)) return;
   }
 }
@@ -245,11 +264,12 @@ function flush(link: Link): void {
  * part's seq; the parts of a line still going out are dropped, and the sender sends it whole from the start. */
 function partsToWhole(link: Link): void {
   for (const item of link.outbox.drop(() => true)) {
-    if (!item.part) link.outbox.push(item);
-    else if (item.whole !== null) {
-      const line = withSeq(item.whole, item.seq);
-      link.outbox.push({ ...item, line, bytes: Buffer.byteLength(line), part: false, whole: null });
-    }
+    link.outboxBytes -= item.bytes;
+    if (item.part && item.whole === null) continue;
+    const line = item.part && item.whole !== null ? withSeq(item.whole, item.seq) : item.line;
+    const bytes = Buffer.byteLength(line);
+    link.outbox.push({ ...item, line, bytes, part: false, whole: null });
+    link.outboxBytes += bytes;
   }
 }
 
@@ -259,8 +279,61 @@ function partsToWhole(link: Link): void {
 function sendDown(link: Link, body: Unsequenced<DownMessage>, key: string): void {
   if (hub().frozen) return;
   const line = encodeQueued(body);
-  link.sender.push(key, { line, size: Buffer.byteLength(line) });
+  const size = Buffer.byteLength(line);
+  // Ahead of it: what is queued or unacked on this link (counters, no scan); fairness may send it before some of that.
+  const sample = { at: Date.now(), bytes: size, bytesAhead: link.outboxBytes + link.sender.queuedBytes, session: sessionOf(link, body) };
+  link.sender.push(key, { line, size, sample });
   flush(link);
+}
+
+/** The session a downlink message serves: a session op's `id`, else its channel's child's; null for host ops. */
+function sessionOf(link: Link, body: Unsequenced<DownMessage>): string | null {
+  if (body.type !== "req") return "ch" in body ? link.channels.get(body.ch)?.session ?? null : null;
+  return isRecord(body.args) && typeof body.args.id === "string" && isValidSessionId(body.args.id) ? body.args.id : null;
+}
+
+/** Link samples (metric "link") waiting to be written, at most LINK_LIMITS.statsSamples: written at that count, after
+ * statsFlushMs or when the hub stops. The file is resolved when a batch starts, so a later flush never re-resolves the
+ * agent dir (a test's may be gone by then). */
+const linkSamples: Record<string, unknown>[] = [];
+let linkSampleFile = "";
+let linkSampleTimer: NodeJS.Timeout | undefined;
+
+function recordLinkSamples(samples: Record<string, unknown>[]): void {
+  for (const sample of samples) {
+    if (linkSamples.length === 0) {
+      linkSampleFile = transportMetricsPath();
+      linkSampleTimer = setTimeout(flushLinkSamples, LINK_LIMITS.statsFlushMs);
+      linkSampleTimer.unref?.();
+    }
+    linkSamples.push(sample);
+    if (linkSamples.length >= LINK_LIMITS.statsSamples) flushLinkSamples();
+  }
+}
+
+/** Write the batch now. Measurement only: a failed write is logged and dropped, never touches a link. */
+export function flushLinkSamples(): void {
+  clearTimeout(linkSampleTimer);
+  linkSampleTimer = undefined;
+  if (linkSamples.length === 0) return;
+  try {
+    appendTransportSamples(linkSamples.splice(0), null, linkSampleFile);
+  } catch (error) {
+    console.warn(`[omp-web] could not write host link samples: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** The daemon applied the downlink through `ack`: each message it acks now (a split one at its last part) becomes a
+ * `down` sample; the lines leave the outbox and the unacked window. */
+function ackDown(link: Link, ack: number): void {
+  const now = Date.now();
+  const samples: Record<string, unknown>[] = [];
+  const acked = link.outbox.ack(ack);
+  for (const { sample } of acked) {
+    if (sample) samples.push({ metric: "link", dir: "down", host: link.id, session: sample.session, bytes: sample.bytes, bytesAhead: sample.bytesAhead, ackMs: now - sample.at, at: sample.at });
+  }
+  released(link, acked);
+  recordLinkSamples(samples);
 }
 
 /** Fail an op for good: a `req` not yet acked is never resent, nor the rest of one going in parts (one already
@@ -347,6 +420,8 @@ const stopping = () => json({ error: "omp-web is shutting down" }, 503);
 export function freezeHostLinks(): void {
   hub().frozen = true;
   for (const link of hub().links.values()) link.socket?.close(LINK_CLOSE.goingAway, "omp-web is restarting");
+  // The process exits next: keep what was measured.
+  flushLinkSamples();
 }
 
 /** GET /api/hosts/link: the daemon's WebSocket. The token is checked before the upgrade, so no unknown caller gets a
@@ -483,7 +558,7 @@ function openLink(link: Link, ws: LinkSocket, hello: Hello): void {
   if (hello.ack <= 0) link.up = new SeqWindow();
   // After a restart of this server the daemon is ahead: number above its ack.
   link.downSeq = Math.max(link.downSeq, hello.ack);
-  link.outbox.ack(hello.ack);
+  released(link, link.outbox.ack(hello.ack));
   link.unknownLog.reset();
   // The version this link speaks: from 5 on, lines over pieceBytes go in parts.
   link.hostVersion = hello.v;
@@ -539,7 +614,7 @@ function onFrame(link: Link, ws: LinkSocket, data: string | Uint8Array): void {
     return ws.close(LINK_CLOSE.invalidData, "Malformed uplink frame");
   }
   for (const message of messages) {
-    if (message.type === "ack") released(link, link.outbox.ack(message.ack));
+    if (message.type === "ack") ackDown(link, message.ack);
     else applyUp(link, message);
   }
   // One answer per frame, also to one with nothing sequenced in it: a v5 daemon counts its frames in flight by them.
@@ -640,6 +715,8 @@ function applyUp(link: Link, message: UpMessage | UnknownMessage, joined = false
     }
     case "res":
       return settle(link, message);
+    case "stats":
+      return recordLinkSamples(message.samples.map((sample) => ({ metric: "link", dir: "up", host: link.id, ...sample })));
   }
 }
 
@@ -797,6 +874,8 @@ export class RemoteRpcTransport implements RpcTransport {
   }
   /** Set for a child of a previous run the daemon listed in `hello` (the session it runs); null for children this server spawned. */
   readonly sessionId: string | null;
+  /** The session the child last named in a get_state answer, else `sessionId`: tags its link samples. */
+  session: string | null;
   /** The daemon confirmed the spawn (or listed the channel); until then a `hello` without it is not a loss. */
   spawned = false;
   /** The daemon stopped listing this child: it died while the link was down. Set before the synthesized exit. */
@@ -820,6 +899,7 @@ export class RemoteRpcTransport implements RpcTransport {
     this.hostId = hostId;
     this.ch = ch;
     this.sessionId = sessionId;
+    this.session = sessionId;
   }
 
   write(line: string, callback: (error?: Error | null) => void): void {
@@ -880,6 +960,7 @@ export class RemoteRpcTransport implements RpcTransport {
   }
 
   deliverLine(line: string): void {
+    if (line.includes('"get_state"')) this.noteSession(line);
     if (this.orphaned) return;
     if (this.lineListeners.length > 0) return notify(this.lineListeners, line);
     const bytes = this.holdable(line);
@@ -905,6 +986,19 @@ export class RemoteRpcTransport implements RpcTransport {
     if (this.exitInfo) return;
     this.exitInfo = [code, signal];
     notify(this.exitListeners, code, signal);
+  }
+
+  private noteSession(line: string): void {
+    let frame: unknown;
+    try {
+      frame = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (isRecord(frame) && frame.type === "response" && frame.command === "get_state" && frame.success === true && isRecord(frame.data)) {
+      const { sessionId } = frame.data;
+      if (typeof sessionId === "string" && isValidSessionId(sessionId)) this.session = sessionId;
+    }
   }
 }
 
