@@ -574,8 +574,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const ta = textareaRef.current;
     if (!ta) {
       const current = valueRef.current;
-      valueRef.current = current + (current ? " " : "") + text;
-      setValue((v) => v + (v ? " " : "") + text);
+      const next = current + (current ? " " : "") + text;
+      valueRef.current = next;
+      setValue((value) => value + (value ? " " : "") + text);
       return;
     }
     const start = ta.selectionStart ?? ta.value.length;
@@ -584,6 +585,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const after = ta.value.slice(end);
     const sep = before.length > 0 && !before.endsWith(" ") ? " " : "";
     const newVal = before + sep + text + after;
+    // A command may finish before this insertion's React commit.
     valueRef.current = newVal;
     setValue(newVal);
     setAtQuery(null);
@@ -1221,12 +1223,24 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
    * started typing while the command ran). */
   const runBuiltinCommand = useCallback(async (msg: string, overrideText?: string): Promise<boolean> => {
     if (submissionBlockedRef.current || holdingRef.current || !onBuiltinCommand) return false;
-    const stored = clearOnceStored(overrideText ?? valueRef.current);
+    const sentValue = overrideText ?? valueRef.current;
+    const revision = attachmentRevisionRef.current;
+    const images = attachedImagesRef.current;
+    const files = attachedTextFilesRef.current;
+    // Dictation inserts overrideText in the same batch as dispatch. It still
+    // must match on completion; an override does not own subsequent typing.
+    const stored = clearOnceStored(sentValue);
     holdingRef.current = true;
     try {
       const result = await onBuiltinCommand(msg);
       if (!result.handled) return false;
-      if (!submissionBlockedRef.current && !result.error && !result.retainInput) stored();
+      const unchanged = valueRef.current === sentValue
+        && attachmentRevisionRef.current === revision
+        && attachedImagesRef.current === images
+        && attachedTextFilesRef.current === files
+        && pendingImageCountRef.current === 0
+        && pendingTextFileCountRef.current === 0;
+      if (!submissionBlockedRef.current && !result.error && !result.retainInput && unchanged) stored();
       return true;
     } finally {
       stored.release();
