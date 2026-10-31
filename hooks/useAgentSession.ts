@@ -261,7 +261,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // Queue delivery modes (set_steering_mode / set_follow_up_mode).
   const [steeringMode, setSteeringMode] = useState<"all" | "one-at-a-time">("all");
   const [followUpMode, setFollowUpMode] = useState<"all" | "one-at-a-time">("all");
-  const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
+  const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; delayMs?: number; startedAt?: number; errorMessage?: string } | null>(null);
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
   const [skillDiagnostics, setSkillDiagnostics] = useState<SkillDiagnosticsSnapshot | null>(null);
@@ -2412,7 +2412,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       case "auto_retry_start": {
         const msg = event.errorMessage as string | undefined;
-        setRetryInfo({ attempt: event.attempt as number, maxAttempts: event.maxAttempts as number, errorMessage: msg });
+        const delayMs = typeof event.delayMs === "number" && Number.isFinite(event.delayMs) && event.delayMs > 0 ? event.delayMs : undefined;
+        setRetryInfo({
+          attempt: event.attempt as number,
+          maxAttempts: event.maxAttempts as number,
+          delayMs,
+          startedAt: delayMs !== undefined ? Date.now() : undefined,
+          errorMessage: msg,
+        });
         if (msg && isQuotaLikeError(msg)) lastQuotaErrorRef.current = msg;
         break;
       }

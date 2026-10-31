@@ -74,3 +74,61 @@ test("question selection survives request replay but is cleared for the next que
     view.unmount();
   }
 });
+
+test("ExtensionDialog masks sensitive input and toggles visibility", async () => {
+  const request = {
+    type: "extension_ui_request",
+    id: "secret-1",
+    method: "input",
+    title: "Enter API Key",
+    placeholder: "sk-...",
+  };
+  const responses = [];
+  const onRespond = (current, response) => responses.push({ id: current.id, ...response });
+  const dialog = (current) => React.createElement(ExtensionDialog, { request: current, onRespond, attached: true });
+  const view = render(dialog(request));
+  try {
+    const input = view.getByPlaceholderText("sk-...");
+    assert.equal(input.type, "password");
+    assert.equal(input.getAttribute("autocomplete"), "off");
+    assert.equal(input.getAttribute("data-1p-ignore"), "true");
+
+    const toggle = screen.getByRole("button", { name: "Show password" });
+    fireEvent.click(toggle);
+    assert.equal(input.type, "text");
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide password" }));
+    assert.equal(input.type, "password");
+
+    // explicit secret: false does not mask even if title contains sensitive words
+    view.rerender(dialog({ ...request, id: "secret-2", secret: false }));
+    const plainInput = view.getByPlaceholderText("sk-...");
+    assert.equal(plainInput.type, "text");
+    assert.equal(screen.queryByRole("button", { name: "Show password" }), null);
+
+    // explicit secret: true masks regardless of title
+    view.rerender(dialog({
+      type: "extension_ui_request",
+      id: "secret-3",
+      method: "input",
+      title: "Random prompt",
+      secret: true,
+    }));
+    const maskedInput = view.container.querySelector("input");
+    assert.ok(maskedInput);
+    assert.equal(maskedInput.type, "password");
+
+    // plural prompt test: "Enter your credentials"
+    view.rerender(dialog({
+      type: "extension_ui_request",
+      id: "secret-4",
+      method: "input",
+      title: "Enter your credentials",
+    }));
+    const pluralInput = view.container.querySelector("input");
+    assert.ok(pluralInput);
+    assert.equal(pluralInput.type, "password");
+  } finally {
+    view.unmount();
+  }
+});

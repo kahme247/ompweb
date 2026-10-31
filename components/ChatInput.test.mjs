@@ -424,3 +424,20 @@ test("renders both queued prompts and attached status bar together", () => {
   assert.match(html, /Waiting for model\.\.\./);
   assert.match(html, /live-status-dot/);
 });
+
+test("renders retry banner with countdown when delayMs and startedAt are provided", () => {
+  const now = Date.now();
+  const html = renderToStaticMarkup(
+    React.createElement(ChatInput, {
+      async onSend() { return { status: "accepted" }; },
+      retryInfo: {
+        attempt: 2,
+        maxAttempts: 5,
+        delayMs: 10000,
+        startedAt: now,
+      },
+    }),
+  );
+
+  assert.match(html, /Retrying \(2\/5\) in 10s…/);
+});

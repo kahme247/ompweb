@@ -1470,6 +1470,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
             {extensionDialog && (
               <div style={{ marginBottom: 8 }}>
                 <ExtensionDialog
+                  key={extensionDialog.id}
                   request={extensionDialog}
                   onRespond={respondToExtensionUi}
                   attached
