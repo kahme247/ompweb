@@ -16,6 +16,26 @@ export type UsageLimitState =
 
 export type SlowModeScope = "session" | "global";
 
+/** omp's goal record (`goal` command reply, `goal_updated`, `get_state.goal.goal`). */
+export interface GoalInfo {
+  id: string;
+  objective: string;
+  /** `active` / `paused`; completed and dropped goals answer `null` instead. */
+  status: string;
+  tokenBudget?: number;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Mirror of omp's GoalModeState: the `goal` reply and the `goal` field of `get_state`. */
+export interface GoalModeState {
+  enabled: boolean;
+  mode: string;
+  goal: GoalInfo | null;
+}
+
 export interface ModelLike {
   id: string;
   provider: string;
@@ -102,6 +122,8 @@ export interface RpcSessionState {
   tokensPerSecond?: number | null;
   /** Structured skill resolution diagnostics; absent on older OMP builds. */
   skillDiagnostics?: SkillDiagnosticsSnapshot;
+  /** omp goal mode; absent on older OMP builds (never invented here). */
+  goal?: GoalModeState | null;
 }
 
 /**
@@ -140,6 +162,8 @@ export interface WebSessionState {
   /** Parsed public diagnostics DTO; absent means unsupported or malformed. */
   skillDiagnostics?: SkillDiagnosticsSnapshot;
   todoPhases: TodoPhase[];
+  /** omp goal mode snapshot; omitted when the child predates the `goal` field. */
+  goal?: GoalModeState | null;
   extensionStatuses: Array<{ key: string; text: string }>;
   extensionWidgets: Array<{ key: string; lines: string[]; placement: "aboveEditor" | "belowEditor" }>;
 }

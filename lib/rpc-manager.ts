@@ -169,6 +169,9 @@ const PASSTHROUGH_COMMANDS = new Set([
   "btw",
   "btw_cancel",
   "get_btw_history",
+  // Goal mode (`{type:"goal", op}`) has the same shape as omp's RPC frame and
+  // is the only way native clients reach it; every op answers `{goal, state}`.
+  "goal",
 ]);
 
 // Outlasts omp's cold prediction-daemon start (up to 3 × 30s start rounds plus a
@@ -1577,6 +1580,9 @@ export class AgentSessionWrapper {
       usageLimit: state.usageLimit,
       ...(skillDiagnostics ? { skillDiagnostics } : {}),
       todoPhases: state.todoPhases ?? [],
+      // Clients distinguish "no goal" (explicit null) from "omp does not know
+      // goals" (field absent), so an absent field stays absent.
+      ...(state.goal !== undefined ? { goal: state.goal } : {}),
       extensionStatuses: Array.from(this.extensionStatuses, ([key, text]) => ({ key, text })),
       extensionWidgets: Array.from(this.extensionWidgets.values()),
     };
