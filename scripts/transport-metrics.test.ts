@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { formatReport, percentile, summarize, type SummaryRow } from "./transport-metrics";
+import { formatReport, LINK_ACK_NOTE, percentile, summarize, type SummaryRow } from "./transport-metrics";
 
 test("percentile is nearest rank", () => {
   assert.equal(percentile([10, 20, 30, 40, 100], 50), 30);
@@ -261,6 +261,25 @@ test("link samples: small lines' ackMs split clear vs behind-large per host and 
   assert.equal(rows.some((r) => r.section === "client"), false);
 });
 
+test("link samples: --session keeps one session's link samples only, and budget drops show per host and direction", () => {
+  const A = "11111111-2222-4333-8444-0000000000aa";
+  const link = (session: string | null, ackMs: number) => ({ metric: "link", dir: "down", host: "mac", session, bytes: 200, bytesAhead: 0, ackMs, at: 0, serverAt: 1 });
+  const samples = [
+    link(A, 10),
+    link(null, 15_000),
+    { metric: "link", dir: "up", host: "mac", dropped: 300, at: 0, serverAt: 1 },
+    { metric: "action", transport: "sse", type: "prompt", clientId: "c", req: "r", outcome: "ok", sentAt: 0, gotAt: 10, serverAt: 1 },
+  ];
+  const all = summarize(samples, {});
+  assert.equal(row(all, "link small ackMs", "link:mac:down", "clear")?.count, 2);
+  assert.deepEqual([row(all, "link dropped", "link:mac:up", "samples")?.count, row(all, "link dropped", "link:mac:up", "samples")?.max], [1, 300]);
+  const one = summarize(samples, { session: A });
+  assert.deepEqual([row(one, "link small ackMs", "link:mac:down", "clear")?.count, row(one, "link small ackMs", "link:mac:down", "clear")?.max], [1, 10]);
+  assert.equal(row(one, "link dropped", "link:mac:up", "samples"), undefined);
+  // The browser samples are not filtered by session.
+  assert.equal(row(one, "action totalMs", "sse", "all")?.count, 1);
+});
+
 test("formatReport prints one line per row", () => {
   const rows = summarize(fixture, {});
   const report = formatReport(rows);
@@ -268,16 +287,22 @@ test("formatReport prints one line per row", () => {
   assert.match(report, /websocket +action totalMs +prompt +n=1 +p50=40 +p95=40 +max=40/);
 });
 
-test("the CLI prints the table for a file, reading .1 before the file", () => {
+test("the CLI prints the table for a file, reading .1 before the file, and the ackMs note under link rows", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "omp-web-transport-summary-"));
   try {
     const file = path.join(dir, "m.jsonl");
     const sample = (req: string, serverAt: number) => JSON.stringify({ metric: "action", transport: "sse", type: "prompt", clientId: "c", req, outcome: "ok", sentAt: 0, gotAt: 10, serverAt });
     writeFileSync(`${file}.1`, `${sample("a", 1_000)}\n`);
     writeFileSync(file, `${sample("b", 2_000)}\nnot json\n`);
-    const run = Bun.spawnSync([process.execPath, path.join(import.meta.dir, "transport-metrics.ts"), "--file", file, "--since", "1970-01-01T00:00:00Z"]);
+    const summary = () => Bun.spawnSync([process.execPath, path.join(import.meta.dir, "transport-metrics.ts"), "--file", file, "--since", "1970-01-01T00:00:00Z"]);
+    const run = summary();
     assert.equal(run.exitCode, 0, run.stderr.toString());
     assert.match(run.stdout.toString(), /sse +action totalMs +all +n=2 +p50=10/);
+    assert.doesNotMatch(run.stdout.toString(), /round trip/);
+    writeFileSync(file, `${JSON.stringify({ metric: "link", dir: "down", host: "mac", session: null, bytes: 200, bytesAhead: 0, ackMs: 10, at: 0, serverAt: 3_000 })}\n`, { flag: "a" });
+    const withLink = summary().stdout.toString();
+    assert.match(withLink, /link:mac:down +link small ackMs +clear +n=1/);
+    assert.ok(withLink.trimEnd().endsWith(LINK_ACK_NOTE), withLink);
     const bad = Bun.spawnSync([process.execPath, path.join(import.meta.dir, "transport-metrics.ts"), "--file", file, "--since", "soon"]);
     assert.notEqual(bad.exitCode, 0);
   } finally {

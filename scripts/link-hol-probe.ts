@@ -1,7 +1,7 @@
 // Head-of-line load on one host link, for the link samples (metric "link", lib/hosts/hub.ts and daemon.ts):
 //
 //   OMP_WEB_TRUSTED_HEADER_SECRET=<secret> bun scripts/link-hol-probe.ts --host <host id> --model <provider/modelId> \
-//     [--server http://127.0.0.1:30185] [--cwd /tmp] [--seconds 60]
+//     [--server http://127.0.0.1:30185] [--cwd /tmp] [--seconds 60 (at most 600)]
 //
 // Against a running omp-web whose server and host both record link samples, it starts three sessions in --cwd on
 // --host (the directory must exist there) and runs two phases of --seconds, each with
@@ -14,11 +14,13 @@
 //       so each read is a ~6.5 MB result blob from the host. readMedia would be the plainer read, but the server keeps
 //       a copy of a remote image after its first fetch, so only one read would cross the link; a session read is not
 //       cached.
-// A and B take one cheap model call per prompt (B one in total, before the phases); C none. Each phase waits 70 s after
-// its load stops, so its samples are written (the daemon reports every 30 s, the server then writes every 30 s) before
-// the next one starts, then the probe prints the summary command for its window. It deletes the three sessions it
-// made, and nothing else, at the end (also on Ctrl-C). OMP_WEB_TRUSTED_HEADER_SECRET goes in `x-omp-web-auth` (as
-// pr-watcher sends it); leave it unset for a server without a password.
+// A and B take one cheap model call per prompt (B one in total, before the phases; A at most 200 per phase); C none.
+// Each phase runs at most 200 large rounds and waits 70 s after its load stops, so its samples are written (the
+// daemon reports every 30 s, the server then writes every 30 s) before the next one starts, then the probe prints the
+// summary command for its window. It deletes the three sessions it made, and nothing else, at the end (also on
+// Ctrl-C, SIGTERM or SIGHUP). The images stay in the host's blob store (omp's content-addressed `blobs/`, ~5 MB of
+// noise; no API deletes them). OMP_WEB_TRUSTED_HEADER_SECRET goes in `x-omp-web-auth` (as pr-watcher sends it); leave
+// it unset for a server without a password.
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
@@ -29,6 +31,10 @@ import { percentile } from "./transport-metrics";
 const SMALL_EVERY_MS = 200;
 const SETTLE_MS = 70_000;
 const IDLE_TIMEOUT_MS = 60_000;
+// Each API call; a 6.5 MB read over a slow link takes seconds, not minutes.
+const FETCH_TIMEOUT_MS = 120_000;
+const MAX_SECONDS = 600;
+const MAX_ROUNDS = 200;
 // 1270² RGB pixels of noise: incompressible, so the PNG is ~4.8 MB, under the server's 5 MiB per image.
 const IMAGE_SIDE = 1270;
 
@@ -44,8 +50,8 @@ const { values } = parseArgs({
 const server = values.server.replace(/\/+$/, "");
 const seconds = Number(values.seconds);
 const slash = values.model?.indexOf("/") ?? -1;
-if (!values.host || !values.model || slash <= 0 || !(seconds > 0)) {
-  console.error("usage: bun scripts/link-hol-probe.ts --host <host id> --model <provider/modelId> [--server <url>] [--cwd <dir on the host>] [--seconds 60]");
+if (!values.host || !values.model || slash <= 0 || !(seconds > 0 && seconds <= MAX_SECONDS)) {
+  console.error(`usage: bun scripts/link-hol-probe.ts --host <host id> --model <provider/modelId> [--server <url>] [--cwd <dir on the host>] [--seconds 60 (at most ${MAX_SECONDS})]`);
   process.exit(2);
 }
 const hostId = values.host;
@@ -53,8 +59,8 @@ const model = { provider: values.model.slice(0, slash), modelId: values.model.sl
 
 const secret = process.env.OMP_WEB_TRUSTED_HEADER_SECRET;
 const stop = new AbortController();
-process.on("SIGINT", () => stop.abort());
-// Ctrl-C cuts a wait short.
+// Ctrl-C, a kill or a dropped ssh session end the load and the waits; the sessions are still deleted.
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, () => stop.abort());
 const sleep = (ms: number) => delay(ms, undefined, { signal: stop.signal }).catch(() => {});
 
 /** One API call; throws on a status outside 2xx unless `allow` lists it. */
@@ -64,6 +70,7 @@ async function api(path: string, init: { method?: string; body?: unknown; allow?
     method,
     headers: { ...(secret ? { "x-omp-web-auth": secret } : {}), ...(init.body === undefined ? {} : { "content-type": "application/json" }) },
     body: init.body === undefined ? undefined : JSON.stringify(init.body),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
   const text = await response.text();
   if (!response.ok && !init.allow?.includes(response.status)) throw new Error(`${method} ${path}: ${response.status} ${text.slice(0, 300)}`);
@@ -139,7 +146,7 @@ async function newSession(withModel: boolean): Promise<string> {
 
 const summaries: string[] = [];
 
-/** `load` back to back while C answers get_state, for --seconds; then the settle wait. */
+/** `load` back to back (at most MAX_ROUNDS) while C answers get_state, for --seconds; then the settle wait. */
 async function phase(name: string, load: () => Promise<void>, c: string): Promise<void> {
   const start = new Date();
   const deadline = Date.now() + seconds * 1000;
@@ -157,7 +164,7 @@ async function phase(name: string, load: () => Promise<void>, c: string): Promis
       }
     })(),
     (async () => {
-      for (; running(); rounds++) await load();
+      for (; running() && rounds < MAX_ROUNDS; rounds++) await load();
     })(),
   ]);
   console.log(`phase ${name}: ${rounds} large rounds; get_state on C over HTTP n=${small.length} p50=${Math.round(percentile(small, 50) ?? 0)} ms p95=${Math.round(percentile(small, 95) ?? 0)} ms; settling ${SETTLE_MS / 1000} s`);
@@ -188,6 +195,8 @@ try {
   console.error(error instanceof Error ? error.message : error);
   process.exitCode = 1;
 } finally {
+  // A failed call leaves the other loop of a phase running: end it before the sessions go.
+  stop.abort();
   // Only what this run made. A session never written (C) answers 404 once its omp is stopped.
   for (const id of created) {
     try {

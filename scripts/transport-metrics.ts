@@ -1,6 +1,6 @@
 // Summarizes the browser transport samples (lib/transport-metrics.ts) per transport, and the host link samples per
-// host and direction (`link:<host>:<up|down>`):
-//   bun scripts/transport-metrics.ts [--since 2h|30m|<ISO>] [--until <ISO>] [--client <id>] [--file <path>]
+// host and direction (`link:<host>:<up|down>`; `--session` keeps only one session's link samples):
+//   bun scripts/transport-metrics.ts [--since 2h|30m|<ISO>] [--until <ISO>] [--client <id>] [--session <id>] [--file <path>]
 import { existsSync, readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { transportMetricsPath } from "../lib/transport-metrics";
@@ -17,17 +17,20 @@ export type SummaryRow = {
   /** Mean `batch` of the reconnects behind a "reconnect ms" row. */
   meanBatch?: number;
 };
-export type SummaryOptions = { since?: number; until?: number; client?: string };
+/** `session` filters the link samples only. */
+export type SummaryOptions = { since?: number; until?: number; client?: string; session?: string };
 type Sample = Record<string, unknown>;
 
 // The report's section order, fixed so two runs over different data line up.
 const SECTION_ORDER = [
   "action totalMs", "action transportMs", "action upMs", "abort behind upload", "event ms", "reconnect ms", "reconnect fromDropMs",
   "isolation event ms", "isolation action ms", "sockets", "pool size", "clock offsetRtt", "rebalance moved", "rebalance settledMs",
-  "hang", "resend", "deduped", "outcome", "link small ackMs", "link bytesAhead", "client",
+  "hang", "resend", "deduped", "outcome", "link small ackMs", "link bytesAhead", "link dropped", "client",
 ];
 // Mirrors public/event-stream-worker.js: the downlink logs frames from this size, and the uplink counts as blocking from it.
 const LARGE_FRAME_BYTES = 64 * 1024;
+/** Printed under a report with link rows: what a `down` ackMs can include. */
+export const LINK_ACK_NOTE = "note: link down ackMs is a round trip bounded by the host's next uplink frame (output, a result, or its pong within 15 s): a line that makes no output can wait up to 15 s.";
 
 /** Nearest-rank percentile. */
 export function percentile(values: number[], p: number): number | null {
@@ -131,8 +134,11 @@ export function summarize(samples: Sample[], options: SummaryOptions): SummaryRo
 
   for (const s of kept) {
     if (s.metric === "link") {
+      if (options.session !== undefined && s.session !== options.session) continue;
       // Head-of-line blocking on a host link: a small line's ack time with less than a large frame ahead, or more.
       const where = `link:${asString(s.host) ?? "unknown"}:${asString(s.dir) ?? "unknown"}`;
+      // Samples the server dropped past a daemon's budget: one record per window.
+      addValue("link dropped", where, "samples", asNumber(s.dropped));
       const bytes = asNumber(s.bytes);
       const bytesAhead = asNumber(s.bytesAhead);
       addValue("link bytesAhead", where, "all", bytesAhead);
@@ -250,14 +256,16 @@ function readSamples(file: string): Sample[] {
 
 if (import.meta.main) {
   try {
-    const { values } = parseArgs({ options: { since: { type: "string" }, until: { type: "string" }, client: { type: "string" }, file: { type: "string" } } });
+    const { values } = parseArgs({ options: { since: { type: "string" }, until: { type: "string" }, client: { type: "string" }, session: { type: "string" }, file: { type: "string" } } });
     const now = Date.now();
     const rows = summarize(readSamples(values.file ?? transportMetricsPath()), {
       since: parseSince(values.since ?? "24h", now),
       until: values.until === undefined ? undefined : parseSince(values.until, now),
       client: values.client,
+      session: values.session,
     });
     console.log(rows.length ? formatReport(rows) : "No samples in range.");
+    if (rows.some((row) => row.section.startsWith("link "))) console.log(LINK_ACK_NOTE);
   } catch (error) {
     console.error(error instanceof Error ? error.message : error);
     process.exit(1);
