@@ -2,13 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createJiti } from "jiti";
 
-const jiti = createJiti(import.meta.url, {
-  jsx: { runtime: "automatic" },
-  tsconfigPaths: true,
-});
-const { ExtensionDialog } = await jiti.import("./ExtensionDialog.tsx");
+const { ExtensionDialog } = await import("./ExtensionDialog.tsx");
 
 function renderEditorTextarea(extra) {
   const html = renderToStaticMarkup(React.createElement(ExtensionDialog, {

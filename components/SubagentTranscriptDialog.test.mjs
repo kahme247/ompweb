@@ -2,13 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createJiti } from "jiti";
 
-const jiti = createJiti(import.meta.url, {
-  jsx: { runtime: "automatic" },
-  tsconfigPaths: true,
-});
-const { TaskBlock, CompletionBlock, SubagentModel } = await jiti.import("./SubagentTranscriptDialog.tsx");
+const { TaskBlock, CompletionBlock, SubagentModel } = await import("./SubagentTranscriptDialog.tsx");
 
 test("shows the provider-qualified model and reasoning effort split from the resolved model", () => {
   const html = renderToStaticMarkup(React.createElement(SubagentModel, {

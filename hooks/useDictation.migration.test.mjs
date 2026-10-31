@@ -1,15 +1,9 @@
 import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
-import { fileURLToPath } from "node:url";
-import { createJiti } from "jiti";
-import { act, cleanup, renderHook } from "@testing-library/react/pure.js";
+const { act, cleanup, renderHook } = await import("@testing-library/react/pure.js");
 
-const jiti = createJiti(import.meta.url, {
-  tryNative: false,
-  alias: { "@/": fileURLToPath(new URL("../", import.meta.url)) },
-});
-const { useDictation } = await jiti.import("../hooks/useDictation.ts");
+const { useDictation } = await import("../hooks/useDictation.ts");
 
 // Isolated routes keep the server's scope, owner grace, and first-claim-token
 // rules. The clock runs hook timers without real-time sleeps or a live server.

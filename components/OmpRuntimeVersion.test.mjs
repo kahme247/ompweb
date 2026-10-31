@@ -2,14 +2,9 @@ import assert from "node:assert/strict";
 import "../tests/setup-dom.mjs";
 import test, { afterEach } from "node:test";
 import React from "react";
-import { act, cleanup, render } from "@testing-library/react/pure.js";
-import { createJiti } from "jiti";
+const { act, cleanup, render } = await import("@testing-library/react/pure.js");
 
-const jiti = createJiti(import.meta.url, {
-  jsx: { runtime: "automatic" },
-  tsconfigPaths: true,
-});
-const { OmpRuntimeVersion } = await jiti.import("./ChatWindow.tsx");
+const { OmpRuntimeVersion } = await import("./ChatWindow.tsx");
 afterEach(cleanup);
 
 test("version survives refresh errors but confirmed unavailability invalidates it", async (t) => {

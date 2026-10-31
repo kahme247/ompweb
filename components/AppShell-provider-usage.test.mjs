@@ -1,11 +1,9 @@
 import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createJiti } from "jiti";
-import { act, cleanup, renderHook } from "@testing-library/react/pure.js";
+const { act, cleanup, renderHook } = await import("@testing-library/react/pure.js");
 
-const jiti = createJiti(import.meta.url, { tryNative: false, tsconfigPaths: true });
-const { useProviderUsage, usageBucketLabel } = await jiti.import("./AppShell-provider-usage.ts");
+const { useProviderUsage, usageBucketLabel } = await import("./AppShell-provider-usage.ts");
 
 test("usageBucketLabel distinguishes Anthropic tiers and Antigravity buckets (#284)", () => {
   assert.equal(usageBucketLabel({ provider: "anthropic", tier: "fable" }), "Fable");

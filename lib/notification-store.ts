@@ -1,6 +1,6 @@
 import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, rmSync } from "fs";
 import { join } from "path";
-import { DatabaseSync } from "node:sqlite";
+import { Database } from "bun:sqlite";
 import type { PushSubscription } from "web-push";
 import { getAgentDir } from "./omp/paths";
 import {
@@ -54,7 +54,7 @@ export function parsePushSubscription(value: unknown): PushSubscription | null {
 }
 
 declare global {
-  var __ompNotificationStore: { path: string; db: DatabaseSync } | undefined;
+  var __ompNotificationStore: { path: string; db: Database } | undefined;
 }
 
 const SCHEMA = `
@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS devices (device_id TEXT PRIMARY KEY, prefs TEXT NOT N
 CREATE TABLE IF NOT EXISTS history (id TEXT PRIMARY KEY, event TEXT NOT NULL, at INTEGER NOT NULL, read INTEGER NOT NULL DEFAULT 0);
 `;
 
-function transaction<T>(db: DatabaseSync, run: () => T): T {
+function transaction<T>(db: Database, run: () => T): T {
   db.exec("BEGIN IMMEDIATE");
   try {
     const result = run();
@@ -71,7 +71,7 @@ function transaction<T>(db: DatabaseSync, run: () => T): T {
     return result;
   } catch (error) {
     // SQLite has already rolled back after some errors (a full disk, an I/O error); the original error is what matters.
-    if (db.isTransaction) db.exec("ROLLBACK");
+    if (db.inTransaction) db.exec("ROLLBACK");
     throw error;
   }
 }
@@ -86,7 +86,7 @@ const parseJson = (text: unknown): unknown => {
 };
 
 /** Imports the pre-SQLite notifications.json once, into an empty store. Runs inside the schema transaction. */
-function importLegacy(db: DatabaseSync, file: string): boolean {
+function importLegacy(db: Database, file: string): boolean {
   let text: string;
   try {
     text = readFileSync(file, "utf8");
@@ -114,24 +114,30 @@ function importLegacy(db: DatabaseSync, file: string): boolean {
 }
 
 /** The store for the current agent directory; reopened when PI_CODING_AGENT_DIR changes. */
-function db(): DatabaseSync {
+function db(): Database {
   const dir = join(getAgentDir(), "omp-web");
   const path = join(dir, "notifications.db");
   const cached = globalThis.__ompNotificationStore;
   if (cached?.path === path) return cached.db;
   const database = open(dir, path);
   // Only a working store replaces the cached one; a failed open leaves it usable.
-  cached?.db.close();
+  closeNotificationStore();
   globalThis.__ompNotificationStore = { path, db: database };
   return database;
 }
 
-function open(dir: string, path: string): DatabaseSync {
+/** Closes the cached store. `close(true)` finalizes the statements still alive: without it the file stays open until GC, and Windows keeps it locked. */
+export function closeNotificationStore(): void {
+  globalThis.__ompNotificationStore?.db.close(true);
+  globalThis.__ompNotificationStore = undefined;
+}
+
+function open(dir: string, path: string): Database {
   mkdirSync(dir, { recursive: true });
   // Owner-only before SQLite opens it: it holds the VAPID private key. SQLite gives its -wal/-shm files the same mode.
   closeSync(openSync(path, "a", 0o600));
   chmodSync(path, 0o600);
-  const database = new DatabaseSync(path);
+  const database = new Database(path);
   try {
     database.exec("PRAGMA busy_timeout = 5000");
     // Switching a new database to WAL takes an exclusive lock that ignores busy_timeout; another omp-web may hold it.
@@ -140,7 +146,7 @@ function open(dir: string, path: string): DatabaseSync {
         database.exec("PRAGMA journal_mode = WAL");
         break;
       } catch (error) {
-        if (!isRecord(error) || error.errcode !== 5 || attempt >= 250) throw error;
+        if (!isRecord(error) || error.errno !== 5 || attempt >= 250) throw error;
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
       }
     }
@@ -158,7 +164,7 @@ function open(dir: string, path: string): DatabaseSync {
     }
     return database;
   } catch (error) {
-    database.close();
+    database.close(true);
     throw error;
   }
 }
@@ -168,7 +174,7 @@ function open(dir: string, path: string): DatabaseSync {
 /** The installation's VAPID key pair, generated on first use. */
 export function getVapidKeys(generate: () => VapidKeys): VapidKeys {
   const database = db();
-  const read = () => database.prepare("SELECT public_key, private_key FROM vapid WHERE id = 1").get() as { public_key: string; private_key: string } | undefined;
+  const read = () => database.prepare("SELECT public_key, private_key FROM vapid WHERE id = 1").get() as { public_key: string; private_key: string } | null;
   const row = read() ?? transaction(database, () => {
     // Re-read under the write lock: another instance may have generated them meanwhile.
     if (!read()) {
@@ -196,8 +202,8 @@ export function listDevices(): NotificationDevice[] {
 }
 
 export function getDevice(deviceId: string): NotificationDevice | undefined {
-  const row = db().prepare("SELECT device_id, prefs, subscription, updated_at FROM devices WHERE device_id = ?").get(deviceId) as DeviceRow | undefined;
-  return row && toDevice(row);
+  const row = db().prepare("SELECT device_id, prefs, subscription, updated_at FROM devices WHERE device_id = ?").get(deviceId) as DeviceRow | null;
+  return row ? toDevice(row) : undefined;
 }
 
 /** Store a device's prefs, and its push subscription when given (otherwise the stored one is kept). */

@@ -2,12 +2,10 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import React from "react";
-import { act, cleanup, renderHook } from "@testing-library/react/pure.js";
-import { createJiti } from "jiti";
+const { act, cleanup, renderHook } = await import("@testing-library/react/pure.js");
 
-const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
-const { useSidebarHistory } = await jiti.import("./useSidebarHistory.ts");
-const { setDraft, getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+const { useSidebarHistory } = await import("./useSidebarHistory.ts");
+const { setDraft, getDraft, clearDraft } = await import("@/lib/draft-store");
 let restoreHistory;
 afterEach(() => {
   try {

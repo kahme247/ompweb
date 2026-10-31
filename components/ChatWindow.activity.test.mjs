@@ -1,13 +1,8 @@
 import assert from "node:assert/strict";
 import "../tests/setup-dom.mjs";
 import test from "node:test";
-import { createJiti } from "jiti";
 
-const jiti = createJiti(import.meta.url, {
-  jsx: { runtime: "automatic" },
-  tsconfigPaths: true,
-});
-const { renderActivityPieces } = await jiti.import("./ChatWindow.tsx");
+const { renderActivityPieces } = await import("./ChatWindow.tsx");
 
 const call = (id, name = "bash") => ({ type: "toolCall", toolCallId: id, toolName: name, input: { command: id } });
 const assistant = (content) => ({ role: "assistant", provider: "p", model: "m", content });
