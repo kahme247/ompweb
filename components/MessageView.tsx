@@ -93,7 +93,7 @@ function formatMessageSize(chars: number): string {
   return chars >= 1_000_000 ? `${(chars / 1_000_000).toFixed(1)} MB` : `${Math.round(chars / 1_000)} KB`;
 }
 
-export function SafeMarkdownBody({ children, className, ...props }: ComponentProps<typeof MarkdownBody>) {
+export const SafeMarkdownBody = memo(function SafeMarkdownBody({ children, className, ...props }: ComponentProps<typeof MarkdownBody>) {
   const { t } = useI18n();
   const [showRaw, setShowRaw] = useState(false);
 
@@ -120,7 +120,7 @@ export function SafeMarkdownBody({ children, className, ...props }: ComponentPro
       </pre>
     </div>
   );
-}
+});
 
 function loadThinkingContent(sessionId: string, entryId: string, blockIndex: number): Promise<string> {
   const key = `${sessionId}:${entryId}:${blockIndex}`;
@@ -196,18 +196,52 @@ function formatTime(ts: number | undefined, locale: Locale): string | null {
   return `${date} ${time}`;
 }
 
-function haveSameRelevantToolResults(
+export function haveSameRelevantToolResults(
   message: AgentMessage,
   previous: Map<string, ToolResultMessage> | undefined,
   next: Map<string, ToolResultMessage> | undefined,
 ): boolean {
-  if (previous === next || message.role !== "assistant") return true;
-  for (const block of (message as AssistantMessage).content ?? []) {
-    if (block.type === "toolCall" && previous?.get(block.toolCallId) !== next?.get(block.toolCallId)) {
-      return false;
+  if (previous === next) return true;
+  if (message.role !== "assistant") return true;
+  const content = (message as AssistantMessage).content;
+  if (!Array.isArray(content)) return true;
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    const b = block as unknown as Record<string, unknown>;
+    if (b.type === "toolCall" || b.type === "tool_use" || b.type === "tool_call") {
+      const id = typeof b.id === "string" ? b.id : typeof b.toolCallId === "string" ? b.toolCallId : undefined;
+      if (id && previous?.get(id) !== next?.get(id)) {
+        return false;
+      }
     }
   }
   return true;
+}
+
+export function areMessageViewPropsEqual(prev: Props, next: Props): boolean {
+  return Object.is(prev.message, next.message)
+    && Object.is(prev.isStreaming, next.isStreaming)
+    && haveSameRelevantToolResults(prev.message, prev.toolResults, next.toolResults)
+    && Object.is(prev.modelNames, next.modelNames)
+    && Object.is(prev.cwd, next.cwd)
+    && Object.is(prev.onOpenFile, next.onOpenFile)
+    && Object.is(prev.entryId, next.entryId)
+    && Object.is(prev.forkEntryId, next.forkEntryId)
+    && Object.is(prev.forkEditsPrompt, next.forkEditsPrompt)
+    && Object.is(prev.onFork, next.onFork)
+    && Object.is(prev.forking, next.forking)
+    && Object.is(prev.forkDisabled, next.forkDisabled)
+    && Object.is(prev.onEdit, next.onEdit)
+    && Object.is(prev.editing, next.editing)
+    && Object.is(prev.editDisabled, next.editDisabled)
+    && Object.is(prev.showTimestamp, next.showTimestamp)
+    && Object.is(prev.prevTimestamp, next.prevTimestamp)
+    && Object.is(prev.sessionId, next.sessionId)
+    && Object.is(prev.toolCallsDefaultCollapsed, next.toolCallsDefaultCollapsed)
+    && Object.is(prev.expandThinkingByDefault, next.expandThinkingByDefault)
+    && Object.is(prev.hideThinking, next.hideThinking)
+    && prev.sourceBlockIndices?.join() === next.sourceBlockIndices?.join()
+    && (!prev.isStreaming || Object.is(prev.liveTokensPerSecond, next.liveTokensPerSecond));
 }
 
 export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, forkEntryId, forkEditsPrompt, onFork, forking, forkDisabled, onEdit, editing, editDisabled, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, expandThinkingByDefault = false, hideThinking = false, sourceBlockIndices, liveTokensPerSecond }: Props) {
@@ -238,31 +272,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     return <BashExecutionView message={message as BashExecutionMessage} sessionId={sessionId} />;
   }
   return null;
-}, (prev, next) => {
-  return prev.message === next.message
-    && prev.isStreaming === next.isStreaming
-    && haveSameRelevantToolResults(prev.message, prev.toolResults, next.toolResults)
-    && prev.modelNames === next.modelNames
-    && prev.cwd === next.cwd
-    && prev.onOpenFile === next.onOpenFile
-    && prev.entryId === next.entryId
-    && prev.forkEntryId === next.forkEntryId
-    && prev.forkEditsPrompt === next.forkEditsPrompt
-    && prev.onFork === next.onFork
-    && prev.forking === next.forking
-    && prev.forkDisabled === next.forkDisabled
-    && prev.onEdit === next.onEdit
-    && prev.editing === next.editing
-    && prev.editDisabled === next.editDisabled
-    && prev.showTimestamp === next.showTimestamp
-    && prev.prevTimestamp === next.prevTimestamp
-    && prev.sessionId === next.sessionId
-    && prev.toolCallsDefaultCollapsed === next.toolCallsDefaultCollapsed
-    && prev.expandThinkingByDefault === next.expandThinkingByDefault
-    && prev.hideThinking === next.hideThinking
-    && prev.sourceBlockIndices?.join() === next.sourceBlockIndices?.join()
-    && (!prev.isStreaming || prev.liveTokensPerSecond === next.liveTokensPerSecond);
-});
+}, areMessageViewPropsEqual);
 
 // lib/types.ts ImageContent uses the Anthropic-style {source:{type,data,media_type,url}}
 // shape; pi-ai on-disk format uses flat {data, mimeType} — handle both.

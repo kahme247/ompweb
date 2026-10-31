@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { existsSync } from "fs";
 import { loadSessionFile } from "@/lib/omp/session-files";
-import { buildSessionContext, getSessionContextBoundary, getSessionEntriesForDisplayAsync, getSessionHistoryPage, readSessionHeader, SessionFileTooLargeError } from "@/lib/session-reader";
+import { buildSessionContext, getSessionContextBoundary, getSessionEntriesForDisplayAsync, getSessionHistoryPage, readSessionHeader, SessionFileMalformedError, SessionFileTooLargeError } from "@/lib/session-reader";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { MAX_SYNC_MESSAGES, parseHistoryCursor, selectSessionHistory, type SessionHistoryCursor, type SessionSyncResponse } from "@/lib/session-sync";
@@ -15,6 +15,12 @@ function contextErrorResponse(error: unknown): NextResponse {
     return NextResponse.json(
       { error: "Session file is too large to open in omp-web", code: "session_file_too_large" },
       { status: 413 },
+    );
+  }
+  if (error instanceof SessionFileMalformedError) {
+    return NextResponse.json(
+      { error: "Session file is missing or malformed", code: "session_file_malformed" },
+      { status: 404 },
     );
   }
   return apiErrorResponse(error);
@@ -85,17 +91,6 @@ export async function GET(
     }
     const filePath = resolved.filePath;
 
-    const header = readSessionHeader(filePath);
-    if (header === null) {
-      const loaded = loadSessionFile(filePath, { resolveBlobs: false });
-      if (loaded.error === "too_large") {
-        return NextResponse.json(
-          { error: "Session file is too large to open in omp-web", code: "session_file_too_large" },
-          { status: 413 },
-        );
-      }
-      return NextResponse.json({ error: "Session file is missing or malformed", code: "session_file_malformed" }, { status: 404 });
-    }
     if (boundary === "1") {
       return NextResponse.json(getSessionContextBoundary(filePath), { headers: { "Cache-Control": "no-store" } });
     }
@@ -113,6 +108,18 @@ export async function GET(
         : null;
       const response: SessionSyncResponse = { ...page.history, sessionId: id, leafId: page.leafId, live };
       return NextResponse.json(response, { headers: { "Cache-Control": "no-store" } });
+    }
+
+    const header = readSessionHeader(filePath);
+    if (header === null) {
+      const loaded = loadSessionFile(filePath, { resolveBlobs: false });
+      if (loaded.error === "too_large") {
+        return NextResponse.json(
+          { error: "Session file is too large to open in omp-web", code: "session_file_too_large" },
+          { status: 413 },
+        );
+      }
+      return NextResponse.json({ error: "Session file is missing or malformed", code: "session_file_malformed" }, { status: 404 });
     }
     // Deduplicated cached read; blob resolution on per-entry deep copies.
     const entries = await getSessionEntriesForDisplayAsync(filePath, { skipToolResultImages: deferToolResultImages });

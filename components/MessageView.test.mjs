@@ -10,7 +10,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { MessageView, SafeMarkdownBody, TaskResultPanel, isInterruptedMessage } = await jiti.import("./MessageView.tsx");
+const { MessageView, SafeMarkdownBody, TaskResultPanel, isInterruptedMessage, areMessageViewPropsEqual, haveSameRelevantToolResults } = await jiti.import("./MessageView.tsx");
 const { CodeBlock } = await jiti.import("./MermaidBlock.tsx");
 const { buildSessionContext } = await jiti.import("../lib/session-reader.ts");
 const { collectToolResults, planTranscriptRows } = await jiti.import("../lib/chat-transcript-plan.ts");
@@ -949,4 +949,50 @@ test("user messages fork at their own entry and edit the prompt", async (t) => {
   await act(async () => { fireEvent.click(view.getByRole("button", { name: FORK_LABEL })); });
   assert.deepEqual(forked, [["user-7", true]]);
   view.unmount();
+});
+
+test("SafeMarkdownBody is wrapped in React.memo", () => {
+  assert.equal(typeof SafeMarkdownBody, "object");
+  assert.ok(SafeMarkdownBody.$$typeof, "SafeMarkdownBody should have a React component symbol");
+});
+
+test("areMessageViewPropsEqual skips re-render when unrelated toolResults change", () => {
+  const msg1 = {
+    role: "assistant",
+    content: [
+      { type: "text", text: "Running tool..." },
+      { type: "toolCall", toolCallId: "call-1", toolName: "read", input: { path: "a.ts" } },
+    ],
+  };
+  const res1 = { role: "toolResult", toolCallId: "call-1", content: "file content" };
+  const res2 = { role: "toolResult", toolCallId: "call-2", content: "another content" };
+
+  const mapA = new Map([["call-1", res1]]);
+  const mapB = new Map([["call-1", res1], ["call-2", res2]]);
+  const mapC = new Map([["call-1", { ...res1, content: "modified" }]]);
+
+  const baseProps = { message: msg1, toolResults: mapA };
+  // New tool in mapB is unrelated to msg1: props should be considered equal
+  assert.equal(areMessageViewPropsEqual(baseProps, { ...baseProps, toolResults: mapB }), true);
+  // Change in msg1's own tool: props should NOT be equal
+  assert.equal(areMessageViewPropsEqual(baseProps, { ...baseProps, toolResults: mapC }), false);
+});
+
+test("haveSameRelevantToolResults supports tool_use and tool_call block formats", () => {
+  const msg = {
+    role: "assistant",
+    content: [
+      { type: "tool_use", id: "tool-u1", name: "bash", input: {} },
+      { type: "tool_call", id: "tool-c1", name: "glob", input: {} },
+    ],
+  };
+  const resU1 = { role: "toolResult", toolCallId: "tool-u1", content: "done" };
+  const resC1 = { role: "toolResult", toolCallId: "tool-c1", content: "done" };
+
+  const map1 = new Map([["tool-u1", resU1], ["tool-c1", resC1]]);
+  const map2 = new Map([["tool-u1", resU1], ["tool-c1", resC1], ["tool-other", { role: "toolResult", toolCallId: "tool-other", content: "x" }]]);
+  const map3 = new Map([["tool-u1", { ...resU1, content: "changed" }], ["tool-c1", resC1]]);
+
+  assert.equal(haveSameRelevantToolResults(msg, map1, map2), true);
+  assert.equal(haveSameRelevantToolResults(msg, map1, map3), false);
 });

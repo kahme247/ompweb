@@ -439,6 +439,14 @@ export class SessionFileTooLargeError extends Error {
     this.name = "SessionFileTooLargeError";
   }
 }
+export class SessionFileMalformedError extends Error {
+  readonly code = "session_file_malformed" as const;
+  constructor(filePath: string) {
+    super(`Session file is missing or malformed: ${filePath}`);
+    this.name = "SessionFileMalformedError";
+  }
+}
+
 
 /**
  * Display-path entry read for the session/context routes: reuses the memoized
@@ -634,6 +642,7 @@ function buildHistoryIndex(
     },
   });
   if (loaded.error === "too_large") throw new SessionFileTooLargeError(filePath);
+  if (!loaded.header) throw new SessionFileMalformedError(filePath);
   const { selected, compactionId, ...metadata } = selectSessionContext(loaded.entries, leafId, { includePreCompaction });
   const rows = selected.map((entry): HistoryEntryRange => ({
     id: entry.id,
@@ -737,7 +746,7 @@ export function getSessionHistoryPage(
         }
         rawEntries.push(entry);
       }
-      if (historyFileVersion(fstatSync(fd)) !== version || historyFileVersion(statSync(filePath)) !== version) {
+      if (historyFileVersion(fstatSync(fd)) !== version) {
         throw new Error("Session changed while reading history");
       }
     } catch (error) {

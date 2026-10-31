@@ -1288,7 +1288,7 @@ export function AppShell({ appName }: { appName: string }) {
   // list itself could not be fetched (keep the entry, abort this navigation).
   const fetchSessionForNavigation = useCallback(async (sessionId: string): Promise<SessionInfo | null | "unavailable"> => {
     try {
-      const res = await fetch("/api/sessions");
+      const res = await fetch(`/api/sessions?id=${encodeURIComponent(sessionId)}`);
       if (!res.ok) return "unavailable";
       const data = (await res.json()) as { sessions?: SessionInfo[] };
       return data.sessions?.find((s) => s.id === sessionId) ?? null;
