@@ -571,6 +571,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const imageFiles = files
       .filter((file) => file.type.startsWith("image/") && file.size <= MAX_ATTACHED_IMAGE_BYTES)
       .slice(0, remaining);
+    // Dropped images must be reported even when siblings are accepted:
+    // silently losing one makes the user send believing all attached.
+    // (processFiles only passes image files here, so every gap is a drop.)
+    const skipped = files.length - imageFiles.length;
     if (!imageFiles.length) {
       if (files.length > 0) {
         setAttachError(
@@ -619,7 +623,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         newImages.slice(accepted.length).forEach(revokeImagePreview);
         return [...prev, ...accepted];
       });
-      setAttachError(null);
+      // Keep the skip notice when some files were dropped, mirroring the
+      // text-file path, which reports every dropped candidate. The zero-
+      // acceptance branch above keeps its own at-limit/skip wording.
+      if (skipped > 0) {
+        setAttachError(t("chatInput.attachmentImagesSkipped", { count: skipped, size: formatAttachmentBytes(MAX_ATTACHED_IMAGE_BYTES) }));
+      } else {
+        setAttachError(null);
+      }
     } catch {
       // A failed read in the batch must not leak the siblings' blob URLs.
       created.forEach(revokeImagePreview);

@@ -349,11 +349,17 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
     typeof message.content === "string"
       ? []
       : message.content.filter((b): b is ImageContent => b.type === "image");
+  // Hoisted so bubble images can re-trigger it on load: image loading grows
+  // the bubble's scrollHeight without resizing the capped box, so the
+  // ResizeObserver below never fires for late-loading images.
+  const updateOverflow = useCallback(() => {
+    const element = bodyRef.current;
+    if (element) setHasOverflow(isMessageOverflowing(element));
+  }, []);
   useLayoutEffect(() => {
     const element = bodyRef.current;
     if (!element) return;
     const observedElement = element;
-    const updateOverflow = () => setHasOverflow(isMessageOverflowing(observedElement));
     updateOverflow();
     observedElement.addEventListener("scroll", updateOverflow, { passive: true });
     const observer = typeof ResizeObserver !== "undefined" ? new ResizeObserver(updateOverflow) : null;
@@ -362,7 +368,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
       observedElement.removeEventListener("scroll", updateOverflow);
       observer?.disconnect();
     };
-  }, [content, imageBlocks.length]);
+  }, [content, imageBlocks.length, updateOverflow]);
 
   const time = formatTime(message.timestamp, locale);
   const canFork = !!entryId && !!onFork;
@@ -408,6 +414,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
                     key={i}
                     src={src}
                     alt=""
+                    onLoad={updateOverflow}
                     style={{ maxWidth: 240, maxHeight: 240, borderRadius: 6, objectFit: "contain", display: "block", border: "1px solid color-mix(in srgb, var(--accent) 18%, transparent)" }}
                   />
                 );

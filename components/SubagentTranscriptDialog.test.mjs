@@ -8,7 +8,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { TaskBlock, CompletionBlock, SubagentModel } = await jiti.import("./SubagentTranscriptDialog.tsx");
+const { TaskBlock, CompletionBlock, SubagentModel, SubagentTranscriptRow } = await jiti.import("./SubagentTranscriptDialog.tsx");
 
 test("shows the provider-qualified model and reasoning effort split from the resolved model", () => {
   const html = renderToStaticMarkup(React.createElement(SubagentModel, {
@@ -89,4 +89,14 @@ test("shows an empty state when no completion exists yet", () => {
     truncated: false,
   }));
   assert.match(html, /No output yet/);
+});
+
+test("transcript rows cap tool-call input at the same 400-char budget as text", () => {
+  const big = "x".repeat(5000);
+  const html = renderToStaticMarkup(React.createElement(SubagentTranscriptRow, {
+    message: { role: "assistant", content: [{ type: "toolCall", toolName: "edit", input: { patch: big } }] },
+  }));
+  assert.match(html, /edit/);
+  assert.ok(html.length < 1000, `tool-call row must not render unbounded input JSON (got ${html.length} chars)`);
+  assert.doesNotMatch(html, new RegExp(`x{1000}`));
 });

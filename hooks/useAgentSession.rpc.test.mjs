@@ -1158,6 +1158,28 @@ test("a finished reply stays on screen until its saved copy replaces it", async 
   assert.equal(w.latest.streamState.streamingMessage, null, "the held reply gives way to its saved copy");
 });
 
+test("a thinking-only finished reply stays on screen until its saved copy replaces it", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "loaded question")]);
+  const { w, es } = await startRun("s1", "hello agent");
+  world.agents.set("s1", { running: true, state: { isStreaming: true } });
+  const reply = { ...assistantMsg("a1", ""), content: [{ type: "thinking", thinking: "Let me think through the options." }], timestamp: 43 };
+  await act(async () => { es.emit({ type: "agent_start" }); await Promise.resolve(); });
+  await act(async () => { es.emit({ type: "message_update", message: reply }); await Promise.resolve(); });
+  await settle(90);
+  // Hold the catch-up read the way the text-reply hold test does, so the
+  // saved copy cannot land before the hold itself is observed.
+  saveSession("s1", [userMsg("u0", "loaded question"), userMsg("u1", "hello agent")]);
+  const releaseSync = holdNextSync("s1", syncSnapshot("s1", liveSnapshot("s1", 99, null)));
+  await act(async () => { es.emit({ type: "message_end", message: reply }); await Promise.resolve(); });
+  // Like a text reply, a thinking row the user was watching must be held,
+  // not unmounted before the catch-up reload delivers the saved copy.
+  assert.equal(w.latest.streamState.streamingMessage?.content?.[0]?.thinking, "Let me think through the options.");
+  await act(async () => { releaseSync(); });
+  await settle();
+  assert.equal(w.latest.streamState.streamingMessage?.content?.[0]?.thinking, "Let me think through the options.", "a read without the saved reply keeps it on screen");
+});
+
 test("provider error on the assistant message is shown instead of ending silently", async () => {
   resetWorld();
   primeSession("s1", [userMsg("u0", "q")]);

@@ -22,7 +22,7 @@ interface SubagentMessagesPage {
 
 /** Compact, defensive row for one raw transcript message (content may be a
  * string, a block array, or absent — legacy pi / omp RPC shapes). */
-function SubagentTranscriptRow({ message }: { message: AgentMessage }) {
+export function SubagentTranscriptRow({ message }: { message: AgentMessage }) {
   const label = message.role === "user" ? "U" : message.role === "assistant" ? "A" : "R";
   const labelColor = message.role === "user" ? "var(--accent)" : message.role === "assistant" ? "var(--text-muted)" : "var(--text-dim)";
   const rawContent = (message as ToolResultMessage).content;
@@ -55,7 +55,10 @@ function SubagentTranscriptRow({ message }: { message: AgentMessage }) {
           ? rawContent.map((block, i) => (
               <div key={i}>
                 {block && typeof block === "object" && (block as { type?: unknown }).type === "toolCall"
-                  ? `→ ${(block as { toolName?: unknown }).toolName ?? "tool"} ${JSON.stringify((block as { input?: unknown }).input ?? {})}`
+                  // Cap the input JSON at the same 400-char budget as plain
+                  // text rows: a big file write/edit must not freeze the
+                  // dialog with one unbounded row.
+                  ? `→ ${(block as { toolName?: unknown }).toolName ?? "tool"} ${JSON.stringify((block as { input?: unknown }).input ?? {}).slice(0, 400)}`
                   : block && typeof block === "object" && (block as { type?: unknown }).type === "text"
                     ? ((block as { text?: unknown }).text as string) ?? ""
                     : ""}
