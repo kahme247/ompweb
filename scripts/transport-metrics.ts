@@ -78,17 +78,15 @@ function hangKind(s: Sample, transportByReq: Map<unknown, number | undefined>): 
 }
 
 /**
- * A reconnect's trigger family, so the rows line up across transports: a socket's silence and hang are how it notices
- * the dead connection an EventSource reports as `error`; a network wake is split by whether the effective type changed
- * (`navigator.connection` `change` also fires on RTT or downlink drift, when WS redials healthy sockets).
+ * A reconnect's trigger family, so the rows line up across transports: a socket's `close` is what an EventSource
+ * reports as `error`; a socket's own `silence` and `hang` detectors keep their rows (SSE has neither, and both can fire
+ * on a healthy socket behind a large downlink frame on a slow link); a network wake is split by whether the effective
+ * type changed (`navigator.connection` `change` also fires on RTT or downlink drift, when WS redials healthy sockets).
  */
 function reconnectFamily(s: Sample): string {
   switch (s.trigger) {
     case "error":
     case "close":
-    case "silence":
-    case "hang":
-    case "end":
       return "error/close";
     case "online":
     case "visible":
@@ -154,7 +152,7 @@ export function summarize(samples: Sample[], options: SummaryOptions): SummaryRo
         addValue(section, transport, "all", value);
         if (type) addValue(section, transport, type, value);
       }
-      if (type?.startsWith("abort")) addValue("abort behind upload", transport, (asNumber(s.behindBytes) ?? 0) > 0 ? "yes" : "no", totalMs);
+      if (type?.startsWith("abort")) addValue("abort behind upload", transport, (asNumber(s.behindBytes) ?? 0) >= LARGE_FRAME_BYTES ? "yes" : "no", totalMs);
       // transportMs, not totalMs: the server's time differs by command type, not by what the pipe was carrying.
       if (isolated) addValue("isolation action ms", transport, isolated, transportMs);
       add("outcome", transport, asString(s.outcome) ?? "unknown");
