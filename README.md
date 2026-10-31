@@ -226,6 +226,11 @@ tar -xzf ompweb-linux-x64.tar.gz -C ~/.local/share   # unpacks ompweb-linux-x64/
   from `OMP_WEB_PACKAGE_DIR` when that is set.
 - **macOS** quarantines downloads: run `xattr -dr com.apple.quarantine ompweb-darwin-arm64`
   once before the first start.
+- **macOS 15 and later** ask before an app may reach your local network. If
+  `ompweb host` on a Mac reports `ECONNREFUSED` for a server on your LAN while
+  `curl` reaches it, allow your terminal (or `ompweb`) under System Settings →
+  Privacy & Security → Local Network. A server reached over a VPN such as
+  Tailscale, or a host started from an SSH session, is not affected.
 - **No tray, service installers or in-app update.** To update, stop `ompweb` and
   `ompweb host`, replace the directory with the new release, and start both again;
   **Settings → System** links the release page when a new version is out.
