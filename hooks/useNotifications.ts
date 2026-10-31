@@ -115,9 +115,13 @@ export function useNotifications({ sessionId, locale, onOpenSession }: { session
   // OPEN_SESSION_EVENT, so listeners such as the bell popover see each one.
   useEffect(() => {
     const openSession = (sessionId: string) => window.dispatchEvent(new CustomEvent(OPEN_SESSION_EVENT, { detail: sessionId }));
-    const showToast = (rendered: RenderedNotification, type: NotificationEvent["type"]) => {
+    // Request id of the toast each tag currently shows. A retraction names the
+    // request it closes, so a toast replaced by the next dialog of that tag stays.
+    const toastRequests = new Map<string, string | undefined>();
+    const showToast = (rendered: RenderedNotification, type: NotificationEvent["type"], requestId?: string) => {
       const show = type === "error" ? toast.error : toast.info;
       const target = rendered.sessionId;
+      toastRequests.set(rendered.tag, requestId);
       // The whole card opens the session (click, tap, or Enter on the focused card); following it is reading it.
       show(rendered.title, rendered.body, {
         id: rendered.tag,
@@ -132,13 +136,32 @@ export function useNotifications({ sessionId, locale, onOpenSession }: { session
       notificationHistory.add(event);
       const rendered = renderNotification(event, translate);
       if (kind === "toast") {
-        showToast(rendered, event.type);
+        showToast(rendered, event.type, event.requestId);
         return;
       }
       // Permission withdrawn or never granted: the toast is the only way left to tell the user.
-      void showSystemNotification(rendered).then((shown) => {
-        if (!shown) showToast(rendered, event.type);
+      void showSystemNotification(rendered, event.requestId).then((shown) => {
+        if (!shown) showToast(rendered, event.type, event.requestId);
       });
+    };
+    // The dialog was answered, cancelled or expired elsewhere. Close only the
+    // notification of that request id: a buffered push can arrive after the
+    // next dialog for the same tag is already shown, and that one stays.
+    const dismiss = async (tag: string, requestId: string) => {
+      if (toastRequests.get(tag) === requestId) {
+        toastRequests.delete(tag);
+        toast.close(tag);
+      }
+      try {
+        const registration = "serviceWorker" in navigator ? await navigator.serviceWorker.getRegistration() : undefined;
+        const shown = await registration?.getNotifications({ tag }) ?? [];
+        for (const notification of shown) {
+          const data: unknown = notification.data;
+          if (isRecord(data) && data.requestId === requestId) notification.close();
+        }
+      } catch {
+        // A closing registration must not break the toast path.
+      }
     };
     const onOpen = (raw: Event) => {
       if (raw instanceof CustomEvent && typeof raw.detail === "string" && raw.detail) openRef.current(raw.detail);
@@ -154,12 +177,20 @@ export function useNotifications({ sessionId, locale, onOpenSession }: { session
       if (data.type === "omp-notification-shown") void notificationHistory.load();
     };
     // This tab's own channel: the server delivers here while it is open, on any
-    // view (the chat, Settings, ...), and counts the tab as reachable.
+    // view (the chat, Settings, ...), and counts the tab as reachable. A settled
+    // input dialog arrives as a dismiss frame and retracts only its own request.
     const stream = openEventStream({ kind: "notifications", clientId: notificationClientId });
     stream.onmessage = ({ data }) => {
       try {
         const frame: unknown = JSON.parse(data);
-        if (!isRecord(frame) || frame.type !== "notification" || (frame.kind !== "toast" && frame.kind !== "os") || !isRecord(frame.event)) return;
+        if (!isRecord(frame)) return;
+        if (frame.type === "notification-dismiss") {
+          if (typeof frame.tag === "string" && frame.tag && typeof frame.requestId === "string" && frame.requestId) {
+            void dismiss(frame.tag, frame.requestId);
+          }
+          return;
+        }
+        if (frame.type !== "notification" || (frame.kind !== "toast" && frame.kind !== "os") || !isRecord(frame.event)) return;
         // Built by our own server's notification hub from a NotificationEvent.
         const event = frame.event as unknown as NotificationEvent;
         deliver(frame.kind, event);

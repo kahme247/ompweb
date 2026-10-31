@@ -199,14 +199,16 @@ export const OPEN_SESSION_EVENT = "omp-open-session";
  * Show a system notification the same way the service worker shows pushes.
  * Returns false when the browser does not allow it, so the caller can fall back.
  */
-export async function showSystemNotification(notification: RenderedNotification): Promise<boolean> {
+export async function showSystemNotification(notification: RenderedNotification, requestId?: string): Promise<boolean> {
   if (!("Notification" in window) || Notification.permission !== "granted") return false;
   const options: NotificationOptions = {
     body: notification.body,
     icon: "/icon-192.png",
     badge: "/badge-96.png",
     tag: notification.tag,
-    data: { url: notification.url, sessionId: notification.sessionId },
+    // A dismiss closes only the notification of the same request id, so a
+    // pushed/shown dialog must carry it too.
+    data: { url: notification.url, sessionId: notification.sessionId, ...(requestId ? { requestId } : {}) },
   };
   try {
     const registration = "serviceWorker" in navigator ? await navigator.serviceWorker.getRegistration() : undefined;

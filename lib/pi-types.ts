@@ -223,6 +223,16 @@ export interface RpcAskDialogAnswer {
 }
 
 /**
+ * One answer to a blocking extension dialog. Exactly one variant is sent, both
+ * by the web dialog (ExtensionDialog) and by the notification answer endpoint.
+ */
+export type ExtensionUiResponse =
+  | { value: string }
+  | { confirmed: boolean }
+  | { cancelled: true }
+  | { answers: RpcAskDialogAnswer[] };
+
+/**
  * omp's rpc-ui extension UI request frames, including the methods missing from
  * the browser-facing union in lib/types.ts (`open_url`, `cancel`). The wrapper
  * adds `expiresAt` when a timeout is present so reconnecting clients can

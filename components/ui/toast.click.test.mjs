@@ -23,10 +23,13 @@ const eventWorker = {
     else if (message.op === "close") eventStreams.delete(message.id);
   },
 };
-function deliverNotification(message) {
+function deliverFrame(frame) {
   const id = [...eventStreams].findLast(([, channel]) => channel.kind === "notifications")?.[0];
   assert.ok(id, "useNotifications must hold a notifications channel");
-  eventWorker.onmessage({ data: { id, type: "message", data: JSON.stringify({ type: "notification", ...message }) } });
+  eventWorker.onmessage({ data: { id, type: "message", data: JSON.stringify(frame) } });
+}
+function deliverNotification(message) {
+  deliverFrame({ type: "notification", ...message });
 }
 
 before(() => {
@@ -172,6 +175,66 @@ test("a push the service worker showed reloads the list from the server; other m
   } finally {
     globalThis.fetch = previousFetch;
     delete window.navigator.serviceWorker;
+    act(() => notificationHistory.clear());
+  }
+});
+
+test("a dismiss frame closes only the toast of its request id, not the next dialog's", () => {
+  render(React.createElement(ToastProvider, null));
+  renderHook(() => useNotifications({ sessionId: null, locale: "en", onOpenSession: () => {} }));
+  const cards = () => Array.from(document.querySelectorAll(".toast-card"))
+    .filter((card) => card.querySelector(".display-serif")?.textContent === "Approve?");
+  const input = (requestId) => ({ type: "notification", kind: "toast", event: { type: "input", sessionId: "s5", sessionName: "Approve?", requestId } });
+  const retract = (requestId) => ({ type: "notification-dismiss", sessionId: "s5", tag: "s5:input", requestId });
+  const ended = (card) => card.hasAttribute("data-ending-style");
+  const live = () => cards().filter((card) => !ended(card));
+
+  act(() => deliverFrame(input("r1")));
+  act(() => deliverFrame(retract("r2")));
+  assert.equal(live().length, 1, "a retraction of another request keeps the toast");
+  act(() => deliverFrame(retract("r1")));
+  assert.equal(live().length, 0, "the retraction of its own request closes the toast");
+
+  act(() => deliverFrame(input("rA")));
+  act(() => deliverFrame(input("rB")));
+  act(() => deliverFrame(retract("rA")));
+  assert.equal(live().length, 1, "a late retraction must not close the dialog that replaced it");
+  act(() => deliverFrame(retract("rB")));
+  assert.equal(live().length, 0);
+});
+
+test("a dismiss frame closes only the system notification of its request id", async () => {
+  const shown = [];
+  const registration = {
+    showNotification: async (title, options) => { shown.push({ title, options, closed: 0 }); },
+    getNotifications: async ({ tag }) => shown
+      .filter((entry) => entry.options.tag === tag)
+      .map((entry) => ({ data: entry.options.data, close: () => { entry.closed += 1; } })),
+  };
+  const worker = new window.EventTarget();
+  worker.getRegistration = async () => registration;
+  Object.defineProperty(window.navigator, "serviceWorker", { configurable: true, value: worker });
+  globalThis.Notification = window.Notification = class { static permission = "granted"; };
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+  try {
+    renderHook(() => useNotifications({ sessionId: null, locale: "en", onOpenSession: () => {} }));
+    await act(async () => {
+      deliverFrame({ type: "notification", kind: "os", event: { type: "input", sessionId: "s6", sessionName: "Answer", requestId: "r1" } });
+      await tick();
+    });
+    assert.deepEqual(shown.map((entry) => [entry.options.tag, entry.options.data.requestId]), [["s6:input", "r1"]]);
+    const retract = async (requestId) => act(async () => {
+      deliverFrame({ type: "notification-dismiss", sessionId: "s6", tag: "s6:input", requestId });
+      await tick();
+    });
+    await retract("r2");
+    assert.equal(shown[0].closed, 0, "a retraction of another request keeps the notification");
+    await retract("r1");
+    assert.equal(shown[0].closed, 1);
+  } finally {
+    delete window.navigator.serviceWorker;
+    delete window.Notification;
+    delete globalThis.Notification;
     act(() => notificationHistory.clear());
   }
 });

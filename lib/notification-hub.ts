@@ -7,7 +7,7 @@ import {
   type NotificationEvent,
   type RenderedNotification,
 } from "./notification-events";
-import { dropDeviceSubscription, getDevice, getVapidKeys, listDevices, recordHistory, type NotificationDevice } from "./notification-store";
+import { dropDeviceSubscription, getDevice, getVapidKeys, listDevices, markHistoryRead, recordHistory, type NotificationDevice } from "./notification-store";
 
 /**
  * Server side of notifications: presence of open tabs, per-device preferences
@@ -21,6 +21,13 @@ const PUSH_TTL_SECONDS = 3600;
 const PUSH_TIMEOUT_MS = 10_000;
 /** Waits before each retry of a push the push service never answered or answered 429/5xx. Well inside the TTL. */
 export const PUSH_RETRY_DELAYS_MS = [2_000, 10_000, 30_000];
+/**
+ * How long a retraction keeps suppressing further delivery attempts of the
+ * same `input` push: one retry cycle is its backoff waits plus the time a
+ * single attempt may hang, and no retry can outlive that.
+ */
+export const PUSH_RETRACTION_TTL_MS = PUSH_RETRY_DELAYS_MS.reduce((total, delay) => total + delay, 0)
+  + (PUSH_RETRY_DELAYS_MS.length + 1) * PUSH_TIMEOUT_MS;
 // Apple's push service rejects VAPID subjects it cannot resolve (e.g. localhost mail).
 const VAPID_SUBJECT = "https://github.com/kahme247/ompweb";
 
@@ -35,7 +42,13 @@ export interface NotificationPresence {
   lastSeen: number;
 }
 
-export type NotificationMessage = { kind: "toast" | "os"; event: NotificationEvent };
+/**
+ * A toast/system notification, or the retraction of a session's `input`
+ * notification once its dialog was answered, cancelled, expired or destroyed.
+ */
+export type NotificationMessage =
+  | { kind: "toast" | "os"; event: NotificationEvent }
+  | { kind: "dismiss"; tag: string; sessionId: string; requestId: string };
 
 type Send = (message: NotificationMessage) => void;
 
@@ -47,6 +60,8 @@ interface HubState {
   presence: Map<string, NotificationPresence>;
   /** Open SSE streams per tab. Independent of presence: streams reconnect, overlap, and close while the tab stays put. */
   streams: Map<string, Set<Send>>;
+  /** `<sessionId>:<requestId>` → when it was retracted. A push retry of a settled dialog must deliver nothing (see `publishNotificationDismiss`). */
+  retractions: Map<string, number>;
 }
 
 declare global {
@@ -54,7 +69,11 @@ declare global {
 }
 
 function hub(): HubState {
-  return (globalThis.__ompNotificationHub ??= { presence: new Map(), streams: new Map() });
+  const state = (globalThis.__ompNotificationHub ??= { presence: new Map(), streams: new Map(), retractions: new Map() });
+  // Next evaluates this module once per route bundle: a state object another
+  // bundle created may predate a field added here.
+  state.retractions ??= new Map();
+  return state;
 }
 
 export function getVapidPublicKey(): string {
@@ -152,14 +171,71 @@ function stillSubscribed(deviceId: string, endpoint: string): boolean {
 }
 
 /** Never throws: a failed push must not break delivery to anyone else. */
+async function sendPushPayload(
+  device: NotificationDevice,
+  payload: unknown,
+  urgency: "high" | "normal",
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const subscription = device.subscription;
+  if (!subscription) return { ok: false, error: "no push subscription" };
+  try {
+    const { publicKey, privateKey } = getVapidKeys(webpush.generateVAPIDKeys);
+    await webpush.sendNotification(subscription, JSON.stringify(payload), {
+      TTL: PUSH_TTL_SECONDS,
+      urgency,
+      timeout: PUSH_TIMEOUT_MS,
+      vapidDetails: { subject: VAPID_SUBJECT, publicKey, privateKey },
+    });
+    return { ok: true };
+  } catch (error) {
+    const status = error instanceof webpush.WebPushError ? error.statusCode : undefined;
+    try {
+      // 404/410: the browser unsubscribed or the subscription expired.
+      if (status === 404 || status === 410) dropDeviceSubscription(device.deviceId, subscription.endpoint);
+    } catch {
+      // A store write failure only delays the cleanup to the next push.
+    }
+    const message = status ? `push service answered ${status}` : describePushError(error);
+    console.warn("[notifications] push failed:", message);
+    return { ok: false, error: message };
+  }
+}
+
+/** The dialog a retraction is about. */
+function retractionKey(sessionId: string, requestId: string): string {
+  return `${sessionId}:${requestId}`;
+}
+
+/**
+ * True while this dialog's retraction still covers a push retry. Every path
+ * that settles a dialog (answer, cancel, expiry, process exit) records one,
+ * and `sendPush` asks before every attempt: a retry that wakes up after
+ * another client answered must never re-deliver a question nobody can answer.
+ */
+function isRetracted(sessionId: string, requestId: string, now: number): boolean {
+  const at = hub().retractions.get(retractionKey(sessionId, requestId));
+  return at !== undefined && now - at <= PUSH_RETRACTION_TTL_MS;
+}
+
 async function sendPush(device: NotificationDevice, event: NotificationEvent, retryDelaysMs: readonly number[] = []): Promise<{ ok: true } | { ok: false; error: string }> {
   const subscription = device.subscription;
   if (!subscription) return { ok: false, error: "no push subscription" };
   for (let attempt = 0; ; attempt++) {
+    // A retry can wake long after the dialog was answered, cancelled, expired
+    // or its omp child died: delivering now would show a dead question.
+    if (event.type === "input" && event.requestId && isRetracted(event.sessionId, event.requestId, Date.now())) {
+      return { ok: false, error: "dialog settled" };
+    }
     try {
       const { publicKey, privateKey } = getVapidKeys(webpush.generateVAPIDKeys);
-      // `type` lets the service worker tell open tabs which kind of entry to list.
-      await webpush.sendNotification(subscription, JSON.stringify({ ...renderFor(event, device.prefs.locale), type: event.type }), {
+      // `type` lets the service worker tell open tabs which kind of entry to list;
+      // `dialog` lets the native app answer without opening the session.
+      await webpush.sendNotification(subscription, JSON.stringify({
+        ...renderFor(event, device.prefs.locale),
+        type: event.type,
+        ...(event.requestId ? { requestId: event.requestId } : {}),
+        ...(event.dialog ? { dialog: event.dialog } : {}),
+      }), {
         TTL: PUSH_TTL_SECONDS,
         urgency: event.type === "input" || event.type === "error" ? "high" : "normal",
         timeout: PUSH_TIMEOUT_MS,
@@ -185,6 +261,22 @@ async function sendPush(device: NotificationDevice, event: NotificationEvent, re
       await new Promise((resolve) => setTimeout(resolve, delay).unref?.());
       if (!stillSubscribed(device.deviceId, subscription.endpoint)) return { ok: false, error: message };
     }
+  }
+}
+
+/**
+ * Apple's push service is the one endpoint where a push that displays nothing
+ * costs the permission itself: iOS revokes Web Push for the site. Dismiss
+ * pushes therefore never go there; the app clears the notification when its
+ * own answer reaches the server, or the stale one is replaced by the next
+ * `input` push of the same tag.
+ */
+export function isApplePushEndpoint(endpoint: string): boolean {
+  try {
+    const host = new URL(endpoint).hostname.toLowerCase();
+    return host === "web.push.apple.com" || host.endsWith(".push.apple.com");
+  } catch {
+    return false;
   }
 }
 
@@ -224,8 +316,58 @@ export function publishNotification(event: NotificationEvent): void {
   }
 }
 
-/** Settings "Send test notification" for a device with push: reports whether the push service accepted it.
- * One attempt, so the button answers at once. */
+/**
+ * Retract a session's `input` notification: its dialog was answered by any
+ * client, cancelled, expired, or its omp child went away. Reachable tabs of
+ * devices that enabled `input` get an SSE frame; subscribed devices get a
+ * dismiss push unless the endpoint is Apple's (see isApplePushEndpoint). The
+ * history entry becomes read because the question is settled.
+ *
+ * Never throws: callers run on the RPC frame path.
+ */
+export function publishNotificationDismiss(sessionId: string, requestId: string): void {
+  const tag = `${sessionId}:input`;
+  // Recorded first: a retry of that `input` push may be sleeping right now.
+  const state = hub();
+  const now = Date.now();
+  for (const [key, at] of state.retractions) {
+    if (now - at > PUSH_RETRACTION_TTL_MS) state.retractions.delete(key);
+  }
+  state.retractions.set(retractionKey(sessionId, requestId), now);
+  try {
+    markHistoryRead([tag]);
+  } catch (error) {
+    console.warn("[notifications] history read mark failed:", error);
+  }
+  let devices: NotificationDevice[] = [];
+  try {
+    devices = listDevices();
+  } catch (error) {
+    console.warn("[notifications] store unavailable:", error);
+  }
+  if (devices.length === 0) return;
+  const presence = livePresence(Date.now());
+  const reachable = new Set(state.streams.keys());
+  for (const device of devices) {
+    if (!device.prefs.enabled || !device.prefs.types.input) continue;
+    for (const tab of presence) {
+      if (tab.deviceId !== device.deviceId || !reachable.has(tab.clientId)) continue;
+      for (const send of state.streams.get(tab.clientId) ?? []) {
+        try {
+          send({ kind: "dismiss", tag, sessionId, requestId });
+        } catch {
+          // A closing stream must not break delivery to the others.
+        }
+      }
+    }
+    if (device.subscription && !isApplePushEndpoint(device.subscription.endpoint)) {
+      // urgency "normal": a retraction must not wake a phone like a question.
+      void sendPushPayload(device, { type: "dismiss", tag, sessionId, requestId }, "normal");
+    }
+  }
+}
+
+/** Settings "Send test notification" for a device with push: reports whether the push service accepted it. */
 export async function sendTestPush(deviceId: string): Promise<{ ok: true } | { ok: false; error: string }> {
   const device = getDevice(deviceId);
   if (!device) return { ok: false, error: "unknown device" };

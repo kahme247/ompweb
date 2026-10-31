@@ -33,12 +33,13 @@ import { comparableProjectPath } from "./comparable-path";
 import { samePath } from "./paths";
 import { isRecord } from "./type-guards";
 import { BLOCKING_UI_METHODS, createNotificationDetector } from "./notification-events";
-import { publishNotification } from "./notification-hub";
+import { publishNotification, publishNotificationDismiss } from "./notification-hub";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./skill-diagnostics";
 import { isReservedLaunchArg, loadProjectRegistry } from "./project-registry";
 import { eventWithToolResultImageUrls } from "./media-cache";
 import type {
   BashResultInfo,
+  ExtensionUiResponse,
   OmpModel,
   RpcAvailableSlashCommand,
   RpcSessionState,
@@ -129,7 +130,7 @@ export class WebRpcError extends Error {
 }
 
 /** Shape check for an ask-dialog `answers` payload; omp validates the content. */
-function isAskAnswers(value: unknown): boolean {
+export function isAskAnswers(value: unknown): boolean {
   return Array.isArray(value) && value.every((answer: unknown) =>
     isRecord(answer)
     && typeof answer.id === "string"
@@ -331,6 +332,8 @@ export class AgentSessionWrapper {
   private listeners: EventListener[] = [];
   private pendingUiRequests = new Map<string, UnsequencedAgentEvent>();
   private uiExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Session id each input notification was published under, keyed by request id. */
+  private inputNotificationSessions = new Map<string, string>();
   private extensionStatuses = new Map<string, string>();
   private extensionWidgets = new Map<string, ExtensionWidgetItem>();
   private promptRunning = false;
@@ -777,6 +780,14 @@ export class AgentSessionWrapper {
       sessionName: this._sessionName || this.cwd.split(/[\\/]/).filter(Boolean).pop() || null,
     };
     for (const notification of this.detectNotification(frame, session)) {
+      if (notification.type === "input") {
+        // Dismiss uses the id the notification was published under, even after
+        // omp moved the conversation to a new file. Remember it even when the
+        // dialog did not fit a notification (`open_url`, oversized payload):
+        // the retraction still has to reach the published tag.
+        const requestId = notification.requestId ?? notification.dialog?.requestId ?? (typeof frame.id === "string" ? frame.id : "");
+        if (requestId) this.inputNotificationSessions.set(requestId, notification.sessionId);
+      }
       publishNotification(this.movedFromIds.length ? { ...notification, aliases: this.movedFromIds } : notification);
     }
   }
@@ -818,6 +829,9 @@ export class AgentSessionWrapper {
         this.awaitingAgentStart = false;
         this.awaitingAgentStartDeadline = 0;
         this.continuationGraceUntil = 0;
+        // A new run supersedes any dialog the previous run left open: its
+        // notification must not offer an answer that would now reach the wrong run.
+        this.clearPendingUiRequests();
         // The session file can appear just after the prompt acknowledgement.
         // Invalidate and signal the sidebar now rather than waiting for the
         // agent's first reply or terminal event.
@@ -1030,17 +1044,59 @@ export class AgentSessionWrapper {
     }
   }
 
+  /**
+   * A pending dialog is settled (answered, cancelled, expired or its child is
+   * gone): forget it and retract the `input` notification it produced.
+   */
+  private settlePendingUiRequest(id: string): boolean {
+    if (!this.pendingUiRequests.has(id)) return false;
+    const sessionId = this.inputNotificationSessions.get(id) ?? this._sessionId;
+    this.forgetPendingUiRequest(id);
+    this.inputNotificationSessions.delete(id);
+    if (sessionId) publishNotificationDismiss(sessionId, id);
+    return true;
+  }
+
   private clearPendingUiRequests(): void {
     for (const timer of this.uiExpiryTimers.values()) clearTimeout(timer);
     this.uiExpiryTimers.clear();
-    this.pendingUiRequests.clear();
+    for (const id of [...this.pendingUiRequests.keys()]) this.settlePendingUiRequest(id);
+    this.inputNotificationSessions.clear();
+  }
+
+  /**
+   * Answer a blocking dialog from a notification action. Uses the same
+   * validation and frame as the agent route's `extension_ui_response` command,
+   * and returns whether the request was still pending.
+   */
+  answerExtensionUiRequest(id: string, response: ExtensionUiResponse): "answered" | "alreadySettled" {
+    const pending = this.pendingUiRequests.get(id);
+    if (!pending) return "alreadySettled";
+    const pendingAsk = pending.method === "ask";
+    // A pending ask accepts only its answers or a cancel; any other pending
+    // dialog accepts no answers. Anything else would drop it from reconnect
+    // replay while omp rejects the payload.
+    if (pendingAsk) {
+      if (!("cancelled" in response) && !isAskAnswers("answers" in response ? response.answers : undefined)) {
+        throw new WebRpcError("Invalid ask dialog answers", "invalid_ask_answers");
+      }
+    } else if ("answers" in response) {
+      throw new WebRpcError("This dialog does not take answers", "invalid_ask_answers");
+    }
+    const wasPending = this.settlePendingUiRequest(id);
+    this.proc.sendFrame({ type: "extension_ui_response", id, ...response });
+    // omp sends no cancel for an answered dialog; other tabs on this session
+    // would keep showing it, so settle it for them here.
+    if (wasPending) this.emit({ type: "extension_ui_request", id: `cancel:${id}`, method: "cancel", targetId: id });
+    return "answered";
   }
 
   private trackExtensionUiRequest(event: UnsequencedAgentEvent): boolean {
     const method = event.method as string;
     const id = event.id as string;
     if (method === "cancel") {
-      this.forgetPendingUiRequest(event.targetId as string);
+      const targetId = typeof event.targetId === "string" ? event.targetId : "";
+      if (targetId) this.settlePendingUiRequest(targetId);
       return false;
     }
     // Only the “Allow tool: <name>” confirmation is covered. Other extension
@@ -1063,7 +1119,7 @@ export class AgentSessionWrapper {
       const timeout = typeof event.timeout === "number" ? event.timeout : undefined;
       if (timeout && timeout > 0) {
         event.expiresAt = Date.now() + timeout;
-        const timer = setTimeout(() => this.forgetPendingUiRequest(id), timeout);
+        const timer = setTimeout(() => this.settlePendingUiRequest(id), timeout);
         timer.unref?.();
         this.uiExpiryTimers.set(id, timer);
       }
@@ -1296,7 +1352,9 @@ export class AgentSessionWrapper {
     for (const [id, event] of this.pendingUiRequests) {
       const expiresAt = event.expiresAt as number | undefined;
       if (expiresAt !== undefined && expiresAt <= now) {
-        this.forgetPendingUiRequest(id);
+        // Same retraction as the expiry timer: forget alone would leave the
+        // notification and history entry behind after a reconnect.
+        this.settlePendingUiRequest(id);
         continue;
       }
       listener({ ...event, web: { streamId: this.streamId, sequence: ++this.streamSequence } });
@@ -2076,8 +2134,9 @@ export class AgentSessionWrapper {
         if (("answers" in rest || pendingAsk) && !isAskAnswers(rest.answers) && !(pendingAsk && rest.cancelled === true)) {
           throw new WebRpcError("Invalid ask dialog answers", "invalid_ask_answers");
         }
-        const wasPending = this.pendingUiRequests.has(id);
-        this.forgetPendingUiRequest(id);
+        // Forgets the pending dialog and retracts its notification for other
+        // tabs/devices; the cancel frame below settles it in other tabs.
+        const wasPending = this.settlePendingUiRequest(id);
         this.proc.sendFrame({ type: "extension_ui_response", id, ...rest });
         // omp sends no cancel for an answered dialog; other tabs on this
         // session would keep showing it, so settle it for them here.
