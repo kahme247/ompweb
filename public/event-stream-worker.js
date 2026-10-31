@@ -66,7 +66,10 @@ let reconnectDelayMs = RECONNECT_MIN_MS;
 let nextSubscriptionId = 1;
 /** Server subscription id -> subscription. */
 const subscriptions = new Map();
-/** The server's setting: SSE until a hello or `transport` control frame says otherwise. */
+/**
+ * The server's setting: SSE until a hello or `transport` control frame says otherwise.
+ * The pool numbers are placeholders until then (every hello carries the server's; lib/web-settings.ts owns the defaults).
+ */
 let state = { transport: "sse", perSocket: 4, maxSockets: 16 };
 /** Every attached tab, told the mode when it changes. */
 const clients = new Set();
@@ -276,8 +279,9 @@ function subscriptionKey(subscription) {
 
 /**
  * After a policy change (spec D2 "Moves"): every stream whose key changed moves
- * make-before-break, every command not yet sent goes to its session's new socket
- * (a sent one stays until answered; see lost), then sockets left with nothing close
+ * make-before-break; a session's commands move to its new socket together and only
+ * while none of them was sent (a sent one is answered on its socket, and the
+ * session's later ones wait behind it there); then sockets left with nothing close
  * (at once when the policy no longer produces their key) or linger.
  */
 function rebalance() {
@@ -287,16 +291,9 @@ function rebalance() {
     if (subscription.conn.key !== key && !subscription.moving) move(subscription, connFor(key));
   }
   for (const conn of [...conns.values()]) {
-    for (const command of conn.pending.values()) {
-      const key = socketKeyFor(command.session);
-      if (command.attempts > 0 || key === conn.key) continue;
-      conn.pending.delete(command.req);
-      clearTimeout(command.deadline);
-      const target = connFor(key);
-      target.pending.set(command.req, command);
-      if (target.connectionId) sendCommand(target, command);
-      else waitToSend(target, command);
-    }
+    const sessions = strayCommandSessions(conn);
+    for (const command of conn.pending.values()) if (command.attempts > 0) sessions.delete(command.session);
+    for (const session of sessions) moveCommands(conn, session);
   }
   for (const conn of [...conns.values()]) idle(conn);
 }
@@ -546,6 +543,8 @@ function redial(conn, delay) {
     subscription.moving = null;
     subscription.conn.subs.add(subscription);
   }
+  // Nothing is in flight here now: a moved session's lost commands go again on its socket of now, the ones behind them follow.
+  for (const session of strayCommandSessions(conn)) moveCommands(conn, session);
   // A lingering socket (or one left empty above) has nothing to come back for.
   if (!busy(conn)) {
     retire(conn);
@@ -590,7 +589,8 @@ function onSocketFrame(conn, text) {
   if (subscription?.conn === conn) subscription.listener({ data });
 }
 
-// Agent commands (spec D5 "Commands", "Resend"): each rides its session's socket (socketKeyFor), keyed by the tab's request id.
+// Agent commands (spec D5 "Commands", "Resend"): each rides its session's socket, keyed by the tab's request id.
+// A session's unanswered commands are all on one socket, so they reach omp in the order the tab sent them.
 
 function queueCommand(client, message) {
   const { n, req, body } = message;
@@ -618,10 +618,37 @@ function queueCommand(client, message) {
     post(client, reply(command, 413, { error: "Agent command is too large", code: "request_too_large" }));
     return;
   }
-  const conn = connFor(socketKeyFor(command.session));
+  const conn = connForCommand(command.session);
   conn.pending.set(req, command);
   if (conn.connectionId) sendCommand(conn, command);
   else waitToSend(conn, command);
+}
+
+/** The socket holding the session's unanswered commands (a move must not let this one pass them), else the session's socket. */
+function connForCommand(session) {
+  for (const conn of conns.values()) for (const command of conn.pending.values()) if (command.session === session) return conn;
+  return connFor(socketKeyFor(session));
+}
+
+/** Sessions with commands on `conn` whose socket is another one now. */
+function strayCommandSessions(conn) {
+  const sessions = new Set();
+  for (const command of conn.pending.values()) if (socketKeyFor(command.session) !== conn.key) sessions.add(command.session);
+  return sessions;
+}
+
+/** Moves a session's commands, none of them in flight, to its socket of now, in order; a lost one goes again under the resend rules. */
+function moveCommands(conn, session) {
+  for (const command of [...conn.pending.values()]) {
+    if (command.session !== session) continue;
+    conn.pending.delete(command.req);
+    clearTimeout(command.deadline);
+    // Per command: a settle below may start the target's linger, which connFor cancels.
+    const target = connFor(socketKeyFor(session));
+    target.pending.set(command.req, command);
+    if (target.connectionId) sendIfSafe(target, command);
+    else waitToSend(target, command);
+  }
 }
 
 /** Not sent within SEND_DEADLINE_MS: unavailable if it never left the browser, lost if it was sent before. */
@@ -669,21 +696,12 @@ function idempotent(command) {
   return typeof type === "string" && (type.startsWith("get_") || type === "predict_word");
 }
 
-/** Its socket dropped before the reply: resent at most once, on the session's socket of now (a move may have changed it), never from a retiring socket. */
+/** Its socket dropped before the reply: resent at most once (redial moves it to the session's socket of now), never from a retiring socket. */
 function lost(conn, command) {
   command.inFlight = false;
   clearTimeout(command.ackTimer);
-  if (conn.retiring || command.attempts > 1) {
-    settle(conn, command, failure(command, TRANSPORT_LOST));
-    return;
-  }
-  const target = connFor(socketKeyFor(command.session));
-  if (target !== conn) {
-    conn.pending.delete(command.req);
-    target.pending.set(command.req, command);
-  }
-  if (target.connectionId) sendIfSafe(target, command);
-  else waitToSend(target, command);
+  if (conn.retiring || command.attempts > 1) settle(conn, command, failure(command, TRANSPORT_LOST));
+  else waitToSend(conn, command);
 }
 
 function onCommandFrame(conn, name, at, frame) {
