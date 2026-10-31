@@ -1,22 +1,11 @@
 import { randomUUID } from "crypto";
-import { existsSync, realpathSync } from "fs";
-import { homedir } from "os";
+import { existsSync } from "fs";
 import { validateAgentImages } from "./image-attachments";
 import { hasVisibleAssistantContent } from "./assistant-response";
 import { invalidateModelsCache } from "./models-cache";
 import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame } from "./omp/rpc-process";
-import { readNativeSettings } from "./omp/settings-config";
-import { getAgentEnvOverrides } from "./omp/agent-env";
-import { editSessionHistory, isSessionEditReply, SESSION_EDIT_COMMAND, SESSION_EDIT_EXTENSION_PATH, SessionEditAgentInvocationError, type SessionEditResult } from "./omp/session-edit";
-import {
-  cacheSessionPath,
-  invalidateSessionEntriesCache,
-  invalidateSessionListCache,
-  invalidateSessionListMeta,
-  listAllSessions,
-  readSessionHeader,
-  resolveSessionPath,
-} from "./session-reader";
+import { editSessionHistory, isSessionEditReply, SESSION_EDIT_COMMAND, SessionEditAgentInvocationError, type SessionEditResult } from "./omp/session-edit";
+import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
 import { allowFileRoot } from "./file-access";
 import { loadWebServerSettings } from "./web-settings";
 import {
@@ -27,15 +16,12 @@ import {
   type AgentToolDeliverResult,
   type AgentToolSessionOps,
 } from "./agent-tools";
-import { markShuttingDown, recordRunningSessions, RESUME_PROMPT, takeInterruptedSessions } from "./session-resume";
-import { PRESET_FULL } from "./tool-presets";
-import { comparableProjectPath } from "./comparable-path";
+import { markShuttingDown, recordRunningSessions, RESUME_PROMPT, resumeOnHostLink, takeInterruptedSessions, type InterruptibleSession } from "./session-resume";
 import { samePath } from "./paths";
 import { isRecord } from "./type-guards";
 import { BLOCKING_UI_METHODS, createNotificationDetector } from "./notification-events";
 import { publishNotification } from "./notification-hub";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./skill-diagnostics";
-import { isReservedLaunchArg, loadProjectRegistry } from "./project-registry";
 import { eventWithToolResultImageUrls } from "./media-cache";
 import type {
   BashResultInfo,
@@ -45,7 +31,12 @@ import type {
   SessionStatsInfo,
   WebSessionState,
 } from "./pi-types";
-import type { AgentMessage, CrossSessionHostToolCall, ExitedRpcSession, ExtensionWidgetItem, ProjectLaunchConfig } from "./types";
+import type { AgentMessage, CrossSessionHostToolCall, ExitedRpcSession, ExtensionWidgetItem } from "./types";
+import { isLinkUp, type Host, type HostStatus } from "./hosts/host";
+import { getHost, lastUplinkAt, listHosts, orphanExit } from "./hosts/hub";
+import { localHost } from "./hosts/local-host";
+import type { OpResult } from "./hosts/session-ops";
+import { hostForSessionId, invalidateHostSessionList, listSessionsAllHosts, sessionSpawnTarget } from "./hosts/session-index";
 import type { SessionLiveSnapshot, SessionLiveToolEvent, SessionStreamCursor } from "./session-sync";
 
 // ============================================================================
@@ -120,11 +111,15 @@ const BASH_EXCLUDE_MESSAGE =
  */
 export class WebRpcError extends Error {
   readonly code: string;
+  /** `host_offline` only: "refused" when nothing was sent, "unknown" when the
+   * link dropped after the command left, so it may still run on the host. */
+  readonly delivery?: "refused" | "unknown";
 
-  constructor(message: string, code: string) {
+  constructor(message: string, code: string, delivery?: "refused" | "unknown") {
     super(message);
     this.name = "WebRpcError";
     this.code = code;
+    if (delivery) this.delivery = delivery;
   }
 }
 
@@ -203,95 +198,9 @@ const UNSUPPORTED_COMMANDS: Record<string, string> = {
   extension_ui_input: "Extension custom UI is not supported over the omp RPC protocol",
 };
 
-// omp aliases "find"->"glob" and has no "ls" tool; the web UI presets still use
-// the pi names (lib/tool-presets.ts), so translate before building --tools.
-const TOOL_NAME_ALIASES: Record<string, string> = { find: "glob", search: "grep" };
-const DROPPED_TOOL_NAMES = new Set(["ls"]);
-
-/** Translate pi-web preset tool names into omp builtin tool names. */
-export function mapPresetToolNames(toolNames: string[]): string[] {
-  const out: string[] = [];
-  for (const raw of toolNames) {
-    const lower = raw.toLowerCase();
-    if (DROPPED_TOOL_NAMES.has(lower)) continue;
-    const mapped = TOOL_NAME_ALIASES[lower] ?? lower;
-    if (!out.includes(mapped)) out.push(mapped);
-  }
-  return out;
-}
-
-const FULL_PRESET_KEY = [...PRESET_FULL].map((n) => n.toLowerCase()).sort().join(",");
-
-/** Extra CLI args for spawning `omp --mode rpc-ui` for a session. */
-export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[], advisor = false, launchConfig?: ProjectLaunchConfig, modelOverride?: string): string[] {
-  const args: string[] = [];
-  if (sessionFile) {
-    // An absolute path (or anything containing "/") resolves deterministically:
-    // omp's createSessionManager opens it directly via SessionManager.open
-    // without any interactive resume/fork prompts (main.ts resume handling).
-    args.push("--resume", sessionFile);
-    // An explicitly chosen model replaces the saved model and skips its
-    // restore check (omp's --model at startup). Without this, resuming a
-    // session whose saved model can no longer be restored dies before any
-    // set_model RPC can run (#277). Args are passed as an argv array, never
-    // through a shell, so only whitespace / flag-smuggled values are kept out.
-    if (modelOverride && !modelOverride.startsWith("-") && !/\s/.test(modelOverride)) {
-      args.push("--model", modelOverride);
-    }
-  } else if (toolNames !== undefined) {
-    const presetKey = toolNames.map((n) => n.toLowerCase()).sort().join(",");
-    if (toolNames.length === 0) {
-      args.push("--no-tools");
-    } else if (presetKey === FULL_PRESET_KEY) {
-      // "Full" means everything: leave omp's complete default toolset intact
-      // rather than restricting it to the (much smaller) pi preset list.
-    } else {
-      const mapped = mapPresetToolNames(toolNames);
-      if (mapped.length > 0) args.push("--tools", mapped.join(","));
-    }
-  }
-  if (advisor) args.push("--advisor");
-  else if (launchConfig?.advisor) args.push("--advisor");
-  // Defense in depth: the registry is hand-editable, so re-strip reserved
-  // args and dash-leading profiles at the spawn boundary even though the
-  // API validates them on write.
-  if (launchConfig?.profile && !launchConfig.profile.startsWith("-")) args.push("--profile", launchConfig.profile);
-  if (launchConfig?.extraArgs) args.push(...launchConfig.extraArgs.filter((arg) => !isReservedLaunchArg(arg)));
-  return args;
-}
-
 function toImageContents(value: unknown): Array<{ type: "image"; data: string; mimeType: string }> | undefined {
   const images = value as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
   return images?.length ? images : undefined;
-}
-
-/**
- * Pick a spawn cwd that actually exists. A session records the directory it was
- * created in, but that directory may have been deleted since: spawn() would
- * fail with ENOENT and `omp --cwd <missing>` throws in setProjectDir. omp's own
- * resume path skips the chdir when the recorded project dir is gone and keeps
- * the launch cwd (main.ts), so hand it a live directory and let it decide.
- */
-export function resolveSpawnCwd(recordedCwd?: string | null): string {
-  return resolveSpawnCwdResult(recordedCwd).cwd;
-}
-
-/**
- * Resolve a spawn cwd and report whether it differs from the session's recorded
- * directory. Callers that surface a UI (the SSE resume paths) use the result to
- * emit a notice so the user knows the agent is running somewhere other than the
- * directory the sidebar/header still advertises — a silent wrong-tree fallback
- * would let file tool calls edit an unexpected repo with no signal.
- */
-export function resolveSpawnCwdResult(recordedCwd?: string | null): { cwd: string; fellBack: boolean } {
-  if (recordedCwd && existsSync(recordedCwd)) return { cwd: recordedCwd, fellBack: false };
-  try {
-    const serverCwd = process.cwd();
-    if (serverCwd && existsSync(serverCwd)) return { cwd: serverCwd, fellBack: true };
-  } catch {
-    // process.cwd() itself throws when the server's own cwd was removed.
-  }
-  return { cwd: homedir(), fellBack: true };
 }
 
 /** omp's CompactionResult historically omitted any post-compaction token
@@ -331,6 +240,8 @@ export class AgentSessionWrapper {
   private listeners: EventListener[] = [];
   private pendingUiRequests = new Map<string, UnsequencedAgentEvent>();
   private uiExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Dialogs omp-web itself raised (confirmFromServer): answered here, never forwarded to omp. */
+  private serverUiRequests = new Map<string, (confirmed: boolean) => void>();
   private extensionStatuses = new Map<string, string>();
   private extensionWidgets = new Map<string, ExtensionWidgetItem>();
   private promptRunning = false;
@@ -398,15 +309,25 @@ export class AgentSessionWrapper {
   private proc: RpcProcess;
   /** Process whose exit is expected because reload is deliberately disposing it. */
   private expectedExitProc: RpcProcess | null = null;
+  /** A reload gave up waiting for the old child behind a dropped link; it may still run, so commands answer host_offline until it exits. */
+  private oldChildExiting = false;
   readonly cwd: string;
   /** Whether the child was spawned with --advisor. The flag is spawn-time
    * only (no runtime RPC toggles it), so applying a changed advisor setting
    * means replacing an idle child on the next startRpcSession call. */
   readonly advisorSpawned: boolean;
+  /** The host's project launch config forced --advisor at spawn. Read by
+   * startRpcSession's replace gate, which cannot ask the host before spawning. */
+  readonly launchAdvisor: boolean;
+  /** Machine the child runs on; every machine-local action goes through it. */
+  readonly host: Host;
   /** The cwd recorded in the session file header; null for brand-new sessions
-   * or when the header lacks one. Used to detect a spawn fallback so a notice
-   * can warn the user the agent is running in a different directory. */
+   * or when the header lacks one. A restart asks the host to start there again. */
   private readonly recordedCwd: string | null;
+  /** The host could not start the child in its directory and used another
+   * one (spawn fallback): a notice warns the user once it is ready. */
+  private readonly fellBack: boolean;
+  private unsubscribeHostStatus: (() => void) | null = null;
 
   // Plain field assignments (not TS parameter properties) keep this module
   // runnable under Node's strip-only TypeScript mode for probes/tests.
@@ -419,6 +340,9 @@ export class AgentSessionWrapper {
     /** Test seam: the real value is DISCONNECT_DESTROY_MS (120s), far too long
      *  for a unit test. 0 disables reaping for that wrapper. */
     disconnectDestroyMs: number = DISCONNECT_DESTROY_MS,
+    host: Host = localHost,
+    launchAdvisor = false,
+    fellBack = false,
   ) {
     this.proc = proc;
     this.cwd = cwd;
@@ -426,6 +350,9 @@ export class AgentSessionWrapper {
     this.advisorSpawned = advisorSpawned;
     this._sessionId = expectedSessionId;
     this.disconnectDestroyMs = disconnectDestroyMs;
+    this.host = host;
+    this.launchAdvisor = launchAdvisor;
+    this.fellBack = fellBack;
   }
 
   get sessionId(): string {
@@ -500,7 +427,7 @@ export class AgentSessionWrapper {
    */
   private reapIfDisconnected(): void {
     if (!this.isAlive() || this.hasSubscribers() || this.isRunning()
-      || this.handshaking || this.pendingCommands > 0) {
+      || this.handshaking || this.pendingCommands > 0 || this.hostDown()) {
       // A paused human dialog produces no frames. Do not spin a zero-delay
       // timer once the old deadline has passed while protected work remains.
       this.reapDeadline = Math.max(this.reapDeadline, Date.now() + this.disconnectDestroyMs);
@@ -545,8 +472,63 @@ export class AgentSessionWrapper {
 
   start(): void {
     this.unsubscribeFrames = this.proc.onFrame((frame) => this.handleFrame(frame));
+    this.watchResync(this.proc);
+    this.unsubscribeHostStatus = this.host.onStatus((status) => this.handleHostStatus(status));
     this.resetIdleTimer();
     notifyRunningChange();
+  }
+
+  /** The host's link is down ("transport down", never "exited"): the child runs on, unreachable. */
+  private hostDown(): boolean {
+    return !isLinkUp(this.host.status());
+  }
+
+  private hostOfflineError(delivery: "refused" | "unknown"): WebRpcError {
+    return new WebRpcError(`${this.host.label} is offline. The run continues there; it reconnects automatically.`, "host_offline", delivery);
+  }
+
+  /** The command timed out because its host's link went quiet, not because omp
+   * wedged: the child runs on there, so it is not recycled (the kill would wait
+   * for the link anyway), and the reconcile on reconnect settles the run. */
+  private linkLostDuring(timeout: RpcCommandTimeoutError): boolean {
+    const lastUplink = lastUplinkAt(this.host.id);
+    // A linked host that sent anything after the command went down has a live
+    // link: omp itself is wedged, and the caller recycles the child as before.
+    return lastUplink !== null && (this.hostDown() || lastUplink <= timeout.dispatchedAt);
+  }
+
+  /** A remote link that dropped this child's buffered output asks for a reconcile.
+   * Duck-typed: route bundles and instrumentation load separate hub modules. */
+  private watchResync(proc: RpcProcess): void {
+    proc.transport?.onResync?.(() => {
+      if (this.proc === proc) void this.reconcileAfterGap();
+    });
+  }
+
+  private handleHostStatus(status: HostStatus): void {
+    if (!this._alive) return;
+    this.emit({ type: "host_status", hostId: this.host.id, status });
+    if (!isLinkUp(status)) return;
+    // The idle and disconnect timers held off while the link was down; give them a full window again.
+    this.resetIdleTimer(true);
+    void this.reconcileAfterGap();
+  }
+
+  /** Frames may have been lost (link down, `resync`): re-read omp's state, as the client's get_state reconcile does. */
+  private async reconcileAfterGap(): Promise<void> {
+    try {
+      const state = await this.getStateWithTimeout();
+      if (!this._alive) return;
+      const wasRunning = this.streaming || this.promptRunning;
+      this.applyIdentity(state);
+      // The run ended while its frames were lost: end it for clients, as on exit.
+      if (wasRunning && !state.isStreaming && !state.isCompacting && !this.awaitingAgentStart && this.promptDispatchPendingCount === 0) {
+        this.emit({ type: "agent_end", isTerminal: true, messages: [] });
+      }
+      notifyRunningChange({ refreshSessionList: true });
+    } catch {
+      // The client's own reconcile poll catches up.
+    }
   }
 
   /** Resolves once the child announced readiness and identity is known. */
@@ -580,7 +562,7 @@ export class AgentSessionWrapper {
       // directory so omp can spawn, but without a notice the user would see the
       // sidebar/header still advertise the (gone) recorded path while file tool
       // calls operate on a different tree.
-      if (this.recordedCwd && this.recordedCwd !== this.cwd) {
+      if (this.fellBack) {
         this.emit({
           type: "notice",
           level: "warning",
@@ -617,7 +599,8 @@ export class AgentSessionWrapper {
     this.streaming = state.isStreaming;
     this.compacting = state.isCompacting;
     this.fastModeEnabled = state.fastModeEnabled ?? state.fastMode ?? this.fastModeEnabled;
-    if (this._sessionFile) cacheSessionPath(this._sessionId, this._sessionFile);
+    // The local path cache resolves ids to files on this machine only.
+    if (this._sessionFile && this.host === localHost) cacheSessionPath(this._sessionId, this._sessionFile);
     if (moved) {
       this.sessionMovePending = false;
       if (oldId !== this._sessionId) {
@@ -704,13 +687,18 @@ export class AgentSessionWrapper {
   private autoTitle(): void {
     const sessionId = this._sessionId;
     if (!sessionId || this._sessionName || this.autoTitleInFlight) return;
-    // omp writes the session file once the history holds an assistant message.
-    if (!this._sessionFile || !existsSync(this._sessionFile)) return;
-    const attempts = this.autoTitleAttempts.get(sessionId) ?? 0;
-    if (attempts >= AUTO_TITLE_MAX_ATTEMPTS) return;
-    this.autoTitleAttempts.set(sessionId, attempts + 1);
+    const sessionFile = this._sessionFile;
+    if (!sessionFile) return;
+    // Held across the async file check so a second agent_end cannot start a parallel run.
     this.autoTitleInFlight = true;
-    this.generateTitle({ quiet: true })
+    void this.host.sessionFileExists(sessionFile)
+      .then(async (exists) => {
+        // omp writes the session file once the history holds an assistant message.
+        const attempts = this.autoTitleAttempts.get(sessionId) ?? 0;
+        if (!exists || this._sessionName || attempts >= AUTO_TITLE_MAX_ATTEMPTS) return;
+        this.autoTitleAttempts.set(sessionId, attempts + 1);
+        await this.generateTitle({ quiet: true });
+      })
       .catch((error) => {
         console.warn(`[omp-web] could not title session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`);
       })
@@ -754,9 +742,14 @@ export class AgentSessionWrapper {
     if (!this._alive || sourceProc === this.expectedExitProc) return;
     const detail = (stderrTail.trim().split("\n").pop() ?? "").slice(-500);
     const status = signal ? `signal ${signal}` : `code ${code ?? "null"}`;
+    // Spec Rules → Reattach: a run whose child vanished while its host link was
+    // down starts again on that host, like a local run after a restart.
+    const resume: InterruptibleSession | null = sourceProc.transport?.lost === true && this._sessionId && (this.streaming || this.promptRunning)
+      ? { id: this._sessionId, advisor: this.advisorSpawned, hostId: this.host.id }
+      : null;
     // Recorded before destroy(): its running-change broadcast must carry the
     // record so sidebars that missed the notice below still see the exit.
-    if (this._sessionId) getExitedMap().set(this._sessionId, { id: this._sessionId, cwd: this.cwd, at: Date.now(), code, signal, detail });
+    if (this._sessionId) getExitedMap().set(this._sessionId, { id: this._sessionId, cwd: this.cwd, ...(this.host.id === localHost.id ? {} : { hostId: this.host.id }), at: Date.now(), code, signal, detail });
     this.emit({
       type: "notice",
       level: "error",
@@ -769,6 +762,7 @@ export class AgentSessionWrapper {
       this.publishNotifications({ type: "process_exit", detail: detail || status });
     }
     this.destroy();
+    if (resume && loadWebServerSettings().autoResumeSessions) void resumeSession(resume);
   }
 
   private publishNotifications(frame: Record<string, unknown>): void {
@@ -829,12 +823,16 @@ export class AgentSessionWrapper {
         // files added inside a project subdirectory), hiding the running
         // session from the list until the next invalidation (agent_end).
         // Re-signal once the file actually lands.
-        if (this._sessionFile && !existsSync(this._sessionFile)) {
-          this.signalWhenSessionFileAppears();
+        if (this._sessionFile) {
+          void this.host.sessionFileExists(this._sessionFile).then((exists) => {
+            if (!exists && this._alive) this.signalWhenSessionFileAppears();
+          }, () => {});
         }
         break;
       case "agent_end":
         if (event.isTerminal !== false) {
+          // A server dialog belongs to a tool call of this run; nobody can answer it after the run.
+          this.dropServerUiRequests();
           this.streaming = false;
           this.promptRunning = false;
           this.awaitingAgentStart = false;
@@ -1031,9 +1029,34 @@ export class AgentSessionWrapper {
   }
 
   private clearPendingUiRequests(): void {
+    this.dropServerUiRequests();
     for (const timer of this.uiExpiryTimers.values()) clearTimeout(timer);
     this.uiExpiryTimers.clear();
     this.pendingUiRequests.clear();
+  }
+
+  /** Settle every server dialog as declined and close it in attached tabs. */
+  private dropServerUiRequests(): void {
+    for (const [id, resolve] of this.serverUiRequests) {
+      this.serverUiRequests.delete(id);
+      this.forgetPendingUiRequest(id);
+      this.emit({ type: "extension_ui_request", id: `cancel:${id}`, method: "cancel", targetId: id });
+      resolve(false);
+    }
+  }
+
+  /**
+   * Ask this session's user to confirm, as an omp dialog would: same tabs,
+   * replay and input-needed notification. Resolves false when declined, when
+   * the run ends, or when the session stops.
+   */
+  confirmFromServer(title: string): Promise<boolean> {
+    if (!this._alive) return Promise.resolve(false);
+    const id = `omp-web:${randomUUID()}`;
+    const { promise, resolve } = Promise.withResolvers<boolean>();
+    this.serverUiRequests.set(id, resolve);
+    this.handleFrame({ type: "extension_ui_request", id, method: "confirm", title, message: "" });
+    return promise;
   }
 
   private trackExtensionUiRequest(event: UnsequencedAgentEvent): boolean {
@@ -1045,13 +1068,7 @@ export class AgentSessionWrapper {
     }
     // Only the “Allow tool: <name>” confirmation is covered. Other extension
     // prompts, including login/editor confirmations, remain interactive.
-    let autoApproveExtension = false;
-    try {
-      autoApproveExtension = readNativeSettings().settings.tools?.approval?.extension === "allow";
-    } catch {
-      // A malformed config must not prevent normal interactive approval.
-    }
-    if (method === "confirm" && typeof event.title === "string" && /^allow tool\s*:/i.test(event.title) && autoApproveExtension) {
+    if (method === "confirm" && typeof event.title === "string" && /^allow tool\s*:/i.test(event.title) && this.host.autoApproveExtension()) {
       this.forgetPendingUiRequest(id);
       this.proc.sendFrame({ type: "extension_ui_response", id, confirmed: true });
       return true;
@@ -1232,12 +1249,8 @@ export class AgentSessionWrapper {
    * open session's parsed-entry cache. List metadata (sidebar order/counts)
    * still always refreshes. */
   private invalidateSessionLists(): void {
-    if (this._sessionFile) {
-      invalidateSessionListMeta();
-      invalidateSessionEntriesCache(this._sessionFile);
-    } else {
-      invalidateSessionListCache();
-    }
+    this.host.invalidateSessionLists(this._sessionFile || undefined);
+    invalidateHostSessionList(this.host.id);
   }
 
   /** Poll briefly for the session file to appear after agent_start, then
@@ -1249,17 +1262,28 @@ export class AgentSessionWrapper {
     if (this.sessionFileSignalTimer) return;
     let attempts = 0;
     const check = () => {
-      this.sessionFileSignalTimer = null;
-      if (!this._alive || !this._sessionFile) return;
-      if (!existsSync(this._sessionFile)) {
-        attempts += 1;
-        if (attempts < 40) {
-          this.sessionFileSignalTimer = setTimeout(check, 250);
-        }
+      const sessionFile = this._sessionFile;
+      if (!this._alive || !sessionFile) {
+        this.sessionFileSignalTimer = null;
         return;
       }
-      this.invalidateSessionLists();
-      notifyRunningChange({ refreshSessionList: true });
+      // The fired handle stays set across the async check so a re-entrant
+      // call cannot start a second poll; destroy() still clears it.
+      void this.host.sessionFileExists(sessionFile).then((exists) => {
+        if (!this._alive) return;
+        this.sessionFileSignalTimer = null;
+        if (!exists) {
+          attempts += 1;
+          if (attempts < 40) {
+            this.sessionFileSignalTimer = setTimeout(check, 250);
+          }
+          return;
+        }
+        this.invalidateSessionLists();
+        notifyRunningChange({ refreshSessionList: true });
+      }, () => {
+        this.sessionFileSignalTimer = null;
+      });
     };
     this.sessionFileSignalTimer = setTimeout(check, 250);
   }
@@ -1277,7 +1301,7 @@ export class AgentSessionWrapper {
     this.lastIdleReset = now;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => {
-      if (this.isRunning() || this.handshaking || this.pendingCommands > 0) {
+      if (this.isRunning() || this.handshaking || this.pendingCommands > 0 || this.hostDown()) {
         this.resetIdleTimer(true);
         return;
       }
@@ -1380,8 +1404,10 @@ export class AgentSessionWrapper {
       const result = await executeAgentTool(toolName, args, createAgentToolOps(), {
         sourceSessionId: this.sessionId,
         sourceCwd: this.cwd,
+        sourceHostId: this.host.id,
         enabled: loadWebServerSettings().agentToolsEnabled,
         guard: getAgentToolGuard(),
+        confirm: (title) => this.confirmFromServer(title),
       });
       sendResult(typeof result === "string" ? result : JSON.stringify(result));
     } catch (error) {
@@ -1485,6 +1511,7 @@ export class AgentSessionWrapper {
         );
       }
       if (expired) {
+        if (error instanceof RpcCommandTimeoutError && this.linkLostDuring(error)) throw this.hostOfflineError("unknown");
         // Nothing on this child will ever resolve the waiter; recycle it like
         // the prompt-ack timeout path so the next request gets a fresh child.
         await this.destroyAndWait();
@@ -1676,6 +1703,7 @@ export class AgentSessionWrapper {
       return result;
     } catch (error) {
       if (error instanceof RpcCommandTimeoutError) {
+        if (this.linkLostDuring(error)) throw this.hostOfflineError("unknown");
         // A timed-out navigation may still be running in a hook. Do not let a
         // later mutation race it once the web-side fence is released.
         await this.destroyAndWait();
@@ -1701,11 +1729,19 @@ export class AgentSessionWrapper {
   private async restart(): Promise<void> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     const sessionFile = this._sessionFile;
-    const resumable = !!sessionFile && existsSync(sessionFile);
     const old = this.proc;
     // Stays true for the whole restart so send() rejects commands that would
     // otherwise hit the disposed or half-built child.
     this.restarting = true;
+    let resumable: boolean;
+    try {
+      // Asked before touching the live child: a remote host can be offline,
+      // and the child must then keep running with its frames still read.
+      resumable = !!sessionFile && await this.host.sessionFileExists(sessionFile);
+    } catch (error) {
+      this.restarting = false;
+      throw error;
+    }
     this.resetStream();
     this.streaming = false;
     this.promptRunning = false;
@@ -1713,11 +1749,24 @@ export class AgentSessionWrapper {
     this.unsubscribeFrames?.();
     try {
       this.expectedExitProc = old;
-      try {
-        await old.dispose();
-      } finally {
-        if (this.expectedExitProc === old) this.expectedExitProc = null;
+      let exited = false;
+      const disposing = old.dispose().then(() => {
+        exited = true;
+      });
+      // Behind a dropped link the old child's exit arrives only when the link
+      // returns: the reload must not hold `restarting` through the outage.
+      await untilHostDown(this.host, disposing);
+      if (!exited) {
+        // It may still run there, so nothing starts beside it: commands answer
+        // host_offline until its exit (via the link, or `lost` on the next hello)
+        // ends this wrapper, and the next request then spawns afresh.
+        this.oldChildExiting = true;
+        void disposing.then(() => {
+          if (this.proc === old) this.destroy("reload-old-child-exited");
+        });
+        throw this.hostOfflineError("unknown");
       }
+      if (this.expectedExitProc === old) this.expectedExitProc = null;
       if (!this._alive) return;
 
       this.extensionStatuses.clear();
@@ -1731,18 +1780,28 @@ export class AgentSessionWrapper {
       this.bashRunning = false;
       this.streaming = false;
       this.compacting = false;
-      const proc = new RpcProcess({
+      const spawned = await this.host.spawnRpc({
         cwd: this.cwd,
-        // Re-read per spawn so a restart picks up environment values the user
-        // added in Settings after this session was created (#104).
-        env: getAgentEnvOverrides(),
-        extraArgs: [...buildSessionSpawnArgs(resumable ? sessionFile : "", undefined, this.advisorSpawned, launchConfigForCwd(this.cwd)), "--extension", SESSION_EDIT_EXTENSION_PATH],
+        recordedCwd: this.recordedCwd,
+        sessionFile: resumable ? sessionFile : "",
+        toolNames: undefined,
+        advisor: this.advisorSpawned,
+      });
+      const proc = new RpcProcess({
+        cwd: spawned.cwd,
+        transport: spawned.transport,
         onExit: (info) => {
           if (this.proc === proc) this.handleProcessExit(info, proc);
         },
       });
+      // Destroyed while the host was spawning: nobody will ever read this child.
+      if (!this._alive) {
+        void proc.dispose();
+        return;
+      }
       this.proc = proc;
       this.unsubscribeFrames = proc.onFrame((frame) => this.handleFrame(frame));
+      this.watchResync(proc);
       try {
         const ready = await proc.waitReady(READY_TIMEOUT_MS);
         await proc.negotiateProtocol(ready);
@@ -1756,7 +1815,7 @@ export class AgentSessionWrapper {
         // restarts bare, and omp's startup resume handling could land it on the
         // cwd's most recent session. An on-disk session file is the resume
         // signal (fresh children report a not-yet-created path).
-        if (!resumable && this._sessionFile && existsSync(this._sessionFile)) {
+        if (!resumable && this._sessionFile && await this.host.sessionFileExists(this._sessionFile)) {
           await proc.sendCommand({ type: "new_session" });
           this.applyIdentity(await proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS));
         }
@@ -1780,6 +1839,7 @@ export class AgentSessionWrapper {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     if (this.mcpListInFlight) throw new WebRpcError("MCP management is in progress. Try again when it finishes.", "session_busy");
     if (!this.isAlive()) throw new Error("Session is no longer running");
+    if (this.hostDown() || this.oldChildExiting) throw this.hostOfflineError("refused");
     if (typeof command.type === "string" && command.type.startsWith("abort")) {
       console.info("[omp-web] cancellation-command", JSON.stringify({ sessionId: this._sessionId, type: command.type, at: new Date().toISOString() }));
     }
@@ -1864,6 +1924,7 @@ export class AgentSessionWrapper {
           this.clearLiveSnapshots();
           notifyRunningChange();
           if (error instanceof RpcCommandTimeoutError) {
+            if (this.linkLostDuring(error)) throw this.hostOfflineError("unknown");
             // The child took the frame but never acked it, so nothing will ever
             // report this run: recycle the unacknowledged prompt. A read-only
             // get_state timeout deliberately does not take this destructive path.
@@ -2078,7 +2139,13 @@ export class AgentSessionWrapper {
         }
         const wasPending = this.pendingUiRequests.has(id);
         this.forgetPendingUiRequest(id);
-        this.proc.sendFrame({ type: "extension_ui_response", id, ...rest });
+        const serverRequest = this.serverUiRequests.get(id);
+        if (serverRequest) {
+          this.serverUiRequests.delete(id);
+          serverRequest(rest.confirmed === true);
+        } else {
+          this.proc.sendFrame({ type: "extension_ui_response", id, ...rest });
+        }
         // omp sends no cancel for an answered dialog; other tabs on this
         // session would keep showing it, so settle it for them here.
         if (wasPending) this.emit({ type: "extension_ui_request", id: `cancel:${id}`, method: "cancel", targetId: id });
@@ -2197,7 +2264,7 @@ export class AgentSessionWrapper {
   async destroyAndWait(reason = "unspecified"): Promise<void> {
     // Re-entrant calls join the in-flight dispose; without this a new spawn
     // can overlap the old child's shutdown (see startRpcSession).
-    if (this.destroyPromise) return this.destroyPromise;
+    if (this.destroyPromise) return untilHostDown(this.host, this.destroyPromise);
     if (!this._alive) return;
     console.info("[omp-web] session-dispose", JSON.stringify({ sessionId: this._sessionId, reason, running: this.isRunning(), pendingDialogs: this.pendingUiRequests.size, at: new Date().toISOString(), caller: new Error().stack?.split("\n").slice(2, 5).map((line) => line.trim()) }));
     this._alive = false;
@@ -2217,6 +2284,8 @@ export class AgentSessionWrapper {
       this.sessionFileSignalTimer = null;
     }
     this.unsubscribeFrames?.();
+    this.unsubscribeHostStatus?.();
+    this.unsubscribeHostStatus = null;
     this.clearPendingUiRequests();
     this.promptDispatchPendingCount = 0;
     this.awaitingAgentStart = false;
@@ -2227,16 +2296,28 @@ export class AgentSessionWrapper {
       this.mcpListWaiter.reject(new Error("Session was closed while loading MCP servers"));
       this.mcpListWaiter = null;
     }
-    const disposed = this.proc.dispose().catch(() => {});
+    // The registry drops this wrapper only once the child has really exited.
+    const disposed = this.proc.dispose().catch(() => {}).then(() => this.onDestroyCallback?.());
     this.destroyPromise = disposed;
     this.pendingHostTools.clear();
     this.hostToolNames.clear();
     this.pendingHostUris.clear();
     this.hostUriSchemes.clear();
     notifyRunningChange();
-    await disposed;
-    this.onDestroyCallback?.();
+    await untilHostDown(this.host, disposed);
   }
+}
+
+/** `promise`, or sooner once `host`'s link is down: a child behind a dropped
+ * link exits only when it returns, and nothing may wait that long. */
+function untilHostDown(host: Host, promise: Promise<void>): Promise<void> {
+  if (!isLinkUp(host.status())) return Promise.resolve();
+  const { promise: settled, resolve } = Promise.withResolvers<void>();
+  const unsubscribe = host.onStatus((status) => {
+    if (!isLinkUp(status)) resolve();
+  });
+  void promise.then(resolve);
+  return settled.finally(unsubscribe);
 }
 
 // ============================================================================
@@ -2245,6 +2326,8 @@ export class AgentSessionWrapper {
 export interface RunningRpcSession {
   id: string;
   cwd: string;
+  /** Absent on this machine, as on `SessionInfo`: the sidebar groups a placeholder under it. */
+  hostId?: string;
 }
 
 export interface RunningSessionUpdate {
@@ -2308,24 +2391,30 @@ export function getRpcSession(sessionId: string): AgentSessionWrapper | undefine
 }
 
 export function getRunningRpcSessions(): RunningRpcSession[] {
-  const map = new Map<string, string>();
+  const map = new Map<string, RunningRpcSession>();
   for (const [sessionId, session] of getRegistry()) {
     if (session.isRunning()) {
-      const realId = session.sessionId || sessionId;
-      map.set(realId, session.cwd);
+      const id = session.sessionId || sessionId;
+      map.set(id, { id, cwd: session.cwd, ...(session.host.id === localHost.id ? {} : { hostId: session.host.id }) });
     }
   }
-  return [...map.entries()].map(([id, cwd]) => ({ id, cwd }));
+  return [...map.values()];
 }
 
 export function getRunningRpcSessionIds(): string[] {
   return getRunningRpcSessions().map((s) => s.id);
 }
 
+/** Ids of sessions with a live omp process (turn running or idle). */
+export function getLiveRpcSessionIds(): string[] {
+  return [...getRegistry()].filter(([, session]) => session.isAlive?.()).map(([sessionId]) => sessionId);
+}
+
 /** Stop all live omp children after an explicit runtime update. The browser will
  * reconnect sessions on demand and start them with the updated executable. */
 export async function restartAllRpcSessions(): Promise<number> {
-  const sessions = [...new Set(getRegistry().values())];
+  // An update changes this machine's omp only; remote runs keep going.
+  const sessions = [...new Set(getRegistry().values())].filter((session) => session.host.id === localHost.id);
   await Promise.all(sessions.map((session) => session.destroyAndWait()));
   return sessions.length;
 }
@@ -2401,43 +2490,36 @@ export function notifyRunningChange({ refreshSessionList = false }: { refreshSes
 /** Record which sessions are mid-run, for resume after a restart. */
 export function syncInterruptibleSessions(): void {
   const registry = getRegistry();
-  const running = new Map<string, { id: string; advisor: boolean }>();
+  const running = new Map<string, InterruptibleSession>();
   for (const session of registry.values()) {
-    if (session.sessionId && session.isRunning()) running.set(session.sessionId, { id: session.sessionId, advisor: session.advisorSpawned });
+    if (session.sessionId && session.isRunning()) running.set(session.sessionId, { id: session.sessionId, advisor: session.advisorSpawned, hostId: session.host.id });
   }
   recordRunningSessions([...running.values()], (id) => registry.get(id)?.isAlive() === true);
 }
 
 /**
  * Restart the sessions that were mid-run when omp-web last stopped and ask
- * each to continue. Only runs when the auto-resume setting is on.
+ * each to continue. Only runs when the auto-resume setting is on. A remote
+ * session waits for its host's next hello and its orphan child's exit.
  */
 export async function resumeInterruptedSessions(): Promise<void> {
-  await Promise.all(takeInterruptedSessions().map(async ({ id, advisor }) => {
-    try {
-      const filePath = await resolveSessionPath(id);
-      if (!filePath) return;
-      const header = readSessionHeader(filePath);
-      const { cwd } = resolveSpawnCwdResult(header?.cwd);
-      const { session } = await startRpcSession(id, filePath, cwd, undefined, advisor, header?.cwd);
-      await session.send({ type: "prompt", message: RESUME_PROMPT });
-      console.log(`[omp-web] resumed interrupted session ${id}`);
-    } catch (error) {
-      console.warn(`[omp-web] could not resume session ${id}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }));
+  const sessions = takeInterruptedSessions();
+  resumeOnHostLink(sessions.filter((session) => session.hostId !== localHost.id), resumeSession);
+  await Promise.all(sessions.filter((session) => session.hostId === localHost.id).map(resumeSession));
 }
 
-/** Look up the workspace-registered launch config; unregistered projects attach none. */
-function launchConfigForCwd(cwd: string): ProjectLaunchConfig | undefined {
-  let canonical = cwd;
-  try { canonical = realpathSync(cwd); } catch {}
-  const key = comparableProjectPath(canonical);
-  return loadProjectRegistry().projects.find((project) => {
-    if (project.hidden) return false;
-    const projectKey = comparableProjectPath(project.path);
-    return projectKey === key || key.startsWith(`${projectKey}-worktrees/`);
-  })?.launchConfig;
+/** Start an interrupted session again on its host and ask it to continue. Never rejects. */
+async function resumeSession({ id, advisor, hostId }: InterruptibleSession): Promise<void> {
+  try {
+    const host = getHost(hostId);
+    const target = host && await sessionSpawnTarget(id, host);
+    if (!host || !target) return;
+    const { session } = await startRpcSession(id, target.sessionFile, target.cwd, undefined, advisor, target.recordedCwd, undefined, host);
+    await session.send({ type: "prompt", message: RESUME_PROMPT });
+    console.log(`[omp-web] resumed interrupted session ${id}`);
+  } catch (error) {
+    console.warn(`[omp-web] could not resume session ${id}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 /**
@@ -2474,16 +2556,23 @@ function createAgentToolOps(): AgentToolSessionOps {
   return {
     async listSessions() {
       const running = new Set(getRunningRpcSessionIds());
-      const sessions = await listAllSessions();
-      return sessions.map((s) => ({ id: s.id, name: s.name, cwd: s.cwd, running: running.has(s.id) }));
+      const sessions = await listSessionsAllHosts();
+      return sessions.map((s) => ({ id: s.id, name: s.name, cwd: s.cwd, running: running.has(s.id), hostId: s.hostId ?? localHost.id }));
+    },
+
+    listHosts() {
+      return [
+        { id: localHost.id, label: localHost.label, online: true, allowAgentStart: true },
+        ...listHosts().map((h) => ({ id: h.id, label: h.label, online: isLinkUp(h.status), allowAgentStart: h.allowAgentStart })),
+      ];
     },
 
     async createSession(input) {
-      if (!existsSync(input.cwd)) throw new Error(`Directory does not exist: ${input.cwd}`);
-      const tempKey = `__new__${randomUUID()}`;
-      const { session, realSessionId } = await startRpcSession(tempKey, "", input.cwd, undefined, undefined);
-      allowFileRoot(input.cwd);
-      invalidateSessionListCache();
+      const host = getHost(input.hostId);
+      if (!host) throw new Error(`Unknown host: ${input.hostId}`);
+      const started = await startNewRpcSession(host, input.cwd);
+      if (!started.ok) throw new Error(started.error);
+      const { session, realSessionId } = started.value;
       try {
         if (input.provider && input.modelId) {
           await session.send({ type: "set_model", provider: input.provider, modelId: input.modelId });
@@ -2491,7 +2580,8 @@ function createAgentToolOps(): AgentToolSessionOps {
         if (input.name) await session.send({ type: "set_session_name", name: input.name });
         if (input.prompt) await session.send({ type: "prompt", message: input.prompt });
       } catch (error) {
-        await session.destroyAndWait();
+        // As /api/agent/new: behind a dropped link the prompt may be running there, so the wrapper stays.
+        if (!(error instanceof WebRpcError && error.code === "host_offline")) await session.destroyAndWait();
         throw error;
       }
       return { sessionId: realSessionId };
@@ -2501,11 +2591,10 @@ function createAgentToolOps(): AgentToolSessionOps {
       const live = getRpcSession(input.sessionId);
       let wrapper = live?.isAlive() ? live : undefined;
       if (!wrapper) {
-        const filePath = await resolveSessionPath(input.sessionId);
-        if (!filePath) throw new Error(`Session not found: ${input.sessionId}`);
-        const header = readSessionHeader(filePath);
-        const { cwd } = resolveSpawnCwdResult(header?.cwd);
-        const started = await startRpcSession(input.sessionId, filePath, cwd, undefined, undefined, header?.cwd);
+        const host = await hostForSessionId(input.sessionId);
+        const target = host && await sessionSpawnTarget(input.sessionId, host);
+        if (!host || !target) throw new Error(`Session not found: ${input.sessionId}`);
+        const started = await startRpcSession(input.sessionId, target.sessionFile, target.cwd, undefined, undefined, target.recordedCwd, undefined, host);
         wrapper = started.session;
       }
       const wasRunning = wrapper.isRunning();
@@ -2531,7 +2620,46 @@ function createAgentToolOps(): AgentToolSessionOps {
         responseText: typeof last?.text === "string" ? last.text : null,
       };
     },
+
+    async sessionHostId(sessionId) {
+      const live = getRpcSession(sessionId);
+      if (live?.isAlive()) return live.host.id;
+      return (await hostForSessionId(sessionId))?.id ?? null;
+    },
   };
+}
+
+/**
+ * Spawn a brand-new session on `host` in `cwd`, checked where it lives: the
+ * host answers with the path it will use. Registers the cwd with this
+ * machine's file routes, or refreshes the host's session list.
+ */
+export async function startNewRpcSession(
+  host: Host,
+  cwd: string,
+  toolNames?: string[],
+  advisor?: boolean,
+): Promise<OpResult<{ session: AgentSessionWrapper; realSessionId: string }>> {
+  let spawnCwd = cwd;
+  if (host === localHost) {
+    if (!existsSync(cwd)) return { ok: false, status: 400, code: "directory_not_found", error: `Directory does not exist: ${cwd}` };
+  } else {
+    const validated = await host.sessionOps.validateCwd(cwd);
+    if (!validated.ok) return validated;
+    spawnCwd = validated.value.cwd;
+  }
+  // Unique per call: startRpcSession coalesces concurrent callers that share a key onto one session.
+  const tempKey = `__new__${randomUUID()}`;
+  const started = await startRpcSession(tempKey, "", spawnCwd, toolNames, advisor, undefined, undefined, host);
+  if (host === localHost) {
+    // Without this a file request under a brand-new cwd would 403 for up to the allowed-roots cache TTL.
+    // Never for another host: its paths do not exist on this machine.
+    allowFileRoot(spawnCwd);
+    invalidateSessionListCache();
+  } else {
+    invalidateHostSessionList(host.id);
+  }
+  return { ok: true, value: started };
 }
 
 export async function startRpcSession(
@@ -2545,7 +2673,6 @@ export async function startRpcSession(
   /** The cwd recorded in the session file header, used to detect a spawn
    * fallback (recorded dir gone) and warn the user. Omit for new sessions. */
   recordedCwd?: string | null,
-  launchConfig?: ProjectLaunchConfig,
   /** Model to bind at spawn time as `provider/modelId` (--model). Only used
    * when resuming: it replaces the saved model and skips its restore check,
    * so a cold set_model can recover a session whose saved model is gone
@@ -2556,17 +2683,20 @@ export async function startRpcSession(
    * or a completed turn); the picker path re-binds on each cold switch, so
    * the user is never stuck on the unrestorable model. */
   spawnModel?: string,
+  host: Host = localHost,
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
-  launchConfig = launchConfig ?? launchConfigForCwd(cwd);
+
+  const existing = registry.get(sessionId);
   // Union semantics, matching the spawn below and the wrapper identity:
   // workspace advisor=true forces the flag on. The gate must compare this
   // same effective value — comparing the raw toggle would destroy+respawn a
-  // workspace-forced child on every toggle-off prompt.
-  const effectiveAdvisor = advisor === true || launchConfig?.advisor === true;
+  // workspace-forced child on every toggle-off prompt. The workspace half is
+  // what the host reported at the live child's spawn: asking it again would
+  // cost a remote host a round trip on every prompt.
+  const effectiveAdvisor = advisor === true || existing?.launchAdvisor === true;
 
-  const existing = registry.get(sessionId);
   if (existing?.isAlive()) {
     // --advisor is a spawn-time flag with no runtime RPC. When the caller
     // carries an explicit advisor setting that differs from the live child's,
@@ -2582,7 +2712,7 @@ export async function startRpcSession(
   // A wrapper whose omp child is still flushing/exiting must fully dispose
   // before a replacement spawns — two children touching the same .jsonl would
   // race on resume/delete/archive.
-  if (existing?.destroyPromise) await existing.destroyPromise;
+  if (existing?.destroyPromise) await untilHostDown(existing.host, existing.destroyPromise);
 
   // omp >= 18.5 lets only one process own a session file; a second `--resume`
   // child would fork into a new nested session on its first write. Reuse the
@@ -2603,19 +2733,25 @@ export async function startRpcSession(
     // The wrapper needs the process and the process's onExit needs the wrapper;
     // the holder breaks that cycle (onExit only fires once the child dies).
     const holder: { wrapper?: AgentSessionWrapper } = {};
+    // A child of this session the host still ran from before a restart of this
+    // server is being killed: two children must never write one session file.
+    if (sessionFile && host !== localHost) await orphanExit(host.id, sessionId);
+    const spawned = await host.spawnRpc({ cwd, recordedCwd: recordedCwd ?? null, sessionFile, toolNames, advisor: advisor === true, spawnModel });
     const proc = new RpcProcess({
-      cwd,
-      // User-configured variables for MCP servers and generated configs (#104).
-      env: getAgentEnvOverrides(),
-      extraArgs: [...buildSessionSpawnArgs(sessionFile, toolNames, advisor === true, launchConfig, spawnModel), "--extension", SESSION_EDIT_EXTENSION_PATH],
+      cwd: spawned.cwd,
+      transport: spawned.transport,
       onExit: (info) => holder.wrapper?.handleProcessExit(info, proc),
     });
     const created = new AgentSessionWrapper(
       proc,
-      cwd,
+      spawned.cwd,
       recordedCwd,
-      advisor === true || launchConfig?.advisor === true,
+      advisor === true || spawned.launchAdvisor,
       sessionFile ? sessionId : "",
+      DISCONNECT_DESTROY_MS,
+      host,
+      spawned.launchAdvisor,
+      spawned.fellBack,
     );
     holder.wrapper = created;
     created.start();
@@ -2628,7 +2764,7 @@ export async function startRpcSession(
       // existing on disk is the resume signal — a genuinely fresh child reports
       // a path it has not created yet (session files are written lazily on the
       // first message), so this never fires for a real new session.
-      if (!sessionFile && created.sessionFile && existsSync(created.sessionFile)) {
+      if (!sessionFile && created.sessionFile && await host.sessionFileExists(created.sessionFile)) {
         await created.send({ type: "new_session" });
       }
       // Register server agent tools (#275) at startup when the gate is on,
@@ -2645,7 +2781,19 @@ export async function startRpcSession(
       // lock: a fire-and-forget destroy() would let a retry spawn a second
       // OMP child while the failed one is still flushing/exiting, and
       // concurrent resume/delete/archive paths could race that old child.
-      await created.destroyAndWait();
+      const disposing = created.destroyAndWait();
+      // That wait ends early once the host is offline, with the child still
+      // exiting there. A resume stays registered until it really exits, so a
+      // retry awaits its destroyPromise instead of starting a second
+      // `--resume` child beside it. Chained on destroyPromise (set by the call
+      // above), not onDestroy: a child that already exited ran no callback.
+      if (sessionFile) {
+        registry.set(sessionId, created);
+        void created.destroyPromise?.then(() => {
+          if (registry.get(sessionId) === created) registry.delete(sessionId);
+        });
+      }
+      await disposing;
       throw error;
     }
 

@@ -73,6 +73,45 @@ with the CLI the user already trusts. The RPC layer negotiates v2 when the CLI
 advertises it, reassembles bounded chunked frames, and remains compatible with
 v1-capable installations.
 
+### The Host seam
+
+Every machine-local action of a session goes through one interface,
+`Host` (`lib/hosts/host.ts`): spawning `omp --mode rpc-ui`, checking that a
+session file exists, invalidating cached session lists, and the
+file-reading operations behind the session and project routes. Two
+implementations exist:
+
+- `LocalHost` runs on the machine that serves ompweb, using `child_process` and
+  direct file access.
+- `RemoteHost` makes the same calls on another machine over the link described
+  below.
+
+```
+Browser ─▶ ompweb ──┬─ LocalHost ── spawn omp --mode rpc-ui (stdio)
+                    └─ RemoteHost ◀── link (HTTP) ── ompweb host
+                                                      └─ spawn omp --mode rpc-ui
+```
+
+The CLI boundary above holds on every machine: a remote machine runs its own
+installed `omp`, its own `~/.omp/agent` and its own credentials. ompweb only
+routes. `RpcProcess` takes its byte pipe (`RpcTransport`) from the host, so the
+session wrapper, event streams, notifications and queue handle frames without
+knowing where omp runs. Session routes address a session by id; the owning
+host resolves the file path, so a remote path never reaches the serving
+machine's filesystem.
+
+The link is two HTTP requests that the `ompweb host` daemon opens to the
+server: a long-lived response for server → daemon and batched POSTs for
+daemon → server. Next route handlers cannot accept WebSocket upgrades and
+ompweb runs without a custom server, so there is no WebSocket. The daemon
+forwards omp's NDJSON unchanged and answers a fixed allow-list of host
+operations; there is no generic exec or file-read operation. A host is
+trusted like the serving machine: control of the server or of a host token is
+a shell on that host. Tokens are stored hashed, shown once, and revocable, and
+the daemon requires `https://` except for loopback or an explicit
+`--allow-http`. The full protocol is in
+`docs/specs/2026-10-28-remote-hosts-design.md`.
+
 ## Data and mutation boundaries
 
 ### OMP-owned state
