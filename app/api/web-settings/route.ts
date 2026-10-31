@@ -75,10 +75,11 @@ export async function PUT(req: Request) {
     patch.agentEnv = parsed.values;
   }
 
+  const previousTransport = loadWebServerSettings().browserTransport;
   const settings = saveWebServerSettings(patch);
   // Apply to sessions that are already running, not only the next run. Only when the
   // flag was part of this save — an agentEnv-only write must not touch live sessions.
   if (resumeProvided) syncInterruptibleSessions();
-  if (patch.browserTransport) broadcastBrowserTransport(patch.browserTransport);
+  if (settings.browserTransport !== previousTransport) broadcastBrowserTransport(settings.browserTransport);
   return Response.json({ ...settings, agentEnv: sanitizeAgentEnvValues(settings.agentEnv).values });
 }
