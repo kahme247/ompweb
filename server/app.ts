@@ -33,7 +33,8 @@ function decodable(pathname: string): boolean {
  * request runs without it. The setting outlives the response on a keep-alive socket, so it is put back once the
  * handler returns or throws, or, when the handler keeps its response open (a stream) with `disableIdleTimeout`, once
  * that stream ends or is cancelled. Public requests keep it unless their handler lifts it (the host link, once its
- * bearer token checks out), so no unauthenticated caller can hold a socket open.
+ * bearer token checks out), so no unauthenticated caller can hold a socket open. No test reaches the throw: `dispatch`
+ * (routes.ts) already turns a handler's throw into a 500, so the `finally` only guards a `respond` that throws later.
  */
 async function handle(
   request: Request,
