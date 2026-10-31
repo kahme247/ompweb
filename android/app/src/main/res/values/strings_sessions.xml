@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WP1 session-shell strings, kept in their own file so the shared strings.xml
+  stays conflict-free between the work packages. English only (user decision).
+-->
+<resources>
+    <string name="sessions_getting_started">Get started</string>
+    <string name="sessions_step_add_project">1. Add a project folder that exists on the PC.</string>
+    <string name="sessions_step_new_session">2. Start a session and send your first message.</string>
+    <string name="sessions_open_workspaces">Open workspaces</string>
+
+    <string name="session_auto_name_running">Naming…</string>
+    <string name="session_auto_name_done">Title generated</string>
+    <string name="session_auto_name_failed">Auto-name failed</string>
+
+    <string name="quick_switcher_current_model">Current model</string>
+    <string name="quick_switcher_hints">↑↓ navigate · Enter open · Esc close</string>
+
+    <string name="new_session_intro_title">Start a new session</string>
+    <string name="new_session_intro_body">Ask anything. The session runs in the workspace above.</string>
+    <string name="new_session_intro_versions">App %1$s · Server %2$s</string>
+
+    <string name="cwd_invalid">This workspace is not available on the server.</string>
+
+    <!-- Phase 13: message search and pinned sessions -->
+    <string name="sessions_search_scope_sessions">Sessions</string>
+    <string name="sessions_search_scope_messages">In messages</string>
+    <string name="sessions_search_messages_placeholder">Search all messages</string>
+    <string name="sessions_search_messages_loading">Searching messages…</string>
+    <string name="sessions_search_messages_continuing">Searching older messages… (page %1$d of %2$d)</string>
+    <string name="sessions_search_messages_empty">No matches in messages</string>
+    <string name="sessions_search_messages_retry">Try again</string>
+    <string name="sessions_search_messages_load_more">Load more results</string>
+    <string name="sessions_search_messages_partial">The server stopped early; more matches may exist.</string>
+    <plurals name="sessions_search_messages_skipped">
+        <item quantity="one">%d session file was too large to search and was skipped.</item>
+        <item quantity="other">%d session files were too large to search and were skipped.</item>
+    </plurals>
+    <string name="sessions_search_role_user">You</string>
+    <string name="sessions_search_role_assistant">Assistant</string>
+    <string name="sessions_pinned">Pinned</string>
+    <string name="session_pin">Pin</string>
+    <string name="session_unpin">Unpin</string>
+
+    <!-- Phase 13: provider limit warning in the session list -->
+    <string name="sessions_usage_warning_label">Usage: %1$s</string>
+    <string name="sessions_usage_warning_value">%1$s %2$d%%</string>
+</resources>

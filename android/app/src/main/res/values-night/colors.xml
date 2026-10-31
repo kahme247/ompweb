@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="window_background">#1B1916</color>
+
+    <!-- Same tokens from the dark theme (OMP Midnight), readable on a dark shade. -->
+    <color name="notify_accent_completed">#7DD8A8</color>
+    <color name="notify_accent_input">#EC5BAB</color>
+    <color name="notify_accent_error">#FF9B92</color>
+    <color name="notify_accent_model_switch">#7CA8FF</color>
+    <color name="notify_accent_connection">#C9C9D1</color>
+    <color name="notify_accent_message">#F5F5F5</color>
+    <color name="notify_accent_summary">#EC5BAB</color>
+</resources>

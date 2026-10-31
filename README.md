@@ -50,6 +50,19 @@ support. Local Chromium verification covered cookie-gated metadata with HTTP
 icon URLs blocked (zero installability errors). The owner also confirmed that
 installation on a physical phone works as expected behind Cloudflare Access.
 
+## Android app
+
+A native Android client lives in [`android/`](./android) and is distributed as
+an APK on [GitHub Releases](https://github.com/kahme247/ompweb/releases) (tags
+`android-v*`). It needs a server with `/api/app-info` (API 1; ompweb 0.5.2 and
+older predate that endpoint) and Android 8.0+; Tailscale is recommended for
+access from anywhere. Its update check reads the public releases list and the
+APK it downloads is verified (SHA-256, package name, `versionCode`, signing
+certificate) before Android's installer sees it.
+
+Installation, first connection, notifications, troubleshooting, privacy and
+APK verification are documented in [`docs/android/README.md`](./docs/android/README.md).
+
 Skill startup notices require an OMP runtime with `get_skill_diagnostics`,
 `set_skill_startup_diagnostics`, and `skill_diagnostics_update`. Conflicts and
 redundant installations appear above the composer when its OMP session starts;

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- In-chat search (top bar search icon, "3/17", ↑/↓ through the transcript). -->
+<resources>
+    <string name="chat_search_open">Search chat</string>
+    <string name="chat_search_placeholder">Search transcript</string>
+    <string name="chat_search_count">%1$d/%2$d</string>
+    <string name="chat_search_no_hits">No matches</string>
+    <string name="chat_search_previous">Previous match</string>
+    <string name="chat_search_next">Next match</string>
+    <string name="chat_search_close">Close search</string>
+    <string name="chat_search_history_hidden">Older history is not shown in this transcript (compacted).</string>
+    <string name="chat_search_full_history">Search full history</string>
+    <string name="chat_search_reveal_missing">The searched message is not part of this transcript.</string>
+</resources>

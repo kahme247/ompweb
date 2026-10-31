@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- The omp glyph from public/omp-web-logo.svg, scaled into the adaptive
+         icon safe zone and filled with the logo's magenta-to-cyan gradient. -->
+    <group
+        android:scaleX="1.4"
+        android:scaleY="1.4"
+        android:translateX="9.2"
+        android:translateY="9.2">
+        <path android:pathData="M14 16h36v8H40v32h-8V24h-6v22h-8V24h-4z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:type="linear"
+                    android:startX="14"
+                    android:startY="16"
+                    android:endX="50"
+                    android:endY="56"
+                    android:startColor="#ED4ABF"
+                    android:centerColor="#9B4DFF"
+                    android:endColor="#5AD8E6" />
+            </aapt:attr>
+        </path>
+    </group>
+</vector>

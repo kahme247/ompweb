@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Git changes pane (web `components/GitChangesPanel.tsx`, `components/FileExplorer.tsx`) -->
+    <string name="git_tab_title">Git</string>
+    <string name="git_filter_files">Filter files…</string>
+    <string name="git_clear_filter">Clear filter</string>
+    <string name="git_refresh_changes">Refresh changes</string>
+    <string name="git_loading">Loading changes…</string>
+    <string name="git_load_failed">Failed to load changes (%1$s)</string>
+    <string name="git_retry">Retry</string>
+    <string name="git_not_a_repo">Not a git repository</string>
+    <string name="git_not_a_repo_hint">Open a git checkout to review changed files and diffs here.</string>
+    <string name="git_no_workspace">No workspace</string>
+    <string name="git_no_workspace_hint">Open a session or pick a workspace to review its changes.</string>
+    <string name="git_no_changes">No changes</string>
+    <string name="git_no_changes_hint">The working tree matches HEAD.</string>
+    <string name="git_no_matching_files">No matching files</string>
+    <string name="git_attribute_files_hint">Generated, vendored, documentation, or -diff files per .gitattributes</string>
+    <string name="git_open_file">Open file</string>
+    <plurals name="git_files_changed">
+        <item quantity="one">%1$d changed file</item>
+        <item quantity="other">%1$d changed files</item>
+    </plurals>
+    <plurals name="git_attribute_files">
+        <item quantity="one">%1$d file marked in .gitattributes</item>
+        <item quantity="other">%1$d files marked in .gitattributes</item>
+    </plurals>
+
+    <!-- Status labels and .gitattributes review reasons (web `fileExplorer.git*`, `gitChanges.reason*`) -->
+    <string name="git_status_modified">Modified</string>
+    <string name="git_status_added">Added</string>
+    <string name="git_status_deleted">Deleted</string>
+    <string name="git_status_renamed">Renamed</string>
+    <string name="git_status_untracked">Untracked</string>
+    <string name="git_status_conflict">Conflict</string>
+    <string name="git_reason_generated">generated</string>
+    <string name="git_reason_vendored">vendored</string>
+    <string name="git_reason_documentation">docs</string>
+    <string name="git_reason_no_diff">no diff</string>
+
+    <!-- Worktrees pane (web `components/WorktreesPanel.tsx`, `components/SessionSidebar.tsx`) -->
+    <string name="worktree_tab_title">Worktrees</string>
+    <string name="worktree_repo_root_only">Worktrees are available in Git repository roots.</string>
+    <string name="worktree_loading">Loading worktrees…</string>
+    <string name="worktree_new">New worktree…</string>
+    <string name="worktree_new_title">Create a worktree checkout for a branch</string>
+    <string name="worktree_branch_placeholder">branch name</string>
+    <string name="worktree_create">Create</string>
+    <string name="worktree_creating">Creating…</string>
+    <string name="worktree_cancel">Cancel</string>
+    <string name="worktree_force">Force</string>
+    <string name="worktree_main_badge">main</string>
+    <string name="worktree_switch">Switch worktree</string>
+    <string name="worktree_remove_title">Remove worktree checkout %1$s; the branch is kept</string>
+    <string name="worktree_target_hint">Checkout at %1$s</string>
+    <string name="worktree_uncommitted_force_remove">Uncommitted changes. Force remove checkout?</string>
+    <string name="worktree_error_branch_required">Enter a branch name.</string>
+    <string name="worktree_error_invalid_branch">Invalid branch name.</string>
+    <string name="worktree_error_directory_exists">That checkout directory already exists.</string>
+    <string name="worktree_error_not_a_worktree">That directory is not a worktree of this repository.</string>
+    <string name="worktree_error_cannot_remove_main">The main worktree cannot be removed.</string>
+    <string name="worktree_error_access_denied">Access denied.</string>
+    <string name="worktree_error_directory_not_found">That directory does not exist.</string>
+    <string name="worktree_error_dirty">The worktree has uncommitted changes.</string>
+</resources>

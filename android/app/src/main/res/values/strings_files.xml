@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Files panel shell (web `components/RightPanel.tsx` + `components/TabBar.tsx`) -->
+    <string name="files_panel_title">Files</string>
+    <string name="files_tab_explorer">Explorer</string>
+    <string name="files_close_panel">Close the files panel</string>
+    <string name="files_tab_actions">File tab actions</string>
+    <string name="files_close_tab">Close %1$s</string>
+    <string name="files_close_other_tabs">Close other tabs</string>
+    <string name="files_close_all_tabs">Close all tabs</string>
+    <string name="files_open_in_session">Open files</string>
+
+    <!-- Explorer (web `components/FileExplorer.tsx`) -->
+    <string name="files_refresh">Refresh files</string>
+    <string name="files_collapse_all">Collapse all</string>
+    <string name="files_search_toggle">Search files</string>
+    <string name="files_search_placeholder">Search files…</string>
+    <string name="files_search_empty">No files match.</string>
+    <string name="files_search_failed">Search failed (%1$s)</string>
+    <string name="files_search_truncated">Showing the first %1$d matches.</string>
+    <string name="files_no_workspace">No workspace</string>
+    <string name="files_no_workspace_hint">Open a session or pick a workspace to browse its files.</string>
+    <string name="files_empty_directory">Empty directory</string>
+    <string name="files_load_failed">Failed to load files (%1$s)</string>
+    <string name="files_retry">Retry</string>
+    <string name="files_upload">Upload files</string>
+    <string name="files_upload_checking">Checking for existing files…</string>
+    <string name="files_upload_progress">Uploading %1$s (%2$d%%)</string>
+    <string name="files_upload_index">File %1$d of %2$d</string>
+    <string name="files_upload_conflict_title">Files already exist</string>
+    <string name="files_upload_conflict_body">%1$s already exist in this directory.</string>
+    <string name="files_upload_conflict_non_replaceable">These cannot be replaced: %1$s</string>
+    <string name="files_upload_replace">Replace all</string>
+    <string name="files_upload_skip">Skip existing</string>
+    <string name="files_upload_cancel">Cancel</string>
+    <string name="files_upload_done">Upload finished</string>
+    <string name="files_upload_uploaded">%1$d uploaded</string>
+    <string name="files_upload_skipped">%1$d skipped</string>
+    <string name="files_upload_failed_count">%1$d failed</string>
+    <string name="files_upload_failed">Upload failed</string>
+    <string name="files_upload_mention">Mention uploaded files</string>
+    <string name="files_dismiss">Dismiss</string>
+
+    <!-- Row actions (open, mention, download, copy path) -->
+    <string name="files_open_file">Open file</string>
+    <string name="files_open_directory">Open directory</string>
+    <string name="files_row_actions">File actions</string>
+    <string name="files_mention">Mention in the composer</string>
+    <string name="files_copy_path">Copy path</string>
+    <string name="files_path_copied">Path copied</string>
+    <string name="files_download">Download</string>
+    <string name="files_download_saved">File saved</string>
+    <string name="files_download_failed">Could not download the file</string>
+    <string name="files_share">Share</string>
+    <string name="files_share_failed">Could not share the file</string>
+    <string name="files_reveal">Reveal in explorer</string>
+
+    <!-- Viewer (web `components/FileViewer.tsx`) -->
+    <string name="files_mode_source">Source</string>
+    <string name="files_mode_preview">Preview</string>
+    <string name="files_mode_diff">Diff</string>
+    <string name="files_wrap_on">Wrap long lines</string>
+    <string name="files_wrap_off">Do not wrap long lines</string>
+    <string name="files_watching">Live</string>
+    <string name="files_line">line %1$d</string>
+    <string name="files_binary_title">Binary file</string>
+    <string name="files_binary_body">This file has no text preview (%1$s, %2$s). Download it to open it elsewhere.</string>
+    <string name="files_binary_unknown_type">unknown type</string>
+    <string name="files_docx_failed">The document preview could not be loaded.</string>
+    <string name="files_pdf_page">Page %1$d of %2$d</string>
+    <string name="files_pdf_previous">Previous page</string>
+    <string name="files_pdf_next">Next page</string>
+    <string name="files_pdf_failed">This PDF could not be rendered.</string>
+    <string name="files_diff_empty">No textual diff for this file.</string>
+    <string name="files_diff_failed">Failed to load the diff (%1$s)</string>
+    <string name="files_no_preview">No preview is available for this file.</string>
+</resources>

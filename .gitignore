@@ -24,12 +24,24 @@ coverage/
 # rendered / generated artifacts (mockups, screenshots, images)
 /output/
 *.png.png
-screenshots/
+# Root-only: the Android app's committed test goldens live in
+# android/app/src/test/screenshots and must survive a fresh clone.
+/screenshots/
 /mockups/
 
 # misc
 .DS_Store
 *.pem
+
+# Signing material must never be committed, in any directory. android/.gitignore
+# repeats this for the app module; these rules also cover the repo root and any
+# other worktree.
+*.jks
+*.keystore
+*.p12
+*.bks
+signing.properties
+keystore.properties
 
 # debug
 .logs/

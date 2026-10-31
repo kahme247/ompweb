@@ -1,0 +1,3 @@
+# Windows batch scripts need CRLF in the working tree; the POSIX wrapper stays LF.
+*.bat   text eol=crlf
+gradlew text eol=lf

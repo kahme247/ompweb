@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Startup skill-diagnostics notice and its details dialog (web
+         `components/SkillDiagnostics.tsx`). -->
+    <string name="skill_diag_title">Skill diagnostics</string>
+    <string name="skill_diag_details">Details</string>
+    <string name="skill_diag_close">Close skill diagnostics</string>
+    <string name="skill_diag_dismiss">Dismiss skill notice</string>
+    <string name="skill_diag_default">Default</string>
+    <string name="skill_diag_variant">Variant</string>
+    <string name="skill_diag_redundant">Redundant copy</string>
+    <string name="skill_diag_no_default">No bare default is included. Invoke a namespaced variant explicitly.</string>
+    <string name="skill_diag_lineage">Shared names do not imply the same skill lineage. These details come from OMP\'s actual resolution.</string>
+    <string name="skill_diag_clean">No conflicting skill variants or redundant installations.</string>
+    <string name="skill_diag_disable">Turn off</string>
+    <string name="skill_diag_saving">Saving…</string>
+    <string name="skill_diag_save_failed">Could not change skill startup notices.</string>
+    <string name="skill_diag_overridden">Startup notices are still enabled for this session.</string>
+    <string name="skill_diag_unavailable">Skill diagnostics are unavailable. The session must be running on an OMP version that supports diagnostics RPC.</string>
+    <string name="skill_diag_source">Source: %1$s</string>
+    <string name="skill_diag_retained">Identical to %1$s (%2$s)</string>
+    <string name="skill_diag_conflicts_one">%1$d conflicting skill name</string>
+    <string name="skill_diag_conflicts_other">%1$d conflicting skill names</string>
+    <string name="skill_diag_duplicates_one">%1$d redundant copy deduplicated</string>
+    <string name="skill_diag_duplicates_other">%1$d redundant copies deduplicated</string>
+    <string name="skill_diag_reason_source_order">Selected by provider priority, then discovery order.</string>
+    <string name="skill_diag_reason_custom_directory">Custom-directory skills override provider skills.</string>
+    <string name="skill_diag_reason_authored_over_installed">Authored skills override registry-installed skills.</string>
+
+    <!-- System prompt panel (web `AppShell` terminal popover). -->
+    <string name="system_prompt_title">System prompt</string>
+    <string name="system_prompt_close">Close system prompt</string>
+    <string name="system_prompt_loading">Loading system prompt…</string>
+    <string name="system_prompt_empty">System prompt is empty (tools are disabled)</string>
+    <string name="system_prompt_unavailable">System prompt has not loaded yet</string>
+</resources>

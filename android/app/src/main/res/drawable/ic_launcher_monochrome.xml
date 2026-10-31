@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Solid silhouette for Android 13+ themed icons. -->
+    <group
+        android:scaleX="1.4"
+        android:scaleY="1.4"
+        android:translateX="9.2"
+        android:translateY="9.2">
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M14 16h36v8H40v32h-8V24h-6v22h-8V24h-4z" />
+    </group>
+</vector>

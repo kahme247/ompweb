@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Extension dialog chrome (web `chatWindow.*`) -->
+    <string name="extension_request">extension request</string>
+    <string name="extension_ask_title">Questions from the agent</string>
+    <string name="extension_ask_recommended">Recommended</string>
+    <string name="extension_ask_other">Other: type your own answer</string>
+    <string name="extension_cancel">Cancel</string>
+    <string name="extension_confirm">Confirm</string>
+    <string name="extension_next">Next</string>
+    <string name="extension_submit">Submit</string>
+    <string name="extension_close">Close</string>
+    <string name="extension_terminal_title">Extension panel</string>
+    <string name="extension_terminal_input">Extension terminal input</string>
+
+    <!-- Extension notices (web `agentSession.openInBrowser` / `unsafeUrlBlocked`) -->
+    <string name="extension_open_in_browser">Open in your browser: %1$s</string>
+    <string name="extension_unsafe_url_blocked">Blocked an unsafe URL %1$s</string>
+    <string name="extension_notification_fallback">%1$s: %2$s</string>
+
+    <!-- Host URI consent (`pi-web://clipboard`) and the deferred `open_url` notice -->
+    <string name="extension_clipboard_read_notice">An extension read your clipboard</string>
+    <string name="extension_clipboard_write_notice">An extension copied text to your clipboard</string>
+    <string name="extension_clipboard_title">Allow clipboard access?</string>
+    <string name="extension_clipboard_body">An extension in this chat wants to read your clipboard. You can allow it for this chat only.</string>
+    <string name="extension_clipboard_allow">Allow</string>
+    <string name="extension_clipboard_deny">Deny</string>
+    <string name="extension_open_url_offer">An extension wants to open:\n%1$s</string>
+    <string name="extension_open_url_instructions">%1$s\n%2$s</string>
+    <string name="extension_open_url_open">Open</string>
+    <string name="extension_open_url_dismiss">Dismiss</string>
+
+    <!-- Host tool consent (web `appShell.openUrl*` / `openFileTitle`) -->
+    <string name="host_tool_open_url_same_session_title">Open link?</string>
+    <string name="host_tool_open_url_same_session_body">The agent wants to open:\n%1$s</string>
+    <string name="host_tool_open_url_cross_session_title">Open link from another session?</string>
+    <string name="host_tool_open_url_cross_session_body">An agent in a session you are not viewing wants to open:\n%1$s</string>
+    <string name="host_tool_open_file_title">Open file from another session?</string>
+    <string name="host_tool_open_file_body">An agent in a session you are not viewing wants to open:\n%1$s</string>
+    <string name="host_tool_open">Open</string>
+    <string name="host_tool_cancel">Cancel</string>
+</resources>

@@ -1,0 +1,229 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Native OMP settings (Slice B): rows of web `SettingsConfig.tsx` and the
+         MCP / Skills / Plugins management panels. -->
+
+    <string name="native_settings_unavailable">Settings are unavailable.</string>
+    <string name="native_settings_loading">Loading settings…</string>
+    <string name="native_settings_saving">Saving…</string>
+    <string name="native_settings_retry">Retry</string>
+    <string name="native_settings_dismiss">Dismiss</string>
+    <string name="native_settings_select_workspace">Select a project workspace to view and edit its project MCP configuration.</string>
+
+    <!-- General (interface tab, native section) -->
+    <string name="native_skill_notices">Skill startup notices</string>
+    <string name="native_skill_notices_desc">Show conflicts and redundant skill copies when an OMP session starts. Manual diagnostics remain available when notices are off.</string>
+
+    <!-- Safety -->
+    <string name="native_safety_title">Tool Safety &amp; Approvals</string>
+    <string name="native_safety_desc">Tool execution safety rules and permission prompts. Persisted in ~/.omp/agent/config.yml.</string>
+    <string name="native_approval_mode">Approval Mode</string>
+    <string name="native_approval_mode_desc">Choose when OMP asks before tool calls.</string>
+    <string name="native_always_ask">Always ask</string>
+    <string name="native_allow_writes">Allow writes</string>
+    <string name="native_auto_approve_yolo">Auto approve (YOLO)</string>
+    <string name="native_bash_override">Bash Override</string>
+    <string name="native_bash_override_desc">Override default approval policy specifically for terminal commands.</string>
+    <string name="native_allow">Allow</string>
+    <string name="native_deny">Deny</string>
+    <string name="native_extension_requests">Extension Tool Requests</string>
+    <string name="native_extension_requests_desc">Automatically approve extension tool authorization requests.</string>
+    <string name="native_auto_approve">Auto approve</string>
+
+    <!-- Model defaults -->
+    <string name="native_model_defaults_title">AI Model Defaults</string>
+    <string name="native_model_defaults_desc">Configure default reasoning effort, response verbosity, personality tone, and thinking display.</string>
+    <string name="native_reasoning">Reasoning</string>
+    <string name="native_reasoning_desc">Default effort level for thinking-capable models.</string>
+    <string name="native_auto_thinking_source">Auto Thinking Source</string>
+    <string name="native_auto_thinking_source_desc">Classifier judges each prompt. Vendor default prefers the publisher\'s effort, then omp\'s per-model default, then normal Auto fallback; the Auto ceiling still applies.</string>
+    <string name="native_auto_thinking_classifier">Classifier</string>
+    <string name="native_auto_thinking_vendor">Vendor default</string>
+    <string name="native_verbosity">Verbosity</string>
+    <string name="native_verbosity_desc">Response detail level for supporting providers.</string>
+    <string name="native_verbosity_low">low</string>
+    <string name="native_verbosity_medium">medium</string>
+    <string name="native_verbosity_high">high</string>
+    <string name="native_personality">Personality</string>
+    <string name="native_personality_desc">Style included in OMP\'s system prompt.</string>
+    <string name="native_thinking_blocks">Hide Thinking Blocks</string>
+    <string name="native_thinking_blocks_desc">Hide model reasoning from output view.</string>
+    <string name="native_external_thinking">External Thinking</string>
+    <string name="native_external_thinking_desc">Private scratchpad reasoning via think tool.</string>
+
+    <!-- Intelligence: compaction -->
+    <string name="native_context_compaction">Context Compaction</string>
+    <string name="native_context_compaction_desc">OMP automatically compacts oversized context to prevent hitting context limits.</string>
+    <string name="native_automatic_compaction">Automatic Compaction</string>
+    <string name="native_automatic_compaction_desc">Compact context before model context limit is hit.</string>
+    <string name="native_continue_after_compaction">Continue After Compaction</string>
+    <string name="native_continue_after_compaction_desc">Resume task execution after compaction completes.</string>
+    <string name="native_compaction_method_order">Compaction Method Order</string>
+    <string name="native_compaction_method_order_desc">Preferred fallback order for automatic context maintenance; unavailable or failed methods advance to the next choice.</string>
+    <string name="native_compaction_none">No method selected: automatic compaction will not run.</string>
+    <string name="native_compaction_position">%1$s, position %2$d</string>
+    <string name="native_move_up">Move %1$s up</string>
+    <string name="native_move_down">Move %1$s down</string>
+    <string name="native_compaction_remote">Server compaction</string>
+    <string name="native_compaction_remote_desc">Use provider-native server compaction (OpenAI Responses compact, Anthropic compaction beta) when the active route supports it</string>
+    <string name="native_compaction_snapcompact">Snapcompact</string>
+    <string name="native_compaction_snapcompact_desc">Archive history onto dense bitmap images the active vision model reads back; no LLM call</string>
+    <string name="native_compaction_handoff">Handoff</string>
+    <string name="native_compaction_handoff_desc">Generate a handoff document and continue from it as the compaction summary</string>
+    <string name="native_compaction_soft">Soft compaction</string>
+    <string name="native_compaction_soft_desc">Summarize in place with a compaction model without using server compaction</string>
+    <string name="native_compaction_shake">Shake</string>
+    <string name="native_compaction_shake_desc">Drop recoverable heavy content in place without an LLM call</string>
+    <string name="native_compact_mid_turn">Compact Mid-Turn</string>
+    <string name="native_compact_mid_turn_desc">Check context limits between tool execution steps.</string>
+
+    <!-- Intelligence: memory -->
+    <string name="native_memory_autolearn">Memory &amp; Auto-Learn</string>
+    <string name="native_memory_autolearn_desc">Durable project memory storage and automatic lesson capture.</string>
+    <string name="native_memory_backend">Memory Backend</string>
+    <string name="native_memory_backend_desc">Where durable knowledge is stored across sessions.</string>
+    <string name="native_memory_backend_off">Off</string>
+    <string name="native_memory_backend_local">Local summaries</string>
+    <string name="native_memory_backend_mnemopi">Mnemopi SQLite</string>
+    <string name="native_memory_backend_hindsight">Hindsight</string>
+    <string name="native_enable_autolearn">Enable Auto-Learn</string>
+    <string name="native_enable_autolearn_desc">Capture reusable lessons after completed runs.</string>
+    <string name="native_private_capture">Private Capture Turn</string>
+    <string name="native_private_capture_desc">Run private lesson-capture turn at completion.</string>
+    <string name="native_memory_scope">Memory Scope</string>
+    <string name="native_memory_scope_desc">Scoping for Mnemopi knowledge storage.</string>
+    <string name="native_memory_scope_per_project">Per project</string>
+    <string name="native_memory_scope_tagged">Per project, tagged recall</string>
+    <string name="native_memory_scope_global">Global</string>
+    <string name="native_recall_session_start">Recall on Session Start</string>
+    <string name="native_recall_session_start_desc">Load relevant memories into first turn.</string>
+    <string name="native_retain_turns">Retain Completed Turns</string>
+    <string name="native_retain_turns_desc">Store completed conversation turns in memory.</string>
+
+    <!-- Intelligence: retry -->
+    <string name="native_automatic_retry">Automatic Retry</string>
+    <string name="native_automatic_retry_desc">Rules for automatically retrying failed turns.</string>
+    <string name="native_retry_toggle">Automatic Retry</string>
+    <string name="native_retry_toggle_desc">Retry failed turns automatically.</string>
+    <string name="native_max_attempts">Max Attempts</string>
+    <string name="native_max_attempts_desc">Retry limit before giving up.</string>
+    <string name="native_model_fallback">Model Fallback</string>
+    <string name="native_model_fallback_desc">Fall back to alternative model when retries exhaust.</string>
+
+    <!-- Extensions & Tools -->
+    <string name="native_mcp_resource_updates">MCP Resource Updates</string>
+    <string name="native_mcp_resource_updates_desc">Inject server resource updates into conversation.</string>
+    <string name="native_mcp_project_config">Load Project MCP Servers</string>
+    <string name="native_mcp_project_config_desc">Allow project-root MCP configuration to be discovered.</string>
+    <string name="native_mcp_render_markdown">Render MCP Markdown</string>
+    <string name="native_mcp_render_markdown_desc">Render non-JSON MCP results as Markdown in the transcript.</string>
+
+    <!-- MCP servers -->
+    <string name="native_mcp_configured">Configured MCP Servers</string>
+    <string name="native_mcp_refresh_live">Refresh live MCP status</string>
+    <string name="native_mcp_none">No MCP servers configured</string>
+    <string name="native_mcp_user_level">User level (%1$s)</string>
+    <string name="native_mcp_live_unavailable">Live status unavailable: %1$s</string>
+    <string name="native_mcp_no_live">No OMP servers</string>
+    <string name="native_mcp_project">Project MCP Servers</string>
+    <string name="native_mcp_counts">%1$d/%2$d enabled</string>
+    <string name="native_mcp_invalid_suffix"> · %1$d invalid</string>
+    <string name="native_mcp_no_servers">No servers</string>
+    <string name="native_mcp_add">Add server</string>
+    <string name="native_mcp_name">Server name</string>
+    <string name="native_mcp_config_json">OMP server configuration (JSON)</string>
+    <string name="native_mcp_check">Check</string>
+    <string name="native_mcp_save">Save server</string>
+    <string name="native_mcp_remove">Remove</string>
+    <string name="native_mcp_status_connected">connected</string>
+    <string name="native_mcp_status_connecting">connecting</string>
+    <string name="native_mcp_status_disabled">disabled</string>
+    <string name="native_mcp_status_not_connected">not connected</string>
+    <string name="native_mcp_status_configured">configured</string>
+    <string name="native_mcp_status_off">off</string>
+    <string name="native_mcp_status_invalid">invalid</string>
+
+    <!-- Skills -->
+    <string name="native_skills_title">Skills</string>
+    <string name="native_skills_none">No skills found</string>
+    <string name="native_skills_add">Add custom skill</string>
+    <string name="native_skills_add_title">Add Skill</string>
+    <string name="native_skills_search_skills">Search skills</string>
+    <string name="native_skills_search_placeholder">e.g. react, testing, deploy</string>
+    <string name="native_skills_search">Search</string>
+    <string name="native_skills_searching">Searching…</string>
+    <string name="native_skills_search_hint">Search skills.sh to discover and install skills for your agent.</string>
+    <string name="native_skills_install">Install</string>
+    <string name="native_skills_installed">✓ Installed</string>
+    <string name="native_skills_installing">Installing…</string>
+    <string name="native_skills_installs">%1$s installs</string>
+    <string name="native_skills_source">Source</string>
+    <string name="native_skills_version">Version</string>
+    <string name="native_skills_unknown_version">unknown</string>
+    <string name="native_skills_toggle_readonly">This skill lives outside the skill folders omp-web edits (for example a plugin or package install), so it can\'t be toggled here</string>
+    <string name="native_skills_visible_prompt">Visible in model prompt — click to disable</string>
+    <string name="native_skills_hidden_prompt">Hidden from model prompt — click to enable</string>
+    <string name="native_skills_check">Check</string>
+    <string name="native_skills_checking">Checking...</string>
+    <string name="native_skills_up_to_date">Up to date</string>
+    <string name="native_skills_checks_unavailable">Automatic checks unavailable</string>
+    <string name="native_skills_check_failed">Check failed</string>
+    <string name="native_skills_update">Update</string>
+    <string name="native_skills_updating">Updating...</string>
+    <string name="native_skills_update_available">Update available</string>
+    <string name="native_skills_check_updates">Check updates</string>
+    <string name="native_skills_update_count">%1$d updates</string>
+    <string name="native_skills_group_project_sh">project / skills.sh</string>
+    <string name="native_skills_group_global_sh">global / skills.sh</string>
+    <string name="native_skills_scope_project">project</string>
+    <string name="native_skills_scope_global">global</string>
+    <string name="native_skills_scope_path">path</string>
+    <string name="native_skills_dormant">Dormant (%1$d)</string>
+    <string name="native_skills_scope_label">Install scope</string>
+
+    <!-- Plugins -->
+    <string name="native_plugins_title">Plugins</string>
+    <string name="native_plugins_none">No plugins configured</string>
+    <string name="native_plugins_add">Add plugin</string>
+    <string name="native_plugins_add_title">Add plugin</string>
+    <string name="native_plugins_source">Source</string>
+    <string name="native_plugins_install">Install</string>
+    <string name="native_plugins_installing">Installing...</string>
+    <string name="native_plugins_examples">Examples</string>
+    <string name="native_plugins_status">Status</string>
+    <string name="native_plugins_version">Version</string>
+    <string name="native_plugins_package">Package</string>
+    <string name="native_plugins_resources">Resources</string>
+    <string name="native_plugins_installed_path">Installed path</string>
+    <string name="native_plugins_cwd">Cwd</string>
+    <string name="native_plugins_resolved_resources">Resolved Resources</string>
+    <string name="native_plugins_no_resolved">No resolved resources</string>
+    <string name="native_plugins_status_loaded">Loaded</string>
+    <string name="native_plugins_status_installed">Installed</string>
+    <string name="native_plugins_status_missing">Missing</string>
+    <string name="native_plugins_status_disabled">Disabled</string>
+    <string name="native_plugins_badge_disabled">disabled</string>
+    <string name="native_plugins_badge_filtered">filtered</string>
+    <string name="native_plugins_package_disabled">Package is disabled</string>
+    <string name="native_plugins_enable">Enable package</string>
+    <string name="native_plugins_disable">Disable package</string>
+    <string name="native_plugins_update">Update</string>
+    <string name="native_plugins_updating">Updating...</string>
+    <string name="native_plugins_remove">Remove</string>
+    <string name="native_plugins_removing">Removing...</string>
+    <string name="native_plugins_reload_session">Reload current session</string>
+    <string name="native_plugins_reloading">Reloading...</string>
+    <string name="native_plugins_open_session_reload">Open a session to reload</string>
+    <string name="native_plugins_remove_title">Remove this plugin?</string>
+    <string name="native_plugins_remove_body">This will uninstall %1$s and drop its resources.</string>
+    <string name="native_plugins_refresh">Refresh</string>
+    <string name="native_plugins_unknown">Unknown</string>
+    <string name="native_plugins_diagnostics">%1$d diagnostics</string>
+    <string name="native_plugins_diagnostic">%1$d diagnostic</string>
+    <string name="native_plugins_counts">%1$d ext · %2$d skills · %3$d prompts · %4$d themes</string>
+    <string name="native_plugins_scope_project">project</string>
+    <string name="native_plugins_scope_global">global</string>
+    <string name="native_plugins_configured_version">configured %1$s</string>
+    <string name="native_plugins_close">Close</string>
+    <string name="native_plugins_cancel">Cancel</string>
+</resources>

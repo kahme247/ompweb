@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Model picker (`ChatInput-model-picker.tsx`) -->
+    <string name="controls_select_model">Select model</string>
+    <string name="controls_change_model">Change model</string>
+    <string name="controls_search_models">Search models…</string>
+    <string name="controls_providers">Providers</string>
+    <string name="controls_loading_models">Loading models…</string>
+    <string name="controls_no_available_models">No available models</string>
+    <string name="controls_no_matching_models">No matching models</string>
+    <string name="controls_close">Close</string>
+    <string name="controls_back_to_providers">Back to providers</string>
+
+    <!-- Reasoning ladder -->
+    <string name="controls_reasoning">Reasoning</string>
+    <string name="controls_change_reasoning">Change reasoning level</string>
+    <string name="controls_applies_next_prompt">Applies to next prompt</string>
+
+    <!-- Fast / Slow / Advisor -->
+    <string name="controls_fast">Fast</string>
+    <string name="controls_slow">Slow</string>
+    <string name="controls_advisor">Advisor</string>
+    <string name="controls_fast_title">Turn Fast mode on or off for this model</string>
+    <string name="controls_slow_title_global">Slow: changes a saved omp setting shared by every session and terminal, not just this one.</string>
+    <string name="controls_slow_title_session">Slow: switches only this session to the provider\'s slower, cheaper flex tier.</string>
+    <string name="controls_advisor_enable">Enable advisor for this chat</string>
+    <string name="controls_advisor_disable">Disable advisor for this chat</string>
+
+    <!-- Provider usage limit badge -->
+    <string name="controls_usage_low_priority">low priority until %1$s</string>
+    <string name="controls_usage_low_priority_allowance">low priority until %1$s · %2$s%% left</string>
+    <string name="controls_usage_low_priority_no_reset">low priority</string>
+    <string name="controls_usage_low_priority_allowance_only">low priority · %1$s%% left</string>
+    <string name="controls_usage_wrap_up">limit reached · wrapping up</string>
+    <string name="controls_usage_wrap_up_reset">limit reached · wrapping up · resets %1$s</string>
+    <string name="controls_usage_wrap_up_extra">limit reached · wrap-up, then extra usage</string>
+
+    <!-- Context sheet (`ComposerPanels.tsx` ContextDetailPanel) -->
+    <string name="controls_context_title">Context</string>
+    <string name="controls_context_empty">No session yet. Send the first message to see context stats.</string>
+    <string name="controls_context_loading">Loading stats…</string>
+    <string name="controls_window_size">%1$s window</string>
+    <string name="controls_max_output">max out %1$s</string>
+    <string name="controls_speed">%1$s t/s · avg %2$s</string>
+    <string name="controls_speed_current">%1$s t/s</string>
+    <string name="controls_compact">Compact</string>
+    <string name="controls_stop_compaction">Stop compaction</string>
+    <string name="controls_compacted">Compacted</string>
+    <string name="controls_compacted_with_reason">%1$s compacted</string>
+    <string name="controls_compact_result">%1$s %2$s → %3$s tokens (%4$s saved)</string>
+    <string name="controls_section_session_info">Session Info</string>
+    <string name="controls_section_messages">Messages</string>
+    <string name="controls_section_tokens">Tokens</string>
+    <string name="controls_stat_name">Name</string>
+    <string name="controls_stat_file">File</string>
+    <string name="controls_stat_id">ID</string>
+    <string name="controls_stat_user">User</string>
+    <string name="controls_stat_assistant">Assistant</string>
+    <string name="controls_stat_tool_calls">Tool Calls</string>
+    <string name="controls_stat_tool_results">Tool Results</string>
+    <string name="controls_stat_total">Total</string>
+    <string name="controls_stat_input">Input</string>
+    <string name="controls_stat_output">Output</string>
+    <string name="controls_stat_cache_read">Cache Read</string>
+    <string name="controls_stat_cache_write">Cache Write</string>
+    <string name="controls_stat_cache_rate">Cache Hit</string>
+    <string name="controls_stat_cost">Cost</string>
+    <string name="controls_in_memory">In-memory</string>
+    <string name="controls_copy_file">Copy file path</string>
+    <string name="controls_copy_id">Copy session ID</string>
+    <string name="controls_copied">Copied</string>
+</resources>

@@ -1,0 +1,307 @@
+# Builds the signed release APK when an `android-v*` tag is pushed and attaches
+# it to the matching GitHub Release.
+#
+# The signing key lives in the repository secrets, never in the repository:
+#   ANDROID_KEYSTORE_BASE64   base64 of release.keystore (`base64 -w0 release.keystore`)
+#   ANDROID_KEYSTORE_PASSWORD store password
+#   ANDROID_KEY_ALIAS         key alias inside the keystore
+#   ANDROID_KEY_PASSWORD      key password
+# Secrets are only passed as environment variables into the build step; the
+# workflow never echoes them. The decoded key lives in $RUNNER_TEMP and is
+# removed by an `if: always()` step, so a failed build leaves nothing behind.
+# Both jobs run in the `android-release` environment: it needs required
+# reviewers, so a stray tag cannot sign or publish an APK on its own. All
+# actions are pinned to commit SHAs (same rule as publish.yml/verify-pr.yml),
+# and checkout keeps no credentials in .git/config for the Gradle build.
+# Locally the same key is used through OMPWEB_SIGNING_PROPERTIES (see AGENTS.md,
+# "Android app").
+name: Android release
+
+on:
+  push:
+    tags:
+      - "android-v*"
+
+permissions:
+  contents: read
+
+env:
+  # The certificate this repository's users verify against (docs/android/README.md).
+  # A different keystore must not sign a release silently; rotate this value
+  # together with the published docs. The build job compares the APK against it
+  # before staging, the publish job again before the upload — one constant for
+  # both, so the two checks cannot drift apart.
+  RELEASE_CERT_SHA256: d73354b52dc7c3f0c74623c439ddb7b52e252811c6e6b5f851c9d04b7015fc87
+  # The build-tools the release pipeline pins: `aapt2` and `apksigner` are taken
+  # from exactly this directory instead of "latest found under build-tools".
+  RELEASE_BUILD_TOOLS: "37.0.0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: android-release
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      # The action's default package list asks sdkmanager for "tools", which the
+      # SDK repository no longer serves; only install what this job needs.
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          packages: platform-tools
+
+      - name: Install SDK packages
+        run: sdkmanager "platforms;android-37.0" "build-tools;37.0.0"
+
+      - name: Make the wrapper executable
+        run: chmod +x gradlew
+
+      - name: Decode the signing key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          signing_dir="$RUNNER_TEMP/ompweb-signing"
+          mkdir -p "$signing_dir"
+          chmod 700 "$signing_dir"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$signing_dir/release.keystore"
+          chmod 600 "$signing_dir/release.keystore"
+          # Written with printf from env vars; GitHub masks the values in logs.
+          {
+            printf 'storeFile=%s\n' "$signing_dir/release.keystore"
+            printf 'storePassword=%s\n' "$ANDROID_KEYSTORE_PASSWORD"
+            printf 'keyAlias=%s\n' "$ANDROID_KEY_ALIAS"
+            printf 'keyPassword=%s\n' "$ANDROID_KEY_PASSWORD"
+          } > "$signing_dir/signing.properties"
+          chmod 600 "$signing_dir/signing.properties"
+
+      - name: Assemble the signed release
+        env:
+          OMPWEB_SIGNING_PROPERTIES: ${{ runner.temp }}/ompweb-signing/signing.properties
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Verify the build and stage the release files
+        id: verify
+        run: |
+          set -euo pipefail
+
+          # The tag names the release, the APK's manifest names the build. A
+          # tag on an un-bumped tree would publish ompweb-1.0.1.apk containing
+          # versionName 1.0.0 and the in-app updater would offer it forever, so
+          # refuse to publish a mismatch.
+          version="${GITHUB_REF_NAME#android-v}"
+          if [ -z "$version" ] || [ "$version" = "$GITHUB_REF_NAME" ]; then
+            echo "::error::$GITHUB_REF_NAME is not an android-v<version> tag"
+            exit 1
+          fi
+          # The tag string is attacker-controlled by anyone who can push a tag,
+          # and it ends up in a file name, a release body and a URL: accept only
+          # a plain dotted version, never a path or shell metacharacter.
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::$GITHUB_REF_NAME is not an android-v<major>.<minor>.<patch> tag"
+            exit 1
+          fi
+
+          # The release build names its output after the version
+          # (`outputFileName` in app/build.gradle.kts), not app-release.apk.
+          apk="app/build/outputs/apk/release/ompweb-$version.apk"
+          test -f "$apk"
+          # The exact build-tools the workflow installs, not whatever another
+          # SDK package left behind in the runner image.
+          aapt2="$ANDROID_HOME/build-tools/$RELEASE_BUILD_TOOLS/aapt2"
+          test -x "$aapt2"
+          apk_version="$("$aapt2" dump badging "$apk" |
+            sed -n "s/^package:.* versionName='\([^']*\)'.*/\1/p")"
+          if [ "$apk_version" != "$version" ]; then
+            echo "::error::Tag android-v$version does not match the APK's versionName '$apk_version'"
+            exit 1
+          fi
+          echo "versionName $apk_version matches $GITHUB_REF_NAME"
+
+          out_dir="$RUNNER_TEMP/ompweb-release"
+          rm -rf "$out_dir"
+          mkdir -p "$out_dir"
+          asset="$out_dir/ompweb-$version.apk"
+          sha_file="$asset.sha256"
+          cp "$apk" "$asset"
+
+          apksigner="$ANDROID_HOME/build-tools/$RELEASE_BUILD_TOOLS/apksigner"
+          test -x "$apksigner"
+          certs="$("$apksigner" verify --print-certs "$asset")"
+          printf '%s\n' "$certs"
+          expected_cert_sha256="$RELEASE_CERT_SHA256"
+          test -n "$expected_cert_sha256"
+          case "$certs" in
+            *"SHA-256 digest: $expected_cert_sha256"*) ;;
+            *)
+              echo "::error::The APK is not signed with the expected release certificate"
+              exit 1
+              ;;
+          esac
+
+          # Relative filename so `sha256sum -c ompweb-<version>.apk.sha256`
+          # works after downloading both files into the same directory.
+          ( cd "$out_dir" && sha256sum "ompweb-$version.apk" ) > "$sha_file"
+          cat "$sha_file"
+          ls -l "$asset"
+          echo "size=$(wc -c < "$asset" | tr -d ' ')" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(cut -d' ' -f1 < "$sha_file")" >> "$GITHUB_OUTPUT"
+          echo "cert_sha256=$expected_cert_sha256" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare release notes
+        env:
+          VERSION: ${{ steps.verify.outputs.version }}
+          SIZE: ${{ steps.verify.outputs.size }}
+          SHA256: ${{ steps.verify.outputs.sha256 }}
+          CERT_SHA256: ${{ steps.verify.outputs.cert_sha256 }}
+        run: |
+          set -euo pipefail
+          notes="../docs/android/RELEASE_NOTES_${VERSION}.md"
+          if [ ! -f "$notes" ]; then
+            # Never publish another version's checksum in this release's body.
+            echo "::error::Missing $notes; add the release notes for $VERSION before tagging"
+            exit 1
+          fi
+          body="$RUNNER_TEMP/ompweb-release/release-notes.md"
+          cp "$notes" "$body"
+          # The notes usually carry their own "Verify the APK" block. Append the
+          # generated one only when the built APK's SHA-256 is missing there, so
+          # the release body never states the same checksum twice. A notes file
+          # naming a *different* SHA-256 fails the build instead of shipping two
+          # contradicting hashes.
+          note_hashes="$(grep -i 'sha-256' "$notes" | grep -oE '[0-9a-fA-F]{64}' | sort -u || true)"
+          if [ -n "$note_hashes" ] && ! grep -qx "$SHA256" <<< "$note_hashes"; then
+            echo "::error::$notes contains a SHA-256 that does not match the built APK"
+            exit 1
+          fi
+          if ! grep -qx "$SHA256" <<< "$note_hashes"; then
+            printf '\n---\n\n**Verify this download:** `ompweb-%s.apk`, %s bytes, SHA-256 `%s`, signing certificate SHA-256 `%s`.\n' \
+              "$VERSION" "$SIZE" "$SHA256" "$CERT_SHA256" >> "$body"
+          fi
+          cat "$body"
+
+      - name: Remove the decoded signing key
+        if: always()
+        run: |
+          set -euo pipefail
+          signing_dir="$RUNNER_TEMP/ompweb-signing"
+          rm -rf "$signing_dir"
+          if [ -e "$signing_dir" ]; then
+            echo "::error::The decoded signing key still exists at $signing_dir"
+            exit 1
+          fi
+          echo "removed $signing_dir"
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: android-release
+          path: ${{ runner.temp }}/ompweb-release/
+          if-no-files-found: ignore
+
+      - name: Upload build reports
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: android-release-reports
+          path: android/app/build/reports/
+          if-no-files-found: ignore
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: android-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: android-release
+          path: dist
+
+      # The action's default package list asks sdkmanager for "tools", which the
+      # SDK repository no longer serves; only install what this job needs.
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+        with:
+          packages: platform-tools
+
+      # The same build-tools the build job used: `aapt2` and `apksigner` must be
+      # the pinned ones, not whatever the runner image happens to ship.
+      - name: Install the SDK tools the verification needs
+        run: sdkmanager "build-tools;$RELEASE_BUILD_TOOLS"
+
+      - name: Resolve the staged release files
+        id: staged
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#android-v}"
+          # Same validation as the build job: the tag reaches a file name here.
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::$GITHUB_REF_NAME is not an android-v<major>.<minor>.<patch> tag"
+            exit 1
+          fi
+          asset="dist/ompweb-$version.apk"
+          test -f "$asset"
+          test -f "$asset.sha256"
+          test -f dist/release-notes.md
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+          echo "sha_file=$asset.sha256" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Re-verify the staged APK
+        env:
+          ASSET: ${{ steps.staged.outputs.asset }}
+          VERSION: ${{ steps.staged.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The artifact travelled through storage between the two jobs. Publish
+          # nothing unless this job can re-derive the claims the build made:
+          # checksum, versionName and signing certificate.
+          recorded="$(cut -d' ' -f1 < "$ASSET.sha256")"
+          actual="$(sha256sum "$ASSET" | cut -d' ' -f1)"
+          if [ -z "$recorded" ] || [ "$recorded" != "$actual" ]; then
+            echo "::error::The staged APK does not match its recorded SHA-256"
+            exit 1
+          fi
+          aapt2="$ANDROID_HOME/build-tools/$RELEASE_BUILD_TOOLS/aapt2"
+          apksigner="$ANDROID_HOME/build-tools/$RELEASE_BUILD_TOOLS/apksigner"
+          test -x "$aapt2"
+          test -x "$apksigner"
+          apk_version="$("$aapt2" dump badging "$ASSET" |
+            sed -n "s/^package:.* versionName='\([^']*\)'.*/\1/p")"
+          if [ "$apk_version" != "$VERSION" ]; then
+            echo "::error::The staged APK reports versionName '$apk_version', expected '$VERSION'"
+            exit 1
+          fi
+          certs="$("$apksigner" verify --print-certs "$ASSET")"
+          case "$certs" in
+            *"SHA-256 digest: $RELEASE_CERT_SHA256"*) ;;
+            *)
+              echo "::error::The staged APK is not signed with the expected release certificate"
+              exit 1
+              ;;
+          esac
+          echo "staged APK verified: versionName $apk_version, SHA-256 $actual"
+
+      - name: Upload the release APK
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: |
+            ${{ steps.staged.outputs.asset }}
+            ${{ steps.staged.outputs.sha_file }}
+          body_path: dist/release-notes.md

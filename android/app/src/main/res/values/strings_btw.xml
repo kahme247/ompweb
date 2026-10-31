@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Composer-attached side-question panel (web `components/BtwPanel.tsx`) -->
+    <string name="btw_panel_title">Side question</string>
+    <string name="btw_status_running">Answering…</string>
+    <string name="btw_status_complete">Answered</string>
+    <string name="btw_status_cancelled">Cancelled</string>
+    <string name="btw_status_error">Failed</string>
+    <string name="btw_status_interrupted">Interrupted</string>
+    <string name="btw_waiting">Thinking…</string>
+    <string name="btw_cancel">Cancel</string>
+    <string name="btw_copy">Copy answer</string>
+    <string name="btw_copied">Answer copied</string>
+    <string name="btw_copy_failed">Could not copy the answer</string>
+    <string name="btw_close">Close side question</string>
+    <string name="btw_expand_panel">Expand</string>
+    <string name="btw_collapse_panel">Collapse</string>
+    <string name="btw_follow_up">Follow up</string>
+    <string name="btw_follow_up_label">Follow-up question</string>
+    <string name="btw_follow_up_placeholder">Ask a follow-up…</string>
+    <string name="btw_ask">Ask</string>
+
+    <!-- History dialog (`/btw` alone) -->
+    <string name="btw_history_title">Side questions</string>
+    <string name="btw_history_empty">No side questions yet. Ask one with /btw &lt;question&gt;.</string>
+
+    <!-- Failures (web `toastBtwError`) -->
+    <string name="btw_unsupported">/btw requires a newer omp. Update omp, then restart the session.</string>
+    <string name="btw_failed">Side question failed</string>
+    <string name="btw_failed_detail">Side question failed: %1$s</string>
+    <string name="btw_attachments_unsupported">Side questions can\'t include attachments. Remove them, or send the message as a normal prompt.</string>
+    <string name="btw_no_session">No active session</string>
+</resources>

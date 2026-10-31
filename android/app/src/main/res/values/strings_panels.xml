@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Composer-attached panels (web `components/ComposerPanels.tsx`) -->
+    <string name="panels_expand_panel">Expand</string>
+    <string name="panels_collapse_panel">Collapse</string>
+
+    <!-- Todo panel (web `components/TodoList.tsx`) -->
+    <string name="panels_todo_title">Tasks</string>
+    <string name="panels_todo_progress">%1$d/%2$d complete</string>
+    <string name="panels_todo_show_all">Show all tasks</string>
+    <string name="panels_todo_show_less">Show fewer tasks</string>
+    <string name="panels_todo_blocker">Blocked: %1$s</string>
+    <string name="panels_todo_plan_scroll">Task list</string>
+    <string name="panels_todo_status_pending">Pending</string>
+    <string name="panels_todo_status_in_progress">In progress</string>
+    <string name="panels_todo_status_completed">Completed</string>
+    <string name="panels_todo_status_blocked">Blocked</string>
+    <string name="panels_todo_status_abandoned">Abandoned</string>
+
+    <!-- Subagent roster panel -->
+    <string name="panels_subagents_title">Subagents</string>
+    <string name="panels_subagents_summary">%1$d running · %2$d total</string>
+    <string name="panels_subagents_completed">Completed (%1$d)</string>
+    <string name="panels_subagent_retrying">retrying %1$d/%2$d</string>
+    <string name="panels_subagent_retry_attempt">attempt %1$d</string>
+    <string name="panels_subagent_state_started">Running</string>
+    <string name="panels_subagent_state_completed">Done</string>
+    <string name="panels_subagent_state_failed">Failed</string>
+    <string name="panels_subagent_state_aborted">Aborted</string>
+    <string name="panels_subagent_detached">Detached from this session</string>
+    <string name="panels_subagent_nested">%1$d nested</string>
+    <string name="panels_tokens_unit">%1$s tok</string>
+    <string name="panels_context_gauge">%1$s/%2$s ctx</string>
+
+    <!-- Subagent transcript dialog (web `components/SubagentTranscriptDialog.tsx`) -->
+    <string name="panels_transcript_title">Subagent transcript</string>
+    <string name="panels_transcript_close">Close transcript</string>
+    <string name="panels_transcript_task">Task</string>
+    <string name="panels_transcript_result">Result</string>
+    <string name="panels_transcript_model">model</string>
+    <string name="panels_transcript_effort">effort</string>
+    <string name="panels_transcript_show">Show transcript</string>
+    <string name="panels_transcript_hide">Hide transcript</string>
+    <string name="panels_transcript_load_more">Load more</string>
+    <string name="panels_transcript_loading">Loading…</string>
+    <string name="panels_transcript_no_completion">No output yet</string>
+    <string name="panels_transcript_no_messages">No messages yet</string>
+    <string name="panels_transcript_truncated">Output truncated</string>
+
+    <!-- Composer status banners -->
+    <string name="panels_goal_active">Goal active</string>
+    <string name="panels_goal_expand">Expand active goal</string>
+    <string name="panels_goal_collapse">Collapse active goal</string>
+    <string name="panels_plan_in_progress">Planning in progress</string>
+    <string name="panels_compact_result">%1$s %2$d -&gt; %3$d tokens (%4$d saved)</string>
+    <string name="panels_compacted">Compacted</string>
+    <string name="panels_compacted_with_reason">%1$s compacted</string>
+    <string name="panels_compact_error">Compaction failed: %1$s</string>
+</resources>

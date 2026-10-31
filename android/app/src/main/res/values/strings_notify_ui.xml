@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Notifications pane: bell, history list, mark read, clear (web `components/NotificationList.tsx`) -->
+    <string name="notify_ui_bell">Notifications</string>
+    <plurals name="notify_ui_bell_unread">
+        <item quantity="one">Notifications, %1$d unread</item>
+        <item quantity="other">Notifications, %1$d unread</item>
+    </plurals>
+    <string name="notify_ui_title">Notifications</string>
+    <string name="notify_ui_mark_all_read">Mark all as read</string>
+    <string name="notify_ui_clear">Clear notifications</string>
+    <string name="notify_ui_clear_title">Clear notification history?</string>
+    <string name="notify_ui_clear_body">All entries are removed from the server, for every device.</string>
+    <string name="notify_ui_clear_confirm">Clear</string>
+    <string name="notify_ui_cancel">Cancel</string>
+    <string name="notify_ui_retry">Retry</string>
+    <string name="notify_ui_empty">No recent notifications</string>
+    <string name="notify_ui_dismiss">Dismiss notification</string>
+    <string name="notify_ui_untitled_session">omp session</string>
+
+    <!-- Entry bodies, same wording as the web `renderNotification` -->
+    <string name="notify_ui_body_completed">Task finished.</string>
+    <string name="notify_ui_body_input">Waiting for your answer: %1$s</string>
+    <string name="notify_ui_body_input_none">Waiting for your answer.</string>
+    <string name="notify_ui_body_error">Run failed: %1$s</string>
+    <string name="notify_ui_body_error_none">Run failed.</string>
+    <string name="notify_ui_body_model_switch">Switched %1$s → %2$s: %3$s</string>
+    <string name="notify_ui_body_model_switch_none">Switched %1$s → %2$s.</string>
+    <string name="notify_ui_body_test">Notifications are working.</string>
+    <string name="notify_ui_body_other">Session activity.</string>
+
+    <!-- Notification settings (web `SettingsConfig.tsx` NotificationSettingsPanel) -->
+    <string name="notify_ui_settings_title">Notifications</string>
+    <string name="notify_ui_settings_subtitle">Get notified about sessions you are not looking at. The server keeps these settings per device.</string>
+    <string name="notify_ui_enable">Enable notifications</string>
+    <string name="notify_ui_enable_desc">Shows a notification when a session finishes, waits for input or fails. Asks Android for permission when you turn this on.</string>
+    <string name="notify_ui_permission">Android permission</string>
+    <string name="notify_ui_permission_not_asked">Not requested yet</string>
+    <string name="notify_ui_permission_granted">Allowed</string>
+    <string name="notify_ui_permission_denied">Blocked in Android settings</string>
+    <string name="notify_ui_permission_unsupported">Not needed on this Android version</string>
+    <string name="notify_ui_permission_allow">Allow</string>
+    <string name="notify_ui_permission_open_settings">Open settings</string>
+    <string name="notify_ui_status_permission">Android has not allowed notifications for ompweb yet. Nothing reaches the notification shade until it does.</string>
+    <string name="notify_ui_status_permission_denied">Android blocks notifications for ompweb. Allow them in the app settings, then return here.</string>
+    <string name="notify_ui_battery">Battery optimization</string>
+    <string name="notify_ui_battery_exempt">Not restricted</string>
+    <string name="notify_ui_battery_restricted">Restricted · notifications may be delayed while the phone sleeps</string>
+    <string name="notify_ui_battery_fix">Fix</string>
+    <string name="notify_ui_connection">Connection</string>
+    <string name="notify_ui_connection_off">Off</string>
+    <string name="notify_ui_connection_connecting">Connecting…</string>
+    <string name="notify_ui_connection_connected">Connected</string>
+    <string name="notify_ui_connection_offline">Server unreachable</string>
+    <string name="notify_ui_types_title">Notify me about</string>
+    <string name="notify_ui_feedback_title">Feedback</string>
+    <string name="notify_ui_vibrate">Vibrate</string>
+    <string name="notify_ui_vibrate_desc">One short pulse when a task finishes, a double pulse when the agent needs an answer, one long pulse on errors. Never when you send. Follows silent mode and Do Not Disturb.</string>
+    <string name="notify_ui_type_completed">Task finished</string>
+    <string name="notify_ui_type_completed_desc">A prompt and the background work it started are done. Subagents never notify.</string>
+    <string name="notify_ui_type_input">Waiting for input</string>
+    <string name="notify_ui_type_input_desc">The agent asks a question or needs an approval.</string>
+    <string name="notify_ui_type_error">Run failed</string>
+    <string name="notify_ui_type_error_desc">A run stops with an error after retries and fallbacks, or the omp process exits.</string>
+    <string name="notify_ui_type_model_switch">Model switched automatically</string>
+    <string name="notify_ui_type_model_switch_desc">omp switches models on its own: a fallback after a refusal, rate limit, or usage limit, or a prewalk / plan hand-off.</string>
+    <string name="notify_ui_when_active">While you are using ompweb elsewhere</string>
+    <string name="notify_ui_when_active_toast">Show an in-app toast</string>
+    <string name="notify_ui_when_active_system">Always send a system notification</string>
+    <string name="notify_ui_send_test">Send test notification</string>
+    <string name="notify_ui_dismiss_message">Dismiss</string>
+    <!-- In-app delivery card (web toast): opens the session and marks it read -->
+    <string name="notify_ui_open">Open</string>
+</resources>

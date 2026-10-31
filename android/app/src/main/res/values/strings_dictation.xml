@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="dictation_start">Start dictation</string>
+    <string name="dictation_uploading">Uploading recording…</string>
+    <string name="dictation_transcribing">Transcribing…</string>
+    <string name="dictation_pause">Pause recording</string>
+    <string name="dictation_resume">Resume recording</string>
+    <string name="dictation_stop">Stop and transcribe</string>
+    <string name="dictation_cancel">Cancel dictation</string>
+    <string name="dictation_discard">Discard recording</string>
+    <string name="dictation_retry">Retry transcription</string>
+    <string name="dictation_play">Play recording</string>
+    <string name="dictation_pause_playback">Pause playback</string>
+    <string name="dictation_progress">%1$s of %2$s</string>
+
+    <string name="dictation_permission_title">Microphone access</string>
+    <string name="dictation_permission_rationale">ompweb records your voice and sends it to your server for transcription. The recording stays on the server until the transcript is claimed or discarded.</string>
+    <string name="dictation_permission_rationale_on_device">ompweb uses this phone\'s speech recognition. The audio is processed on the device; only the recognized text is inserted into your message.</string>
+    <string name="dictation_permission_allow">Allow</string>
+    <string name="dictation_permission_later">Not now</string>
+
+    <string name="dictation_error_mic_denied">Microphone access is denied. Allow it for ompweb in Android Settings to dictate.</string>
+    <string name="dictation_error_mic_unavailable">Recording is not available on this device</string>
+    <string name="dictation_error_no_speech">No speech detected</string>
+    <string name="dictation_error_failed">Transcription failed</string>
+    <string name="dictation_error_timeout">Transcription timed out</string>
+    <string name="dictation_error_job_missing">Transcription job not found</string>
+    <string name="dictation_error_busy">Too many transcriptions in progress</string>
+    <string name="dictation_error_upload_interrupted">Recording not transcribed yet</string>
+
+    <string name="dictation_live_listening">Listening…</string>
+    <string name="dictation_live_stop">Done</string>
+    <string name="dictation_live_cancel">Cancel</string>
+
+    <string name="dictation_error_no_recognizer">Speech recognition on this phone is not available (needs Android 12+ and the offline language pack). Use server transcription or install the language pack.</string>
+    <string name="dictation_error_offline">On-device speech recognition could not run. Try again.</string>
+    <string name="dictation_error_language">This language is not installed for on-device recognition. Pick another dictation language or download the language data.</string>
+    <string name="dictation_error_recognizer_busy">Speech recognition is busy. Try again in a moment.</string>
+    <string name="dictation_error_recognizer_failed">Speech recognition failed</string>
+</resources>

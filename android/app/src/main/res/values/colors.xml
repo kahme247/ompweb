@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_launcher_background">#0F0A14</color>
+    <color name="splash_background">#000000</color>
+    <color name="window_background">#FAF9F6</color>
+
+    <!-- Per-type notification accents: the light theme's status tokens. -->
+    <color name="notify_accent_completed">#18794E</color>
+    <color name="notify_accent_input">#B03E22</color>
+    <color name="notify_accent_error">#B42318</color>
+    <color name="notify_accent_model_switch">#2563EB</color>
+    <color name="notify_accent_connection">#69635A</color>
+    <color name="notify_accent_message">#2B2823</color>
+    <color name="notify_accent_summary">#B03E22</color>
+</resources>

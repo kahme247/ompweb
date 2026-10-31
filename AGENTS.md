@@ -768,6 +768,42 @@ during the wait.
   targets are accepted). The worker navigates non-app windows to the session
   URL; the app falls back to that URL when `/api/sessions` cannot be read.
 
+## Android app
+
+The native Android client lives in [`android/`](./android): Kotlin, Jetpack
+Compose, one `app` module. User documentation is
+[`docs/android/README.md`](./docs/android/README.md); the wire contract it
+implements is [`docs/android/protocol.md`](./docs/android/protocol.md).
+
+- Build with JDK 21: `cd android && ./gradlew assembleDebug`. Unit tests
+  (including the golden screenshots): `./gradlew testDebugUnitTest`; lint:
+  `./gradlew lintDebug`. `.github/workflows/android.yml` runs those three on
+  every change under `android/`.
+- The screenshot goldens live in `android/app/src/test/screenshots/` (30 cells
+  per surface: five widths, light plus one dark theme, three font scales) and
+  are rendered through Robolectric on the JVM. Re-record them with
+  `./gradlew recordScreenshots`; review every changed image before committing.
+- Never send `Origin` or `Sec-Fetch-Site` from the app: ompweb's origin gate
+  answers those headers with 403, so `ServerProbe` is the reference request.
+- Plain HTTP is allowed only for loopback, RFC 1918, `100.64.0.0/10`,
+  link-local, `.local`, `.ts.net` and single-label hosts (`ServerAddress`,
+  unit-tested). `HttpPolicyInterceptor` enforces the same policy on every
+  request and redirect hop, and an `EventListener` additionally requires every
+  resolved peer address to be loopback/private.
+- The session cookie is the only persisted credential: `EncryptedCookieRecords`
+  keeps it AES-GCM-encrypted under `filesDir/` with a Keystore key, and
+  `OriginBoundCookieJar` hands it to exactly one origin. The password is never
+  stored or logged; `allowBackup` stays `false` and the backup rules exclude
+  app data.
+- Release signing is opt-in: set `OMPWEB_SIGNING_PROPERTIES` to a properties
+  file with `storeFile`, `storePassword`, `keyAlias` and `keyPassword` before
+  `assembleRelease`. CI uses the `ANDROID_KEYSTORE_BASE64`,
+  `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD`
+  secrets in the `android-release` environment. Never commit signing material.
+- Onboarding order matters: reachability (`/api/sessions`) → `/api/app-info` →
+  password → `/api/app-info` again, because the auth gate runs before routing.
+  The app requires a server with `/api/app-info` (`"api": 1`).
+
 ## Git history and PR landing rules
 
 - **Never rewrite `main`'s history** — no force-push, `filter-branch`, rebase

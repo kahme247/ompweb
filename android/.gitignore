@@ -1,0 +1,28 @@
+# Gradle
+.gradle/
+.kotlin/
+build/
+**/build/
+
+# Local machine configuration
+local.properties
+*.iml
+
+# IDE
+.idea/
+.cxx/
+captures/
+
+# Signing material must never be committed.
+*.jks
+*.keystore
+*.p12
+*.pem
+*.bks
+signing.properties
+# Property files may carry a password; gradle.properties and the Gradle wrapper
+# property file carry no secrets and are required by a fresh clone, so keep the
+# ignore scoped to the directories that can hold local secrets.
+/app/**/*.properties
+/*.properties
+!/gradle.properties

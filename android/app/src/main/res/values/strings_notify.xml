@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Channels (Slice A owns the ids and the system-visible names). -->
+    <string name="notify_channel_needs_input">Needs input</string>
+    <string name="notify_channel_needs_input_description">The agent is waiting for your answer or approval.</string>
+    <string name="notify_channel_errors">Errors</string>
+    <string name="notify_channel_errors_description">A run failed, crashed, or ran out of retries.</string>
+    <string name="notify_channel_completed">Completed</string>
+    <string name="notify_channel_completed_description">A prompt and the background work it started are done.</string>
+    <string name="notify_channel_model_switch">Model switch</string>
+    <string name="notify_channel_model_switch_description">omp switched models on its own (fallback or hand-off).</string>
+    <string name="notify_channel_connection">Connection status</string>
+    <string name="notify_channel_connection_description">The silent status of the notification service.</string>
+    <string name="notify_channel_agent_messages">Agent messages</string>
+    <string name="notify_channel_agent_messages_description">Short messages agents send through the notify host tool.</string>
+
+    <!-- The quiet twin of an event channel: the "Vibrate" setting switched off. -->
+    <string name="notify_channel_quiet_suffix"> (no vibration)</string>
+
+    <!-- Group summary: one Android group per project (project root). -->
+    <plurals name="notify_group_summary">
+        <item quantity="one">%1$d session in %2$s</item>
+        <item quantity="other">%1$d sessions in %2$s</item>
+    </plurals>
+
+    <!-- Service status notification. -->
+    <string name="notify_status_title">ompweb</string>
+    <string name="notify_status_reconnecting">Reconnecting…</string>
+    <string name="notify_status_unreachable">Server unreachable</string>
+    <plurals name="notify_status_connected">
+        <item quantity="one">Connected · %1$d agent running</item>
+        <item quantity="other">Connected · %1$d agents running</item>
+    </plurals>
+
+    <!-- Lock screen: the private public version. -->
+    <string name="notify_private_body">ompweb notification</string>
+
+    <!-- Actions and results. -->
+    <string name="notify_reply_label">Reply</string>
+    <string name="notify_reply_hint">Type a reply…</string>
+    <string name="notify_result_sent">Sent</string>
+    <string name="notify_result_already">Already answered</string>
+    <string name="notify_result_failed">Failed — open app</string>
+    <string name="notify_test_body">Notifications are working.</string>
+
+    <!-- Permission and battery onboarding. -->
+    <string name="notify_onboarding_title">Allow notifications?</string>
+    <string name="notify_onboarding_text">ompweb keeps one connection to your PC so you learn when an agent finishes, needs an answer, or fails. Allow notifications to see those alerts. Battery optimisation can delay them — allow ompweb to run unrestricted in the battery settings.</string>
+    <string name="notify_onboarding_allow">Allow notifications</string>
+    <string name="notify_onboarding_later">Not now</string>
+    <string name="notify_sync_failed">Could not register this device</string>
+
+    <!-- Settings test result lines. -->
+    <string name="notify_test_sent">Test notification sent</string>
+    <string name="notify_test_shown">Test notification shown</string>
+    <string name="notify_test_blocked">Android does not allow notifications for ompweb</string>
+    <string name="notify_test_failed">Could not send the test</string>
+    <plurals name="notify_running_agents">
+        <item quantity="one">%1$d agent running</item>
+        <item quantity="other">%1$d agents running</item>
+    </plurals>
+</resources>

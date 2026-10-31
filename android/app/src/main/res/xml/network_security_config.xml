@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Cleartext must stay permitted at the platform level: the private and
+         Tailscale addresses ompweb runs on are plain HTTP. The app enforces
+         the policy itself in HttpPolicyInterceptor on every request and
+         redirect hop, not only in ServerAddress. -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

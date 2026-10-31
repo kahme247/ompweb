@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Composer field -->
+    <string name="composer_placeholder">Message the agent…</string>
+    <string name="composer_placeholder_new">Ask anything to start a session…</string>
+    <string name="composer_queue">Queue</string>
+    <string name="composer_bash_hint">Shell command — runs in the project directory</string>
+    <string name="composer_bash_excluded_hint">Shell command — output stays out of the agent\'s context</string>
+    <string name="composer_bash_running">Running shell command</string>
+    <string name="composer_attach_file">Attach files</string>
+    <string name="composer_attach_image">Attach image</string>
+    <string name="composer_paste_image">Paste image</string>
+    <string name="composer_camera">Take photo</string>
+    <string name="composer_reading_attachments">Reading attachments…</string>
+    <string name="composer_attach_image_skipped">%1$d image(s) skipped: images up to %2$s are supported.</string>
+    <string name="composer_attach_file_skipped">%1$d file(s) skipped.</string>
+
+    <!-- Built-in slash commands (web `chatInput.cmd*`) -->
+    <string name="composer_cmd_goal_desc">Set the goal for this session</string>
+    <string name="composer_cmd_goal_arg">[goal]</string>
+    <string name="composer_cmd_plan_desc">Create a step-by-step plan</string>
+    <string name="composer_cmd_plan_arg">[task]</string>
+    <string name="composer_cmd_review_desc">Review project state and changes</string>
+    <string name="composer_cmd_review_arg">[scope]</string>
+    <string name="composer_cmd_fix_desc">Fix a reported issue</string>
+    <string name="composer_cmd_fix_arg">[issue]</string>
+    <string name="composer_cmd_test_desc">Write and run tests</string>
+    <string name="composer_cmd_test_arg">[target]</string>
+    <string name="composer_cmd_explain_desc">Explain code or a concept</string>
+    <string name="composer_cmd_explain_arg">[thing]</string>
+    <string name="composer_cmd_simplify_desc">Simplify code while preserving behavior</string>
+    <string name="composer_cmd_simplify_arg">[target]</string>
+    <string name="composer_cmd_commit_desc">Stage and commit changes</string>
+    <string name="composer_cmd_commit_arg">[message]</string>
+    <string name="composer_cmd_advisor_desc">Get an independent advisory review of the current work</string>
+    <string name="composer_cmd_advisor_arg">[topic]</string>
+    <string name="composer_cmd_loop_desc">Repeat a task until done, up to N attempts</string>
+    <string name="composer_cmd_loop_arg">[count] [task]</string>
+    <string name="composer_cmd_btw_desc">Ask a side question without adding it to the conversation</string>
+    <string name="composer_cmd_btw_arg">[question]</string>
+    <string name="composer_cmd_compact_desc">Compress context, optionally with instructions</string>
+    <string name="composer_cmd_reload_desc">Reload extensions, skills, prompts, and tools</string>
+    <string name="composer_cmd_name_desc">Set the session display name</string>
+    <string name="composer_cmd_session_desc">Show session message, token, and cost stats</string>
+    <string name="composer_cmd_copy_desc">Copy the last assistant message</string>
+
+    <!-- Notices -->
+    <string name="composer_notice_queued_while_shell">A shell command is still running, so the message was queued and runs when it finishes.</string>
+    <string name="composer_notice_queue_restore_uncertain">The run was stopped, but the queued messages may not have come back to the composer. Check the queue and the chat before resending.</string>
+    <string name="composer_notice_queue_discard_failed">The run was stopped, but some queued messages could not be taken back. The agent may still deliver them.</string>
+    <string name="composer_notice_command_requires_args">Usage: %1$s %2$s</string>
+    <string name="composer_notice_advisor_disabled">Advisor is disabled — enable it with the advisor toggle in the composer menu.</string>
+    <string name="composer_notice_no_session">No active session</string>
+    <string name="composer_notice_name_usage">Usage: /name &lt;name&gt;</string>
+    <string name="composer_notice_session_renamed">Session renamed to %1$s</string>
+    <string name="composer_notice_no_message_copy">No assistant message to copy</string>
+    <string name="composer_notice_copied">Copied the last assistant message</string>
+    <string name="composer_notice_compacted">Context compacted</string>
+    <string name="composer_notice_reloaded">Reloaded session resources</string>
+    <string name="composer_notice_unknown_command">/%1$s is not a command this session can run — it was sent as plain text.</string>
+    <string name="composer_notice_queued_removal_unavailable">This message is no longer pending in that queue and could not be cancelled.</string>
+    <string name="composer_notice_queued_promotion_unavailable">The queued follow-up is no longer available to steer.</string>
+    <string name="composer_notice_shell_session_failed">Unable to create a session for the shell command</string>
+    <string name="composer_notice_live_state_unknown">Could not check whether the agent is running — your message stays in the composer.</string>
+    <string name="composer_notice_submit_abandoned">Your message was not sent — the chat was left before the agent\'s state arrived. Your draft is still in that chat.</string>
+    <string name="composer_notice_foreign_owner_blocked">Another omp process is running this chat, so the message was not sent. Use “Send anyway (copy)” above the composer to continue in a copy.</string>
+    <string name="composer_notice_foreign_owner_command_blocked">Another omp process is running this chat, so the command was not applied. Nothing was sent to omp.</string>
+
+    <!-- Another omp process owns the chat (foreign owner) -->
+    <string name="composer_elsewhere_title">Running somewhere else</string>
+    <string name="composer_elsewhere_body_omp_web">Another omp-web instance is running this chat. You can read along here; sending would create a copy with a new chat id.</string>
+    <string name="composer_elsewhere_body_terminal">A terminal omp process is running this chat. You can read along here; sending would create a copy with a new chat id.</string>
+    <string name="composer_elsewhere_body_unknown">Another omp process is running this chat. You can read along here; sending would create a copy with a new chat id.</string>
+    <string name="composer_elsewhere_send_anyway">Send anyway…</string>
+    <string name="composer_elsewhere_confirm_title">Send into a copy?</string>
+    <string name="composer_elsewhere_confirm_body">omp lets only one process write a chat. Another one is running this one, so your message starts a copy with a new chat id. The original stays as it is and keeps running elsewhere; the copy contains your message.</string>
+    <string name="composer_elsewhere_confirm_send">Send anyway (copy)</string>
+    <string name="composer_elsewhere_confirm_cancel">Keep reading</string>
+
+    <!-- A send raced the foreign owner: omp continued in a copy (web
+         `sessionOwnership.copyNotice*`). -->
+    <string name="composer_contention_title">Continued in a copy</string>
+    <string name="composer_contention_body">Another omp process owned this chat, so your message continued in a copy. The original is unchanged and still belongs to that process.</string>
+    <string name="composer_contention_open_original">Open original</string>
+    <string name="composer_contention_open_copy">Open copy</string>
+    <string name="composer_contention_dismiss">Dismiss</string>
+
+    <!-- Queue bar -->
+    <string name="composer_queue_follow_up">Queued follow-up</string>
+    <string name="composer_queue_steer">Queued steer</string>
+    <!-- The action that promotes a follow-up into steering (web `queuedSteerAction`). -->
+    <string name="composer_steer">Steer</string>
+    <string name="composer_steer_action_desc">Deliver this message as a steer</string>
+    <string name="composer_queue_edit">Edit</string>
+    <string name="composer_queue_delete">Delete</string>
+    <string name="composer_queue_delete_title">Remove this queued message</string>
+    <string name="composer_queue_delete_body">Cancel this queued message? Once cancellation is confirmed, it will be removed from the agent\'s queue. A message already delivered to the agent cannot be cancelled.</string>
+    <string name="composer_queue_delete_confirm">Delete</string>
+    <string name="composer_cancel">Cancel</string>
+    <string name="composer_queue_count">Queued · %1$d</string>
+    <string name="composer_queue_show_all">Show all queued prompts (%1$d)</string>
+
+    <!-- Exit with drafts -->
+    <string name="composer_drafts_title">Unsent drafts</string>
+    <string name="composer_drafts_body">You have unsent text in %1$d chat(s). Leave anyway?</string>
+    <string name="composer_drafts_leave">Leave</string>
+    <string name="composer_drafts_stay">Stay</string>
+
+    <!-- Tools preset submenu (spawn-time only) -->
+    <string name="composer_tools">Tools</string>
+
+    <!-- Shell mode primary action -->
+    <string name="composer_run_shell">Run</string>
+
+    <!-- Live status and auto-retry -->
+    <string name="composer_auto_retry">Retrying (%1$s)</string>
+    <string name="composer_auto_retry_plain">Retrying</string>
+    <string name="composer_auto_retry_stop">Stop waiting</string>
+
+    <!-- Share target chooser -->
+    <string name="composer_share_title">Share to a chat</string>
+    <string name="composer_share_new_chat">New chat</string>
+    <string name="composer_share_count">%1$d shared item(s)</string>
+    <string name="composer_share_failed">The shared file could not be attached.</string>
+    <string name="composer_share_cancel">Cancel</string>
+
+    <!-- Camera capture -->
+    <string name="composer_camera_failed">The camera could not take a photo.</string>
+    <string name="composer_paste_unavailable">No image on the clipboard.</string>
+    <string name="composer_add_attachment">Add attachment</string>
+    <string name="composer_minimize">Minimize input</string>
+    <string name="composer_expand">Expand input</string>
+    <string name="composer_minimized_attachments">Attachments</string>
+    <string name="composer_remove">Remove attachment</string>
+    <string name="composer_at_searching_all">Searching all files…</string>
+    <string name="composer_tools_none">No tools</string>
+    <string name="composer_tools_default">Default tools</string>
+    <string name="composer_tools_full">All tools</string>
+</resources>
