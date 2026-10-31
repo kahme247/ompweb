@@ -4,7 +4,7 @@ import { parseEventStreamChannel, SUBSCRIPTION_ID_RE } from "./event-stream-prot
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "./image-attachments";
 
 // The browser's WebSocket transport (docs/specs/2026-10-31-browser-transport-experiment-design.md D3/D4): one
-// EventStreamConnection per socket, plus a session socket's agent commands. Server → client frames are
+// EventStreamConnection per socket, plus agent commands of any session. Server → client frames are
 // "<name> <server ms>\n<json>"; client → server frames are one JSON object each.
 
 export const WS_HEARTBEAT_MS = 10_000;
@@ -19,10 +19,9 @@ const MAX_RID_LENGTH = 64;
 const CLOSE = { badFrame: 1007, tooBig: 1009, failed: 1011 } as const;
 const INVALID_REQUEST = { error: "Invalid event stream request", code: "invalid_event_stream_request" };
 
-/** What Bun keeps on a browser socket (`ws.data`): its session (null: the general socket) and, once open, its connection. */
+/** What Bun keeps on a browser socket (`ws.data`): once open, its connection. */
 export interface BrowserSocketData {
   kind: "browser";
-  sessionId: string | null;
   connection: EventStreamConnection | null;
 }
 
@@ -49,13 +48,9 @@ declare global {
   var __ompBrowserCommands: Map<string, Remembered> | undefined;
 }
 
-/** GET /api/events/ws[?session=<id>]: the gate already ran (proxy.ts); undefined once upgraded. */
-export function handleBrowserSocketUpgrade(req: Request, upgrade: (data: BrowserSocketData) => boolean): Response | undefined {
-  const sessionId = new URL(req.url).searchParams.get("session");
-  if (sessionId !== null && (!sessionId || sessionId.length > MAX_SESSION_ID_LENGTH)) {
-    return Response.json(INVALID_REQUEST, { status: 400 });
-  }
-  return upgrade({ kind: "browser", sessionId, connection: null })
+/** GET /api/events/ws: the gate already ran (proxy.ts); undefined once upgraded. */
+export function handleBrowserSocketUpgrade(upgrade: (data: BrowserSocketData) => boolean): Response | undefined {
+  return upgrade({ kind: "browser", connection: null })
     ? undefined
     : Response.json({ error: "The event stream socket is a WebSocket", code: "upgrade_required" }, { status: 426 });
 }
@@ -145,16 +140,17 @@ function onFrame(ws: BrowserSocket, data: string | Uint8Array): void {
 }
 
 function onCommand(ws: BrowserSocket, frame: Record<string, unknown>): void {
-  const { rid } = frame;
+  const { rid, session } = frame;
   if (typeof rid !== "string" || !rid || rid.length > MAX_RID_LENGTH) return ws.close(CLOSE.badFrame, "Invalid rid");
   send(ws, "ack", { rid });
-  const sessionId = ws.data.sessionId;
-  // Commands belong to a session: the general socket carries none.
-  if (sessionId === null) return send(ws, "reply", { rid, status: 400, body: INVALID_REQUEST });
-  // Scoped to the session, not the socket: a resend comes on the session's next socket, and a rid another session
+  // A bad session fails only this command: the socket carries other sessions' commands.
+  if (typeof session !== "string" || !session || session.length > MAX_SESSION_ID_LENGTH) {
+    return send(ws, "reply", { rid, status: 400, body: INVALID_REQUEST });
+  }
+  // Scoped to the session, not the socket: a resend may come on another socket, and a rid another session
   // happens to use never replays this one's reply. JSON keeps the pair unambiguous for any session id.
-  const { result, deduped } = runOnce(JSON.stringify([sessionId, rid]), async () => {
-    const response = await runAgentCommand(sessionId, frame.command, frame.advisor === true);
+  const { result, deduped } = runOnce(JSON.stringify([session, rid]), async () => {
+    const response = await runAgentCommand(session, frame.command, frame.advisor === true);
     return { status: response.status, body: await response.json() };
   });
   result

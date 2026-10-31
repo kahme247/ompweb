@@ -7,8 +7,8 @@
 // per host. The server's `browserTransport` setting (every hello and
 // `transport` control frame carry it) picks the connections:
 //   "sse" (default): the ONLY `/api/events` EventSource; POST /api/events subscribes.
-//   "websocket": one general `/api/events/ws` socket for the non-session
-//   channels plus one `/api/events/ws?session=<id>` per session.
+//   "websocket": `/api/events/ws` sockets, one general for the non-session
+//   channels plus one per session; every command frame names its session.
 //
 // Plain script, not bundled: mirrors lib/event-stream-protocol.ts.
 //
@@ -393,9 +393,7 @@ function shut(conn) {
 }
 
 function dial(conn) {
-  const url = new URL(EVENT_SOCKET_PATH, self.location.href);
-  if (conn.sessionId !== null) url.searchParams.set("session", conn.sessionId);
-  const ws = new WebSocket(url.href.replace(/^http/, "ws"));
+  const ws = new WebSocket(new URL(EVENT_SOCKET_PATH, self.location.href).href.replace(/^http/, "ws"));
   conn.ws = ws;
   conn.dialedAt = conn.lastFrameAt = Date.now();
   // Events of a socket this Conn replaced (late frames, its close) are ignored.
@@ -481,7 +479,7 @@ function queueCommand(client, message) {
     client,
     req,
     body,
-    frame: `{"t":"cmd","rid":${JSON.stringify(req)},"advisor":${message.advisor === true},"command":${body}}`,
+    frame: `{"t":"cmd","rid":${JSON.stringify(req)},"session":${JSON.stringify(message.sessionId)},"advisor":${message.advisor === true},"command":${body}}`,
     attempts: 0,
     inFlight: false,
     serverId: null,
