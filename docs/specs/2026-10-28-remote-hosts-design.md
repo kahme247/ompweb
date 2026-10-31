@@ -216,7 +216,7 @@ one socket keeps that order.
 | Code | Sent by | When | Daemon reaction |
 |---|---|---|---|
 | 1000 | main | host revoked | redial, refused 401, diagnosis: stop children, exit 1 |
-| 1001 | main | shutting down | redial with backoff |
+| 1001 | main | shutting down (a real SIGTERM exits in the same tick, so daemons usually see 1006 or ECONNREFUSED instead) | redial with backoff |
 | 1007 | main | a frame with a malformed line or bad envelope (nothing in it is applied) | log, redial, resend |
 | 1008 | main | first frame binary, not JSON, or not a decodable `hello` | log, redial |
 | 1009 | main or Bun | frame over its size limit | log, redial |
@@ -276,7 +276,8 @@ one socket keeps that order.
   downlink pacing above. **Known slow-link limit:** a single multi-MiB line
   that takes longer than `offlineMs` to arrive makes main treat the link as
   dropped and resend it; the line is retried each time, so a link slower than
-  roughly 280 KiB/s cannot deliver an 8 MiB line.
+  roughly 280 KiB/s cannot deliver an 8 MiB line, and a full 16 MiB uplink
+  batch needs more than about 560 KiB/s.
 
 ### Protocol versions and compatibility
 
@@ -460,9 +461,9 @@ asks ("Send a message from a session on <host> to session <id> on
 | No `pong` for 30 s | Host is offline. Its sessions show a banner: "<host> is offline. The run continues there; it reconnects automatically." Sends refused before they leave return 503 `{hostOffline: true, delivery: "refused"}`; the composer keeps the draft and shows a toast. A prompt whose ack the dropped link lost returns `delivery: "unknown"`: it may still run once the host reconnects, so the composer drops the draft and the toast says so. A fresh chat's 503 carries the `sessionId` it spawned when the link dropped after the spawn; the chat adopts it, so a retry starts no second session. |
 | Link returns, children alive | Wrappers reattach; `get_state` reconcile runs; `resync` channels reconcile too. |
 | Daemon restarted, children gone | Synthesized `process_exit` per missing channel, which raises the existing "Run failed" notification. With `autoResumeSessions` on, main restarts sessions that were mid-run and sends `RESUME_PROMPT` (Rules → Reattach). |
-| Second daemon with the same token | Newest link wins; the old daemon receives `replaced` and exits. |
+| Second daemon with the same token | Newest link wins; the old socket is closed 4409 and its daemon exits 0. |
 | Host op over 30 s | 504 naming the host; the sidebar keeps that host's last list. |
-| Version mismatch | 426; host status `needs-upgrade`. |
+| Version mismatch | Close 4426 (hello frame) or 426 (a pre-WebSocket daemon's POST); host status `needs-upgrade`. |
 | `omp` missing on the host | Host status `omp-missing`; new sessions there are disabled. |
 | Host revoked while sessions run | Link closed; its wrappers are destroyed; its sessions leave the list. The omp children on that machine are killed by the daemon when it sees the 401 on reconnect. |
 
@@ -473,7 +474,7 @@ asks ("Send a message from a session on <host> to session <id> on
 - **Unit:**
   - link message encode/decode and size limits
   - token generation, hashing, verification; revoke closes the link
-  - host hub: reattach, `replaced`, offline after missed pongs, missing
+  - host hub: reattach, 4409 replacement, offline after missed pongs, missing
     channel → `process_exit`
   - `RemoteHost` + `RpcProcess` over an in-memory link
   - buffer overflow → `resync` → reconcile

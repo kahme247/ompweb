@@ -335,7 +335,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         return;
       }
       if (blob.byteLength > LINK_LIMITS.blobBytes) throw new HostOpError(413, "result_too_large", "The result is too large for the host link");
-      // The bytes go ahead of their `res` on the same socket. With no link the hub has already failed the op: the `res` goes alone.
+      // The bytes go ahead of their `res` on the same socket. With no link the hub usually has already failed the op and the `res` goes alone; a half-open socket the hub replaced keeps its pending ops, so there a `res` without its bytes fails 502 host_blob_missing.
       linked?.send(encodeBlobFrame(id, blob));
       queue({ type: "res", id, ok: true, blob: { bytes: blob.byteLength } });
     } catch (error) {

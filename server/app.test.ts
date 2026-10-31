@@ -321,7 +321,7 @@ test("Bun's idle timeout spares the event stream and the host link, and only the
   }
 });
 
-test("the host link refuses an unauthenticated upgrade with 401, not the gate's 307, and answers 426 to a request that does not upgrade", async (t) => {
+test("the host link refuses an unauthenticated upgrade with 401 and answers 426 to a request that does not upgrade", async (t) => {
   const created = await fetch(url("/api/hosts"), { method: "POST", body: JSON.stringify({ label: "refusing" }) });
   const bearer = { authorization: `Bearer ${(await created.json()).token}` };
   process.env.OMP_WEB_PASSWORD_HASH = hashPassword("pw", { logN: 12 });
