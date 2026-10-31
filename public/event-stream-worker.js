@@ -7,8 +7,9 @@
 // per host. The server's `browserTransport` setting (every hello and
 // `transport` control frame carry it) picks the connections:
 //   "sse" (default): the ONLY `/api/events` EventSource; POST /api/events subscribes.
-//   "websocket": `/api/events/ws` sockets, one general for the non-session
-//   channels plus one per session; every command frame names its session.
+//   "ws-client" | "ws-session" | "ws-pool": `/api/events/ws` sockets; any socket carries
+//   any channel and any session's commands, and the mode only picks the socket
+//   (socketKeyFor): one for everything, a general one plus one per session, or a pool.
 //
 // Plain script, not bundled: mirrors lib/event-stream-protocol.ts.
 //
@@ -20,7 +21,7 @@
 // Worker -> tab:  { id, type: "open" }
 //                 { id, type: "message", data }   (raw JSON string)
 //                 { id, type: "error", readyState: 0 | 2 }  (EventSource semantics)
-//                 { transport: "sse" | "websocket" }  (on attach once known, and on every change)
+//                 { transport: "sse" | "ws-client" | "ws-session" | "ws-pool" }  (on attach once known, and on every change)
 //                 { cmd: n, http: true }  (SSE mode: the tab POSTs the command itself)
 //                 { cmd: n, status, body, recvAt, repliedAt, attempts, deduped, behindBytes }
 "use strict";
@@ -28,6 +29,7 @@
 const EVENT_STREAM_PATH = "/api/events";
 const MUX_CONTROL_EVENT = "mux";
 const UNKNOWN_CONNECTION_CODE = "unknown_connection";
+const BROWSER_TRANSPORTS = ["sse", "ws-client", "ws-session", "ws-pool"];
 const CONNECTING = 0;
 const OPEN = 1;
 const CLOSED = 2;
@@ -64,12 +66,12 @@ let reconnectDelayMs = RECONNECT_MIN_MS;
 let nextSubscriptionId = 1;
 /** Server subscription id -> subscription. */
 const subscriptions = new Map();
-/** "sse" | "websocket": SSE until a hello or `transport` control frame says otherwise. */
-let mode = "sse";
+/** The server's setting: SSE until a hello or `transport` control frame says otherwise. */
+let state = { transport: "sse", perSocket: 4, maxSockets: 16 };
 /** Every attached tab, told the mode when it changes. */
 const clients = new Set();
 /**
- * WebSocket mode's sockets: "general" | `session:<id>` -> Conn (see connFor).
+ * The WebSocket modes' sockets: socketKeyFor's key -> Conn (see connFor).
  * Empty in SSE mode, so wakes and silence checks have nothing to act on there.
  */
 const conns = new Map();
@@ -152,26 +154,49 @@ function ensureSource() {
 /** A control frame from the EventSource (`conn` = sseConn) or from a socket's Conn. */
 function handleControl(frame, conn = sseConn) {
   if (frame.type === "transport") {
-    setMode(frame.transport);
+    setTransport(frame);
     return;
   }
   if (frame.type === "hello") {
+    // A worker that missed a switch (or just started) converges here, before this
+    // connection counts as open: a stream moving onto it is subscribed once, below.
+    setTransport(frame);
     if (conn === sseConn) {
-      connectionId = frame.connectionId;
       reconnectDelayMs = RECONNECT_MIN_MS;
+      // Switched to sockets: the switch moved every subscription off this EventSource.
+      if (isWebSocketTransport(state.transport)) return;
+      connectionId = frame.connectionId;
     } else {
+      conn.reconnectDelayMs = RECONNECT_MIN_MS;
+      // Retired by the switch (to SSE, or emptied by a move and no key of the new mode).
+      if (conn.retiring) return;
       conn.connectionId = frame.connectionId;
       conn.serverId = frame.serverId;
-      conn.reconnectDelayMs = RECONNECT_MIN_MS;
     }
-    // A worker that missed a switch (or just started) converges here: the
-    // switch moves every subscription instead of subscribing them on this one.
-    if (setMode(frame.transport)) return;
-    for (const subscription of conn === sseConn ? subscriptions.values() : conn.subs) subscribe(subscription);
+    for (const subscription of subscriptions.values()) {
+      if (subscription.conn === conn) subscribe(subscription);
+      else if (subscription.moving === conn) sendSub(conn, subscription);
+    }
     if (conn !== sseConn) sendWaiting(conn);
     return;
   }
   const subscription = subscriptions.get(frame.sub);
+  if (subscription?.moving === conn) {
+    if (frame.type !== "open") {
+      // refused or end: the move is off; the stream stays where it is and moves at the next policy change.
+      cancelMove(subscription);
+      return;
+    }
+    // Make-before-break: the old socket delivered until now; the tab sees the reconnect
+    // it already handles (CONNECTING, then OPEN with the channel's snapshot).
+    const old = subscription.conn;
+    if (old.connectionId) sendFrame(old, { t: "unsub", id: subscription.id });
+    markConnecting([subscription]);
+    subscription.moving = null;
+    subscription.conn = conn;
+    conn.subs.add(subscription);
+    leave(old, subscription);
+  }
   if (!subscription || subscription.conn !== conn) return;
   if (frame.type === "open") {
     subscription.state = OPEN;
@@ -189,27 +214,105 @@ function handleControl(frame, conn = sseConn) {
   }
 }
 
+function isWebSocketTransport(transport) {
+  return transport !== "sse";
+}
+
 /**
- * Moves every subscription to `next`'s connections. Idempotent: anything but
- * a mode (a hello without `transport`) or the current mode (a reconnect's
- * hello) changes nothing. True when it switched.
+ * Applies the server's setting from a hello or `transport` frame. Idempotent: a frame
+ * without a known transport (an older server's hello) or equal to the current state
+ * changes nothing. True when it changed. To or from SSE every subscription switches
+ * at once (spec D5 "Mode switch"); between socket modes they move (rebalance).
  */
-function setMode(next) {
-  if ((next !== "sse" && next !== "websocket") || next === mode) return false;
-  mode = next;
-  for (const client of clients) post(client, { transport: mode });
+function setTransport(next) {
+  const perSocket = Number.isInteger(next.perSocket) ? next.perSocket : state.perSocket;
+  const maxSockets = Number.isInteger(next.maxSockets) ? next.maxSockets : state.maxSockets;
+  if (!BROWSER_TRANSPORTS.includes(next.transport)) return false;
+  if (next.transport === state.transport && perSocket === state.perSocket && maxSockets === state.maxSockets) return false;
+  const previous = state.transport;
+  state = { transport: next.transport, perSocket, maxSockets };
+  if (state.transport !== previous) for (const client of clients) post(client, { transport: state.transport });
+  if (isWebSocketTransport(previous) === isWebSocketTransport(state.transport)) {
+    if (isWebSocketTransport(state.transport)) rebalance();
+    return true;
+  }
   markConnecting(subscriptions.values());
-  if (mode === "websocket") {
+  if (isWebSocketTransport(state.transport)) {
     clearTimeout(reconnectTimer);
     reconnectTimer = undefined;
     closeSource();
     for (const subscription of subscriptions.values()) join(subscription);
   } else {
+    // Before retiring: a socket a move still points at would never count as idle.
+    for (const subscription of subscriptions.values()) {
+      subscription.conn = sseConn;
+      subscription.moving = null;
+    }
     for (const conn of conns.values()) retire(conn);
-    for (const subscription of subscriptions.values()) subscription.conn = sseConn;
     ensureSource();
   }
   return true;
+}
+
+/** The socket for a session's stream and commands, or for every non-session channel (null): spec D2. */
+function socketKeyFor(sessionId) {
+  if (state.transport === "ws-client") return "client";
+  // shortcut: one pool socket (N = 1) for everything; upgrade when the pool sizes itself from the active sessions.
+  if (state.transport === "ws-pool") return "pool:0";
+  return sessionId === null ? "general" : `session:${sessionId}`;
+}
+
+/** Whether the current policy can still produce `key`: an idle socket whose key it cannot closes at once. */
+function keyValid(key) {
+  if (state.transport === "ws-client") return key === "client";
+  if (state.transport === "ws-pool") return key === "pool:0";
+  return state.transport === "ws-session" && (key === "general" || key.startsWith("session:"));
+}
+
+function subscriptionKey(subscription) {
+  const { channel } = subscription;
+  return socketKeyFor(channel.kind === "session" ? channel.sessionId : null);
+}
+
+/**
+ * After a policy change (spec D2 "Moves"): every stream whose key changed moves
+ * make-before-break, every command not yet sent goes to its session's new socket
+ * (a sent one stays until answered; see lost), then sockets left with nothing close
+ * (at once when the policy no longer produces their key) or linger.
+ */
+function rebalance() {
+  for (const subscription of subscriptions.values()) {
+    const key = subscriptionKey(subscription);
+    if (subscription.moving && subscription.moving.key !== key) cancelMove(subscription);
+    if (subscription.conn.key !== key && !subscription.moving) move(subscription, connFor(key));
+  }
+  for (const conn of [...conns.values()]) {
+    for (const command of conn.pending.values()) {
+      const key = socketKeyFor(command.session);
+      if (command.attempts > 0 || key === conn.key) continue;
+      conn.pending.delete(command.req);
+      clearTimeout(command.deadline);
+      const target = connFor(key);
+      target.pending.set(command.req, command);
+      if (target.connectionId) sendCommand(target, command);
+      else waitToSend(target, command);
+    }
+  }
+  for (const conn of [...conns.values()]) idle(conn);
+}
+
+/** Subscribes on `conn`; the current socket keeps delivering until `conn` opens it (handleControl). */
+function move(subscription, conn) {
+  subscription.moving = conn;
+  sendSub(conn, subscription);
+}
+
+function cancelMove(subscription) {
+  const target = subscription.moving;
+  if (!target) return;
+  subscription.moving = null;
+  if (target.connectionId) sendFrame(target, { t: "unsub", id: subscription.id });
+  idle(target);
 }
 
 function requestServer(body) {
@@ -224,8 +327,7 @@ function requestServer(body) {
 function subscribe(subscription) {
   const conn = subscription.conn;
   if (conn !== sseConn) {
-    // Before its hello the socket has nothing to send on; the hello re-sends every subscription.
-    if (conn.connectionId) sendFrame(conn, { t: "sub", id: subscription.id, channel: subscription.channel });
+    sendSub(conn, subscription);
     return;
   }
   if (!connectionId || subscriptions.get(subscription.id) !== subscription) return;
@@ -251,10 +353,16 @@ function subscribe(subscription) {
   });
 }
 
+/** Before its hello a socket has nothing to send on; the hello sends every subscription it carries or takes over. */
+function sendSub(conn, subscription) {
+  if (conn.connectionId) sendFrame(conn, { t: "sub", id: subscription.id, channel: subscription.channel });
+}
+
 function release(subscription) {
   clearTimeout(subscription.retryTimer);
   subscriptions.delete(subscription.id);
   subscription.client.streams.delete(subscription.streamId);
+  cancelMove(subscription);
   if (subscription.conn !== sseConn) leave(subscription.conn, subscription);
   source?.removeEventListener(subscription.id, subscription.listener);
   if (subscriptions.size === 0) {
@@ -275,11 +383,13 @@ function open(client, streamId, channel) {
     state: CONNECTING,
     retryTimer: undefined,
     conn: sseConn,
+    /** The Conn this stream is moving to (make-before-break), or null. */
+    moving: null,
     listener: (event) => post(client, { id: streamId, type: "message", data: event.data }),
   };
   subscriptions.set(subscription.id, subscription);
   client.streams.set(streamId, subscription);
-  if (mode === "websocket") {
+  if (isWebSocketTransport(state.transport)) {
     join(subscription);
     return;
   }
@@ -307,14 +417,12 @@ function dropClient(client) {
   for (const streamId of [...client.streams.keys()]) close(client, streamId);
 }
 
-/** The socket for a session's streams, or the general one (sessionId null); dialed on first use. */
-function connFor(sessionId) {
-  const key = sessionId === null ? "general" : `session:${sessionId}`;
+/** The socket for a socketKeyFor key; dialed on first use. */
+function connFor(key) {
   let conn = conns.get(key);
   if (!conn) {
     conn = {
       key,
-      sessionId,
       ws: null,
       serverId: null,
       connectionId: null,
@@ -340,8 +448,7 @@ function connFor(sessionId) {
 }
 
 function join(subscription) {
-  const { channel } = subscription;
-  const conn = connFor(channel.kind === "session" ? channel.sessionId : null);
+  const conn = connFor(subscriptionKey(subscription));
   conn.subs.add(subscription);
   subscription.conn = conn;
   subscribe(subscription);
@@ -352,15 +459,24 @@ function leave(conn, subscription) {
   idle(conn);
 }
 
-/** Closes a socket with no stream and no command left: the general one now (like the EventSource), a session one after the linger. */
+/** Whether a socket still carries a stream, has one moving onto it, or holds a command. */
+function busy(conn) {
+  if (conn.subs.size > 0 || conn.pending.size > 0) return true;
+  for (const subscription of subscriptions.values()) if (subscription.moving === conn) return true;
+  return false;
+}
+
+/**
+ * Closes a socket left with nothing: at once when it is the general one (like the
+ * EventSource) or the policy no longer produces its key, otherwise after the linger.
+ */
 function idle(conn) {
-  if (conn.subs.size > 0 || conn.pending.size > 0) return;
+  if (busy(conn)) return;
   if (conn.retiring) {
     shut(conn);
-  } else if (conn.sessionId === null) {
+  } else if (conn.key === "general" || !keyValid(conn.key)) {
     retire(conn);
-  } else {
-    clearTimeout(conn.lingerTimer);
+  } else if (conn.lingerTimer === undefined) {
     conn.lingerTimer = setTimeout(() => retire(conn), SESSION_LINGER_MS);
   }
 }
@@ -421,12 +537,20 @@ function redial(conn, delay) {
   ws?.close(FORCED_RECONNECT_CODE);
   for (const command of conn.pending.values()) if (command.inFlight) lost(conn, command);
   if (conn.retiring) return;
-  // A lingering socket has no stream or command to come back for.
-  if (conn.subs.size === 0 && conn.pending.size === 0) {
+  markConnecting(conn.subs);
+  // A stream moving away switches to its new socket now: CONNECTING until that one opens it.
+  for (const subscription of conn.subs) {
+    if (!subscription.moving) continue;
+    conn.subs.delete(subscription);
+    subscription.conn = subscription.moving;
+    subscription.moving = null;
+    subscription.conn.subs.add(subscription);
+  }
+  // A lingering socket (or one left empty above) has nothing to come back for.
+  if (!busy(conn)) {
     retire(conn);
     return;
   }
-  markConnecting(conn.subs);
   clearTimeout(conn.reconnectTimer);
   conn.reconnectTimer = undefined;
   if (delay === 0) {
@@ -466,11 +590,11 @@ function onSocketFrame(conn, text) {
   if (subscription?.conn === conn) subscription.listener({ data });
 }
 
-// Agent commands (spec D5 "Commands", "Resend"): each rides its session's socket, keyed by the tab's request id.
+// Agent commands (spec D5 "Commands", "Resend"): each rides its session's socket (socketKeyFor), keyed by the tab's request id.
 
 function queueCommand(client, message) {
   const { n, req, body } = message;
-  if (mode !== "websocket") {
+  if (!isWebSocketTransport(state.transport)) {
     post(client, { cmd: n, http: true });
     return;
   }
@@ -479,6 +603,7 @@ function queueCommand(client, message) {
     client,
     req,
     body,
+    session: message.sessionId,
     frame: `{"t":"cmd","rid":${JSON.stringify(req)},"session":${JSON.stringify(message.sessionId)},"advisor":${message.advisor === true},"command":${body}}`,
     attempts: 0,
     inFlight: false,
@@ -493,7 +618,7 @@ function queueCommand(client, message) {
     post(client, reply(command, 413, { error: "Agent command is too large", code: "request_too_large" }));
     return;
   }
-  const conn = connFor(message.sessionId);
+  const conn = connFor(socketKeyFor(command.session));
   conn.pending.set(req, command);
   if (conn.connectionId) sendCommand(conn, command);
   else waitToSend(conn, command);
@@ -528,13 +653,15 @@ function unackedBytes(conn) {
   return bytes;
 }
 
-/** After a hello: a lost command goes again only where it cannot run twice, to the server that dedupes its rid or as an idempotent one. */
+/** After a hello: send what waits, a lost command only where it cannot run twice. */
 function sendWaiting(conn) {
-  for (const command of conn.pending.values()) {
-    if (command.inFlight) continue;
-    if (command.attempts === 0 || command.serverId === conn.serverId || idempotent(command)) sendCommand(conn, command);
-    else settle(conn, command, failure(command, TRANSPORT_LOST));
-  }
+  for (const command of conn.pending.values()) if (!command.inFlight) sendIfSafe(conn, command);
+}
+
+/** A first send, or a resend to the server that dedupes its rid or of an idempotent command; anything else may have run: lost. */
+function sendIfSafe(conn, command) {
+  if (command.attempts === 0 || command.serverId === conn.serverId || idempotent(command)) sendCommand(conn, command);
+  else settle(conn, command, failure(command, TRANSPORT_LOST));
 }
 
 function idempotent(command) {
@@ -542,12 +669,21 @@ function idempotent(command) {
   return typeof type === "string" && (type.startsWith("get_") || type === "predict_word");
 }
 
-/** Its socket dropped before the reply: resent at most once, never from a retiring socket. */
+/** Its socket dropped before the reply: resent at most once, on the session's socket of now (a move may have changed it), never from a retiring socket. */
 function lost(conn, command) {
   command.inFlight = false;
   clearTimeout(command.ackTimer);
-  if (conn.retiring || command.attempts > 1) settle(conn, command, failure(command, TRANSPORT_LOST));
-  else waitToSend(conn, command);
+  if (conn.retiring || command.attempts > 1) {
+    settle(conn, command, failure(command, TRANSPORT_LOST));
+    return;
+  }
+  const target = connFor(socketKeyFor(command.session));
+  if (target !== conn) {
+    conn.pending.delete(command.req);
+    target.pending.set(command.req, command);
+  }
+  if (target.connectionId) sendIfSafe(target, command);
+  else waitToSend(target, command);
 }
 
 function onCommandFrame(conn, name, at, frame) {
@@ -622,7 +758,7 @@ function attach(port) {
   const client = { port, streams: new Map() };
   clients.add(client);
   // Tabs assume SSE until told otherwise.
-  if (mode === "websocket") post(client, { transport: mode });
+  if (isWebSocketTransport(state.transport)) post(client, { transport: state.transport });
   port.onmessage = (event) => {
     const message = event.data;
     if (!message || typeof message !== "object") return;
