@@ -310,9 +310,13 @@ function poolRank(sessionId, n) {
   return best;
 }
 
-/** This worker's active sessions (spec D2): a `session` stream (current or moving) or an unanswered command on any socket. */
-function activeSessions() {
+/**
+ * This worker's active sessions (spec D2): a `session` stream (current or moving) or an unanswered command on any
+ * socket; plus `joining`, a session whose first stream or command is being added.
+ */
+function activeSessions(joining) {
   const active = new Set();
+  if (joining !== undefined) active.add(joining);
   for (const subscription of subscriptions.values()) if (subscription.channel.kind === "session") active.add(subscription.channel.sessionId);
   eachSocket((conn) => {
     for (const command of conn.pending.values()) active.add(command.session);
@@ -327,16 +331,14 @@ function poolTarget(active) {
 
 /**
  * Recomputes N in ws-pool after the active sessions changed: grows at once; shrinks only once the target has
- * stayed below N for SESSION_LINGER_MS (a recompute that reaches N cancels it). `joining`: a session about to
- * become active, counted now so its stream or command goes straight to its bucket of the new size.
+ * stayed below N for SESSION_LINGER_MS (a recompute that reaches N cancels it). `joining` is counted now, so its
+ * stream or command goes straight to its bucket of the new size.
  */
 function sizePool(joining) {
   if (state.transport !== "ws-pool") return;
-  const active = activeSessions();
-  if (joining !== undefined) active.add(joining);
-  const target = poolTarget(active);
+  const target = poolTarget(activeSessions(joining));
   if (target > poolSize) {
-    resizePool("grow", target);
+    resizePool("grow", target, joining);
   } else if (target === poolSize) {
     clearTimeout(shrinkTimer);
     shrinkTimer = undefined;
@@ -350,12 +352,12 @@ function sizePool(joining) {
 }
 
 /** N becomes `target` now; every stream and command whose bucket changed moves (rebalance). */
-function resizePool(reason, target) {
+function resizePool(reason, target, joining) {
   const fromPool = poolSize;
   clearTimeout(shrinkTimer);
   shrinkTimer = undefined;
   poolSize = target;
-  return rebalance(reason, fromPool);
+  return rebalance(reason, fromPool, joining);
 }
 
 function subscriptionKey(subscription) {
@@ -369,11 +371,12 @@ function subscriptionKey(subscription) {
  * them was sent (a sent one is answered on its socket, and the session's later ones wait behind it there); then
  * sockets left with nothing close (at once when the policy no longer produces their key) or linger.
  * Returns the change for its `rebalance` sample (spec D6): `fromPool`/`toPool` are N in ws-pool, else null;
- * `fromSockets` the sockets held before, `toSockets` those the policy still produces after; `moved` the sessions
- * whose socket changed; `movedOther` the non-session streams moved.
+ * `fromSockets` the sockets held before, `toSockets` those held after that the policy still produces; `moved` the
+ * sessions whose socket changed; `movedOther` the non-session streams moved. `joining` (a grow's new session) is
+ * active and its socket dialed here, so a grow's sample counts both.
  */
-function rebalance(reason, fromPool) {
-  const fromSockets = conns.size;
+function rebalance(reason, fromPool, joining) {
+  const fromSockets = heldSockets(false);
   const moved = new Set();
   let movedOther = 0;
   for (const subscription of subscriptions.values()) {
@@ -392,11 +395,17 @@ function rebalance(reason, fromPool) {
       moved.add(session);
     }
   }
+  if (joining !== undefined) connFor(socketKeyFor(joining));
   for (const conn of [...conns.values()]) idle(conn);
-  let toSockets = 0;
-  for (const conn of conns.values()) if (keyValid(conn.key)) toSockets += 1;
   const toPool = state.transport === "ws-pool" ? poolSize : null;
-  return { reason, fromPool, toPool, fromSockets, toSockets, active: activeSessions().size, moved: moved.size, movedOther };
+  return { reason, fromPool, toPool, fromSockets, toSockets: heldSockets(true), active: activeSessions(joining).size, moved: moved.size, movedOther };
+}
+
+/** Sockets this worker holds (open or dialing); `policyOnly`: only those whose key the current policy still produces. */
+function heldSockets(policyOnly) {
+  let count = 0;
+  for (const conn of conns.values()) if (conn.ws && (!policyOnly || keyValid(conn.key))) count += 1;
+  return count;
 }
 
 /** Subscribes on `conn`; the current socket keeps delivering until `conn` opens it (handleControl). */
