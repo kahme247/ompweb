@@ -1,4 +1,5 @@
-// Summarizes the browser transport samples (lib/transport-metrics.ts) per transport:
+// Summarizes the browser transport samples (lib/transport-metrics.ts) per transport, and the host link samples per
+// host and direction (`link:<host>:<up|down>`):
 //   bun scripts/transport-metrics.ts [--since 2h|30m|<ISO>] [--until <ISO>] [--client <id>] [--file <path>]
 import { existsSync, readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
@@ -23,7 +24,7 @@ type Sample = Record<string, unknown>;
 const SECTION_ORDER = [
   "action totalMs", "action transportMs", "action upMs", "abort behind upload", "event ms", "reconnect ms", "reconnect fromDropMs",
   "isolation event ms", "isolation action ms", "sockets", "pool size", "clock offsetRtt", "rebalance moved", "rebalance settledMs",
-  "hang", "resend", "deduped", "outcome", "client",
+  "hang", "resend", "deduped", "outcome", "link small ackMs", "link bytesAhead", "client",
 ];
 // Mirrors public/event-stream-worker.js: the downlink logs frames from this size, and the uplink counts as blocking from it.
 const LARGE_FRAME_BYTES = 64 * 1024;
@@ -129,6 +130,17 @@ export function summarize(samples: Sample[], options: SummaryOptions): SummaryRo
   const transportByReq = new Map(samples.filter((s) => s.metric === "action" && typeof s.req === "string").map((s) => [s.req, transportMsOf(s)]));
 
   for (const s of kept) {
+    if (s.metric === "link") {
+      // Head-of-line blocking on a host link: a small line's ack time with less than a large frame ahead, or more.
+      const where = `link:${asString(s.host) ?? "unknown"}:${asString(s.dir) ?? "unknown"}`;
+      const bytes = asNumber(s.bytes);
+      const bytesAhead = asNumber(s.bytesAhead);
+      addValue("link bytesAhead", where, "all", bytesAhead);
+      if (bytes !== undefined && bytes < LARGE_FRAME_BYTES && bytesAhead !== undefined) {
+        addValue("link small ackMs", where, bytesAhead < LARGE_FRAME_BYTES ? "clear" : "behind-large", asNumber(s.ackMs));
+      }
+      continue;
+    }
     const transport = asString(s.transport) ?? "unknown";
     const clientId = asString(s.clientId) ?? "unknown";
     const client = clients.get(clientId) ?? { samples: 0, types: new Set<string>(), ua: "" };

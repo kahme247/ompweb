@@ -234,6 +234,33 @@ test("the client table lists samples, effective types and the user agent", () =>
   assert.equal(c1.key, "c1 4g UA/1");
 });
 
+test("link samples: small lines' ackMs split clear vs behind-large per host and direction, with the bytesAhead spread", () => {
+  const link = (dir: string, bytes: number, bytesAhead: number, ackMs: number, host = "mac") =>
+    ({ metric: "link", dir, host, session: null, bytes, bytesAhead, ackMs, at: 0, serverAt: 1, ua: null });
+  const rows = summarize([
+    link("down", 200, 0, 10),
+    link("down", 200, 65_535, 20),
+    link("down", 200, 65_536, 900),
+    link("down", 200, 6_000_000, 1_500),
+    // A large line itself: only in bytesAhead.
+    link("down", 6_000_000, 0, 2_000),
+    link("up", 300, 7_000_000, 3_000),
+    link("up", 300, 0, 5, "box"),
+  ], {});
+  const stats = (section: string, transport: string, key: string) => {
+    const r = row(rows, section, transport, key);
+    return r && [r.count, r.p50, r.p95, r.max];
+  };
+  assert.deepEqual(stats("link small ackMs", "link:mac:down", "clear"), [2, 10, 20, 20]);
+  assert.deepEqual(stats("link small ackMs", "link:mac:down", "behind-large"), [2, 900, 1_500, 1_500]);
+  assert.deepEqual(stats("link bytesAhead", "link:mac:down", "all"), [5, 65_535, 6_000_000, 6_000_000]);
+  assert.deepEqual(stats("link small ackMs", "link:mac:up", "behind-large"), [1, 3_000, 3_000, 3_000]);
+  assert.equal(row(rows, "link small ackMs", "link:mac:up", "clear"), undefined);
+  assert.deepEqual(stats("link small ackMs", "link:box:up", "clear"), [1, 5, 5, 5]);
+  // Not a browser client.
+  assert.equal(rows.some((r) => r.section === "client"), false);
+});
+
 test("formatReport prints one line per row", () => {
   const rows = summarize(fixture, {});
   const report = formatReport(rows);
