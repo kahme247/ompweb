@@ -7,6 +7,7 @@ import { parse as parseYaml } from "yaml";
 import { existingPathWithinRootsChecker, getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { resolveOmpBin, versionFingerprint, wrapWindowsScript } from "@/lib/omp/omp-cli";
 import { getAgentDir } from "@/lib/omp/paths";
+import { createChildProcessEnvironment } from "@/lib/project-command-env";
 import { isRecord } from "@/lib/type-guards";
 import type { SkillInfo } from "@/lib/api-types";
 import { annotateSkillsWithInstallInfo } from "@/lib/skill-lock";
@@ -322,6 +323,9 @@ async function discoverSkillsViaCli(cwd: string, ompBin: string | null): Promise
       timeout: SKILLS_CLI_TIMEOUT_MS,
       maxBuffer: 16 * 1024 * 1024,
       windowsHide: true,
+      // Otherwise this child inherits the server's full environment,
+      // including omp-web's own secrets.
+      env: createChildProcessEnvironment(),
     });
     const listed = skillsFromCliPayload(JSON.parse(stdout));
     if (listed) return listed;

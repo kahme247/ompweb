@@ -2,6 +2,7 @@ import { execFile } from "child_process";
 import { existsSync, realpathSync, statSync } from "fs";
 import { homedir } from "os";
 import { delimiter, join } from "path";
+import { createChildProcessEnvironment } from "../project-command-env";
 
 /**
  * Locating and probing the user's installed `omp` CLI. omp-web never embeds
@@ -113,7 +114,9 @@ async function probeOmpVersion(): Promise<string | null> {
   try {
     const output = await new Promise<string>((resolve, reject) => {
       const target = wrapWindowsScript(bin, ["--version"]);
-      execFile(target.file, target.args, { timeout: 10_000, windowsHide: true }, (error, stdout) => {
+      // Without an explicit env this probe would inherit the server's full
+      // environment, including omp-web's own secrets, into the child.
+      execFile(target.file, target.args, { timeout: 10_000, windowsHide: true, env: createChildProcessEnvironment() }, (error, stdout) => {
         if (error) reject(error);
         else resolve(stdout);
       });
