@@ -129,11 +129,11 @@ class Transport {
     this.streams.delete(id);
   }
 
-  command(sessionId: string, req: string, body: string, advisor: boolean): Promise<CommandReply | null> {
+  command(sessionId: string, req: string, body: string, advisor: boolean, type: string): Promise<CommandReply | null> {
     return new Promise((resolve) => {
       const n = this.nextId++;
       this.commands.set(n, resolve);
-      this.port.postMessage({ op: "cmd", n, req, sessionId, advisor, body });
+      this.port.postMessage({ op: "cmd", n, req, sessionId, advisor, body, type });
     });
   }
 
@@ -263,7 +263,8 @@ export function recordTransportSample(sample: Record<string, unknown>): void {
 }
 
 /** Sends an agent command over the worker's socket for its session (any `ws-*` transport): null (or a promise of null,
- * when the worker turns out to be in SSE mode) means the caller POSTs it instead. */
-export function sendSessionCommand(sessionId: string, req: string, body: string, advisor: boolean): Promise<CommandReply | null> | null {
-  return transport && isWebSocketTransport(transport.mode) ? transport.command(sessionId, req, body, advisor) : null;
+ * when the worker turns out to be in SSE mode) means the caller POSTs it instead. `type` is the command's, so the
+ * worker never parses a body of up to 8 MB to learn it. */
+export function sendSessionCommand(sessionId: string, req: string, body: string, advisor: boolean, type: string): Promise<CommandReply | null> | null {
+  return transport && isWebSocketTransport(transport.mode) ? transport.command(sessionId, req, body, advisor, type) : null;
 }
