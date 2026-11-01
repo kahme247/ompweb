@@ -21,7 +21,9 @@ from the same code, so bump this together with a rebuilt graph) and run
 that stages anything else, and registers graphify's merge driver for `graph.json`.
 The first commit in a new clone or worktree rebuilds from scratch (about two
 minutes); later ones take about a second. Set `GRAPHIFY_SKIP_HOOK=1` to commit
-without the rebuild. Git runs no pre-commit hook for rebases, cherry-picks or
+without the rebuild. The rebuild reads the working tree, so unstaged code ends up in
+the committed graph: to commit only part of your changes, `git stash --keep-index
+--include-untracked` first. Git runs no pre-commit hook for rebases, cherry-picks or
 merges that complete without conflicts: run `PYTHONHASHSEED=0 graphify update .`
 afterwards and commit the graph.
 
