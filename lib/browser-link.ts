@@ -75,7 +75,7 @@ interface BrowserLink {
   /** The window's size now (see `measure`). */
   window: number;
   /** Bytes acked over `busyMs`, the time lines were in flight (from `busyFrom`, performance.now), and whether the
-   * window held queued lines back meanwhile: what `measure` sizes the window from. */
+   * window or the socket's backpressure held lines back meanwhile: what `measure` sizes the window from. */
   acked: number;
   busyMs: number;
   busyFrom: number;
@@ -288,7 +288,9 @@ function flush(link: BrowserLink): void {
       link.unacked += item.bytes;
     }
     if (sent > 0) return true;
+    // The kernel's buffer is full: the link, not the browser's traffic, sets the ack rate now.
     link.awaitingDrain = true;
+    link.limited = true;
     return false;
   };
   for (const item of link.outbox.pending()) {
@@ -324,9 +326,9 @@ function released(link: BrowserLink, items: Sent[]): number {
   return acked;
 }
 
-/** Each WINDOW_TARGET_MS or more of busy time in which the window held lines back sizes it to WINDOW_TARGET_MS of the
- * ack rate over that time. A stretch it held nothing back changes nothing: that rate is the browser's traffic, not
- * what the link can carry. */
+/** Each WINDOW_TARGET_MS or more of busy time in which the window or backpressure held lines back sizes the window to
+ * WINDOW_TARGET_MS of the ack rate over that time. A stretch nothing was held back changes nothing: that rate is the
+ * browser's traffic, not what the link can carry. */
 function measure(link: BrowserLink, acked: number): void {
   if (acked === 0) return;
   const now = performance.now();
