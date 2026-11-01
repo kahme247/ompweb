@@ -336,15 +336,22 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   results (daemon → hub, before the `res` naming them). Every line except
   `hello`/`welcome`/`ack`/`ping`/`pong` has a per-direction `seq`; `ack {ack}`
   is a message: the first line of every daemon frame, and the hub answers every
-  uplink frame with exactly one. **Pieces and fair sending (v5, design D7):** a
+  uplink frame (v5: binary ones too) with exactly one. **Pieces and fair sending
+  (v5, design D7):** a
   line over `LINK_LIMITS.pieceBytes` (256 KiB) goes as sequenced `part {at, end,
-  data}` messages (`PartJoiner` joins them, one partial line at a time) and a
+  data}` messages (`PartJoiner` joins them, one partial line at a time, ≤ 512
+  parts) and a
   result as binary frames of at most 256 KiB; both sides queue per key (channel,
   or request id) in `LinkSender`, send round-robin and number each line as it
-  goes out, so wire order stays `seq` order and a small message waits about one
-  piece per busy key. The hub sends until Bun's `send` reports backpressure
-  (`drain` resumes); the daemon sends while `bufferedAmount` is under two pieces
-  (polling every 16 ms), not one frame per `ack`. The
+  goes out, so wire order stays `seq` order. **Unacked window:** each side sends
+  queued units only while less than `LINK_LIMITS.unackedBytes` (1 MiB) is
+  unacked, since kernel/proxy buffers hide megabytes from `bufferedAmount` and
+  Bun's `send`: the hub counts outbox lines written (`unacked`, shrunk by the
+  daemon's `ack` line), the daemon counts frames the hub has not answered (one
+  `ack` per frame) and also waits for `bufferedAmount` under two pieces. The
+  daemon acks applied downlink lines within 16 ms (ack-only frame if need be).
+  A small message waits behind at most that window plus about one piece per
+  busy key; control lines skip both. The
   `hello` is the first text frame of a socket. Each `hello.channels`
   entry carries `pending`: the raw stdout lines of that child's
   still-open `host_tool_call`s, `host_uri_request`s and blocking `extension_ui_request`s

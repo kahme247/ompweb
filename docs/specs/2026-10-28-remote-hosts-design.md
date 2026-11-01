@@ -176,12 +176,18 @@ main in order. Each side queues unsent messages per key (the channel, or the
 request id of a `req` / `res`) and sends round-robin, one line, part or result
 piece per key per turn, numbering each as it goes out (so wire order is `seq`
 order); only one key at a time may be part-way through a multi-part line. A
-small message therefore waits for about one piece per busy key, and `ping` /
-`pong` / `ack` skip the queues. Below the WebSocket, main sends while `send`
-does not report backpressure (`drain` resumes it), and the daemon sends frames
-only while the socket's `bufferedAmount` is under two pieces (polled every
-16 ms); it no longer waits for main's `ack` before its next frame. Main
-decodes a whole frame before applying any of it.
+small message therefore waits behind at most the unacked window plus about one
+piece per busy key, and `ping` / `pong` / `ack` skip the queues. **Unacked
+window:** each side sends queued lines and result pieces only while less than
+`LINK_LIMITS.unackedBytes` (1 MiB) is sent and not acknowledged, because kernel,
+proxy and peer buffers below the socket hold megabytes that `bufferedAmount`
+and Bun's `send` do not show. Main counts its outbox lines written to the
+socket and shrinks that on the daemon's `ack`; the daemon counts its frames
+main has not answered (main answers every v5 frame, text or binary, with one
+`ack`) and also sends only while `bufferedAmount` is under two pieces. The
+daemon acks applied downlink messages within 16 ms (an ack-only frame when it
+has nothing else to send), at once past a piece. Main's `send` / `drain`
+pacing stays underneath. Main decodes a whole frame before applying any of it.
 
 The daemon's first text frame on a new socket is its `hello`, alone. It lists
 every live channel, so it can be large; as a frame body it is not subject to
