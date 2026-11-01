@@ -173,7 +173,7 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { id: "touch-targets", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.touchTargets", descKey: "settingsConfig.touchTargetsDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Touch Targets", fallbackDesc: "Adjust interactive target sizes for buttons and toolbar controls.", scope: "UI" },
   { id: "message-during-active-run", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.messageDuringActiveRun", descKey: "settingsConfig.messageDuringActiveRunDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Message during active run", fallbackDesc: "What composer does on submit while agent runs. Steer interrupts; Queue follow-up delivers after finish.", scope: "UI" },
   { id: "word-completion", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.wordCompletion", descKey: "settingsConfig.wordCompletionDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Word completion", fallbackDesc: "Ghost text from omp's word prediction; Tab or → accepts. Auto enables it only with a mouse or trackpad (not on touch keyboards).", scope: "UI" },
-  { id: "browser-transport", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.browserTransport", descKey: "settingsConfig.browserTransportDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Browser connection (experiment)", fallbackDesc: "How browsers receive live updates and send chat commands. Server-sent events + HTTP is the default. The WebSocket options differ in how many connections a browser opens. Every open browser switches within a few seconds.", scope: "UI" },
+  { id: "browser-transport", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.browserTransport", descKey: "settingsConfig.browserTransportDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Browser connection (experiment)", fallbackDesc: "How browsers receive live updates and send chat commands: server-sent events + HTTP (the default), or one WebSocket that picks up where it left off after a dropped connection. Every open browser switches within a few seconds.", scope: "UI" },
   // Tool Safety & Approvals
   { id: "approval-mode", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.approvalMode", descKey: "settingsConfig.approvalModeDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Approval Mode", fallbackDesc: "Choose when OMP asks before tool calls.", scope: "Native OMP" },
   { id: "bash-override", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.bashOverride", descKey: "settingsConfig.bashOverrideDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Bash Override", fallbackDesc: "Override default approval policy specifically for terminal commands.", scope: "Native OMP" },
@@ -352,103 +352,57 @@ function AgentToolsSetting() {
   );
 }
 
-interface BrowserTransportSettings {
-  browserTransport: BrowserTransport;
-  browserTransportPerSocket: number;
-  browserTransportMaxSockets: number;
-}
-
 const BROWSER_TRANSPORT_LABELS: Record<BrowserTransport, string> = {
   sse: "settingsConfig.browserTransportSse",
-  "ws-client": "settingsConfig.browserTransportWsClient",
-  "ws-client-split": "settingsConfig.browserTransportWsClientSplit",
-  "ws-session": "settingsConfig.browserTransportWsSession",
-  "ws-pool": "settingsConfig.browserTransportWsPool",
+  ws: "settingsConfig.browserTransportWs",
 };
 
 /** Server-side omp-web setting (lib/web-settings.ts): every open browser follows a save within a few seconds. */
 function BrowserTransportSetting() {
   const { t } = useI18n();
-  const [settings, setSettings] = useState<BrowserTransportSettings | null>(null);
+  const [transport, setTransport] = useState<BrowserTransport | null>(null);
   useEffect(() => {
     let alive = true;
     fetch("/api/web-settings")
       .then((res) => (res.ok ? res.json() : null))
-      .then((data: Partial<BrowserTransportSettings> | null) => {
-        if (alive) setSettings({ browserTransport: data?.browserTransport ?? "sse", browserTransportPerSocket: data?.browserTransportPerSocket ?? 4, browserTransportMaxSockets: data?.browserTransportMaxSockets ?? 16 });
+      .then((data: { browserTransport?: BrowserTransport } | null) => {
+        if (alive) setTransport(data?.browserTransport ?? "sse");
       })
-      .catch(() => { if (alive) setSettings({ browserTransport: "sse", browserTransportPerSocket: 4, browserTransportMaxSockets: 16 }); });
+      .catch(() => { if (alive) setTransport("sse"); });
     return () => { alive = false; };
   }, []);
-  const change = async (patch: Partial<BrowserTransportSettings>) => {
-    if (!settings) return;
-    const previous = settings;
-    setSettings({ ...settings, ...patch });
+  const change = async (next: BrowserTransport) => {
+    if (!transport) return;
+    const previous = transport;
+    setTransport(next);
     try {
       const res = await fetch("/api/web-settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
+        body: JSON.stringify({ browserTransport: next }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
     } catch (error) {
-      setSettings(previous);
+      setTransport(previous);
       toast.error(t("settingsConfig.browserTransportSaveFailed"), error instanceof Error ? error.message : String(error));
     }
   };
   return (
-    <>
-      <NativeSetting searchId="browser-transport" label={t("settingsConfig.browserTransport")} description={t("settingsConfig.browserTransportDesc")} scope="UI">
-        <select
-          style={nativeSelectStyle}
-          value={settings?.browserTransport ?? "sse"}
-          disabled={settings === null}
-          onChange={(event) => {
-            const next = BROWSER_TRANSPORTS.find((mode) => mode === event.target.value);
-            if (next) void change({ browserTransport: next });
-          }}
-        >
-          {BROWSER_TRANSPORTS.map((mode) => (
-            <option key={mode} value={mode} style={nativeOptionStyle}>{t(BROWSER_TRANSPORT_LABELS[mode])}</option>
-          ))}
-        </select>
-      </NativeSetting>
-      {settings?.browserTransport === "ws-pool" && (
-        <NativeSetting searchId="browser-transport-pool" label={t("settingsConfig.browserTransportWsPool")} description={t("settingsConfig.browserTransportPoolDesc")} scope="UI">
-          {/* The route's ranges (BROWSER_TRANSPORT_RANGES, lib/web-settings.ts, server-only); anything else is not saved. */}
-          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-            <PoolNumberInput label={t("settingsConfig.browserTransportPerSocket")} max={64} value={settings.browserTransportPerSocket} onSave={(value) => void change({ browserTransportPerSocket: value })} />
-            <PoolNumberInput label={t("settingsConfig.browserTransportMaxSockets")} max={16} value={settings.browserTransportMaxSockets} onSave={(value) => void change({ browserTransportMaxSockets: value })} />
-          </div>
-        </NativeSetting>
-      )}
-    </>
-  );
-}
-
-/** Every save resizes each open browser's pool, so a number is saved once, on blur or Enter, never per keystroke. */
-function PoolNumberInput({ label, max, value, onSave }: { label: string; max: number; value: number; onSave: (value: number) => void }) {
-  const [draft, setDraft] = useState(String(value));
-  useEffect(() => setDraft(String(value)), [value]);
-  const commit = () => {
-    const next = Number(draft);
-    if (Number.isInteger(next) && next >= 1 && next <= max && next !== value) onSave(next);
-    else setDraft(String(value));
-  };
-  return (
-    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: "var(--text-sm)", color: "var(--text-muted)" }}>
-      {label}
-      <input
-        type="number"
-        min={1}
-        max={max}
-        value={draft}
-        onChange={(event) => setDraft(event.target.value)}
-        onBlur={commit}
-        onKeyDown={(event) => { if (event.key === "Enter") commit(); }}
-        style={{ width: 64, height: "var(--control-height)", padding: "0 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: "var(--text-sm)" }}
-      />
-    </label>
+    <NativeSetting searchId="browser-transport" label={t("settingsConfig.browserTransport")} description={t("settingsConfig.browserTransportDesc")} scope="UI">
+      <select
+        style={nativeSelectStyle}
+        value={transport ?? "sse"}
+        disabled={transport === null}
+        onChange={(event) => {
+          const next = BROWSER_TRANSPORTS.find((mode) => mode === event.target.value);
+          if (next) void change(next);
+        }}
+      >
+        {BROWSER_TRANSPORTS.map((mode) => (
+          <option key={mode} value={mode} style={nativeOptionStyle}>{t(BROWSER_TRANSPORT_LABELS[mode])}</option>
+        ))}
+      </select>
+    </NativeSetting>
   );
 }
 

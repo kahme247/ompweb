@@ -2,14 +2,7 @@ import { broadcastBrowserTransport } from "@/lib/event-stream-hub";
 import { BROWSER_TRANSPORTS } from "@/lib/event-stream-protocol";
 import { syncInterruptibleSessions } from "@/lib/rpc-manager";
 import { parseAgentEnvText, sanitizeAgentEnvValues, type AgentEnvParseResult } from "@/lib/omp/agent-env";
-import {
-  BROWSER_TRANSPORT_RANGES,
-  browserTransportState,
-  inBrowserTransportRange,
-  loadWebServerSettings,
-  saveWebServerSettings,
-  type WebServerSettings,
-} from "@/lib/web-settings";
+import { browserTransportState, loadWebServerSettings, saveWebServerSettings, type WebServerSettings } from "@/lib/web-settings";
 import { isRecord } from "@/lib/type-guards";
 
 /** GET/PUT /api/web-settings - omp-web's own server-side settings. */
@@ -60,16 +53,6 @@ export async function PUT(req: Request) {
       return Response.json({ error: `browserTransport must be one of ${BROWSER_TRANSPORTS.map((value) => `"${value}"`).join(", ")}`, code: "invalid_settings" }, { status: 400 });
     }
     patch.browserTransport = transport;
-  }
-
-  for (const key of ["browserTransportPerSocket", "browserTransportMaxSockets"] as const) {
-    const value = payload[key];
-    if (value === undefined) continue;
-    if (!inBrowserTransportRange(key, value)) {
-      const [min, max] = BROWSER_TRANSPORT_RANGES[key];
-      return Response.json({ error: `${key} must be an integer from ${min} to ${max}`, code: "invalid_settings" }, { status: 400 });
-    }
-    patch[key] = value;
   }
 
   if (payload.agentEnv !== undefined) {
