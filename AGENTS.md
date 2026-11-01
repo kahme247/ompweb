@@ -377,7 +377,7 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   v4 (the WebSocket link) dropped v3 before any release. v5 (pieces) keeps v4:
   `MIN_LINK_PROTOCOL_VERSION` is 4 and `LINK_PROTOCOL_VERSION` 5 (literal
   one-liners: the deploy script parses them with `sed`); a v4 daemon gets no
-  `part` and whole lines (`link.sender.parts`). Main keeps at least N-1, and
+  `part`, whole lines and no unacked window (`link.sender.parts`). Main keeps at least N-1, and
   dropping one is an explicit decision (a hello
   outside the range gets close 4426 with `{"serverVersion":N}`, a pre-WebSocket
   daemon's POST gets 426; an update-only mode is planned). Upgrade order: web app
