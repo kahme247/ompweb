@@ -1389,6 +1389,7 @@
   "settingsConfig.browserTransportDesc": "ブラウザーがライブ更新を受け取り、チャットのコマンドを送る方法です。既定はサーバー送信イベント + HTTP です。WebSocket の選択肢は、ブラウザーが開く接続の数が異なります。開いているすべてのブラウザーが数秒以内に切り替わります。",
   "settingsConfig.browserTransportSse": "サーバー送信イベント + HTTP（既定）",
   "settingsConfig.browserTransportWsClient": "WebSocket: ブラウザーごとに 1 接続",
+  "settingsConfig.browserTransportWsClientSplit": "WebSocket: セッション共有 + アプリ通信は別接続",
   "settingsConfig.browserTransportWsSession": "WebSocket: 開いているセッションごとに 1 接続",
   "settingsConfig.browserTransportWsPool": "WebSocket: 共有プール",
   "settingsConfig.browserTransportPerSocket": "1 接続あたりのセッション数",

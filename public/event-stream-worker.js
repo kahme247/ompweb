@@ -7,9 +7,9 @@
 // per host. The server's `browserTransport` setting (every hello and
 // `transport` control frame carry it) picks the connections:
 //   "sse" (default): the ONLY `/api/events` EventSource; POST /api/events subscribes.
-//   "ws-client" | "ws-session" | "ws-pool": `/api/events/ws` sockets; any socket carries
+//   "ws-client" | "ws-client-split" | "ws-session" | "ws-pool": `/api/events/ws` sockets; any socket carries
 //   any channel and any session's commands, and the mode only picks the socket
-//   (socketKeyFor): one for everything, a general one plus one per session, or a pool.
+//   (socketKeyFor): one for everything, a general one plus one per session or one shared by all sessions, or a pool.
 //
 // Plain script, not bundled: mirrors lib/event-stream-protocol.ts.
 //
@@ -22,7 +22,7 @@
 // Worker -> tab:  { id, type: "open" }
 //                 { id, type: "message", data }   (raw JSON string)
 //                 { id, type: "error", readyState: 0 | 2 }  (EventSource semantics)
-//                 { transport: "sse" | "ws-client" | "ws-session" | "ws-pool" }  (on attach once known, and on every change)
+//                 { transport: "sse" | "ws-client" | "ws-client-split" | "ws-session" | "ws-pool" }  (on attach once known, and on every change)
 //                 { cmd: n, http: true }  (SSE mode: the tab POSTs the command itself)
 //                 { cmd: n, status, body, recvAt, repliedAt, attempts, deduped, behindBytes,
 //                   socket, behindSameBytes, behindOtherBytes, replyBehindOtherBytes }
@@ -31,7 +31,7 @@
 const EVENT_STREAM_PATH = "/api/events";
 const MUX_CONTROL_EVENT = "mux";
 const UNKNOWN_CONNECTION_CODE = "unknown_connection";
-const BROWSER_TRANSPORTS = ["sse", "ws-client", "ws-session", "ws-pool"];
+const BROWSER_TRANSPORTS = ["sse", "ws-client", "ws-client-split", "ws-session", "ws-pool"];
 const CONNECTING = 0;
 const OPEN = 1;
 const CLOSED = 2;
@@ -321,6 +321,7 @@ function setTransport(next) {
 /** The socket for a session's stream and commands, or for every non-session channel (null): spec D2. */
 function socketKeyFor(sessionId) {
   if (state.transport === "ws-client") return "client";
+  if (state.transport === "ws-client-split") return sessionId === null ? "general" : "client-sessions";
   // Sessions ranked 0 share pool:0 with every non-session channel.
   if (state.transport === "ws-pool") return sessionId === null ? "pool:0" : `pool:${poolRank(sessionId, poolSize)}`;
   return sessionId === null ? "general" : `session:${sessionId}`;
@@ -329,6 +330,8 @@ function socketKeyFor(sessionId) {
 /** Whether the current policy can still produce `key`: an idle socket whose key it cannot closes at once. */
 function keyValid(key) {
   if (state.transport === "ws-client") return key === "client";
+  // Mirrors socketKeyFor: the general socket and the one shared by every session.
+  if (state.transport === "ws-client-split") return key === "general" || key === "client-sessions";
   if (state.transport === "ws-pool") return key.startsWith("pool:") && Number(key.slice(5)) < poolSize;
   return state.transport === "ws-session" && (key === "general" || key.startsWith("session:"));
 }

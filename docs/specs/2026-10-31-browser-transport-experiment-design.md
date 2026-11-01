@@ -11,6 +11,7 @@ An A/B experiment for the browser's live transport. Today one SharedWorker (`pub
 |---|---|---|
 | `sse` (default) | 1 EventSource + HTTP requests | today's baseline |
 | `ws-client` | 1 socket per browser, every channel and session | fewest connections; all sessions share one ordered pipe |
+| `ws-client-split` | 1 general socket + 1 socket shared by every session | sessions share one pipe; app traffic stays off it |
 | `ws-session` | 1 general socket + 1 per active session | full isolation between sessions; most connections |
 | `ws-pool` | 1..`maxSockets` sockets, sized from the active sessions | isolation per bucket at a bounded connection count |
 
@@ -23,10 +24,10 @@ Non-goals: replacing SSE; moving any API besides the agent command path and chan
 ### D1. The switch
 
 - Web settings in `omp-web-settings.json` (`lib/web-settings.ts`):
-  - `browserTransport: "sse" | "ws-client" | "ws-session" | "ws-pool"`, default `"sse"`; any other value reads as `"sse"` (the experiment's earlier `"websocket"` value included: no alias).
+  - `browserTransport: "sse" | "ws-client" | "ws-client-split" | "ws-session" | "ws-pool"`, default `"sse"`; any other value reads as `"sse"` (the experiment's earlier `"websocket"` value included: no alias).
   - `browserTransportPerSocket`: sessions per pool socket, integer 1–64, default 4.
   - `browserTransportMaxSockets`: most pool sockets, integer 1–16, default 16.
-  - Out-of-range or non-integer stored values read as the default. `GET /api/web-settings` returns all three; `PUT` validates each key it carries (400 `invalid_settings`). Settings → Interface & Behavior: a four-option select, plus the two numbers while `ws-pool` is selected. Number inputs keep a local draft; blur or Enter saves only a valid in-range integer that differs from the saved value, otherwise restores it. Typing alone never saves.
+  - Out-of-range or non-integer stored values read as the default. `GET /api/web-settings` returns all three; `PUT` validates each key it carries (400 `invalid_settings`). Settings → Interface & Behavior: a five-option select, plus the two numbers while `ws-pool` is selected. Number inputs keep a local draft; blur or Enter saves only a valid in-range integer that differs from the saved value, otherwise restores it. Typing alone never saves.
 - **Live switch: push.** A `PUT` that changes any of the three calls `broadcastBrowserTransport(state)` (`lib/event-stream-hub.ts`), which writes `{type:"transport", transport, perSocket, maxSockets}` on every open connection, SSE and WebSocket. Every `hello` carries the same three fields, so a worker that was disconnected during a flip, or one that just started, converges on its next hello. A `PUT` that changes nothing broadcasts nothing, and the worker ignores a frame equal to its current state: the switch is idempotent. A worker always starts in SSE mode and switches on its first hello (one wasted SSE handshake per worker start in WebSocket modes; not counted in any metric).
 - **Editing the file** works only after an omp-web restart (the settings are cached in `globalThis`, as today); the HTTP call is the supported flip.
 - **The agent's flip command** (production, port 30185; the trusted header is the one `pr-watcher` uses, verified: its SHA-256 matches `OMP_WEB_TRUSTED_HEADER_SHA256`; a request without `Origin` skips the origin check):
@@ -36,18 +37,19 @@ Non-goals: replacing SSE; moving any API besides the agent command path and chan
     -H "x-omp-web-auth: $(sed -n 's/^OMP_WEB_TRUSTED_HEADER_SECRET=//p' /opt/omp-deployment/pr-watcher.env)" \
     -H 'content-type: application/json' \
     -d '{"browserTransport":"ws-pool","browserTransportPerSocket":4,"browserTransportMaxSockets":16}'
-  # or {"browserTransport":"sse"} / {"browserTransport":"ws-client"} / {"browserTransport":"ws-session"}
+  # or {"browserTransport":"sse"} / {"browserTransport":"ws-client"} / {"browserTransport":"ws-client-split"} / {"browserTransport":"ws-session"}
   ```
 
   The response is the saved settings object; every open browser switches within one round trip.
 
 ### D2. Sockets and their assignment
 
-Every browser socket is **multi-session**: frames already name their subscription, and commands name their session (D4), so any socket can carry any channel and any session's commands. The three WebSocket modes are only a worker-side policy, `socketKeyFor(sessionId | null) → key`, where `null` stands for every non-session channel (`running`, `notifications`, `host-tools`, `hosts`, `file`):
+Every browser socket is **multi-session**: frames already name their subscription, and commands name their session (D4), so any socket can carry any channel and any session's commands. The four WebSocket modes are only a worker-side policy, `socketKeyFor(sessionId | null) → key`, where `null` stands for every non-session channel (`running`, `notifications`, `host-tools`, `hosts`, `file`):
 
 | mode | non-session channels | session `s` (its `session` channel and its commands) |
 |---|---|---|
 | `ws-client` | `client` | `client` |
+| `ws-client-split` | `general` | `client-sessions` (one socket for every session) |
 | `ws-session` | `general` | `session:<s>` |
 | `ws-pool` | `pool:0` | `pool:<rank(s, N)>` |
 
@@ -171,7 +173,7 @@ Summary: `bun scripts/transport-metrics.ts [--since 2h|<ISO>] [--until <ISO>] [-
 ## Acceptance
 
 1. With the settings absent or `browserTransport: "sse"`, every existing test passes; the only edited assertions are the extended `hello`, the settings object with its new keys, the source-text checks that follow the command code into `lib/agent-command.ts`, and the session binding the upgrade no longer has. The browser opens no WebSocket.
-2. Each `PUT` of a transport switches an open browser within 5 s without a reload: `ws-client` holds 1 socket, `ws-session` 1 + one per active session, `ws-pool` between 1 and `maxSockets`; switching between WebSocket modes moves subscriptions make-before-break; `"sse"` switches back.
+2. Each `PUT` of a transport switches an open browser within 5 s without a reload: `ws-client` holds 1 socket, `ws-client-split` 2 (the general socket and one shared by every session), `ws-session` 1 + one per active session, `ws-pool` between 1 and `maxSockets`; switching between WebSocket modes moves subscriptions make-before-break; `"sse"` switches back.
 3. `/api/events/ws` refuses an unauthenticated upgrade (401) and a cross-origin one (403), and outlives Bun's 10 s HTTP idle timeout once upgraded.
 4. A command replayed with a known `(session, rid)` runs once; one socket carries several sessions' commands; a non-idempotent command is never sent to a second server process.
 5. `ws-pool` grows as soon as the active sessions need it, shrinks only after 30 s below, and a resize moves only the sessions whose top-ranked socket changed.

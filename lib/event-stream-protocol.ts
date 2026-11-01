@@ -12,7 +12,7 @@
 // Every frame also carries `id: <server ms at emit>`, read as `lastEventId`.
 // Subscriptions are added/removed with POST /api/events (EventStreamRequest).
 //
-// Stream framing (WebSocket, `browserTransport` "ws-client" | "ws-session" | "ws-pool"; lib/browser-socket.ts):
+// Stream framing (WebSocket, `browserTransport` "ws-client" | "ws-client-split" | "ws-session" | "ws-pool"; lib/browser-socket.ts):
 // sockets at GET /api/events/ws (no query); any socket carries any channel and any session's commands,
 // and the mode only picks which socket the worker uses for what (public/event-stream-worker.js `socketKeyFor`).
 //   server -> client  text "<name> <server ms>\n<json>", split at the first newline:
@@ -44,10 +44,10 @@ export type EventStreamChannel =
   /** Settings → Hosts: the `GET /api/hosts` body on subscribe and after every change. */
   | { kind: "hosts" };
 
-/** How the browser's shared worker reaches `/api/events`: SSE + HTTP POST, or WebSockets assigned per client, per session or from a pool. */
-export type BrowserTransport = "sse" | "ws-client" | "ws-session" | "ws-pool";
+/** How the browser's shared worker reaches `/api/events`: SSE + HTTP POST, or WebSockets assigned per client, per session, to a general socket and one shared by the sessions, or from a pool. */
+export type BrowserTransport = "sse" | "ws-client" | "ws-client-split" | "ws-session" | "ws-pool";
 
-export const BROWSER_TRANSPORTS: readonly BrowserTransport[] = ["sse", "ws-client", "ws-session", "ws-pool"];
+export const BROWSER_TRANSPORTS: readonly BrowserTransport[] = ["sse", "ws-client", "ws-client-split", "ws-session", "ws-pool"];
 
 export function isWebSocketTransport(transport: BrowserTransport): boolean {
   return transport !== "sse";

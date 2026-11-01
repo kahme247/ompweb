@@ -677,7 +677,7 @@ during the wait.
   worker's connections. With `sse` (the default; any unknown value reads as `sse`) everything above holds
   unchanged and the worker opens no WebSocket.
   - **Modes** are only the worker's `socketKeyFor(sessionId | null)` (`null` = every non-session channel):
-    `ws-client` one socket `client`; `ws-session` `general` plus `session:<id>` per active session;
+    `ws-client` one socket `client`; `ws-client-split` `general` plus one `client-sessions` socket for every session; `ws-session` `general` plus `session:<id>` per active session;
     `ws-pool` `pool:0` for the non-session channels and `pool:<rank>` per session. Every socket carries any
     channel and any session's commands. Active sessions: a live `session` stream or an unanswered command
     in this worker. Reconcile polls (`GET /api/agent/[id]`), `POST /api/agent/new`, files, settings and the
@@ -697,7 +697,7 @@ during the wait.
       -H "x-omp-web-auth: $(sed -n 's/^OMP_WEB_TRUSTED_HEADER_SECRET=//p' /opt/omp-deployment/pr-watcher.env)" \
       -H 'content-type: application/json' \
       -d '{"browserTransport":"ws-pool","browserTransportPerSocket":4,"browserTransportMaxSockets":16}'
-    # or {"browserTransport":"sse"} / {"browserTransport":"ws-client"} / {"browserTransport":"ws-session"}
+    # or {"browserTransport":"sse"} / {"browserTransport":"ws-client"} / {"browserTransport":"ws-client-split"} / {"browserTransport":"ws-session"}
     ```
     The answer is the saved settings object.
   - **ws-pool sizing.** N = clamp(ceil(active / perSocket), 1, maxSockets). It grows at once and shrinks

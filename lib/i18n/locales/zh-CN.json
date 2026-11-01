@@ -1389,6 +1389,7 @@
   "settingsConfig.browserTransportDesc": "浏览器接收实时更新和发送聊天命令的方式。默认为服务器发送事件 + HTTP。各 WebSocket 选项的区别在于浏览器打开的连接数量。所有打开的浏览器会在几秒内切换。",
   "settingsConfig.browserTransportSse": "服务器发送事件 + HTTP（默认）",
   "settingsConfig.browserTransportWsClient": "WebSocket：每个浏览器一个连接",
+  "settingsConfig.browserTransportWsClientSplit": "WebSocket：会话共享一个连接，应用通信另用一个连接",
   "settingsConfig.browserTransportWsSession": "WebSocket：每个打开的会话一个连接",
   "settingsConfig.browserTransportWsPool": "WebSocket：共享连接池",
   "settingsConfig.browserTransportPerSocket": "每个连接的会话数",
