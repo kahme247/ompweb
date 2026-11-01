@@ -400,12 +400,11 @@ const CommittedTranscript = memo(function CommittedTranscript({
   // Expanded-by-default thinking, and tool calls when asked, stay out of the
   // fold: folding on commit would hide the block the preference just opened.
   const rows = useMemo<TranscriptRow[]>(
-    () => planTranscriptRows(messages, { hideThinking: hideThinkingBlock, showThinking: expandThinkingByDefault, showToolCalls: showToolCallsUnfolded }),
-    [messages, hideThinkingBlock, expandThinkingByDefault, showToolCallsUnfolded],
+    () => planTranscriptRows(messages, { hideThinking: hideThinkingBlock, showThinking: expandThinkingByDefault, showToolCalls: showToolCallsUnfolded, neverFold: neverFoldActivity }),
+    [messages, hideThinkingBlock, expandThinkingByDefault, showToolCallsUnfolded, neverFoldActivity],
   );
   const rendersFlat = (row: TranscriptRow): boolean => {
     if (row.kind !== "group") return false;
-    if (neverFoldActivity) return true;
     // With "Hide tool activity while working" on (the default) the running turn
     // folds like a finished one; off restores the flat tail.
     if (hideToolActivity) return false;
@@ -444,8 +443,8 @@ const CommittedTranscript = memo(function CommittedTranscript({
     const { userIndex: userIdx, endIndex: endIdx, segments } = row;
 
     if (rendersFlat(row)) {
-      // Flat: "Never fold tool activity", or the live tail, which stays flat so
-      // streaming updates and tool progress stay in view and folds once the run ends.
+      // Live tail: stays flat so streaming updates and tool progress stay in
+      // view, and folds once the run ends.
       for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
         rendered.push(renderMessage(renderIdx));
       }

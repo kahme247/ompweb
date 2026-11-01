@@ -610,8 +610,9 @@ wait for that commit:
   treat those blocks like text, so they never fold. A text segment can
   therefore carry thinking, and `ChatWindow` passes its `sourceBlockIndices`
   so deferred thinking loads the right block. "Never fold tool activity"
-  (`omp-web:never-fold-activity`) renders every group flat, overriding "Hide
-  tool activity while working".
+  (`omp-web:never-fold-activity`, planner option `neverFold`) plans every turn
+  as standalone message rows, so the render window still counts messages and a
+  long turn never mounts at once; it overrides "Hide tool activity while working".
 - `tool_execution_update` is coalesced per tool call at display rate in
   `lib/message-update-coalescer.ts` (chatty commands emit ~10-100+ frames/s),
   like `message_update` (which carries omp deltas, see "Streaming message

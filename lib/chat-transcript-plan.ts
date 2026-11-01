@@ -38,6 +38,8 @@ export interface PlanOptions {
   showThinking?: boolean;
   /** "Show tool calls outside Process details": tool call rows stay visible like text. */
   showToolCalls?: boolean;
+  /** "Never fold tool activity": every turn becomes standalone rows, with no Process details. */
+  neverFold?: boolean;
 }
 
 // A user message normally anchors a turn. When compaction fires mid-turn, pi
@@ -253,7 +255,8 @@ export function planTranscriptRows(messages: AgentMessage[], options: PlanOption
     const userIdx = idx;
     let endIdx = userIdx + 1;
     while (endIdx < messages.length && !isGroupAnchor(messages[endIdx])) endIdx += 1;
-    const segments = planTurnSegments(messages, userIdx, endIdx, options);
+    // "Never fold" plans standalone rows, so the render window counts every message.
+    const segments = options.neverFold ? [] : planTurnSegments(messages, userIdx, endIdx, options);
     if (segments.some((segment) => segment.kind === "activity")) {
       rows.push({ kind: "group", userIndex: userIdx, endIndex: endIdx, segments });
     } else {
