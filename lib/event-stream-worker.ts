@@ -32,6 +32,8 @@ import {
   EVENT_STREAM_PATH,
   MUX_CONTROL_EVENT,
   UNKNOWN_CONNECTION_CODE,
+  commandKey,
+  isIdempotentCommand,
   type BrowserTransport,
   type EventStreamChannel,
 } from "./event-stream-protocol";
@@ -435,7 +437,7 @@ function applyMode(): void {
   }
   for (const command of [...pending.values()]) {
     if (command.sent) continue;
-    link.sender.drop(`cmd:${command.session}`);
+    link.sender.drop(commandKey(command.session, command.type));
     settle(command, { cmd: command.n, http: true });
   }
   ensureSource();
@@ -654,15 +656,16 @@ function scheduleDial(delay: number): void {
 
 /**
  * The socket closed before it opened: ask the route with a plain GET why (the host daemon's diagnosis). Offline, signed
- * out or restarting: the link comes back once that passes. Any other answer reached the server but not the upgrade (a
- * proxy that drops Upgrade answers 426, a server without the route 404): SSE for FALLBACK_MS.
+ * out, restarting, or a proxy whose upstream is down (502, 504): the link comes back once that passes. Any other answer
+ * reached the server but not the upgrade (a proxy that drops Upgrade answers 426, a server without the route 404): SSE
+ * for FALLBACK_MS.
  */
 function refused(): void {
   if (!giveUp("close")) return;
   link.diagnosing = true;
   fetch(BROWSER_LINK_PATH, { cache: "no-store" }).then((response) => response.status, () => 0).then((status) => {
     link.diagnosing = false;
-    if (status === 0 || status === 401 || status === 503) scheduleDial(backoff());
+    if ([0, 401, 502, 503, 504].includes(status)) scheduleDial(backoff());
     else fallBack();
   });
 }
@@ -728,9 +731,9 @@ function flushLink(): void {
     const command = unit.done && unit.item.rid !== undefined ? pending.get(unit.item.rid) : undefined;
     if (command) {
       command.sent = true;
-      command.attempts += 1;
       command.seq = unit.seq;
-      command.sentAt = Date.now();
+      // The first send's time: the server's dedupe forgets a command COMMAND_DEDUPE_MS after its first run.
+      if (command.attempts++ === 0) command.sentAt = Date.now();
     }
   }
   if (ws.bufferedAmount >= SEND_BUFFER_BYTES) link.flushTimer = setTimeout(flushLink, LINK_LIMITS.flushMs);
@@ -854,7 +857,7 @@ function onWelcome(welcome: DownHead): void {
     command.deadline = undefined;
     if (command.queued) continue;
     if (!command.sent) sendCommand(command);
-    else if (idempotent(command) || (sameServer && now - command.sentAt < COMMAND_DEDUPE_MS)) sendCommand(command);
+    else if (isIdempotentCommand(command.type) || (sameServer && now - command.sentAt < COMMAND_DEDUPE_MS)) sendCommand(command);
     else settle(command, failure(command, TRANSPORT_LOST));
   }
   const reconnect = linkConn.reconnect;
@@ -952,7 +955,7 @@ function queueCommand(client: Client, message: Record<string, unknown>): void {
 function sendCommand(command: Command): void {
   command.queued = true;
   queueUp(
-    `cmd:${command.session}`,
+    commandKey(command.session, command.type),
     `{"type":"cmd","rid":${JSON.stringify(command.rid)},"session":${JSON.stringify(command.session)},"advisor":${command.advisor},"command":${command.body}}`,
     command.rid,
   );
@@ -961,10 +964,6 @@ function sendCommand(command: Command): void {
 /** No link to send on: unavailable if none comes within SEND_DEADLINE_MS (the command never left the browser). */
 function waitToSend(command: Command): void {
   command.deadline = setTimeout(() => settle(command, failure(command, TRANSPORT_UNAVAILABLE)), SEND_DEADLINE_MS);
-}
-
-function idempotent(command: Command): boolean {
-  return command.type.startsWith("get_") || command.type === "predict_word";
 }
 
 function reply(command: Command, status: number, body: unknown, recvAt: number | null = null, repliedAt: number | null = null, deduped = false, replyBehindOtherBytes: number | null = null) {
