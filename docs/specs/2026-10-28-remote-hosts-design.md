@@ -344,8 +344,8 @@ the one socket keeps that order.
   understands (to a v4 daemon: no `part`, every line whole, and no unacked
   window, since it acks only inside its next uplink frame).
   A daemon on a dropped version gets 426
-  (a POST) or close 4426 (a hello frame); an update-only mode for it is
-  planned, separately.
+  (a POST) or close 4426 (a hello frame). Dropping versions ends with the
+  decision below.
 - **Upgrade order: web app first, then hosts.** Main supports older daemons; a
   daemon is not required to support a newer main, and one newer than main gets
   close 4426.
@@ -363,6 +363,16 @@ the one socket keeps that order.
   dialing a v4 server gets close 4426 with `{"serverVersion":4}`, logs "this
   host's ompweb is newer than the server's: update ompweb on the server" and
   exits 1; update the server first.
+- **Decided: backward compatibility becomes enforced once the WebSocket
+  experiments end.** Until then (the browser transport experiment and the
+  host-link measurements), versions may still be dropped as above. Call N the
+  first link protocol version released after them. From N on the guarantees
+  are enforced, so the web app can always update an old host from Settings →
+  Hosts: the handshake (`hello`/`welcome` and the version close codes), the
+  version report, and an update op form a fixed core that every later web app
+  keeps working with every daemon on N or newer. `MIN_LINK_PROTOCOL_VERSION`
+  never goes above N. This replaces the update-only mode that was planned
+  for dropped versions.
 
 ## Host ops (this sub-project)
 

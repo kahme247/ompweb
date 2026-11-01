@@ -1300,6 +1300,8 @@
   "agentSession.transportLostMaybeSent": "发送时连接中断，消息可能已送达。再次发送前请先查看对话。",
   "hostsConfig.lastSeen": "最近在线 {time}",
   "hostsConfig.neverSeen": "从未连接",
+  "hostsConfig.protocol": "链接协议 v{version}",
+  "hostsConfig.serverProtocol": "此 Web 应用使用链接协议 v{version}。",
   "hostsConfig.allowAgentStart": "智能体可在此无需确认即启动会话",
   "hostsConfig.allowAgentStartAria": "智能体可在 {name} 上无需确认即启动会话",
   "hostsConfig.rename": "重命名",

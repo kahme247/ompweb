@@ -431,8 +431,9 @@ host (KDE Plasma, and most Wayland/X11 desktops).
 
 One ompweb can start and watch omp sessions on other machines. Each machine keeps
 its own `omp` install, `~/.omp/agent` directory, sessions, and credentials;
-ompweb only routes. The remote machine needs Node 24 and `omp` installed, and must
-be able to reach the ompweb server over HTTP(S). It dials out, so it can sit behind NAT.
+ompweb only routes. The remote machine needs `omp` and either Node 24 (for `npx`) or
+the [single binary](#single-binary), and must be able to reach the ompweb server over
+HTTP(S). It dials out, so it can sit behind NAT.
 
 1. On the ompweb server, open **Settings → Hosts → Add host**, enter a name, and copy
    the token. The token is shown once; only its hash is stored.
@@ -481,9 +482,8 @@ Notes:
 - **Service helpers:** `ompweb systemd install` and `ompweb launchd install` set up
   this machine's own daemon next to its web server (see
   [Two services](#two-services-the-web-server-and-the-local-daemon)). On the other
-  machine you only need the daemon, and the helpers would also start a web server
-  there, so run `ompweb host` under a supervisor of your choice that restarts it
-  after failure to keep the link up across logouts or reboots.
+  machine you only need the daemon, so use
+  [Keep a host running as a service](#keep-a-host-running-as-a-service) instead.
   The daemon exits with code `1` when the server revokes its token or when its
   link protocol version is outside the range the server supports (older than the
   server's oldest supported version, or newer than the server: update ompweb on
@@ -506,6 +506,101 @@ Notes:
   confirmation each time unless **Agents can start sessions here without asking**
   is switched on for it in Settings → Hosts. An agent running on a remote host
   always asks before it starts or messages a session on this machine.
+
+### Keep a host running as a service
+
+These run the [single binary](#single-binary) in host mode. On Linux and Windows a
+service keeps the link up across logouts and reboots; on macOS a script keeps it
+running in a terminal (see below for why). Unpack the release for the machine first,
+then save the link once with `ompweb host login --url …` as in step 2 (with the
+binary's path in place of `npx @kahme247/ompweb@latest`). Each setup starts
+`ompweb host` again 10 seconds after it exits. Add `--allow-http` after `host` if
+the server URL is plain `http://`, and set `PI_CODING_AGENT_DIR` in the service too
+if you saved the link with it set. A machine links to one server: do not also run an
+ompweb web server on it, which writes the same link file for its own daemon. To
+update, stop the service, replace the release directory, and start it again. After
+revoking a host, stop and remove its service: it otherwise keeps retrying.
+
+**Linux (systemd user service).** Create `~/.config/systemd/user/ompweb-host.service`
+(adjust the release path, and add omp's directory to `PATH` or set `OMP_WEB_OMP_BIN`):
+
+```ini
+[Unit]
+Description=ompweb host
+StartLimitIntervalSec=0
+
+[Service]
+WorkingDirectory=%h
+ExecStart=%h/.local/share/ompweb-linux-x64/ompweb host
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now ompweb-host
+loginctl enable-linger "$USER"            # keep it running while you are logged out
+journalctl --user -u ompweb-host -f       # logs
+```
+
+**macOS (from a terminal).** No launchd job can run a host that omp sessions can
+fully use. A LaunchAgent cannot reach LAN addresses (`connect` fails with "No route
+to host"): macOS Local Network privacy cannot ask for or remember a grant for the
+ad-hoc signed `ompweb` binary, which has no app bundle. A LaunchDaemon cannot reach
+the LAN either, and it has no login keychain or SSH agent, which sessions need for
+SSH keys and commit signing. A process started from a terminal inherits the
+terminal's permissions, so run the host there, in tmux so it outlives the window.
+Save this as `~/.local/bin/ompweb-host-run` (adjust `DIR`) and make it executable
+with `chmod +x`:
+
+```sh
+#!/bin/sh
+# Keeps `ompweb host` running in this terminal, which lends it its keychain, SSH agent
+# and Local Network permission. Restarts it 10 s after a crash; stops when the token is
+# revoked or the link protocol is unsupported (exit 1), or a newer link replaced it (0).
+DIR=${OMPWEB_DIR:-$HOME/.local/share/ompweb-darwin-arm64}
+# A tmux started over SSH sees the login keychain locked: unlock it while a terminal can ask.
+security show-keychain-info login.keychain-db 2>/dev/null || security unlock-keychain login.keychain-db || exit 1
+while :; do
+	(cd "$DIR" && exec ./ompweb host)
+	rc=$?
+	case $rc in 0 | 1) exit "$rc" ;; esac
+	echo "ompweb host exited $rc; restarting in 10 s" >&2
+	sleep 10
+done
+```
+
+Run `ompweb-host-run` in a tmux window; Ctrl-C stops the daemon and its sessions.
+Start it again after a reboot or logout. If the login keychain locks itself after
+inactivity or on sleep, SSH key passphrases and signing fail until you restart it.
+
+**Windows (scheduled task at logon).** In PowerShell, with `$dir` set to the
+unpacked release:
+
+```powershell
+$dir = "$env:LOCALAPPDATA\ompweb-windows-x64"
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.omp\agent\logs" | Out-Null
+Set-Content "$dir\ompweb-host.ps1" @'
+# Starts `ompweb host` again 10 s after it exits; output goes to ~\.omp\agent\logs\ompweb-host.log.
+$log = "$env:USERPROFILE\.omp\agent\logs\ompweb-host.log"
+while ($true) {
+  & "$PSScriptRoot\ompweb.exe" host 2>&1 | ForEach-Object { "$_" } | Out-File -Append -Encoding utf8 $log
+  Start-Sleep 10
+}
+'@
+Register-ScheduledTask -TaskName ompweb-host -Force `
+  -Trigger (New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME") `
+  -Action (New-ScheduledTaskAction -Execute powershell.exe -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$dir\ompweb-host.ps1`"") `
+  -Settings (New-ScheduledTaskSettingsSet -ExecutionTimeLimit 0 -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries)
+Start-ScheduledTask ompweb-host
+```
+
+Stop it with `Stop-ScheduledTask ompweb-host; Stop-Process -Name ompweb`, and remove
+it with `Unregister-ScheduledTask ompweb-host`. The log is not rotated.
 
 ## Features
 
