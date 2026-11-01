@@ -160,7 +160,8 @@ export function createSessionCatchUp(options: {
                 if (fields.message) messageSequence = sequence;
                 if (fields.lifecycle) lifecycleSequence = sequence;
                 stream = { ...stream, sequence: Math.max(stream.sequence, sequence) };
-                if (fields.message || fields.lifecycle || fields.tools) options.live(page.live, fields);
+                // Even with no field to apply, the snapshot can complete deltas that arrived without their message.
+                options.live(page.live, fields);
               }
             }
             break;

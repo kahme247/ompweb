@@ -472,6 +472,7 @@ export class AgentSessionWrapper {
       isCompacting: this.compacting,
       responseObserved: this.responseObserved,
       streamingMessage: this.streamingMessage ? { ...withStreamedArguments(this.streamingMessage) } : null,
+      streamingMessageId: this.streamingMessageId,
       toolEvents: Array.from(this.liveToolEvents.values(), (event) => ({ ...event })),
     };
   }
