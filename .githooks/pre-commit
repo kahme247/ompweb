@@ -1,0 +1,8 @@
+#!/bin/sh
+# Enable once per clone: sh scripts/setup-hooks.sh
+
+# graphify: rebuild graphify-out/graph.json and commit it with the code that changed it.
+if [ "${GRAPHIFY_SKIP_HOOK:-0}" != 1 ] && [ -f graphify-out/graph.json ] &&
+	! git diff --cached --quiet -- . ':!graphify-out/graph.json'; then
+	{ PYTHONHASHSEED=0 graphify update . && git add graphify-out/graph.json; } || exit 1
+fi
