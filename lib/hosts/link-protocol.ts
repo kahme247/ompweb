@@ -2,10 +2,11 @@
 // Pure: no I/O and no Next or `@/` imports, so both sides share it.
 import type { SessionOps } from "./session-ops";
 
-/** 4: the link is one WebSocket: text frames carry the messages, binary frames large results, `ack` messages replace
- * the ack header and the POST answer; `replaced` and `welcome.nonce` are gone.
+/** 5: a line over `pieceBytes` goes as `part` messages and a large result as several binary frames, both sent fair
+ * across channels (docs/specs/2026-10-31-websocket-link-design.md, D7). 4: the link is one WebSocket: text frames carry
+ * the messages, binary frames large results, `ack` messages replace the ack header and the POST answer.
  * Rules for changing it: docs/specs/2026-10-28-remote-hosts-design.md, "Protocol versions and compatibility". */
-export const LINK_PROTOCOL_VERSION = 4;
+export const LINK_PROTOCOL_VERSION = 5;
 /** The oldest daemon protocol the server still links (older ones get close 4426). Dropping one is an explicit decision. */
 export const MIN_LINK_PROTOCOL_VERSION = 4;
 
@@ -17,7 +18,8 @@ export const LINK_LIMITS = {
   // (~10.7 MiB), and the rest is room for the streamed reply.
   channelBufferBytes: 32 * 1024 * 1024,
   flushMs: 16,
-  flushBytes: 256 * 1024,
+  /** Largest `part` line and binary frame payload (v5); an uplink text frame batches lines up to it. */
+  pieceBytes: 256 * 1024,
   uplinkBytes: 16 * 1024 * 1024,
   blobBytes: 64 * 1024 * 1024,
   inlineResultBytes: 1024 * 1024,
@@ -70,6 +72,10 @@ export class HostOpError extends Error {
   }
 }
 
+/** v5: one slice of a sequenced line longer than `pieceBytes` (`LinkSender` cuts it, `PartJoiner` joins it): `data`
+ * starts at UTF-16 offset `at` of the line; `end` marks the last slice. */
+export type Part = { type: "part"; seq: number; at: number; end: boolean; data: string };
+
 export type DownMessage =
   | { type: "welcome"; v: number; hostId: string }
   | { type: "stdin"; seq: number; ch: string; line: string }
@@ -79,7 +85,8 @@ export type DownMessage =
   | { type: "ping" }
   | { type: "pong" }
   /** Unsequenced: the highest uplink `seq` the hub applied. */
-  | { type: "ack"; ack: number };
+  | { type: "ack"; ack: number }
+  | Part;
 
 /** `sessionId`: the session the child last reported (null before it named one); `cwd`: where the
  * daemon spawned it; `pending`: raw stdout lines of its open blocking requests, or null when over `pendingBytes`. */
@@ -112,7 +119,8 @@ export type UpMessage =
   | { type: "ping" }
   | { type: "pong" }
   /** Unsequenced: the highest downlink `seq` the daemon applied. */
-  | { type: "ack"; ack: number };
+  | { type: "ack"; ack: number }
+  | Part;
 
 /** A message this side cannot decode by type (a newer peer's), or one that only the other side may send
  * (`wrongDirection`): receivers skip it, but ack its `seq` (null when it carries none) so it is never resent. */
@@ -135,6 +143,22 @@ export function encodeLine(message: DownMessage | UpMessage): string {
     throw new LinkLimitError(`link line exceeds ${LINK_LIMITS.maxLineBytes} bytes`);
   }
   return json + "\n";
+}
+
+/** A sequenced message before the link numbers it. */
+export type Unsequenced<M> = M extends { seq: number } ? Omit<M, "seq"> : never;
+
+const SEQ_TAIL = `${Number.MAX_SAFE_INTEGER}}\n`;
+
+/** A sequenced message's line before its `seq` is known: `LinkSender` numbers it as it goes out (`withSeq`). Encoded
+ * with the widest seq, so the real one never takes it past maxLineBytes. Throws LinkLimitError. */
+export function encodeQueued(body: Unsequenced<DownMessage | UpMessage>): string {
+  return encodeLine({ ...body, seq: Number.MAX_SAFE_INTEGER } as DownMessage | UpMessage);
+}
+
+/** `line` from encodeQueued with `seq` filled in (it is the last key). */
+export function withSeq(line: string, seq: number): string {
+  return `${line.slice(0, -SEQ_TAIL.length)}${seq}}\n`;
 }
 
 type Obj = Record<string, unknown>;
@@ -261,9 +285,15 @@ export function decodeDown(line: string): DownMessage | UnknownMessage {
       return { type: "pong" };
     case "ack":
       return { type: "ack", ack: seqNum(o, "ack") };
+    case "part":
+      return part(o);
     default:
       return unknownMessage(o, UP_TYPES);
   }
+}
+
+function part(o: Obj): Part {
+  return { type: "part", seq: seqNum(o, "seq"), at: seqNum(o, "at"), end: bool(o, "end"), data: str(o, "data") };
 }
 
 function channels(o: Obj): HelloChannel[] {
@@ -338,6 +368,8 @@ export function decodeUp(line: string): UpMessage | UnknownMessage {
       return { type: "pong" };
     case "ack":
       return { type: "ack", ack: seqNum(o, "ack") };
+    case "part":
+      return part(o);
     default:
       return unknownMessage(o, DOWN_TYPES);
   }
@@ -401,5 +433,114 @@ export class Outbox<M extends { seq: number }> {
 
   drop(predicate: (m: M) => boolean): void {
     this.items = this.items.filter((m) => !predicate(m));
+  }
+}
+
+/** What `LinkSender` queues under a key: a line from `encodeQueued` (`size`: its UTF-8 bytes), or a result's bytes. */
+export type SendItem = { line: string; size: number } | { id: string; blob: Uint8Array };
+
+/** One unit from `LinkSender.next`; `done` when it was the last of `item`. A line (a whole message or a `part`) carries
+ * the `seq` it was numbered with; a piece of result bytes is an unnumbered binary `frame`. */
+export type SendUnit<T extends SendItem> = { key: string; item: T; done: boolean } & ({ seq: number; line: string } | { frame: Uint8Array<ArrayBuffer> });
+
+/** The `part` line for `line` from `at`: as much of it as fits in pieceBytes once encoded. */
+function cutPart(line: string, at: number, seq: number): { line: string; at: number } {
+  for (let n = Math.min(line.length - at, LINK_LIMITS.pieceBytes); ;) {
+    const part: Part = { type: "part", seq, at, end: at + n >= line.length, data: line.slice(at, at + n) };
+    const encoded = `${JSON.stringify(part)}\n`;
+    const size = encoder.encode(encoded).byteLength;
+    if (size <= LINK_LIMITS.pieceBytes || n === 1) return { line: encoded, at: at + n };
+    n = Math.max(1, Math.floor((n * LINK_LIMITS.pieceBytes) / size) - 1);
+  }
+}
+
+/** The sending side of one link direction (spec D7): FIFO per key, keys served round-robin (Map order: a key that
+ * sent goes to the back), each turn one whole line, one `part` or one result piece. Lines are numbered as they go
+ * out, so wire order is `seq` order. One key at a time may be part-way through a multi-part line, so the receiver
+ * holds at most one partial line. `parts`: false for a v4 peer, which gets every line whole. */
+export class LinkSender<T extends SendItem> {
+  parts: boolean;
+  /** `at`: how far the item has gone out (UTF-16 units of `line`, bytes of `blob`); `line`: set while it goes in parts. */
+  private readonly queues = new Map<string, { item: T; at: number; line: string | null }[]>();
+  private active: string | null = null;
+
+  constructor(parts: boolean) {
+    this.parts = parts;
+  }
+
+  push(key: string, item: T): void {
+    const entry = { item, at: 0, line: null };
+    const queue = this.queues.get(key);
+    if (queue) queue.push(entry);
+    else this.queues.set(key, [entry]);
+  }
+
+  /** Forget what `key` queued, a line part-way out included: the receiver drops that partial line. */
+  drop(key: string): void {
+    this.queues.delete(key);
+    if (this.active === key) this.active = null;
+  }
+
+  get empty(): boolean {
+    return this.queues.size === 0;
+  }
+
+  /** The next unit, or null when nothing is queued; `nextSeq` numbers a line. */
+  next(nextSeq: () => number): SendUnit<T> | null {
+    for (const [key, queue] of this.queues) {
+      const head = queue[0];
+      const { item } = head;
+      let unit: SendUnit<T>;
+      if ("blob" in item) {
+        const piece = item.blob.subarray(head.at, head.at + LINK_LIMITS.pieceBytes);
+        head.at += piece.byteLength;
+        unit = { key, item, done: head.at >= item.blob.byteLength, frame: encodeBlobFrame(item.id, piece) };
+      } else if (!this.parts || item.size <= LINK_LIMITS.pieceBytes) {
+        const seq = nextSeq();
+        unit = { key, item, done: true, seq, line: withSeq(item.line, seq) };
+      } else {
+        if (this.active !== null && this.active !== key) continue;
+        this.active = key;
+        // The joined line is applied without a dedup of its own (its parts had one), so its seq is 0.
+        head.line ??= withSeq(item.line, 0);
+        const seq = nextSeq();
+        const cut = cutPart(head.line, head.at, seq);
+        head.at = cut.at;
+        const done = head.at >= head.line.length;
+        if (done) this.active = null;
+        unit = { key, item, done, seq, line: cut.line };
+      }
+      if (unit.done) queue.shift();
+      this.queues.delete(key);
+      if (queue.length > 0) this.queues.set(key, queue);
+      return unit;
+    }
+    return null;
+  }
+}
+
+/** Joins `part`s back into their line (spec D7), one line at a time as `LinkSender` sends them. */
+export class PartJoiner {
+  private chunks: string[] | null = null;
+  private at = 0;
+
+  /** The whole line once `part` ends it, else null. A part at 0 starts a new line, dropping a partial one; a part that
+   * does not continue the line in progress (its sender dropped the rest), or takes it past maxLineBytes, is dropped
+   * with that line. */
+  add(part: Pick<Part, "at" | "end" | "data">): string | null {
+    if (part.at === 0) {
+      this.chunks = [];
+      this.at = 0;
+    }
+    if (!this.chunks || part.at !== this.at || this.at + part.data.length > LINK_LIMITS.maxLineBytes) {
+      this.chunks = null;
+      return null;
+    }
+    this.chunks.push(part.data);
+    this.at += part.data.length;
+    if (!part.end) return null;
+    const line = this.chunks.join("");
+    this.chunks = null;
+    return line;
   }
 }
