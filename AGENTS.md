@@ -632,10 +632,11 @@ A full `message_update` carries the whole message twice (`message` and
 second. omp >= 18.13.2 sends rebuildable deltas instead, and omp-web uses them
 end to end:
 - Every session start (spawn, restart, adoption) sends `set_event_filter`
-  `{ events: null, messageUpdates: "delta" }`. omp echoes `messageUpdates`; an
-  omp that rejects the command or does not echo it keeps full updates, which
-  every consumer below still handles (a frame is a delta when its `message` has
-  no `content`).
+  `{ events: null, messageUpdates: "delta" }`. omp accepts the option since
+  18.4.5 and sends rebuildable deltas (with block shells) since 18.13.2; an omp
+  that rejects or ignores it keeps full updates, which every consumer below
+  still handles (a frame is a delta when its `message` has no `content`). The
+  reply is not read: the first delta that does not fit tells.
 - `lib/message-delta.ts` is the one reducer, shared by server and browser: a
   `*_start` carries the opened block, `*_delta` appends at `contentIndex`,
   `*_end` carries the final block, `start` restarts from a whole message.
@@ -645,25 +646,33 @@ end to end:
   cannot place, and nobody renders a guess. `message_end` stays authoritative
   (omp adds `intent` there; block kinds with no start event arrive only there).
 - The wrapper (`rpc-manager.ts`) keeps each open assistant message by
-  `messageId` and rebuilds it; `getStreamSnapshot()` (HTTP catch-up) carries it
+  `messageId` and rebuilds it. Only `message_start` and a rebuilt delta set that
+  base: a full update drops it (its tool calls have no streamed JSON, and its
+  snapshot can be ahead of the next delta). `getStreamSnapshot()` (HTTP catch-up) carries it
   with `streamingMessageId`, and `onEvent` replays it as one whole
   `message_update` to a tab that attaches mid-message, before any later delta.
 - No base (adopted child after a server restart, frames lost on the host link —
   `reconcileAfterGap` drops every base): the delta is not forwarded and the
   wrapper switches omp to full updates until that assistant message ends (or the
   run ends), then back to deltas. A delta that does not fit a message the
-  wrapper does have (an omp from 18.4.5 to 18.13.1 sends no block shells) leaves
-  the session on full updates for good.
+  wrapper does have (an omp from 18.4.5 to 18.13.1 sends no block shells), or a
+  `set_event_filter` switch that fails, leaves the session on full updates for
+  good; after a failed switch the next lost delta asks for full updates again.
 - Backpressure (`event-stream-hub.ts`, SSE and WebSocket sinks): a behind socket
   queues `message_update` frames; consecutive deltas of one block concatenate,
   a whole message replaces the queued updates of its message, and nothing is
   dropped or reordered. Merged frames keep the latest frame's sequence and emit
-  time.
+  time and carry `web.first`, their first piece's sequence. Deltas of different
+  blocks never merge past each other: that would break the sequence order.
 - Browser (`lib/message-update-coalescer.ts`): applies each delta on arrival and
   dispatches the whole message at display rate, so `useAgentSession` only ever
   sees whole messages. A delta with no base is held and triggers a catch-up; the
   HTTP live snapshot (`seed`) re-bases the coalescer whenever it is applied, and
   otherwise completes held deltas newer than it when it is not older than them.
+  A snapshot at S already holds delta S, so catch-up drops that frame as stale
+  (`useAgentSession-sync.ts`); a merged frame with `web.first <= S < sequence`
+  is held for the next snapshot instead of applied. Streamed tool arguments are
+  re-parsed for display only after 2 KB more JSON or 100 ms.
 
 ### Event protocol differences vs pi
 omp emits no `prompt_done` / `prompt_error` / `compaction_start` /
