@@ -1,8 +1,9 @@
 name: Binary prerelease
 
 # Every commit on main that passed Verify PR becomes a GitHub prerelease carrying the five single binaries,
-# named after the time it was created: title 2026-11-01T10:30:00Z, tag 20261101T103000Z (git tags cannot
-# hold ":"). Prereleases are never "latest", so the in-app update notice and `v*` releases are unaffected.
+# titled with the time it was created (2026-11-01T10:30:00Z), tag 20261101T103000Z-<short sha> (git tags
+# cannot hold ":"; the sha keeps parallel runs apart). Prereleases are never "latest", so the in-app update
+# notice and `v*` releases are unaffected.
 on:
   workflow_run:
     workflows: [Verify PR]
@@ -10,8 +11,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# One group per commit: a shared group keeps only one pending run, so a burst of merges would drop commits.
 concurrency:
-  group: ${{ github.workflow }}
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_sha || github.sha }}
   cancel-in-progress: false
 
 permissions:
@@ -48,7 +50,7 @@ jobs:
         run: |
           now=$(date -u +%s)
           title=$(date -u -d "@$now" +%Y-%m-%dT%H:%M:%SZ)
-          tag=$(date -u -d "@$now" +%Y%m%dT%H%M%SZ)
+          tag=$(date -u -d "@$now" +%Y%m%dT%H%M%SZ)-$(git rev-parse --short=10 "$SHA")
           subject=$(git log -1 --format=%s "$SHA")
           # A draft first, so a failed upload never leaves a published prerelease missing archives.
           gh release create "$tag" release/ompweb-*.tar.gz release/ompweb-*.zip \
