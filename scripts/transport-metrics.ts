@@ -30,7 +30,7 @@ const SECTION_ORDER = [
 // Mirrors public/event-stream-worker.js: the downlink logs frames from this size, and the uplink counts as blocking from it.
 const LARGE_FRAME_BYTES = 64 * 1024;
 /** Printed under a report with link rows: what a `down` ackMs can include. */
-export const LINK_ACK_NOTE = "note: link down ackMs is a round trip bounded by the host's next uplink frame (output, a result, or its pong within 15 s): a line that makes no output can wait up to 15 s.";
+export const LINK_ACK_NOTE = "note: link down ackMs is a round trip; a v5 host acks within about 16 ms, a v4 host only with its next uplink frame (output, a result, or its pong within 15 s), so there a line that makes no output can wait up to 15 s.";
 
 /** Nearest-rank percentile. */
 export function percentile(values: number[], p: number): number | null {
