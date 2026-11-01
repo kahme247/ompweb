@@ -773,10 +773,13 @@ during the wait.
   - **The host link's delivery, reused** from `lib/hosts/link-protocol.ts`: sequenced lines both ways
     (`LinkSender`, `SeqWindow`, `Outbox`), acked and resent after a reconnect; lines over 256 KiB as `part`s
     (`PartJoiner`); per-key queues served round-robin (a subscription's frames, a session's commands or
-    replies, `mux`); at most 512 KiB unacked below the socket. `welcome`/`ack`/`ping`/`pong` skip the
-    queues. So a command's reply waits behind at most the window plus a piece per busy key, never behind
-    a snapshot. The pacing loops are the browser link's own: the server's mirrors the hub's (`send` →
-    `-1` → `drain`), the worker's the daemon's (`bufferedAmount` under 2 pieces).
+    replies, Stop (`abort*`) apart so it passes its session's large prompt (`commandKey`), `mux`); at most
+    512 KiB unacked below the socket. `welcome`/`ack`/`ping`/`pong` skip the queues. So a command's reply
+    waits behind at most the window plus a piece per busy key, never behind a snapshot. The pacing loops
+    are the browser link's own copies: the server's mirrors the hub's (`send` → `-1` → `drain`), the
+    worker's the daemon's (`bufferedAmount` under 2 pieces); a fix to either original must be carried over
+    (`lib/browser-link.integration.test.mjs` runs the real worker against the real server end). A socket
+    that has not said hello within 10 s is closed 1008.
   - **Liveness is ping/pong only**: the server pings every 15 s, each side drops a socket after 30 s
     without any frame. A command waiting for its reply never redials. Wakes: `online` and a network
     change redial at once, `visible` pings and redials a socket silent for 3 s.
@@ -786,15 +789,16 @@ during the wait.
     the server, so the tabs see nothing: no `error`, no second `open`, no snapshot. While the socket is
     gone or lines wait for the window, `message_update`s merge (`queueUpdate`) and go on the next ack.
   - **Resync** when the gap is gone (2 min passed, the backlog passed 32 MiB and the socket closed 4410,
-    or the server restarted): `welcome {resumed: false}`, both sides start over, every stream gets
-    CONNECTING and subscribes again (fresh snapshots, as an SSE reconnect). Sent commands go again (same
-    `rid`) when idempotent (`get_*`, `predict_word`) or when the server is the same and they were sent
-    within `COMMAND_DEDUPE_MS` (10 min; the server's `(session, rid)` dedupe answers a repeat with
-    `deduped: true`), else 503 `transport_lost` (`TransportLostError`). A command with no link for 15 s
-    answers 503 `transport_unavailable`. A worker done with its link closes it 1000 (the server drops it
-    at once); 4000 is its own redial.
-  - **Fallback.** A socket that closes before it opens gets a plain `GET /api/events/link`: offline, 401
-    or 503 redial; any other answer (a proxy that drops Upgrade: 426) puts this worker on SSE for 5 min.
+    all links together passed 256 MiB and this one's socket was gone longest, or the server restarted):
+    `welcome {resumed: false}`, both sides start over, every stream gets CONNECTING and subscribes again
+    (fresh snapshots, as an SSE reconnect). Sent commands go again (same `rid`) when idempotent
+    (`isIdempotentCommand`: `get_*`, `predict_word`; the server does not remember those) or when the
+    server is the same and their first send was within `COMMAND_DEDUPE_MS` (10 min; the server's
+    `(session, rid)` dedupe answers a repeat with `deduped: true`), else 503 `transport_lost`
+    (`TransportLostError`). A command with no link for 15 s answers 503 `transport_unavailable`. A worker
+    done with its link closes it 1000 (the server drops it at once); 4000 is its own redial.
+  - **Fallback.** A socket that closes before it opens gets a plain `GET /api/events/link`: offline, 401,
+    502, 503 or 504 redial; any other answer (a proxy that drops Upgrade: 426) puts this worker on SSE for 5 min.
     Close 4426 (another link version) does the same.
   - **One command path.** `runAgentCommand` (`lib/agent-command.ts`) is what `POST /api/agent/[id]` runs
     after parsing and what a link `cmd` runs, so both answer identically. Command logic goes there.
@@ -811,8 +815,8 @@ during the wait.
     `lib/event-stream-worker.test.mjs`. The link URL is absolute (`new URL(path, self.location.href)`,
     `http`→`ws`). Ids are `Math.random().toString(36).slice(2, 12) + Date.now().toString(36)`: insecure LAN
     origins have no `crypto.randomUUID`.
-  - **Limits:** a socket stays authorized after logout until it closes; a session's commands keep their
-    order, so Stop waits behind that session's own large prompt; a notification routed to a tab whose
+  - **Limits:** a socket stays authorized after logout until it closes; Bun buffers a browser frame up to the host
+    link's 64 MiB `maxPayloadLength` (per server) before the handler refuses it; a notification routed to a tab whose
     link then resyncs is not shown there.
 
 ### Running state + reconciliation
