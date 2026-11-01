@@ -83,7 +83,7 @@ async function api(path: string, init: { method?: string; body?: unknown; allow?
   return { bytes: Buffer.byteLength(text), json };
 }
 
-const command = (session: string, body: Record<string, unknown>) => api(`/api/agent/${session}`, { body });
+const command = (session: string, body: Record<string, unknown>, allow?: number[]) => api(`/api/agent/${session}`, { body, allow });
 
 /** A valid PNG of random pixels: 8-bit RGB, or 1-bit gray. */
 function noisePng(side: number, rgb: boolean): Buffer {
@@ -113,8 +113,12 @@ function noisePng(side: number, rgb: boolean): Buffer {
 async function waitIdle(session: string): Promise<void> {
   const deadline = Date.now() + IDLE_TIMEOUT_MS;
   while (!stop.signal.aborted) {
-    const { json } = await command(session, { type: "get_state" });
-    if ((json.data as { isStreaming?: unknown } | undefined)?.isStreaming !== true) return;
+    const { json } = await command(session, { type: "get_state" }, [400]);
+    // A get_state stuck behind megabytes on a slow link times out (5 s, session_state_timeout): poll again.
+    if (json.code !== "session_state_timeout") {
+      if (json.error) throw new Error(`get_state on ${session}: ${JSON.stringify(json).slice(0, 300)}`);
+      if ((json.data as { isStreaming?: unknown } | undefined)?.isStreaming !== true) return;
+    }
     if (Date.now() > deadline) throw new Error(`session ${session} still streaming after ${IDLE_TIMEOUT_MS / 1000} s`);
     await sleep(100);
   }
@@ -153,12 +157,15 @@ async function phase(name: string, load: () => Promise<void>, c: string): Promis
   const running = () => Date.now() < deadline && !stop.signal.aborted;
   const small: number[] = [];
   let rounds = 0;
+  let timeouts = 0;
   console.log(`phase ${name}: ${seconds} s from ${start.toISOString()}`);
   await Promise.all([
     (async () => {
       while (running()) {
         const sent = performance.now();
-        await command(c, { type: "get_state" });
+        const { json } = await command(c, { type: "get_state" }, [400]);
+        if (json.code === "session_state_timeout") timeouts++;
+        else if (json.error) throw new Error(`get_state on ${c}: ${JSON.stringify(json).slice(0, 300)}`);
         small.push(performance.now() - sent);
         await sleep(SMALL_EVERY_MS);
       }
@@ -167,7 +174,7 @@ async function phase(name: string, load: () => Promise<void>, c: string): Promis
       for (; running() && rounds < MAX_ROUNDS; rounds++) await load();
     })(),
   ]);
-  console.log(`phase ${name}: ${rounds} large rounds; get_state on C over HTTP n=${small.length} p50=${Math.round(percentile(small, 50) ?? 0)} ms p95=${Math.round(percentile(small, 95) ?? 0)} ms; settling ${SETTLE_MS / 1000} s`);
+  console.log(`phase ${name}: ${rounds} large rounds; get_state on C over HTTP n=${small.length} p50=${Math.round(percentile(small, 50) ?? 0)} ms p95=${Math.round(percentile(small, 95) ?? 0)} ms max=${Math.round(Math.max(0, ...small))} ms; ${timeouts} timed out (5 s); settling ${SETTLE_MS / 1000} s`);
   await sleep(SETTLE_MS);
   summaries.push(`${name}: bun scripts/transport-metrics.ts --since ${start.toISOString()} --until ${new Date().toISOString()}`);
 }
@@ -183,8 +190,10 @@ try {
   const c = await newSession(false);
   console.log(`sessions on ${hostId} in ${values.cwd}: A ${a} (image prompts), B ${b} (read), C ${c} (get_state)`);
 
-  // B holds the ten images: from here each read of it is a large result from the host.
-  await promptAndAbort(b, storedPrompt);
+  // B holds the ten images: from here each read of it is a large result from the host. The prompt runs to the end:
+  // aborted before the model answers, omp may never write the session file (a slow uplink makes that the rule).
+  await command(b, storedPrompt);
+  await waitIdle(b);
   const read = await api(`/api/sessions/${b}`);
   console.log(`a read of B is ${(read.bytes / 1e6).toFixed(1)} MB${read.bytes < 1024 * 1024 ? " (under 1 MiB: did the model take the images? not a large frame)" : ""}`);
 
