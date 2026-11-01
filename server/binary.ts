@@ -45,9 +45,7 @@ if (!existsSync(path.join(root, "dist", "index.html"))) {
   process.exit(1);
 }
 const { hostname, port } = options;
-// What the npm launcher hands its server: the local daemon link (instrumentation.node.ts) dials this address.
-Object.assign(process.env, { OMP_WEB_PORT: port, OMP_WEB_HOSTNAME: hostname });
-// Loaded after the environment above is set, for the modules that read it when they load.
+// Loaded after OMP_WEB_PACKAGE_DIR is set above, for the modules that read it when they load.
 const { startProduction } = await import("./app");
 await startProduction({ port: Number(port), hostname });
 const { entries, hint } = getAccessibleAddresses({ hostname, port });
