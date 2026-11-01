@@ -32,7 +32,6 @@ import {
   EVENT_STREAM_PATH,
   MUX_CONTROL_EVENT,
   UNKNOWN_CONNECTION_CODE,
-  commandKey,
   isIdempotentCommand,
   type BrowserTransport,
   type EventStreamChannel,
@@ -437,7 +436,7 @@ function applyMode(): void {
   }
   for (const command of [...pending.values()]) {
     if (command.sent) continue;
-    link.sender.drop(commandKey(command.session, command.type));
+    link.sender.drop(`cmd:${command.session}`);
     settle(command, { cmd: command.n, http: true });
   }
   ensureSource();
@@ -955,7 +954,7 @@ function queueCommand(client: Client, message: Record<string, unknown>): void {
 function sendCommand(command: Command): void {
   command.queued = true;
   queueUp(
-    commandKey(command.session, command.type),
+    `cmd:${command.session}`,
     `{"type":"cmd","rid":${JSON.stringify(command.rid)},"session":${JSON.stringify(command.session)},"advisor":${command.advisor},"command":${command.body}}`,
     command.rid,
   );

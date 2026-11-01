@@ -773,7 +773,7 @@ during the wait.
   - **The host link's delivery, reused** from `lib/hosts/link-protocol.ts`: sequenced lines both ways
     (`LinkSender`, `SeqWindow`, `Outbox`), acked and resent after a reconnect; lines over 256 KiB as `part`s
     (`PartJoiner`); per-key queues served round-robin (a subscription's frames, a session's commands or
-    replies, Stop (`abort*`) apart so it passes its session's large prompt (`commandKey`), `mux`); at most
+    replies, `mux`); a session's commands stay in order, so Stop never overtakes the prompt it stops; at most
     512 KiB unacked below the socket. `welcome`/`ack`/`ping`/`pong` skip the queues. So a command's reply
     waits behind at most the window plus a piece per busy key, never behind a snapshot. The pacing loops
     are the browser link's own copies: the server's mirrors the hub's (`send` → `-1` → `drain`), the

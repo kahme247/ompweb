@@ -63,12 +63,6 @@ export function isIdempotentCommand(type: string): boolean {
   return type.startsWith("get_") || type === "predict_word";
 }
 
-/** The link key a session's command and its reply go under: Stop (`abort*`) has its own, so it passes the session's
- * large prompt still going out, as a separate POST does over HTTP. */
-export function commandKey(session: string, type: string): string {
-  return type.startsWith("abort") ? `cmd:${session}:abort` : `cmd:${session}`;
-}
-
 export type MuxControlFrame =
   | ({ type: "hello"; connectionId: string; serverId: string } & BrowserTransportState)
   | { type: "open"; sub: string }

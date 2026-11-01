@@ -4,7 +4,6 @@ import { EventStreamConnection, serverId, type FrameSink } from "./event-stream-
 import {
   BROWSER_LINK_VERSION,
   COMMAND_DEDUPE_MS,
-  commandKey,
   isIdempotentCommand,
   LINK_RESUME_MS,
   parseEventStreamChannel,
@@ -440,7 +439,8 @@ function onCommand(link: BrowserLink, ws: BrowserSocket, message: Record<string,
   if (typeof rid !== "string" || !rid || rid.length > MAX_RID_LENGTH) return ws.close(CLOSE.invalidData, "Invalid rid");
   const recvAt = Date.now();
   const type = isRecord(message.command) && typeof message.command.type === "string" ? message.command.type : "";
-  const key = commandKey(typeof session === "string" ? session : "", type);
+  // One key per session, as the worker sends them: its commands and replies keep their order.
+  const key = `cmd:${typeof session === "string" ? session : ""}`;
   const reply = ({ status, body }: Reply, deduped: boolean) => {
     queue(link, key, `{"type":"reply","rid":${JSON.stringify(rid)},"status":${status},"recvAt":${recvAt},"at":${Date.now()},"deduped":${deduped},"data":${JSON.stringify(body)}}`);
   };
