@@ -185,6 +185,9 @@ export async function startProduction(listen: { port: number; hostname: string }
     console.error(`Port ${listen.port} on ${listen.hostname} is already in use: is ompweb already running? Otherwise stop the process using it or start ompweb with --port ${listen.port + 1}.`);
     process.exit(1);
   }
+  // The local daemon link (local-bootstrap.ts, run by register) and the update worker dial this address; set it here
+  // so `npm start` (server/main.ts) links the daemon like the launcher and the binary do.
+  Object.assign(process.env, { OMP_WEB_PORT: String(server.port), OMP_WEB_HOSTNAME: listen.hostname });
   await register();
   console.log(`[omp-web] Ready on ${server.url.origin}`);
   return server;
