@@ -1,6 +1,8 @@
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
 import { uptime } from "os";
 import { resolve } from "path";
+import { isLinkUp } from "./hosts/host";
+import { getHost, onHostHello } from "./hosts/hub";
 import { getAgentDir } from "./omp/paths";
 import { isValidSessionId } from "./session-file-references-core";
 import { isRecord } from "./type-guards";
@@ -19,6 +21,8 @@ export interface InterruptibleSession {
   id: string;
   /** The child's spawn-time --advisor flag, restored on resume. */
   advisor: boolean;
+  /** Host the child ran on; lists written before hosts existed read back as "local". */
+  hostId: string;
 }
 
 interface TrackerState {
@@ -96,7 +100,7 @@ function readLeftover(): InterruptibleSession[] {
       const list = isRecord(raw) && Array.isArray(raw.sessions) ? raw.sessions : [];
       for (const entry of list) {
         if (isRecord(entry) && typeof entry.id === "string" && isValidSessionId(entry.id)) {
-          sessions.set(entry.id, { id: entry.id, advisor: entry.advisor === true });
+          sessions.set(entry.id, { id: entry.id, advisor: entry.advisor === true, hostId: typeof entry.hostId === "string" ? entry.hostId : "local" });
         }
       }
     } catch {
@@ -191,4 +195,29 @@ export function takeInterruptedSessions(): InterruptibleSession[] {
   const sessions = state.leftover;
   state.leftover = [];
   return loadWebServerSettings().autoResumeSessions ? sessions : [];
+}
+
+/**
+ * Resume remote entries once their host links, once only. startRpcSession
+ * waits for any orphan child of the session the host still runs (spec Rules
+ * → Reattach). A host already linked in this run said hello before this ran;
+ * a host revoked since is skipped.
+ */
+export function resumeOnHostLink(entries: InterruptibleSession[], resume: (entry: InterruptibleSession) => Promise<void>): void {
+  // An unhandled rejection stops the server (instrumentation.node.ts).
+  const start = (entry: InterruptibleSession) => void resume(entry).catch(() => {});
+  const waiting = new Map<string, InterruptibleSession[]>();
+  for (const entry of entries) {
+    const status = getHost(entry.hostId)?.status();
+    if (status && isLinkUp(status)) start(entry);
+    else if (status) waiting.set(entry.hostId, [...(waiting.get(entry.hostId) ?? []), entry]);
+  }
+  if (waiting.size === 0) return;
+  const stop = onHostHello((hostId) => {
+    const linked = waiting.get(hostId);
+    if (!linked) return;
+    waiting.delete(hostId);
+    if (waiting.size === 0) stop();
+    for (const entry of linked) start(entry);
+  });
 }

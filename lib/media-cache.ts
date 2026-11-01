@@ -98,6 +98,11 @@ export function storeInlineImage(base64: string): string {
   return hash;
 }
 
+/** Keep a copy of an image another host sent, so later requests are served locally. */
+export function storeMediaCopy(hash: string, bytes: Uint8Array): void {
+  if (HASH_RE.test(hash)) writeAtomic(path.join(mediaDir(), hash), Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+}
+
 function imageBlockAsUrl(block: unknown): unknown {
   if (!isRecord(block) || block.type !== "image") return block;
   let data: unknown;

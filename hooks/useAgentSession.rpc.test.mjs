@@ -4906,3 +4906,172 @@ test("a failed HTTP response overtaken by a completed turn and newer send is sup
   assert.equal(w.latest.agentRunning, true, "the stale response cannot reset the newer run");
   assert.equal(w.latest.notices.some((notice) => notice.message.includes("late failed response")), false);
 });
+
+test("host_status frames report the session's host going offline and coming back", async () => {
+  resetWorld();
+  primeSession("remote-link", [userMsg("u0", "q")]);
+  const { w, es } = await startRun("remote-link", "hello");
+  assert.equal(w.latest.hostStatus, null, "no change reported yet");
+  await act(() => es.emit({ type: "host_status", hostId: "h1", status: "offline" }));
+  assert.equal(w.latest.hostStatus, "offline");
+  assert.equal(w.latest.agentRunning, true, "the run continues on the host while its link is down");
+  await act(() => es.emit({ type: "host_status", hostId: "h1", status: "online" }));
+  assert.equal(w.latest.hostStatus, "online");
+});
+
+test("a send to an offline host toasts and leaves the draft to the composer without an error notice", async () => {
+  resetWorld();
+  toastCalls.length = 0;
+  world.holds.push({
+    match: (method, url) => method === "POST" && url.includes("/api/agent/remote-off"),
+    produce: async () => ({ status: 503, value: { error: "Build box is offline", code: "host_offline", hostOffline: true } }),
+  });
+  const w = await mountSession("remote-off");
+  let receipt;
+  await act(async () => { receipt = await w.latest.handleSend("keep me"); await sleep(30); });
+  assert.deepEqual(receipt, { status: "rejected", recoveryKey: "remote-off" });
+  assert.equal(w.latest.agentRunning, false);
+  assert.deepEqual(toastCalls, [["error", translate("agentSession.hostOfflineSend", { detail: "Build box is offline" })]]);
+  assert.equal(w.latest.notices.length, 0, "the toast replaces the chat notice");
+});
+
+test("a fresh chat on a remote host creates its session there and toasts when that host is offline", async () => {
+  resetWorld();
+  toastCalls.length = 0;
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ status: 503, value: { error: "Build box is offline", code: "host_offline", hostOffline: true } }),
+  });
+  const w = await mountSession(null, undefined, { newSessionCwd: "/remote/work", newSessionHostId: "h1" });
+  let receipt;
+  await act(async () => { receipt = await w.latest.handleSend("first"); await sleep(30); });
+  // Drafts for one path on two hosts must not share a composer key.
+  assert.deepEqual(receipt, { status: "rejected", recoveryKey: "new:h1:/remote/work" });
+  assert.deepEqual(callsTo("POST", "/api/agent/new").map((call) => [call.body.cwd, call.body.hostId]), [["/remote/work", "h1"]]);
+  assert.equal(toastCalls[0]?.[0], "error");
+  assert.equal(w.latest.notices.length, 0);
+});
+
+test("a fresh chat whose host drops after the spawn adopts the kept session, so a retry starts no second one", async () => {
+  resetWorld();
+  toastCalls.length = 0;
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ status: 503, value: { error: "Build box is offline", code: "host_offline", hostOffline: true, delivery: "refused", sessionId: "kept-remote" } }),
+  });
+  const w = await mountSession(null, undefined, { newSessionCwd: "/remote/work", newSessionHostId: "h1", onSessionCreated: () => {} });
+  let first;
+  await act(async () => { first = await w.latest.handleSend("first"); await sleep(30); });
+  assert.equal(first.status, "rejected");
+  assert.equal(toastCalls[0]?.[0], "error");
+  let retry;
+  await act(async () => { retry = w.latest.handleSend("first"); await sleep(30); });
+  await act(async () => { lastEs()?.open(); retry = await retry; });
+  w.unmount();
+  assert.equal(retry.status, "accepted");
+  assert.equal(callsTo("POST", "/api/agent/new").length, 1, "the retry reuses the kept session");
+  assert.equal(callsTo("POST", "/api/agent/kept-remote").some((call) => call.body?.type === "prompt"), true);
+});
+
+test("a fresh local chat sends no host id and keeps the pre-hosts draft key", async () => {
+  resetWorld();
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ status: 500, value: { error: "stop here" } }),
+  });
+  const w = await mountSession(null, undefined, { newSessionCwd: "/workspace" });
+  let receipt;
+  await act(async () => { receipt = await w.latest.handleSend("first"); await sleep(30); });
+  assert.equal("hostId" in callsTo("POST", "/api/agent/new")[0].body, false);
+  assert.deepEqual(receipt, { status: "rejected", recoveryKey: "new:/workspace" });
+});
+
+for (const [name, method, command] of [["steer", "handleSteer", "steer"], ["follow-up", "handleFollowUp", "follow_up"], ["streaming-behavior prompt", "handlePromptWithStreamingBehavior", "prompt"]]) {
+  test(`a ${name} to an offline host toasts and reports the refusal so the composer keeps its draft`, async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession(`remote-queue-${command}`, [userMsg("u0", "q")]);
+    const w = await mountSession(`remote-queue-${command}`);
+    world.holds.push({
+      match: (httpMethod, url, body) => httpMethod === "POST" && url.includes(`/api/agent/remote-queue-${command}`) && body?.type === command,
+      produce: async () => ({ status: 503, value: { error: "Build box is offline", code: "host_offline", hostOffline: true } }),
+    });
+    let accepted;
+    await act(async () => {
+      accepted = method === "handlePromptWithStreamingBehavior"
+        ? await w.latest[method]("queued text", "steer")
+        : await w.latest[method]("queued text");
+      await sleep(30);
+    });
+    assert.equal(accepted, false);
+    assert.deepEqual(toastCalls, [["error", translate("agentSession.hostOfflineSend", { detail: "Build box is offline" })]]);
+    assert.equal(w.latest.notices.length, 0);
+  });
+}
+
+test("a prompt the dropped link may have delivered toasts that it may still run and leaves no draft to restore", async () => {
+  resetWorld();
+  toastCalls.length = 0;
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url.includes("/api/agent/remote-maybe") && body?.type === "prompt",
+    produce: async () => ({ status: 503, value: { error: "Build box is offline", code: "host_offline", hostOffline: true, delivery: "unknown" } }),
+  });
+  const w = await mountSession("remote-maybe");
+  let receipt;
+  await act(async () => { receipt = w.latest.handleSend("maybe sent"); await sleep(30); });
+  await act(async () => { lastEs()?.open(); receipt = await receipt; });
+  w.unmount();
+  assert.notEqual(receipt.status, "rejected", "the composer must not bring the text back: it may run twice");
+  assert.equal(w.latest.agentRunning, false);
+  assert.deepEqual(toastCalls, [["info", translate("agentSession.hostOfflineMaybeSent", { detail: "Build box is offline" })]]);
+  assert.equal(w.latest.notices.length, 0);
+});
+
+test("a streaming-behavior prompt the dropped link may have delivered is reported as taken", async () => {
+  resetWorld();
+  toastCalls.length = 0;
+  primeSession("remote-maybe-queue", [userMsg("u0", "q")]);
+  const w = await mountSession("remote-maybe-queue");
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url.includes("/api/agent/remote-maybe-queue") && body?.type === "prompt",
+    produce: async () => ({ status: 503, value: { error: "Build box is offline", code: "host_offline", hostOffline: true, delivery: "unknown" } }),
+  });
+  let accepted;
+  await act(async () => { accepted = await w.latest.handlePromptWithStreamingBehavior("queued text", "followUp"); await sleep(30); });
+  assert.equal(accepted, true);
+  assert.deepEqual(toastCalls, [["info", translate("agentSession.hostOfflineMaybeSent", { detail: "Build box is offline" })]]);
+});
+
+test("the hosts channel decides the offline banner; a frame only speaks before its first snapshot", async () => {
+  resetWorld();
+  primeSession("remote-banner", [userMsg("u0", "q")]);
+  world.agents.set("remote-banner", { running: true, state: {} }); // a running chat attaches its stream on load
+  const bannerText = translate("hosts.offlineBanner", { host: "Build box" });
+  const mount = async (hostStatus) => {
+    const view = ownRoot(render(React.createElement(ChatWindow, {
+      session: { ...sessionInfo("remote-banner"), hostId: "h1" }, newSessionCwd: null, hostLabel: "Build box", ...(hostStatus ? { hostStatus } : {}),
+    }), { wrapper: TestRoot }));
+    await settle();
+    await act(async () => { lastEs()?.open(); });
+    await settle();
+    return view;
+  };
+  const withChannel = await mount("online");
+  await act(async () => { lastEs().emit({ type: "host_status", hostId: "h1", status: "offline" }); });
+  assert.equal(withChannel.queryByText(bannerText), null, "a frame cannot override the channel's online status");
+  withChannel.unmount();
+
+  resetWorld();
+  primeSession("remote-banner", [userMsg("u0", "q")]);
+  world.agents.set("remote-banner", { running: true, state: {} }); // a running chat attaches its stream on load
+  const beforeSnapshot = await mount(undefined);
+  await act(async () => { lastEs().emit({ type: "host_status", hostId: "h1", status: "offline" }); });
+  assert.ok(beforeSnapshot.queryByText(bannerText), "without a channel snapshot the frame shows the banner");
+  beforeSnapshot.unmount();
+
+  resetWorld();
+  primeSession("remote-banner", [userMsg("u0", "q")]);
+  world.agents.set("remote-banner", { running: true, state: {} }); // a running chat attaches its stream on load
+  const offlineChannel = await mount("offline");
+  assert.ok(offlineChannel.queryByText(bannerText), "a chat opened during an outage shows the banner from the channel");
+});
