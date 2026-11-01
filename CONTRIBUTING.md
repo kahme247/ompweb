@@ -23,7 +23,9 @@ The first commit in a new clone or worktree rebuilds from scratch (about two
 minutes); later ones take about a second. Set `GRAPHIFY_SKIP_HOOK=1` to commit
 without the rebuild. The rebuild reads the working tree, so unstaged code ends up in
 the committed graph: to commit only part of your changes, `git stash --keep-index
---include-untracked` first. Git runs no pre-commit hook for rebases, cherry-picks or
+--include-untracked` first. The hook refuses `git commit <path>`, whose temporary
+index would leave the rebuilt graph unstaged; stage with `git add` and run a plain
+`git commit`. Git runs no pre-commit hook for rebases, cherry-picks or
 merges that complete without conflicts: run `PYTHONHASHSEED=0 graphify update .`
 afterwards and commit the graph.
 
