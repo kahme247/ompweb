@@ -897,6 +897,12 @@ function wake(reason: string): void {
     lastWake = { at: now, effectiveType: knownEffectiveType ?? type };
   }
   knownEffectiveType = type;
+  // The network is back or changed: the outage's long delay and its refusals no longer apply, and the first dial may
+  // still fail while the route settles, so the next one goes after the shortest delay.
+  if (reason === "online" || reason === "network") {
+    link.reconnectDelayMs = RECONNECT_MIN_MS;
+    link.refusals = 0;
+  }
   const justDialed = link.ws !== null && !link.welcomed && now - link.dialedAt < WAKE_REDIAL_GAP_MS;
   if (justDialed || (link.ws === null && link.reconnectTimer === undefined)) return;
   if (reason === "online" || reason === "network" || (reason === "visible" && link.reconnectTimer !== undefined)) {
