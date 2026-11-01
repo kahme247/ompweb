@@ -773,16 +773,19 @@ during the wait.
   - **The host link's delivery, reused** from `lib/hosts/link-protocol.ts`: sequenced lines both ways
     (`LinkSender`, `SeqWindow`, `Outbox`), acked and resent after a reconnect; lines over 256 KiB as `part`s
     (`PartJoiner`); per-key queues served round-robin (a subscription's frames, a session's commands or
-    replies, `mux`); a session's commands stay in order, so Stop never overtakes the prompt it stops; at most
-    512 KiB unacked below the socket. `welcome`/`ack`/`ping`/`pong` skip the queues. So a command's reply
-    waits behind at most the window plus a piece per busy key, never behind a snapshot. The pacing loops
+    replies, `mux`); a session's commands stay in order, so Stop never overtakes the prompt it stops. The
+    server keeps at most about 1 s of the measured ack rate unacked below the socket (64 KiB to 512 KiB,
+    `measure` in `lib/browser-link.ts`; only a stretch where the window held lines back resizes it), the
+    worker at most 512 KiB. `welcome`/`ack`/`ping`/`pong` skip the queues. So a command's reply waits behind
+    about a second of the link plus a piece per busy key, never behind a snapshot. The pacing loops
     are the browser link's own copies: the server's mirrors the hub's (`send` → `-1` → `drain`), the
     worker's the daemon's (`bufferedAmount` under 2 pieces); a fix to either original must be carried over
     (`lib/browser-link.integration.test.mjs` runs the real worker against the real server end). A socket
     that has not said hello within 10 s is closed 1008.
   - **Liveness is ping/pong only**: the server pings every 15 s, each side drops a socket after 30 s
     without any frame. A command waiting for its reply never redials. Wakes: `online` and a network
-    change redial at once, `visible` pings and redials a socket silent for 3 s.
+    change redial at once and reset the dial backoff to 1 s (the first dial as a network returns often
+    fails), `visible` pings and redials a socket silent for 3 s.
   - **Resume.** The link outlives its socket for 2 min (`LINK_RESUME_MS`): the worker's `hello` carries
     its token and `ack`, the server (same web session only: SHA-256 of the session cookie, else
     `trusted`/`open`) reattaches and both sides resend what the other missed. Subscriptions stay open on

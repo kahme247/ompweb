@@ -33,6 +33,10 @@ const MAX_RID_LENGTH = 64;
 const CLOSE = { invalidData: 1007, policy: 1008, tooBig: 1009, failed: 1011, replaced: 4409, gone: 4410, versionMismatch: 4426 } as const;
 const INVALID_REQUEST = { error: "Invalid event stream request", code: "invalid_event_stream_request" };
 
+/** The unacked window follows the link: about WINDOW_TARGET_MS of what the browser acks, between WINDOW_MIN_BYTES and
+ * LINK_LIMITS.unackedBytes. A command's reply queued behind a backlog waits behind at most that much on the wire. */
+const WINDOW_TARGET_MS = 1000;
+const WINDOW_MIN_BYTES = 64 * 1024;
 /** What Bun keeps on a browser socket (`ws.data`): the web session it was opened by, and its link after the hello. */
 export interface BrowserLinkData {
   kind: "browser";
@@ -68,6 +72,14 @@ interface BrowserLink {
   sentSeq: number;
   /** Bytes of the outbox lines written to the current socket: the unacked window. */
   unacked: number;
+  /** The window's size now (see `measure`). */
+  window: number;
+  /** Bytes acked over `busyMs`, the time lines were in flight (from `busyFrom`, performance.now), and whether the
+   * window held queued lines back meanwhile: what `measure` sizes the window from. */
+  acked: number;
+  busyMs: number;
+  busyFrom: number;
+  limited: boolean;
   /** Bun queued the last line under backpressure: the rest waits for `drain`. */
   awaitingDrain: boolean;
   readonly up: SeqWindow;
@@ -189,6 +201,11 @@ function createLink(owner: string): BrowserLink {
     downSeq: 0,
     sentSeq: 0,
     unacked: 0,
+    window: LINK_LIMITS.unackedBytes,
+    acked: 0,
+    busyMs: 0,
+    busyFrom: 0,
+    limited: false,
     awaitingDrain: false,
     up: new SeqWindow(),
     parts: new PartJoiner(MAX_COMMAND_CHARS),
@@ -263,6 +280,8 @@ function flush(link: BrowserLink): void {
   const ws = link.socket;
   if (!ws || link.awaitingDrain) return;
   const write = (item: Sent): boolean => {
+    // Lines start going into an empty window: idle time says nothing about the link.
+    if (link.unacked === 0) link.busyFrom = performance.now();
     const sent = ws.send(item.line);
     if (sent !== 0) {
       link.sentSeq = item.seq;
@@ -273,9 +292,14 @@ function flush(link: BrowserLink): void {
     return false;
   };
   for (const item of link.outbox.pending()) {
-    if (item.seq > link.sentSeq && (link.unacked >= LINK_LIMITS.unackedBytes || !write(item))) return;
+    if (item.seq <= link.sentSeq) continue;
+    if (link.unacked >= link.window) {
+      link.limited = true;
+      return;
+    }
+    if (!write(item)) return;
   }
-  while (link.unacked < LINK_LIMITS.unackedBytes) {
+  while (link.unacked < link.window) {
     const unit = link.sender.next(() => ++link.downSeq);
     // Lines only: the browser link queues no result bytes.
     if (!unit || !("line" in unit)) return;
@@ -284,14 +308,35 @@ function flush(link: BrowserLink): void {
     link.outboxBytes += item.bytes;
     if (!write(item)) return;
   }
+  if (link.sender.queuedBytes > 0) link.limited = true;
 }
 
-/** Lines that left the outbox: those written to the current socket leave the unacked window. */
-function released(link: BrowserLink, items: Sent[]): void {
+/** Lines that left the outbox: those written to the current socket leave the unacked window. Returns their bytes. */
+function released(link: BrowserLink, items: Sent[]): number {
+  let acked = 0;
   for (const item of items) {
     link.outboxBytes -= item.bytes;
-    if (item.seq <= link.sentSeq) link.unacked -= item.bytes;
+    if (item.seq <= link.sentSeq) {
+      link.unacked -= item.bytes;
+      acked += item.bytes;
+    }
   }
+  return acked;
+}
+
+/** Each WINDOW_TARGET_MS or more of busy time in which the window held lines back sizes it to WINDOW_TARGET_MS of the
+ * ack rate over that time. A stretch it held nothing back changes nothing: that rate is the browser's traffic, not
+ * what the link can carry. */
+function measure(link: BrowserLink, acked: number): void {
+  if (acked === 0) return;
+  const now = performance.now();
+  link.acked += acked;
+  link.busyMs += now - link.busyFrom;
+  link.busyFrom = now;
+  if (link.busyMs < WINDOW_TARGET_MS) return;
+  const fit = Math.min(LINK_LIMITS.unackedBytes, Math.max(WINDOW_MIN_BYTES, Math.round((link.acked * WINDOW_TARGET_MS) / link.busyMs)));
+  if (link.limited) link.window = fit;
+  Object.assign(link, { acked: 0, busyMs: 0, limited: false });
 }
 
 /** The socket is gone (closed, silent or replaced): the link waits resumeMs for the browser to come back. */
@@ -351,7 +396,7 @@ function onFrame(ws: BrowserSocket, data: string | Uint8Array): void {
   switch (message.type) {
     case "ack":
       if (!isSafeCount(message.ack)) return ws.close(CLOSE.invalidData, "Invalid ack");
-      released(link, link.outbox.ack(message.ack));
+      measure(link, released(link, link.outbox.ack(message.ack)));
       flush(link);
       // The window moved: merged updates go now.
       link.connection.resume();
