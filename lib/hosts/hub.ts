@@ -14,19 +14,23 @@ import {
   decodeBlobFrame,
   decodeUp,
   encodeLine,
+  encodeQueued,
   HostOpError,
   LINK_CLOSE,
   LINK_LIMITS,
   LINK_PROTOCOL_VERSION,
   LinkLimitError,
+  LinkSender,
   MIN_LINK_PROTOCOL_VERSION,
   Outbox,
+  PartJoiner,
   SeqWindow,
   SESSION_OP_PARAMS,
   type DownMessage,
   type HelloChannel,
   type HostOpName,
   type UnknownMessage,
+  type Unsequenced,
   UnknownMessageLog,
   type UpMessage,
 } from "./link-protocol";
@@ -56,18 +60,15 @@ export interface LinkSocket {
 
 type Hello = Extract<UpMessage, { type: "hello" }>;
 type Res = Extract<UpMessage, { type: "res" }>;
-/** A sequenced downlink message before the link numbers it. */
-type Unsequenced<M> = M extends { seq: number } ? Omit<M, "seq"> : never;
 
 interface PendingOp {
   op: HostOpName;
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
-  /** Downlink seq of its `req`; dropped from the outbox when the op fails, so it never runs after. */
-  seq: number;
-  /** Result bytes from the binary frame sent ahead of their `res` (a view into that frame). */
-  blob: Uint8Array | null;
+  /** Result bytes from the binary frames sent ahead of their `res`, in order (views into those frames). */
+  blob: Uint8Array[];
+  blobBytes: number;
 }
 
 interface Link {
@@ -84,12 +85,17 @@ interface Link {
   socket: LinkSocket | null;
   /** Last downlink seq handed out. Lines stay in `outbox` until the daemon acks them. */
   downSeq: number;
-  outbox: Outbox<{ seq: number; line: string }>;
+  /** Downlink messages not numbered yet, per channel or request, sent fair (spec D7). */
+  sender: LinkSender<{ line: string; size: number }>;
+  /** `key`: the `sender` key the line went out under. */
+  outbox: Outbox<{ seq: number; line: string; key: string }>;
   /** Highest outbox seq written to the current socket; `flush` sends what is past it. */
   sentSeq: number;
   /** Bun queued the last line over the socket's buffered data: the rest waits for its `drain`. */
   awaitingDrain: boolean;
   up: SeqWindow;
+  /** The uplink line the daemon is sending in parts. */
+  parts: PartJoiner;
   /** What this link has already logged about messages it skipped. */
   unknownLog: UnknownMessageLog;
   pending: Map<string, PendingOp>;
@@ -132,10 +138,12 @@ function linkFor(id: string): Link {
       autoApprove: false,
       socket: null,
       downSeq: 0,
+      sender: new LinkSender(true),
       outbox: new Outbox(),
       sentSeq: 0,
       awaitingDrain: false,
       up: new SeqWindow(),
+      parts: new PartJoiner(),
       unknownLog: new UnknownMessageLog("daemon"),
       pending: new Map(),
       channels: new Map(),
@@ -179,43 +187,49 @@ function enqueue(link: Link, line: string): void {
   link.socket?.send(line);
 }
 
-/** Send outbox lines past `sentSeq`, in order, until Bun queues one under backpressure (-1: the rest goes on
- * `drain`) or drops it (0: the socket is closing; the next socket starts from its hello's ack). So at most one
- * sequenced line sits in Bun's buffer, and a daemon that stops reading is waited for instead of closed. */
+/** Send outbox lines past `sentSeq` (a resend after a redial), then the sender's next units, until Bun queues one
+ * under backpressure (-1: the rest goes on `drain`) or drops it (0: the socket is closing; the next socket starts
+ * from its hello's ack). So at most one sequenced line, one piece at most, sits in Bun's buffer, and a daemon that
+ * stops reading is waited for instead of closed. */
 function flush(link: Link): void {
   const ws = link.socket;
   if (!ws || link.awaitingDrain || hub().frozen) return;
-  for (const { seq, line } of link.outbox.pending()) {
-    if (seq <= link.sentSeq) continue;
+  const write = (seq: number, line: string): boolean => {
     const sent = ws.send(line);
     if (sent !== 0) link.sentSeq = seq;
-    if (sent <= 0) {
-      link.awaitingDrain = true;
-      return;
-    }
+    if (sent > 0) return true;
+    link.awaitingDrain = true;
+    return false;
+  };
+  for (const { seq, line } of link.outbox.pending()) {
+    if (seq > link.sentSeq && !write(seq, line)) return;
+  }
+  // The hub queues lines only, so every unit is a line.
+  for (let unit = link.sender.next(() => ++link.downSeq); unit && "line" in unit; unit = link.sender.next(() => ++link.downSeq)) {
+    link.outbox.push({ seq: unit.seq, line: unit.line, key: unit.key });
+    if (!write(unit.seq, unit.line)) return;
   }
 }
 
-/** Number, keep until acked, and send when the socket has room; returns the seq. Throws LinkLimitError before
- * recording anything. Dropped once frozen (0): a kill, an answer or a command from a stopping server must not reach
- * the children. */
-function sendDown(link: Link, body: Unsequenced<DownMessage>): number {
-  if (hub().frozen) return 0;
-  const seq = link.downSeq + 1;
-  const line = encodeLine({ ...body, seq } as DownMessage);
-  link.downSeq = seq;
-  link.outbox.push({ seq, line });
+/** Queue under `key` (its channel or request id), numbered and kept until acked as it goes out. Throws
+ * LinkLimitError before recording anything. Dropped once frozen: a kill, an answer or a command from a stopping
+ * server must not reach the children. */
+function sendDown(link: Link, body: Unsequenced<DownMessage>, key: string): void {
+  if (hub().frozen) return;
+  const line = encodeQueued(body);
+  link.sender.push(key, { line, size: Buffer.byteLength(line) });
   flush(link);
-  return seq;
 }
 
-/** Fail an op for good: a `req` not yet acked is never resent (one already written may still run). */
+/** Fail an op for good: a `req` not yet acked is never resent, nor the rest of one going in parts (one already
+ * written may still run). */
 function failOp(link: Link, id: string, error: Error): void {
   const pending = link.pending.get(id);
   if (!pending) return;
   link.pending.delete(id);
   clearTimeout(pending.timer);
-  link.outbox.drop((m) => m.seq === pending.seq);
+  link.sender.drop(id);
+  link.outbox.drop((m) => m.key === id);
   pending.reject(error);
 }
 
@@ -427,8 +441,9 @@ function openLink(link: Link, ws: LinkSocket, hello: Hello): void {
   link.downSeq = Math.max(link.downSeq, hello.ack);
   link.outbox.ack(hello.ack);
   link.unknownLog.reset();
-  // The version this link speaks.
+  // The version this link speaks: from 5 on, lines over pieceBytes go in parts.
   link.hostVersion = hello.v;
+  link.sender.parts = hello.v >= 5;
   enqueue(link, encodeLine({ type: "welcome", v: hello.v, hostId: link.id }));
   // Resend what the daemon has not applied, in order and paced, before anything new.
   link.sentSeq = hello.ack;
@@ -458,9 +473,12 @@ function onFrame(link: Link, ws: LinkSocket, data: string | Uint8Array): void {
     } catch {
       return ws.close(LINK_CLOSE.policy, "Malformed result frame");
     }
-    // An unknown or already filled id is ignored: its `res` then fails host_blob_missing if the op still waits.
+    // A large result comes in pieces, in order (a v4 daemon sends one). Pieces for an op no longer waiting are dropped;
+    // past blobBytes none are kept, so its `res` then fails host_blob_missing.
     const pending = link.pending.get(result.id);
-    if (pending && !pending.blob) pending.blob = result.bytes;
+    if (!pending) return;
+    pending.blobBytes += result.bytes.byteLength;
+    if (pending.blobBytes <= LINK_LIMITS.blobBytes) pending.blob.push(result.bytes);
     return;
   }
   if (Buffer.byteLength(data) > LINK_LIMITS.uplinkBytes) return ws.close(LINK_CLOSE.tooBig, "Uplink frame too large");
@@ -540,7 +558,8 @@ async function adopt(link: Link, child: RemoteRpcTransport, sessionId: string, c
   }
 }
 
-function applyUp(link: Link, message: UpMessage | UnknownMessage): void {
+/** `joined`: a line whose `part`s were applied, so it gets no dedup of its own. */
+function applyUp(link: Link, message: UpMessage | UnknownMessage, joined = false): void {
   if (message.type === "ping") return enqueue(link, encodeLine({ type: "pong" }));
   if (message.type === "pong" || message.type === "hello" || message.type === "ack") return;
   if (message.type === "unknown") {
@@ -551,8 +570,12 @@ function applyUp(link: Link, message: UpMessage | UnknownMessage): void {
     return;
   }
   // Already applied before a resend.
-  if (!link.up.applied(message.seq)) return;
+  if (!joined && !link.up.applied(message.seq)) return;
   switch (message.type) {
+    case "part": {
+      const line = joined ? null : link.parts.add(message);
+      return line === null ? undefined : applyUp(link, decodeUp(line), true);
+    }
     case "stdout":
       return link.channels.get(message.ch)?.deliverLine(message.line);
     case "stderr":
@@ -582,10 +605,10 @@ function settle(link: Link, message: Res): void {
     return;
   }
   if (!message.blob) return pending.resolve(message.result);
-  const blob = pending.blob;
-  if (!blob || blob.byteLength !== message.blob.bytes) {
+  if (pending.blob.length === 0 || pending.blobBytes > LINK_LIMITS.blobBytes || pending.blobBytes !== message.blob.bytes) {
     return pending.reject(new HostOpError(502, "host_blob_missing", `${label} did not deliver the ${pending.op} result`));
   }
+  const blob = Buffer.concat(pending.blob);
   if (pending.op === "readMedia") return pending.resolve({ ok: true, value: blob });
   try {
     pending.resolve(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(blob)));
@@ -606,10 +629,10 @@ function request(hostId: string, op: HostOpName, args: Record<string, unknown>):
   const timer = setTimeout(() => failOp(link, id, new HostOpError(504, "host_timeout", `${label} did not answer ${op} in time`)), linkTimings.opTimeoutMs);
   // A deadline, like the ping and offline timers: never what keeps the server running.
   timer.unref?.();
-  const pending: PendingOp = { op, resolve, reject, timer, seq: 0, blob: null };
+  const pending: PendingOp = { op, resolve, reject, timer, blob: [], blobBytes: 0 };
   link.pending.set(id, pending);
   try {
-    pending.seq = sendDown(link, { type: "req", id, op, args });
+    sendDown(link, { type: "req", id, op, args }, id);
   } catch (error) {
     clearTimeout(timer);
     link.pending.delete(id);
@@ -753,8 +776,8 @@ export class RemoteRpcTransport implements RpcTransport {
     // sendDown would drop it: a command waiting on it fails now instead of at its timeout.
     if (hub().frozen) return callback(new Error("omp-web is shutting down"));
     try {
-      // Kept in the link outbox until the daemon acks it, across reconnects.
-      sendDown(linkFor(this.hostId), { type: "stdin", ch: this.ch, line });
+      // Kept in the link outbox until the daemon acks it, across reconnects; queued per channel, in order.
+      sendDown(linkFor(this.hostId), { type: "stdin", ch: this.ch, line }, this.ch);
       callback(null);
     } catch (error) {
       callback(error instanceof Error ? error : new Error(String(error)));
@@ -791,7 +814,7 @@ export class RemoteRpcTransport implements RpcTransport {
 
   killTree(force: boolean): void {
     if (this.exitInfo) return;
-    sendDown(linkFor(this.hostId), { type: "kill", ch: this.ch, force });
+    sendDown(linkFor(this.hostId), { type: "kill", ch: this.ch, force }, this.ch);
   }
 
   /** The byte size of `text` when it may be held for a listener; null past the cap, where the child is killed once. */

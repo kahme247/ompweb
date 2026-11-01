@@ -14,8 +14,8 @@ import { isRecord } from "../type-guards";
 import { isLoopbackHost, readHostLogin } from "./host-login";
 import {
   decodeDown,
-  encodeBlobFrame,
   encodeLine,
+  encodeQueued,
   HostOpError,
   isHostOp,
   LINK_CLOSE,
@@ -23,12 +23,16 @@ import {
   LINK_PROTOCOL_VERSION,
   LinkLimitError,
   LinkProtocolError,
+  LinkSender,
   Outbox,
+  PartJoiner,
   SeqWindow,
   SESSION_OP_PARAMS,
   type DownMessage,
+  type SendItem,
   type UnknownMessage,
   UnknownMessageLog,
+  type Unsequenced,
   type UpMessage,
 } from "./link-protocol";
 import { localHost, resolveSpawnCwdResult } from "./local-host";
@@ -42,8 +46,8 @@ const LOOPBACK_MAX_RETRY_MS = 3_000;
 /** Children still running this long after SIGTERM get SIGKILL. */
 const KILL_GRACE_MS = 5_000;
 const PONG_LINE = encodeLine({ type: "pong" });
-
-type Unsequenced<M> = M extends { seq: number } ? Omit<M, "seq"> : never;
+/** Frames go to the socket only while it buffers less than this (spec D7): a small message waits behind little. */
+const SEND_BUFFER_BYTES = 2 * LINK_LIMITS.pieceBytes;
 
 interface Channel {
   transport: RpcTransport;
@@ -55,13 +59,18 @@ interface Channel {
   pending: PendingRequests;
 }
 
+/** An uplink line sent and not acked yet. */
 interface Queued {
   seq: number;
   line: string;
+  /** The `LinkSender` key it went out under: its channel, or the request id of a `res`. */
+  key: string;
+  /** Child output bytes this ack releases from its channel's buffer (on a message's last part). */
   bytes: number;
-  /** Set for child output, which an overflow may drop. */
-  ch: string | null;
 }
+
+/** `counted`: child output, held against its channel's buffer until acked. */
+type Pending = Extract<SendItem, { line: string }> & { counted: boolean } | Extract<SendItem, { blob: Uint8Array }>;
 
 /** How a socket closed; `opened` is false for a dial the server refused or never answered. A string instead: why
  * the daemon gave the socket up itself. */
@@ -131,18 +140,22 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   let authorization = `Bearer ${options.token}`;
 
   const channels = new Map<string, Channel>();
-  // Uplink messages stay here until main acks them; a dropped socket resends them after the next welcome.
+  // Uplink messages wait in `sender` until they go out, then here until main acks them; a dropped socket resends
+  // them after the next welcome.
+  const sender = new LinkSender<Pending>(true);
   const outbox = new Outbox<Queued>();
   const down = new SeqWindow();
+  /** The downlink line main is sending in parts. */
+  const parts = new PartJoiner();
   let upSeq = 0;
+  /** Highest outbox seq handed to the current socket. */
+  let sentSeq = 0;
   let unsentBytes = 0;
   let pongOwed = false;
   /** The current socket, from dial to close: every handler ignores events from any other. */
   let socket: WebSocket | null = null;
   /** `socket` once its welcome arrived: uplink frames go only here. */
   let linked: WebSocket | null = null;
-  /** One uplink frame waits for the hub's `ack`; the next goes after it. */
-  let inFlight = false;
   let redialDelay = FIRST_RETRY_MS;
   let flushTimer: NodeJS.Timeout | undefined;
   let stopped = false;
@@ -150,75 +163,99 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   const stopSignal = new AbortController();
   const { promise: done, resolve: finish } = Promise.withResolvers<number>();
 
-  /** Number and keep an uplink message; its byte size, or null when it exceeds the line limit. */
-  function queue(body: Unsequenced<UpMessage>, ch: string | null = null): number | null {
+  /** Queue an uplink message under `key` (its channel, or the request id of a `res`); its byte size, or null when it
+   * exceeds the line limit. */
+  function queue(body: Unsequenced<UpMessage>, key: string, counted = false): number | null {
     let line: string;
     try {
-      line = encodeLine({ ...body, seq: upSeq + 1 } as UpMessage);
+      line = encodeQueued(body);
     } catch (error) {
       if (error instanceof LinkLimitError) return null;
       throw error;
     }
-    upSeq += 1;
-    const bytes = Buffer.byteLength(line);
-    outbox.push({ seq: upSeq, line, bytes, ch });
-    unsentBytes += bytes;
+    const size = Buffer.byteLength(line);
+    sender.push(key, { line, size, counted });
+    unsentBytes += size;
     scheduleFlush();
-    return bytes;
+    return size;
   }
 
   function output(ch: string, body: Unsequenced<Extract<UpMessage, { type: "stdout" | "stderr" }>>): void {
     const channel = channels.get(ch);
     if (!channel) return;
-    const bytes = queue(body, ch);
+    const bytes = queue(body, ch, true);
     if (bytes === null) {
       // One line over the link limit: drop it and let main reconcile.
-      queue({ type: "resync", ch });
+      queue({ type: "resync", ch }, ch);
       return;
     }
     channel.buffered += bytes;
     if (channel.buffered > LINK_LIMITS.channelBufferBytes) {
-      // The uplink lags too far: drop this child's backlog. The resync goes
-      // out with the first frame that gets through, ahead of later output.
-      outbox.drop((item) => item.ch === ch);
+      // The uplink lags too far: drop this child's backlog, a line part-way out included (main drops that partial
+      // line). The resync goes out ahead of the channel's later output.
+      sender.drop(ch);
+      outbox.drop((item) => item.key === ch);
       channel.buffered = 0;
-      queue({ type: "resync", ch });
+      queue({ type: "resync", ch }, ch);
     }
   }
 
   function acked(ack: number): void {
     for (const item of outbox.pending()) {
       if (item.seq > ack) break;
-      const channel = item.ch ? channels.get(item.ch) : undefined;
+      const channel = channels.get(item.key);
       if (channel) channel.buffered -= item.bytes;
     }
     outbox.ack(ack);
   }
 
   function scheduleFlush(): void {
-    if (!linked || inFlight || stopped) return;
-    if (unsentBytes >= LINK_LIMITS.flushBytes) flush();
+    if (!linked || stopped) return;
+    if (unsentBytes >= LINK_LIMITS.pieceBytes) flush();
     else flushTimer ??= setTimeout(flush, LINK_LIMITS.flushMs);
   }
 
-  /** One uplink frame: the applied downlink's `ack`, an owed pong, then the outbox in `seq` order. */
+  /** The next thing to send: an outbox line past `sentSeq` (a resend after a redial), else the sender's next unit. */
+  function nextUnit(): string | Uint8Array | null {
+    const resend = sentSeq < upSeq ? outbox.pending().find((item) => item.seq > sentSeq) : undefined;
+    if (resend) {
+      sentSeq = resend.seq;
+      return resend.line;
+    }
+    const unit = sender.next(() => ++upSeq);
+    if (!unit) return null;
+    if ("frame" in unit) return unit.frame;
+    const bytes = unit.done && "counted" in unit.item && unit.item.counted ? unit.item.size : 0;
+    outbox.push({ seq: unit.seq, line: unit.line, key: unit.key, bytes });
+    sentSeq = unit.seq;
+    return unit.line;
+  }
+
+  /** Hand frames to the socket while it buffers under SEND_BUFFER_BYTES; poll every flushMs while more waits. A text
+   * frame batches lines up to one piece behind the applied downlink's `ack` and an owed pong. */
   function flush(): void {
     clearTimeout(flushTimer);
     flushTimer = undefined;
-    if (!linked || inFlight || stopped) return;
-    const head = encodeLine({ type: "ack", ack: down.acked }) + (pongOwed ? PONG_LINE : "");
-    const batch: string[] = [];
-    let size = head.length;
-    for (const item of outbox.pending()) {
-      if (size + item.bytes > LINK_LIMITS.uplinkBytes) break;
-      batch.push(item.line);
-      size += item.bytes;
-    }
-    if (batch.length === 0 && !pongOwed) return;
-    linked.send(head + batch.join(""));
-    pongOwed = false;
     unsentBytes = 0;
-    inFlight = true;
+    const ws = linked;
+    if (!ws || stopped) return;
+    let text = "";
+    const sendText = () => {
+      ws.send(encodeLine({ type: "ack", ack: down.acked }) + (pongOwed ? PONG_LINE : "") + text);
+      pongOwed = false;
+      text = "";
+    };
+    for (let unit = ws.bufferedAmount < SEND_BUFFER_BYTES ? nextUnit() : null; unit !== null; unit = ws.bufferedAmount < SEND_BUFFER_BYTES ? nextUnit() : null) {
+      if (typeof unit === "string" && text.length + unit.length <= LINK_LIMITS.pieceBytes) {
+        text += unit;
+        continue;
+      }
+      if (text) sendText();
+      if (typeof unit === "string") text = unit;
+      else ws.send(unit);
+    }
+    if (text || pongOwed) sendText();
+    if (ws.bufferedAmount >= SEND_BUFFER_BYTES) flushTimer = setTimeout(flush, LINK_LIMITS.flushMs);
   }
 
   /** A refused dial's 401: revoked (exit 1), unless host.json already holds a newer token for this server, which the
@@ -250,7 +287,8 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   /** What this link has already logged about messages it skipped. */
   const unknownLog = new UnknownMessageLog("server");
 
-  function handleDown(line: string): void {
+  /** `joined`: a line whose `part`s were applied, so it gets no dedup of its own. */
+  function handleDown(line: string, joined = false): void {
     let message: DownMessage | UnknownMessage;
     try {
       message = decodeDown(line);
@@ -266,6 +304,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         linked = socket;
         redialDelay = FIRST_RETRY_MS;
         // A fresh link: resend what main has not acked.
+        sentSeq = 0;
         flush();
         return;
       case "ping":
@@ -275,9 +314,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       case "pong":
         return;
       case "ack":
-        inFlight = false;
         acked(message.ack);
-        scheduleFlush();
         return;
       case "unknown":
         // A newer main's message, or one only the daemon sends: skipped, but its seq is applied so it is acked and never resent.
@@ -289,8 +326,13 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         return;
     }
     // Resent after a reconnect but already applied.
-    if (!down.applied(message.seq)) return;
+    if (!joined && !down.applied(message.seq)) return;
     switch (message.type) {
+      case "part": {
+        const whole = joined ? null : parts.add(message);
+        if (whole !== null) handleDown(whole, true);
+        return;
+      }
       case "stdin": {
         const channel = channels.get(message.ch);
         channel?.pending.noteStdin(message.line);
@@ -317,7 +359,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     if (isRecord(raw) && typeof raw.seq === "number" && Number.isInteger(raw.seq)) {
       if (!down.applied(raw.seq)) return;
       if (raw.type === "req" && typeof raw.id === "string") {
-        queue({ type: "res", id: raw.id, ok: false, error: { status: 400, code: "invalid_request", message: why } });
+        queue({ type: "res", id: raw.id, ok: false, error: { status: 400, code: "invalid_request", message: why } }, raw.id);
         return;
       }
     }
@@ -331,13 +373,15 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       const json = media ? undefined : JSON.stringify(result);
       const blob = media ?? (json !== undefined && Buffer.byteLength(json) > LINK_LIMITS.inlineResultBytes ? Buffer.from(json) : null);
       if (!blob) {
-        queue({ type: "res", id, ok: true, result });
+        queue({ type: "res", id, ok: true, result }, id);
         return;
       }
       if (blob.byteLength > LINK_LIMITS.blobBytes) throw new HostOpError(413, "result_too_large", "The result is too large for the host link");
-      // The bytes go ahead of their `res` on the same socket. With no link the hub usually has already failed the op and the `res` goes alone; a half-open socket the hub replaced keeps its pending ops, so there a `res` without its bytes fails 502 host_blob_missing.
-      linked?.send(encodeBlobFrame(id, blob));
-      queue({ type: "res", id, ok: true, blob: { bytes: blob.byteLength } });
+      // The bytes go ahead of their `res`, in pieces. Pieces still go after a redial; the hub ignores those for an op it
+      // no longer waits on (it failed its ops when the socket closed). A half-open socket the hub replaced keeps its
+      // pending ops, so there a piece lost with the old socket makes the `res` fail 502 host_blob_missing.
+      sender.push(id, { id, blob });
+      queue({ type: "res", id, ok: true, blob: { bytes: blob.byteLength } }, id);
     } catch (error) {
       const failure = error instanceof HostOpError
         ? { status: error.status, code: error.code, message: error.message }
@@ -345,7 +389,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         : error instanceof ProjectPathError
           ? { status: 400, code: error.code, message: error.message }
           : { status: 500, code: "host_op_failed", message: reason(error) };
-      queue({ type: "res", id, ok: false, error: failure });
+      queue({ type: "res", id, ok: false, error: failure }, id);
     }
   }
 
@@ -398,7 +442,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     transport.onStderr((chunk) => output(ch, { type: "stderr", ch, chunk }));
     transport.onExit((code, signal) => {
       channels.delete(ch);
-      queue({ type: "exit", ch, code, signal });
+      queue({ type: "exit", ch, code, signal }, ch);
     });
     // spawnRpc only compares a recorded cwd; a new session's missing cwd falls back too.
     return { cwd: spawned.cwd, fellBack: resolved.fellBack || spawned.fellBack, launchAdvisor: spawned.launchAdvisor, autoApproveExtension: localHost.autoApproveExtension() };
@@ -418,7 +462,6 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       clearTimeout(watchdog);
       socket = null;
       linked = null;
-      inFlight = false;
       resolve(closed);
     };
     const giveUp = (why: string) => {
