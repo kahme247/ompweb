@@ -1,5 +1,6 @@
 import { historyCursor, type SessionHistoryCursor, type SessionLiveSnapshot, type SessionStreamCursor, type SessionSyncResponse } from "@/lib/session-sync";
 import type { SessionContext } from "@/lib/types";
+import { isDeltaUpdate } from "@/lib/message-delta";
 import type { AgentEvent } from "./useAgentSession-stream";
 
 type SessionView = { leafId: string | null; includePreCompaction: boolean };
@@ -213,7 +214,8 @@ export function createSessionCatchUp(options: {
       const floor = lifecycle ? Math.max(lifecycleSequence, messageSequence, latestToolSequence)
         : message ? Math.max(lifecycleSequence, messageSequence)
         : tool ? Math.max(lifecycleSequence, toolsSnapshotSequence, toolSequences.get(tool) ?? 0) : 0;
-      if (next.sequence < floor) return "stale";
+      // A catch-up snapshot at sequence S already holds delta S: applying its frame again would repeat it.
+      if (next.sequence < floor || (message && next.sequence === floor && isDeltaUpdate(event))) return "stale";
       if (lifecycle) {
         lifecycleSequence = next.sequence;
         toolSequences.clear();

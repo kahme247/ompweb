@@ -77,3 +77,74 @@ test("a held full response cannot resurrect truncated entries and fresh catch-up
   assert.deepEqual(displayed.entryIds, ["a", "b", "d"]);
   assert.equal(requests, 2);
 });
+
+// omp's delta updates through catch-up and the coalescer, wired as useAgentSession wires them.
+const { createMessageUpdateCoalescer } = await import("../lib/message-update-coalescer.ts");
+
+function deltaPipeline(t) {
+  const shown = [];
+  const liveCalls = [];
+  let page;
+  let scheduled = [];
+  t.mock.method(globalThis, "fetch", async () => ({ ok: true, json: async () => page }));
+  const dispatch = (event) => { if (event.type === "message_update") shown.push(event.message.content[0]?.text); };
+  const coalescer = createMessageUpdateCoalescer(dispatch, (flush) => {
+    scheduled.push(flush);
+    return () => { scheduled = scheduled.filter((job) => job !== flush); };
+  });
+  const catchUp = createSessionCatchUp({
+    sessionId: () => "s1", scope: () => "run", history() {}, subscribe: () => false,
+    live(snapshot, fields) {
+      liveCalls.push(fields);
+      coalescer.flush();
+      if (fields.message) dispatch({ type: "message_update", message: snapshot.streamingMessage });
+      coalescer.seed(snapshot.streamingMessageId ?? null, snapshot.streamingMessage, snapshot.cursor.sequence, fields.message);
+    },
+  });
+  const web = (sequence) => ({ streamId: "s", sequence });
+  return {
+    shown,
+    liveCalls,
+    web,
+    feed(event) { if (catchUp.observe(event) !== "stale") coalescer.push(event); },
+    fire() { for (const flush of scheduled.splice(0)) flush(); },
+    delta: (sequence, assistantMessageEvent) => ({ type: "message_update", messageId: "m1", message: { role: "assistant" }, assistantMessageEvent, web: web(sequence) }),
+    async snapshot(sequence, text, { busy = true } = {}) {
+      page = {
+        sessionId: "s1", mode: "replace", baseEntryId: null, context: { messages: [], entryIds: [] },
+        cursor: { firstEntryId: null, lastEntryId: null }, hasMore: false, leafId: null,
+        live: {
+          cursor: { streamId: "s", sequence }, isStreaming: busy, isPromptRunning: busy, isCompacting: false,
+          streamingMessage: { role: "assistant", content: [{ type: "text", text }] }, streamingMessageId: "m1", toolEvents: [],
+        },
+      };
+      await catchUp.request();
+    },
+  };
+}
+
+test("a delta already in a catch-up snapshot is not applied again when its frame arrives after it", async (t) => {
+  const pipe = deltaPipeline(t);
+  pipe.feed({ type: "message_start", messageId: "m1", message: { role: "assistant", content: [] }, web: pipe.web(1) });
+  pipe.feed(pipe.delta(2, { type: "text_start", contentIndex: 0, block: { type: "text", text: "" } }));
+  // The snapshot is taken at sequence 3, so it holds "ab"; frame 3 is still on its way.
+  await pipe.snapshot(3, "ab");
+  pipe.feed(pipe.delta(3, { type: "text_delta", contentIndex: 0, delta: "ab" }));
+  pipe.feed(pipe.delta(4, { type: "text_delta", contentIndex: 0, delta: "c" }));
+  pipe.fire();
+  assert.equal(pipe.shown.at(-1), "abc");
+});
+
+test("a snapshot no field takes still completes deltas that arrived without their message", async (t) => {
+  const pipe = deltaPipeline(t);
+  pipe.feed({ type: "connected", web: pipe.web(4) });
+  // No base: both deltas are held.
+  pipe.feed(pipe.delta(5, { type: "text_delta", contentIndex: 0, delta: "c" }));
+  pipe.feed({ type: "auto_compaction_start", web: pipe.web(6) });
+  pipe.feed(pipe.delta(7, { type: "text_delta", contentIndex: 0, delta: "d" }));
+  // Older than the lifecycle frame and the last delta: no field applies, yet it holds delta 5.
+  await pipe.snapshot(5, "abc", { busy: false });
+  assert.deepEqual(pipe.liveCalls.at(-1), { message: false, lifecycle: false, tools: null });
+  pipe.fire();
+  assert.equal(pipe.shown.at(-1), "abcd");
+});
