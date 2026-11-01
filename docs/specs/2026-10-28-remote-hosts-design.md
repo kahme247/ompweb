@@ -338,7 +338,8 @@ the one socket keeps that order.
   decision (raising `MIN_LINK_PROTOCOL_VERSION`, which is 4 today). In
   practice main keeps at least version N-1. For an older daemon main decodes
   its hello into today's shape and sends only messages that version
-  understands (to a v4 daemon: no `part`, every line whole).
+  understands (to a v4 daemon: no `part`, every line whole, and no unacked
+  window, since it acks only inside its next uplink frame).
   A daemon on a dropped version gets 426
   (a POST) or close 4426 (a hello frame); an update-only mode for it is
   planned, separately.
