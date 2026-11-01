@@ -13,16 +13,8 @@
 import { isRecord } from "./type-guards";
 
 type Block = { type?: unknown; [key: string]: unknown };
-export type StreamedMessage = { role?: unknown; content?: unknown; [key: string]: unknown };
-type DeltaEvent = {
-  type?: unknown;
-  contentIndex?: unknown;
-  delta?: unknown;
-  content?: unknown;
-  block?: unknown;
-  toolCall?: unknown;
-  message?: unknown;
-};
+/** Any message shape; only `content` is read. */
+const contentOf = (message: object | undefined): unknown => (message as { content?: unknown } | undefined)?.content;
 
 const DELTA_KINDS: Record<string, true> = { text_delta: true, thinking_delta: true, toolcall_delta: true };
 
@@ -37,13 +29,15 @@ export function isDeltaUpdate(event: { type?: unknown; message?: unknown }): boo
  * kind, an unknown kind, an omp older than 18.13.2 that sends no opened block):
  * the caller has lost the message and must get a snapshot, never guess.
  */
-export function applyMessageDelta<T extends StreamedMessage>(message: T | undefined, update: DeltaEvent): T | null {
+export function applyMessageDelta<T extends object>(message: T | undefined, update: unknown): T | null {
+  if (!isRecord(update)) return null;
   if (update.type === "start") return isRecord(update.message) && Array.isArray(update.message.content) ? update.message as T : null;
-  if (!message || !Array.isArray(message.content)) return null;
+  const blocks = contentOf(message);
+  if (!message || !Array.isArray(blocks)) return null;
   if (update.type === "done" || update.type === "error") return message;
   const index = update.contentIndex;
   if (typeof index !== "number" || !Number.isInteger(index) || index < 0) return null;
-  const block = message.content[index] as Block | null | undefined;
+  const block = blocks[index] as Block | null | undefined;
   let next: unknown;
   switch (update.type) {
     case "text_start":
@@ -82,9 +76,9 @@ export function applyMessageDelta<T extends StreamedMessage>(message: T | undefi
       return null;
   }
   if (!isRecord(next)) return null;
-  const content = message.content.slice();
+  const content = blocks.slice();
   content[index] = next;
-  return { ...message, content };
+  return { ...message, content } as T;
 }
 
 /** One frame for two consecutive deltas of the same block, or null when they cannot merge. */
@@ -100,8 +94,8 @@ export function mergeDeltaUpdates<T extends { messageId?: unknown; assistantMess
 const parsedCalls = new WeakMap<object, Block>();
 
 /** Tool calls still streaming get the arguments their JSON so far reads as, like omp's full snapshots. */
-export function withStreamedArguments<T extends StreamedMessage>(message: T): T {
-  const content = message.content;
+export function withStreamedArguments<T extends object>(message: T): T {
+  const content = contentOf(message);
   if (!Array.isArray(content) || !content.some((block) => typeof block?.partialJson === "string")) return message;
   return {
     ...message,
@@ -114,15 +108,15 @@ export function withStreamedArguments<T extends StreamedMessage>(message: T): T 
       }
       return parsed;
     }),
-  };
+  } as T;
 }
 
 /** What the transcript renders: streamed arguments parsed, and no holes left by block kinds omp sends only in full at message_end. */
-export function displayMessage<T extends StreamedMessage>(message: T): T {
+export function displayMessage<T extends object>(message: T): T {
   const parsed = withStreamedArguments(message);
-  const content = parsed.content;
+  const content = contentOf(parsed);
   if (!Array.isArray(content) || content.every((block) => block != null)) return parsed;
-  return { ...parsed, content: content.filter((block) => block != null) };
+  return { ...parsed, content: content.filter((block) => block != null) } as T;
 }
 
 const INCOMPLETE = Symbol("incomplete");
