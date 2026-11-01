@@ -488,9 +488,9 @@ Notes:
   whoever controls the ompweb server or the token. Keep the token private and
   revoke it when a machine is retired.
 - **Not available on remote hosts yet:** the file explorer, Git and worktree
-  panels, directory browsing, and the Skills, Plugins, Agents and MCP settings only
-  work on the machine ompweb runs on. Chat, session history, notifications and
-  starting sessions work on every host.
+  panels, directory browsing, archiving sessions, and the Skills, Plugins, Agents
+  and MCP settings only work on the machine ompweb runs on. Chat, session history,
+  notifications and starting sessions work on every host.
 - **Agent-started sessions:** with agent tools enabled, an agent can pass a `host`
   to `new_session` (it defaults to the agent's own host). A remote host asks for
   confirmation each time unless **Agents can start sessions here without asking**
