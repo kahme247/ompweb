@@ -179,7 +179,9 @@ order); only one key at a time may be part-way through a multi-part line. A
 small message therefore waits behind at most the unacked window plus about one
 piece per busy key, and `ping` / `pong` / `ack` skip the queues. **Unacked
 window:** each side sends queued lines and result pieces only while less than
-`LINK_LIMITS.unackedBytes` (1 MiB) is sent and not acknowledged, because kernel,
+`LINK_LIMITS.unackedBytes` (512 KiB; with the one unit that may start below it, at
+most 768 KiB in flight: about 3.1 s at 2 Mbit, and about 512 KiB of throughput
+per round trip) is sent and not acknowledged, because kernel,
 proxy and peer buffers below the socket hold megabytes that `bufferedAmount`
 and Bun's `send` do not show. Main counts its outbox lines written to the
 socket and shrinks that on the daemon's `ack`; the daemon counts its frames
