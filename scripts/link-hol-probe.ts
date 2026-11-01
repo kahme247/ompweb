@@ -31,6 +31,10 @@ import { percentile } from "./transport-metrics";
 const SMALL_EVERY_MS = 200;
 const SETTLE_MS = 70_000;
 const IDLE_TIMEOUT_MS = 60_000;
+// B's setup prompt runs to its end: omp re-encodes ten images (~25 s on a small host), the model answers, and ~19 MB of
+// echoes cross the uplink (~15 s at 10 Mbit, over a minute at 2 Mbit). Measured 2026-11-01 on netlab: 48 s on the
+// LAN, 89 s at 10 Mbit / 40 ms. The phases themselves stay at --seconds.
+const SETUP_TIMEOUT_MS = 300_000;
 // Each API call; a 6.5 MB read over a slow link takes seconds, not minutes.
 const FETCH_TIMEOUT_MS = 120_000;
 const MAX_SECONDS = 600;
@@ -110,8 +114,8 @@ function noisePng(side: number, rgb: boolean): Buffer {
   ]);
 }
 
-async function waitIdle(session: string): Promise<void> {
-  const deadline = Date.now() + IDLE_TIMEOUT_MS;
+async function waitIdle(session: string, timeoutMs = IDLE_TIMEOUT_MS): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (!stop.signal.aborted) {
     const { json } = await command(session, { type: "get_state" }, [400]);
     // A get_state stuck behind megabytes on a slow link times out (5 s, session_state_timeout): poll again.
@@ -119,7 +123,7 @@ async function waitIdle(session: string): Promise<void> {
       if (json.error) throw new Error(`get_state on ${session}: ${JSON.stringify(json).slice(0, 300)}`);
       if ((json.data as { isStreaming?: unknown } | undefined)?.isStreaming !== true) return;
     }
-    if (Date.now() > deadline) throw new Error(`session ${session} still streaming after ${IDLE_TIMEOUT_MS / 1000} s`);
+    if (Date.now() > deadline) throw new Error(`session ${session} still streaming after ${timeoutMs / 1000} s`);
     await sleep(100);
   }
 }
@@ -131,7 +135,12 @@ const asImage = (bytes: Buffer) => ({ type: "image", data: bytes.toString("base6
 const largePrompt = { type: "prompt", message: "omp-web link probe: ignore this image.", images: [asImage(png)] };
 // omp stores every image re-encoded as a JPEG of a few hundred KB (the 4.8 MB one comes back ~0.4 MB), so one image
 // cannot make B large: B gets ten, 1-bit noise of the same size (~0.2 MB each as PNG, 2 MB together).
-const storedPrompt = { type: "prompt", message: "omp-web link probe: ignore these images.", images: Array.from({ length: 10 }, () => asImage(noisePng(IMAGE_SIDE, false))) };
+// A short answer with no tool call: the model's own time stays small next to the transport's.
+const storedPrompt = {
+  type: "prompt",
+  message: "omp-web link probe: these images are test noise. Do not call any tool. Reply with exactly: ok",
+  images: Array.from({ length: 10 }, () => asImage(noisePng(IMAGE_SIDE, false))),
+};
 
 /** One prompt, aborted once omp took it. */
 async function promptAndAbort(session: string, body: Record<string, unknown>): Promise<void> {
@@ -185,17 +194,21 @@ try {
   if (host?.status !== "online") throw new Error(`host ${hostId} is ${host ? host.status : "not listed"}`);
   await api("/api/cwd/validate", { body: { cwd: values.cwd, hostId } });
 
-  const a = await newSession(true);
   const b = await newSession(true);
-  const c = await newSession(false);
-  console.log(`sessions on ${hostId} in ${values.cwd}: A ${a} (image prompts), B ${b} (read), C ${c} (get_state)`);
+  console.log(`session B ${b} (read) on ${hostId} in ${values.cwd}`);
 
   // B holds the ten images: from here each read of it is a large result from the host. The prompt runs to the end:
   // aborted before the model answers, omp may never write the session file (a slow uplink makes that the rule).
   await command(b, storedPrompt);
-  await waitIdle(b);
+  await waitIdle(b, SETUP_TIMEOUT_MS);
   const read = await api(`/api/sessions/${b}`);
   console.log(`a read of B is ${(read.bytes / 1e6).toFixed(1)} MB${read.bytes < 1024 * 1024 ? " (under 1 MiB: did the model take the images? not a large frame)" : ""}`);
+
+  // Made only now: a session nobody watches is disposed after 2 min (disconnected-idle), shorter than B's setup on a
+  // slow link.
+  const a = await newSession(true);
+  const c = await newSession(false);
+  console.log(`sessions A ${a} (image prompts), C ${c} (get_state)`);
 
   if (!stop.signal.aborted) await phase("down", () => promptAndAbort(a, largePrompt), c);
   if (!stop.signal.aborted) await phase("up", async () => { await api(`/api/sessions/${b}`); }, c);
