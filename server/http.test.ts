@@ -200,3 +200,10 @@ test("renderIndex escapes the install name into the titles and adds the manifest
     else process.env.OMP_WEB_NAME = previous;
   }
 });
+
+test("renderIndex puts the remembered theme color into the manifest link, and nothing else", () => {
+  const link = (cookie: string) => /<link rel="manifest" href="([^"]*)"/.exec(renderIndex("<head></head>", new Request("http://localhost/", { headers: { cookie } })))?.[1];
+  // Chrome refreshes an installed app's manifest without cookies, so the color has to be in the link.
+  assert.equal(link("a=1; omp-theme-color=F2F0EA"), "/api/manifest?theme=F2F0EA");
+  for (const value of ["zzzzzz", "%22%3E%3Cscript%3E", "abcdef0"]) assert.equal(link(`omp-theme-color=${value}`), "/api/manifest", value);
+});
