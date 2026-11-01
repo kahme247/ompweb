@@ -72,30 +72,34 @@ export function createMessageUpdateCoalescer(
   // concurrent tools dispatch in the order they first reported progress.
   const pendingToolUpdates = new Map<string, CoalescableEvent>();
   let cancelScheduled: (() => void) | null = null;
-  /** The message deltas apply to. */
-  let live: { messageId: string; message: object } | null = null;
+  /** The message deltas apply to, and the sequence it holds every update up to. */
+  let live: { messageId: string; message: object; since: number } | null = null;
   /** Deltas that found no message, and the newest sequence seen before the first of them. */
   let held: CoalescableEvent[] = [];
   let heldFloor = 0;
   let lastSequence = 0;
 
   const sequenceOf = (event: CoalescableEvent) => isRecord(event.web) && typeof event.web.sequence === "number" ? event.web.sequence : 0;
+  /** A frame the server merged under backpressure (event-stream-hub.ts) holds the deltas from `web.first` on. */
+  const firstOf = (event: CoalescableEvent) => isRecord(event.web) && typeof event.web.first === "number" ? event.web.first : sequenceOf(event);
   const shown = (event: CoalescableEvent): CoalescableEvent => {
     if (!isRecord(event.message)) return event;
     const message = displayMessage(event.message);
     return message === event.message ? event : { ...event, message };
   };
-  const rebase = (messageId: string, message: object) => {
-    live = { messageId, message };
+  const rebase = (messageId: string, message: object, since: number) => {
+    live = { messageId, message, since };
     held = held.filter((event) => event.messageId !== messageId);
   };
   /** The update to show, or null when a delta has no message to apply to. */
   const rebuild = (event: CoalescableEvent, floor: number): CoalescableEvent | null => {
     const messageId = typeof event.messageId === "string" ? event.messageId : null;
     if (!isDeltaUpdate(event)) {
-      if (messageId !== null && isRecord(event.message)) rebase(messageId, event.message);
+      if (messageId !== null && isRecord(event.message)) rebase(messageId, event.message, sequenceOf(event));
       return event;
     }
+    // A merged frame whose first pieces the base already holds would repeat them.
+    if (live && live.messageId === messageId && firstOf(event) <= live.since) live = null;
     const message = live && live.messageId === messageId ? applyMessageDelta(live.message, event.assistantMessageEvent) : null;
     if (!live || !message) {
       if (held.length === 0) heldFloor = floor;
@@ -103,7 +107,7 @@ export function createMessageUpdateCoalescer(
       onMissingBase();
       return null;
     }
-    live = { messageId: live.messageId, message };
+    live = { messageId: live.messageId, message, since: sequenceOf(event) };
     return { ...event, message };
   };
   const cancel = () => {
@@ -139,7 +143,7 @@ export function createMessageUpdateCoalescer(
         return;
       }
       if (event.type === "message_start" && typeof event.messageId === "string" && isRecord(event.message) && event.message.role === "assistant") {
-        rebase(event.messageId, event.message);
+        rebase(event.messageId, event.message, sequenceOf(event));
       }
       if (event.type === "tool_execution_update") {
         // A frame without an id cannot be keyed; dispatch it straight away
@@ -189,16 +193,19 @@ export function createMessageUpdateCoalescer(
       if (!applied && (sequence < heldFloor || !held.some((event) => event.messageId === messageId))) return;
       const replay = held.filter((event) => event.messageId === messageId && sequenceOf(event) > sequence);
       held = held.filter((event) => event.messageId !== messageId);
-      live = messageId !== null && isRecord(message) ? { messageId, message } : null;
+      live = messageId !== null && isRecord(message) ? { messageId, message, since: sequence } : null;
       let last: CoalescableEvent | null = null;
-      for (const event of replay) {
-        const next = live && applyMessageDelta(live.message, event.assistantMessageEvent);
+      for (const [index, event] of replay.entries()) {
+        // Not applicable (or a merged frame the snapshot holds only part of): wait for the next snapshot.
+        const next = live && firstOf(event) > live.since ? applyMessageDelta(live.message, event.assistantMessageEvent) : null;
         if (!live || !next) {
           live = null;
+          held.push(...replay.slice(index));
+          heldFloor = sequence;
           onMissingBase();
           return;
         }
-        live = { messageId: live.messageId, message: next };
+        live = { messageId: live.messageId, message: next, since: sequenceOf(event) };
         last = event;
       }
       if (last && live) {

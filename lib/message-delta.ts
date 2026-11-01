@@ -81,14 +81,22 @@ export function applyMessageDelta<T extends object>(message: T | undefined, upda
   return { ...message, content } as T;
 }
 
-/** One frame for two consecutive deltas of the same block, or null when they cannot merge. */
-export function mergeDeltaUpdates<T extends { messageId?: unknown; assistantMessageEvent?: unknown }>(earlier: T, later: T): T | null {
+/**
+ * One frame for two consecutive deltas of the same block, or null when they cannot merge. It keeps the later
+ * frame's sequence and stamps `web.first` with the earlier's first: a snapshot inside that range holds only part
+ * of it, so the browser must not apply it there (message-update-coalescer.ts).
+ */
+export function mergeDeltaUpdates<T extends { messageId?: unknown; assistantMessageEvent?: unknown; web?: unknown }>(earlier: T, later: T): T | null {
   const a = earlier.assistantMessageEvent;
   const b = later.assistantMessageEvent;
   if (!isRecord(a) || !isRecord(b) || earlier.messageId !== later.messageId) return null;
   if (a.type !== b.type || typeof a.type !== "string" || !DELTA_KINDS[a.type] || a.contentIndex !== b.contentIndex) return null;
   if (typeof a.delta !== "string" || typeof b.delta !== "string") return null;
-  return { ...later, assistantMessageEvent: { ...b, delta: a.delta + b.delta } };
+  const merged = { ...later, assistantMessageEvent: { ...b, delta: a.delta + b.delta } };
+  const before = earlier.web;
+  if (!isRecord(before) || !isRecord(later.web)) return merged;
+  const first = typeof before.first === "number" ? before.first : before.sequence;
+  return typeof first === "number" ? { ...merged, web: { ...later.web, first } } : merged;
 }
 
 const parsedCalls = new WeakMap<object, Block>();

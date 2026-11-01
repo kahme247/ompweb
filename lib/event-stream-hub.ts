@@ -301,10 +301,11 @@ type QueuedUpdate = { data: Record<string, unknown>; at: number };
  * Merge a `message_update` into a backpressure queue without losing anything:
  * a whole message replaces the queued updates of that message (it holds them
  * all), and a delta joins the last queued delta of the same block. Each entry
- * keeps the emit time and sequence of its latest frame, so the stamp keeps
- * measuring server-to-peer delay and sequences stay in order.
- * shortcut: deltas interleaved across blocks do not merge and grow the queue
- * like unmerged frames; merge per block if a provider ever interleaves them.
+ * keeps the emit time and sequence of its latest frame (and `web.first`, its
+ * first piece's), so the stamp keeps measuring server-to-peer delay and
+ * sequences stay in order. Deltas interleaved across blocks do not merge:
+ * joining a delta to an earlier entry would put it before frames it follows
+ * and break the sequence fence the browser relies on.
  */
 function queueUpdate(queue: QueuedUpdate[], data: Record<string, unknown>, at: number): void {
   if (!isDeltaUpdate(data)) {
