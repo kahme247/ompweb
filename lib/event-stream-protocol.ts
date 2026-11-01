@@ -12,18 +12,13 @@
 // Every frame also carries `id: <server ms at emit>`, read as `lastEventId`.
 // Subscriptions are added/removed with POST /api/events (EventStreamRequest).
 //
-// Stream framing (WebSocket, `browserTransport` "ws-client" | "ws-client-split" | "ws-session" | "ws-pool"; lib/browser-socket.ts):
-// sockets at GET /api/events/ws (no query); any socket carries any channel and any session's commands,
-// and the mode only picks which socket the worker uses for what (public/event-stream-worker.js `socketKeyFor`).
-//   server -> client  text "<name> <server ms>\n<json>", split at the first newline:
-//                     mux (MuxControlFrame) | s<n> (one subscription's frame) |
-//                     ack {rid} | reply {rid, status, body, deduped?} | ping {} (10 s) | pong {c}
-//   client -> server  one JSON object per frame: {t:"sub", id, channel} | {t:"unsub", id} |
-//                     {t:"cmd", rid, session, advisor, command} | {t:"ping", c}
+// The browser link (`browserTransport` "ws"; lib/browser-link.ts, docs/specs/2026-11-01-browser-link-design.md):
+// one WebSocket per browser at GET /api/events/link, carrying every subscription and every agent command with the
+// host link's sequencing, pieces and fair queues (lib/hosts/link-protocol.ts). Its `e` messages carry exactly the
+// SSE frames above (name, emit time, data).
 // Every hello and the `transport` control frame carry the setting; the worker switches on it.
 //
-// public/event-stream-worker.js is a plain script (not bundled) and mirrors
-// these constants; keep the two in sync.
+// lib/event-stream-worker.ts imports this module (bundled by server/client-env.ts).
 
 import { isValidNotificationId } from "./notification-events";
 
@@ -44,28 +39,30 @@ export type EventStreamChannel =
   /** Settings → Hosts: the `GET /api/hosts` body on subscribe and after every change. */
   | { kind: "hosts" };
 
-/** How the browser's shared worker reaches `/api/events`: SSE + HTTP POST, or WebSockets assigned per client, per session, to a general socket and one shared by the sessions, or from a pool. */
-export type BrowserTransport = "sse" | "ws-client" | "ws-client-split" | "ws-session" | "ws-pool";
+/** How the browser's shared worker reaches the server: SSE + HTTP POST, or the browser link (one WebSocket). */
+export type BrowserTransport = "sse" | "ws";
 
-export const BROWSER_TRANSPORTS: readonly BrowserTransport[] = ["sse", "ws-client", "ws-client-split", "ws-session", "ws-pool"];
+export const BROWSER_TRANSPORTS: readonly BrowserTransport[] = ["sse", "ws"];
 
-export function isWebSocketTransport(transport: BrowserTransport): boolean {
-  return transport !== "sse";
-}
-
-/** The setting every hello and `transport` frame carries; `perSocket`/`maxSockets` size the ws-pool. */
+/** The setting every hello and `transport` frame carries. */
 export interface BrowserTransportState {
   transport: BrowserTransport;
-  perSocket: number;
-  maxSockets: number;
 }
+
+export const BROWSER_LINK_PATH = "/api/events/link";
+export const BROWSER_LINK_VERSION = 1;
+/** How long the server keeps a link whose socket is gone, so the browser can resume it. */
+export const LINK_RESUME_MS = 120_000;
+/** How long the server remembers a command's reply by (session, rid): a resend within it is answered, not run again.
+ * Longer than LINK_RESUME_MS, so a command resent after a resync to the same server still finds it. */
+export const COMMAND_DEDUPE_MS = 600_000;
 
 export type MuxControlFrame =
   | ({ type: "hello"; connectionId: string; serverId: string } & BrowserTransportState)
   | { type: "open"; sub: string }
   | { type: "end"; sub: string }
   | { type: "refused"; sub: string; status: number; error: string; code: string }
-  /** The setting changed; the worker switches transport or reassigns its sockets. */
+  /** The setting changed; the worker switches transport. */
   | ({ type: "transport" } & BrowserTransportState);
 
 export type EventStreamRequest =

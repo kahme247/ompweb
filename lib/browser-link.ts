@@ -1,0 +1,428 @@
+import { createHash, randomBytes } from "crypto";
+import { runAgentCommand } from "./agent-command";
+import { EventStreamConnection, serverId, type FrameSink } from "./event-stream-hub";
+import { BROWSER_LINK_VERSION, COMMAND_DEDUPE_MS, LINK_RESUME_MS, parseEventStreamChannel, SUBSCRIPTION_ID_RE } from "./event-stream-protocol";
+import { LINK_LIMITS, LinkSender, Outbox, PartJoiner, queuedLine, SeqWindow } from "./hosts/link-protocol";
+import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "./image-attachments";
+import { isRecord } from "./type-guards";
+import { isTrustedProxyRequest, OMP_WEB_SESSION_COOKIE, OMP_WEB_TRUSTED_HEADER } from "./web-auth";
+
+// The browser link (docs/specs/2026-11-01-browser-link-design.md): one WebSocket per browser at /api/events/link,
+// carrying every subscription and agent command with the host link's delivery (lib/hosts/link-protocol.ts): sequenced
+// lines both ways, acked and resent after a reconnect, large lines in pieces, fair per-key queues and an unacked
+// window. A link outlives its socket for LINK_RESUME_MS, so a reconnect resumes it instead of re-subscribing.
+
+/** Mutable so tests can shorten them. */
+export const browserLinkTimings = { pingMs: LINK_LIMITS.pingMs, offlineMs: LINK_LIMITS.offlineMs, resumeMs: LINK_RESUME_MS };
+/** A link holding more than this (sent and unacked, plus queued) is dropped: its browser resyncs. */
+export const BACKLOG_BYTES = 32 * 1024 * 1024;
+export const DEDUPE_MAX = 500;
+/** The longest joined command line: the route's body cap plus room for the envelope. */
+const MAX_COMMAND_CHARS = MAX_AGENT_COMMAND_REQUEST_BYTES + 64 * 1024;
+const MAX_SESSION_ID_LENGTH = 512;
+const MAX_RID_LENGTH = 64;
+const CLOSE = { invalidData: 1007, policy: 1008, tooBig: 1009, failed: 1011, replaced: 4409, gone: 4410, versionMismatch: 4426 } as const;
+const INVALID_REQUEST = { error: "Invalid event stream request", code: "invalid_event_stream_request" };
+
+/** What Bun keeps on a browser socket (`ws.data`): the web session it was opened by, and its link after the hello. */
+export interface BrowserLinkData {
+  kind: "browser";
+  owner: string;
+  link: BrowserLink | null;
+}
+
+/** The part of Bun's ServerWebSocket the handler uses, so tests drive it with a plain object. */
+export interface BrowserSocket {
+  readonly data: BrowserLinkData;
+  send(data: string): number;
+  close(code?: number, reason?: string): void;
+}
+
+interface Sent {
+  seq: number;
+  line: string;
+  bytes: number;
+}
+
+interface BrowserLink {
+  readonly token: string;
+  readonly owner: string;
+  socket: BrowserSocket | null;
+  connection: EventStreamConnection;
+  /** Lines not numbered yet, per subscription or session, sent fair. */
+  readonly sender: LinkSender<{ line: string; size: number }>;
+  /** Sent lines until the browser acks them; resent from its ack after a reconnect. */
+  readonly outbox: Outbox<Sent>;
+  outboxBytes: number;
+  downSeq: number;
+  /** Highest outbox seq written to the current socket; `flush` sends what is past it. */
+  sentSeq: number;
+  /** Bytes of the outbox lines written to the current socket: the unacked window. */
+  unacked: number;
+  /** Bun queued the last line under backpressure: the rest waits for `drain`. */
+  awaitingDrain: boolean;
+  readonly up: SeqWindow;
+  readonly parts: PartJoiner;
+  offlineTimer: NodeJS.Timeout | undefined;
+  expiryTimer: NodeJS.Timeout | undefined;
+  disposed: boolean;
+}
+
+interface Reply {
+  status: number;
+  body: unknown;
+}
+
+/** A command's run by session and rid; `expiresAt` is Infinity while it runs. */
+interface Remembered {
+  result: Promise<Reply>;
+  expiresAt: number;
+}
+
+declare global {
+  var __ompBrowserLinks: Map<string, BrowserLink> | undefined;
+  var __ompBrowserCommands: Map<string, Remembered> | undefined;
+}
+
+function links(): Map<string, BrowserLink> {
+  return (globalThis.__ompBrowserLinks ??= new Map());
+}
+
+/** The web session a socket belongs to: a resume token is honored only for the same one. */
+function linkOwner(request: Request): string {
+  const cookie = new Bun.CookieMap(request.headers.get("cookie") ?? "").get(OMP_WEB_SESSION_COOKIE);
+  if (cookie) return `session:${createHash("sha256").update(cookie).digest("base64url")}`;
+  return isTrustedProxyRequest(request.headers.get(OMP_WEB_TRUSTED_HEADER)) ? "trusted" : "open";
+}
+
+/** GET /api/events/link: the gate already ran (proxy.ts); undefined once upgraded. */
+export function handleBrowserLinkUpgrade(request: Request, upgrade: (data: BrowserLinkData) => boolean): Response | undefined {
+  return upgrade({ kind: "browser", owner: linkOwner(request), link: null })
+    ? undefined
+    : Response.json({ error: "The browser link is a WebSocket", code: "upgrade_required" }, { status: 426 });
+}
+
+/** Bun's `websocket` handler for browser sockets (server/app.ts dispatches on `ws.data.kind`). */
+export const browserLink = {
+  message(ws: BrowserSocket, data: string | Uint8Array): void {
+    guarded(ws, () => onFrame(ws, data));
+  },
+  /** Bun wrote out what it had queued: send what waited. */
+  drain(ws: BrowserSocket): void {
+    guarded(ws, () => {
+      const link = ws.data.link;
+      if (link?.socket !== ws) return;
+      link.awaitingDrain = false;
+      flush(link);
+      link.connection.resume();
+    });
+  },
+  /** 1000/1001: the browser is done with the link (nothing left to carry, a switch to SSE, the worker going away), so
+   * it ends now; any other close is a drop the browser comes back from. */
+  close(ws: BrowserSocket, code?: number): void {
+    guarded(ws, () => {
+      const link = ws.data.link;
+      if (link?.socket !== ws) return;
+      if (code === 1000 || code === 1001) dispose(link, code);
+      else detach(link);
+    });
+  },
+};
+
+/** A throw in a websocket handler would reach uncaughtException, which exits the server: it ends that link instead. */
+function guarded(ws: BrowserSocket, handle: () => void): void {
+  try {
+    handle();
+  } catch (error) {
+    fail(ws, error);
+  }
+}
+
+function fail(ws: BrowserSocket, error: unknown): void {
+  console.error(`[omp-web] browser link failed; closing it: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+  const link = ws.data.link;
+  // Nothing half-applied is resumed: the browser resyncs.
+  if (link) dispose(link, CLOSE.failed);
+  else ws.close(CLOSE.failed, "Internal error");
+}
+
+function control(ws: BrowserSocket, message: Record<string, unknown>): void {
+  ws.send(JSON.stringify(message));
+}
+
+function createLink(owner: string): BrowserLink {
+  const link: BrowserLink = {
+    token: randomBytes(32).toString("base64url"),
+    owner,
+    socket: null,
+    connection: null as unknown as EventStreamConnection,
+    sender: new LinkSender(true),
+    outbox: new Outbox(),
+    outboxBytes: 0,
+    downSeq: 0,
+    sentSeq: 0,
+    unacked: 0,
+    awaitingDrain: false,
+    up: new SeqWindow(),
+    parts: new PartJoiner(MAX_COMMAND_CHARS),
+    offlineTimer: undefined,
+    expiryTimer: undefined,
+    disposed: false,
+  };
+  links().set(link.token, link);
+  // Its hello is the link's first line (seq 1).
+  link.connection = new EventStreamConnection(undefined, linkSink(link));
+  return link;
+}
+
+/** The link's EventStreamConnection writes here: every frame a sequenced `e` line, keyed by its subscription. */
+function linkSink(link: BrowserLink): FrameSink {
+  return {
+    heartbeatMs: browserLinkTimings.pingMs,
+    write: (name, at, data) => {
+      // A control frame goes with its subscription's frames (`open` before them, `end` after); hello and transport alone.
+      const frame: unknown = name === "mux" ? JSON.parse(data) : null;
+      const key = name !== "mux" ? name : isRecord(frame) && typeof frame.sub === "string" ? frame.sub : "mux";
+      return queue(link, key, `{"type":"e","name":${JSON.stringify(name)},"at":${at},"data":${data}}`);
+    },
+    // Replaceable updates merge while the socket is gone or lines wait for the window; every ack resumes them.
+    backpressured: () => !link.socket || link.sender.queuedBytes > 0,
+    heartbeat: () => {
+      if (link.socket) control(link.socket, { type: "ping", at: Date.now() });
+      return true;
+    },
+    close: () => dispose(link, CLOSE.gone),
+  };
+}
+
+/** Queues a sequenced line under `key`; false (and the link is dropped) once the backlog passes BACKLOG_BYTES. */
+function queue(link: BrowserLink, key: string, json: string): boolean {
+  if (link.disposed) return false;
+  const line = queuedLine(json);
+  link.sender.push(key, { line, size: Buffer.byteLength(line) });
+  if (link.outboxBytes + link.sender.queuedBytes > BACKLOG_BYTES) {
+    dispose(link, CLOSE.gone);
+    return false;
+  }
+  flush(link);
+  return true;
+}
+
+/** Send outbox lines past `sentSeq` (a resend after a reconnect), then the sender's next units, while the unacked
+ * window has room and until Bun queues one under backpressure (the rest goes on `drain`): the hub's flush. */
+function flush(link: BrowserLink): void {
+  const ws = link.socket;
+  if (!ws || link.awaitingDrain) return;
+  const write = (item: Sent): boolean => {
+    const sent = ws.send(item.line);
+    if (sent !== 0) {
+      link.sentSeq = item.seq;
+      link.unacked += item.bytes;
+    }
+    if (sent > 0) return true;
+    link.awaitingDrain = true;
+    return false;
+  };
+  for (const item of link.outbox.pending()) {
+    if (item.seq > link.sentSeq && (link.unacked >= LINK_LIMITS.unackedBytes || !write(item))) return;
+  }
+  while (link.unacked < LINK_LIMITS.unackedBytes) {
+    const unit = link.sender.next(() => ++link.downSeq);
+    // Lines only: the browser link queues no result bytes.
+    if (!unit || !("line" in unit)) return;
+    const item = { seq: unit.seq, line: unit.line, bytes: Buffer.byteLength(unit.line) };
+    link.outbox.push(item);
+    link.outboxBytes += item.bytes;
+    if (!write(item)) return;
+  }
+}
+
+/** Lines that left the outbox: those written to the current socket leave the unacked window. */
+function released(link: BrowserLink, items: Sent[]): void {
+  for (const item of items) {
+    link.outboxBytes -= item.bytes;
+    if (item.seq <= link.sentSeq) link.unacked -= item.bytes;
+  }
+}
+
+/** The socket is gone (closed, silent or replaced): the link waits resumeMs for the browser to come back. */
+function detach(link: BrowserLink): void {
+  link.socket = null;
+  link.awaitingDrain = false;
+  clearTimeout(link.offlineTimer);
+  clearTimeout(link.expiryTimer);
+  link.expiryTimer = setTimeout(() => dispose(link, CLOSE.gone), browserLinkTimings.resumeMs);
+  link.expiryTimer.unref?.();
+}
+
+/** The link is gone for good: its subscriptions are released and its token resumes nothing. */
+function dispose(link: BrowserLink, code: number): void {
+  if (link.disposed) return;
+  link.disposed = true;
+  links().delete(link.token);
+  clearTimeout(link.offlineTimer);
+  clearTimeout(link.expiryTimer);
+  const ws = link.socket;
+  link.socket = null;
+  ws?.close(code, "Browser link gone");
+  link.connection.close();
+}
+
+/** Any frame proves the browser alive; offlineMs of silence drops the socket (the link stays resumable). */
+function sawBrowser(link: BrowserLink): void {
+  clearTimeout(link.offlineTimer);
+  link.offlineTimer = setTimeout(() => {
+    const ws = link.socket;
+    if (!ws) return;
+    detach(link);
+    ws.close();
+  }, browserLinkTimings.offlineMs);
+  link.offlineTimer.unref?.();
+}
+
+const isSafeCount = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
+
+function onFrame(ws: BrowserSocket, data: string | Uint8Array): void {
+  if (typeof data !== "string") return ws.close(CLOSE.invalidData, "Text frames only");
+  // Every line the browser sends fits a piece: longer ones go as parts.
+  if (Buffer.byteLength(data) > LINK_LIMITS.pieceBytes) return ws.close(CLOSE.tooBig, "Frame too large");
+  let message: unknown;
+  try {
+    message = JSON.parse(data);
+  } catch {
+    return ws.close(CLOSE.invalidData, "Invalid JSON");
+  }
+  if (!isRecord(message)) return ws.close(CLOSE.invalidData, "Not a message");
+  const link = ws.data.link;
+  if (!link) return message.type === "hello" ? onHello(ws, message) : ws.close(CLOSE.policy, "The first frame must be a hello");
+  // A socket a newer one replaced: what it still sends belongs to no link.
+  if (link.socket !== ws) return;
+  sawBrowser(link);
+  switch (message.type) {
+    case "ack":
+      if (!isSafeCount(message.ack)) return ws.close(CLOSE.invalidData, "Invalid ack");
+      released(link, link.outbox.ack(message.ack));
+      flush(link);
+      // The window moved: merged updates go now.
+      link.connection.resume();
+      return;
+    case "ping":
+      return control(ws, { type: "pong", c: message.c, at: Date.now() });
+    case "pong":
+      return;
+  }
+  if (!isSafeCount(message.seq) || message.seq === 0) return ws.close(CLOSE.invalidData, "Invalid seq");
+  if (link.up.applied(message.seq)) {
+    if (message.type !== "part") apply(link, ws, message);
+    else {
+      const { at, end, data: slice } = message;
+      if (!isSafeCount(at) || typeof end !== "boolean" || typeof slice !== "string") return ws.close(CLOSE.invalidData, "Invalid part");
+      const line = link.parts.add({ at, end, data: slice });
+      if (line !== null) {
+        let joined: unknown;
+        try {
+          joined = JSON.parse(line);
+        } catch {
+          return ws.close(CLOSE.invalidData, "Invalid JSON");
+        }
+        if (!isRecord(joined)) return ws.close(CLOSE.invalidData, "Not a message");
+        apply(link, ws, joined);
+      }
+    }
+  }
+  if (link.socket === ws) control(ws, { type: "ack", ack: link.up.acked });
+}
+
+function onHello(ws: BrowserSocket, hello: Record<string, unknown>): void {
+  if (hello.v !== BROWSER_LINK_VERSION) return ws.close(CLOSE.versionMismatch, JSON.stringify({ serverVersion: BROWSER_LINK_VERSION }));
+  if (!isSafeCount(hello.ack) || (hello.token !== null && typeof hello.token !== "string")) return ws.close(CLOSE.policy, "Invalid hello");
+  const known = typeof hello.token === "string" ? links().get(hello.token) : undefined;
+  // Another web session's token resumes nothing, and its link is left alone.
+  const resumed = known !== undefined && known.owner === ws.data.owner;
+  const link = resumed ? known : createLink(ws.data.owner);
+  ws.data.link = link;
+  const previous = link.socket;
+  if (previous) {
+    detach(link);
+    previous.close(CLOSE.replaced, "Replaced by a newer socket");
+  }
+  clearTimeout(link.expiryTimer);
+  link.socket = ws;
+  if (resumed) released(link, link.outbox.ack(hello.ack));
+  // Resend what the browser has not applied, in order and paced, before anything new.
+  link.sentSeq = resumed ? hello.ack : 0;
+  link.unacked = 0;
+  link.awaitingDrain = false;
+  control(ws, { type: "welcome", v: BROWSER_LINK_VERSION, token: link.token, serverId: serverId(), resumed, ack: link.up.acked });
+  sawBrowser(link);
+  flush(link);
+  // Updates merged while the socket was gone go now: no ack may come to resume them.
+  link.connection.resume();
+}
+
+const isSubscriptionId = (id: unknown): id is string => typeof id === "string" && SUBSCRIPTION_ID_RE.test(id);
+
+function apply(link: BrowserLink, ws: BrowserSocket, message: Record<string, unknown>): void {
+  const { connection } = link;
+  switch (message.type) {
+    case "sub": {
+      const id = message.id;
+      if (!isSubscriptionId(id)) return ws.close(CLOSE.invalidData, "Invalid subscription id");
+      const channel = parseEventStreamChannel(message.channel);
+      // `refused` stands in for the 400 a POST /api/events would answer.
+      if (!channel) return connection.control({ type: "refused", sub: id, status: 400, ...INVALID_REQUEST });
+      void connection.subscribe(id, channel).then((result) => {
+        if (!result.ok) connection.control({ type: "refused", sub: id, status: result.status, error: result.error, code: result.code });
+      }).catch((error: unknown) => fail(ws, error));
+      return;
+    }
+    case "unsub":
+      if (!isSubscriptionId(message.id)) return ws.close(CLOSE.invalidData, "Invalid subscription id");
+      return connection.unsubscribe(message.id);
+    case "cmd":
+      return onCommand(link, ws, message);
+    // A newer browser's message type: skipped, but its seq is acked so it is never resent.
+  }
+}
+
+function onCommand(link: BrowserLink, ws: BrowserSocket, message: Record<string, unknown>): void {
+  const { rid, session } = message;
+  if (typeof rid !== "string" || !rid || rid.length > MAX_RID_LENGTH) return ws.close(CLOSE.invalidData, "Invalid rid");
+  const recvAt = Date.now();
+  const key = `cmd:${typeof session === "string" ? session : ""}`;
+  const reply = ({ status, body }: Reply, deduped: boolean) => {
+    queue(link, key, `{"type":"reply","rid":${JSON.stringify(rid)},"status":${status},"recvAt":${recvAt},"at":${Date.now()},"deduped":${deduped},"data":${JSON.stringify(body)}}`);
+  };
+  // A bad session fails only this command: the link carries other sessions' commands.
+  if (typeof session !== "string" || !session || session.length > MAX_SESSION_ID_LENGTH) return reply({ status: 400, body: INVALID_REQUEST }, false);
+  // Scoped to the session, not the link: a resend after a resync comes on a new link, and a rid another session
+  // happens to use never replays this one's reply. JSON keeps the pair unambiguous for any session id.
+  const { result, deduped } = runOnce(JSON.stringify([session, rid]), async () => {
+    const response = await runAgentCommand(session, message.command, message.advisor === true);
+    return { status: response.status, body: await response.json() };
+  });
+  result.then((answer) => reply(answer, deduped)).catch((error: unknown) => fail(ws, error));
+}
+
+/** One run per key: a known key joins the run in flight or replays its settled reply (a resend after a lost reply). */
+function runOnce(key: string, run: () => Promise<Reply>): { result: Promise<Reply>; deduped: boolean } {
+  const map = (globalThis.__ompBrowserCommands ??= new Map());
+  const now = Date.now();
+  const known = map.get(key);
+  if (known && known.expiresAt > now) return { result: known.result, deduped: true };
+  for (const [stale, entry] of map) if (entry.expiresAt <= now) map.delete(stale);
+  if (map.size >= DEDUPE_MAX) {
+    // The oldest settled goes first; one in flight (Infinity) only when none has settled.
+    let oldest: [string, Remembered] | undefined;
+    for (const item of map) if (!oldest || item[1].expiresAt < oldest[1].expiresAt) oldest = item;
+    if (oldest) map.delete(oldest[0]);
+  }
+  // Called now, not after an await: on the fast path the command reaches omp in the link's order.
+  const entry: Remembered = { result: run(), expiresAt: Infinity };
+  const settle = () => {
+    entry.expiresAt = Date.now() + COMMAND_DEDUPE_MS;
+  };
+  entry.result.then(settle, settle);
+  map.set(key, entry);
+  return { result: entry.result, deduped: false };
+}
