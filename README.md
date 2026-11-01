@@ -213,7 +213,9 @@ ompweb as one compiled program with the files it serves beside it:
 `ompweb-darwin-arm64.tar.gz` and `ompweb-windows-x64.zip`. It needs no Node, npm
 or Bun; only omp must be installed. The x64 builds use Bun's baseline runtime, so
 they also run on CPUs without AVX2. Each archive carries the licenses of what it
-bundles in `licenses/`.
+bundles in `licenses/`. Every commit on `main` that passes CI is also published as a
+[prerelease](https://github.com/kahme247/ompweb/releases) named after the time it was
+built (for example `2026-11-01T10:30:00Z`), with the same five archives.
 
 ```bash
 tar -xzf ompweb-linux-x64.tar.gz -C ~/.local/share   # unpacks ompweb-linux-x64/
