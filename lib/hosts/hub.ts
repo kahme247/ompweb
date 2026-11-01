@@ -5,7 +5,6 @@
 import { randomUUID } from "node:crypto";
 import { readBodyWithinLimit, RequestBodyTooLargeError } from "../bounded-form-data";
 import type { RpcTransport } from "../omp/rpc-transport";
-import { getOmpVersion } from "../omp/omp-cli";
 import type { ProjectRegistryEntry } from "../project-registry";
 import { isValidSessionId } from "../session-file-references-core";
 import { isRecord } from "../type-guards";
@@ -21,15 +20,18 @@ import {
   LINK_NONCE_HEADER,
   LINK_PROTOCOL_VERSION,
   LinkLimitError,
+  MIN_LINK_PROTOCOL_VERSION,
   Outbox,
   SeqWindow,
   SESSION_OP_PARAMS,
   type DownMessage,
+  type HelloChannel,
   type HostOpName,
+  type UnknownMessage,
+  UnknownMessageLog,
   type UpMessage,
 } from "./link-protocol";
-import { localHost } from "./local-host";
-import { HostRegistryUnreadableError, hostForToken, loadHosts, touchHost, type HostRecord } from "./registry";
+import { customLocalLabel, DEFAULT_LOCAL_LABEL, HostRegistryUnreadableError, hostForToken, LOCAL_HOST_ID, loadHosts, touchHost, type HostRecord } from "./registry";
 import type { SessionOps } from "./session-ops";
 
 /** Liveness and op timeouts from LINK_LIMITS; tests shorten them. */
@@ -39,7 +41,6 @@ export const linkTimings = {
   opTimeoutMs: LINK_LIMITS.opTimeoutMs,
 };
 
-type HelloChannel = { ch: string; sessionId: string | null };
 type Hello = Extract<UpMessage, { type: "hello" }>;
 type Res = Extract<UpMessage, { type: "res" }>;
 /** A sequenced downlink message before the link numbers it. */
@@ -76,6 +77,8 @@ interface Link {
   downSeq: number;
   outbox: Outbox<{ seq: number; line: string }>;
   up: SeqWindow;
+  /** What this link has already logged about messages it skipped. */
+  unknownLog: UnknownMessageLog;
   pending: Map<string, PendingOp>;
   channels: Map<string, RemoteRpcTransport>;
   pingTimer: NodeJS.Timeout | undefined;
@@ -87,6 +90,8 @@ interface HubState {
   links: Map<string, Link>;
   changeListeners: Set<() => void>;
   helloListeners: Set<(hostId: string, channels: HelloChannel[]) => void>;
+  /** This server is shutting down (freezeHostLinks): links neither send nor apply anything. */
+  frozen: boolean;
 }
 
 declare global {
@@ -95,7 +100,7 @@ declare global {
 
 // globalThis, like the rpc-manager registry: survives Next.js hot reload.
 function hub(): HubState {
-  globalThis.__ompHostHub ??= { links: new Map(), changeListeners: new Set(), helloListeners: new Set() };
+  globalThis.__ompHostHub ??= { links: new Map(), changeListeners: new Set(), helloListeners: new Set(), frozen: false };
   return globalThis.__ompHostHub;
 }
 
@@ -118,6 +123,7 @@ function linkFor(id: string): Link {
       downSeq: 0,
       outbox: new Outbox(),
       up: new SeqWindow(),
+      unknownLog: new UnknownMessageLog("daemon"),
       pending: new Map(),
       channels: new Map(),
       pingTimer: undefined,
@@ -130,6 +136,7 @@ function linkFor(id: string): Link {
 }
 
 function labelOf(id: string): string {
+  if (id === LOCAL_HOST_ID) return customLocalLabel() || DEFAULT_LOCAL_LABEL;
   return loadHosts().find((h) => h.id === id)?.label ?? id;
 }
 
@@ -164,8 +171,10 @@ function enqueue(link: Link, line: string): void {
   }
 }
 
-/** Number, keep until acked, and send; returns the seq. Throws LinkLimitError before recording anything. */
+/** Number, keep until acked, and send; returns the seq. Throws LinkLimitError before recording anything.
+ * Dropped once frozen (0): a kill, an answer or a command from a stopping server must not reach the children. */
 function sendDown(link: Link, body: Unsequenced<DownMessage>): number {
+  if (hub().frozen) return 0;
   const seq = link.downSeq + 1;
   const line = encodeLine({ ...body, seq } as DownMessage);
   link.downSeq = seq;
@@ -252,11 +261,26 @@ function currentLink(req: Request, record: HostRecord): Link | null {
 }
 
 const staleLink = () => json({ error: "This link was replaced; wait for the next welcome" }, 409);
+// The daemon retries a 503: what it sends lands on the next server instead.
+const stopping = () => json({ error: "omp-web is shutting down" }, 503);
+
+/**
+ * This server is shutting down. From here on nothing reaches a daemon (sendDown
+ * drops it), and no hello, uplink batch or blob upload is applied or acked: each
+ * daemon keeps its children's output unacked and sends it to the next server,
+ * which adopts the children. Without this a tab closing on the way out would
+ * answer omp's open host tool calls with an error, and output this server took
+ * but never showed would be lost to the next one.
+ */
+export function freezeHostLinks(): void {
+  hub().frozen = true;
+}
 
 /** GET /api/hosts/link: the daemon's downlink, an NDJSON stream, opened with the id of the hello it POSTed. */
 export async function handleLinkGet(req: Request): Promise<Response> {
   const record = authenticate(req);
   if (record instanceof Response) return record;
+  if (hub().frozen) return stopping();
   const link = linkFor(record.id);
   const helloId = req.headers.get(LINK_HELLO_HEADER);
   const offer = link.helloOffer;
@@ -278,10 +302,11 @@ function legacyHelloVersion(link: Link, header: string | null): Response | null 
   }
 }
 
-/** 426 for a daemon on another protocol version. Compared before decoding: another version may shape its hello differently. */
+/** 426 for a daemon outside MIN_LINK_PROTOCOL_VERSION..LINK_PROTOCOL_VERSION (a newer one too: the web app upgrades first).
+ * Compared before decoding: another version may shape its hello differently. */
 function versionMismatch(link: Link, raw: unknown): Response | null {
   const version = isRecord(raw) ? raw.v : undefined;
-  if (version === LINK_PROTOCOL_VERSION) return null;
+  if (typeof version === "number" && version >= MIN_LINK_PROTOCOL_VERSION && version <= LINK_PROTOCOL_VERSION && Number.isInteger(version)) return null;
   const hostVersion = typeof version === "number" && Number.isInteger(version) ? version : null;
   // A stray old daemon with this token must not take down the healthy link.
   if (!link.stream) {
@@ -311,7 +336,7 @@ async function handleHelloPost(req: Request, record: HostRecord): Promise<Respon
   const link = linkFor(record.id);
   const mismatch = versionMismatch(link, raw);
   if (mismatch) return mismatch;
-  let hello: UpMessage;
+  let hello: UpMessage | UnknownMessage;
   try {
     hello = decodeUp(text);
   } catch {
@@ -357,14 +382,17 @@ function openDownlink(link: Link, hello: Hello, signal: AbortSignal): Response {
   }, { once: true });
   link.stream = controller;
   link.nonce = randomUUID();
-  link.hostVersion = LINK_PROTOCOL_VERSION;
-  enqueue(link, encodeLine({ type: "welcome", v: LINK_PROTOCOL_VERSION, hostId: link.id, nonce: link.nonce }));
+  link.unknownLog.reset();
+  // The version this link speaks: the daemon's (decodeUp read a v2 hello as today's shape; v2 and v3 send the same down messages).
+  link.hostVersion = hello.v;
+  enqueue(link, encodeLine({ type: "welcome", v: hello.v, hostId: link.id, nonce: link.nonce }));
   // Resend what the daemon has not applied, in order, before anything new.
   for (const { line } of link.outbox.pending()) enqueue(link, line);
   reattach(link, hello.channels);
 
   link.ompVersion = hello.ompVersion;
   link.platform = hello.platform;
+  link.autoApprove = hello.autoApproveExtension;
   sawDaemon(link);
   persistLastSeen(link);
   clearInterval(link.pingTimer);
@@ -389,8 +417,9 @@ const ORPHAN_KILL_GRACE_MS = 5_000;
  * Spec Rules → Reattach. Listed channels this server has a transport for carry
  * on unchanged. A spawned child the daemon no longer lists died while the link
  * was down: its transport gets a synthesized exit, marked `lost`. Listed
- * channels without a transport are orphans of a restart of this server and are
- * killed; they stay registered until their `exit` (see orphanExit).
+ * channels without a transport are children of a previous run of this server:
+ * adopted (see adopt), or killed as orphans when that is not possible. Either
+ * way they stay registered until their `exit` (see orphanExit).
  */
 function reattach(link: Link, listed: HelloChannel[]): void {
   const live = new Set(listed.map(({ ch }) => ch));
@@ -401,16 +430,44 @@ function reattach(link: Link, listed: HelloChannel[]): void {
     transport.lost = true;
     transport.deliverExit(null, null);
   }
-  for (const { ch, sessionId } of listed) {
+  for (const { ch, sessionId, cwd, pending } of listed) {
     if (link.channels.has(ch)) continue;
-    const orphan = new RemoteRpcTransport(link.id, ch, sessionId);
-    orphan.spawned = true;
-    orphan.orphaned = true;
-    link.channels.set(ch, orphan);
-    orphan.killTree(false);
-    const escalate = setTimeout(() => orphan.killTree(true), ORPHAN_KILL_GRACE_MS);
-    escalate.unref?.();
-    orphan.onExit(() => clearTimeout(escalate));
+    const child = new RemoteRpcTransport(link.id, ch, sessionId);
+    child.spawned = true;
+    link.channels.set(ch, child);
+    // A null `pending` lost open requests to the daemon's cap: adopted, the run would wait on them forever.
+    if (sessionId && pending) child.adoption = adopt(link, child, sessionId, cwd, pending);
+    else killOrphan(child);
+  }
+}
+
+function killOrphan(orphan: RemoteRpcTransport): void {
+  orphan.orphaned = true;
+  orphan.killTree(false);
+  const escalate = setTimeout(() => orphan.killTree(true), ORPHAN_KILL_GRACE_MS);
+  escalate.unref?.();
+  orphan.onExit(() => clearTimeout(escalate));
+}
+
+/** Spec "Adopting live children": a session wrapper takes the child over, by
+ * the identity the child itself reports (a new session is in no list before
+ * its first reply is written). One that cannot re-sync is killed. True when adopted. */
+async function adopt(link: Link, child: RemoteRpcTransport, sessionId: string, cwd: string, replay: string[]): Promise<boolean> {
+  try {
+    // Dynamic: rpc-manager imports this module.
+    const { adoptRpcSession } = await import("../rpc-manager");
+    await adoptRpcSession({ host: link.host, transport: child, sessionId, cwd, replay });
+    return true;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    if (hub().frozen) {
+      // Nothing reaches the daemon now, a kill included: the child runs on for the next server.
+      console.warn(`[omp-web] left the omp child of session ${sessionId} on ${labelOf(link.id)} to the next server: this one stopped while adopting it (${reason})`);
+    } else {
+      // adoptRpcSession has already killed it (its wrapper's dispose escalates to SIGKILL).
+      console.warn(`[omp-web] killing the omp child of session ${sessionId} on ${labelOf(link.id)}: it could not be adopted (${reason})`);
+    }
+    return false;
   }
 }
 
@@ -418,6 +475,7 @@ function reattach(link: Link, listed: HelloChannel[]): void {
 export async function handleLinkPost(req: Request): Promise<Response> {
   const record = authenticate(req);
   if (record instanceof Response) return record;
+  if (hub().frozen) return stopping();
   if (req.headers.has(LINK_HELLO_HEADER)) return handleHelloPost(req, record);
   // A replaced link's late POST must not reach the current daemon's uplink window.
   const link = currentLink(req, record);
@@ -425,7 +483,7 @@ export async function handleLinkPost(req: Request): Promise<Response> {
   const nonce = link.nonce;
   const ack = req.headers.get(LINK_ACK_HEADER);
   if (ack === null || !/^\d+$/.test(ack)) return json({ error: "Missing ack" }, 400);
-  let messages: UpMessage[];
+  let messages: (UpMessage | UnknownMessage)[];
   try {
     const bytes = await readBodyWithinLimit(req, LINK_LIMITS.uplinkBytes);
     // Decode the whole batch first: a batch cut mid-line applies nothing.
@@ -434,6 +492,7 @@ export async function handleLinkPost(req: Request): Promise<Response> {
     if (error instanceof RequestBodyTooLargeError) return json({ error: "Uplink batch too large" }, 413);
     return json({ error: "Malformed uplink batch" }, 400);
   }
+  if (hub().frozen) return stopping();
   // Replaced while the body was arriving.
   if (link.nonce !== nonce) return staleLink();
   sawDaemon(link);
@@ -442,9 +501,16 @@ export async function handleLinkPost(req: Request): Promise<Response> {
   return json({ ack: link.up.acked });
 }
 
-function applyUp(link: Link, message: UpMessage): void {
+function applyUp(link: Link, message: UpMessage | UnknownMessage): void {
   if (message.type === "ping") return enqueue(link, encodeLine({ type: "pong" }));
   if (message.type === "pong" || message.type === "hello") return;
+  if (message.type === "unknown") {
+    // A newer daemon's message, or one only the server sends: skipped, but its seq is applied so it is acked and never resent.
+    if (message.seq !== null) link.up.applied(message.seq);
+    const note = link.unknownLog.note(message);
+    if (note) console.warn(`[omp-web] ${labelOf(link.id)}: ${note}`);
+    return;
+  }
   // Already applied before a resend.
   if (!link.up.applied(message.seq)) return;
   switch (message.type) {
@@ -493,6 +559,7 @@ function settle(link: Link, message: Res): void {
 export async function handleLinkBlob(req: Request, reqId: string): Promise<Response> {
   const record = authenticate(req);
   if (record instanceof Response) return record;
+  if (hub().frozen) return stopping();
   const link = currentLink(req, record);
   if (!link) return staleLink();
   const nonce = link.nonce;
@@ -507,6 +574,7 @@ export async function handleLinkBlob(req: Request, reqId: string): Promise<Respo
     if (error instanceof RequestBodyTooLargeError) return json({ error: "Result too large" }, 413);
     return json({ error: "Malformed result upload" }, 400);
   }
+  if (hub().frozen) return stopping();
   if (link.nonce !== nonce) return staleLink();
   pending.blob = blob;
   return json({ ok: true });
@@ -515,6 +583,7 @@ export async function handleLinkBlob(req: Request, reqId: string): Promise<Respo
 function request(hostId: string, op: HostOpName, args: Record<string, unknown>): Promise<unknown> {
   const link = linkFor(hostId);
   const label = labelOf(hostId);
+  if (hub().frozen) return Promise.reject(new HostOpError(503, "server_stopping", "omp-web is shutting down"));
   if (!link.nonce || !isLinkUp(link.status)) {
     return Promise.reject(new HostOpError(503, "host_offline", `${label} is offline`));
   }
@@ -638,14 +707,16 @@ export class RemoteRpcTransport implements RpcTransport {
   get id(): string {
     return this.ch;
   }
-  /** Set for an orphan the daemon listed in `hello` (the session it runs); null for children this server spawned. */
+  /** Set for a child of a previous run the daemon listed in `hello` (the session it runs); null for children this server spawned. */
   readonly sessionId: string | null;
   /** The daemon confirmed the spawn (or listed the channel); until then a `hello` without it is not a loss. */
   spawned = false;
   /** The daemon stopped listing this child: it died while the link was down. Set before the synthesized exit. */
   lost = false;
-  /** Killed on sight: a child of a previous run of this server. Its output has no reader and is dropped. */
+  /** Killed: a child of a previous run of this server that it could not adopt. Its output has no reader and is dropped. */
   orphaned = false;
+  /** A listed child being taken over (see reattach): resolves true once adopted, false once killed instead. */
+  adoption: Promise<boolean> | null = null;
   private readonly lineListeners: Array<(line: string) => void> = [];
   private readonly stderrListeners: Array<(chunk: string) => void> = [];
   private readonly exitListeners: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = [];
@@ -665,6 +736,8 @@ export class RemoteRpcTransport implements RpcTransport {
 
   write(line: string, callback: (error?: Error | null) => void): void {
     if (this.exitInfo) return callback(new Error("RPC process is not running"));
+    // sendDown would drop it: a command waiting on it fails now instead of at its timeout.
+    if (hub().frozen) return callback(new Error("omp-web is shutting down"));
     try {
       // Kept in the link outbox until the daemon acks it, across reconnects.
       sendDown(linkFor(this.hostId), { type: "stdin", ch: this.ch, line });
@@ -818,10 +891,11 @@ export class RemoteHost implements Host {
   }
 }
 
-/** "local" is this machine; other ids must be registered hosts. */
+/** `local` is this machine, reached through its daemon link (offline while none is linked); other ids must be registered hosts. */
+export function getHost(id: typeof LOCAL_HOST_ID): Host;
+export function getHost(id: string): Host | null;
 export function getHost(id: string): Host | null {
-  if (id === localHost.id) return localHost;
-  return loadHosts().some((h) => h.id === id) ? linkFor(id).host : null;
+  return id === LOCAL_HOST_ID || loadHosts().some((h) => h.id === id) ? linkFor(id).host : null;
 }
 
 export interface LinkedHostRow {
@@ -838,7 +912,7 @@ export interface LinkedHostRow {
 }
 
 export function listHosts(): LinkedHostRow[] {
-  return loadHosts().map((record) => {
+  return loadHosts().filter((record) => record.id !== LOCAL_HOST_ID).map((record) => {
     const link = hub().links.get(record.id);
     return {
       id: record.id,
@@ -856,24 +930,36 @@ export function listHosts(): LinkedHostRow[] {
 
 export interface LocalHostRow {
   id: "local";
+  /** The user's name for this machine; "" while it goes by the localized default. */
   label: string;
-  status: "online";
+  status: HostStatus;
   ompVersion: string | null;
-  platform: string;
+  platform: string | null;
   lastSeenAt: null;
+  hostVersion: number | null;
+  serverVersion: number;
+  /** `process.platform` of this server: picks the daemon install command while no daemon has linked. */
+  serverPlatform: string;
+  /** False in `next dev`, where this machine runs sessions in-process and is offline by design: no install hints. */
+  daemonManaged: boolean;
 }
 
 export type HostRow = LocalHostRow | LinkedHostRow;
 
-/** Settings → Hosts payload (`GET /api/hosts` and the `hosts` channel): this machine first, then linked hosts. */
-export async function hostsSnapshot(): Promise<{ hosts: HostRow[] }> {
+/** Settings → Hosts payload (`GET /api/hosts` and the `hosts` channel): this machine first, then linked hosts. This machine's status is its daemon link's. */
+export function hostsSnapshot(): { hosts: HostRow[] } {
+  const link = hub().links.get(LOCAL_HOST_ID);
   const local: LocalHostRow = {
     id: "local",
-    label: "This machine",
-    status: "online",
-    ompVersion: await getOmpVersion(),
-    platform: process.platform,
+    label: customLocalLabel(),
+    status: link?.status ?? "offline",
+    ompVersion: link?.ompVersion ?? null,
+    platform: link?.platform ?? null,
     lastSeenAt: null,
+    hostVersion: link?.hostVersion ?? null,
+    serverVersion: LINK_PROTOCOL_VERSION,
+    serverPlatform: process.platform,
+    daemonManaged: process.env.NODE_ENV !== "development",
   };
   return { hosts: [local, ...listHosts()] };
 }
@@ -897,8 +983,8 @@ export function onHostsChange(listener: () => void): () => void {
   };
 }
 
-/** Fires on every accepted hello with the omp children the daemon still runs.
- * Listeners run after reattach: lost channels have exited and orphans are being killed. */
+/** Fires on every accepted hello with the omp children the daemon still runs. Listeners
+ * run after reattach: lost channels have exited, the rest are being adopted or killed. */
 export function onHostHello(listener: (hostId: string, channels: HelloChannel[]) => void): () => void {
   const listeners = hub().helloListeners;
   listeners.add(listener);
@@ -907,27 +993,34 @@ export function onHostHello(listener: (hostId: string, channels: HelloChannel[])
   };
 }
 
-/** Resolves once every orphan of `sessionId` the host listed in a hello has exited.
+/** Whether this server adopted a child of `sessionId` the host listed in a hello; waits for an adoption still running. */
+export async function adoptedChild(hostId: string, sessionId: string): Promise<boolean> {
+  const listed = [...(hub().links.get(hostId)?.channels.values() ?? [])].filter((child) => child.sessionId === sessionId);
+  return (await Promise.all(listed.map((child) => child.adoption))).includes(true);
+}
+
+/** Resolves once every child of `sessionId` the host listed in a hello has exited or been adopted.
  * Rejects with 503 if the host goes offline first: waiting through an outage
  * would hold the session's start lock until the host redials. */
 export async function orphanExit(hostId: string, sessionId: string): Promise<void> {
   const link = hub().links.get(hostId);
-  const orphans = [...(link?.channels.values() ?? [])].filter((transport) => transport.sessionId === sessionId);
-  if (!link || orphans.length === 0) return;
-  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  const listed = [...(link?.channels.values() ?? [])].filter((child) => child.sessionId === sessionId);
+  if (!link || listed.length === 0) return;
+  const { promise: offline, reject } = Promise.withResolvers<never>();
   const onStatus = (status: HostStatus) => {
     if (!isLinkUp(status)) reject(new HostOpError(503, "host_offline", `${labelOf(hostId)} is offline`));
   };
   onStatus(link.status);
   link.statusListeners.add(onStatus);
-  let running = orphans.length;
-  for (const orphan of orphans) {
-    orphan.onExit(() => {
-      if (--running === 0) resolve();
-    });
-  }
+  const gone = listed.map((child) => {
+    const { promise, resolve } = Promise.withResolvers<void>();
+    child.onExit(() => resolve());
+    // An adopted child runs the live session: not an orphan to wait for.
+    void child.adoption?.then((adopted) => adopted && resolve());
+    return promise;
+  });
   try {
-    await promise;
+    await Promise.race([offline, Promise.all(gone)]);
   } finally {
     link.statusListeners.delete(onStatus);
   }
