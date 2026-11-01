@@ -43,6 +43,8 @@ interface Props {
   revealPath: string | null;
   onRevealDone: () => void;
   explorerCwd: string | null;
+  /** The workspace lives on a remote host: Files, Git and Worktrees are not available there yet. */
+  remoteHost: boolean;
   /** Active Git workspace's worktrees (null when it is not a Git top-level repo). */
   worktrees: WorktreeContext | null;
   explorerRefreshKey: number;
@@ -95,6 +97,7 @@ export const RightPanel = memo(function RightPanel({
   revealPath,
   onRevealDone,
   explorerCwd,
+  remoteHost,
   worktrees,
   explorerRefreshKey,
   fileSearchOpen,
@@ -418,7 +421,7 @@ export const RightPanel = memo(function RightPanel({
             <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: 24, textAlign: "center" }}>
               <Folder size={26} strokeWidth={1.5} aria-hidden="true" style={{ color: "var(--text-dim)" }} />
               <div style={{ color: "var(--text)", fontSize: 13, fontWeight: 600 }}>{t("sessionSidebar.explorer")}</div>
-              <div style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.6, maxWidth: 260 }}>{t("sessionSidebar.selectProjectFirst")}</div>
+              <div style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.6, maxWidth: 260 }}>{t(remoteHost ? "hosts.notAvailableRemote" : "sessionSidebar.selectProjectFirst")}</div>
             </div>
           ))}
         </div>
@@ -436,7 +439,7 @@ export const RightPanel = memo(function RightPanel({
             <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: 24, textAlign: "center" }}>
               <GitBranch size={26} strokeWidth={1.5} aria-hidden="true" style={{ color: "var(--text-dim)" }} />
               <div style={{ color: "var(--text)", fontSize: 13, fontWeight: 600 }}>{t("tabBar.git")}</div>
-              <div style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.6, maxWidth: 260 }}>{t("sessionSidebar.selectProjectFirst")}</div>
+              <div style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.6, maxWidth: 260 }}>{t(remoteHost ? "hosts.notAvailableRemote" : "sessionSidebar.selectProjectFirst")}</div>
             </div>
           ))}
         </div>
@@ -445,7 +448,7 @@ export const RightPanel = memo(function RightPanel({
         </div>
         <div id="workspace-file-panel-worktrees" role="tabpanel" aria-label={t("tabBar.worktrees")} style={{ display: rightView === "worktrees" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>
           {/* Keyed by repository so a draft branch or pending confirmation never carries over to another repo. */}
-          {visitedViews.has("worktrees") && <WorktreesPanel key={worktrees?.projectRoot ?? ""} ctx={worktrees} />}
+          {visitedViews.has("worktrees") && <WorktreesPanel key={worktrees?.projectRoot ?? ""} ctx={worktrees} remoteHost={remoteHost} />}
         </div>
         {/* Keep open viewers mounted so switching tabs preserves scroll and preview state. */}
         <div id="workspace-file-panel-file" role="tabpanel" aria-label={activeFileTab?.filePath ?? t("appShell.filePanel")} style={{ display: rightView === "file" ? "block" : "none", flex: 1, minHeight: 0, overflow: "hidden" }}>

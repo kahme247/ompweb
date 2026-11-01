@@ -1,24 +1,8 @@
 import { NextResponse } from "next/server";
-import { existsSync } from "fs";
-import { loadSessionFile } from "@/lib/omp/session-files";
-import { buildSessionContext, getSessionContextBoundary, getSessionEntriesForDisplayAsync, getSessionHistoryPage, readSessionHeader, SessionFileTooLargeError } from "@/lib/session-reader";
-import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
+import { buildSessionContext } from "@/lib/session-reader";
+import { apiErrorResponse, opErrorResponse, resolveSessionHostOr404 } from "@/lib/api-utils";
 import { getRpcSession } from "@/lib/rpc-manager";
-import { MAX_SYNC_MESSAGES, parseHistoryCursor, selectSessionHistory, type SessionHistoryCursor, type SessionSyncResponse } from "@/lib/session-sync";
-
-/** Uniform error mapping for this route: the display read throws
- * SessionFileTooLargeError on files past the load ceiling, which must surface
- * as the same 413 the null-header path returns — not a 500 so the frontend
- * does not treat history as gone. */
-function contextErrorResponse(error: unknown): NextResponse {
-  if (error instanceof SessionFileTooLargeError) {
-    return NextResponse.json(
-      { error: "Session file is too large to open in omp-web", code: "session_file_too_large" },
-      { status: 413 },
-    );
-  }
-  return apiErrorResponse(error);
-}
+import { MAX_SYNC_MESSAGES, parseHistoryCursor, selectSessionHistory, type SessionHistoryCursor, type SessionHistoryPage, type SessionSyncResponse } from "@/lib/session-sync";
 
 export async function GET(
   req: Request,
@@ -62,14 +46,14 @@ export async function GET(
   }
 
   try {
-    const resolved = await resolveSessionPathOr404(id);
+    const resolved = await resolveSessionHostOr404(id);
     if ("response" in resolved) {
       // OMP may not create the file until the first assistant message is
       // committed. A live wrapper can still recover that first partial reply,
       // and its persisted boundary is empty (the next prompt must not 404).
       // Never replace previously confirmed history when its file is missing.
       const session = boundary === "1" || (sync === "1" && !cursor?.lastEntryId && leafId === undefined) ? getRpcSession(id) : undefined;
-      if (session?.isAlive() && !existsSync(session.sessionFile)) {
+      if (session?.isAlive() && !(await session.host.sessionFileExists(session.sessionFile))) {
         if (boundary === "1") {
           return NextResponse.json({ entryIds: [] }, { headers: { "Cache-Control": "no-store" } });
         }
@@ -83,28 +67,19 @@ export async function GET(
       }
       return resolved.response;
     }
-    const filePath = resolved.filePath;
-
-    const header = readSessionHeader(filePath);
-    if (header === null) {
-      const loaded = loadSessionFile(filePath, { resolveBlobs: false });
-      if (loaded.error === "too_large") {
-        return NextResponse.json(
-          { error: "Session file is too large to open in omp-web", code: "session_file_too_large" },
-          { status: 413 },
-        );
-      }
-      return NextResponse.json({ error: "Session file is missing or malformed", code: "session_file_malformed" }, { status: 404 });
-    }
+    const result = await resolved.host.sessionOps.readContext(id, leafId, {
+      deferThinking,
+      deferMedia: deferToolResultImages,
+      includePreCompaction,
+      boundary: boundary === "1",
+      sync: sync === "1" ? { cursor, limit } : null,
+    });
+    if (!result.ok) return opErrorResponse(result);
     if (boundary === "1") {
-      return NextResponse.json(getSessionContextBoundary(filePath), { headers: { "Cache-Control": "no-store" } });
+      return NextResponse.json(result.value, { headers: { "Cache-Control": "no-store" } });
     }
     if (sync === "1") {
-      const page = await getSessionHistoryPage(filePath, cursor, limit, leafId, {
-        deferThinking,
-        deferToolResultImages,
-        includePreCompaction,
-      });
+      const page = result.value as { history: SessionHistoryPage; leafId: string | null; tipId: string | null };
       // Sample AFTER the disk read: a quiet active run still supplies its most
       // recent partial output, and events arriving during the read win.
       const session = getRpcSession(id);
@@ -114,16 +89,8 @@ export async function GET(
       const response: SessionSyncResponse = { ...page.history, sessionId: id, leafId: page.leafId, live };
       return NextResponse.json(response, { headers: { "Cache-Control": "no-store" } });
     }
-    // Deduplicated cached read; blob resolution on per-entry deep copies.
-    const entries = await getSessionEntriesForDisplayAsync(filePath, { skipToolResultImages: deferToolResultImages });
-    const context = buildSessionContext(entries, leafId, {
-      deferThinking,
-      deferToolResultImages,
-      includePreCompaction,
-    });
-
-    return NextResponse.json({ context });
+    return NextResponse.json(result.value);
   } catch (error) {
-    return contextErrorResponse(error);
+    return apiErrorResponse(error);
   }
 }

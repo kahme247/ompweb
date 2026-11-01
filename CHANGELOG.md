@@ -6,6 +6,10 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ## [Unreleased]
 
+### Added
+
+- **Run sessions on other machines from one ompweb.** Link a machine (for example a MacBook) with **Settings → Hosts → Add host**, then run `ompweb host login --url <server url>` (the token is read from stdin) and `ompweb host` there. The remote machine keeps its own `omp`, agent directory and credentials; ompweb routes. The sidebar groups sessions by host, the new-session screen has a host picker, and chat, history, notifications and resume work on every host. If the link drops, the run continues on the remote machine and the chat shows an offline banner until the host reconnects. Agents can pass `host` to `new_session` (it defaults to the agent's own host), which asks for confirmation on a remote host unless the host allows it; an agent on a remote host always asks before it starts or messages a session on this machine. Explorer, Git, worktrees and the skills, plugins, agents and MCP settings are not available on remote hosts yet.
+
 ### Fixes & Improvements
 
 - **In-app updates work when ompweb runs as a systemd service.** The update worker ran inside the service's cgroup, so stopping the server killed the worker too: nothing was installed, the service could stay down (`Restart=on-failure` does not restart a clean SIGTERM exit), and every page load reopened the update dialog at "Stop ompweb-managed sessions". The worker now runs in its own transient scope (`systemd-run --scope`) and stops, updates and starts the unit through `systemctl`, starting it again if the install fails.
