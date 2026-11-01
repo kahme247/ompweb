@@ -34,7 +34,8 @@ const CLOSE = { invalidData: 1007, policy: 1008, tooBig: 1009, failed: 1011, rep
 const INVALID_REQUEST = { error: "Invalid event stream request", code: "invalid_event_stream_request" };
 
 /** The unacked window follows the link: about WINDOW_TARGET_MS of what the browser acks, between WINDOW_MIN_BYTES and
- * LINK_LIMITS.unackedBytes. A command's reply queued behind a backlog waits behind at most that much on the wire. */
+ * LINK_LIMITS.unackedBytes (see `measure`). A command's reply queued behind a backlog waits behind about that much on
+ * the wire, plus at most one line or piece that started below it. */
 const WINDOW_TARGET_MS = 1000;
 const WINDOW_MIN_BYTES = 64 * 1024;
 /** What Bun keeps on a browser socket (`ws.data`): the web session it was opened by, and its link after the hello. */

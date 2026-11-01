@@ -775,7 +775,7 @@ during the wait.
     (`PartJoiner`); per-key queues served round-robin (a subscription's frames, a session's commands or
     replies, `mux`); a session's commands stay in order, so Stop never overtakes the prompt it stops. The
     server keeps at most about 1 s of the measured ack rate unacked below the socket (64 KiB to 512 KiB,
-    `measure` in `lib/browser-link.ts`; only a stretch where the window held lines back resizes it), the
+    `measure` in `lib/browser-link.ts`; only a stretch where the window or the socket's backpressure held lines back resizes it), the
     worker at most 512 KiB. `welcome`/`ack`/`ping`/`pong` skip the queues. So a command's reply waits behind
     about a second of the link plus a piece per busy key, never behind a snapshot. The pacing loops
     are the browser link's own copies: the server's mirrors the hub's (`send` → `-1` → `drain`), the
