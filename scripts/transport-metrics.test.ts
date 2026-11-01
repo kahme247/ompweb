@@ -119,7 +119,7 @@ test("the report keeps one section order whatever the order of the samples", () 
 });
 
 test("isolation, sockets, pool size and rebalance rows per transport", () => {
-  const transports = ["sse", "ws-client", "ws-session", "ws-pool"];
+  const transports = ["sse", "ws-client", "ws-client-split", "ws-session", "ws-pool"];
   const samples = transports.flatMap((transport, index) => {
     const tagged = (fields: Record<string, unknown>) => ({ ...at(1_000), transport, pool: transport === "ws-pool" ? 2 : null, sockets: index + 1, ...fields });
     // event ms = gotAt + offset − at

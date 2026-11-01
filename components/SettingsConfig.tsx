@@ -361,6 +361,7 @@ interface BrowserTransportSettings {
 const BROWSER_TRANSPORT_LABELS: Record<BrowserTransport, string> = {
   sse: "settingsConfig.browserTransportSse",
   "ws-client": "settingsConfig.browserTransportWsClient",
+  "ws-client-split": "settingsConfig.browserTransportWsClientSplit",
   "ws-session": "settingsConfig.browserTransportWsSession",
   "ws-pool": "settingsConfig.browserTransportWsPool",
 };
