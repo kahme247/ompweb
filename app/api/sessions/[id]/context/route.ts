@@ -47,12 +47,21 @@ export async function GET(
 
   try {
     const resolved = await resolveSessionHostOr404(id);
-    if ("response" in resolved) {
+    // A live session resolves to its host even before its file exists; the host then answers 404.
+    const result = "response" in resolved ? resolved : await resolved.host.sessionOps.readContext(id, leafId, {
+      deferThinking,
+      deferMedia: deferToolResultImages,
+      includePreCompaction,
+      boundary: boundary === "1",
+      sync: sync === "1" ? { cursor, limit } : null,
+    });
+    if ("response" in result || !result.ok) {
       // OMP may not create the file until the first assistant message is
       // committed. A live wrapper can still recover that first partial reply,
       // and its persisted boundary is empty (the next prompt must not 404).
       // Never replace previously confirmed history when its file is missing.
-      const session = boundary === "1" || (sync === "1" && !cursor?.lastEntryId && leafId === undefined) ? getRpcSession(id) : undefined;
+      const notFound = "response" in result ? result.response.status === 404 : result.status === 404;
+      const session = notFound && (boundary === "1" || (sync === "1" && !cursor?.lastEntryId && leafId === undefined)) ? getRpcSession(id) : undefined;
       if (session?.isAlive() && !(await session.host.sessionFileExists(session.sessionFile))) {
         if (boundary === "1") {
           return NextResponse.json({ entryIds: [] }, { headers: { "Cache-Control": "no-store" } });
@@ -65,16 +74,8 @@ export async function GET(
         };
         return NextResponse.json(response, { headers: { "Cache-Control": "no-store" } });
       }
-      return resolved.response;
+      return "response" in result ? result.response : opErrorResponse(result);
     }
-    const result = await resolved.host.sessionOps.readContext(id, leafId, {
-      deferThinking,
-      deferMedia: deferToolResultImages,
-      includePreCompaction,
-      boundary: boundary === "1",
-      sync: sync === "1" ? { cursor, limit } : null,
-    });
-    if (!result.ok) return opErrorResponse(result);
     if (boundary === "1") {
       return NextResponse.json(result.value, { headers: { "Cache-Control": "no-store" } });
     }

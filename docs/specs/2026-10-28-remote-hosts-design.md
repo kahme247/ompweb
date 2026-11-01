@@ -196,14 +196,21 @@ On 409 the daemon keeps the messages and sends them after the next
 
 ### Rules
 
-- **Version.** `v` is an integer bumped on any incompatible change (2: the
-  hello moved from the GET header into a POST body). On a mismatch the link
-  request gets 426 with both versions, and so does a v1 daemon's GET carrying
-  its hello in the header; the daemon exits with "upgrade omp-web on this
-  host"; Settings → Hosts shows "needs upgrade (host vN, server vM)". A hello
-  POST answered 400, 404, 405 or 409 without a `helloId` comes from an older
-  main (v1 answers a POST without a link nonce 409): the daemon logs "the
-  server runs an older ompweb: upgrade it" and exits 1 instead of redialing.
+- **Version.** `v` is an integer, bumped on any incompatible change (2: the
+  hello moved from the GET header into a POST body; 3: the hello carries
+  `autoApproveExtension` and each channel its `cwd` and `pending`). Main links
+  daemons from `MIN_LINK_PROTOCOL_VERSION` (2) up to its own
+  `LINK_PROTOCOL_VERSION`, and its `welcome` carries the version the link
+  speaks, the daemon's (see "Protocol versions and compatibility"). Any other
+  version, older or newer than main, gets 426 with both versions, and so does a
+  v1 daemon's GET carrying its hello in the header; the daemon exits, telling
+  which side to update ("update ompweb on this host", or "this host's ompweb is
+  newer than the server's: update ompweb on the server" when the 426's
+  `serverVersion` is below its own); Settings → Hosts shows "needs upgrade (host
+  vN, server vM)". A hello POST answered 400, 404, 405 or 409 without a
+  `helloId` comes from an older main (v1 answers a POST without a link nonce
+  409): the daemon logs "the server runs an older ompweb: upgrade it" and exits
+  1 instead of redialing.
 - **Identity.** The host is the record whose `tokenHash` matches. Nothing the
   daemon sends selects or changes its identity.
 - **One link per host.** A new link with the same token replaces the old one,
@@ -238,6 +245,48 @@ On 409 the daemon keeps the messages and sends them after the next
 - **Limits.** Uplink batches are capped at 16 MB and blob uploads at 64 MB;
   over-limit requests get 413. A single `stdout` line over 8 MB is dropped and
   replaced by `resync {ch}`.
+
+### Protocol versions and compatibility
+
+- **A released version changes only compatibly.** Compatible means both: every
+  message the newer side can send is valid for an older receiver, and every
+  message the older side can send is valid for a newer receiver. Anything else
+  needs a new `LINK_PROTOCOL_VERSION`.
+  - Compatible: a sender starting to always include a field the receiver
+    already accepts as optional; adding an optional field (decoders ignore
+    fields they do not know); adding a message type that receivers ignore when
+    unknown.
+  - Not compatible: making a field the receiver requires optional for
+    senders; changing a field's type or meaning; a receiver starting to
+    require a field older senders may omit.
+  - Receivers tolerate what they do not know: an unknown message type (valid
+    envelope: a string `type` and, where the direction numbers messages, a
+    non-negative safe-integer `seq`) is skipped, its `seq` still applied and
+    acked so it is never resent and later messages are not blocked. A known
+    type arriving the wrong way (`stdout` on the downlink) is skipped and acked
+    the same way. Each side logs an unknown type once per link (at most 16
+    distinct types, escaped and cut to 64 characters) and a wrong-way message
+    each time (at most 16 per link). An unknown host op in a `req` is answered `res {ok: false, error:
+    {status: 501, code: "unknown_op"}}`, which main surfaces as a 501
+    `HostOpError` so callers can fall back. A sender must not rely on a newer
+    message being understood unless the version (or, later, a capability) says
+    so. Tolerance starts with v3: a v2 daemon is strict (an unknown type or op
+    makes it refuse the line), so main sends a v2 daemon only messages and ops
+    v2 understands.
+- **Older versions stay supported** until supporting one becomes too much of a
+  maintenance burden; dropping one is an explicit decision (raising
+  `MIN_LINK_PROTOCOL_VERSION`). In practice main keeps at least version N-1.
+  For an older daemon main decodes its hello into today's shape and sends only
+  messages that version understands. A daemon on a dropped version gets 426;
+  an update-only mode for it is planned, separately.
+- **Upgrade order: web app first, then hosts.** Main supports older daemons; a
+  daemon is not required to support a newer main, and one newer than main gets
+  426. `hostVersion` (Settings → Hosts) is the version a linked daemon speaks,
+  so Settings can later show "update available" for one behind the server.
+- **v2 daemons** (N-1 today): their hello has no `autoApproveExtension` (read
+  as false until a spawn result reports it) and no channel `cwd` or `pending`,
+  so their listed children are never adopted: they take the kill-and-resume
+  path. v2 and v3 have the same down messages, host ops and HTTP legs.
 
 ## Host ops (this sub-project)
 

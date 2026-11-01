@@ -296,8 +296,8 @@ function openHostsChannel(handle: SubscriptionHandle): SubscribeResult {
   let chain: Promise<void> = Promise.resolve();
   const push = () => {
     chain = chain
-      .then(async () => {
-        const snapshot = await hostsSnapshot();
+      .then(() => {
+        const snapshot = hostsSnapshot();
         if (handle.active) handle.send(snapshot);
       })
       .catch(() => {});

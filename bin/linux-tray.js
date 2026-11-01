@@ -272,6 +272,7 @@ const ITEM_PATH = "/StatusNotifierItem";
 const MENU_PATH = "/MenuBar";
 const TRAY_PATH = "/ompweb/tray";
 const SERVICE_UNIT = "ompweb.service";
+const DAEMON_UNIT = "ompweb-host.service";
 const AUTOSTART_FILE = path.join(os.homedir(), ".config", "autostart", "ompweb-tray.desktop");
 const ICON_DIR = path.join(os.homedir(), ".local", "share", "icons", "hicolor", "scalable", "apps");
 const POLL_INTERVAL_MS = 5000;
@@ -450,15 +451,17 @@ function readTrayConfig(overrides = {}, env = process.env, home = os.homedir()) 
 
 // Menu item table. `separator` items render as dividers; `checkmark` items
 // carry a toggle state; `disabled` items are inert status rows.
-function buildMenuItems({ running, version, autostart, hasService, exposed, hasDialogTool }) {
+// `daemon` is "running", "stopped" or "not installed" (the ompweb-host unit).
+function buildMenuItems({ running, version, autostart, hasService, exposed, hasDialogTool, daemon = "not installed" }) {
   return [
     { id: 1, label: `ompweb (v${version})`, enabled: false },
     { id: 2, label: running ? "  Status: Running" : "  Status: Stopped", enabled: false },
+    { id: 19, label: `  Daemon: ${daemon[0].toUpperCase()}${daemon.slice(1)}`, enabled: false },
     { id: 3, separator: true },
     { id: 4, label: "Open in Browser", action: "open" },
     { id: 5, label: "Copy Web URL", action: "copy" },
     { id: 6, separator: true },
-    { id: 7, label: running ? "Stop Server" : "Start Server", action: "toggle", enabled: hasService },
+    { id: 7, label: running ? "Stop Server (omp runs keep going)" : "Start Server", action: "toggle", enabled: hasService },
     { id: 8, label: "Restart Server", action: "restart", enabled: hasService },
     { id: 9, separator: true },
     { id: 10, label: "View Logs", action: "logs" },
@@ -665,9 +668,18 @@ function systemctlUser(args) {
   };
 }
 
-function serviceInstalled() {
+function unitInstalled(unit) {
   const dir = process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config");
-  return fs.existsSync(path.join(dir, "systemd", "user", SERVICE_UNIT));
+  return fs.existsSync(path.join(dir, "systemd", "user", unit));
+}
+
+function serviceInstalled() {
+  return unitInstalled(SERVICE_UNIT);
+}
+
+function daemonState() {
+  if (!unitInstalled(DAEMON_UNIT)) return "not installed";
+  return systemctlUser(["is-active", DAEMON_UNIT]).stdout === "active" ? "running" : "stopped";
 }
 
 function openUrl(url) {
@@ -691,7 +703,7 @@ function viewLogs() {
   const resolved = candidateBinPath(terminal);
   if (!resolved) return false;
   const prefix = terminalPrefix(terminal).slice(1);
-  const child = spawn(resolved, [...prefix, `journalctl --user -u ompweb -f`], {
+  const child = spawn(resolved, [...prefix, `journalctl --user -u ompweb -u ompweb-host -f`], {
     stdio: "ignore",
     detached: true,
     env: process.env,
@@ -730,6 +742,7 @@ function createTrayState(config, { log = console.log } = {}) {
     port: config.port,
     hostname: config.hostname,
     version: readPackageVersion(),
+    daemon: daemonState(),
   };
 
   state.menuItems = () =>
@@ -740,6 +753,7 @@ function createTrayState(config, { log = console.log } = {}) {
       hasService: state.hasService,
       exposed: state.exposed,
       hasDialogTool: state.dialogTool !== null,
+      daemon: state.daemon,
     });
 
   // Re-read the env file after config changes and refresh icon + menu.
@@ -926,11 +940,13 @@ function createTrayState(config, { log = console.log } = {}) {
     }
     const hadService = state.hasService;
     state.hasService = serviceInstalled();
+    const hadDaemon = state.daemon;
+    state.daemon = daemonState();
     if (running !== wasRunning) {
       state.running = running;
       state.refreshIcon();
       state.refreshMenu();
-    } else if (state.hasService !== hadService) {
+    } else if (state.hasService !== hadService || state.daemon !== hadDaemon) {
       state.refreshMenu();
     }
   };
@@ -1094,6 +1110,7 @@ async function readStatus(overrides) {
     trayRunning,
     serviceInstalled: serviceInstalled(),
     serviceRunning,
+    daemon: daemonState(),
     autostart,
     port: config.port,
     hostname: config.hostname,
@@ -1268,6 +1285,7 @@ async function runCli(argv = process.argv.slice(2)) {
     console.log(`=== ompweb Linux tray status ===`);
     console.log(`  Tray running    : ${status.trayRunning ? "Yes" : "No"}`);
     console.log(`  Service unit    : ${status.serviceInstalled ? "installed" : "not installed"} (${status.serviceRunning ? "active" : "inactive"})`);
+    console.log(`  Host daemon     : ${status.daemon}`);
     console.log(`  Autostart       : ${status.autostart ? `enabled (${status.autostartFile})` : "disabled"}`);
     console.log(`  Live URL        : ${status.serviceUrl}`);
   }
