@@ -61,8 +61,10 @@ const VERSION_MISMATCH_CODE = 4426;
 const SEND_BUFFER_BYTES = 2 * LINK_LIMITS.pieceBytes;
 /** A command that cannot go out (no link) for this long answers transport_unavailable. */
 const SEND_DEADLINE_MS = 15000;
-/** After a refused upgrade the worker uses SSE for this long, then tries the link again. */
+/** After refused upgrades the worker uses SSE for this long, then tries the link again. */
 const FALLBACK_MS = 300000;
+/** Refused dials in a row (each GET reaching the server, no open between, the browser online) before that fallback. */
+const FALLBACK_REFUSALS = 3;
 const TRANSPORT_UNAVAILABLE = { error: "Not sent: no connection to omp-web.", code: "transport_unavailable" };
 const TRANSPORT_LOST = { error: "The connection to omp-web dropped before the answer arrived; the command may have run.", code: "transport_lost" };
 // Transport samples (spec D6 of the experiment): POSTed in batches to the metrics route, whose GET is the SSE clock probe.
@@ -95,6 +97,7 @@ interface WorkerScope extends Port {
   navigator: {
     locks?: { request(name: string, callback: () => unknown): Promise<unknown> };
     connection?: { effectiveType?: string };
+    onLine?: boolean;
   };
   location: { href: string };
 }
@@ -240,6 +243,8 @@ const link = {
   /** The current socket's welcome arrived: lines go out only after it. */
   welcomed: false,
   diagnosing: false,
+  /** Dials in a row refused while plain HTTP to the same URL worked: FALLBACK_REFUSALS of them mean a proxy. */
+  refusals: 0,
   sender: new LinkSender<UpItem>(true),
   outbox: new Outbox<Sent>(),
   upSeq: 0,
@@ -592,6 +597,8 @@ function dial(): void {
   ws.onopen = () => {
     if (link.ws !== ws) return;
     link.opened = true;
+    // The upgrade works: whatever refused dials came before were the network, not a proxy.
+    link.refusals = 0;
     sendControl({ type: "hello", v: BROWSER_LINK_VERSION, token: link.token, ack: link.down.acked });
     clockPing();
   };
@@ -656,20 +663,24 @@ function scheduleDial(delay: number): void {
 /**
  * The socket closed before it opened: ask the route with a plain GET why (the host daemon's diagnosis). Offline, signed
  * out, restarting, or a proxy whose upstream is down (502, 504): the link comes back once that passes. Any other answer
- * reached the server but not the upgrade (a proxy that drops Upgrade answers 426, a server without the route 404): SSE
- * for FALLBACK_MS.
+ * reached the server but not the upgrade (a proxy that drops Upgrade answers 426, a server without the route 404), but a
+ * healthy server answers a plain GET 426 too, so one such answer cannot tell a proxy from a dial that failed as the
+ * network came back. Only FALLBACK_REFUSALS of them in a row, with no open in between and none while the browser was
+ * offline, put the worker on SSE for FALLBACK_MS.
  */
 function refused(): void {
   if (!giveUp("close")) return;
+  const offline = scope.navigator.onLine === false;
   link.diagnosing = true;
   fetch(BROWSER_LINK_PATH, { cache: "no-store" }).then((response) => response.status, () => 0).then((status) => {
     link.diagnosing = false;
-    if ([0, 401, 502, 503, 504].includes(status)) scheduleDial(backoff());
+    if (offline || [0, 401, 502, 503, 504].includes(status) || ++link.refusals < FALLBACK_REFUSALS) scheduleDial(backoff());
     else fallBack();
   });
 }
 
 function fallBack(): void {
+  link.refusals = 0;
   link.ws?.close(DONE_CODE);
   link.ws = null;
   clearTimeout(fallbackTimer);

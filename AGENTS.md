@@ -798,8 +798,10 @@ during the wait.
     (`TransportLostError`). A command with no link for 15 s answers 503 `transport_unavailable`. A worker
     done with its link closes it 1000 (the server drops it at once); 4000 is its own redial.
   - **Fallback.** A socket that closes before it opens gets a plain `GET /api/events/link`: offline, 401,
-    502, 503 or 504 redial; any other answer (a proxy that drops Upgrade: 426) puts this worker on SSE for 5 min.
-    Close 4426 (another link version) does the same.
+    502, 503 or 504 redial. Any other answer (426: a proxy that drops Upgrade, but also a healthy server's
+    answer to a dial that failed as the network came back) is a refusal: 3 in a row, with no open between
+    and none while `navigator.onLine` is false, put this worker on SSE for 5 min. Close 4426 (another link
+    version) falls back at once.
   - **One command path.** `runAgentCommand` (`lib/agent-command.ts`) is what `POST /api/agent/[id]` runs
     after parsing and what a link `cmd` runs, so both answer identically. Command logic goes there.
   - **Metrics** (both transports). Tabs and the worker record `action`, `event`, `reconnect` (with
