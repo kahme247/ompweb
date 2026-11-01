@@ -1,5 +1,5 @@
 // Client-side helper for agent commands: POST /api/agent/[id], or the worker's
-// socket for the session in a `ws-*` browser transport (lib/event-stream.ts).
+// browser link in the `ws` browser transport (lib/event-stream.ts).
 //
 // Every /api/agent/[id] route returns one of:
 //   { success: true, data: <result> }
@@ -16,8 +16,8 @@ import { formatApiError } from "@/lib/i18n/api-error";
 // decision happens inside the route, which only sees id + query string.
 const advisorSpawnSessions = new Set<string>();
 
-// The worker's ack timeout (public/event-stream-worker.js): 10 s plus 1 ms per 32 bytes to upload first.
-const ACK_TIMEOUT_MS = 10_000;
+// The `hang` sample's patience for a POST: 10 s plus 1 ms per 32 bytes to upload first (a 32 KB/s floor).
+const HANG_AFTER_MS = 10_000;
 
 /**
  * This tab's unanswered POSTs, for a later one's isolation bytes (spec D6 "Uplink"). fetch reports no upload progress
@@ -39,9 +39,9 @@ export class HostOfflineError extends Error {
   }
 }
 
-/** 503 `transport_lost`: the session socket dropped after the command left and
- *  before its answer (lib/event-stream.ts), so it may have run; the caller must
- *  not offer it again. */
+/** 503 `transport_lost`: the browser link resynced with a server that cannot
+ *  tell whether the command ran (a restart, or past the dedupe window), so it
+ *  may have run; the caller must not offer it again. */
 export class TransportLostError extends Error {
   readonly mayHaveRun = true;
 }
@@ -56,7 +56,7 @@ export async function sendAgentCommand<T = unknown>(
   command: Record<string, unknown>,
 ): Promise<T> {
   const advisor = advisorSpawnSessions.has(sessionId);
-  // The session socket's dedupe key; no crypto.randomUUID (insecure LAN origins lack it).
+  // The link's dedupe key; no crypto.randomUUID (insecure LAN origins lack it).
   const req = Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
   const json = JSON.stringify(command);
   // Every command's `action` sample (spec D6); the worker adds the tags and its clock.
@@ -118,8 +118,8 @@ async function postAgentCommand(sessionId: string, body: string, advisor: boolea
   }
   const mine = { sessionId, bytes: body.length };
   inFlightPosts.add(mine);
-  // The worker's ack formula over all this tab has in flight (HTTP/2 shares one connection); it records, never aborts.
-  const waitedMs = ACK_TIMEOUT_MS + Math.ceil((behindSameBytes + behindOtherBytes + body.length) / 32);
+  // The hang formula over all this tab has in flight (HTTP/2 shares one connection); it records, never aborts.
+  const waitedMs = HANG_AFTER_MS + Math.ceil((behindSameBytes + behindOtherBytes + body.length) / 32);
   const hang = setTimeout(() => recordTransportSample({ metric: "hang", socket: "http", req, type, via: "http", bytes: body.length, waitedMs }), waitedMs);
   try {
     const res = await fetch(`/api/agent/${encodeURIComponent(sessionId)}${advisor ? "?advisor=1" : ""}`, {

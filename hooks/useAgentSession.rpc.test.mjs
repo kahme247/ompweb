@@ -5077,7 +5077,7 @@ const SOCKET_LOST = { error: "The connection to omp-web dropped before the answe
 async function inWebSocketMode(run) {
   const { openEventStream } = await import("@/lib/event-stream");
   openEventStream({ kind: "running" }).close(); // the tab's transport exists before the hook mounts
-  workerPort.onmessage({ data: { transport: "ws-session" } });
+  workerPort.onmessage({ data: { transport: "ws" } });
   try {
     await run();
   } finally {
