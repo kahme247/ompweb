@@ -148,10 +148,21 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   /** The downlink line main is sending in parts. */
   const parts = new PartJoiner();
   let upSeq = 0;
-  /** Highest outbox seq handed to the current socket. */
-  let sentSeq = 0;
+  /** Highest uplink seq main acked. */
+  let ackedUp = 0;
+  /** The outbox as it stood at the last welcome, resent in order from `resendAt` (spec D7). */
+  let resend: Queued[] = [];
+  let resendAt = 0;
+  /** Byte sizes of the frames sent on this socket that main has not answered yet, oldest first: main answers every
+   * frame, text or binary, with one `ack`. */
+  let inFlight: number[] = [];
+  let inFlightBytes = 0;
   let unsentBytes = 0;
   let pongOwed = false;
+  /** A downlink message was applied since the last frame: the next frame carries its ack, an ack-only one if need be. */
+  let ackOwed = false;
+  /** Downlink characters applied since the last frame; past a piece the ack goes at once. */
+  let appliedSince = 0;
   /** The current socket, from dial to close: every handler ignores events from any other. */
   let socket: WebSocket | null = null;
   /** `socket` once its welcome arrived: uplink frames go only here. */
@@ -195,18 +206,19 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       // line). The resync goes out ahead of the channel's later output.
       sender.drop(ch);
       outbox.drop((item) => item.key === ch);
+      resend = resend.slice(resendAt).filter((item) => item.key !== ch);
+      resendAt = 0;
       channel.buffered = 0;
       queue({ type: "resync", ch }, ch);
     }
   }
 
   function acked(ack: number): void {
-    for (const item of outbox.pending()) {
-      if (item.seq > ack) break;
+    ackedUp = Math.max(ackedUp, ack);
+    for (const item of outbox.ack(ack)) {
       const channel = channels.get(item.key);
       if (channel) channel.buffered -= item.bytes;
     }
-    outbox.ack(ack);
   }
 
   function scheduleFlush(): void {
@@ -215,24 +227,24 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     else flushTimer ??= setTimeout(flush, LINK_LIMITS.flushMs);
   }
 
-  /** The next thing to send: an outbox line past `sentSeq` (a resend after a redial), else the sender's next unit. */
+  /** The next thing to send: an unacked line from the last welcome's snapshot, else the sender's next unit. */
   function nextUnit(): string | Uint8Array | null {
-    const resend = sentSeq < upSeq ? outbox.pending().find((item) => item.seq > sentSeq) : undefined;
-    if (resend) {
-      sentSeq = resend.seq;
-      return resend.line;
+    while (resendAt < resend.length) {
+      const item = resend[resendAt++];
+      if (item.seq > ackedUp) return item.line;
     }
     const unit = sender.next(() => ++upSeq);
     if (!unit) return null;
     if ("frame" in unit) return unit.frame;
     const bytes = unit.done && "counted" in unit.item && unit.item.counted ? unit.item.size : 0;
     outbox.push({ seq: unit.seq, line: unit.line, key: unit.key, bytes });
-    sentSeq = unit.seq;
     return unit.line;
   }
 
-  /** Hand frames to the socket while it buffers under SEND_BUFFER_BYTES; poll every flushMs while more waits. A text
-   * frame batches lines up to one piece behind the applied downlink's `ack` and an owed pong. */
+  /** Hand frames to the socket while it buffers under SEND_BUFFER_BYTES and the frames main has not answered hold
+   * under unackedBytes (spec D7); poll every flushMs while the socket buffer is full, and send again on main's next
+   * `ack` while the window is. A text frame batches lines up to one piece (UTF-8) behind the applied downlink's `ack`
+   * and an owed pong; one with only those goes regardless of both bounds. */
   function flush(): void {
     clearTimeout(flushTimer);
     flushTimer = undefined;
@@ -240,21 +252,38 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     const ws = linked;
     if (!ws || stopped) return;
     let text = "";
-    const sendText = () => {
-      ws.send(encodeLine({ type: "ack", ack: down.acked }) + (pongOwed ? PONG_LINE : "") + text);
-      pongOwed = false;
-      text = "";
+    let textBytes = 0;
+    const send = (data: string | Uint8Array, bytes: number) => {
+      ws.send(data);
+      inFlight.push(bytes);
+      inFlightBytes += bytes;
     };
-    for (let unit = ws.bufferedAmount < SEND_BUFFER_BYTES ? nextUnit() : null; unit !== null; unit = ws.bufferedAmount < SEND_BUFFER_BYTES ? nextUnit() : null) {
-      if (typeof unit === "string" && text.length + unit.length <= LINK_LIMITS.pieceBytes) {
+    const sendText = () => {
+      const head = encodeLine({ type: "ack", ack: down.acked }) + (pongOwed ? PONG_LINE : "");
+      send(head + text, head.length + textBytes);
+      pongOwed = false;
+      ackOwed = false;
+      appliedSince = 0;
+      text = "";
+      textBytes = 0;
+    };
+    while (ws.bufferedAmount < SEND_BUFFER_BYTES && inFlightBytes + textBytes < LINK_LIMITS.unackedBytes) {
+      const unit = nextUnit();
+      if (unit === null) break;
+      const bytes = typeof unit === "string" ? Buffer.byteLength(unit) : unit.byteLength;
+      if (typeof unit === "string" && textBytes + bytes <= LINK_LIMITS.pieceBytes) {
         text += unit;
+        textBytes += bytes;
         continue;
       }
       if (text) sendText();
-      if (typeof unit === "string") text = unit;
-      else ws.send(unit);
+      if (typeof unit !== "string") send(unit, bytes);
+      else {
+        text = unit;
+        textBytes = bytes;
+      }
     }
-    if (text || pongOwed) sendText();
+    if (text || pongOwed || ackOwed) sendText();
     if (ws.bufferedAmount >= SEND_BUFFER_BYTES) flushTimer = setTimeout(flush, LINK_LIMITS.flushMs);
   }
 
@@ -294,7 +323,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       message = decodeDown(line);
     } catch (error) {
       if (!(error instanceof LinkProtocolError || error instanceof LinkLimitError)) throw error;
-      refuse(line, error.message);
+      refuse(line, error.message, joined);
       return;
     }
     switch (message.type) {
@@ -303,8 +332,11 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         unknownLog.reset();
         linked = socket;
         redialDelay = FIRST_RETRY_MS;
-        // A fresh link: resend what main has not acked.
-        sentSeq = 0;
+        // A fresh link: resend what main has not acked, from one snapshot. Result bytes not sent yet are dropped: main
+        // failed those ops when the socket closed (or their `res` now fails 502 host_blob_missing).
+        resend = outbox.pending();
+        resendAt = 0;
+        sender.dropBlobs();
         flush();
         return;
       case "ping":
@@ -314,7 +346,10 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       case "pong":
         return;
       case "ack":
+        // Main answers each frame once: the oldest one in flight has arrived, so the window may have room again.
+        inFlightBytes -= inFlight.shift() ?? 0;
         acked(message.ack);
+        flush();
         return;
       case "unknown":
         // A newer main's message, or one only the daemon sends: skipped, but its seq is applied so it is acked and never resent.
@@ -348,8 +383,9 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     }
   }
 
-  /** A line that does not decode (a known type with a bad field, say) is never run. */
-  function refuse(line: string, why: string): void {
+  /** A line that does not decode (a known type with a bad field, say) is never run. `joined`: joined from parts, whose
+   * seqs were already applied. */
+  function refuse(line: string, why: string, joined: boolean): void {
     let raw: unknown;
     try {
       raw = JSON.parse(line);
@@ -357,7 +393,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       // Not JSON at all.
     }
     if (isRecord(raw) && typeof raw.seq === "number" && Number.isInteger(raw.seq)) {
-      if (!down.applied(raw.seq)) return;
+      if (!joined && !down.applied(raw.seq)) return;
       if (raw.type === "req" && typeof raw.id === "string") {
         queue({ type: "res", id: raw.id, ok: false, error: { status: 400, code: "invalid_request", message: why } }, raw.id);
         return;
@@ -462,6 +498,8 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       clearTimeout(watchdog);
       socket = null;
       linked = null;
+      inFlight = [];
+      inFlightBytes = 0;
       resolve(closed);
     };
     const giveUp = (why: string) => {
@@ -483,8 +521,17 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       if (socket !== ws) return;
       alive();
       try {
-        // One message per text frame; the hub sends no binary frames.
-        if (typeof data === "string") handleDown(data);
+        // One message per text frame; the hub sends no binary frames. An applied one is acked soon, at once past a
+        // piece, so main's unacked window moves (spec D7).
+        if (typeof data !== "string") return;
+        const applied = down.acked;
+        handleDown(data);
+        if (down.acked !== applied) {
+          ackOwed = true;
+          appliedSince += data.length;
+          if (appliedSince >= LINK_LIMITS.pieceBytes) flush();
+          else flushTimer ??= setTimeout(flush, LINK_LIMITS.flushMs);
+        }
       } catch (error) {
         // A failure handling one message drops this socket, never the daemon: the redial resends what is unacked.
         giveUp(reason(error));

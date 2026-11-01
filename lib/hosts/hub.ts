@@ -33,6 +33,7 @@ import {
   type Unsequenced,
   UnknownMessageLog,
   type UpMessage,
+  withSeq,
 } from "./link-protocol";
 import { customLocalLabel, DEFAULT_LOCAL_LABEL, HostRegistryUnreadableError, hostForToken, LOCAL_HOST_ID, loadHosts, touchHost, type HostRecord } from "./registry";
 import type { SessionOps } from "./session-ops";
@@ -71,6 +72,18 @@ interface PendingOp {
   blobBytes: number;
 }
 
+/** A downlink line sent (or to resend) and not acked yet. `key`: the `sender` key it went out under; `bytes`: its
+ * UTF-8 size; `part`: a `part` line; `whole`: on the last part of a line, that line as queued, which a v4 daemon gets
+ * instead (partsToWhole). */
+interface Sent {
+  seq: number;
+  line: string;
+  key: string;
+  bytes: number;
+  part: boolean;
+  whole: string | null;
+}
+
 interface Link {
   readonly id: string;
   readonly host: RemoteHost;
@@ -87,10 +100,11 @@ interface Link {
   downSeq: number;
   /** Downlink messages not numbered yet, per channel or request, sent fair (spec D7). */
   sender: LinkSender<{ line: string; size: number }>;
-  /** `key`: the `sender` key the line went out under. */
-  outbox: Outbox<{ seq: number; line: string; key: string }>;
+  outbox: Outbox<Sent>;
   /** Highest outbox seq written to the current socket; `flush` sends what is past it. */
   sentSeq: number;
+  /** Bytes of the outbox lines written to the current socket: the unacked window (spec D7). */
+  unacked: number;
   /** Bun queued the last line over the socket's buffered data: the rest waits for its `drain`. */
   awaitingDrain: boolean;
   up: SeqWindow;
@@ -141,6 +155,7 @@ function linkFor(id: string): Link {
       sender: new LinkSender(true),
       outbox: new Outbox(),
       sentSeq: 0,
+      unacked: 0,
       awaitingDrain: false,
       up: new SeqWindow(),
       parts: new PartJoiner(),
@@ -187,27 +202,53 @@ function enqueue(link: Link, line: string): void {
   link.socket?.send(line);
 }
 
-/** Send outbox lines past `sentSeq` (a resend after a redial), then the sender's next units, until Bun queues one
- * under backpressure (-1: the rest goes on `drain`) or drops it (0: the socket is closing; the next socket starts
- * from its hello's ack). So at most one sequenced line, one piece at most, sits in Bun's buffer, and a daemon that
- * stops reading is waited for instead of closed. */
+/** Lines that left the outbox (acked or dropped): those written to the current socket leave the unacked window. */
+function released(link: Link, items: Sent[]): void {
+  for (const item of items) if (item.seq <= link.sentSeq) link.unacked -= item.bytes;
+}
+
+/** Send outbox lines past `sentSeq` (a resend after a redial), then the sender's next units, while the unacked window
+ * has room and until Bun queues one under backpressure (-1: the rest goes on `drain`) or drops it (0: the socket is
+ * closing; the next socket starts from its hello's ack). So at most about unackedBytes of sequenced lines sit in
+ * Bun's, the kernel's and the daemon's buffers (spec D7), and a daemon that stops reading is waited for instead of
+ * closed. */
 function flush(link: Link): void {
   const ws = link.socket;
   if (!ws || link.awaitingDrain || hub().frozen) return;
-  const write = (seq: number, line: string): boolean => {
-    const sent = ws.send(line);
-    if (sent !== 0) link.sentSeq = seq;
+  const limit = LINK_LIMITS.unackedBytes;
+  const write = (item: Sent): boolean => {
+    const sent = ws.send(item.line);
+    if (sent !== 0) {
+      link.sentSeq = item.seq;
+      link.unacked += item.bytes;
+    }
     if (sent > 0) return true;
     link.awaitingDrain = true;
     return false;
   };
-  for (const { seq, line } of link.outbox.pending()) {
-    if (seq > link.sentSeq && !write(seq, line)) return;
+  for (const item of link.outbox.pending()) {
+    if (item.seq > link.sentSeq && (link.unacked >= limit || !write(item))) return;
   }
-  // The hub queues lines only, so every unit is a line.
-  for (let unit = link.sender.next(() => ++link.downSeq); unit && "line" in unit; unit = link.sender.next(() => ++link.downSeq)) {
-    link.outbox.push({ seq: unit.seq, line: unit.line, key: unit.key });
-    if (!write(unit.seq, unit.line)) return;
+  while (link.unacked < limit) {
+    const unit = link.sender.next(() => ++link.downSeq);
+    // The hub queues lines only, so every unit is a line.
+    if (!unit || !("line" in unit)) return;
+    const whole = unit.part && unit.done ? unit.item.line : null;
+    const item: Sent = { seq: unit.seq, line: unit.line, key: unit.key, bytes: Buffer.byteLength(unit.line), part: unit.part, whole };
+    link.outbox.push(item);
+    if (!write(item)) return;
+  }
+}
+
+/** A v4 daemon gets no `part`: the parts of a line that went out whole in parts go again as that line, under its last
+ * part's seq; the parts of a line still going out are dropped, and the sender sends it whole from the start. */
+function partsToWhole(link: Link): void {
+  for (const item of link.outbox.drop(() => true)) {
+    if (!item.part) link.outbox.push(item);
+    else if (item.whole !== null) {
+      const line = withSeq(item.whole, item.seq);
+      link.outbox.push({ ...item, line, bytes: Buffer.byteLength(line), part: false, whole: null });
+    }
   }
 }
 
@@ -229,8 +270,9 @@ function failOp(link: Link, id: string, error: Error): void {
   link.pending.delete(id);
   clearTimeout(pending.timer);
   link.sender.drop(id);
-  link.outbox.drop((m) => m.key === id);
+  released(link, link.outbox.drop((m) => m.key === id));
   pending.reject(error);
+  flush(link);
 }
 
 function failAllOps(link: Link, error: () => Error): void {
@@ -444,9 +486,11 @@ function openLink(link: Link, ws: LinkSocket, hello: Hello): void {
   // The version this link speaks: from 5 on, lines over pieceBytes go in parts.
   link.hostVersion = hello.v;
   link.sender.parts = hello.v >= 5;
+  if (!link.sender.parts) partsToWhole(link);
   enqueue(link, encodeLine({ type: "welcome", v: hello.v, hostId: link.id }));
   // Resend what the daemon has not applied, in order and paced, before anything new.
   link.sentSeq = hello.ack;
+  link.unacked = 0;
   link.awaitingDrain = false;
   flush(link);
   reattach(link, hello.channels);
@@ -476,9 +520,12 @@ function onFrame(link: Link, ws: LinkSocket, data: string | Uint8Array): void {
     // A large result comes in pieces, in order (a v4 daemon sends one). Pieces for an op no longer waiting are dropped;
     // past blobBytes none are kept, so its `res` then fails host_blob_missing.
     const pending = link.pending.get(result.id);
-    if (!pending) return;
-    pending.blobBytes += result.bytes.byteLength;
-    if (pending.blobBytes <= LINK_LIMITS.blobBytes) pending.blob.push(result.bytes);
+    if (pending) {
+      pending.blobBytes += result.bytes.byteLength;
+      if (pending.blobBytes <= LINK_LIMITS.blobBytes) pending.blob.push(result.bytes);
+    }
+    // A v5 daemon counts its frames in flight by these answers, binary ones included.
+    if ((link.hostVersion ?? 0) >= 5) enqueue(link, encodeLine({ type: "ack", ack: link.up.acked }));
     return;
   }
   if (Buffer.byteLength(data) > LINK_LIMITS.uplinkBytes) return ws.close(LINK_CLOSE.tooBig, "Uplink frame too large");
@@ -490,11 +537,13 @@ function onFrame(link: Link, ws: LinkSocket, data: string | Uint8Array): void {
     return ws.close(LINK_CLOSE.invalidData, "Malformed uplink frame");
   }
   for (const message of messages) {
-    if (message.type === "ack") link.outbox.ack(message.ack);
+    if (message.type === "ack") released(link, link.outbox.ack(message.ack));
     else applyUp(link, message);
   }
-  // One answer per frame, also to one with nothing sequenced in it: the daemon sends its next frame only after it.
+  // One answer per frame, also to one with nothing sequenced in it: a v5 daemon counts its frames in flight by them.
   enqueue(link, encodeLine({ type: "ack", ack: link.up.acked }));
+  // The daemon's ack may have opened the unacked window.
+  flush(link);
 }
 
 /** SIGKILL an orphan this long after its SIGTERM, as the daemon does when it stops. */
@@ -608,7 +657,7 @@ function settle(link: Link, message: Res): void {
   if (pending.blob.length === 0 || pending.blobBytes > LINK_LIMITS.blobBytes || pending.blobBytes !== message.blob.bytes) {
     return pending.reject(new HostOpError(502, "host_blob_missing", `${label} did not deliver the ${pending.op} result`));
   }
-  const blob = Buffer.concat(pending.blob);
+  const blob = pending.blob.length === 1 ? pending.blob[0] : Buffer.concat(pending.blob);
   if (pending.op === "readMedia") return pending.resolve({ ok: true, value: blob });
   try {
     pending.resolve(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(blob)));
