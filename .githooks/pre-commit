@@ -2,7 +2,8 @@
 # Enable once per clone: sh scripts/setup-hooks.sh
 
 # graphify: rebuild graphify-out/graph.json and commit it with the code that changed it.
-if [ "${GRAPHIFY_SKIP_HOOK:-0}" != 1 ] && [ -f graphify-out/graph.json ] &&
+# The graph is tracked, so a missing one is rebuilt too rather than skipped.
+if [ "${GRAPHIFY_SKIP_HOOK:-0}" != 1 ] &&
 	! git diff --cached --quiet -- . ':!graphify-out/graph.json'; then
 	command -v graphify >/dev/null || {
 		echo "pre-commit: graphify is not on PATH (see CONTRIBUTING.md); GRAPHIFY_SKIP_HOOK=1 commits without the graph rebuild." >&2
