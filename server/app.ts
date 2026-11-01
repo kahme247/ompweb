@@ -154,6 +154,9 @@ export function startServer(options: { port: number; hostname: string; dev: bool
     // Bun's limits are per server: browser links inherit the host link's (lib/browser-link.ts caps its own frames).
     websocket: {
       ...hostLinkSocket,
+      open: (ws: ServerSocket) => {
+        if (isBrowserSocket(ws)) browserLink.open(ws);
+      },
       message: (ws: ServerSocket, data: string | Uint8Array) => (isBrowserSocket(ws) ? browserLink.message(ws, data) : hostLinkSocket.message(asLink(ws), data)),
       drain: (ws: ServerSocket) => (isBrowserSocket(ws) ? browserLink.drain(ws) : hostLinkSocket.drain(asLink(ws))),
       close: (ws: ServerSocket, code: number) => (isBrowserSocket(ws) ? browserLink.close(ws, code) : hostLinkSocket.close(asLink(ws))),

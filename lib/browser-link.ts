@@ -1,7 +1,15 @@
 import { createHash, randomBytes } from "crypto";
 import { runAgentCommand } from "./agent-command";
 import { EventStreamConnection, serverId, type FrameSink } from "./event-stream-hub";
-import { BROWSER_LINK_VERSION, COMMAND_DEDUPE_MS, LINK_RESUME_MS, parseEventStreamChannel, SUBSCRIPTION_ID_RE } from "./event-stream-protocol";
+import {
+  BROWSER_LINK_VERSION,
+  COMMAND_DEDUPE_MS,
+  commandKey,
+  isIdempotentCommand,
+  LINK_RESUME_MS,
+  parseEventStreamChannel,
+  SUBSCRIPTION_ID_RE,
+} from "./event-stream-protocol";
 import { LINK_LIMITS, LinkSender, Outbox, PartJoiner, queuedLine, SeqWindow } from "./hosts/link-protocol";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "./image-attachments";
 import { isRecord } from "./type-guards";
@@ -12,10 +20,12 @@ import { isTrustedProxyRequest, OMP_WEB_SESSION_COOKIE, OMP_WEB_TRUSTED_HEADER }
 // lines both ways, acked and resent after a reconnect, large lines in pieces, fair per-key queues and an unacked
 // window. A link outlives its socket for LINK_RESUME_MS, so a reconnect resumes it instead of re-subscribing.
 
-/** Mutable so tests can shorten them. */
-export const browserLinkTimings = { pingMs: LINK_LIMITS.pingMs, offlineMs: LINK_LIMITS.offlineMs, resumeMs: LINK_RESUME_MS };
-/** A link holding more than this (sent and unacked, plus queued) is dropped: its browser resyncs. */
-export const BACKLOG_BYTES = 32 * 1024 * 1024;
+/** Mutable so tests can shorten them. `helloMs`: a socket that has not said hello by then is closed. */
+export const browserLinkTimings = { pingMs: LINK_LIMITS.pingMs, offlineMs: LINK_LIMITS.offlineMs, resumeMs: LINK_RESUME_MS, helloMs: 10_000 };
+/** Mutable so tests can shrink them. A link holding more than `backlogBytes` (sent and unacked, plus queued) is dropped;
+ * past `totalBacklogBytes` across every link, the links whose sockets have been gone longest are dropped first. Either
+ * way their browsers resync. */
+export const browserLinkLimits = { backlogBytes: 32 * 1024 * 1024, totalBacklogBytes: 256 * 1024 * 1024 };
 export const DEDUPE_MAX = 500;
 /** The longest joined command line: the route's body cap plus room for the envelope. */
 const MAX_COMMAND_CHARS = MAX_AGENT_COMMAND_REQUEST_BYTES + 64 * 1024;
@@ -66,6 +76,8 @@ interface BrowserLink {
   offlineTimer: NodeJS.Timeout | undefined;
   expiryTimer: NodeJS.Timeout | undefined;
   disposed: boolean;
+  /** When its socket went, in detach order (Infinity while it has never been detached): the budget drops the oldest. */
+  detachedAt: number;
 }
 
 interface Reply {
@@ -88,6 +100,11 @@ function links(): Map<string, BrowserLink> {
   return (globalThis.__ompBrowserLinks ??= new Map());
 }
 
+/** Counts detaches, so "the oldest detached link" needs no clock (two in one millisecond still order). */
+let detachCount = 0;
+/** The hello deadline of each socket that has not said hello yet. */
+const helloTimers = new WeakMap<BrowserSocket, NodeJS.Timeout>();
+
 /** The web session a socket belongs to: a resume token is honored only for the same one. */
 function linkOwner(request: Request): string {
   const cookie = new Bun.CookieMap(request.headers.get("cookie") ?? "").get(OMP_WEB_SESSION_COOKIE);
@@ -104,6 +121,16 @@ export function handleBrowserLinkUpgrade(request: Request, upgrade: (data: Brows
 
 /** Bun's `websocket` handler for browser sockets (server/app.ts dispatches on `ws.data.kind`). */
 export const browserLink = {
+  /** A socket gets helloMs to say hello: until then Bun holds what it sends for nothing (see the spec's B3). */
+  open(ws: BrowserSocket): void {
+    guarded(ws, () => {
+      const timer = setTimeout(() => {
+        if (!ws.data.link) ws.close(CLOSE.policy, "No hello");
+      }, browserLinkTimings.helloMs);
+      timer.unref?.();
+      helloTimers.set(ws, timer);
+    });
+  },
   message(ws: BrowserSocket, data: string | Uint8Array): void {
     guarded(ws, () => onFrame(ws, data));
   },
@@ -121,6 +148,7 @@ export const browserLink = {
    * it ends now; any other close is a drop the browser comes back from. */
   close(ws: BrowserSocket, code?: number): void {
     guarded(ws, () => {
+      clearTimeout(helloTimers.get(ws));
       const link = ws.data.link;
       if (link?.socket !== ws) return;
       if (code === 1000 || code === 1001) dispose(link, code);
@@ -167,6 +195,7 @@ function createLink(owner: string): BrowserLink {
     parts: new PartJoiner(MAX_COMMAND_CHARS),
     offlineTimer: undefined,
     expiryTimer: undefined,
+    detachedAt: Infinity,
     disposed: false,
   };
   links().set(link.token, link);
@@ -195,17 +224,34 @@ function linkSink(link: BrowserLink): FrameSink {
   };
 }
 
-/** Queues a sequenced line under `key`; false (and the link is dropped) once the backlog passes BACKLOG_BYTES. */
+/** Queues a sequenced line under `key`; false (and the link is dropped) once its backlog passes backlogBytes, or the
+ * budget across every link drops it. */
 function queue(link: BrowserLink, key: string, json: string): boolean {
   if (link.disposed) return false;
   const line = queuedLine(json);
   link.sender.push(key, { line, size: Buffer.byteLength(line) });
-  if (link.outboxBytes + link.sender.queuedBytes > BACKLOG_BYTES) {
+  if (link.outboxBytes + link.sender.queuedBytes > browserLinkLimits.backlogBytes) {
     dispose(link, CLOSE.gone);
     return false;
   }
+  enforceBudget();
+  if (link.disposed) return false;
   flush(link);
   return true;
+}
+
+/** Past totalBacklogBytes across every link, the links whose sockets are gone longest go first. Attached links are
+ * never dropped here: each stays under backlogBytes, and its browser is reading. */
+function enforceBudget(): void {
+  let total = 0;
+  for (const each of links().values()) total += each.outboxBytes + each.sender.queuedBytes;
+  while (total > browserLinkLimits.totalBacklogBytes) {
+    let oldest: BrowserLink | undefined;
+    for (const each of links().values()) if (!each.socket && each.detachedAt < (oldest?.detachedAt ?? Infinity)) oldest = each;
+    if (!oldest) return;
+    total -= oldest.outboxBytes + oldest.sender.queuedBytes;
+    dispose(oldest, CLOSE.gone);
+  }
 }
 
 /** Send outbox lines past `sentSeq` (a resend after a reconnect), then the sender's next units, while the unacked
@@ -248,6 +294,7 @@ function released(link: BrowserLink, items: Sent[]): void {
 /** The socket is gone (closed, silent or replaced): the link waits resumeMs for the browser to come back. */
 function detach(link: BrowserLink): void {
   link.socket = null;
+  link.detachedAt = ++detachCount;
   link.awaitingDrain = false;
   clearTimeout(link.offlineTimer);
   clearTimeout(link.expiryTimer);
@@ -339,6 +386,7 @@ function onHello(ws: BrowserSocket, hello: Record<string, unknown>): void {
   const known = typeof hello.token === "string" ? links().get(hello.token) : undefined;
   // Another web session's token resumes nothing, and its link is left alone.
   const resumed = known !== undefined && known.owner === ws.data.owner;
+  clearTimeout(helloTimers.get(ws));
   const link = resumed ? known : createLink(ws.data.owner);
   ws.data.link = link;
   const previous = link.socket;
@@ -348,9 +396,11 @@ function onHello(ws: BrowserSocket, hello: Record<string, unknown>): void {
   }
   clearTimeout(link.expiryTimer);
   link.socket = ws;
-  if (resumed) released(link, link.outbox.ack(hello.ack));
+  // An ack past what was sent (a confused or hostile browser) acks what was sent and no more.
+  const ack = resumed ? Math.min(hello.ack, link.downSeq) : 0;
+  if (resumed) released(link, link.outbox.ack(ack));
   // Resend what the browser has not applied, in order and paced, before anything new.
-  link.sentSeq = resumed ? hello.ack : 0;
+  link.sentSeq = ack;
   link.unacked = 0;
   link.awaitingDrain = false;
   control(ws, { type: "welcome", v: BROWSER_LINK_VERSION, token: link.token, serverId: serverId(), resumed, ack: link.up.acked });
@@ -389,18 +439,21 @@ function onCommand(link: BrowserLink, ws: BrowserSocket, message: Record<string,
   const { rid, session } = message;
   if (typeof rid !== "string" || !rid || rid.length > MAX_RID_LENGTH) return ws.close(CLOSE.invalidData, "Invalid rid");
   const recvAt = Date.now();
-  const key = `cmd:${typeof session === "string" ? session : ""}`;
+  const type = isRecord(message.command) && typeof message.command.type === "string" ? message.command.type : "";
+  const key = commandKey(typeof session === "string" ? session : "", type);
   const reply = ({ status, body }: Reply, deduped: boolean) => {
     queue(link, key, `{"type":"reply","rid":${JSON.stringify(rid)},"status":${status},"recvAt":${recvAt},"at":${Date.now()},"deduped":${deduped},"data":${JSON.stringify(body)}}`);
   };
   // A bad session fails only this command: the link carries other sessions' commands.
   if (typeof session !== "string" || !session || session.length > MAX_SESSION_ID_LENGTH) return reply({ status: 400, body: INVALID_REQUEST }, false);
   // Scoped to the session, not the link: a resend after a resync comes on a new link, and a rid another session
-  // happens to use never replays this one's reply. JSON keeps the pair unambiguous for any session id.
-  const { result, deduped } = runOnce(JSON.stringify([session, rid]), async () => {
+  // happens to use never replays this one's reply. JSON keeps the pair unambiguous for any session id. A read-only
+  // command is safe to run again and is not remembered, so it never takes the room of one that changes something.
+  const run = async () => {
     const response = await runAgentCommand(session, message.command, message.advisor === true);
     return { status: response.status, body: await response.json() };
-  });
+  };
+  const { result, deduped } = isIdempotentCommand(type) ? { result: run(), deduped: false } : runOnce(JSON.stringify([session, rid]), run);
   result.then((answer) => reply(answer, deduped)).catch((error: unknown) => fail(ws, error));
 }
 
