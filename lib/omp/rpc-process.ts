@@ -136,6 +136,9 @@ export class RpcProcess {
   /** Ids of the requests `replay` delivered (see `release`). */
   private readonly replayedRequests = new Set<string>();
   private nextId = 1;
+  // An adopted child may still answer the previous server's commands; a fresh prefix per process keeps those
+  // late answers from settling this process's commands with the same number.
+  private readonly idPrefix = `w${crypto.randomUUID().slice(0, 8)}-`;
   private stderrTail = "";
   private exited = false;
   private exitInfo: { code: number | null; signal: NodeJS.Signals | null } | null = null;
@@ -337,7 +340,7 @@ export class RpcProcess {
     }
     if (this.heldOverflow) return Promise.reject(this.heldOverflow);
     const dispatchedAt = Date.now();
-    const id = `w${this.nextId++}`;
+    const id = `${this.idPrefix}${this.nextId++}`;
     return new Promise<T>((resolve, reject) => {
       const entry: PendingCommand = {
         command: command.type,
@@ -406,7 +409,7 @@ export class RpcProcess {
   private handleResponse(response: RpcResponseFrame): void {
     const id = response.id;
     const entry = id ? this.pending.get(id) : undefined;
-    // An adopted child numbers from w1 again: a late answer to the old server's command of another type is not this one's.
+    // A late answer naming another command is not this one's either (defense beside the per-process id prefix).
     if (!entry || !id || (response.command && response.command !== entry.command)) {
       // Unsolicited response (or a command we already timed out) — surface to
       // frame listeners so nothing is silently dropped.
