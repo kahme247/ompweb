@@ -24,6 +24,7 @@ for (const name of UNSET) delete process.env[name];
 Object.assign(process.env, ENV);
 // Imported after the environment is set, so no module sees the real home or agent dir.
 const { startServer } = await import("./app");
+const { browserLinkTimings } = await import("@/lib/browser-link");
 const server = startServer({ port: 0, hostname: "127.0.0.1", dev: false, root });
 const url = (pathname: string) => new URL(pathname, server.url);
 
@@ -347,6 +348,25 @@ test("Bun's idle timeout spares the event stream, the browser link and the host 
   } finally {
     controller.abort();
   }
+});
+
+test("the real server closes a browser link socket without a hello within helloMs (1008) and welcomes one in time", async (t) => {
+  const saved = browserLinkTimings.helloMs;
+  browserLinkTimings.helloMs = 300;
+  t.after(() => (browserLinkTimings.helloMs = saved));
+  const dial = () => new WebSocket(url("/api/events/link").href.replace(/^http/, "ws"));
+  const silent = dial();
+  const closed = Promise.withResolvers<{ code: number; reason: string }>();
+  silent.onclose = ({ code, reason }) => closed.resolve({ code, reason });
+  const greeted = dial();
+  t.after(() => greeted.close());
+  const welcome = Promise.withResolvers<string>();
+  greeted.onopen = () => greeted.send(JSON.stringify({ type: "hello", v: 1, token: null, ack: 0 }));
+  greeted.onmessage = ({ data }) => welcome.resolve(String(data));
+  assert.deepEqual(await closed.promise, { code: 1008, reason: "No hello" });
+  assert.match(await welcome.promise, /^\{"type":"welcome","v":1,/);
+  await Bun.sleep(400);
+  assert.equal(greeted.readyState, WebSocket.OPEN, "a socket that said hello is not closed by the deadline");
 });
 
 test("the host link and the browser link refuse an unauthenticated upgrade with 401 and answer 426 to a request that does not upgrade", async (t) => {

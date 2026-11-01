@@ -239,16 +239,20 @@ function queue(link: BrowserLink, key: string, json: string): boolean {
   return true;
 }
 
-/** Past totalBacklogBytes across every link, the links whose sockets are gone longest go first. Attached links are
- * never dropped here: each stays under backlogBytes, and its browser is reading. */
+/** Past totalBacklogBytes across every link, the detached links whose sockets are gone longest go first, and only ones
+ * holding bytes: dropping an empty one frees nothing. Attached links are never dropped here: each stays under
+ * backlogBytes, and its browser is reading. */
 function enforceBudget(): void {
+  const held = (link: BrowserLink) => link.outboxBytes + link.sender.queuedBytes;
   let total = 0;
-  for (const each of links().values()) total += each.outboxBytes + each.sender.queuedBytes;
+  for (const each of links().values()) total += held(each);
   while (total > browserLinkLimits.totalBacklogBytes) {
     let oldest: BrowserLink | undefined;
-    for (const each of links().values()) if (!each.socket && each.detachedAt < (oldest?.detachedAt ?? Infinity)) oldest = each;
+    for (const each of links().values()) {
+      if (!each.socket && held(each) > 0 && each.detachedAt < (oldest?.detachedAt ?? Infinity)) oldest = each;
+    }
     if (!oldest) return;
-    total -= oldest.outboxBytes + oldest.sender.queuedBytes;
+    total -= held(oldest);
     dispose(oldest, CLOSE.gone);
   }
 }
