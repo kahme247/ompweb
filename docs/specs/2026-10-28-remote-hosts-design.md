@@ -137,8 +137,9 @@ under `next start`, which cannot accept upgrades; those legs are gone.
   plus `/api/hosts/link` with `Authorization: Bearer <host token>`. **Text
   frames** carry the JSON messages: one message per frame from main, one or more
   newline-separated messages per frame from the daemon (the uplink batch,
-  flushed every 16 ms or at 256 KB). **Binary frames** carry large op results
-  (daemon → main only, below).
+  flushed every 16 ms or at one 256 KiB piece). **Binary frames** carry large op
+  results (daemon → main only, below). From v5 no frame carries more than about
+  one piece (see "Pieces and fair sending").
 - **Auth before the upgrade.** `proxy.ts` reports the route as ungated; the
   route checks the bearer token before `server.upgrade`: 401 when no host
   record matches, 503 when the host registry cannot be read (a daemon that sees
@@ -165,10 +166,22 @@ unacknowledged messages, resends them after a reconnect, and drops any `seq` it
 already applied, so no line is lost or applied twice when the socket breaks
 mid-write. stdin lines omp has not received would otherwise vanish.
 
-The daemon keeps **one uplink text frame in flight**: it sends the next only
-after main's `ack` for the previous. A drop clears that; everything unacked is
-sent again after the next `welcome`. Main decodes a whole frame before applying
-any of it.
+**Pieces and fair sending (v5;** websocket-link design D7**).** A sequenced line
+longer than `LINK_LIMITS.pieceBytes` (256 KiB) goes as `part {at, end, data}`
+messages, each an ordinary sequenced message of at most 256 KiB; the receiver
+joins them and applies the line when the `end` part is applied (one partial
+line at a time, at most 8 MiB; a part that does not continue it drops it). A
+large result goes as binary frames of at most 256 KiB of bytes each, joined by
+main in order. Each side queues unsent messages per key (the channel, or the
+request id of a `req` / `res`) and sends round-robin, one line, part or result
+piece per key per turn, numbering each as it goes out (so wire order is `seq`
+order); only one key at a time may be part-way through a multi-part line. A
+small message therefore waits for about one piece per busy key, and `ping` /
+`pong` / `ack` skip the queues. Below the WebSocket, main sends while `send`
+does not report backpressure (`drain` resumes it), and the daemon sends frames
+only while the socket's `bufferedAmount` is under two pieces (polled every
+16 ms); it no longer waits for main's `ack` before its next frame. Main
+decodes a whole frame before applying any of it.
 
 The daemon's first text frame on a new socket is its `hello`, alone. It lists
 every live channel, so it can be large; as a frame body it is not subject to
@@ -182,8 +195,8 @@ a downlink message): main restarts its uplink window for that host. Main
 numbers downlink messages above the daemon's `ack`, so a restarted main and
 a running daemon never reuse a `seq`.
 
-**Downlink pacing.** Main paces the downlink from its outbox: it sends the unsent
-sequenced lines in `seq` order until the socket's `send` reports backpressure,
+**Downlink pacing.** Main paces the downlink from its outbox and queues: it sends
+the unsent sequenced lines in `seq` order until the socket's `send` reports backpressure,
 then sends the rest on the socket's `drain`. A daemon that stops reading
 (asleep, stopped, on a slow link) is waited for, not closed, and a resend after
 a redial is paced the same way. The outbox therefore holds the unacked backlog in
@@ -205,11 +218,13 @@ messages go again after the redial.
 | `res {id, ok, result \| error}`; `res {id, ok: true, blob: {bytes}}` | up | Host op result; the second form names bytes sent earlier in a binary frame. |
 | `ack {ack}` | both | Highest `seq` applied from the other side; unsequenced. |
 | `ping` / `pong` | both | Liveness: main pings every 15 s; each side drops the link after 30 s without a frame. |
+| `part {at, end, data}` | both | v5: the next slice of a line over 256 KiB (`at`: its UTF-16 offset in the line; `end`: the last). Main never sends one to a v4 daemon. |
 
 A binary frame is `byte 0` = the UTF-8 length *n* of the request id (1 to 255),
-then the id, then the result bytes (media bytes for `readMedia`, else the UTF-8
-JSON of the result). The daemon sends it before the `res` that names it; the
-one socket keeps that order.
+then the id, then result bytes (media bytes for `readMedia`, else the UTF-8
+JSON of the result): all of them from a v4 daemon, at most 256 KiB of them per
+frame from v5. The daemon sends them before the `res` that names their total;
+the one socket keeps that order.
 
 ### Close codes
 
@@ -230,11 +245,13 @@ one socket keeps that order.
   hello moved from the GET header into a POST body; 3: the hello carries
   `autoApproveExtension` and each channel its `cwd` and `pending`; 4: the link
   is one WebSocket, `ack` is a message and `replaced` and `welcome.nonce` are
-  gone). Main links daemons from `MIN_LINK_PROTOCOL_VERSION` (4) up to its own
-  `LINK_PROTOCOL_VERSION` (4); its `welcome` carries the version the link
-  speaks (see "Protocol versions and compatibility"). A hello whose `v` is
-  outside that range (checked on the raw JSON before decoding) gets close 4426
-  with reason `{"serverVersion":4}`; the daemon exits 1, telling which side to
+  gone; 5: lines over 256 KiB go as `part`s and large results as several binary
+  frames, sent fair across channels). Main links daemons from
+  `MIN_LINK_PROTOCOL_VERSION` (4) up to its own `LINK_PROTOCOL_VERSION` (5);
+  its `welcome` carries the version the link speaks (see "Protocol versions and
+  compatibility"). A hello whose `v` is outside that range (checked on the raw
+  JSON before decoding) gets close 4426 with reason `{"serverVersion":5}`; the
+  daemon exits 1, telling which side to
   update ("update ompweb on this host", or "this host's ompweb is newer than
   the server's: update ompweb on the server" when `serverVersion` is below its
   own); Settings → Hosts shows "needs upgrade (host vN, server vM)" unless the
@@ -269,19 +286,20 @@ one socket keeps that order.
   restarted on that host (after the orphan's `exit`) and sent `RESUME_PROMPT`,
   as local sessions are after a restart.
 - **Large results.** An op result whose JSON exceeds 1 MB, and every
-  successful `readMedia` result, is sent in a binary frame (above) before its
+  successful `readMedia` result, is sent in binary frames (above) before its
   `res`, in the same socket, instead of inside a text frame; the `res` line
   then carries `blob: {bytes}` and no `result`.
-- **Limits.** An uplink text frame is capped at 16 MiB (the daemon's batch cap;
-  main closes 1009 above it), a single message line at 8 MiB (an over-limit
-  `stdout` line is dropped and replaced by `resync {ch}`) and a binary frame at
-  64 MiB plus its header (the daemon refuses a larger result with 413
-  `result_too_large`). Main's send buffer holds 16 MiB, a backstop behind the
-  downlink pacing above. **Known slow-link limit:** a single multi-MiB line
-  that takes longer than `offlineMs` to arrive makes main treat the link as
-  dropped and resend it; the line is retried each time, so a link slower than
-  roughly 280 KiB/s cannot deliver an 8 MiB line, and a full 16 MiB uplink
-  batch needs more than about 560 KiB/s.
+- **Limits.** An uplink text frame is capped at 16 MiB (a v4 daemon's batch
+  cap; main closes 1009 above it), a single message line at 8 MiB, also when
+  joined from parts (an over-limit `stdout` line is dropped and replaced by
+  `resync {ch}`), and a result at 64 MiB (a binary frame at 64 MiB plus its
+  header; the daemon refuses a larger result with 413 `result_too_large`, main
+  keeps no more of its pieces). Main's send buffer holds 16 MiB, a backstop
+  behind the downlink pacing above. **Slow links:** with v5 every frame is at
+  most about one piece, so liveness passes at any bandwidth where one 256 KiB
+  piece crosses within `offlineMs`. A v4 daemon still gets whole lines: a
+  multi-MiB line that takes longer than `offlineMs` to arrive makes main treat
+  the link as dropped and resend it (below roughly 280 KiB/s for an 8 MiB line).
 
 ### Protocol versions and compatibility
 
@@ -311,10 +329,11 @@ one socket keeps that order.
     unknown type or op makes it refuse the line).
 - **Older versions stay supported** from the next version on, until supporting
   one becomes too much of a maintenance burden; dropping one is an explicit
-  decision (raising `MIN_LINK_PROTOCOL_VERSION`, which is 4 today: the
-  WebSocket link links only v4). In practice main keeps at least version N-1.
-  For an older daemon main decodes its hello into today's shape and sends only
-  messages that version understands. A daemon on a dropped version gets 426
+  decision (raising `MIN_LINK_PROTOCOL_VERSION`, which is 4 today). In
+  practice main keeps at least version N-1. For an older daemon main decodes
+  its hello into today's shape and sends only messages that version
+  understands (to a v4 daemon: no `part`, every line whole).
+  A daemon on a dropped version gets 426
   (a POST) or close 4426 (a hello frame); an update-only mode for it is
   planned, separately.
 - **Upgrade order: web app first, then hosts.** Main supports older daemons; a
@@ -329,6 +348,11 @@ one socket keeps that order.
   A v4 daemon dialing an older server gets an upgrade refusal and keeps
   redialing (backoff up to 60 s) with a hint, so it links once the server is
   updated. Update the server first, then its hosts.
+- **v5 (pieces) keeps v4.** A v5 server links a v4 daemon as before (`welcome
+  {v: 4}`, whole lines, its one-frame results joined like pieces). A v5 daemon
+  dialing a v4 server gets close 4426 with `{"serverVersion":4}`, logs "this
+  host's ompweb is newer than the server's: update ompweb on the server" and
+  exits 1; update the server first.
 
 ## Host ops (this sub-project)
 

@@ -136,7 +136,7 @@ lib/
     local-bootstrap.ts web server side of the local link: `localLinkUrl`, `ensureLocalHostLink` (the `local` record + `host.json`)
     host-login.ts      `host.json` (`loginHost`, `readHostLogin`) and `isLoopbackHost`, shared by the daemon and local-bootstrap
     session-ops.ts     file-reading half of the session/project routes, run on the owning host's daemon (this machine's too)
-    link-protocol.ts   link messages, codec, binary blob frames, close codes, size limits, `HOST_OP_NAMES`, `SeqWindow`/`Outbox`
+    link-protocol.ts   link messages, codec, binary blob frames, close codes, size limits, `HOST_OP_NAMES`, `SeqWindow`/`Outbox`, `LinkSender`/`PartJoiner` (pieces, fair sending)
     hub.ts             main side: the link's upgrade and `websocket` handler (`handleLinkUpgrade`, `hostLinkSocket`), `RemoteHost`, `getHost`, `listHosts`, adoption of live children (`reattach`/`adopt`), orphans, `freezeHostLinks`, `hosts` change events
     daemon.ts          daemon side: `runHostDaemon` (reconnect, buffering, op dispatch, hello with each child's `{sessionId, cwd, pending}`; follows a `host.json` url or token change when a dial fails; loopback redials at most 3 s apart)
     pending-requests.ts daemon side: `PendingRequests`, a channel's still-open blocking requests and current session id for the hello
@@ -332,11 +332,19 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
 - **Link = one WebSocket per host, dialled by the daemon** (`/api/hosts/link`;
   design `docs/specs/2026-10-31-websocket-link-design.md`). **Text frames**
   carry the messages (hub → daemon one per frame; daemon → hub newline-separated
-  batches flushed every 16 ms or at 256 KB), **binary frames** carry large op
+  batches flushed every 16 ms or at one 256 KiB piece), **binary frames** carry large op
   results (daemon → hub, before the `res` naming them). Every line except
   `hello`/`welcome`/`ack`/`ping`/`pong` has a per-direction `seq`; `ack {ack}`
   is a message: the first line of every daemon frame, and the hub answers every
-  uplink frame with exactly one. One uplink frame is in flight at a time. The
+  uplink frame with exactly one. **Pieces and fair sending (v5, design D7):** a
+  line over `LINK_LIMITS.pieceBytes` (256 KiB) goes as sequenced `part {at, end,
+  data}` messages (`PartJoiner` joins them, one partial line at a time) and a
+  result as binary frames of at most 256 KiB; both sides queue per key (channel,
+  or request id) in `LinkSender`, send round-robin and number each line as it
+  goes out, so wire order stays `seq` order and a small message waits about one
+  piece per busy key. The hub sends until Bun's `send` reports backpressure
+  (`drain` resumes); the daemon sends while `bufferedAmount` is under two pieces
+  (polling every 16 ms), not one frame per `ack`. The
   `hello` is the first text frame of a socket. Each `hello.channels`
   entry carries `pending`: the raw stdout lines of that child's
   still-open `host_tool_call`s, `host_uri_request`s and blocking `extension_ui_request`s
@@ -346,10 +354,9 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   `hello.ack === 0` means a fresh daemon: main restarts that host's uplink
   window. The hub paces the downlink from its outbox (`drain`): the 16 MiB send
   buffer limit (`closeOnBackpressureLimit`) is only a backstop, and the outbox
-  holds the unacked backlog in server memory. Known slow-link limit: a single
-  multi-MiB line that takes longer than `offlineMs` to arrive is retried
-  (roughly below 280 KiB/s for an 8 MiB downlink line; a full 16 MiB uplink
-  batch likewise needs more than about 560 KiB/s). Close codes: 1000 revoke,
+  holds the unacked backlog in server memory. A v4 daemon still gets whole
+  lines, so for it a multi-MiB line slower than `offlineMs` is retried (below
+  roughly 280 KiB/s for an 8 MiB line). Close codes: 1000 revoke,
   1001 freeze (a real SIGTERM exits first, so daemons usually see 1006 or
   ECONNREFUSED), 1007 bad frame, 1008 bad first frame, 1009 too big, 4409
   replaced,
@@ -361,14 +368,16 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   field or a message type receivers skip is fine; a changed type or meaning, or
   a newly required field, needs a new version. Receivers skip unknown message
   types (acking their `seq`) and answer unknown ops 501 `unknown_op`, from v3 on.
-  v4 (the WebSocket link) dropped v3 before any release, so
-  `MIN_LINK_PROTOCOL_VERSION` and `LINK_PROTOCOL_VERSION` are both 4 (literal
-  one-liners: the deploy script parses them with `sed`); from the next version
-  on main keeps at least N-1, and dropping one is an explicit decision (a hello
+  v4 (the WebSocket link) dropped v3 before any release. v5 (pieces) keeps v4:
+  `MIN_LINK_PROTOCOL_VERSION` is 4 and `LINK_PROTOCOL_VERSION` 5 (literal
+  one-liners: the deploy script parses them with `sed`); a v4 daemon gets no
+  `part` and whole lines (`link.sender.parts`). Main keeps at least N-1, and
+  dropping one is an explicit decision (a hello
   outside the range gets close 4426 with `{"serverVersion":N}`, a pre-WebSocket
   daemon's POST gets 426; an update-only mode is planned). Upgrade order: web app
-  first, then hosts; a daemon need not support a newer main (it gets 4426). A v4
-  daemon dialing an older server keeps redialing with a hint.
+  first, then hosts; a daemon need not support a newer main (a v5 daemon gets
+  4426 from a v4 server and exits 1). A daemon dialing a pre-WebSocket server
+  keeps redialing with a hint.
 - **One socket per host.** A new hello on a new socket of the same token closes
   the old socket 4409 (the old daemon exits 0); two daemons must never run
   competing `omp --resume` children on one agent dir. A frame belongs to the

@@ -16,7 +16,7 @@ Non-goals: compression (`perMessageDeflate` stays off), an update-only mode for 
 ### D1. Transport
 
 - One WebSocket per host, dialed by the daemon: `ws://` or `wss://` + the host's saved server URL + `/api/hosts/link` (the daemon swaps `http`→`ws` in its link URL). The reverse proxy must forward `Upgrade`/`Connection` (ai-web.brait.dev: `snippets/ai-brait-proxy.conf` sets `proxy_http_version 1.1`, `Upgrade $http_upgrade`, `Connection $pfb_connection_upgrade`, `proxy_read_timeout 1d`; verified).
-- **Text frames** carry the existing JSON messages: hub → daemon one message per frame; daemon → hub one or more newline-separated messages per frame (the uplink batch, still flushed every 16 ms or at 256 KB).
+- **Text frames** carry the existing JSON messages: hub → daemon one message per frame; daemon → hub one or more newline-separated messages per frame (the uplink batch, still flushed every 16 ms or at 256 KB; from v5 capped at about one 256 KiB piece, D7).
 - **Binary frames** carry what the blob leg carried: the bytes of one large op result, daemon → hub only, sent before the `res` that names them (one socket keeps that order).
 - Deleted, no fallback: the hello POST, the downlink GET, uplink POSTs, `POST /api/hosts/link/blob/[reqId]` and its route file.
 
@@ -33,7 +33,7 @@ Non-goals: compression (`perMessageDeflate` stays off), an update-only mode for 
 - **`seq`/`ack`/resend stays.** A socket drop is a link drop: each side keeps unacked sequenced messages, resends them after the next `welcome`, and drops a `seq` it already applied. The `ack` header and the POST answer become an unsequenced `ack {ack}` message:
   - daemon → hub: the first line of every uplink frame is `ack` with the highest downlink `seq` the daemon applied;
   - hub → daemon: after applying an uplink frame the hub answers exactly one `ack` with the highest uplink `seq` it applied.
-- **Flow control, daemon side: one uplink text frame in flight.** The daemon sends the next frame only after the hub's `ack` for the previous one (the old one-POST-at-a-time rule). A drop clears the in-flight state; everything unacked goes again after the next `welcome`.
+- **Flow control, daemon side (v4): one uplink text frame in flight.** The daemon sent the next frame only after the hub's `ack` for the previous one (the old one-POST-at-a-time rule). v5 replaces this with the send-buffer bound in D7; the `ack` still trims the outbox, and everything unacked goes again after the next `welcome`.
 - **Hello.** The daemon's first text frame on a new socket is its `hello` (unchanged shape: `v`, `ompVersion`, `platform`, `home`, `autoApproveExtension`, `ack`, `channels[{ch, sessionId, cwd, pending}]`). The hub checks `v`, applies the hello (replace an older socket, reattach/adopt/kill, resend the outbox) and sends `welcome {v, hostId}`. `welcome.nonce`, the hello offer/`helloId` and the 409 rule are gone: a frame belongs to the socket it arrived on, and the hub ignores frames from a socket that is no longer the host's link.
 - **Replaced link.** A hello on a new socket of the same host closes the previous socket with **4409** "replaced". The `replaced` down message is deleted. A daemon that gets 4409 on its current socket logs "another ompweb host linked with this token; exiting" and exits 0. A daemon ignores every event from a socket it has already given up (its watchdog fired), so a late 4409 never stops a daemon that already redialed.
 - **Shutdown freeze.** `freezeHostLinks()` sets `frozen`, closes every link socket with **1001** "omp-web is restarting", and from then on the hub sends nothing, applies nothing and answers new upgrades 503. A real SIGTERM exits in the same tick (`process.exit` in `instrumentation.node.ts`), before Bun writes the close frame, so daemons usually see 1006 or ECONNREFUSED instead of 1001; they redial the same way. The daemon keeps its output unacked and redials (503 → backoff, loopback capped at 3 s) until the next server takes the hello and adopts the children. Pending host ops on the closed sockets fail at once (503 `host_offline`), as when a downlink ended.
@@ -106,6 +106,7 @@ Unchanged from v3 unless marked. `seq` is per direction on every message except 
 | `ack {ack}` | both | **new**, unsequenced; up: first line of every frame; down: one per applied uplink frame |
 | `ping` / `pong` | both | — |
 | `replaced` | down | **deleted** (close 4409) |
+| `part {at, end, data}` | both | **new in v5** (D7): a slice of a line over 256 KiB; never sent to a v4 daemon |
 
 Receivers keep tolerating unknown types (skipped, `seq` applied and acked) and log them as today.
 
