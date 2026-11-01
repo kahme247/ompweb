@@ -28,6 +28,9 @@ const from = arg("--from");
 const launcherPid = Number(arg("--launcher-pid"));
 const serverPid = Number(arg("--server-pid"));
 const kind = arg("--kind") || "app";
+// Set when the server runs as this systemd unit; systemd stops and starts it.
+const systemdUnit = arg("--systemd-unit");
+const systemctlScope = arg("--systemd-user") === "1" ? ["--user"] : [];
 let descriptor;
 let managerPrefix;
 try {
@@ -76,9 +79,20 @@ function isTrayActive() {
     return Boolean(data && data.pid);
   } catch { return false; }
 }
+function systemctl(action) {
+  const result = cp.spawnSync("systemctl", [...systemctlScope, action, systemdUnit], { encoding: "utf8", timeout: 120000 });
+  if (result.status !== 0) {
+    const detail = (result.stderr || result.stdout || (result.error && result.error.message) || "").trim().slice(0, 200);
+    throw new Error(`systemctl ${action} ${systemdUnit} failed${detail ? `: ${detail}` : ""}`);
+  }
+}
 
 async function stopOriginalProcesses() {
   updateStatus({ stage: "stopping" });
+  if (systemdUnit) {
+    systemctl("stop");
+    return { systemd: true, launchd: false, tray: false };
+  }
   // Detect services
   const launchd = isLaunchdActive();
   const tray = isTrayActive();
@@ -158,6 +172,15 @@ async function runManagerGate() {
 
 async function restartServices(info) {
   updateStatus({ stage: "restarting" });
+  if (info.systemd) {
+    systemctl("start");
+    // A Type=simple start returns once the process is forked; a release that
+    // crashes on startup shows up as not active a moment later.
+    // shortcut: one check after 3s, not a port probe; upgrade if slow-starting crashes slip through.
+    await sleep(3000);
+    systemctl("is-active");
+    return;
+  }
   if (info.launchd) {
     try {
       const uid = typeof process.getuid === "function" ? process.getuid() : 501;
@@ -228,7 +251,11 @@ async function main() {
     // write complete marker
     try { atomicWrite(markerFile("complete.json"), { attemptId, completedAt: new Date().toISOString() }); } catch {}
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    let msg = e instanceof Error ? e.message : String(e);
+    // Never leave the service stopped after a failed install.
+    if (systemdUnit) {
+      try { systemctl("start"); } catch { msg = `${systemdUnit} is still stopped: ${msg}`; }
+    }
     updateStatus({ state: "failed", error: msg.slice(0, 240), finishedAt: new Date().toISOString(), cleanupReady: true });
   }
 }

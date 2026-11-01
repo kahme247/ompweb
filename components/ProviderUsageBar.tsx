@@ -174,10 +174,9 @@ export function ProviderUsageBar() {
         flexShrink: 0,
         minHeight: 0,
         maxHeight: "32vh",
-        overflowY: "auto",
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 2, flexShrink: 0 }}>
       <button
         type="button"
         onClick={() => setCollapsed((v) => {
@@ -272,7 +271,9 @@ export function ProviderUsageBar() {
           </SidebarIconButton>
         </Tooltip>
       </div>
-      {!collapsed && reports.map((report, index) => {
+      {!collapsed && reports.length > 0 && (
+      <div style={{ display: "flex", flexDirection: "column", gap: 2, minHeight: 0, overflowY: "auto" }}>
+      {reports.map((report, index) => {
         const account = report.accountLabel ?? t("appShell.account", { number: report.accountIndex ?? index + 1 });
         const bucketLabel = usageBucketLabel(report);
         const key = `${report.provider}:${account}:${report.modelId ?? "all"}:${report.tier ?? ""}:${report.bucket ?? ""}:${index}`;
@@ -284,6 +285,7 @@ export function ProviderUsageBar() {
           <div key={key} style={{ borderRadius: "var(--radius-control)", background: expanded ? "var(--bg-subtle)" : "transparent" }}>
             <button
               type="button"
+              className="provider-usage-row"
               onClick={() => setExpandedKey((prev) => (prev === key ? null : key))}
               aria-expanded={report.noLimits ? undefined : expanded}
               title={bucketLabel ? `${account} (${bucketLabel})` : account}
@@ -349,6 +351,8 @@ export function ProviderUsageBar() {
           </div>
         );
       })}
+      </div>
+      )}
     </section>
   );
 }

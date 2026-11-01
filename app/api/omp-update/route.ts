@@ -50,7 +50,7 @@ export async function POST(request: Request) {
       const commitState = validateCommitSelfUpdate(body.attemptId, OMP_KIND);
       if (commitState !== "replay") {
         if (commitState === "ready") markSelfUpdateStopping(body.attemptId, OMP_KIND);
-        commitSelfUpdate(body.attemptId, OMP_KIND);
+        await commitSelfUpdate(body.attemptId, OMP_KIND);
       }
       return NextResponse.json({ accepted: true, attemptId: body.attemptId }, { status: 202 });
     }

@@ -12,17 +12,19 @@ import {
   writeFileSync,
   type Stats,
 } from "fs";
-import { spawn } from "child_process";
+import { execFile, spawn } from "child_process";
 import { createChildProcessEnvironment } from "./project-command-env";
 import { randomUUID } from "crypto";
 import { tmpdir } from "os";
 import { dirname, join, posix, resolve, win32 } from "path";
+import { promisify } from "util";
 import { checkNpmUpdate, detectInstallMethod } from "./npm-update";
 import { checkOmpUpdate } from "./omp/updates";
 import { DISABLE_AUTOUPDATE_ENV_VAR, isUpdateDisabled } from "./update-policy";
 
 const LEASE_MS = 30 * 60 * 1000;
 const TERMINAL_STATUS_TTL_MS = 24 * 60 * 60 * 1000;
+const execFileAsync = promisify(execFile);
 
 export type SelfUpdateState = "prepared" | "running" | "succeeded" | "failed";
 export type SelfUpdateStage = "preparing" | "stopping" | "installing" | "restarting" | "finalizing";
@@ -273,12 +275,74 @@ export function cleanupStaleSelfUpdate(now = Date.now(), kind: Kind = "app"): vo
   pruneEmptyRoot(kind);
 }
 
+const WORKER_LOST_ERROR = "The update worker stopped before the update finished";
+
+function isWorkerLost(status: StoredStatus, kind: Kind): boolean {
+  if (status.state !== "running") return false;
+  // The worker never outlives its lease, and a reused pid cannot keep an expired one alive.
+  if (!isActiveLease(readStateJson<{ expiresAt?: unknown }>(leasePath(kind)))) return true;
+  return status.workerPid !== undefined && !isProcessAlive(status.workerPid);
+}
+
 export function getSelfUpdateStatus(kind: Kind = "app"): SelfUpdateStatus | null {
   const s = readStateJson<StoredStatus>(statusPath(kind));
   if (!s) return null;
   // minimal validation
   if (typeof s.attemptId !== "string" || typeof s.state !== "string") return null;
-  return s;
+  if (!isWorkerLost(s, kind)) return s;
+  // Re-read: the worker may have written its result just before it exited.
+  const latest = readStateJson<StoredStatus>(statusPath(kind));
+  if (latest?.attemptId !== s.attemptId || latest.state !== "running") return latest;
+  const failed: StoredStatus = { ...latest, state: "failed", error: WORKER_LOST_ERROR, finishedAt: new Date().toISOString(), cleanupReady: true };
+  // A read must not fail over the write; the next poll retries it.
+  try {
+    atomicWrite(statusPath(kind), JSON.stringify(failed));
+  } catch {}
+  return failed;
+}
+
+export interface SystemdService {
+  unit: string;
+  user: boolean;
+}
+
+/** The systemd service named by `/proc/<pid>/cgroup` content, or null outside one. */
+export function parseSystemdServiceCgroup(cgroup: string): SystemdService | null {
+  for (const line of cgroup.split("\n")) {
+    if (!line.startsWith("0::") && !line.includes(":name=systemd:")) continue;
+    const segments = line.split(":").slice(2).join(":").trim().split("/");
+    const unit = segments.at(-1);
+    if (unit?.endsWith(".service")) {
+      return { unit, user: segments.some((segment) => /^user@\d+\.service$/.test(segment)) };
+    }
+  }
+  return null;
+}
+
+function commandError(error: unknown): string {
+  const stderr = (error as { stderr?: unknown } | null)?.stderr;
+  return (typeof stderr === "string" && stderr.trim()) || (error instanceof Error ? error.message : String(error));
+}
+
+async function detectSystemdService(launcherPid: number): Promise<SystemdService | null> {
+  if (process.platform !== "linux") return null;
+  let service: SystemdService | null;
+  try {
+    service = parseSystemdServiceCgroup(readFileSync("/proc/self/cgroup", "utf8"));
+  } catch {
+    return null;
+  }
+  if (!service) return null;
+  // Only the unit this launcher is the main process of: a dev server started
+  // from a session inside another unit must never stop that unit.
+  let stdout: string;
+  try {
+    ({ stdout } = await execFileAsync("systemctl", [...(service.user ? ["--user"] : []), "show", "--property=MainPID", "--value", service.unit], { encoding: "utf8", timeout: 5000 }));
+  } catch (error) {
+    // Guessing "not systemd" would start a worker the unit's stop kills.
+    throw new Error(`Cannot check systemd unit ${service.unit}: ${commandError(error)}`);
+  }
+  return Number(stdout.trim()) === launcherPid ? service : null;
 }
 export function getSelfUpdateSupport(): { supported: boolean; reason?: string; packageDir: string } {
   const packageDir = process.env.OMP_WEB_PACKAGE_DIR ?? resolve(join(import.meta ? dirname(new URL(import.meta.url).pathname) : process.cwd(), ".."));
@@ -369,14 +433,21 @@ export function validateCommitSelfUpdate(attemptId: string, kind: Kind = "app"):
   if (!status || status.attemptId !== attemptId) throw new SelfUpdateError("attempt_not_found", "Update attempt not found", 404);
   if (status.state === "running") return "replay";
   if (status.state !== "prepared") throw new SelfUpdateError("invalid_state", "Update attempt is not prepared", 409);
-  const lease = readStateJson<{ attemptId?: string }>(leasePath(kind));
+  const lease = readStateJson<{ attemptId?: string; expiresAt?: unknown }>(leasePath(kind));
   if (!lease || lease.attemptId !== attemptId) throw new SelfUpdateError("lease_mismatch", "Lease mismatch", 409);
+  if (!isActiveLease(lease)) throw new SelfUpdateError("lease_expired", "Update attempt expired; prepare it again", 409);
   if (!existsSync(markerPath(attemptId, "ready", kind))) throw new SelfUpdateError("not_ready", "Update attempt not ready", 409);
   return "ready";
 }
 export function markSelfUpdateStopping(attemptId: string, kind: Kind = "app"): void {
   const status = readStateJson<StoredStatus>(statusPath(kind));
   if (!status || status.attemptId !== attemptId) return;
+  // The worker gets a full lease from here: a running attempt past it counts as lost.
+  const lease = readStateJson<Record<string, unknown>>(leasePath(kind));
+  // Never take over another attempt's lease.
+  if (lease?.attemptId === attemptId) {
+    atomicWrite(leasePath(kind), JSON.stringify({ ...lease, expiresAt: Date.now() + LEASE_MS }));
+  }
   const next: StoredStatus = { ...status, state: "running", stage: "stopping", startedAt: new Date().toISOString() };
   atomicWrite(statusPath(kind), JSON.stringify(next));
 }
@@ -388,7 +459,7 @@ export async function armSelfUpdateLauncher(attemptId: string, kind: Kind = "app
   await new Promise<void>((r) => setTimeout(r, 500));
 }
 
-export function commitSelfUpdate(attemptId: string, kind: Kind = "app"): { accepted: true; attemptId: string } {
+export async function commitSelfUpdate(attemptId: string, kind: Kind = "app"): Promise<{ accepted: true; attemptId: string }> {
   assertUpdatesEnabled();
   const status = readStateJson<StoredStatus>(statusPath(kind));
   if (!status || status.attemptId !== attemptId) throw new SelfUpdateError("attempt_not_found", "Update attempt not found", 404);
@@ -407,6 +478,7 @@ export function commitSelfUpdate(attemptId: string, kind: Kind = "app"): { accep
   const { manager, managerPath, prefix } = detectManager(packageDir);
   const fromVersion = status.fromVersion;
   const targetVersion = status.targetVersion;
+  const launcherPid = Number(process.env.OMP_WEB_LAUNCHER_PID ?? process.pid);
   const descriptor = {
     launcherPath: join(resolve(packageDir), "bin", "omp-web.js"),
     hostname: process.env.OMP_WEB_HOSTNAME ?? process.env.HOSTNAME ?? "127.0.0.1",
@@ -429,7 +501,7 @@ export function commitSelfUpdate(attemptId: string, kind: Kind = "app"): { accep
     "--from",
     fromVersion,
     "--launcher-pid",
-    String(process.env.OMP_WEB_LAUNCHER_PID ?? process.pid),
+    String(launcherPid),
     "--server-pid",
     String(process.pid),
     JSON.stringify(descriptor),
@@ -439,13 +511,40 @@ export function commitSelfUpdate(attemptId: string, kind: Kind = "app"): { accep
     kind,
   ];
   try {
-    const child = spawn(process.execPath, workerPath ? [workerPath, ...args] : args, {
+    const systemd = kind === "app" ? await detectSystemdService(launcherPid) : null;
+    if (systemd) args.push("--systemd-unit", systemd.unit, "--systemd-user", systemd.user ? "1" : "0");
+    const workerArgs = workerPath ? [workerPath, ...args] : args;
+    let command = process.execPath;
+    let commandArgs = workerArgs;
+    if (systemd) {
+      // A worker left in the unit's cgroup is killed with the server it stops,
+      // so it runs in its own transient scope.
+      const systemdRun = [...(systemd.user ? ["--user"] : []), "--scope", "--quiet", "--collect", "--no-ask-password"];
+      // The detached worker's own failure would be invisible; fail here instead
+      // (e.g. a non-root system service, which polkit refuses).
+      try {
+        await execFileAsync("systemd-run", [...systemdRun, "true"], { encoding: "utf8", timeout: 10000 });
+      } catch (error) {
+        throw new Error(`systemd-run cannot start the update worker: ${commandError(error)}`);
+      }
+      command = "systemd-run";
+      commandArgs = [...systemdRun, process.execPath, ...workerArgs];
+    }
+    const child = spawn(command, commandArgs, {
       detached: true,
       stdio: "ignore",
       windowsHide: true,
       // The worker and everything it runs inherit this environment, so the web
       // password hash must not be in it (issue #239).
       env: createChildProcessEnvironment(),
+    });
+    // A failed launch arrives as an event, after this function returned.
+    child.once("error", (error) => {
+      const current = readStateJson<StoredStatus>(statusPath(kind));
+      if (current?.attemptId !== attemptId || current.state !== "running") return;
+      try {
+        atomicWrite(statusPath(kind), JSON.stringify({ ...current, state: "failed", error: error.message.slice(0, 240), finishedAt: new Date().toISOString(), cleanupReady: true }));
+      } catch {}
     });
     child.unref();
     // record worker pid

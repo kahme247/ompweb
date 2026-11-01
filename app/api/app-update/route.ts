@@ -27,7 +27,7 @@ async function commitAppUpdate(attemptId: string): Promise<CommitResult> {
     if (commitState === "ready") markSelfUpdateStopping(attemptId);
     await armSelfUpdateLauncher(attemptId);
     launcherArmed = true;
-    return commitSelfUpdate(attemptId);
+    return await commitSelfUpdate(attemptId);
   } catch (error) {
     if (!launcherArmed) {
       const reason = error instanceof SelfUpdateError
