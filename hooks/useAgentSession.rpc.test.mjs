@@ -61,7 +61,7 @@ class FakeStream {
 /** The port of the worker the tab's transport started; tests flip its transport. */
 let workerPort = null;
 
-/** Speaks the tab<->worker protocol of public/event-stream-worker.js. */
+/** Speaks the tab<->worker protocol of lib/event-stream-worker.ts. */
 class FakeSharedWorker {
   constructor() {
     const streams = new Map();
