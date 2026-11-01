@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import fs from "fs";
 import { authorizeFileAccess } from "./file-authorization";
 import { filePathApiSegments } from "./file-paths";
+import { hostsSnapshot, onHostsChange } from "./hosts/hub";
 import { attachNotificationClient } from "./notification-hub";
 import { getExitedRpcSessions, getRpcSession, getRunningRpcSessions, subscribeHostToolCalls, subscribeRunningSessions } from "./rpc-manager";
 import { subscribeSessionFileChanges } from "./session-watcher";
@@ -236,6 +237,8 @@ async function openChannel(channel: EventStreamChannel, handle: SubscriptionHand
       return openFileChannel(channel.path, channel.sessionId, handle);
     case "host-tools":
       return openHostToolsChannel(handle);
+    case "hosts":
+      return openHostsChannel(handle);
   }
 }
 
@@ -283,6 +286,24 @@ function openNotificationsChannel(clientId: string, handle: SubscriptionHandle):
 function openHostToolsChannel(handle: SubscriptionHandle): SubscribeResult {
   handle.open();
   handle.setDetach(subscribeHostToolCalls((call) => handle.send({ type: "host_tool_call", ...call })));
+  return SUBSCRIBED;
+}
+
+// Settings → Hosts: the linked-hosts list on subscribe and after every change.
+function openHostsChannel(handle: SubscriptionHandle): SubscribeResult {
+  handle.open();
+  // Snapshots are built one at a time so frames never arrive out of order.
+  let chain: Promise<void> = Promise.resolve();
+  const push = () => {
+    chain = chain
+      .then(async () => {
+        const snapshot = await hostsSnapshot();
+        if (handle.active) handle.send(snapshot);
+      })
+      .catch(() => {});
+  };
+  handle.setDetach(onHostsChange(push));
+  push();
   return SUBSCRIBED;
 }
 

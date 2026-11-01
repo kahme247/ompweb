@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createHash } from "crypto";
-import { listAllSessions } from "@/lib/session-reader";
+import { listSessionsAllHosts } from "@/lib/hosts/session-index";
 import { getRunningRpcSessions } from "@/lib/rpc-manager";
 import type { SessionInfo } from "@/lib/types";
 
@@ -23,15 +23,28 @@ function getRouteCache() {
     etag: null,
   });
 }
+
 function computeSessionsSig(sessions: SessionInfo[]): string {
   let sig = `${sessions.length}:`;
   for (let i = 0; i < sessions.length; i++) {
     const s = sessions[i];
-    sig += `${JSON.stringify([s.id, s.path, s.cwd, s.modified, s.messageCount, s.name, s.firstMessage, s.lastMessageAt ?? null, s.projectRoot, s.worktreeBranch ?? null, s.parentSessionId ?? null])};`;
+    sig += `${JSON.stringify([
+      s.id,
+      s.path,
+      s.cwd,
+      s.modified,
+      s.messageCount,
+      s.name,
+      s.firstMessage,
+      s.lastMessageAt ?? null,
+      s.projectRoot,
+      s.worktreeBranch ?? null,
+      s.parentSessionId ?? null,
+      s.hostId ?? null,
+    ])};`;
   }
   return sig;
 }
-
 
 // The session list mixes on-disk sessions with the live runningSessionIds set,
 // which changes on every agent turn, so it must never be cached by proxies or
@@ -50,7 +63,7 @@ export async function GET(req: Request) {
       ? req.nextUrl.searchParams.get("id")
       : url.searchParams.get("id");
 
-    const sessions = await listAllSessions();
+    const sessions = await listSessionsAllHosts();
     const runningSessions = getRunningRpcSessions();
     const runningSessionIds = runningSessions.map((s) => s.id);
 

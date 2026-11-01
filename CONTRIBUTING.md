@@ -12,6 +12,23 @@ npm install
 npm run dev   # http://127.0.0.1:30178
 ```
 
+The repository tracks a [graphify](https://github.com/Graphify-Labs/graphify) code
+graph in `graphify-out/graph.json`. To keep it current, install the graphify release
+that built it (`uv tool install graphifyy==0.9.99`; releases build different graphs
+from the same code, so bump this together with a rebuilt graph) and run
+`sh scripts/setup-hooks.sh` once per clone. The script enables the tracked
+`.githooks/pre-commit`, which rebuilds the graph and stages it with every commit
+that stages anything else, and registers graphify's merge driver for `graph.json`.
+The first commit in a new clone or worktree rebuilds from scratch (about two
+minutes); later ones take about a second. Set `GRAPHIFY_SKIP_HOOK=1` to commit
+without the rebuild. The rebuild reads the working tree, so unstaged code ends up in
+the committed graph: to commit only part of your changes, `git stash --keep-index
+--include-untracked` first. The hook refuses `git commit <path>`, whose temporary
+index would leave the rebuilt graph unstaged; stage with `git add` and run a plain
+`git commit`. Git runs no pre-commit hook for rebases, cherry-picks or
+merges that complete without conflicts: run `PYTHONHASHSEED=0 graphify update .`
+afterwards and commit the graph.
+
 ## Checks (must pass before submitting)
 
 ```bash

@@ -92,3 +92,7 @@ bin/tray-publish/
 
 # npm packaging archives
 *.tgz
+
+# graphify: track only the graph; each clone rebuilds the rest
+graphify-out/*
+!graphify-out/graph.json

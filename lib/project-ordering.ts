@@ -15,6 +15,49 @@ import { workspaceKeyOf } from "./workspace-memory";
 // opt-in "updated" sort follows activity (see orderProjects).
 // ============================================================================
 
+/** Host id of this machine (see `HostRow` from the `hosts` channel). */
+export const LOCAL_HOST_ID = "local";
+
+/** `hostId` as requests and view state carry it: undefined for this machine. */
+export function remoteHostId(hostId: string | null | undefined): string | undefined {
+  return hostId && hostId !== LOCAL_HOST_ID ? hostId : undefined;
+}
+
+/** Identity of a project across hosts: the bare path on this machine, so keys
+ *  stored before hosts existed (expanded set, last-open memory) stay valid,
+ *  and `<hostId>:<path>` on a remote host. A missing hostId is this machine. */
+export function hostProjectKey(hostId: string | undefined, path: string): string {
+  return hostId === undefined || hostId === LOCAL_HOST_ID ? path : `${hostId}:${path}`;
+}
+
+/** Composer draft key of a fresh chat: `new:<cwd>` on this machine (drafts
+ *  saved before hosts existed keep their key), `new:<hostId>:<cwd>` elsewhere. */
+export function newChatDraftKey(cwd: string, hostId: string | undefined): string {
+  return `new:${hostProjectKey(hostId, cwd)}`;
+}
+
+/** `hostProjectKey` over the case-folded comparable path (how sessions find their project). */
+export function foldedHostProjectKey(hostId: string | undefined, path: string): string {
+  return hostProjectKey(hostId, comparableProjectPath(path));
+}
+
+/** Projects per host for the sidebar: this machine first, then the other
+ *  hosts by label. Every known host gets a group, empty or not, so it can
+ *  still be added to; projects of a host that is not listed are dropped. */
+export function groupProjectsByHost<T extends { hostId?: string }>(
+  projects: T[],
+  hosts: { id: string; label: string }[],
+): { host: { id: string; label: string }; projects: T[] }[] {
+  const ordered = [...hosts].sort((a, b) => {
+    if ((a.id === LOCAL_HOST_ID) !== (b.id === LOCAL_HOST_ID)) return a.id === LOCAL_HOST_ID ? -1 : 1;
+    return a.label.localeCompare(b.label, undefined, { sensitivity: "base", numeric: true });
+  });
+  return ordered.map((host) => ({
+    host,
+    projects: projects.filter((project) => (project.hostId ?? LOCAL_HOST_ID) === host.id),
+  }));
+}
+
 /** Sort projects by most-recently-added (addedAt desc), then by path for a
  *  deterministic order. Projects without addedAt (session-discovered) always
  *  sort below registered ones. The order never depends on session activity,
@@ -62,11 +105,11 @@ export function orderProjects(
     for (const session of sessions) {
       const key = workspaceKeyOf(session);
       if (!key) continue;
-      const folded = comparableProjectPath(key);
+      const folded = foldedHostProjectKey(session.hostId, key);
       const time = Date.parse(session.lastMessageAt ?? session.modified);
       if (time > (updated.get(folded) ?? 0)) updated.set(folded, time);
     }
-    rest.sort((a, b) => (updated.get(comparableProjectPath(b.path)) ?? 0) - (updated.get(comparableProjectPath(a.path)) ?? 0));
+    rest.sort((a, b) => (updated.get(foldedHostProjectKey(b.hostId, b.path)) ?? 0) - (updated.get(foldedHostProjectKey(a.hostId, a.path)) ?? 0));
   }
   return [...pinned, ...rest];
 }
@@ -79,7 +122,7 @@ export function nextPinOrder(projects: ManagedProject[]): number {
 /** Running/unread/exit session counts per project, for the activity indicators
  *  on project rows. Keys are the case-folded comparable form of the projectRoot
  *  so casing-only differences (Windows/NTFS) still resolve — callers must
- *  look up with comparableProjectPath(project.path). */
+ *  look up with foldedHostProjectKey(project.hostId, project.path). */
 export function projectActivityCounts(
   sessions: SessionInfo[],
   runningIds: Iterable<string>,
@@ -93,7 +136,7 @@ export function projectActivityCounts(
   for (const session of sessions) {
     const key = workspaceKeyOf(session);
     if (!key) continue;
-    const folded = comparableProjectPath(session.projectKey ?? key);
+    const folded = foldedHostProjectKey(session.hostId, session.projectKey ?? key);
     const current = result.get(folded) ?? { running: 0, unread: 0, exited: 0 };
     if (running.has(session.id)) current.running += 1;
     if (unread.has(session.id)) current.unread += 1;
@@ -109,7 +152,8 @@ export function projectActivityCounts(
  *  matched through a case-folded lookup (Windows/NTFS is case-insensitive and
  *  session-file cwds can carry different casing than the registered path), so
  *  casing-only differences land in the right bucket instead of silently
- *  dropping the session from the sidebar. */
+ *  dropping the session from the sidebar. Hosts are separate namespaces: the
+ *  same path on two hosts is two projects, keyed by `hostProjectKey`. */
 export function groupSessionsByProject(
   projects: ManagedProject[],
   sessions: SessionInfo[],
@@ -118,8 +162,8 @@ export function groupSessionsByProject(
   const bucketByKey = new Map<string, SessionInfo[]>();
   for (const project of projects) {
     const bucket: SessionInfo[] = [];
-    grouped.set(project.path, bucket);
-    bucketByKey.set(comparableProjectPath(project.path), bucket);
+    grouped.set(hostProjectKey(project.hostId, project.path), bucket);
+    bucketByKey.set(foldedHostProjectKey(project.hostId, project.path), bucket);
   }
   for (const session of sessions) {
     const key = workspaceKeyOf(session);
@@ -128,7 +172,7 @@ export function groupSessionsByProject(
     // key; bucketByKey covers every registered project under its case-folded
     // path, and an exact-case fallback here could only hit when the folded
     // lookup already did — otherwise it silently dropped the session.
-    const bucket = bucketByKey.get(comparableProjectPath(key));
+    const bucket = bucketByKey.get(foldedHostProjectKey(session.hostId, key));
     if (bucket) bucket.push(session);
   }
   return grouped;

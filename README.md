@@ -303,6 +303,77 @@ access.
 `~/.config/autostart/ompweb-tray.desktop`. Requires a running StatusNotifierItem
 host (KDE Plasma, and most Wayland/X11 desktops).
 
+## Run sessions on another machine
+
+One ompweb can start and watch omp sessions on other machines. Each machine keeps
+its own `omp` install, `~/.omp/agent` directory, sessions, and credentials;
+ompweb only routes. The remote machine needs Node 24 and `omp` installed, and must
+be able to reach the ompweb server over HTTP(S). It dials out, so it can sit behind NAT.
+
+1. On the ompweb server, open **Settings → Hosts → Add host**, enter a name, and copy
+   the token. The token is shown once; only its hash is stored.
+2. On the remote machine, save the link. The token is read from stdin, never from
+   an argument, so it does not show up in `ps`:
+
+   ```bash
+   npx @kahme247/ompweb@latest host login --url https://your-ompweb.example.com
+   ```
+
+   Paste the token when prompted (or pipe it in). It is saved to
+   `~/.omp/agent/omp-web/host.json` with mode `600`.
+3. Start the link and leave it running:
+
+   ```bash
+   npx @kahme247/ompweb@latest host
+   ```
+
+   The host shows **online** in Settings → Hosts, the sidebar gets a group for it,
+   and the new-session screen gets a host picker.
+
+`https://` is required. Plain `http://` is accepted only for loopback addresses, or
+with `--allow-http` (for example on a tailnet):
+
+```bash
+npx @kahme247/ompweb@latest host login --url http://100.64.0.1:30177
+npx @kahme247/ompweb@latest host --allow-http
+```
+
+If the connection drops, the daemon reconnects by itself (1 s backoff doubling to
+60 s). After a network drop, runs keep going on the remote machine; the chat shows
+an offline banner and the runs reattach when the link returns. A laptop that goes
+to sleep (closing the lid, usually) pauses the daemon and its omp runs along with
+everything else on it: they resume when it wakes, and the link returns then. A
+docked or no-sleep setup keeps running with the lid closed. Revoking a host in
+Settings closes its link and the daemon stops its omp processes.
+
+Notes:
+
+- **Service helpers:** `ompweb-launchd` and `ompweb-systemd` install the web server
+  only (their service runs `ompweb` with no arguments), so they cannot run
+  `ompweb host`. To keep the link up across logouts or reboots, run
+  `ompweb host` under a supervisor of your choice that restarts it after failure.
+  The daemon exits with code `1` when the server revokes its token or when the
+  link protocol versions differ (either side may be the newer one; upgrade ompweb
+  on the older side), and `0` when a newer link for the same host replaces it.
+  SIGTERM or SIGINT stops the daemon and its omp processes.
+  A link is one-per-host, so never run two daemons with the same token.
+- **The server's agent directory holds the host list** (`omp-web/hosts.json`).
+  Starting the ompweb server with a different `PI_CODING_AGENT_DIR`, or losing
+  that file, makes every host token unknown: each daemon is told it was revoked,
+  stops its omp processes and exits.
+- **Trust:** a linked host runs omp with full tool access on that machine for
+  whoever controls the ompweb server or the token. Keep the token private and
+  revoke it when a machine is retired.
+- **Not available on remote hosts yet:** the file explorer, Git and worktree
+  panels, directory browsing, and the Skills, Plugins, Agents and MCP settings only
+  work on the machine ompweb runs on. Chat, session history, notifications and
+  starting sessions work on every host.
+- **Agent-started sessions:** with agent tools enabled, an agent can pass a `host`
+  to `new_session` (it defaults to the agent's own host). A remote host asks for
+  confirmation each time unless **Agents can start sessions here without asking**
+  is switched on for it in Settings → Hosts. An agent running on a remote host
+  always asks before it starts or messages a session on this machine.
+
 ## Features
 
 - **Interactive Chat**: Real-time streaming conversation with your local `omp` agent — tool calls, thinking levels, token counts, cost, context gauge, queue controls, and interrupt & retry.
@@ -314,12 +385,13 @@ host (KDE Plasma, and most Wayland/X11 desktops).
 - **Tool Preset Picker**: Choose the toolset for new sessions in the composer — `none` / `default` (`read,bash,edit,write`) / `full` (all tools including subagents). Persists to localStorage.
 - **File Explorer & Previews**: Browse workspaces side-by-side with chat; preview code, markdown, Mermaid, images, audio, PDFs, and diffs with allow-listed access.
 - **Git Worktree Support**: Create, switch, and manage Git worktrees directly from the sidebar; sessions and file roots stay grouped by project.
+- **Remote Hosts**: Link other machines (for example a MacBook) and run sessions there from one ompweb. The sidebar groups sessions by host. See [Run sessions on another machine](#run-sessions-on-another-machine).
 - **Usage & Analytics**: Dashboard in **Settings → Usage** for tokens, costs, cache savings, and breakdowns by provider / model / day / project with SQLite persistence.
 - **Windows System Tray & Service**: Background service, tray icon, logon autostart, and Desktop/Start Menu shortcuts (Windows).
 - **macOS launchd Service**: LaunchAgent that starts at login, restarts on crash, and logs under `~/Library/Logs/ompweb`.
 - **Linux systemd Service & Tray**: User service that starts at login and restarts on crash, plus a StatusNotifierItem tray icon with service controls (KDE Plasma and compatible desktops).
 - **Notifications**: Desktop and mobile (PWA) notifications for finished tasks, questions waiting for an answer, failed runs, and automatic model switches, with Web Push when served over HTTPS. See [Notifications](#notifications).
-- **Web-based Settings** (10 tabs): Interface & Behavior, Safety & Approvals, AI Model Defaults, API Keys & Providers, Usage, Agent & Intelligence (advisor, memory, compaction), Agents, Extensions & Tools (MCP, skills, plugins), Notifications, System & Updates.
+- **Web-based Settings** (11 tabs): Interface & Behavior, Safety & Approvals, AI Model Defaults, API Keys & Providers, Usage, Agent & Intelligence (advisor, memory, compaction), Agents, Extensions & Tools (MCP, skills, plugins), Hosts, Notifications, System & Updates.
 - **Slash Commands & Shortcuts**: Quick prompts (`/plan`, `/review`, `/fix`, `/test`, etc.), `⌘K` / `Ctrl+K` palette, and model/reasoning cycling.
 - **UI Themes & Localization**: Warm paper light/dark themes plus an omp.sh-inspired midnight (`omp`) theme, chat font size & interface scale, with full English, Chinese (简体中文), and Japanese (日本語) translations.
 
