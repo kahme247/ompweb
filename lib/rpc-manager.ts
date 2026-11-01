@@ -263,8 +263,8 @@ export class AgentSessionWrapper {
   private streamingMessageId: string | null = null;
   /** Assistant messages omp is streaming, by messageId: what its delta updates apply to (lib/message-delta.ts). */
   private openMessages = new Map<string, Partial<AgentMessage>>();
-  /** omp sends delta message updates (set_event_filter); false for an omp without usable ones. */
-  private deltaUpdates = false;
+  /** False once omp's deltas did not fit a message it started, or switching updates failed: full updates for good. */
+  private deltasFit = true;
   /** A delta found no message to apply to: omp sends full updates until the message ends. */
   private recoveringUpdates = false;
   private liveToolEvents = new Map<string, SessionLiveToolEvent>();
@@ -603,15 +603,23 @@ export class AgentSessionWrapper {
     }
   }
 
-  /** omp >= 18.13.2 echoes `messageUpdates: "delta"`; an older omp rejects or ignores it and keeps full updates. */
+  /**
+   * omp >= 18.4.5 accepts `messageUpdates: "delta"`; from 18.13.2 its deltas carry the block shells that make them
+   * rebuildable (an omp in between is caught at its first block, see loseDeltaBase). An older omp rejects or
+   * ignores the option and keeps full updates.
+   */
   private async enableDeltaUpdates(proc: RpcProcess): Promise<void> {
     this.recoveringUpdates = false;
-    const reply = await proc.sendCommand<{ messageUpdates?: unknown } | undefined>({ type: "set_event_filter", events: null, messageUpdates: "delta" }, GET_STATE_TIMEOUT_MS).catch(() => undefined);
-    this.deltaUpdates = reply?.messageUpdates === "delta";
+    this.deltasFit = true;
+    await proc.sendCommand({ type: "set_event_filter", events: null, messageUpdates: "delta" }, GET_STATE_TIMEOUT_MS).catch(() => {});
   }
 
   private setMessageUpdates(messageUpdates: "full" | "delta"): void {
-    void this.proc.sendCommand({ type: "set_event_filter", events: null, messageUpdates }, GET_STATE_TIMEOUT_MS).catch(() => {});
+    void this.proc.sendCommand({ type: "set_event_filter", events: null, messageUpdates }, GET_STATE_TIMEOUT_MS).catch(() => {
+      // The next delta that finds no base asks again; nothing switches back to deltas.
+      this.recoveringUpdates = false;
+      this.deltasFit = false;
+    });
   }
 
   /**
@@ -621,7 +629,7 @@ export class AgentSessionWrapper {
    * what it started (one before 18.13.2 sends no block shells): full updates for good.
    */
   private loseDeltaBase(incompatible: boolean): void {
-    if (incompatible) this.deltaUpdates = false;
+    if (incompatible) this.deltasFit = false;
     if (this.recoveringUpdates) return;
     this.recoveringUpdates = true;
     this.setMessageUpdates("full");
@@ -630,7 +638,7 @@ export class AgentSessionWrapper {
   private resumeDeltaUpdates(): void {
     if (!this.recoveringUpdates) return;
     this.recoveringUpdates = false;
-    if (this.deltaUpdates) this.setMessageUpdates("delta");
+    if (this.deltasFit) this.setMessageUpdates("delta");
   }
 
   /**
@@ -1363,7 +1371,12 @@ export class AgentSessionWrapper {
           }
           message = rebuilt;
         }
-        if (messageId !== null && message?.role === "assistant") this.openMessages.set(messageId, message);
+        // Only a start or a rebuilt delta is a base: a full update's tool calls have no streamed JSON, and its
+        // snapshot can be ahead of the deltas that follow it, so a delta after one recovers instead.
+        if (messageId !== null && message?.role === "assistant") {
+          if (event.type === "message_start" || isDeltaUpdate(event)) this.openMessages.set(messageId, message);
+          else this.openMessages.delete(messageId);
+        }
         if (message && message.role !== "user") {
           this.streamingMessage = message;
           this.streamingMessageId = messageId;
