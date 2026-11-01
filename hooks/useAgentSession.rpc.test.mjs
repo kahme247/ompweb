@@ -293,6 +293,11 @@ const { MessageView } = await import("@/components/MessageView");
 const { translate } = await import("@/lib/i18n");
 const { ChatWindow } = await import("@/components/ChatWindow");
 const { SESSION_EDIT_COMMAND, SESSION_EDIT_RESPONSE_PREFIX } = await import("@/lib/omp/session-edit-extension.mjs");
+// Edit only opens a confirm dialog; the edit starts from its confirm button.
+async function confirmEdit(view, button) {
+  await act(async () => { fireEvent.click(button); });
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: translate("messageView.editFromHere") })); });
+}
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -2911,7 +2916,7 @@ for (const order of ["identity/history before HTTP", "HTTP before history delive
         },
       });
     }
-    await act(async () => { fireEvent.click(w.editButton()); });
+    await confirmEdit(w.view, w.editButton());
     await until(() => server.identityChanges.length === 1, "native identity machinery must confirm the copy-on-write move");
     assert.deepEqual(server.identityChanges, [{ oldId: sid, newId: target, keepOldId: true }]);
     assert.equal(world.wrappers.get(sid), world.wrappers.get(target), "the existing alias registry retains the originating observer");
@@ -2999,7 +3004,7 @@ test("relocation merges existing target attachments and preserves typing added w
       leafId: native.leafId, context: world.sessions.get(target),
     } }); }),
   });
-  await act(async () => { fireEvent.click(w.editButton()); });
+  await confirmEdit(w.view, w.editButton());
   await until(() => release, "confirmed target history must be awaiting its load");
   await act(async () => {
     fireEvent.change(w.view.getByRole("textbox"), { target: { value: "new source typing" } });
@@ -3034,7 +3039,7 @@ test("relocation adopts existing target text without prefilling over it", async 
   const w = await mountMovableChat(sid);
   const composer = w.view.getByRole("textbox");
   assert.equal(composer.value, "");
-  await act(async () => { fireEvent.click(w.editButton()); });
+  await confirmEdit(w.view, w.editButton());
   await until(() => w.selectedId === target, "the confirmed target must become selected");
   await settle();
   assert.equal(w.view.getByRole("textbox"), composer, "the existing composer adopts its new draft identity");
@@ -3072,7 +3077,7 @@ test("relocation at draft capacity preserves every unrelated draft and its attac
   await attachEditableWrapper(t, native);
   const w = await mountMovableChat(sid);
   const composer = w.view.getByRole("textbox");
-  await act(async () => { fireEvent.click(w.editButton()); });
+  await confirmEdit(w.view, w.editButton());
   await until(() => w.selectedId === target, "Edit must move the selected conversation at full draft capacity");
   await settle();
   assert.equal(w.view.getByRole("textbox"), composer);
@@ -3122,7 +3127,7 @@ test(`navigation during a moved Edit's ${phase} is not hijacked or prefilled`, a
       } }); }),
     });
   }
-  await act(async () => { fireEvent.click(w.editButton()); });
+  await confirmEdit(w.view, w.editButton());
   await until(() => release, "the old instance must await the moved Edit");
   await act(async () => { w.navigate(other); });
   await settle();
@@ -3154,7 +3159,7 @@ test("a moved conversation whose reload fails preserves attachments without pref
     match: (method, url) => method === "GET" && url.startsWith(`/api/sessions/${target}?`),
     produce: async () => ({ status: 503, value: {} }),
   });
-  await act(async () => { fireEvent.click(w.editButton()); });
+  await confirmEdit(w.view, w.editButton());
   await until(() => w.selectedId === target, "authoritative identity must survive a failed read of the moved history");
   await settle();
   assert.equal(new URL(window.location.href).searchParams.get("session"), target);
@@ -3177,7 +3182,7 @@ test("observed edit-time persistence errors preserve the real composer and compl
   await attachEditableWrapper(t, native);
   const w = await mountMovableChat(sid);
   const composer = w.view.getByRole("textbox");
-  await act(async () => { fireEvent.click(w.editButton()); });
+  await confirmEdit(w.view, w.editButton());
   await until(() => w.view.queryAllByText(/Could not append session file: disk full/).length > 0, "native persistence failure must be displayed");
   await settle();
   assert.equal(w.selectedId, sid);
@@ -3204,7 +3209,7 @@ test("Edit rewinds and resends in the same persisted session while retaining the
   const release = native.holdEdit();
   t.after(release);
   const edit = w.editButton("entry-u2");
-  await act(async () => { fireEvent.click(edit); });
+  await confirmEdit(w.view, edit);
   await until(() => native.edits.length === 1, "the actual Edit button must reach native history navigation");
   assert.equal(w.latest.editingEntryId, "entry-u2");
   assert.equal(edit.disabled, true);
@@ -3286,7 +3291,7 @@ for (const order of ["HTTP first", "SSE first"]) {
     const { w, stream } = await mountObservedEditableSession(sid);
     const releaseReply = order === "SSE first" ? native.holdEditReply() : null;
     if (releaseReply) t.after(releaseReply);
-    await act(async () => { fireEvent.click(w.editButton("entry-u2")); });
+    await confirmEdit(w.view, w.editButton("entry-u2"));
     await until(() => native.leafId === "edit-marker-1", "the real native history must persist the Edit marker");
     const ownLeafId = native.leafId;
     if (releaseReply) {
@@ -3349,7 +3354,7 @@ test("an HTTP-first Edit echo cannot reset the next replacement prompt", async (
       const native = primeEditableHistory(sid);
       const original = structuredClone(world.sessions.get(sid));
       const { w, stream: observer } = await mountObservedEditableSession(sid);
-      await act(async () => { fireEvent.click(w.editButton("entry-u2")); });
+      await confirmEdit(w.view, w.editButton("entry-u2"));
       await until(() => w.latest.editingEntryId === null && w.latest.activeLeafId === "edit-marker-1", "HTTP success and its reload must precede the next send");
       await settle();
       const ownLeafId = native.leafId;
@@ -3448,7 +3453,7 @@ test("history notifications received during an unsuccessful Edit remain effectiv
           return { status: response.status, value };
         },
       });
-      await act(async () => { fireEvent.click(w.editButton("entry-u2")); });
+      await confirmEdit(w.view, w.editButton("entry-u2"));
       await until(() => replyReady, "the native Edit must settle before its HTTP reply is released");
       if (outcome !== "wrong-session") {
         // A separate client successfully navigates while this client's
@@ -3496,7 +3501,7 @@ test("cancelled and failed Edits preserve history selection and draft, then rele
       await act(async () => { await w.changeLeaf("entry-a2"); });
       const selectedIds = [...w.latest.entryIds];
       const selectedMessages = structuredClone(w.latest.messages);
-      await act(async () => { fireEvent.click(w.editButton("entry-u2")); });
+      await confirmEdit(w.view, w.editButton("entry-u2"));
       await until(() => native.edits.length === 1 && w.latest.editingEntryId === null, "the unsuccessful Edit must settle");
       assert.equal(w.latest.sessionIdRef.current, sid);
       assert.equal(w.latest.activeLeafId, "entry-a2");
@@ -3509,7 +3514,7 @@ test("cancelled and failed Edits preserve history selection and draft, then rele
       assert.deepEqual(w.latest.notices.map((notice) => notice.type), outcome === "error" ? ["error"] : []);
 
       native.editOutcome = "success";
-      await act(async () => { fireEvent.click(w.editButton("entry-u2")); });
+      await confirmEdit(w.view, w.editButton("entry-u2"));
       await until(() => native.edits.length === 2 && w.latest.editingEntryId === null, "a settled refusal must allow another Edit");
       assert.deepEqual(world.sessions.get(sid).entryIds, ["entry-u1", "entry-a1"]);
       assert.deepEqual(w.latest.entryIds, ["entry-u1", "entry-a1"]);
@@ -3538,7 +3543,7 @@ test("an Edit completed after unmount cannot fill the current composer or change
   const old = await mountEditableSession(sid, options);
   const release = native.holdEdit();
   t.after(release);
-  await act(async () => { fireEvent.click(old.editButton("entry-u2")); });
+  await confirmEdit(old.view, old.editButton("entry-u2"));
   await until(() => native.edits.length === 1, "Edit must be waiting on native before leaving");
   old.unmount();
   const current = await mountEditableSession(currentSid, options);
