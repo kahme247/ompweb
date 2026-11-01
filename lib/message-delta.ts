@@ -16,6 +16,7 @@ type Block = { type?: unknown; [key: string]: unknown };
 /** Any message shape; only `content` is read. */
 const contentOf = (message: object | undefined): unknown => (message as { content?: unknown } | undefined)?.content;
 
+const MAX_INDEX_GAP = 32;
 const DELTA_KINDS: Record<string, true> = { text_delta: true, thinking_delta: true, toolcall_delta: true };
 
 /** A `message_update` without a snapshot: omp's delta projection sends `message: { role }` only. */
@@ -36,7 +37,8 @@ export function applyMessageDelta<T extends object>(message: T | undefined, upda
   if (!message || !Array.isArray(blocks)) return null;
   if (update.type === "done" || update.type === "error") return message;
   const index = update.contentIndex;
-  if (typeof index !== "number" || !Number.isInteger(index) || index < 0) return null;
+  // A block opens at most a little past the last one: a far index would grow the message by millions of holes.
+  if (typeof index !== "number" || !Number.isInteger(index) || index < 0 || index > blocks.length + MAX_INDEX_GAP) return null;
   const block = blocks[index] as Block | null | undefined;
   let next: unknown;
   switch (update.type) {
@@ -56,8 +58,14 @@ export function applyMessageDelta<T extends object>(message: T | undefined, upda
     case "toolcall_delta":
       // The arguments are complete only at toolcall_end; until then keep the JSON so far (see withStreamedArguments).
       if (block?.type !== "toolCall" || typeof update.delta !== "string") return null;
-      next = { ...block, partialJson: (typeof block.partialJson === "string" ? block.partialJson : "") + update.delta };
+    {
+      const streamed = { ...block, partialJson: (typeof block.partialJson === "string" ? block.partialJson : "") + update.delta };
+      // The block's last parse carries over, so withStreamedArguments can skip re-parsing a few more bytes.
+      const parsed = parsedArguments.get(block);
+      if (parsed) parsedArguments.set(streamed, parsed);
+      next = streamed;
       break;
+    }
     case "text_end":
       if (typeof update.content !== "string") return null;
       next = { ...(isRecord(update.block) ? update.block : block?.type === "text" ? block : { type: "text" }), text: update.content };
@@ -99,22 +107,30 @@ export function mergeDeltaUpdates<T extends { messageId?: unknown; assistantMess
   return typeof first === "number" ? { ...merged, web: { ...later.web, first } } : merged;
 }
 
-const parsedCalls = new WeakMap<object, Block>();
+/** The last parse of a streaming tool call's JSON: how long it was, when, and what it read as. */
+const parsedArguments = new WeakMap<object, { length: number; at: number; arguments: unknown }>();
+const REPARSE_BYTES = 2048;
+const REPARSE_MS = 100;
 
-/** Tool calls still streaming get the arguments their JSON so far reads as, like omp's full snapshots. */
-export function withStreamedArguments<T extends object>(message: T): T {
+/**
+ * Tool calls still streaming get the arguments their JSON so far reads as, like omp's full snapshots. Parsing a
+ * large argument (a whole file being written) costs milliseconds, so it is redone only once the JSON grew by
+ * REPARSE_BYTES or REPARSE_MS passed; toolcall_end replaces the block with omp's final arguments.
+ */
+export function withStreamedArguments<T extends object>(message: T, now = Date.now()): T {
   const content = contentOf(message);
   if (!Array.isArray(content) || !content.some((block) => typeof block?.partialJson === "string")) return message;
   return {
     ...message,
     content: content.map((block: Block) => {
-      if (typeof block?.partialJson !== "string") return block;
-      let parsed = parsedCalls.get(block);
-      if (!parsed) {
-        parsed = { ...block, arguments: parsePartialJson(block.partialJson) };
-        parsedCalls.set(block, parsed);
+      const json = block?.partialJson;
+      if (typeof json !== "string") return block;
+      let parsed = parsedArguments.get(block);
+      if (!parsed || (parsed.length !== json.length && (json.length - parsed.length >= REPARSE_BYTES || now - parsed.at >= REPARSE_MS))) {
+        parsed = { length: json.length, at: now, arguments: parsePartialJson(json) };
+        parsedArguments.set(block, parsed);
       }
-      return parsed;
+      return { ...block, arguments: parsed.arguments };
     }),
   } as T;
 }
