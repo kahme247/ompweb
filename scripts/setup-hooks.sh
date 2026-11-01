@@ -5,8 +5,6 @@
 set -eu
 
 root=$(git rev-parse --show-toplevel)
-git -C "$root" config core.hooksPath .githooks
-
 command -v graphify >/dev/null || {
 	echo "graphify is not on PATH: install it (see CONTRIBUTING.md), then run this again." >&2
 	exit 1
@@ -27,4 +25,5 @@ fi
 git -C "$root" config merge.graphify.name "graphify graph.json union merge"
 git -C "$root" config merge.graphify.driver "$driver"
 
+git -C "$root" config core.hooksPath .githooks
 echo "core.hooksPath = .githooks; graphify merge driver: $driver"
