@@ -21,8 +21,9 @@ export const LINK_LIMITS = {
   /** Largest `part` line and binary frame payload (v5); an uplink text frame batches lines up to it. */
   pieceBytes: 256 * 1024,
   /** v5: a side sends queued lines and result pieces only while less than this is sent and not acked (spec D7), so a
-   * small message never waits behind more than this in kernel, proxy or peer buffers. Control lines go regardless. */
-  unackedBytes: 4 * 256 * 1024,
+   * small message never waits behind more than this plus one piece in kernel, proxy or peer buffers (768 KiB: about
+   * 3.1 s at 2 Mbit). It also caps throughput at about this per round trip. Control lines go regardless. */
+  unackedBytes: 2 * 256 * 1024,
   uplinkBytes: 16 * 1024 * 1024,
   blobBytes: 64 * 1024 * 1024,
   inlineResultBytes: 1024 * 1024,

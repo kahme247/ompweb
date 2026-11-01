@@ -344,7 +344,8 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   result as binary frames of at most 256 KiB; both sides queue per key (channel,
   or request id) in `LinkSender`, send round-robin and number each line as it
   goes out, so wire order stays `seq` order. **Unacked window:** each side sends
-  queued units only while less than `LINK_LIMITS.unackedBytes` (1 MiB) is
+  queued units only while less than `LINK_LIMITS.unackedBytes` (512 KiB; ≤ 768 KiB in
+  flight with the last unit, ~3.1 s at 2 Mbit; ~512 KiB per round trip of throughput) is
   unacked, since kernel/proxy buffers hide megabytes from `bufferedAmount` and
   Bun's `send`: the hub counts outbox lines written (`unacked`, shrunk by the
   daemon's `ack` line), the daemon counts frames the hub has not answered (one
