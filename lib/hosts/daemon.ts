@@ -233,6 +233,9 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       const item = resend[resendAt++];
       if (item.seq > ackedUp) return item.line;
     }
+    // Consumed: the snapshot holds no lines any longer.
+    resend = [];
+    resendAt = 0;
     const unit = sender.next(() => ++upSeq);
     if (!unit) return null;
     if ("frame" in unit) return unit.frame;
