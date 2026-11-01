@@ -88,7 +88,8 @@ ompweb --no-open                           # 不自動開啟瀏覽器
 ompweb --install-tray                      # 安裝 Windows 系統匣服務與桌面捷徑
 ompweb --uninstall-tray                    # 解除安裝 Windows 系統匣服務與捷徑
 ompweb --tray                              # 啟動背景系統匣管理工具
-ompweb systemd install                     # 安裝 Linux systemd 使用者服務
+ompweb systemd install                     # 安裝 Linux systemd 使用者服務（網頁 + ompweb-host 守護行程）
+ompweb launchd install                     # 安裝 macOS launchd 代理程式（網頁 + ompweb-host 守護行程）
 ompweb --help                              # 顯示說明
 ompweb --version                           # 顯示版本資訊
 ```
@@ -116,6 +117,18 @@ OMP_WEB_PASSWORD_HASH='scrypt$15$8$1$…' ompweb
 各項服務安裝程式（`ompweb systemd install`、`ompweb-launchd install`、Linux 系統匣以及 Windows 服務）在安裝時仍接受傳入 `OMP_WEB_PASSWORD`，並會在寫入設定檔前先行雜湊處理。設定檔中僅會儲存雜湊值。
 
 在 Windows 上，系統匣與背景服務每次啟動伺服器時，都會直接從使用者或系統環境變數（例如 `setx OMP_WEB_PASSWORD_HASH "scrypt$…"`）讀取 `OMP_WEB_PASSWORD_HASH`，而非從當初啟動服務時的環境變數讀取。變更或移除雜湊值會在下次伺服器重新啟動時生效，無需將 Windows 登出。
+### 兩項服務：網頁伺服器與本機守護行程
+
+ompweb 透過一個輕量的守護行程 `ompweb host` 來執行這台機器的 `omp` 對話，該守護行程透過 loopback 與網頁伺服器連結。各服務安裝程式（`ompweb systemd install`、`ompweb launchd install`、`ompweb --install-tray`）都會同時安裝兩項服務：網頁服務與 `ompweb-host`。解除安裝時也會一併移除兩者。
+
+**在前台執行 ompweb**（在終端機中執行 `ompweb`，或使用 `npx @kahme247/ompweb@latest`）不會安裝任何服務，因此不會自動執行守護行程：請在第二個終端機中保持執行 `ompweb host`（使用 npx 時：`npx @kahme247/ompweb@latest host`）。若未執行它，「本機」將保持離線狀態。網頁伺服器在啟動時會寫入守護行程的連線設定，因此請先啟動網頁伺服器。
+
+- **重新啟動或重新部署網頁伺服器不會中斷執行中的作業。** 守護行程會保持 omp 程序持續運作；重新啟動後的網頁伺服器會直接接管它們，不會跳出繼續提示，omp 正在等待的對話方塊或工具呼叫也會重新顯示。
+- **重新啟動守護行程則會結束執行作業**（因為它擁有 omp 程序）。若開啟了自動繼續，原本正在執行的對話會自動繼續一次。`ompweb systemd restart` 僅會重新啟動網頁服務；升級版本時，只有在守護行程的連線協定版本超出新版本支援的範圍時，才會重新啟動守護行程。
+- **升級後的首次啟動：** 若約 90 秒後仍未連結任何守護行程，ompweb 會顯示橫幅提示您平台的安裝指令。它絕不會自動自行安裝服務。在守護行程執行之前，「本機」會顯示為離線，且無法在上面啟動新的對話。
+- **它就像其他任何主機一樣。** 您可以在**設定 → 主機**中重新命名「本機」（清空名稱即可重設）；它無法被撤銷。網頁伺服器僅會在 loopback 繫結位址啟動時，寫入守護行程的連線設定（`~/.omp/agent/omp-web/host.json`，權限 `600`）。
+- **開發環境：** `npm run dev` 不會接管守護行程（請參閱[本機開發](#本機開發)）。
+
 
 ### 作為 Windows 服務執行（系統匣）
 
@@ -132,7 +145,7 @@ ompweb --tray          # 啟動系統匣管理工具
 ompweb --uninstall-tray
 ```
 
-安裝程式會在桌面與開始功能表建立捷徑。服務發生異常時會自動重新啟動，並在系統匣顯示目前連接埠與運作狀態。
+安裝程式會在桌面與開始功能表建立捷徑。服務發生異常時會自動重新啟動，並在系統匣顯示目前連接埠與運作狀態。安裝時也會將[本機守護行程](#兩項服務網頁伺服器與本機守護行程)註冊為第二個排程工作（`ompweb host`）；系統匣會同時顯示兩者的狀態。
 
 ### 作為 macOS 服務執行（launchd）
 
@@ -159,7 +172,7 @@ OMP_WEB_PASSWORD=secret npx --yes @kahme247/ompweb@latest ompweb-launchd install
 
 當繫結至非回呼（non-loopback）主機時，請務必設定 `OMP_WEB_PASSWORD_HASH`（反向代理或 VPN 僅提供額外防護），並透過受信任的反向代理或 VPN 使用 HTTPS。切勿將未經驗證的 Web UI 暴露在公開網路中，或在明文 HTTP 連線下傳送密碼與工作階段 Cookie。
 
-記錄檔位於 `~/Library/Logs/ompweb/ompweb.log`，plist 檔案存放於 `~/Library/LaunchAgents/com.kahme247.ompweb.plist`（權限 600；其中儲存的是密碼雜湊，而非密碼明文）。
+記錄檔位於 `~/Library/Logs/ompweb/ompweb.log`（網頁）與 `~/Library/Logs/ompweb/ompweb-host.log`（[本機守護行程](#兩項服務網頁伺服器與本機守護行程)）。plist 檔案存放於 `~/Library/LaunchAgents/com.kahme247.ompweb.plist`（權限 600；其中儲存的是密碼雜湊，而非密碼明文）以及 `~/Library/LaunchAgents/com.kahme247.ompweb-host.plist`。
 
 ### 作為 Linux 服務執行（systemd）
 
@@ -188,10 +201,10 @@ npx --yes --package=@kahme247/ompweb@latest ompweb-systemd uninstall # 停止並
 ```
 
 該服務會執行在安裝時解析出的本機 `ompweb` 二進位檔（可透過 `OMP_WEB_SYSTEMD_BIN` 覆寫）。執行階段組態位於 `~/.omp/agent/web-service.env`——透過系統匣（或任何文字編輯器）皆可直接修改連接埠、主機名稱與密碼雜湊，並只需重新啟動服務即可生效，無需重新安裝。
-安裝時指定的[環境變數](#環境變數)會直接寫入該檔案。作為服務執行時，預設**不會**自動開啟瀏覽器。服務單元檔位於 `~/.config/systemd/user/ompweb.service`，記錄檔會輸出至 journal：
+安裝時指定的[環境變數](#環境變數)會直接寫入該檔案。作為服務執行時，預設**不會**自動開啟瀏覽器。服務單元檔位於 `~/.config/systemd/user/ompweb.service` 與 `~/.config/systemd/user/ompweb-host.service`（[本機守護行程](#兩項服務網頁伺服器與本機守護行程)）；記錄檔會輸出至 journal：
 
 ```bash
-journalctl --user -u ompweb -f
+journalctl --user -u ompweb -u ompweb-host -f
 ```
 
 在無外接顯示器的伺服器（headless server）上，若希望在所有登入階段皆結束後服務仍持續運作，請啟用使用者常駐（lingering）：
@@ -241,11 +254,11 @@ npx @kahme247/ompweb@latest host login --url http://100.64.0.1:30177
 npx @kahme247/ompweb@latest host --allow-http
 ```
 
-若連線中斷，常駐程式（daemon）會自動重新連線（從 1 秒退避重試，加倍遞增至 60 秒）。網路中斷後，遠端機器上的執行作業仍會繼續；聊天介面會顯示離線橫幅，當連線恢復時執行作業會重新連結。筆記型電腦進入睡眠狀態（通常是闔上螢幕）時，會將常駐程式及其 omp 執行作業與其上的其他作業一併暫停：喚醒時會自動恢復，連線也會在當時恢復。接上擴充底座或設定不休眠的裝置則可在闔上螢幕時繼續執行。在設定中撤銷主機會關閉其連線，常駐程式也會停止其 omp 程序。
+若連線中斷，常駐程式（daemon）會自動重新連線（從 1 秒退避重試，加倍遞增至 60 秒；在同一台機器上的網頁伺服器最多 3 秒）。連線失敗後它會重新讀取儲存的連線資訊，因此即使網頁伺服器在不同連接埠上恢復，也無需重新啟動常駐程式即可自動找到。網路中斷後，遠端機器上的執行作業仍會繼續；聊天介面會顯示離線橫幅，當連線恢復時執行作業會重新連結。筆記型電腦進入睡眠狀態（通常是闔上螢幕）時，會將常駐程式及其 omp 執行作業與其上的其他作業一併暫停：喚醒時會自動恢復，連線也會在當時恢復。接上擴充底座或設定不休眠的裝置則可在闔上螢幕時繼續執行。在設定中撤銷主機會關閉其連線，常駐程式也會停止其 omp 程序。
 
 注意事項：
 
-- **服務輔助程式：** `ompweb-launchd` 與 `ompweb-systemd` 僅會安裝 Web 伺服器（其服務執行不帶引數的 `ompweb`），因此無法執行 `ompweb host`。若要在登出或重新開機後保持連線，請在您自選的行程監控程式（supervisor）下執行 `ompweb host`，讓它在失敗時自動重新啟動。當伺服器撤銷其權杖，或連線協定版本不同時（任一方可能是較新版本；請在較舊的一方升級 ompweb），常駐程式會以結束代碼 `1` 結束；若同一個主機有較新的連線取代它，則以 `0` 結束。SIGTERM 或 SIGINT 會停止常駐程式及其 omp 程序。每個主機僅能有一個連線，切勿使用相同權杖執行兩個常駐程式。
+- **服務輔助程式：** `ompweb systemd install` 與 `ompweb launchd install` 會在網頁伺服器旁同時設定本機自己的守護行程（請參閱[兩項服務](#兩項服務網頁伺服器與本機守護行程)）。在另一台機器上您只需要守護行程，而這些輔助程式在那裡也會同時啟動網頁伺服器，因此請在您自選的行程監控程式（supervisor）下執行 `ompweb host`，讓它在失敗時自動重新啟動，以在登出或重新開機後保持連線。當伺服器撤銷其權杖，或其連線協定版本超出伺服器支援的範圍時（舊於伺服器支援的最舊版本，或新於伺服器：請在較舊的一方更新 ompweb），守護行程會以結束代碼 `1` 結束；若同一個主機有較新的連線取代它，則以 `0` 結束。SIGTERM 或 SIGINT 會停止守護行程及其 omp 程序。每個主機僅能有一個連線，切勿使用相同權杖執行兩個守護行程。
 - **伺服器的代理目錄保存主機清單**（`omp-web/hosts.json`）。若以不同的 `PI_CODING_AGENT_DIR` 啟動 ompweb 伺服器，或遺失該檔案，會導致所有主機權杖失效：每個常駐程式都會收到已遭撤銷的通知，停止其 omp 程序並結束。
 - **信任機制：** 已連結的主機會在該機器上為掌控 ompweb 伺服器或權杖的人員執行具備完整工具存取權限的 omp。請妥善保護權杖隱私，並在機器淘汰時將其撤銷。
 - **遠端主機尚不支援：** 檔案總管、Git 與工作樹（worktree）面板、目錄瀏覽，以及技能、外掛程式、代理與 MCP 設定目前僅在執行 ompweb 的本機上可用。聊天、對話歷史紀錄、通知與開始新對話則在所有主機上皆可正常運作。
@@ -372,6 +385,8 @@ npm run dev
 ```
 
 開發伺服器將執行於 [http://127.0.0.1:30178](http://127.0.0.1:30178)。
+開發伺服器不會接管本機守護行程：只有正式環境的網頁伺服器會寫入守護行程的 `host.json`，因此「本機」在開發環境中會顯示為離線，而守護行程會保持與您已安裝的 ompweb 連結。
+
 
 開發伺服器允許 loopback 與 RFC1918 私有 IPv4 來源（`10.0.0.0/8`、`172.16.0.0/12` 與 `192.168.0.0/16`）。若搭配穿透通道（tunnel）或反向代理使用自訂主機名稱，無需修改 `next.config.ts` 即可直接指定：
 
