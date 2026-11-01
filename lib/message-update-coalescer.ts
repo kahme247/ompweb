@@ -195,13 +195,11 @@ export function createMessageUpdateCoalescer(
       held = held.filter((event) => event.messageId !== messageId);
       live = messageId !== null && isRecord(message) ? { messageId, message, since: sequence } : null;
       let last: CoalescableEvent | null = null;
-      for (const [index, event] of replay.entries()) {
+      for (const event of replay) {
         // Not applicable (or a merged frame the snapshot holds only part of): wait for the next snapshot.
         const next = live && firstOf(event) > live.since ? applyMessageDelta(live.message, event.assistantMessageEvent) : null;
         if (!live || !next) {
           live = null;
-          held.push(...replay.slice(index));
-          heldFloor = sequence;
           onMissingBase();
           return;
         }
