@@ -20,6 +20,9 @@ export const LINK_LIMITS = {
   flushMs: 16,
   /** Largest `part` line and binary frame payload (v5); an uplink text frame batches lines up to it. */
   pieceBytes: 256 * 1024,
+  /** v5: a side sends queued lines and result pieces only while less than this is sent and not acked (spec D7), so a
+   * small message never waits behind more than this in kernel, proxy or peer buffers. Control lines go regardless. */
+  unackedBytes: 4 * 256 * 1024,
   uplinkBytes: 16 * 1024 * 1024,
   blobBytes: 64 * 1024 * 1024,
   inlineResultBytes: 1024 * 1024,
@@ -416,6 +419,8 @@ export class SeqWindow {
   }
 }
 
+/** Sent lines a side keeps until the peer acks them, in `seq` order (both sides push them in the order they number
+ * them). `ack` and `drop` return what they removed. */
 export class Outbox<M extends { seq: number }> {
   private items: M[] = [];
 
@@ -423,25 +428,30 @@ export class Outbox<M extends { seq: number }> {
     this.items.push(m);
   }
 
-  ack(upTo: number): void {
-    this.items = this.items.filter((m) => m.seq > upTo);
+  ack(upTo: number): M[] {
+    let n = 0;
+    while (n < this.items.length && this.items[n].seq <= upTo) n += 1;
+    return this.items.splice(0, n);
   }
 
+  /** A copy, in seq order. */
   pending(): M[] {
-    return [...this.items].sort((a, b) => a.seq - b.seq);
+    return this.items.slice();
   }
 
-  drop(predicate: (m: M) => boolean): void {
-    this.items = this.items.filter((m) => !predicate(m));
+  drop(predicate: (m: M) => boolean): M[] {
+    const dropped = this.items.filter(predicate);
+    if (dropped.length > 0) this.items = this.items.filter((m) => !predicate(m));
+    return dropped;
   }
 }
 
 /** What `LinkSender` queues under a key: a line from `encodeQueued` (`size`: its UTF-8 bytes), or a result's bytes. */
 export type SendItem = { line: string; size: number } | { id: string; blob: Uint8Array };
 
-/** One unit from `LinkSender.next`; `done` when it was the last of `item`. A line (a whole message or a `part`) carries
- * the `seq` it was numbered with; a piece of result bytes is an unnumbered binary `frame`. */
-export type SendUnit<T extends SendItem> = { key: string; item: T; done: boolean } & ({ seq: number; line: string } | { frame: Uint8Array<ArrayBuffer> });
+/** One unit from `LinkSender.next`; `done` when it was the last of `item`. A line (a whole message, or a `part` when
+ * `part`) carries the `seq` it was numbered with; a piece of result bytes is an unnumbered binary `frame`. */
+export type SendUnit<T extends SendItem> = { key: string; item: T; done: boolean } & ({ seq: number; line: string; part: boolean } | { frame: Uint8Array<ArrayBuffer> });
 
 /** The `part` line for `line` from `at`: as much of it as fits in pieceBytes once encoded. */
 function cutPart(line: string, at: number, seq: number): { line: string; at: number } {
@@ -481,8 +491,14 @@ export class LinkSender<T extends SendItem> {
     if (this.active === key) this.active = null;
   }
 
-  get empty(): boolean {
-    return this.queues.size === 0;
+  /** Forget every result's bytes not sent yet, a result part-way out included, but not the `res` behind them: after a
+   * redial the server has failed those ops, or their `res` fails 502 host_blob_missing. */
+  dropBlobs(): void {
+    for (const [key, queue] of this.queues) {
+      const rest = queue.filter(({ item }) => !("blob" in item));
+      if (rest.length === 0) this.queues.delete(key);
+      else this.queues.set(key, rest);
+    }
   }
 
   /** The next unit, or null when nothing is queued; `nextSeq` numbers a line. */
@@ -496,8 +512,10 @@ export class LinkSender<T extends SendItem> {
         head.at += piece.byteLength;
         unit = { key, item, done: head.at >= item.blob.byteLength, frame: encodeBlobFrame(item.id, piece) };
       } else if (!this.parts || item.size <= LINK_LIMITS.pieceBytes) {
+        // A line part-way out in parts when the peer turned out to be v4 goes whole from the start.
+        if (this.active === key) this.active = null;
         const seq = nextSeq();
-        unit = { key, item, done: true, seq, line: withSeq(item.line, seq) };
+        unit = { key, item, done: true, seq, line: withSeq(item.line, seq), part: false };
       } else {
         if (this.active !== null && this.active !== key) continue;
         this.active = key;
@@ -508,7 +526,7 @@ export class LinkSender<T extends SendItem> {
         head.at = cut.at;
         const done = head.at >= head.line.length;
         if (done) this.active = null;
-        unit = { key, item, done, seq, line: cut.line };
+        unit = { key, item, done, seq, line: cut.line, part: true };
       }
       if (unit.done) queue.shift();
       this.queues.delete(key);
@@ -521,18 +539,25 @@ export class LinkSender<T extends SendItem> {
 
 /** Joins `part`s back into their line (spec D7), one line at a time as `LinkSender` sends them. */
 export class PartJoiner {
+  /** Most parts in one line: a legitimate 8 MiB line needs about 200, even with every character escaped. */
+  static readonly maxParts = 512;
   private chunks: string[] | null = null;
   private at = 0;
 
   /** The whole line once `part` ends it, else null. A part at 0 starts a new line, dropping a partial one; a part that
-   * does not continue the line in progress (its sender dropped the rest), or takes it past maxLineBytes, is dropped
-   * with that line. */
+   * does not continue the line in progress (its sender dropped the rest), or takes it past maxLineBytes or maxParts,
+   * is dropped with that line. */
   add(part: Pick<Part, "at" | "end" | "data">): string | null {
     if (part.at === 0) {
       this.chunks = [];
       this.at = 0;
     }
-    if (!this.chunks || part.at !== this.at || this.at + part.data.length > LINK_LIMITS.maxLineBytes) {
+    if (
+      !this.chunks
+      || part.at !== this.at
+      || this.at + part.data.length > LINK_LIMITS.maxLineBytes
+      || this.chunks.length >= PartJoiner.maxParts
+    ) {
       this.chunks = null;
       return null;
     }
