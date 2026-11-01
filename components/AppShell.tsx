@@ -38,6 +38,7 @@ import { comparableProjectPath } from "@/lib/comparable-path";
 import { LOCAL_HOST_ID, remoteHostId } from "@/lib/project-ordering";
 import { isLinkUp } from "@/lib/hosts/host";
 import { useHostRows } from "@/hooks/useHostRows";
+import { LocalDaemonBanner } from "./LocalDaemonBanner";
 import { hostName, hostStatusText } from "./host-status";
 import { clearDraft } from "@/lib/draft-store";
 import { useNotifications } from "@/hooks/useNotifications";
@@ -2730,6 +2731,7 @@ export function AppShell({ appName }: { appName: string }) {
       )}
 
     </div>
+    <LocalDaemonBanner />
     <AppUpdateDialog open={appUpdateDialogOpen} update={appUpdate} phase={appUpdatePhase} visibleStage={appUpdateVisibleStage} error={appUpdateError} onProceed={() => void proceedWithAppUpdate()} onNotNow={dismissAppUpdate} />
     {archiveBrowserOpen && (
       <ArchiveBrowser
