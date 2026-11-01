@@ -548,20 +548,26 @@ journalctl --user -u ompweb-host -f       # logs
 ```
 
 **macOS (from a terminal).** No launchd job can run a host that omp sessions can
-fully use. A LaunchAgent cannot reach LAN addresses (`connect` fails with "No route
-to host"): macOS Local Network privacy cannot ask for or remember a grant for the
-ad-hoc signed `ompweb` binary, which has no app bundle. A LaunchDaemon cannot reach
-the LAN either, and it has no login keychain or SSH agent, which sessions need for
-SSH keys and commit signing. A process started from a terminal inherits the
-terminal's permissions, so run the host there, in tmux so it outlives the window.
-Save this as `~/.local/bin/ompweb-host-run` (adjust `DIR`) and make it executable
-with `chmod +x`:
+fully use: a LaunchDaemon has no login keychain or SSH agent, which sessions need
+for SSH keys and commit signing, and a LaunchAgent cannot reach LAN addresses. A
+process started from a terminal inherits the terminal's keychain and SSH agent, so
+run the host there, in tmux so it outlives the window.
+
+tmux does not keep the terminal's Local Network permission, though: the tmux server
+detaches from the terminal app, and macOS Local Network privacy then blocks the
+ad-hoc signed `ompweb` binary from LAN addresses (`connect` fails with "No route to
+host", which the daemon reports as `ECONNREFUSED`; Apple's own tools such as `curl`
+are not blocked, so a `curl` test passes). Link the host to a URL that does not
+resolve to a LAN address, for example the server's public URL, or its VPN or
+tailnet name (a Tailscale MagicDNS name served by your reverse proxy with its own
+certificate). Save this as `~/.local/bin/ompweb-host-run` (adjust `DIR`) and make
+it executable with `chmod +x`:
 
 ```sh
 #!/bin/sh
-# Keeps `ompweb host` running in this terminal, which lends it its keychain, SSH agent
-# and Local Network permission. Restarts it 10 s after a crash; stops when the token is
-# revoked or the link protocol is unsupported (exit 1), or a newer link replaced it (0).
+# Keeps `ompweb host` running in this terminal, which lends it its keychain and SSH agent.
+# Restarts it 10 s after a crash; stops when the token is revoked or the link protocol is
+# unsupported (exit 1), or on exit 0: a newer link replaced it, or it was stopped (Ctrl-C).
 DIR=${OMPWEB_DIR:-$HOME/.local/share/ompweb-darwin-arm64}
 # A tmux started over SSH sees the login keychain locked: unlock it while a terminal can ask.
 security show-keychain-info login.keychain-db 2>/dev/null || security unlock-keychain login.keychain-db || exit 1
