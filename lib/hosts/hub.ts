@@ -215,7 +215,8 @@ function released(link: Link, items: Sent[]): void {
 function flush(link: Link): void {
   const ws = link.socket;
   if (!ws || link.awaitingDrain || hub().frozen) return;
-  const limit = LINK_LIMITS.unackedBytes;
+  // A v4 daemon acks only inside its next uplink frame, which may be a pong 15 s away: it gets no window.
+  const limit = link.sender.parts ? LINK_LIMITS.unackedBytes : Infinity;
   const write = (item: Sent): boolean => {
     const sent = ws.send(item.line);
     if (sent !== 0) {
@@ -396,8 +397,9 @@ function versionMismatch(link: Link, raw: unknown): boolean {
 export const hostLinkSocket = {
   // A result frame is up to blobBytes plus its id header; Bun closes 1009 above it.
   maxPayloadLength: LINK_LIMITS.blobBytes + 256,
-  // A backstop: flush keeps at most one sequenced line in Bun's buffer. Past the limit the socket closes instead of
-  // buffering on, and what the daemon missed is resent after its redial.
+  // A backstop: flush keeps at most about unackedBytes of sequenced lines unacked (v5) and stops when Bun reports
+  // backpressure. Past the limit the socket closes instead of buffering on, and what the daemon missed is resent after
+  // its redial.
   backpressureLimit: LINK_LIMITS.uplinkBytes,
   closeOnBackpressureLimit: true as const,
   message(ws: LinkSocket, data: string | Uint8Array): void {
