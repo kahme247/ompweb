@@ -29,7 +29,7 @@ declare global {
   var __ompHostLists: Map<string, HostLists> | undefined;
 }
 
-// globalThis, like the hub: survives Next.js hot reload.
+// globalThis, like the hub: survives a `bun --hot` re-evaluation.
 function hostLists(hostId: string): HostLists {
   if (!globalThis.__ompHostLists) {
     globalThis.__ompHostLists = new Map();

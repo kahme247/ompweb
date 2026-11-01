@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import { createHash } from "crypto";
 import { listSessionsAllHosts } from "@/lib/hosts/session-index";
 import { getRunningRpcSessions } from "@/lib/rpc-manager";
@@ -22,11 +21,11 @@ export async function GET(req: Request) {
     const bodyJson = JSON.stringify(body);
     const etag = `"${createHash("sha1").update(bodyJson).digest("hex").slice(0, 16)}"`;
     if (req.headers.get("if-none-match") === etag) {
-      return new NextResponse(null, { status: 304, headers: { ETag: etag, ...SESSION_LIST_HEADERS } });
+      return new Response(null, { status: 304, headers: { ETag: etag, ...SESSION_LIST_HEADERS } });
     }
-    return new NextResponse(bodyJson, { headers: { ETag: etag, "Content-Type": "application/json", ...SESSION_LIST_HEADERS } });
+    return new Response(bodyJson, { headers: { ETag: etag, "Content-Type": "application/json", ...SESSION_LIST_HEADERS } });
   } catch (error) {
-    return NextResponse.json(
+    return Response.json(
       { error: error instanceof Error ? error.message : String(error), code: "internal_error" },
       { status: 500, headers: { "Cache-Control": "no-store" } },
     );

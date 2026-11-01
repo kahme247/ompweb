@@ -119,6 +119,8 @@ export interface AppUpdateInfo {
   currentVersion: string | null;
   availableVersion: string | null;
   updateAvailable: boolean;
+  /** "binary": a compiled release, whose `updateCommand` is the download page. */
+  installMethod?: "npm" | "bun" | "binary";
   updateCommand?: string;
   selfUpdateSupported?: boolean;
   updatesDisabled?: boolean;

@@ -1,6 +1,26 @@
 import { randomUUID } from "node:crypto";
-import type { SttAfter, SttConfig } from "@/lib/stt";
+import type { SttAfter } from "@/lib/stt";
 import { authGatewayRequest } from "@/lib/omp/auth-gateway";
+
+function cleanEnvVar(val?: string): string | undefined {
+  const cleaned = val?.replace(/\\n|[\r\n]/g, "").trim();
+  return cleaned || undefined;
+}
+
+export interface SttConfig {
+  /** Unset: transcribe with `model` (an omp model selector) through omp's auth gateway. */
+  endpoint: string | undefined;
+  apiKey: string | undefined;
+  model: string | undefined;
+}
+
+/** STT settings from OMP_WEB_STT_*; null when neither an endpoint nor a model is configured. Server-only: lib/stt.ts is shared with the browser. */
+export function readSttConfig(): SttConfig | null {
+  const endpoint = cleanEnvVar(process.env.OMP_WEB_STT_ENDPOINT);
+  const model = cleanEnvVar(process.env.OMP_WEB_STT_MODEL);
+  if (!endpoint && !model) return null;
+  return { endpoint, apiKey: cleanEnvVar(process.env.OMP_WEB_STT_KEY), model };
+}
 
 /**
  * Server-owned transcription jobs. POST /api/stt starts one and returns its id
@@ -44,9 +64,8 @@ export interface SttClaim extends SttJobView {
 }
 
 /**
- * Cap on how long the server waits on the STT endpoint. Kept under undici's
- * default 300s headersTimeout so a slow upstream ends as "timed out", not
- * an opaque "fetch failed".
+ * Cap on how long the server waits on the STT endpoint, so a slow upstream
+ * ends as "timed out", not an opaque "fetch failed".
  */
 const STT_UPSTREAM_TIMEOUT_MS = 290_000;
 /** Unclaimed results and failures (with their audio) stay retrievable this long. */
@@ -71,8 +90,7 @@ const MAX_LIVE_JOBS = 20;
 const MAX_TOMBSTONES = 20;
 
 declare global {
-  // globalThis survives Next.js hot reload and is shared by the separately
-  // bundled /api/stt route handlers; a module-level Map is neither.
+  // globalThis survives a `bun --hot` re-evaluation; a module-level Map does not.
   var __ompSttJobs: Map<string, SttJob> | undefined;
 }
 

@@ -16,7 +16,7 @@ test("SIGTERM to `ompweb host` stops the daemon itself, leaving no orphan", { sk
   mkdirSync(join(agentDir, "omp-web"), { recursive: true });
   // Nothing listens on this loopback port: the daemon redials until it is stopped.
   writeFileSync(join(agentDir, "omp-web", "host.json"), JSON.stringify({ url: "http://127.0.0.1:9", token: "t" }), { mode: 0o600 });
-  const child = spawn(process.execPath, [bin, "host"], {
+  const child = spawn("node", [bin, "host"], {
     env: { ...process.env, HOME: scratch, USERPROFILE: scratch, PI_CODING_AGENT_DIR: agentDir },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -48,7 +48,7 @@ async function login(t, input, { end = true } = {}) {
   const scratch = mkdtempSync(join(tmpdir(), "omp-web-host-login-"));
   const agentDir = join(scratch, "agent");
   t.after(() => rmSync(scratch, { recursive: true, force: true }));
-  const child = spawn(process.execPath, [bin, "host", "login", "--url", "http://127.0.0.1:9"], {
+  const child = spawn("node", [bin, "host", "login", "--url", "http://127.0.0.1:9"], {
     env: { ...process.env, HOME: scratch, USERPROFILE: scratch, PI_CODING_AGENT_DIR: agentDir },
     stdio: ["pipe", "pipe", "pipe"],
   });

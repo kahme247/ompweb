@@ -1,12 +1,9 @@
-import { NextResponse } from "next/server";
 import { existsSync, statSync } from "fs";
 import { dirname, resolve } from "path";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { AGENT_NAME_RE, MAX_AGENT_BYTES, deleteAgent, discoverAgents, readAgentFile, resolveAgentsScope, unpackBundled, validateAgentFileReference, validateAgentPayload, writeAgent, type AgentPayload } from "@/lib/omp/agents-service";
 import { getProjectAgentsDir, getUserAgentsDir } from "@/lib/omp/paths";
-
-export const dynamic = "force-dynamic";
 
 // JSON can expand control characters in a maximum-size agent prompt to six
 // bytes each, with room for the envelope fields.
@@ -64,7 +61,7 @@ export async function GET(request: Request) {
     const cwd = project?.cwd;
     const result = await discoverAgents(cwd);
     const agents = scope === "all" ? result.agents : result.agents.filter((agent) => agent.scope === scope);
-    return NextResponse.json({
+    return Response.json({
       agents,
       diagnostics: result.diagnostics,
       userPath: getUserAgentsDir(),
@@ -73,7 +70,7 @@ export async function GET(request: Request) {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return NextResponse.json({ error: message }, { status: /not allowed/i.test(message) ? 403 : 400 });
+    return Response.json({ error: message }, { status: /not allowed/i.test(message) ? 403 : 400 });
   }
 }
 
@@ -85,7 +82,7 @@ export async function POST(request: Request) {
       const project = body.scope === "project" ? await allowedProjectScope(body.cwd) : undefined;
       const cwd = project?.cwd;
       const targetDir = project?.dir ?? resolveAgentsScope(cwd, body.scope);
-      return NextResponse.json({ success: true, ...unpackBundled(targetDir, false) });
+      return Response.json({ success: true, ...unpackBundled(targetDir, false) });
     }
     if (body.scope !== "user" && body.scope !== "project") throw new Error("scope must be user or project");
     const project = body.scope === "project" ? await allowedProjectScope(body.cwd) : undefined;
@@ -97,11 +94,11 @@ export async function POST(request: Request) {
     const scopeDir = project?.dir ?? resolveAgentsScope(cwd, body.scope);
     const written = writeAgent(scopeDir, body.name.trim(), body.agent as AgentPayload, body.previousName);
     const agent = readAgentFile(written.path);
-    return NextResponse.json({ success: true, ...written, agent });
+    return Response.json({ success: true, ...written, agent });
   } catch (error) {
-    if (error instanceof RequestBodyTooLargeError) return NextResponse.json({ error: "Agent request is too large" }, { status: 413 });
+    if (error instanceof RequestBodyTooLargeError) return Response.json({ error: "Agent request is too large" }, { status: 413 });
     const message = error instanceof Error ? error.message : String(error);
-    return NextResponse.json({ error: message }, { status: /not allowed/i.test(message) ? 403 : 400 });
+    return Response.json({ error: message }, { status: /not allowed/i.test(message) ? 403 : 400 });
   }
 }
 
@@ -117,11 +114,11 @@ export async function PUT(request: Request) {
     validateAgentPayload({ ...(body.agent as Record<string, unknown>), name: body.name });
     const scopeDir = project?.dir ?? resolveAgentsScope(cwd, body.scope);
     const written = writeAgent(scopeDir, body.name.trim(), body.agent as AgentPayload, body.previousName);
-    return NextResponse.json({ success: true, ...written, agent: readAgentFile(written.path) });
+    return Response.json({ success: true, ...written, agent: readAgentFile(written.path) });
   } catch (error) {
-    if (error instanceof RequestBodyTooLargeError) return NextResponse.json({ error: "Agent request is too large" }, { status: 413 });
+    if (error instanceof RequestBodyTooLargeError) return Response.json({ error: "Agent request is too large" }, { status: 413 });
     const message = error instanceof Error ? error.message : String(error);
-    return NextResponse.json({ error: message }, { status: /not allowed/i.test(message) ? 403 : 400 });
+    return Response.json({ error: message }, { status: /not allowed/i.test(message) ? 403 : 400 });
   }
 }
 
@@ -134,11 +131,11 @@ export async function DELETE(request: Request) {
     if (typeof body.name !== "string" || !body.name.trim()) throw new Error("name is required");
     const scopeDir = project?.dir ?? resolveAgentsScope(cwd, body.scope);
     validateAgentFileReference(scopeDir, body.name.trim());
-    return NextResponse.json({ success: true, ...deleteAgent(scopeDir, body.name.trim()) });
+    return Response.json({ success: true, ...deleteAgent(scopeDir, body.name.trim()) });
   } catch (error) {
-    if (error instanceof RequestBodyTooLargeError) return NextResponse.json({ error: "Agent request is too large" }, { status: 413 });
+    if (error instanceof RequestBodyTooLargeError) return Response.json({ error: "Agent request is too large" }, { status: 413 });
     const message = error instanceof Error ? error.message : String(error);
     const status = /not found/i.test(message) ? 404 : /not allowed/i.test(message) ? 403 : 400;
-    return NextResponse.json({ error: message }, { status });
+    return Response.json({ error: message }, { status });
   }
 }

@@ -2,15 +2,13 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach, before } from "node:test";
 import React from "react";
-import { act, cleanup, render } from "@testing-library/react/pure.js";
-import { createJiti } from "jiti";
+const { act, cleanup, render } = await import("@testing-library/react/pure.js");
 
-const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tryNative: false, tsconfigPaths: true });
 // Same specifiers as NotificationList's own imports: on Windows a relative path
 // can load a second copy of the module, whose list the component never sees.
-const { NotificationList } = await jiti.import("@/components/NotificationList");
-const { notificationHistory } = await jiti.import("@/lib/notification-history");
-const { OPEN_SESSION_EVENT } = await jiti.import("@/lib/notification-client");
+const { NotificationList } = await import("@/components/NotificationList");
+const { notificationHistory } = await import("@/lib/notification-history");
+const { OPEN_SESSION_EVENT } = await import("@/lib/notification-client");
 
 before(() => {
   window.Element.prototype.setPointerCapture = () => {};

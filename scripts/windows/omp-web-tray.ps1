@@ -76,9 +76,9 @@ if ($OpenBrowser) {
     $ShouldOpenBrowser = $true
 }
 
-# Fallback: if in start mode but .next directory does not exist, fall back to dev mode
-$NextDir = Join-Path $RepoRoot ".next"
-if ($EffectiveMode -eq "start" -and !(Test-Path $NextDir)) {
+# Fallback: if in start mode but the client build (dist\index.html) does not exist, fall back to dev mode
+$BuildIndex = Join-Path $RepoRoot "dist\index.html"
+if ($EffectiveMode -eq "start" -and !(Test-Path $BuildIndex)) {
     $EffectiveMode = "dev"
     if ($EffectivePort -eq 30177) {
         $EffectivePort = 30178
@@ -246,8 +246,7 @@ function Start-WebServer {
         $launcherJs = Join-Path $RepoRoot "bin\omp-web.js"
         $inner = "`"$NodeExe`" `"$launcherJs`" -p $EffectivePort -H $EffectiveHostname --no-open"
     } else {
-        $nextBin = Join-Path $RepoRoot "node_modules\next\dist\bin\next"
-        $inner = "`"$NodeExe`" `"$nextBin`" dev -H $EffectiveHostname -p $EffectivePort"
+        $inner = "`"$NodeExe`" `"$(Join-Path $RepoRoot 'bin\bun-runtime.js')`" --hot server\dev.ts -H $EffectiveHostname -p $EffectivePort"
     }
     $psi.FileName = $env:ComSpec
     $psi.Arguments = "/d /s /c `"$inner >> `"$childOutLog`" 2>&1`""

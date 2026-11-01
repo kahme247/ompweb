@@ -62,13 +62,15 @@ const fs = require("node:fs");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const crypto = require("node:crypto");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { parseLaunchOptions } = require("./omp-web-options");
+const { checkLaunchSecurity, parseLaunchOptions } = require("./omp-web-options");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { isPortAvailable } = require("./port-availability");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { terminateChildProcess, wireChildProcessLifecycle } = require("./process-lifecycle");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { getAccessibleAddresses, getBrowserUrl, formatAddressBanner, isLoopbackHost } = require("./network-addresses");
+const { getAccessibleAddresses, getBrowserUrl, formatAddressBanner, openInBrowser } = require("./network-addresses");
+// module.require: bin/ files add no new eslint-disable comments (see bin/bun-runtime.js).
+const { resolveBunBinary } = module.require("./bun-runtime");
 
 const UPDATE_PROTOCOL = 1;
 const UPDATE_MESSAGE = "ompweb:update-control";
@@ -134,8 +136,8 @@ function runRestartGate(startMessageType) {
   process.once("disconnect", () => stop());
   process.on("message", (message) => {
     if (!child) {
-      if (message?.type !== startMessageType || !Array.isArray(message.args)) return;
-      child = spawnChild(process.execPath, message.args, {
+      if (message?.type !== startMessageType || !Array.isArray(message.args) || message.args.length === 0) return;
+      child = spawnChild(message.args[0], message.args.slice(1), {
         cwd: process.cwd(),
         env: process.env,
         stdio: ["inherit", "pipe", "inherit", "ipc"],
@@ -154,26 +156,14 @@ function runRestartGate(startMessageType) {
   });
 }
 const pkgDir = path.join(__dirname, "..");
-const nextDir = path.join(pkgDir, ".next");
-
-function resolveNextBin(packageDirectory) {
-  try {
-    return require.resolve("next/dist/bin/next", { paths: [packageDirectory] });
-  } catch {
-    try {
-      const nextPackage = require.resolve("next/package.json", { paths: [packageDirectory] });
-      return path.join(path.dirname(nextPackage), "dist", "bin", "next");
-    } catch {
-      return path.join(packageDirectory, "node_modules", "next", "dist", "bin", "next");
-    }
-  }
-}
-
-const nextBin = resolveNextBin(pkgDir);
 
 const launchOptions = parseLaunchOptions();
 if (launchOptions.help || launchOptions.version) {
   process.exit(0);
+}
+if (launchOptions.error) {
+  console.error(launchOptions.error);
+  process.exit(2);
 }
 
 if (launchOptions.installTray || launchOptions.uninstallTray || launchOptions.tray) {
@@ -201,58 +191,12 @@ if (launchOptions.installTray || launchOptions.uninstallTray || launchOptions.tr
 const port = launchOptions.port;
 const hostname = launchOptions.hostname;
 const openBrowser = launchOptions.openBrowser;
-// Only a password hash reaches the server (issue #239). A plaintext
-// OMP_WEB_PASSWORD alone is migrated: hashed here and removed from the
-// environment before any child can inherit it. The removed --password flag,
-// or a plaintext set next to a hash, stops the launcher.
-let passwordHash = launchOptions.passwordHash;
-if (launchOptions.legacyPasswordSource === "env" && !passwordHash) {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { hashPassword } = require("./omp-web-password-hash");
-  passwordHash = hashPassword(process.env.OMP_WEB_PASSWORD);
-  process.env.OMP_WEB_PASSWORD_HASH = passwordHash;
-  delete process.env.OMP_WEB_PASSWORD;
-  console.warn([
-    "Warning: OMP_WEB_PASSWORD holds a plaintext password. This option has been deprecated and is marked for removal.",
-    "",
-    "Every omp session inherits omp-web's environment, so an agent could print",
-    "the password into its transcript. ompweb hashed it and kept it out of the",
-    "server's environment, but agents can still read it from this launcher",
-    "process, and a new hash is made on every start, which signs every browser",
-    "out on each restart.",
-    "",
-    "Remove OMP_WEB_PASSWORD and set this instead:",
-    "",
-    `  OMP_WEB_PASSWORD_HASH='${passwordHash}'`,
-  ].join("\n"));
-} else if (launchOptions.legacyPasswordSource === "env") {
-  console.error("OMP_WEB_PASSWORD_HASH and the plaintext OMP_WEB_PASSWORD are both set. Remove OMP_WEB_PASSWORD.");
-  process.exit(1);
-} else if (launchOptions.legacyPassword !== undefined) {
-  console.error([
-    "ompweb no longer accepts a plaintext password: the --password flag was removed.",
-    "Every omp session inherits this process's environment, so an agent could",
-    "print the password into its transcript.",
-    "",
-    "Create a hash and use that instead:",
-    "",
-    "  ompweb hash-password",
-    "  OMP_WEB_PASSWORD_HASH='scrypt$...' ompweb",
-  ].join("\n"));
-  process.exit(1);
-}
-if (passwordHash !== undefined) {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { isPasswordHash } = require("./omp-web-password-hash");
-  if (!isPasswordHash(passwordHash)) {
-    console.error(`OMP_WEB_PASSWORD_HASH is not a valid password hash.\n\nGenerate one with: ompweb hash-password`);
-    process.exit(1);
-  }
-}
-const passwordEnabled = passwordHash !== undefined;
+const passwordEnabled = checkLaunchSecurity(launchOptions) !== undefined;
 
-
-const nextArgs = ["start", "-p", port, "-H", hostname];
+// Resolved at every spawn, so a restart after an update finds the updated Bun.
+function serverCommand() {
+  return [resolveBunBinary(pkgDir), path.join(pkgDir, "server", "main.ts"), "-p", String(port), "-H", String(hostname)];
+}
 const restartDescriptor = JSON.stringify({
   launcherPath: path.join(pkgDir, "bin", "omp-web.js"),
   hostname: String(hostname),
@@ -469,10 +413,7 @@ function attachOutput(child) {
     }
     if (openBrowser && !browserOpened) {
       browserOpened = true;
-      const openCmd = process.platform === "win32" ? "explorer.exe" : process.platform === "darwin" ? "open" : "xdg-open";
-      const opener = spawn(openCmd, [browserUrl], { stdio: "ignore", detached: true });
-      opener.on("error", (error) => console.warn(`Could not open browser automatically: ${error.message}`));
-      opener.unref();
+      openInBrowser(browserUrl);
     }
   });
 }
@@ -482,6 +423,7 @@ function serverEnvironment() {
     ...process.env,
     OMP_WEB_PACKAGE_DIR: pkgDir,
     OMP_WEB_LAUNCHER_PID: String(process.pid),
+    OMP_WEB_NODE_BIN: process.execPath,
     OMP_WEB_PORT: port,
     OMP_WEB_HOSTNAME: hostname,
     OMP_WEB_RESTART_DESCRIPTOR: restartDescriptor,
@@ -513,8 +455,8 @@ function trackServer(child) {
   return child;
 }
 
-function spawnServer() {
-  return trackServer(spawn(process.execPath, [nextBin, ...nextArgs], {
+function spawnServer(command) {
+  return trackServer(spawn(command[0], command.slice(1), {
     cwd: pkgDir,
     stdio: ["inherit", "pipe", "inherit", "ipc"],
     env: serverEnvironment(),
@@ -596,8 +538,17 @@ async function waitForRestartRequest(control) {
         && request.action === "start"
         && Number.isInteger(request.generation)
         && request.generation === currentGeneration + 1) {
+        let command;
+        try {
+          command = serverCommand();
+        } catch (error) {
+          // Retried while the update is active; one line per attempt, not a spin.
+          console.error(`Could not start the updated server: ${error.message}`);
+          await new Promise((resolve) => setTimeout(resolve, 1_000));
+          continue;
+        }
         const child = trackServer(spawnRestartGate());
-        if (await acknowledgeAndStartRestart(control, request, child, [nextBin, ...nextArgs])) return;
+        if (await acknowledgeAndStartRestart(control, request, child, command)) return;
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
@@ -614,25 +565,24 @@ async function waitForRestartRequest(control) {
 }
 
 async function main() {
-  if (!fs.existsSync(nextDir) || !fs.existsSync(nextBin)) {
+  if (!fs.existsSync(path.join(pkgDir, "dist", "index.html")) || !fs.existsSync(path.join(pkgDir, "server", "main.ts"))) {
     console.error("Build artifacts not found. Please report this issue.");
     process.exit(1);
   }
-  if (!isLoopbackHost(hostname)) {
-    if (!passwordEnabled) {
-      console.error(`Refusing to listen on ${hostname} without a password hash. Run: ompweb hash-password, then set OMP_WEB_PASSWORD_HASH. Or bind to 127.0.0.1.`);
-      process.exit(1);
-    }
-    console.warn(`Warning: ompweb is listening on ${hostname} over HTTP. Use HTTPS or a trusted VPN to protect the password and session cookie in transit.`);
-  }
-
   if (!await isPortAvailable(port, hostname)) {
     console.error(`Port ${port} on ${hostname} is already in use.`);
     console.error(`If ompweb is already running, open ${browserUrl}. Otherwise, stop the process using it or run: ompweb --port ${Number(port) + 1}`);
     process.exitCode = 1;
     return;
   }
-  spawnServer();
+  let command;
+  try {
+    command = serverCommand();
+  } catch (error) {
+    console.error(error.message);
+    process.exit(1);
+  }
+  spawnServer(command);
 }
 
 if (require.main === module) {
@@ -646,7 +596,6 @@ module.exports = {
   acknowledgeAndStartRestart,
   acknowledgeRestartRequest,
   handleUpdateArm,
-  resolveNextBin,
   spawnRestartGate,
   startRestartGate,
 };

@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import { apiErrorResponse, opErrorResponse, resolveHostOrError } from "@/lib/api-utils";
 import { WebRpcError, startNewRpcSession } from "@/lib/rpc-manager";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
@@ -7,14 +6,14 @@ import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "@/lib/image-attachments";
 
 function newSessionErrorResponse(error: unknown) {
   if (error instanceof RequestBodyTooLargeError) {
-    return NextResponse.json({ error: "New session request is too large", code: "request_too_large" }, { status: 413 });
+    return Response.json({ error: "New session request is too large", code: "request_too_large" }, { status: 413 });
   }
   if (error instanceof SyntaxError) {
-    return NextResponse.json({ error: "Invalid JSON request body", code: "invalid_json" }, { status: 400 });
+    return Response.json({ error: "Invalid JSON request body", code: "invalid_json" }, { status: 400 });
   }
   // host_offline falls through to apiErrorResponse: 503 {hostOffline: true}.
   if ((error instanceof WebRpcError && error.code !== "host_offline") || error instanceof RpcCommandError) {
-    return NextResponse.json(
+    return Response.json(
       { error: error.message, code: error instanceof WebRpcError ? error.code : (error.code ?? "rpc_command_failed") },
       { status: 400 },
     );
@@ -38,7 +37,7 @@ export async function POST(req: Request) {
     const { host } = target;
 
     if (!requestedCwd || typeof requestedCwd !== "string") {
-      return NextResponse.json({ error: "cwd is required", code: "cwd_required" }, { status: 400 });
+      return Response.json({ error: "cwd is required", code: "cwd_required" }, { status: 400 });
     }
 
     const { provider, modelId, toolNames, thinkingLevel, advisor, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: string; advisor?: boolean; [key: string]: unknown };
@@ -46,7 +45,7 @@ export async function POST(req: Request) {
     // child RPC: a stale or forged id would address the wrong session.
     delete promptCommand.sessionId;
     if (typeof promptCommand.type !== "string" || !promptCommand.type.trim()) {
-      return NextResponse.json({ error: "command type is required", code: "command_type_required" }, { status: 400 });
+      return Response.json({ error: "command type is required", code: "command_type_required" }, { status: 400 });
     }
 
     // The cwd is checked on its host; the host answers with the path it will use.
@@ -66,12 +65,12 @@ export async function POST(req: Request) {
       }
 
       if (promptCommand.type === "ensure_session") {
-        return NextResponse.json({ success: true, sessionId: realSessionId, data: null });
+        return Response.json({ success: true, sessionId: realSessionId, data: null });
       }
 
       const result = await session.send(promptCommand);
 
-      return NextResponse.json({ success: true, sessionId: realSessionId, data: result });
+      return Response.json({ success: true, sessionId: realSessionId, data: result });
     } catch (error) {
       // The child was spawned but the prompt never ran: without this cleanup a
       // failed set_model/set_thinking_level/prompt leaves an orphaned omp
@@ -80,7 +79,7 @@ export async function POST(req: Request) {
       // wrapper stays for the reconnect (and disposing it would wait for the link).
       // Its id lets the client open it instead of starting a second session.
       if (error instanceof WebRpcError && error.code === "host_offline") {
-        return NextResponse.json({ error: error.message, code: error.code, hostOffline: true, delivery: error.delivery, sessionId: realSessionId }, { status: 503 });
+        return Response.json({ error: error.message, code: error.code, hostOffline: true, delivery: error.delivery, sessionId: realSessionId }, { status: 503 });
       }
       await session.destroyAndWait();
       throw error;

@@ -91,7 +91,7 @@ async function runCli(argv = process.argv.slice(2)) {
   }
 
   // Load windows-service lib
-  // In Next.js / TypeScript codebase, lib/windows-service.ts can be loaded via jiti / ts require or relative
+  // lib/windows-service.ts is TypeScript: a plain require works where Node strips types, jiti covers the rest.
   let windowsService;
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports

@@ -1,8 +1,5 @@
-import { NextResponse } from "next/server";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { runUtilityCommand } from "@/lib/omp/rpc-utility";
-
-export const dynamic = "force-dynamic";
 
 /** Entry of omp's `get_logout_accounts` response. Labels never carry a raw key. */
 interface OmpProviderAccount {
@@ -33,14 +30,14 @@ export async function GET(_req: Request, { params }: { params: Promise<{ provide
       30_000,
     );
     const list = Array.isArray(accounts) ? accounts.filter(isAccount) : [];
-    return NextResponse.json({
+    return Response.json({
       supported: true,
       accounts: list.map(({ credentialId, label, detail, type }) => ({ credentialId, label, detail, type })),
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (message.includes(UNSUPPORTED)) return NextResponse.json({ supported: false, accounts: [] });
-    return NextResponse.json({ error: message }, { status: 500 });
+    if (message.includes(UNSUPPORTED)) return Response.json({ supported: false, accounts: [] });
+    return Response.json({ error: message }, { status: 500 });
   }
 }
 
@@ -49,17 +46,17 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ provi
   const raw = new URL(req.url).searchParams.get("credentialId") ?? "";
   const credentialId = Number(raw);
   if (!/^\d+$/.test(raw) || !Number.isSafeInteger(credentialId)) {
-    return NextResponse.json({ error: "credentialId must be an integer" }, { status: 400 });
+    return Response.json({ error: "credentialId must be an integer" }, { status: 400 });
   }
   const { provider } = await params;
   try {
     await runUtilityCommand({ type: "logout", providerId: provider, credentialId }, 60_000);
     invalidateModelsCache();
-    return NextResponse.json({ ok: true });
+    return Response.json({ ok: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (message.includes(UNSUPPORTED)) {
-      return NextResponse.json(
+      return Response.json(
         {
           error: "omp-web cannot disconnect accounts with this omp version. Update omp, or run `omp` in a terminal and use /logout.",
           code: "logout_unsupported",
@@ -67,6 +64,6 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ provi
         { status: 501 },
       );
     }
-    return NextResponse.json({ error: message }, { status: 500 });
+    return Response.json({ error: message }, { status: 500 });
   }
 }

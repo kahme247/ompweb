@@ -1,5 +1,6 @@
 import { existsSync, realpathSync, statSync } from "fs";
 import { homedir } from "os";
+import { join } from "path";
 import { fileURLToPath } from "url";
 import { comparableProjectPath } from "../comparable-path";
 import { getAgentEnvOverrides } from "../omp/agent-env";
@@ -12,8 +13,12 @@ import type { ProjectLaunchConfig } from "../types";
 import type { Host } from "./host";
 import { sessionOps } from "./session-ops";
 
-/** omp loads it for history edits (#278). Next to this module, not in the cwd: the daemon runs in HOME. */
-export const SESSION_EDIT_EXTENSION_PATH = fileURLToPath(new URL("../omp/session-edit-extension.mjs", import.meta.url));
+const EXTENSION_BESIDE_MODULE = fileURLToPath(new URL("../omp/session-edit-extension.mjs", import.meta.url));
+/** omp loads it for history edits (#278). Next to this module, not in the cwd: the daemon runs in HOME. In the compiled
+ * binary this module lives in Bun's virtual filesystem, which omp cannot read, so the file ships in its static root. */
+export const SESSION_EDIT_EXTENSION_PATH = existsSync(EXTENSION_BESIDE_MODULE)
+  ? EXTENSION_BESIDE_MODULE
+  : join(process.env.OMP_WEB_PACKAGE_DIR ?? process.cwd(), "lib", "omp", "session-edit-extension.mjs");
 
 // omp aliases "find"->"glob" and has no "ls" tool; the web UI presets still use
 // the pi names (lib/tool-presets.ts), so translate before building --tools.

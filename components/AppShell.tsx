@@ -1,8 +1,8 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo } from "react";
-import dynamic from "next/dynamic";
-import { useRouter, useSearchParams } from "next/navigation";
+import dynamic from "@/lib/dynamic";
+import { useRouter, useSearchParams } from "@/lib/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { useSidebarHistory } from "@/hooks/useSidebarHistory";
 import { useModalDialog } from "@/hooks/useModalDialog";
@@ -90,13 +90,13 @@ import {
   type AppUpdatePhase,
   type AppUpdateStage,
 } from "./AppUpdateDialog";
+import { UpdateToastBody } from "./UpdateToast";
 import { ArchiveBrowser } from "./ArchiveBrowser";
 import { publishSessionsChanged } from "@/lib/session-change-bus";
 // The settings shell is part of the app bundle so opening it does not fetch or compile a modal chunk. The right panel (viewer included) is a separate chunk, preloaded on the first pointerdown or keydown and mounted on first open.
 // No loading placeholder: it would take the panel's place in the layout (on
 // phones, squeezing out the chat) for a frame even when the code is cached.
 const RightPanel = dynamic(() => import("./RightPanel").then((m) => m.RightPanel), {
-  ssr: false,
   loading: () => null,
 });
 
@@ -350,7 +350,7 @@ export function AppShell({ appName }: { appName: string }) {
       signal: controller.signal,
     })
       .then((response) => response.ok ? response.json() : null)
-      .then((data: { currentVersion?: string | null; availableVersion?: string | null; updateAvailable?: boolean; updateCommand?: string; updatesDisabled?: boolean } | null) => {
+      .then((data: { currentVersion?: string | null; availableVersion?: string | null; updateAvailable?: boolean; updateCommand?: string; updatesDisabled?: boolean; selfUpdateSupported?: boolean } | null) => {
         setOmpUpdateAvailable(Boolean(data?.updateAvailable));
         setOmpUpdatesDisabled(Boolean(data?.updatesDisabled));
         if (!data?.updateAvailable || !data.availableVersion) return;
@@ -358,38 +358,22 @@ export function AppShell({ appName }: { appName: string }) {
         // version the user already dismissed must not be re-announced.
         if (readDismissedVersion(DISMISSED_OMP_UPDATE_KEY) === data.availableVersion) return;
         const version = data.availableVersion;
-        const cmd = data.updateCommand || "omp update";
         toast.info(
           translate("appShell.ompUpdateAvailable"),
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
-            <div>{translate("appShell.updateVersion", { current: data.currentVersion ?? "?", available: data.availableVersion })}</div>
-            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-              <code style={{ background: "var(--bg-panel)", padding: "3px 7px", borderRadius: "var(--radius-control)", fontSize: 11, fontFamily: "var(--font-mono)" }}>
-                {cmd}
-              </code>
-              <button
-                type="button"
-                onClick={() => {
-                  void copyText(cmd)
-                    .then(() => toast.success(translate("appShell.commandCopied")))
-                    .catch(() => toast.error(translate("appShell.commandCopyFailed")));
-                }}
-                style={{ padding: "3px 7px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}
-              >
-                {translate("appShell.copyCommand")}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setSettingsTab("system");
-                  toast.close(`omp-update-available:${version}`);
-                }}
-                style={{ padding: "3px 7px", border: "1px solid var(--accent-strong)", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "var(--on-accent)", cursor: "pointer", fontSize: 11, fontWeight: 600 }}
-              >
-                {translate("settingsConfig.ompUpdateAction")}
-              </button>
-            </div>
-          </div>,
+          <UpdateToastBody
+            currentVersion={data.currentVersion}
+            availableVersion={version}
+            target={data.updateCommand || "omp update"}
+            link={false}
+            // Update now runs from Settings → System, and only where this server can run it (not in the binary).
+            action={data.selfUpdateSupported === true ? {
+              label: translate("settingsConfig.ompUpdateAction"),
+              onClick: () => {
+                setSettingsTab("system");
+                toast.close(`omp-update-available:${version}`);
+              },
+            } : undefined}
+          />,
           // Version in the id: re-announcing the same version keeps its
           // notification-center read state; a newer version is a new notice.
           { id: `omp-update-available:${version}`, timeout: 0, onClose: () => rememberDismissedVersion(DISMISSED_OMP_UPDATE_KEY, version) }
@@ -428,40 +412,25 @@ export function AppShell({ appName }: { appName: string }) {
           setAppUpdateDialogOpen(true);
         }
       } else {
-        const cmd = data.updateCommand || "npm install -g @kahme247/ompweb";
         const version = data.availableVersion;
         if (readDismissedVersion(DISMISSED_APP_UPDATE_KEY) === version) return data;
+        // The compiled binary updates by download: its target is the release page, and there is nothing to run here.
+        const binary = data.installMethod === "binary";
         toast.info(
           translate("appShell.appUpdateAvailable"),
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
-            <div>{translate("appShell.updateVersion", { current: data.currentVersion ?? "?", available: data.availableVersion })}</div>
-            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-              <code style={{ background: "var(--bg-panel)", padding: "3px 7px", borderRadius: "var(--radius-control)", fontSize: 11, fontFamily: "var(--font-mono)" }}>
-                {cmd}
-              </code>
-              <button
-                type="button"
-                onClick={() => {
-                  void copyText(cmd)
-                    .then(() => toast.success(translate("appShell.commandCopied")))
-                    .catch(() => toast.error(translate("appShell.commandCopyFailed")));
-                }}
-                style={{ padding: "3px 7px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}
-              >
-                {translate("appShell.copyCommand")}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setSettingsTab("system");
-                  toast.close(`app-update-available:${version}`);
-                }}
-                style={{ padding: "3px 7px", border: "1px solid var(--accent-strong)", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "var(--on-accent)", cursor: "pointer", fontSize: 11, fontWeight: 600 }}
-              >
-                {translate("settingsConfig.appUpdateAction")}
-              </button>
-            </div>
-          </div>,
+          <UpdateToastBody
+            currentVersion={data.currentVersion}
+            availableVersion={version}
+            target={data.updateCommand || "npm install -g @kahme247/ompweb"}
+            link={binary}
+            action={binary ? undefined : {
+              label: translate("settingsConfig.appUpdateAction"),
+              onClick: () => {
+                setSettingsTab("system");
+                toast.close(`app-update-available:${version}`);
+              },
+            }}
+          />,
           { id: `app-update-available:${version}`, timeout: 0, onClose: () => rememberDismissedVersion(DISMISSED_APP_UPDATE_KEY, version) }
         );
       }
@@ -1223,7 +1192,7 @@ export function AppShell({ appName }: { appName: string }) {
     setSystemPrompt(null);
     setSystemPromptLoading(false);
     setActiveTopPanel(null);
-    router.replace("/", { scroll: false });
+    router.replace("/");
   }, [router, selectedSession]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
@@ -1252,10 +1221,9 @@ export function AppShell({ appName }: { appName: string }) {
       // genuine project switch.
       suppressCwdRef.current = session.cwd;
     }
-    // Skip router.replace when restoring from URL — the param is already correct
-    // and calling replace in production Next.js triggers a Suspense remount loop
+    // Skip router.replace when restoring from the URL: the param is already correct.
     if (!isRestore) {
-      router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
+      router.replace(`?session=${encodeURIComponent(session.id)}`);
     }
   }, [router, isMobile, selectedSession?.id]);
 
@@ -1274,7 +1242,7 @@ export function AppShell({ appName }: { appName: string }) {
       setSidebarOpen(false);
       requestAnimationFrame(() => chatInputRef.current?.focus());
     }
-    router.replace("/", { scroll: false });
+    router.replace("/");
   }, [router, isMobile]);
 
   // ---- In-app Navigate back / forward over visited chat views ----
@@ -1399,7 +1367,7 @@ export function AppShell({ appName }: { appName: string }) {
     setSelectedSession(session);
     setRefreshKey((k) => k + 1);
     hydrateSelectedSession(session.id);
-    router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
+    router.replace(`?session=${encodeURIComponent(session.id)}`);
   }, [router, hydrateSelectedSession]);
 
   const handleSessionMoved = useCallback((oldId: string, newId: string) => {
@@ -1410,7 +1378,7 @@ export function AppShell({ appName }: { appName: string }) {
     hydrateSelectedSession(newId);
     // This is the same conversation. Preserve ChatWindow's run/edit fences
     // and its mounted composer, including unfinished attachments and audio.
-    router.replace(`?session=${encodeURIComponent(newId)}`, { scroll: false });
+    router.replace(`?session=${encodeURIComponent(newId)}`);
   }, [router, hydrateSelectedSession]);
 
   const handleAgentEnd = useCallback(() => {
@@ -1502,7 +1470,7 @@ export function AppShell({ appName }: { appName: string }) {
       path: "",
     }));
     hydrateSelectedSession(newSessionId);
-    router.replace(`?session=${encodeURIComponent(newSessionId)}`, { scroll: false });
+    router.replace(`?session=${encodeURIComponent(newSessionId)}`);
   }, [router, hydrateSelectedSession]);
 
   const handleSessionDeleted = useCallback((sessionId: string) => {
@@ -1519,7 +1487,7 @@ export function AppShell({ appName }: { appName: string }) {
       setBranchActiveLeafId(null);
       setSystemPrompt(null);
       setActiveTopPanel(null);
-      router.replace("/", { scroll: false });
+      router.replace("/");
     }
   }, [selectedSession, router]);
   const handleInitialRestoreDone = useCallback(() => {
@@ -1556,7 +1524,7 @@ export function AppShell({ appName }: { appName: string }) {
       if (attemptsLeft > 0) {
         archiveRetryTimerRef.current = setTimeout(() => void selectRestoredSession(attemptsLeft - 1), 300);
       } else if (activeSessionIdRef.current === sessionAtRestoreStart) {
-        router.replace(`?session=${encodeURIComponent(sessionId)}`, { scroll: false });
+        router.replace(`?session=${encodeURIComponent(sessionId)}`);
       }
     };
 

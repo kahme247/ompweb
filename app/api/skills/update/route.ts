@@ -1,12 +1,9 @@
-import { NextResponse } from "next/server";
 import { runNpx } from "@/lib/npx";
 import { createChildProcessEnvironment } from "@/lib/project-command-env";
 import type { SkillInstallScope } from "@/lib/api-types";
 import { buildSkillUpdateArgs } from "@/lib/skill-updates";
 import { loadSkillsWithInstallInfo } from "@/lib/skills-service";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
-
-export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
   try {
@@ -21,11 +18,11 @@ export async function POST(req: Request) {
       ? body.scope as SkillInstallScope
       : undefined;
     if (!cwd || !pkg || !scope) {
-      return NextResponse.json({ error: "cwd, package, and scope are required", code: "cwd_package_scope_required" }, { status: 400 });
+      return Response.json({ error: "cwd, package, and scope are required", code: "cwd_package_scope_required" }, { status: 400 });
     }
     const allowedRoots = await getAllowedFileRoots();
     if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
-      return NextResponse.json({ error: "Access denied", code: "access_denied" }, { status: 403 });
+      return Response.json({ error: "Access denied", code: "access_denied" }, { status: 403 });
     }
 
     const { skills } = await loadSkillsWithInstallInfo(cwd);
@@ -33,10 +30,10 @@ export async function POST(req: Request) {
       (item) => item.install?.package === pkg && item.install.scope === scope,
     );
     if (!skill?.install) {
-      return NextResponse.json({ error: "Installed skill not found", code: "skill_not_installed" }, { status: 404 });
+      return Response.json({ error: "Installed skill not found", code: "skill_not_installed" }, { status: 404 });
     }
     if (!skill.install.canCheckForUpdates) {
-      return NextResponse.json({ error: "This skill cannot be updated automatically", code: "skill_update_unsupported" }, { status: 400 });
+      return Response.json({ error: "This skill cannot be updated automatically", code: "skill_update_unsupported" }, { status: 400 });
     }
 
     const { stdout, stderr } = await runNpx(buildSkillUpdateArgs(skill.install), {
@@ -49,7 +46,7 @@ export async function POST(req: Request) {
     const updatedSkill = refreshed.skills.find(
       (item) => item.install?.package === pkg && item.install.scope === scope,
     );
-    return NextResponse.json({
+    return Response.json({
       success: true,
       skill: updatedSkill,
       output: `${stdout}${stderr}`.slice(-500),
@@ -57,7 +54,7 @@ export async function POST(req: Request) {
   } catch (error: unknown) {
     const detail = error as { stdout?: string; stderr?: string; message?: string };
     const output = `${detail.stdout ?? ""}${detail.stderr ?? ""}`;
-    return NextResponse.json(
+    return Response.json(
       { error: output || detail.message || String(error) },
       { status: 500 },
     );

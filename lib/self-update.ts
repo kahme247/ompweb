@@ -345,10 +345,11 @@ async function detectSystemdService(launcherPid: number): Promise<SystemdService
   return Number(stdout.trim()) === launcherPid ? service : null;
 }
 export function getSelfUpdateSupport(): { supported: boolean; reason?: string; packageDir: string } {
-  const packageDir = process.env.OMP_WEB_PACKAGE_DIR ?? resolve(join(import.meta ? dirname(new URL(import.meta.url).pathname) : process.cwd(), ".."));
+  const packageDir = process.env.OMP_WEB_PACKAGE_DIR ?? process.cwd();
   if (isUpdateDisabled()) {
     return { supported: false, reason: `Updates are disabled by ${DISABLE_AUTOUPDATE_ENV_VAR}`, packageDir };
   }
+  if (Bun.isStandaloneExecutable) return { supported: false, reason: "The ompweb binary updates by download", packageDir };
   // simplified: always supported if packageDir exists
   try {
     if (!existsSync(packageDir)) return { supported: false, reason: "package dir not found", packageDir };
@@ -366,6 +367,10 @@ function detectManager(packageDir: string): { manager: "npm" | "bun"; managerPat
 
 export async function prepareSelfUpdate(kind: Kind = "app"): Promise<PrepareResult> {
   assertUpdatesEnabled();
+  // The compiled binary has no npm install to replace and no runtime for the worker: its updates run from a terminal.
+  if (Bun.isStandaloneExecutable) {
+    throw new SelfUpdateError("self_update_unsupported", "In-app updates are not available in the ompweb binary: update from a terminal", 409);
+  }
   cleanupStaleSelfUpdate(Date.now(), kind);
   ensureSecureRoot(kind, true);
   const leaseFile = leasePath(kind);
@@ -409,12 +414,7 @@ export async function prepareSelfUpdate(kind: Kind = "app"): Promise<PrepareResu
   const attemptDir = join(attempts, attemptId);
   mkdirSync(attemptDir, { mode: 0o700, recursive: true });
   secureDirectory(attemptDir);
-  const srcWorker = resolve(join(dirname(new URL(import.meta.url).pathname), "..", "bin", "omp-web-update-worker.js"));
-  // fallback to CWD relative
-  let workerSrc = srcWorker;
-  if (!existsSync(workerSrc)) {
-    workerSrc = resolve(join(process.cwd(), "bin", "omp-web-update-worker.js"));
-  }
+  const workerSrc = join(process.env.OMP_WEB_PACKAGE_DIR ?? process.cwd(), "bin", "omp-web-update-worker.js");
   const destWorker = join(attemptDir, "worker.js");
   if (existsSync(workerSrc)) {
     copyFileSync(workerSrc, destWorker);
@@ -514,7 +514,9 @@ export async function commitSelfUpdate(attemptId: string, kind: Kind = "app"): P
     const systemd = kind === "app" ? await detectSystemdService(launcherPid) : null;
     if (systemd) args.push("--systemd-unit", systemd.unit, "--systemd-user", systemd.user ? "1" : "0");
     const workerArgs = workerPath ? [workerPath, ...args] : args;
-    let command = process.execPath;
+    // Windows locks a running bun.exe, and npm replaces the package's: the worker runs on the launcher's Node.
+    const runtime = process.env.OMP_WEB_NODE_BIN || process.execPath;
+    let command = runtime;
     let commandArgs = workerArgs;
     if (systemd) {
       // A worker left in the unit's cgroup is killed with the server it stops,
@@ -528,7 +530,7 @@ export async function commitSelfUpdate(attemptId: string, kind: Kind = "app"): P
         throw new Error(`systemd-run cannot start the update worker: ${commandError(error)}`);
       }
       command = "systemd-run";
-      commandArgs = [...systemdRun, process.execPath, ...workerArgs];
+      commandArgs = [...systemdRun, runtime, ...workerArgs];
     }
     const child = spawn(command, commandArgs, {
       detached: true,

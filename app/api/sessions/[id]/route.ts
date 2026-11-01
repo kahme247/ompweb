@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import { apiErrorResponse, hostOfflineResponse, opErrorResponse, resolveSessionHostOr404 } from "@/lib/api-utils";
 import { HostOpError } from "@/lib/hosts/link-protocol";
 import { invalidateHostSessionList } from "@/lib/hosts/session-index";
@@ -8,20 +7,20 @@ import { clearExitedRpcSession, getLiveRpcSessionIds, getRpcSession, WebRpcError
 
 /** Stable, client-safe error body for catch-all handlers: details go to the
  *  server log only, never to the browser. */
-function sessionsErrorResponse(error: unknown): NextResponse {
+function sessionsErrorResponse(error: unknown): Response {
   if (error instanceof WebRpcError && error.code === "session_busy") {
-    return NextResponse.json({ error: error.message, code: error.code }, { status: 409 });
+    return Response.json({ error: error.message, code: error.code }, { status: 409 });
   }
   if (error instanceof RequestBodyTooLargeError) {
-    return NextResponse.json({ error: "Request body is too large", code: "request_too_large" }, { status: 413 });
+    return Response.json({ error: "Request body is too large", code: "request_too_large" }, { status: 413 });
   }
   if (error instanceof SyntaxError) {
-    return NextResponse.json({ error: "Invalid JSON request body", code: "invalid_json" }, { status: 400 });
+    return Response.json({ error: "Invalid JSON request body", code: "invalid_json" }, { status: 400 });
   }
   // A host link failure keeps its status: 503 offline, 504 timeout.
   if (error instanceof HostOpError) return apiErrorResponse(error);
   console.error("[api/sessions]", error);
-  return NextResponse.json({ error: "Session request failed", code: "session_request_failed" }, { status: 500 });
+  return Response.json({ error: "Session request failed", code: "session_request_failed" }, { status: 500 });
 }
 
 export async function GET(
@@ -59,7 +58,7 @@ export async function GET(
       }
     }
 
-    return NextResponse.json({
+    return Response.json({
       sessionId: id,
       ...read.value,
       ...(agent ? { agent } : {}),
@@ -78,7 +77,7 @@ export async function PATCH(
   try {
     const { name } = await parseJsonWithinLimit<{ name?: string }>(req, 64 * 1024);
     if (typeof name !== "string" || !name.trim()) {
-      return NextResponse.json({ error: "name is required", code: "session_name_required" }, { status: 400 });
+      return Response.json({ error: "name is required", code: "session_name_required" }, { status: 400 });
     }
     // A running omp process owns its session file; route the rename through it
     // so the in-memory title cannot clobber ours on the next flush. This runs
@@ -106,10 +105,10 @@ export async function PATCH(
       const result = await resolved.host.sessionOps.renameSessionFile(id, name.trim());
       if (!result.ok) return opErrorResponse(result);
       invalidateHostSessionList(resolved.host.id);
-      return NextResponse.json({ ok: true });
+      return Response.json({ ok: true });
     }
     invalidateSessionCaches();
-    return NextResponse.json({ ok: true });
+    return Response.json({ ok: true });
   } catch (error) {
     return sessionsErrorResponse(error);
   }
@@ -136,7 +135,7 @@ export async function DELETE(
     if (!result.ok) return opErrorResponse(result);
     invalidateHostSessionList(resolved.host.id);
     clearExitedRpcSession(id);
-    return NextResponse.json({ ok: true, ...result.value });
+    return Response.json({ ok: true, ...result.value });
   } catch (error) {
     return sessionsErrorResponse(error);
   }
