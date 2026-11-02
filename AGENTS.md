@@ -669,6 +669,8 @@ end to end:
   sees whole messages. A delta with no base is held and triggers a catch-up; the
   HTTP live snapshot (`seed`) re-bases the coalescer whenever it is applied, and
   otherwise completes held deltas newer than it when it is not older than them.
+  At most 1000 deltas are held; past that they are dropped, and only a snapshot
+  that covers them takes the deltas held afterwards.
   A snapshot at S already holds delta S, so catch-up drops that frame as stale
   (`useAgentSession-sync.ts`); a merged frame with `web.first <= S < sequence`
   is held for the next snapshot instead of applied. Streamed tool arguments are

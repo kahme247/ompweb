@@ -62,6 +62,9 @@ export function scheduleAtDisplayRate(flush: () => void): () => void {
   return () => clearTimeout(id);
 }
 
+/** Held deltas kept while no snapshot arrives: far above a normal catch-up, but bounded in a long message. */
+export const HELD_DELTA_LIMIT = 1000;
+
 export function createMessageUpdateCoalescer(
   dispatch: (event: CoalescableEvent) => void,
   schedule: FlushScheduler = scheduleAtDisplayRate,
@@ -102,6 +105,8 @@ export function createMessageUpdateCoalescer(
     if (live && live.messageId === messageId && firstOf(event) <= live.since) live = null;
     const message = live && live.messageId === messageId ? applyMessageDelta(live.message, event.assistantMessageEvent) : null;
     if (!live || !message) {
+      // Past the limit the held deltas go; the next held delta restarts the set with a floor that covers them.
+      if (held.length >= HELD_DELTA_LIMIT) held = [];
       if (held.length === 0) heldFloor = floor;
       held.push(event);
       onMissingBase();
