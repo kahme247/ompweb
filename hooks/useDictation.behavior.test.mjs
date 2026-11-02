@@ -233,13 +233,19 @@ test("starting capture puts the hook in the recording state with a live analyser
   assert.ok(view.result.current.captureRef.current.startedAt > 0, "timer needs a start stamp");
 });
 
-test("the meter's audio context is resumed inside the click, before the microphone await", async () => {
+test("the meter's audio context is resumed inside the click, and again if the mic session suspends it", async () => {
   // After the await the click's activation may be gone; a context the browser
   // then keeps suspended feeds the waveform silence while recording works.
   const events = [];
+  const contexts = [];
   class TrackingAudioContext extends FakeAudioContext {
+    constructor() {
+      super();
+      contexts.push(this);
+    }
     resume() {
       events.push("resume");
+      this.state = "running";
       return super.resume();
     }
   }
@@ -248,6 +254,8 @@ test("the meter's audio context is resumed inside the click, before the micropho
   override(navigator, "mediaDevices", {
     getUserMedia: async () => {
       events.push("getUserMedia");
+      // Safari interrupts the context while the microphone session starts.
+      contexts[0].state = "suspended";
       return { getTracks: () => [new FakeTrack()] };
     },
   });
@@ -258,7 +266,7 @@ test("the meter's audio context is resumed inside the click, before the micropho
   });
   await settle();
 
-  assert.equal(events[0], "resume", `context must resume before getUserMedia, got ${events.join(",")}`);
+  assert.deepEqual(events, ["resume", "getUserMedia", "resume"]);
   assert.notEqual(view.result.current.captureRef.current.analyser, null);
 });
 
