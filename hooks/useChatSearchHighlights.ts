@@ -9,8 +9,9 @@ const CURRENT_HIT = "omp-search-current";
 // Typing settles before the transcript is walked again.
 const PAINT_DELAY_MS = 150;
 // Rendered text that is not in the message's markdown source, which the server counts hits in:
-// code-block headers (language label, Copy button) and KaTeX's hidden MathML copy.
-const NOT_MESSAGE_TEXT = "button, .markdown-code-header, .katex-mathml";
+// code-block headers (language label, Copy button), KaTeX's hidden MathML copy and the
+// charts generated from tables (they repeat the table's labels and values).
+const NOT_MESSAGE_TEXT = "button, .markdown-code-header, .katex-mathml, [data-table-chart]";
 
 // Absent before Chrome 105 / Safari 17.2 / Firefox 140: hits are then not
 // painted, but jumping to one still works.
@@ -122,6 +123,13 @@ export function useChatSearchHighlights({ container, query: rawQuery, target, re
     if (registry && range) registry.set(CURRENT_HIT, new Highlight(range));
     else registry?.delete(CURRENT_HIT);
     // Instant: a smooth scroll would race the lazy-load sentinel the reveal just put on screen.
+    // The parent first (it may sit in an inner scroller, e.g. a capped user bubble), then centre
+    // the range itself: a paragraph taller than the viewport holds hits far from its centre.
     (range?.startContainer.parentElement ?? message)?.scrollIntoView({ block: "center", behavior: "instant" });
+    if (range) {
+      const rect = range.getBoundingClientRect();
+      const view = element.getBoundingClientRect();
+      element.scrollTo({ top: element.scrollTop + rect.top + rect.height / 2 - (view.top + view.height / 2), behavior: "instant" });
+    }
   }, [container, rawQuery, target, ready, entryIds, revealMessage, holdScrollPosition, onTargetHandled]);
 }
