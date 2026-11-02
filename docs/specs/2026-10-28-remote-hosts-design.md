@@ -222,6 +222,7 @@ messages go again after the redial.
 | `kill {ch, force}` | down | Stop a child: `force: false` terminates its process tree, `true` kills it. |
 | `exit {ch, code, signal}` | up | Child exited. |
 | `resync {ch}` | up | Buffered output for `ch` was dropped. |
+| `stats {samples[{session, bytes, bytesAhead, ackMs, at}]}` | up | Head-of-line samples of acked uplink messages (at most `LINK_LIMITS.statsSamples`); main writes them as `metric: "link"` samples. Advisory: a malformed sample is dropped (logged once per host), never fails the frame; past 8 × `statsSamples` per host per `statsFlushMs` the rest is dropped and counted. A compatible addition: an older main skips the type. Queued under its own sender key, so it waits its turn and the unacked window like any message. |
 | `req {id, op, args}` | down | Host op request. |
 | `res {id, ok, result \| error}`; `res {id, ok: true, blob: {bytes}}` | up | Host op result; the second form names bytes sent earlier in a binary frame. |
 | `ack {ack}` | both | Highest `seq` applied from the other side; unsequenced. |
@@ -390,7 +391,7 @@ parts of those routes stay on main.
 | `spawn {ch, cwd, sessionFile, toolNames, advisor}` | `startRpcSession` spawn |
 | `sessionFileExists {path}` / `invalidateSessionLists {path}` | `AgentSessionWrapper` |
 
-Op timeout: 30 s, then 504 naming the host.
+Op timeout: 30 s of silence (each result byte frame that arrives restarts it), then 504 naming the host.
 
 ## Data flow
 
@@ -499,7 +500,7 @@ asks ("Send a message from a session on <host> to session <id> on
 | Link returns, children alive | Wrappers reattach; `get_state` reconcile runs; `resync` channels reconcile too. |
 | Daemon restarted, children gone | Synthesized `process_exit` per missing channel, which raises the existing "Run failed" notification. With `autoResumeSessions` on, main restarts sessions that were mid-run and sends `RESUME_PROMPT` (Rules → Reattach). |
 | Second daemon with the same token | Newest link wins; the old socket is closed 4409 and its daemon exits 0. |
-| Host op over 30 s | 504 naming the host; the sidebar keeps that host's last list. |
+| Host op silent for 30 s (a result still arriving counts as activity) | 504 naming the host; the sidebar keeps that host's last list. |
 | Version mismatch | Close 4426 (hello frame) or 426 (a pre-WebSocket daemon's POST); host status `needs-upgrade`. |
 | `omp` missing on the host | Host status `omp-missing`; new sessions there are disabled. |
 | Host revoked while sessions run | Link closed; its wrappers are destroyed; its sessions leave the list. The omp children on that machine are killed by the daemon when it sees the 401 on reconnect. |
