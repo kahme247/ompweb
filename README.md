@@ -472,6 +472,16 @@ the host's restart-only update. Unsupported service wrappers and detected restar
 scripts show a manual-update reason. Stop external restart loops before updating
 a foreground daemon.
 
+A daemon update is carried out by a separate updater process on the host. It
+stops the daemon, swaps in the new release and starts it again, and on a failure
+it restores the previous release. If that updater is itself killed after stopping
+the daemon (a reboot, an out-of-memory kill), nothing restarts the host, which
+stays offline. Recover on the host: in the folder containing the installation,
+`.ompweb-backup-<id>` is the previous release. If it is there, move the
+installation aside and rename the backup back to the installation's name; then
+start `ompweb host` (or its service) again. Settings → Hosts reports the update
+as interrupted.
+
 `https://` is required. Plain `http://` is accepted only for loopback addresses, or
 with `--allow-http` (for example on a tailnet):
 

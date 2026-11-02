@@ -152,6 +152,13 @@ instead of attempting a competing daemon. External restart loops must be stopped
 before a foreground update; an inline shell loop cannot reliably be distinguished
 from an interactive shell.
 
+Only the detached helper restarts the daemon after stopping it. A helper killed
+between the stop and a healthy acknowledgement leaves the host offline and the
+installation either the old release or the candidate (with `.ompweb-backup-<id>`
+beside it); recovery is manual, as the README describes. Automatic recovery
+would need a supervisor that outlives the helper on every platform; there is
+none on unmanaged macOS and Windows hosts, so none was added.
+
 ### Routing
 
 Every `SessionInfo` carries `hostId`. API routes resolve `id → host` once
