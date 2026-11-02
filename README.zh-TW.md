@@ -118,6 +118,11 @@ OMP_WEB_PASSWORD_HASH='scrypt$15$8$1$…' ompweb
 各項服務安裝程式（`ompweb systemd install`、`ompweb-launchd install`、Linux 系統匣以及 Windows 服務）在安裝時仍接受傳入 `OMP_WEB_PASSWORD`，並會在寫入設定檔前先行雜湊處理。設定檔中僅會儲存雜湊值。
 
 在 Windows 上，系統匣與背景服務每次啟動伺服器時，都會直接從使用者或系統環境變數（例如 `setx OMP_WEB_PASSWORD_HASH "scrypt$…"`）讀取 `OMP_WEB_PASSWORD_HASH`，而非從當初啟動服務時的環境變數讀取。變更或移除雜湊值會在下次伺服器重新啟動時生效，無需將 Windows 登出。
+
+### 位於反向代理後方
+
+請在 `/api/events/link`（瀏覽器）與 `/api/hosts/link`（主機）上轉發 WebSocket 升級請求；若未轉發升級請求，瀏覽器會在幾秒鐘後自動改用伺服器傳送事件（SSE）。在 nginx 中，這表示需設定 `proxy_http_version 1.1;`、`proxy_set_header Upgrade $http_upgrade;`、`proxy_set_header Connection "upgrade";`，並將 `proxy_read_timeout` 設定為遠高於 30 秒。
+
 ### 兩項服務：網頁伺服器與本機守護行程
 
 ompweb 透過一個輕量的守護行程 `ompweb host` 來執行這台機器的 `omp` 對話，該守護行程透過 loopback 與網頁伺服器連結。各服務安裝程式（`ompweb systemd install`、`ompweb launchd install`、`ompweb --install-tray`）都會同時安裝兩項服務：網頁服務與 `ompweb-host`。解除安裝時也會一併移除兩者。
@@ -293,7 +298,7 @@ npx --yes @kahme247/ompweb@latest ompweb-tray --uninstall    # 移除自動啟�
 
 ## 在其他機器上執行對話
 
-單一 ompweb 可以啟動並監看其他機器上的 omp 對話。每台機器保留其各自的 `omp` 安裝、`~/.omp/agent` 目錄、對話與認證資訊；ompweb 僅負責路由。遠端機器需要安裝 Node 24 與 `omp`，並且必須能透過 HTTP(S) 連線至 ompweb 伺服器。遠端機器向外連線，因此可以位於 NAT 後方。
+單一 ompweb 可以啟動並監看其他機器上的 omp 對話。每台機器保留其各自的 `omp` 安裝、`~/.omp/agent` 目錄、對話與認證資訊；ompweb 僅負責路由。遠端機器需要安裝 `omp` 以及 Node 24（用於 `npx`）或[單一二進位檔](#單一二進位檔)，並且必須能透過 HTTP(S) 連線至 ompweb 伺服器。遠端機器向外連線，因此可以位於 NAT 後方。
 
 1. 在 ompweb 伺服器上，開啟**設定 → 主機 → 新增主機**，輸入名稱，並複製權杖。權杖僅會顯示一次；系統只會儲存其雜湊值。
 2. 在遠端機器上儲存連線資訊。權杖是從 stdin 讀取，絕不會作為引數傳遞，因此不會出現在 `ps` 中：
@@ -320,17 +325,97 @@ npx @kahme247/ompweb@latest host --allow-http
 
 若連線中斷，常駐程式（daemon）會自動重新連線（從 1 秒退避重試，加倍遞增至 60 秒；在同一台機器上的網頁伺服器最多 3 秒）。連線失敗後它會重新讀取儲存的連線資訊，因此即使網頁伺服器在不同連接埠上恢復，也無需重新啟動常駐程式即可自動找到。網路中斷後，遠端機器上的執行作業仍會繼續；聊天介面會顯示離線橫幅，當連線恢復時執行作業會重新連結。筆記型電腦進入睡眠狀態（通常是闔上螢幕）時，會將常駐程式及其 omp 執行作業與其上的其他作業一併暫停：喚醒時會自動恢復，連線也會在當時恢復。接上擴充底座或設定不休眠的裝置則可在闔上螢幕時繼續執行。在設定中撤銷主機會關閉其連線，常駐程式也會停止其 omp 程序。
 
-若位於反向代理後方，請在 `/api/hosts/link` 上轉發 WebSocket 升級請求（nginx：`proxy_http_version 1.1;`、`proxy_set_header Upgrade $http_upgrade;`、`proxy_set_header Connection "upgrade";`，並將 `proxy_read_timeout` 設定為遠高於 30 秒）。
+反向代理必須在 `/api/hosts/link` 上轉發升級請求；請參閱[位於反向代理後方](#位於反向代理後方)。
 
 請先更新伺服器上的 ompweb，再更新其主機：此版本之前的主機在更新前會顯示為**需要升級**。
 
 注意事項：
 
-- **服務輔助程式：** `ompweb systemd install` 與 `ompweb launchd install` 會在網頁伺服器旁同時設定本機自己的守護行程（請參閱[兩項服務](#兩項服務網頁伺服器與本機守護行程)）。在另一台機器上您只需要守護行程，而這些輔助程式在那裡也會同時啟動網頁伺服器，因此請在您自選的行程監控程式（supervisor）下執行 `ompweb host`，讓它在失敗時自動重新啟動，以在登出或重新開機後保持連線。當伺服器撤銷其權杖，或其連線協定版本超出伺服器支援的範圍時（舊於伺服器支援的最舊版本，或新於伺服器：請在較舊的一方更新 ompweb），守護行程會以結束代碼 `1` 結束；若同一個主機有較新的連線取代它，則以 `0` 結束。SIGTERM 或 SIGINT 會停止守護行程及其 omp 程序。每個主機僅能有一個連線，切勿使用相同權杖執行兩個守護行程。
+- **服務輔助程式：** `ompweb systemd install` 與 `ompweb launchd install` 會在網頁伺服器旁同時設定本機自己的守護行程（請參閱[兩項服務](#兩項服務網頁伺服器與本機守護行程)）。在另一台機器上您只需要守護行程，因此請改用[讓主機作為服務持續執行](#讓主機作為服務持續執行)。當伺服器撤銷其權杖，或其連線協定版本超出伺服器支援的範圍時（舊於伺服器支援的最舊版本，或新於伺服器：請在較舊的一方更新 ompweb），守護行程會以結束代碼 `1` 結束；若同一個主機有較新的連線取代它，則以 `0` 結束。SIGTERM 或 SIGINT 會停止守護行程及其 omp 程序。每個主機僅能有一個連線，切勿使用相同權杖執行兩個守護行程。
 - **伺服器的代理目錄保存主機清單**（`omp-web/hosts.json`）。若以不同的 `PI_CODING_AGENT_DIR` 啟動 ompweb 伺服器，或遺失該檔案，會導致所有主機權杖失效：每個常駐程式都會收到已遭撤銷的通知，停止其 omp 程序並結束。
 - **信任機制：** 已連結的主機會在該機器上為掌控 ompweb 伺服器或權杖的人員執行具備完整工具存取權限的 omp。請妥善保護權杖隱私，並在機器淘汰時將其撤銷。
 - **遠端主機尚不支援：** 檔案總管、Git 與工作樹（worktree）面板、目錄瀏覽、封存對話，以及技能、外掛程式、代理與 MCP 設定目前僅在執行 ompweb 的本機上可用。聊天、對話歷史紀錄、通知與開始新對話則在所有主機上皆可正常運作。
 - **由代理發起的對話：** 在啟用代理工具時，代理可傳遞 `host` 給 `new_session`（預設為該代理自身所在的主機）。遠端主機每次都會要求確認，除非在「設定 → 主機」中為其開啟了**代理可在此處直接開始對話，無需詢問**。在遠端主機上執行的代理在於本機開始對話或傳送訊息之前，一定會先詢問確認。
+
+### 讓主機作為服務持續執行
+
+以下方式皆以主機模式執行[單一二進位檔](#單一二進位檔)。在 Linux 與 Windows 上，服務可在登出與重新開機後持續維持連線；在 macOS 上，則透過指令碼在終端機中保持執行（原因詳見下方）。請先解壓縮適用於該機器的發行版，接著依照步驟 2 執行一次 `ompweb host login --url …` 以儲存連線資訊（將 `npx @kahme247/ompweb@latest` 替換為二進位檔路徑）。每種設定都會在 `ompweb host` 失敗 10 秒後重新啟動，但結束代碼為 `0` 時不會重新啟動：那代表有使用相同權杖的較新連線取代了它，若重新啟動會導致每 10 秒互相搶奪連線。若伺服器網址為純 `http://`，請在 `host` 後方加上 `--allow-http`；若儲存連線資訊時有設定 `PI_CODING_AGENT_DIR`，請在服務中也一併設定。一台機器僅能連結至一台伺服器：請勿在同一台機器上同時執行 ompweb 網頁伺服器，因為它會為自己的守護行程寫入同一個連線設定檔。若要更新，請先停止服務、替換發行版目錄，然後重新啟動服務。撤銷主機後，請停止並移除其服務，否則它會持續重試。
+
+**Linux（systemd 使用者服務）。** 建立 `~/.config/systemd/user/ompweb-host.service`（請調整發行版路徑，並將 omp 所在目錄加入 `PATH` 或設定 `OMP_WEB_OMP_BIN`）：
+
+```ini
+[Unit]
+Description=ompweb host
+StartLimitIntervalSec=0
+
+[Service]
+WorkingDirectory=%h
+ExecStart=%h/.local/share/ompweb-linux-x64/ompweb host
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Restart=always
+# Exit 0: a newer link for this host replaced it. Restarting would take the link back.
+RestartPreventExitStatus=0
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now ompweb-host
+loginctl enable-linger "$USER"            # 登出後仍保持執行
+journalctl --user -u ompweb-host -f       # 檢視記錄
+```
+
+**macOS（從終端機執行）。** 任何 launchd 工作都無法執行可供 omp 對話完整使用的主機：LaunchDaemon 沒有登入鑰匙圈（login keychain）或 SSH agent（對話需要它們來存取 SSH 金鑰與簽署提交），而 LaunchAgent 則無法連線至區網（LAN）位址。從終端機啟動的程序會繼承終端機的鑰匙圈與 SSH agent，因此請在終端機的 tmux 中執行主機，讓它在視窗關閉後仍持續運作。
+
+不過，tmux 不會保留終端機的「區域網路（Local Network）」權限：tmux 伺服器會與終端機應用程式分離，接著 macOS 的區域網路隱私保護便會封鎖採用臨時簽章（ad-hoc signed）的 `ompweb` 二進位檔存取區網位址（`connect` 會因「No route to host」而失敗，守護行程會回報為 `ECONNREFUSED`；Apple 內建工具如 `curl` 不受封鎖，因此 `curl` 測試會通過）。請將主機連結至不會解析為區網位址的網址，例如伺服器的公開網址，或其 VPN／tailnet 名稱（由您的反向代理搭配自有憑證提供的 Tailscale MagicDNS 名稱）。將以下內容儲存為 `~/.local/bin/ompweb-host-run`（請調整 `DIR`）並以 `chmod +x` 設為可執行：
+
+```sh
+#!/bin/sh
+# Keeps `ompweb host` running in this terminal, which lends it its keychain and SSH agent.
+# Restarts it 10 s after a crash; stops when the token is revoked or the link protocol is
+# unsupported (exit 1), or on exit 0: a newer link replaced it, or it was stopped (Ctrl-C).
+DIR=${OMPWEB_DIR:-$HOME/.local/share/ompweb-darwin-arm64}
+# A tmux started over SSH sees the login keychain locked: unlock it while a terminal can ask.
+security show-keychain-info login.keychain-db 2>/dev/null || security unlock-keychain login.keychain-db || exit 1
+while :; do
+	(cd "$DIR" && exec ./ompweb host)
+	rc=$?
+	case $rc in 0 | 1) exit "$rc" ;; esac
+	echo "ompweb host exited $rc; restarting in 10 s" >&2
+	sleep 10
+done
+```
+
+在 tmux 視窗中執行 `ompweb-host-run`；按下 Ctrl-C 可停止守護行程及其對話。重新開機或登出後請再次啟動。若登入鑰匙圈因閒置或睡眠而自動上鎖，SSH 金鑰通行碼與簽署功能將會失敗，直到您重新啟動它為止。
+
+**Windows（登入時執行的排程工作）。** 在 PowerShell 中，將 `$dir` 設定為解壓縮後的發行版路徑：
+
+```powershell
+$dir = "$env:LOCALAPPDATA\ompweb-windows-x64"
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.omp\agent\logs" | Out-Null
+Set-Content "$dir\ompweb-host.ps1" @'
+# Starts `ompweb host` again 10 s after it fails, and stops on exit 0 (a newer link replaced it).
+# Output goes to ~\.omp\agent\logs\ompweb-host.log, moved to .log.1 past 10 MB (checked between restarts).
+# For a plain http:// server URL, put --allow-http after `host` below.
+$log = "$env:USERPROFILE\.omp\agent\logs\ompweb-host.log"
+while ($true) {
+  if ((Test-Path $log) -and (Get-Item $log).Length -gt 10MB) { Move-Item $log "$log.1" -Force }
+  & "$PSScriptRoot\ompweb.exe" host 2>&1 | ForEach-Object { "$_" } | Out-File -Append -Encoding utf8 $log
+  if ($LASTEXITCODE -eq 0) { break }
+  Start-Sleep 10
+}
+'@
+Register-ScheduledTask -TaskName ompweb-host -Force `
+  -Trigger (New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME") `
+  -Action (New-ScheduledTaskAction -Execute powershell.exe -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$dir\ompweb-host.ps1`"") `
+  -Settings (New-ScheduledTaskSettingsSet -ExecutionTimeLimit 0 -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries)
+Start-ScheduledTask ompweb-host
+```
+
+使用 `Stop-ScheduledTask ompweb-host` 停止排程工作，接著透過 `Get-Process ompweb | Where-Object Path -eq "$env:LOCALAPPDATA\ompweb-windows-x64\ompweb.exe" | Stop-Process` 結束執行中的主機（僅結束此發行版的 `ompweb.exe`；請依 `$dir` 調整路徑）。使用 `Unregister-ScheduledTask ompweb-host` 即可將其移除。
 
 ## 功能特色
 
