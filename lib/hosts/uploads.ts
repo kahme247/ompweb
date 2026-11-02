@@ -233,8 +233,11 @@ export class StagedUploads {
       this.send({ id, attempt, received: upload.received, done: true });
     }).catch(async (error: unknown) => {
       if (this.open.get(id) !== upload) return;
-      this.close(id, upload);
+      // A new start must still find and drain this chain until its old files are gone.
+      clearTimeout(upload.timer);
+      upload.timer = undefined;
       await this.remove(id).catch(() => {});
+      this.close(id, upload);
       const failure = error instanceof HostOpError ? error : new HostOpError(507, "upload_write_failed", `The upload could not be written: ${error instanceof Error ? error.message : String(error)}`);
       this.send({ id, attempt, received: upload.received, done: false, error: { status: failure.status, code: failure.code, message: failure.message } });
     });
