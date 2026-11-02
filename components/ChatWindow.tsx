@@ -728,13 +728,13 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
   // Widen the lazy render window until it includes the message's transcript row.
   const revealMessage = useCallback((messageIndex: number) => {
-    const rows = planTranscriptRows(messages, { hideThinking: hideThinkingBlock, showThinking: expandThinkingByDefault, showToolCalls: showToolCallsUnfolded });
+    const rows = planTranscriptRows(messages, { hideThinking: hideThinkingBlock, showThinking: expandThinkingByDefault, showToolCalls: showToolCallsUnfolded, neverFold: neverFoldActivity });
     const rowIndex = rows.findIndex((row) => (row.kind === "message" ? row.index === messageIndex : messageIndex >= row.userIndex && messageIndex < row.endIndex));
     const needed = rows.length - Math.max(0, rowIndex);
     if (needed <= visibleCount) return true;
     setVisibleCount(needed);
     return false;
-  }, [messages, hideThinkingBlock, expandThinkingByDefault, showToolCallsUnfolded, visibleCount]);
+  }, [messages, hideThinkingBlock, expandThinkingByDefault, showToolCallsUnfolded, neverFoldActivity, visibleCount]);
   useChatSearchHighlights({
     container: scrollContainerRef,
     query: searchQuery,
