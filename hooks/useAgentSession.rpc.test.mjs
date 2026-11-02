@@ -5149,6 +5149,42 @@ test("a steer whose session socket dropped before the answer is reported as take
   });
 });
 
+test("a get_state whose reply was lost before the prompt went out gives the draft back: no prompt ran", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession("socket-lost-state", [userMsg("u0", "q")]);
+    const w = await mountSession("socket-lost-state");
+    world.socketAnswer = (command) => command.type === "get_state" ? { status: 503, body: SOCKET_LOST } : null;
+    let receipt;
+    await act(async () => { receipt = await w.latest.handleSend("never sent"); await sleep(30); });
+    assert.deepEqual(receipt, { status: "rejected", recoveryKey: "socket-lost-state" });
+    assert.deepEqual(toastCalls, [], "no prompt was sent, so nothing may have been delivered");
+    assert.deepEqual(w.latest.notices.map((notice) => notice.type), ["error"]);
+    assert.equal(w.latest.agentRunning, false);
+    assert.equal(callsTo("POST", "/api/agent/socket-lost-state").some((call) => call.body?.type === "prompt"), false);
+  });
+});
+
+test("an interrupt-and-reply whose abort_and_prompt reply was lost is reported as taken and the text is not offered again", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession("socket-lost-interrupt", [userMsg("u0", "q")]);
+    const offered = [];
+    const { w, es } = await startRun("socket-lost-interrupt", "q1", false, { chatInputRef: { current: { insertIfEmpty: (text) => offered.push(text) } } });
+    await act(async () => { es.emit({ type: "agent_start" }); await Promise.resolve(); });
+    world.socketAnswer = (command) => command.type === "abort_and_prompt" ? { status: 503, body: SOCKET_LOST } : null;
+    let interrupt;
+    await act(async () => { interrupt = w.latest.handleInterruptAndReply("replacement"); await sleep(30); });
+    let accepted;
+    await act(async () => { lastEs().open(); accepted = await interrupt; });
+    assert.equal(accepted, true, "the replacement may be running: the composer drops the text");
+    assert.deepEqual(offered, [], "a resend would interrupt the replacement turn");
+    assert.deepEqual(toastCalls, [["info", translate("agentSession.transportLostMaybeSent")]]);
+  });
+});
+
 test("the hosts channel decides the offline banner; a frame only speaks before its first snapshot", async () => {
   resetWorld();
   primeSession("remote-banner", [userMsg("u0", "q")]);
