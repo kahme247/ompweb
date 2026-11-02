@@ -3,7 +3,7 @@
 // `RemoteHost`. Everything a daemon sends is untrusted input.
 // No `next/*` or `@/` imports.
 import { randomUUID } from "node:crypto";
-import { readBodyWithinLimit, RequestBodyTooLargeError } from "../bounded-form-data";
+import { readBodyWithinLimit } from "../bounded-form-data";
 import type { RpcTransport } from "../omp/rpc-transport";
 import type { ProjectRegistryEntry } from "../project-registry";
 import { isValidSessionId } from "../session-file-references-core";
@@ -11,25 +11,29 @@ import { isRecord } from "../type-guards";
 import type { SessionInfo } from "../types";
 import { isLinkUp, type Host, type HostStatus, type SpawnRequest, type SpawnResult } from "./host";
 import {
+  decodeBlobFrame,
   decodeUp,
   encodeLine,
+  encodeQueued,
   HostOpError,
-  LINK_ACK_HEADER,
-  LINK_HELLO_HEADER,
+  LINK_CLOSE,
   LINK_LIMITS,
-  LINK_NONCE_HEADER,
   LINK_PROTOCOL_VERSION,
   LinkLimitError,
+  LinkSender,
   MIN_LINK_PROTOCOL_VERSION,
   Outbox,
+  PartJoiner,
   SeqWindow,
   SESSION_OP_PARAMS,
   type DownMessage,
   type HelloChannel,
   type HostOpName,
   type UnknownMessage,
+  type Unsequenced,
   UnknownMessageLog,
   type UpMessage,
+  withSeq,
 } from "./link-protocol";
 import { customLocalLabel, DEFAULT_LOCAL_LABEL, HostRegistryUnreadableError, hostForToken, LOCAL_HOST_ID, loadHosts, touchHost, type HostRecord } from "./registry";
 import type { SessionOps } from "./session-ops";
@@ -41,42 +45,71 @@ export const linkTimings = {
   opTimeoutMs: LINK_LIMITS.opTimeoutMs,
 };
 
+/** What the hub keeps on each link socket (Bun's `ws.data`): the host its token named, and whether its hello came. */
+export interface LinkSocketData {
+  hostId: string;
+  hello: boolean;
+}
+
+/** The server end of a link WebSocket: the part of Bun's ServerWebSocket the hub uses, so tests drive it with a plain object. */
+export interface LinkSocket {
+  readonly data: LinkSocketData;
+  send(data: string | Uint8Array): number;
+  close(code?: number, reason?: string): void;
+  terminate(): void;
+}
+
 type Hello = Extract<UpMessage, { type: "hello" }>;
 type Res = Extract<UpMessage, { type: "res" }>;
-/** A sequenced downlink message before the link numbers it. */
-type Unsequenced<M> = M extends { seq: number } ? Omit<M, "seq"> : never;
 
 interface PendingOp {
   op: HostOpName;
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
-  /** Downlink seq of its `req`; dropped from the outbox when the op fails, so it never runs after. */
+  /** Result bytes from the binary frames sent ahead of their `res`, in order (views into those frames). */
+  blob: Uint8Array[];
+  blobBytes: number;
+}
+
+/** A downlink line sent (or to resend) and not acked yet. `key`: the `sender` key it went out under; `bytes`: its
+ * UTF-8 size; `part`: a `part` line; `whole`: on the last part of a line, that line as queued, which a v4 daemon gets
+ * instead (partsToWhole). */
+interface Sent {
   seq: number;
-  /** Result bytes uploaded on the blob leg ahead of their `res`. */
-  blob: Uint8Array<ArrayBuffer> | null;
+  line: string;
+  key: string;
+  bytes: number;
+  part: boolean;
+  whole: string | null;
 }
 
 interface Link {
   readonly id: string;
   readonly host: RemoteHost;
   status: HostStatus;
-  /** Names the current downlink (`welcome.nonce`); null until a daemon says hello.
-   * Uplink POSTs and blob uploads from any other link are refused. */
-  nonce: string | null;
-  /** The last `hello` POSTed (spec Rules → Hello): its id opens one downlink GET, once, within offlineMs. */
-  helloOffer: { id: string; hello: Hello; at: number } | null;
   /** Link protocol version the daemon last presented (Settings shows it on a 426). */
   hostVersion: number | null;
   ompVersion: string | null;
   platform: string | null;
   lastSeenAt: string | null;
   autoApprove: boolean;
-  stream: ReadableStreamDefaultController<Uint8Array> | null;
+  /** The socket whose hello this link took; null while the daemon has none. */
+  socket: LinkSocket | null;
   /** Last downlink seq handed out. Lines stay in `outbox` until the daemon acks them. */
   downSeq: number;
-  outbox: Outbox<{ seq: number; line: string }>;
+  /** Downlink messages not numbered yet, per channel or request, sent fair (spec D7). */
+  sender: LinkSender<{ line: string; size: number }>;
+  outbox: Outbox<Sent>;
+  /** Highest outbox seq written to the current socket; `flush` sends what is past it. */
+  sentSeq: number;
+  /** Bytes of the outbox lines written to the current socket: the unacked window (spec D7). */
+  unacked: number;
+  /** Bun queued the last line over the socket's buffered data: the rest waits for its `drain`. */
+  awaitingDrain: boolean;
   up: SeqWindow;
+  /** The uplink line the daemon is sending in parts. */
+  parts: PartJoiner;
   /** What this link has already logged about messages it skipped. */
   unknownLog: UnknownMessageLog;
   pending: Map<string, PendingOp>;
@@ -112,17 +145,20 @@ function linkFor(id: string): Link {
       id,
       host: new RemoteHost(id),
       status: "offline",
-      nonce: null,
-      helloOffer: null,
       hostVersion: null,
       ompVersion: null,
       platform: null,
       lastSeenAt: null,
       autoApprove: false,
-      stream: null,
+      socket: null,
       downSeq: 0,
+      sender: new LinkSender(true),
       outbox: new Outbox(),
+      sentSeq: 0,
+      unacked: 0,
+      awaitingDrain: false,
       up: new SeqWindow(),
+      parts: new PartJoiner(),
       unknownLog: new UnknownMessageLog("daemon"),
       pending: new Map(),
       channels: new Map(),
@@ -158,54 +194,95 @@ function setStatus(link: Link, status: HostStatus): void {
   notify(hub().changeListeners);
 }
 
-const encoder = new TextEncoder();
 const isStatus = (status: unknown): status is number => Number.isInteger(status) && (status as number) >= 400 && (status as number) <= 599;
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { "cache-control": "no-store" } });
 
+/** Unsequenced lines (welcome, ping, pong, ack): small, sent at once, never resent. */
 function enqueue(link: Link, line: string): void {
-  try {
-    link.stream?.enqueue(encoder.encode(line));
-  } catch {
-    // Closed under us; sequenced lines are still in the outbox.
-    link.stream = null;
+  link.socket?.send(line);
+}
+
+/** Lines that left the outbox (acked or dropped): those written to the current socket leave the unacked window. */
+function released(link: Link, items: Sent[]): void {
+  for (const item of items) if (item.seq <= link.sentSeq) link.unacked -= item.bytes;
+}
+
+/** Send outbox lines past `sentSeq` (a resend after a redial), then the sender's next units, while the unacked window
+ * has room and until Bun queues one under backpressure (-1: the rest goes on `drain`) or drops it (0: the socket is
+ * closing; the next socket starts from its hello's ack). So at most about unackedBytes of sequenced lines sit in
+ * Bun's, the kernel's and the daemon's buffers (spec D7), and a daemon that stops reading is waited for instead of
+ * closed. */
+function flush(link: Link): void {
+  const ws = link.socket;
+  if (!ws || link.awaitingDrain || hub().frozen) return;
+  // A v4 daemon acks only inside its next uplink frame, which may be a pong 15 s away: it gets no window.
+  const limit = link.sender.parts ? LINK_LIMITS.unackedBytes : Infinity;
+  const write = (item: Sent): boolean => {
+    const sent = ws.send(item.line);
+    if (sent !== 0) {
+      link.sentSeq = item.seq;
+      link.unacked += item.bytes;
+    }
+    if (sent > 0) return true;
+    link.awaitingDrain = true;
+    return false;
+  };
+  for (const item of link.outbox.pending()) {
+    if (item.seq > link.sentSeq && (link.unacked >= limit || !write(item))) return;
+  }
+  while (link.unacked < limit) {
+    const unit = link.sender.next(() => ++link.downSeq);
+    // The hub queues lines only, so every unit is a line.
+    if (!unit || !("line" in unit)) return;
+    const whole = unit.part && unit.done ? unit.item.line : null;
+    const item: Sent = { seq: unit.seq, line: unit.line, key: unit.key, bytes: Buffer.byteLength(unit.line), part: unit.part, whole };
+    link.outbox.push(item);
+    if (!write(item)) return;
   }
 }
 
-/** Number, keep until acked, and send; returns the seq. Throws LinkLimitError before recording anything.
- * Dropped once frozen (0): a kill, an answer or a command from a stopping server must not reach the children. */
-function sendDown(link: Link, body: Unsequenced<DownMessage>): number {
-  if (hub().frozen) return 0;
-  const seq = link.downSeq + 1;
-  const line = encodeLine({ ...body, seq } as DownMessage);
-  link.downSeq = seq;
-  link.outbox.push({ seq, line });
-  enqueue(link, line);
-  return seq;
+/** A v4 daemon gets no `part`: the parts of a line that went out whole in parts go again as that line, under its last
+ * part's seq; the parts of a line still going out are dropped, and the sender sends it whole from the start. */
+function partsToWhole(link: Link): void {
+  for (const item of link.outbox.drop(() => true)) {
+    if (!item.part) link.outbox.push(item);
+    else if (item.whole !== null) {
+      const line = withSeq(item.whole, item.seq);
+      link.outbox.push({ ...item, line, bytes: Buffer.byteLength(line), part: false, whole: null });
+    }
+  }
 }
 
-/** Fail an op for good: a `req` not yet acked is never resent (one already written may still run). */
+/** Queue under `key` (its channel or request id), numbered and kept until acked as it goes out. Throws
+ * LinkLimitError before recording anything. Dropped once frozen: a kill, an answer or a command from a stopping
+ * server must not reach the children. */
+function sendDown(link: Link, body: Unsequenced<DownMessage>, key: string): void {
+  if (hub().frozen) return;
+  const line = encodeQueued(body);
+  link.sender.push(key, { line, size: Buffer.byteLength(line) });
+  flush(link);
+}
+
+/** Fail an op for good: a `req` not yet acked is never resent, nor the rest of one going in parts (one already
+ * written may still run). */
 function failOp(link: Link, id: string, error: Error): void {
   const pending = link.pending.get(id);
   if (!pending) return;
   link.pending.delete(id);
   clearTimeout(pending.timer);
-  link.outbox.drop((m) => m.seq === pending.seq);
+  link.sender.drop(id);
+  released(link, link.outbox.drop((m) => m.key === id));
   pending.reject(error);
+  flush(link);
 }
 
 function failAllOps(link: Link, error: () => Error): void {
   for (const id of [...link.pending.keys()]) failOp(link, id, error());
 }
 
-/** The downlink is gone: ops in flight fail now rather than at their timeout. */
-function endStream(link: Link): void {
-  const stream = link.stream;
-  link.stream = null;
-  try {
-    stream?.close();
-  } catch {
-    // Already closed.
-  }
+/** The socket is gone: ops in flight fail now rather than at their timeout. */
+function endSocket(link: Link): void {
+  link.socket = null;
   failAllOps(link, () => new HostOpError(503, "host_offline", `${labelOf(link.id)} is offline`));
 }
 
@@ -231,8 +308,9 @@ function sawDaemon(link: Link): void {
   clearTimeout(link.offlineTimer);
   link.offlineTimer = setTimeout(() => {
     stopTimers(link);
-    // The daemon redials once its downlink ends.
-    endStream(link);
+    // No close handshake on a link gone silent; the daemon redials once its own watchdog fires.
+    link.socket?.terminate();
+    endSocket(link);
     persistLastSeen(link);
     setStatus(link, "offline");
   }, linkTimings.offlineMs);
@@ -240,14 +318,12 @@ function sawDaemon(link: Link): void {
 }
 
 /** The host the bearer token names, or the refusal to answer with. */
-function authenticate(req: Request, disableIdleTimeout?: () => void): HostRecord | Response {
+function authenticate(req: Request): HostRecord | Response {
   const header = req.headers.get("authorization");
   const token = typeof header === "string" && header.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : "";
   try {
     const record = token ? hostForToken(token) : null;
     if (!record) return json({ error: "Invalid host token" }, 401);
-    // Only a known host may keep the socket open past Bun's idle timeout (a ping comes every 15 s).
-    disableIdleTimeout?.();
     return record;
   } catch (error) {
     if (!(error instanceof HostRegistryUnreadableError)) throw error;
@@ -257,112 +333,150 @@ function authenticate(req: Request, disableIdleTimeout?: () => void): HostRecord
   }
 }
 
-/** The authenticated host's link when the request names its current nonce. */
-function currentLink(req: Request, record: HostRecord): Link | null {
-  const link = hub().links.get(record.id);
-  return link?.nonce && req.headers.get(LINK_NONCE_HEADER) === link.nonce ? link : null;
-}
-
-const staleLink = () => json({ error: "This link was replaced; wait for the next welcome" }, 409);
 // The daemon retries a 503: what it sends lands on the next server instead.
 const stopping = () => json({ error: "omp-web is shutting down" }, 503);
 
 /**
  * This server is shutting down. From here on nothing reaches a daemon (sendDown
- * drops it), and no hello, uplink batch or blob upload is applied or acked: each
- * daemon keeps its children's output unacked and sends it to the next server,
- * which adopts the children. Without this a tab closing on the way out would
- * answer omp's open host tool calls with an error, and output this server took
- * but never showed would be lost to the next one.
+ * drops it), and no hello or uplink frame is applied or acked: each daemon keeps
+ * its children's output unacked and sends it to the next server, which adopts the
+ * children. Every link socket closes 1001, so its daemon redials. Without this a
+ * tab closing on the way out would answer omp's open host tool calls with an
+ * error, and output this server took but never showed would be lost to the next one.
  */
 export function freezeHostLinks(): void {
   hub().frozen = true;
+  for (const link of hub().links.values()) link.socket?.close(LINK_CLOSE.goingAway, "omp-web is restarting");
 }
 
-/** GET /api/hosts/link: the daemon's downlink, an NDJSON stream, opened with the id of the hello it POSTed. */
-export async function handleLinkGet(req: Request, disableIdleTimeout?: () => void): Promise<Response> {
-  const record = authenticate(req, disableIdleTimeout);
+/** GET /api/hosts/link: the daemon's WebSocket. The token is checked before the upgrade, so no unknown caller gets a
+ * socket; undefined once upgraded. The hello comes as the socket's first frame (hostLinkSocket). */
+export function handleLinkUpgrade(req: Request, upgrade: (data: LinkSocketData) => boolean): Response | undefined {
+  const record = authenticate(req);
   if (record instanceof Response) return record;
   if (hub().frozen) return stopping();
-  const link = linkFor(record.id);
-  const helloId = req.headers.get(LINK_HELLO_HEADER);
-  const offer = link.helloOffer;
-  if (!offer || !helloId || offer.id !== helloId || Date.now() - offer.at > linkTimings.offlineMs) {
-    return legacyHelloVersion(link, helloId) ?? json({ error: "Unknown or expired hello; POST a new one" }, 400);
-  }
-  // Taken here so the hello is applied once, however often its GET is replayed.
-  link.helloOffer = null;
-  return openDownlink(link, offer.hello, req.signal);
+  return upgrade({ hostId: record.id, hello: false }) ? undefined : json({ error: "The host link is a WebSocket" }, 426);
 }
 
-/** A v1 daemon sent its hello itself in the GET header (base64url JSON): it gets the 426 that tells it to upgrade. */
-function legacyHelloVersion(link: Link, header: string | null): Response | null {
+/** POST /api/hosts/link: only a daemon from before the WebSocket (v3) sends one, its hello. It gets the 426 that tells
+ * it to update ompweb on its host. */
+export async function handleOutdatedLinkPost(req: Request): Promise<Response> {
+  const record = authenticate(req);
+  if (record instanceof Response) return record;
+  let raw: unknown = null;
   try {
-    const raw: unknown = JSON.parse(Buffer.from(header ?? "", "base64url").toString("utf8"));
-    return isRecord(raw) ? versionMismatch(link, raw) : null;
+    raw = JSON.parse(new TextDecoder().decode(await readBodyWithinLimit(req, LINK_LIMITS.uplinkBytes)));
   } catch {
-    return null;
+    // Too large or not JSON: no version to report.
   }
+  versionMismatch(linkFor(record.id), raw);
+  return json({ error: "Link protocol version mismatch", hostVersion: helloVersion(raw), serverVersion: LINK_PROTOCOL_VERSION }, 426);
 }
 
-/** 426 for a daemon outside MIN_LINK_PROTOCOL_VERSION..LINK_PROTOCOL_VERSION (a newer one too: the web app upgrades first).
- * Compared before decoding: another version may shape its hello differently. */
-function versionMismatch(link: Link, raw: unknown): Response | null {
+/** A hello's `v` when it is an integer, else null. */
+function helloVersion(raw: unknown): number | null {
   const version = isRecord(raw) ? raw.v : undefined;
-  if (typeof version === "number" && version >= MIN_LINK_PROTOCOL_VERSION && version <= LINK_PROTOCOL_VERSION && Number.isInteger(version)) return null;
-  const hostVersion = typeof version === "number" && Number.isInteger(version) ? version : null;
+  return typeof version === "number" && Number.isInteger(version) ? version : null;
+}
+
+/** True for a daemon outside MIN_LINK_PROTOCOL_VERSION..LINK_PROTOCOL_VERSION (a newer one too: the web app upgrades first).
+ * Compared before decoding: another version may shape its hello differently. */
+function versionMismatch(link: Link, raw: unknown): boolean {
+  const version = helloVersion(raw);
+  if (version !== null && version >= MIN_LINK_PROTOCOL_VERSION && version <= LINK_PROTOCOL_VERSION) return false;
   // A stray old daemon with this token must not take down the healthy link.
-  if (!link.stream) {
+  if (!link.socket) {
     // Kept for Settings: "needs upgrade (host vN, server vM)".
-    link.hostVersion = hostVersion;
+    link.hostVersion = version;
     setStatus(link, "needs-upgrade");
   }
-  return json({ error: "Link protocol version mismatch", hostVersion, serverVersion: LINK_PROTOCOL_VERSION }, 426);
+  return true;
 }
 
-/** POST /api/hosts/link carrying LINK_HELLO_HEADER: the daemon's hello, in the body
- * (a header would cap how many channels it can list). Answers the id its downlink GET names. */
-async function handleHelloPost(req: Request, record: HostRecord): Promise<Response> {
-  let text: string;
+/** Bun's `websocket` handler for host links (server/app.ts). */
+export const hostLinkSocket = {
+  // A result frame is up to blobBytes plus its id header; Bun closes 1009 above it.
+  maxPayloadLength: LINK_LIMITS.blobBytes + 256,
+  // A backstop: flush keeps at most about unackedBytes of sequenced lines unacked (v5) and stops when Bun reports
+  // backpressure. Past the limit the socket closes instead of buffering on, and what the daemon missed is resent after
+  // its redial.
+  backpressureLimit: LINK_LIMITS.uplinkBytes,
+  closeOnBackpressureLimit: true as const,
+  message(ws: LinkSocket, data: string | Uint8Array): void {
+    guarded(ws, () => {
+      // Nothing is applied or answered once this server stops: the daemon keeps it for the next one.
+      if (hub().frozen || failedSockets.has(ws)) return;
+      const link = hub().links.get(ws.data.hostId);
+      if (link?.socket === ws) return onFrame(link, ws, data);
+      // A socket a newer one replaced: what it still sends belongs to no link.
+      if (ws.data.hello) return;
+      onFirstFrame(ws, data);
+    });
+  },
+  /** Bun wrote out what it had queued: send the outbox lines that waited. */
+  drain(ws: LinkSocket): void {
+    guarded(ws, () => {
+      const link = hub().links.get(ws.data.hostId);
+      if (link?.socket !== ws) return;
+      link.awaitingDrain = false;
+      flush(link);
+    });
+  },
+  close(ws: LinkSocket): void {
+    guarded(ws, () => {
+      const link = hub().links.get(ws.data.hostId);
+      if (link?.socket === ws) endSocket(link);
+    });
+  },
+};
+
+/** Sockets whose handler threw: closed, and nothing more they send is applied (it would land past a half-applied frame). */
+const failedSockets = new WeakSet<LinkSocket>();
+
+/** A throw in a websocket handler would reach uncaughtException, which exits the server: it ends that socket instead. */
+function guarded(ws: LinkSocket, handle: () => void): void {
   try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(await readBodyWithinLimit(req, LINK_LIMITS.uplinkBytes)).trim();
+    handle();
   } catch (error) {
-    if (error instanceof RequestBodyTooLargeError) return json({ error: "Hello too large" }, 413);
-    return json({ error: "Missing or malformed hello" }, 400);
+    failedSockets.add(ws);
+    console.error(`[omp-web] host link of ${ws.data.hostId} failed; closing it: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+    ws.close();
   }
+}
+
+/** A socket's first frame must be its hello. */
+function onFirstFrame(ws: LinkSocket, data: string | Uint8Array): void {
+  const refuse = () => ws.close(LINK_CLOSE.policy, "The first frame must be a hello");
+  if (typeof data !== "string") return refuse();
+  // A hello is one line: nothing longer is worth parsing.
+  if (Buffer.byteLength(data) > LINK_LIMITS.maxLineBytes) return ws.close(LINK_CLOSE.tooBig, "Hello too large");
+  // Revoked or deleted since the upgrade, or the registry cannot say: a plain close sends the daemon's redial through
+  // the token check (401 stops its children, 503 redials).
+  if (ws.data.hostId !== LOCAL_HOST_ID && !loadHosts().some((h) => h.id === ws.data.hostId)) return ws.close();
+  const link = linkFor(ws.data.hostId);
   let raw: unknown;
   try {
-    raw = JSON.parse(text);
+    raw = JSON.parse(data);
   } catch {
-    return json({ error: "Missing or malformed hello" }, 400);
+    return refuse();
   }
-  const link = linkFor(record.id);
-  const mismatch = versionMismatch(link, raw);
-  if (mismatch) return mismatch;
+  if (versionMismatch(link, raw)) return ws.close(LINK_CLOSE.versionMismatch, JSON.stringify({ serverVersion: LINK_PROTOCOL_VERSION }));
   let hello: UpMessage | UnknownMessage;
   try {
-    hello = decodeUp(text);
+    hello = decodeUp(data);
   } catch {
-    return json({ error: "Missing or malformed hello" }, 400);
+    return refuse();
   }
-  if (hello.type !== "hello") return json({ error: "Missing or malformed hello" }, 400);
-  // One offer per host: a newer hello replaces one whose GET never came.
-  link.helloOffer = { id: randomUUID(), hello, at: Date.now() };
-  return json({ helloId: link.helloOffer.id });
+  if (hello.type !== "hello") return refuse();
+  ws.data.hello = true;
+  openLink(link, ws, hello);
 }
 
-function openDownlink(link: Link, hello: Hello, signal: AbortSignal): Response {
+function openLink(link: Link, ws: LinkSocket, hello: Hello): void {
   // One link per host: the newest wins and the previous daemon exits.
-  const previous = link.stream;
-  link.stream = null;
-  if (previous) {
-    try {
-      previous.enqueue(encoder.encode(encodeLine({ type: "replaced", seq: ++link.downSeq })));
-      previous.close();
-    } catch {
-      // Already gone.
-    }
-  }
+  const previous = link.socket;
+  link.socket = ws;
+  previous?.close(LINK_CLOSE.replaced, "replaced by a newer link");
   // Every sequenced uplink message answers a downlink one, so a daemon that
   // has applied none (ack 0) has sent none: it is a fresh process whose
   // uplink numbering starts again at 1.
@@ -370,27 +484,17 @@ function openDownlink(link: Link, hello: Hello, signal: AbortSignal): Response {
   // After a restart of this server the daemon is ahead: number above its ack.
   link.downSeq = Math.max(link.downSeq, hello.ack);
   link.outbox.ack(hello.ack);
-
-  let controller!: ReadableStreamDefaultController<Uint8Array>;
-  const stream = new ReadableStream<Uint8Array>({
-    start(c) {
-      controller = c;
-    },
-    cancel() {
-      if (link.stream === controller) link.stream = null;
-    },
-  });
-  signal.addEventListener("abort", () => {
-    if (link.stream === controller) endStream(link);
-  }, { once: true });
-  link.stream = controller;
-  link.nonce = randomUUID();
   link.unknownLog.reset();
-  // The version this link speaks: the daemon's (decodeUp read a v2 hello as today's shape; v2 and v3 send the same down messages).
+  // The version this link speaks: from 5 on, lines over pieceBytes go in parts.
   link.hostVersion = hello.v;
-  enqueue(link, encodeLine({ type: "welcome", v: hello.v, hostId: link.id, nonce: link.nonce }));
-  // Resend what the daemon has not applied, in order, before anything new.
-  for (const { line } of link.outbox.pending()) enqueue(link, line);
+  link.sender.parts = hello.v >= 5;
+  if (!link.sender.parts) partsToWhole(link);
+  enqueue(link, encodeLine({ type: "welcome", v: hello.v, hostId: link.id }));
+  // Resend what the daemon has not applied, in order and paced, before anything new.
+  link.sentSeq = hello.ack;
+  link.unacked = 0;
+  link.awaitingDrain = false;
+  flush(link);
   reattach(link, hello.channels);
 
   link.ompVersion = hello.ompVersion;
@@ -403,14 +507,45 @@ function openDownlink(link: Link, hello: Hello, signal: AbortSignal): Response {
   link.pingTimer.unref?.();
   setStatus(link, hello.ompVersion === null ? "omp-missing" : "online");
   notify(hub().helloListeners, link.id, hello.channels);
-  return new Response(stream, {
-    headers: {
-      "content-type": "application/x-ndjson",
-      // no-transform keeps Next's compression from buffering the stream.
-      "cache-control": "no-cache, no-transform",
-      "x-accel-buffering": "no",
-    },
-  });
+}
+
+/** A frame on the link's current socket: a result's bytes (binary), or uplink messages (text). */
+function onFrame(link: Link, ws: LinkSocket, data: string | Uint8Array): void {
+  sawDaemon(link);
+  if (typeof data !== "string") {
+    let result: { id: string; bytes: Uint8Array };
+    try {
+      result = decodeBlobFrame(data);
+    } catch {
+      return ws.close(LINK_CLOSE.policy, "Malformed result frame");
+    }
+    // A large result comes in pieces, in order (a v4 daemon sends one). Pieces for an op no longer waiting are dropped;
+    // past blobBytes none are kept, so its `res` then fails host_blob_missing.
+    const pending = link.pending.get(result.id);
+    if (pending) {
+      pending.blobBytes += result.bytes.byteLength;
+      if (pending.blobBytes <= LINK_LIMITS.blobBytes) pending.blob.push(result.bytes);
+    }
+    // A v5 daemon counts its frames in flight by these answers, binary ones included.
+    if ((link.hostVersion ?? 0) >= 5) enqueue(link, encodeLine({ type: "ack", ack: link.up.acked }));
+    return;
+  }
+  if (Buffer.byteLength(data) > LINK_LIMITS.uplinkBytes) return ws.close(LINK_CLOSE.tooBig, "Uplink frame too large");
+  let messages: (UpMessage | UnknownMessage)[];
+  try {
+    // Decode the whole frame first: a frame with one bad line applies nothing.
+    messages = data.split("\n").filter(Boolean).map((line) => decodeUp(line));
+  } catch {
+    return ws.close(LINK_CLOSE.invalidData, "Malformed uplink frame");
+  }
+  for (const message of messages) {
+    if (message.type === "ack") released(link, link.outbox.ack(message.ack));
+    else applyUp(link, message);
+  }
+  // One answer per frame, also to one with nothing sequenced in it: a v5 daemon counts its frames in flight by them.
+  enqueue(link, encodeLine({ type: "ack", ack: link.up.acked }));
+  // The daemon's ack may have opened the unacked window.
+  flush(link);
 }
 
 /** SIGKILL an orphan this long after its SIGTERM, as the daemon does when it stops. */
@@ -474,39 +609,10 @@ async function adopt(link: Link, child: RemoteRpcTransport, sessionId: string, c
   }
 }
 
-/** POST /api/hosts/link: a batch of uplink NDJSON messages, or a hello (see handleHelloPost). */
-export async function handleLinkPost(req: Request, disableIdleTimeout?: () => void): Promise<Response> {
-  const record = authenticate(req, disableIdleTimeout);
-  if (record instanceof Response) return record;
-  if (hub().frozen) return stopping();
-  if (req.headers.has(LINK_HELLO_HEADER)) return handleHelloPost(req, record);
-  // A replaced link's late POST must not reach the current daemon's uplink window.
-  const link = currentLink(req, record);
-  if (!link) return staleLink();
-  const nonce = link.nonce;
-  const ack = req.headers.get(LINK_ACK_HEADER);
-  if (ack === null || !/^\d+$/.test(ack)) return json({ error: "Missing ack" }, 400);
-  let messages: (UpMessage | UnknownMessage)[];
-  try {
-    const bytes = await readBodyWithinLimit(req, LINK_LIMITS.uplinkBytes);
-    // Decode the whole batch first: a batch cut mid-line applies nothing.
-    messages = new TextDecoder("utf-8", { fatal: true }).decode(bytes).split("\n").filter(Boolean).map((line) => decodeUp(line));
-  } catch (error) {
-    if (error instanceof RequestBodyTooLargeError) return json({ error: "Uplink batch too large" }, 413);
-    return json({ error: "Malformed uplink batch" }, 400);
-  }
-  if (hub().frozen) return stopping();
-  // Replaced while the body was arriving.
-  if (link.nonce !== nonce) return staleLink();
-  sawDaemon(link);
-  link.outbox.ack(Number(ack));
-  for (const message of messages) applyUp(link, message);
-  return json({ ack: link.up.acked });
-}
-
-function applyUp(link: Link, message: UpMessage | UnknownMessage): void {
+/** `joined`: a line whose `part`s were applied, so it gets no dedup of its own. */
+function applyUp(link: Link, message: UpMessage | UnknownMessage, joined = false): void {
   if (message.type === "ping") return enqueue(link, encodeLine({ type: "pong" }));
-  if (message.type === "pong" || message.type === "hello") return;
+  if (message.type === "pong" || message.type === "hello" || message.type === "ack") return;
   if (message.type === "unknown") {
     // A newer daemon's message, or one only the server sends: skipped, but its seq is applied so it is acked and never resent.
     if (message.seq !== null) link.up.applied(message.seq);
@@ -515,8 +621,12 @@ function applyUp(link: Link, message: UpMessage | UnknownMessage): void {
     return;
   }
   // Already applied before a resend.
-  if (!link.up.applied(message.seq)) return;
+  if (!joined && !link.up.applied(message.seq)) return;
   switch (message.type) {
+    case "part": {
+      const line = joined ? null : link.parts.add(message);
+      return line === null ? undefined : applyUp(link, decodeUp(line), true);
+    }
     case "stdout":
       return link.channels.get(message.ch)?.deliverLine(message.line);
     case "stderr":
@@ -546,10 +656,10 @@ function settle(link: Link, message: Res): void {
     return;
   }
   if (!message.blob) return pending.resolve(message.result);
-  const blob = pending.blob;
-  if (!blob || blob.byteLength !== message.blob.bytes) {
+  if (pending.blob.length === 0 || pending.blobBytes > LINK_LIMITS.blobBytes || pending.blobBytes !== message.blob.bytes) {
     return pending.reject(new HostOpError(502, "host_blob_missing", `${label} did not deliver the ${pending.op} result`));
   }
+  const blob = pending.blob.length === 1 ? pending.blob[0] : Buffer.concat(pending.blob);
   if (pending.op === "readMedia") return pending.resolve({ ok: true, value: blob });
   try {
     pending.resolve(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(blob)));
@@ -558,36 +668,11 @@ function settle(link: Link, message: Res): void {
   }
 }
 
-/** POST /api/hosts/link/blob/<reqId>: the bytes of one large op result, sent before its `res`. */
-export async function handleLinkBlob(req: Request, reqId: string, disableIdleTimeout?: () => void): Promise<Response> {
-  const record = authenticate(req, disableIdleTimeout);
-  if (record instanceof Response) return record;
-  if (hub().frozen) return stopping();
-  const link = currentLink(req, record);
-  if (!link) return staleLink();
-  const nonce = link.nonce;
-  const pending = link.pending.get(reqId);
-  if (!pending) return json({ error: "Unknown request" }, 404);
-  // Not 409: the daemon reads a 409 as "link replaced" and retries on the next link.
-  if (pending.blob) return json({ error: "Result already uploaded" }, 400);
-  let blob: Uint8Array<ArrayBuffer>;
-  try {
-    blob = await readBodyWithinLimit(req, LINK_LIMITS.blobBytes);
-  } catch (error) {
-    if (error instanceof RequestBodyTooLargeError) return json({ error: "Result too large" }, 413);
-    return json({ error: "Malformed result upload" }, 400);
-  }
-  if (hub().frozen) return stopping();
-  if (link.nonce !== nonce) return staleLink();
-  pending.blob = blob;
-  return json({ ok: true });
-}
-
 function request(hostId: string, op: HostOpName, args: Record<string, unknown>): Promise<unknown> {
   const link = linkFor(hostId);
   const label = labelOf(hostId);
   if (hub().frozen) return Promise.reject(new HostOpError(503, "server_stopping", "omp-web is shutting down"));
-  if (!link.nonce || !isLinkUp(link.status)) {
+  if (!link.socket || !isLinkUp(link.status)) {
     return Promise.reject(new HostOpError(503, "host_offline", `${label} is offline`));
   }
   const { promise, resolve, reject } = Promise.withResolvers<unknown>();
@@ -595,10 +680,10 @@ function request(hostId: string, op: HostOpName, args: Record<string, unknown>):
   const timer = setTimeout(() => failOp(link, id, new HostOpError(504, "host_timeout", `${label} did not answer ${op} in time`)), linkTimings.opTimeoutMs);
   // A deadline, like the ping and offline timers: never what keeps the server running.
   timer.unref?.();
-  const pending: PendingOp = { op, resolve, reject, timer, seq: 0, blob: null };
+  const pending: PendingOp = { op, resolve, reject, timer, blob: [], blobBytes: 0 };
   link.pending.set(id, pending);
   try {
-    pending.seq = sendDown(link, { type: "req", id, op, args });
+    sendDown(link, { type: "req", id, op, args }, id);
   } catch (error) {
     clearTimeout(timer);
     link.pending.delete(id);
@@ -742,8 +827,8 @@ export class RemoteRpcTransport implements RpcTransport {
     // sendDown would drop it: a command waiting on it fails now instead of at its timeout.
     if (hub().frozen) return callback(new Error("omp-web is shutting down"));
     try {
-      // Kept in the link outbox until the daemon acks it, across reconnects.
-      sendDown(linkFor(this.hostId), { type: "stdin", ch: this.ch, line });
+      // Kept in the link outbox until the daemon acks it, across reconnects; queued per channel, in order.
+      sendDown(linkFor(this.hostId), { type: "stdin", ch: this.ch, line }, this.ch);
       callback(null);
     } catch (error) {
       callback(error instanceof Error ? error : new Error(String(error)));
@@ -780,7 +865,7 @@ export class RemoteRpcTransport implements RpcTransport {
 
   killTree(force: boolean): void {
     if (this.exitInfo) return;
-    sendDown(linkFor(this.hostId), { type: "kill", ch: this.ch, force });
+    sendDown(linkFor(this.hostId), { type: "kill", ch: this.ch, force }, this.ch);
   }
 
   /** The byte size of `text` when it may be held for a listener; null past the cap, where the child is killed once. */
@@ -1036,7 +1121,8 @@ export function closeHostLink(id: string): void {
   hub().links.delete(id);
   stopTimers(link);
   failAllOps(link, () => new HostOpError(503, "host_offline", "The host link was closed"));
-  endStream(link);
+  link.socket?.close();
+  endSocket(link);
   // Nothing will report these children again.
   for (const transport of link.channels.values()) transport.deliverExit(null, null);
   setStatus(link, "offline");

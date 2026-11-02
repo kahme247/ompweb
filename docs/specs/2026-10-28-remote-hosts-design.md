@@ -43,8 +43,8 @@ flag.
 ```
 Browser ─▶ main omp-web ──┬─ LocalHost ── spawn omp --mode rpc-ui (stdio)
                           │
-                          └─ RemoteHost ◀── link (HTTP) ── ompweb host (daemon)
-                                                            └─ spawn omp --mode rpc-ui
+                          └─ RemoteHost ◀── link (WebSocket) ── ompweb host (daemon)
+                                                               └─ spawn omp --mode rpc-ui
 ```
 
 ### Daemon: `ompweb host`
@@ -126,63 +126,96 @@ by label.
 
 ## Link protocol
 
-omp-web runs under `next start` with no custom server (`bin/omp-web.js`), and
-Next route handlers cannot accept WebSocket upgrades. The link therefore uses
-two HTTP legs and a hello, all opened by the daemon (which also works behind NAT):
+The link is **one WebSocket per host** at `/api/hosts/link`, opened by the
+daemon (which also works behind NAT). The full design, with the decisions, wire
+format, close codes and limits, is `docs/specs/2026-10-31-websocket-link-design.md`;
+this section is the summary. Before v4 the link was two HTTP legs (a hello POST,
+an NDJSON downlink GET, uplink POSTs and a blob POST) because the server then ran
+under `next start`, which cannot accept upgrades; those legs are gone.
 
-- **Hello** `POST /api/hosts/link` with the `x-omp-web-hello: 1` header: the
-  daemon's `hello` in the body; main answers `{helloId}`.
-- **Downlink** `GET /api/hosts/link` naming that `helloId` in the
-  `x-omp-web-hello` header: a long-lived NDJSON response, main → daemon.
-- **Uplink** `POST /api/hosts/link`: batched NDJSON, daemon → main, flushed
-  every 16 ms or at 256 KB.
-- All three carry `Authorization: Bearer <host token>`, and the route verifies
-  it before reading any body: 401 when no host record matches, 503 when the
-  host registry cannot be read (a daemon that sees 401 stops its omp
-  children; it retries any 5xx). `proxy.ts` does not run for
-  `/api/hosts/link` and its subpaths (its matcher excludes exactly those):
-  Next buffers a proxied request body and silently truncates it past 10 MB,
-  below the link's upload limits.
+- **Transport.** The daemon dials `ws://` or `wss://` plus its saved server URL
+  plus `/api/hosts/link` with `Authorization: Bearer <host token>`. **Text
+  frames** carry the JSON messages: one message per frame from main, one or more
+  newline-separated messages per frame from the daemon (the uplink batch,
+  flushed every 16 ms or at one 256 KiB piece). **Binary frames** carry large op
+  results (daemon → main only, below). From v5 no frame carries more than about
+  one piece (see "Pieces and fair sending").
+- **Auth before the upgrade.** `proxy.ts` reports the route as ungated; the
+  route checks the bearer token before `server.upgrade`: 401 when no host
+  record matches, 503 when the host registry cannot be read (a daemon that sees
+  401 stops its omp children; it retries any 5xx) and 503 while the server is
+  shutting down. An authenticated request that is not an upgrade gets 426. The
+  token is checked once per socket; revoking a host closes its socket (1000),
+  and the daemon's redial is refused 401.
+- **Refusal diagnosis.** A daemon's built-in `WebSocket` does not expose the
+  status of a refused upgrade, so when a dial closes before `open` the daemon
+  sends one plain `GET /api/hosts/link` with the same token and acts on that
+  status: 401 revokes (stop the children, exit 1), 503 redials, anything else
+  is logged with a hint (a reverse proxy not forwarding `Upgrade`/`Connection`,
+  or an older server) and redialed with backoff.
 
 ### Messages
 
-One JSON object per line. Every message except `hello`, `welcome`, `ping` and
-`pong` carries a per-direction sequence number `seq`, and every uplink POST and
-`hello` carries `ack` (the highest downlink `seq` the daemon applied); every
-POST response carries `ack` (the highest uplink `seq` main applied). Each side
-keeps unacknowledged messages, resends them after a reconnect, and drops any
-`seq` it already applied, so no line is lost or applied twice when a leg
-breaks mid-write. stdin lines omp has not received would otherwise vanish.
+One JSON object per line. Every message except `hello`, `welcome`, `ack`,
+`ping` and `pong` carries a per-direction sequence number `seq`. An `ack {ack}`
+message carries the highest `seq` the sender applied from the other side:
+it is the first line of every daemon → main frame (`ack` = highest downlink
+`seq` applied), and main answers every uplink frame with exactly one `ack` (the
+highest uplink `seq` it applied). The `hello` carries `ack` too. Each side keeps
+unacknowledged messages, resends them after a reconnect, and drops any `seq` it
+already applied, so no line is lost or applied twice when the socket breaks
+mid-write. stdin lines omp has not received would otherwise vanish.
 
-`hello` goes in the body of its own POST, never in a header: it lists every
-live channel, and a reverse proxy's header buffers (nginx: 8 KB by default)
-would cut it to a few dozen channels, then 431 every redial while the children
-run on. Main keeps one hello per host and answers its random `helloId`; the
-downlink GET names it, and main takes the hello at that GET, so it opens one
-downlink once (a replayed or late GET, or one after `offlineMs`, gets 400 and
-the daemon posts a new hello). The version is checked on the hello POST; the
-replacement of an older link and the new `nonce` happen when the GET opens the
-downlink. An uplink POST carries its `ack` in the `x-omp-web-ack` header. Main
-decodes a whole POST before applying any of it.
+**Pieces and fair sending (v5;** websocket-link design D7**).** A sequenced line
+longer than `LINK_LIMITS.pieceBytes` (256 KiB) goes as `part {at, end, data}`
+messages, each an ordinary sequenced message of at most 256 KiB; the receiver
+joins them and applies the line when the `end` part is applied (one partial
+line at a time, at most 8 MiB; a part that does not continue it drops it). A
+large result goes as binary frames of at most 256 KiB of bytes each, joined by
+main in order. Each side queues unsent messages per key (the channel, or the
+request id of a `req` / `res`) and sends round-robin, one line, part or result
+piece per key per turn, numbering each as it goes out (so wire order is `seq`
+order); only one key at a time may be part-way through a multi-part line. A
+small message therefore waits behind at most the unacked window plus about one
+piece per busy key, and `ping` / `pong` / `ack` skip the queues. **Unacked
+window:** each side sends queued lines and result pieces only while less than
+`LINK_LIMITS.unackedBytes` (512 KiB; with the one unit that may start below it, at
+most 768 KiB in flight: about 3.1 s at 2 Mbit, and about 512 KiB of throughput
+per round trip) is sent and not acknowledged, because kernel,
+proxy and peer buffers below the socket hold megabytes that `bufferedAmount`
+and Bun's `send` do not show. Main counts its outbox lines written to the
+socket and shrinks that on the daemon's `ack`; the daemon counts its frames
+main has not answered (main answers every v5 frame, text or binary, with one
+`ack`) and also sends only while `bufferedAmount` is under two pieces. The
+daemon acks applied downlink messages within 16 ms (an ack-only frame when it
+has nothing else to send), at once past a piece. Main's `send` / `drain`
+pacing stays underneath. Main decodes a whole frame before applying any of it.
+
+The daemon's first text frame on a new socket is its `hello`, alone. It lists
+every live channel, so it can be large; as a frame body it is not subject to
+header buffers. Main checks `v`, applies the hello (closing an older socket of
+this host, reattaching, adopting or killing channels, resending its outbox) and
+answers `welcome`. A frame belongs to the socket it arrived on: main ignores
+frames from a socket that is no longer the host's link.
 A `hello` with `ack: 0` comes from a daemon that has applied no downlink
 message, so it has sent no sequenced uplink message either (each one answers
 a downlink message): main restarts its uplink window for that host. Main
 numbers downlink messages above the daemon's `ack`, so a restarted main and
 a running daemon never reuse a `seq`.
 
-Each `welcome` carries a fresh random `nonce` naming that link. Every uplink
-POST and blob upload sends it in the `x-omp-web-link` header, and main answers
-409, before reading the body (and again if the link changed while the body
-arrived), when it is not the current link's. Without it a replaced daemon's
-late POST would land in the uplink window a newer daemon's `hello` just
-restarted, and main would drop that daemon's first messages as duplicates.
-On 409 the daemon keeps the messages and sends them after the next
-`welcome`.
+**Downlink pacing.** Main paces the downlink from its outbox and queues: it sends
+the unsent sequenced lines in `seq` order until the socket's `send` reports backpressure,
+then sends the rest on the socket's `drain`. A daemon that stops reading
+(asleep, stopped, on a slow link) is waited for, not closed, and a resend after
+a redial is paced the same way. The outbox therefore holds the unacked backlog in
+server memory until the daemon acknowledges it. The send-buffer limit
+(16 MiB) is only a backstop: past it the socket is closed and the unacked
+messages go again after the redial.
 
 | Message | Direction | Purpose |
 |---|---|---|
-| `hello {v, ompVersion, platform, home, ack, channels[{ch, sessionId}]}` | up | Handshake; `channels` lists live omp children from before a reconnect. `ompVersion` is `null` when `omp` is not found. |
-| `welcome {v, hostId, nonce}` | down | Accepted; `nonce` names this link. |
+| `hello {v, ompVersion, platform, home, autoApproveExtension, ack, channels[{ch, sessionId, cwd, pending}]}` | up | Handshake; `channels` lists live omp children from before a reconnect. `ompVersion` is `null` when `omp` is not found. |
+| `welcome {v, hostId}` | down | Accepted. |
 | `stdin {ch, line}` | down | One raw omp NDJSON line. |
 | `stdout {ch, line}` | up | One raw omp NDJSON line. |
 | `stderr {ch, chunk}` | up | Child stderr, for the existing logging. |
@@ -190,37 +223,59 @@ On 409 the daemon keeps the messages and sends them after the next
 | `exit {ch, code, signal}` | up | Child exited. |
 | `resync {ch}` | up | Buffered output for `ch` was dropped. |
 | `req {id, op, args}` | down | Host op request. |
-| `res {id, ok, result \| error}` | up | Host op result. |
-| `replaced` | down | A newer link with this token took over; the daemon exits. |
-| `ping` / `pong` | both | Liveness, every 15 s. |
+| `res {id, ok, result \| error}`; `res {id, ok: true, blob: {bytes}}` | up | Host op result; the second form names bytes sent earlier in a binary frame. |
+| `ack {ack}` | both | Highest `seq` applied from the other side; unsequenced. |
+| `ping` / `pong` | both | Liveness: main pings every 15 s; each side drops the link after 30 s without a frame. |
+| `part {at, end, data}` | both | v5: the next slice of a line over 256 KiB (`at`: its UTF-16 offset in the line; `end`: the last). Main never sends one to a v4 daemon. |
+
+A binary frame is `byte 0` = the UTF-8 length *n* of the request id (1 to 255),
+then the id, then result bytes (media bytes for `readMedia`, else the UTF-8
+JSON of the result): all of them from a v4 daemon, at most 256 KiB of them per
+frame from v5. The daemon sends them before the `res` that names their total;
+the one socket keeps that order.
+
+### Close codes
+
+| Code | Sent by | When | Daemon reaction |
+|---|---|---|---|
+| 1000 | main | host revoked | redial, refused 401, diagnosis: stop children, exit 1 |
+| 1001 | main | shutting down (a real SIGTERM exits in the same tick, so daemons usually see 1006 or ECONNREFUSED instead) | redial with backoff |
+| 1007 | main | a frame with a malformed line or bad envelope (nothing in it is applied) | log, redial, resend |
+| 1008 | main | first frame binary, not JSON, or not a decodable `hello` | log, redial |
+| 1009 | main or Bun | frame over its size limit | log, redial |
+| 4409 | main | a newer socket of this host said hello | exit 0 |
+| 4426 | main | hello `v` outside the supported range; reason `{"serverVersion":N}` | log which side to update, exit 1 |
+| 1006, other | | drop or watchdog | redial with backoff |
 
 ### Rules
 
 - **Version.** `v` is an integer, bumped on any incompatible change (2: the
   hello moved from the GET header into a POST body; 3: the hello carries
-  `autoApproveExtension` and each channel its `cwd` and `pending`). Main links
-  daemons from `MIN_LINK_PROTOCOL_VERSION` (2) up to its own
-  `LINK_PROTOCOL_VERSION`, and its `welcome` carries the version the link
-  speaks, the daemon's (see "Protocol versions and compatibility"). Any other
-  version, older or newer than main, gets 426 with both versions, and so does a
-  v1 daemon's GET carrying its hello in the header; the daemon exits, telling
-  which side to update ("update ompweb on this host", or "this host's ompweb is
-  newer than the server's: update ompweb on the server" when the 426's
-  `serverVersion` is below its own); Settings → Hosts shows "needs upgrade (host
-  vN, server vM)". A hello POST answered 400, 404, 405 or 409 without a
-  `helloId` comes from an older main (v1 answers a POST without a link nonce
-  409): the daemon logs "the server runs an older ompweb: upgrade it" and exits
-  1 instead of redialing.
+  `autoApproveExtension` and each channel its `cwd` and `pending`; 4: the link
+  is one WebSocket, `ack` is a message and `replaced` and `welcome.nonce` are
+  gone; 5: lines over 256 KiB go as `part`s and large results as several binary
+  frames, sent fair across channels). Main links daemons from
+  `MIN_LINK_PROTOCOL_VERSION` (4) up to its own `LINK_PROTOCOL_VERSION` (5);
+  its `welcome` carries the version the link speaks (see "Protocol versions and
+  compatibility"). A hello whose `v` is outside that range (checked on the raw
+  JSON before decoding) gets close 4426 with reason `{"serverVersion":5}`; the
+  daemon exits 1, telling which side to
+  update ("update ompweb on this host", or "this host's ompweb is newer than
+  the server's: update ompweb on the server" when `serverVersion` is below its
+  own); Settings → Hosts shows "needs upgrade (host vN, server vM)" unless the
+  host has a healthy socket.
 - **Identity.** The host is the record whose `tokenHash` matches. Nothing the
   daemon sends selects or changes its identity.
-- **One link per host.** A new link with the same token replaces the old one,
-  which receives `replaced`. Two daemons must never run competing
-  `omp --resume` children against one agent directory.
+- **One link per host.** A hello on a new socket with the same token closes the
+  old socket with 4409 (the old daemon exits). A revoked host is refused at the
+  upgrade (401) and, if its socket was already open, at the hello (close 1000).
+  Two daemons must never run competing `omp --resume` children against one
+  agent directory.
 - **Buffering.** While the uplink is down, the daemon buffers each child's
   output up to 32 MB per channel, so one image prompt's two echoes
   (`message_start`, `message_end`, each up to ~11 MB of `rpc_chunk` lines)
   fit unacked. On overflow it drops that channel's buffer
-  and queues `resync {ch}`, which reaches main with the first uplink POST that
+  and queues `resync {ch}`, which reaches main with the first uplink frame that
   gets through, ahead of the channel's later output. The drop may cut an
   `rpc_chunk` sequence, so main's `RpcProcess` discards any partial chunked
   frame and skips leftover chunks until the next frame start, then runs the
@@ -239,12 +294,20 @@ On 409 the daemon keeps the messages and sends them after the next
   restarted on that host (after the orphan's `exit`) and sent `RESUME_PROMPT`,
   as local sessions are after a restart.
 - **Large results.** An op result whose JSON exceeds 1 MB, and every
-  successful `readMedia` result, is sent as raw bytes to
-  `POST /api/hosts/link/blob/<reqId>` instead of inside NDJSON; the `res` line
+  successful `readMedia` result, is sent in binary frames (above) before its
+  `res`, in the same socket, instead of inside a text frame; the `res` line
   then carries `blob: {bytes}` and no `result`.
-- **Limits.** Uplink batches are capped at 16 MB and blob uploads at 64 MB;
-  over-limit requests get 413. A single `stdout` line over 8 MB is dropped and
-  replaced by `resync {ch}`.
+- **Limits.** An uplink text frame is capped at 16 MiB (a v4 daemon's batch
+  cap; main closes 1009 above it), a single message line at 8 MiB, also when
+  joined from parts (an over-limit `stdout` line is dropped and replaced by
+  `resync {ch}`), and a result at 64 MiB (a binary frame at 64 MiB plus its
+  header; the daemon refuses a larger result with 413 `result_too_large`, main
+  keeps no more of its pieces). Main's send buffer holds 16 MiB, a backstop
+  behind the downlink pacing above. **Slow links:** with v5 every frame is at
+  most about one piece, so liveness passes at any bandwidth where one 256 KiB
+  piece crosses within `offlineMs`. A v4 daemon still gets whole lines: a
+  multi-MiB line that takes longer than `offlineMs` to arrive makes main treat
+  the link as dropped and resend it (below roughly 280 KiB/s for an 8 MiB line).
 
 ### Protocol versions and compatibility
 
@@ -270,23 +333,35 @@ On 409 the daemon keeps the messages and sends them after the next
     {status: 501, code: "unknown_op"}}`, which main surfaces as a 501
     `HostOpError` so callers can fall back. A sender must not rely on a newer
     message being understood unless the version (or, later, a capability) says
-    so. Tolerance starts with v3: a v2 daemon is strict (an unknown type or op
-    makes it refuse the line), so main sends a v2 daemon only messages and ops
-    v2 understands.
-- **Older versions stay supported** until supporting one becomes too much of a
-  maintenance burden; dropping one is an explicit decision (raising
-  `MIN_LINK_PROTOCOL_VERSION`). In practice main keeps at least version N-1.
-  For an older daemon main decodes its hello into today's shape and sends only
-  messages that version understands. A daemon on a dropped version gets 426;
-  an update-only mode for it is planned, separately.
+    so. Tolerance starts with v3: a daemon older than that is strict (an
+    unknown type or op makes it refuse the line).
+- **Older versions stay supported** from the next version on, until supporting
+  one becomes too much of a maintenance burden; dropping one is an explicit
+  decision (raising `MIN_LINK_PROTOCOL_VERSION`, which is 4 today). In
+  practice main keeps at least version N-1. For an older daemon main decodes
+  its hello into today's shape and sends only messages that version
+  understands (to a v4 daemon: no `part`, every line whole, and no unacked
+  window, since it acks only inside its next uplink frame).
+  A daemon on a dropped version gets 426
+  (a POST) or close 4426 (a hello frame); an update-only mode for it is
+  planned, separately.
 - **Upgrade order: web app first, then hosts.** Main supports older daemons; a
   daemon is not required to support a newer main, and one newer than main gets
-  426. `hostVersion` (Settings → Hosts) is the version a linked daemon speaks,
+  close 4426.
+  `hostVersion` (Settings → Hosts) is the version a linked daemon speaks,
   so Settings can later show "update available" for one behind the server.
-- **v2 daemons** (N-1 today): their hello has no `autoApproveExtension` (read
-  as false until a spawn result reports it) and no channel `cwd` or `pending`,
-  so their listed children are never adopted: they take the kill-and-resume
-  path. v2 and v3 have the same down messages, host ops and HTTP legs.
+- **v4 (the WebSocket link) dropped v3** before any release; from the next
+  version on, main keeps N-1. A v3 daemon POSTs its hello to
+  `/api/hosts/link`; main answers that POST 426 with both versions (and never
+  links it), so the old daemon logs "update ompweb on this host" and exits 1.
+  A v4 daemon dialing an older server gets an upgrade refusal and keeps
+  redialing (backoff up to 60 s) with a hint, so it links once the server is
+  updated. Update the server first, then its hosts.
+- **v5 (pieces) keeps v4.** A v5 server links a v4 daemon as before (`welcome
+  {v: 4}`, whole lines, its one-frame results joined like pieces). A v5 daemon
+  dialing a v4 server gets close 4426 with `{"serverVersion":4}`, logs "this
+  host's ompweb is newer than the server's: update ompweb on the server" and
+  exits 1; update the server first.
 
 ## Host ops (this sub-project)
 
@@ -423,9 +498,9 @@ asks ("Send a message from a session on <host> to session <id> on
 | No `pong` for 30 s | Host is offline. Its sessions show a banner: "<host> is offline. The run continues there; it reconnects automatically." Sends refused before they leave return 503 `{hostOffline: true, delivery: "refused"}`; the composer keeps the draft and shows a toast. A prompt whose ack the dropped link lost returns `delivery: "unknown"`: it may still run once the host reconnects, so the composer drops the draft and the toast says so. A fresh chat's 503 carries the `sessionId` it spawned when the link dropped after the spawn; the chat adopts it, so a retry starts no second session. |
 | Link returns, children alive | Wrappers reattach; `get_state` reconcile runs; `resync` channels reconcile too. |
 | Daemon restarted, children gone | Synthesized `process_exit` per missing channel, which raises the existing "Run failed" notification. With `autoResumeSessions` on, main restarts sessions that were mid-run and sends `RESUME_PROMPT` (Rules → Reattach). |
-| Second daemon with the same token | Newest link wins; the old daemon receives `replaced` and exits. |
+| Second daemon with the same token | Newest link wins; the old socket is closed 4409 and its daemon exits 0. |
 | Host op over 30 s | 504 naming the host; the sidebar keeps that host's last list. |
-| Version mismatch | 426; host status `needs-upgrade`. |
+| Version mismatch | Close 4426 (hello frame) or 426 (a pre-WebSocket daemon's POST); host status `needs-upgrade`. |
 | `omp` missing on the host | Host status `omp-missing`; new sessions there are disabled. |
 | Host revoked while sessions run | Link closed; its wrappers are destroyed; its sessions leave the list. The omp children on that machine are killed by the daemon when it sees the 401 on reconnect. |
 
@@ -436,7 +511,7 @@ asks ("Send a message from a session on <host> to session <id> on
 - **Unit:**
   - link message encode/decode and size limits
   - token generation, hashing, verification; revoke closes the link
-  - host hub: reattach, `replaced`, offline after missed pongs, missing
+  - host hub: reattach, 4409 replacement, offline after missed pongs, missing
     channel → `process_exit`
   - `RemoteHost` + `RpcProcess` over an in-memory link
   - buffer overflow → `resync` → reconcile

@@ -2,12 +2,13 @@
 // Pure: no I/O and no Next or `@/` imports, so both sides share it.
 import type { SessionOps } from "./session-ops";
 
-/** 2: the hello moved from a GET header into a POST body (a v1 daemon gets 426).
- * 3: hello channels carry `pending`, the raw lines of their open blocking requests.
+/** 5: a line over `pieceBytes` goes as `part` messages and a large result as several binary frames, both sent fair
+ * across channels (docs/specs/2026-10-31-websocket-link-design.md, D7). 4: the link is one WebSocket: text frames carry
+ * the messages, binary frames large results, `ack` messages replace the ack header and the POST answer.
  * Rules for changing it: docs/specs/2026-10-28-remote-hosts-design.md, "Protocol versions and compatibility". */
-export const LINK_PROTOCOL_VERSION = 3;
-/** The oldest daemon protocol the server still links (older ones get 426). Dropping one is an explicit decision. */
-export const MIN_LINK_PROTOCOL_VERSION = 2;
+export const LINK_PROTOCOL_VERSION = 5;
+/** The oldest daemon protocol the server still links (older ones get close 4426). Dropping one is an explicit decision. */
+export const MIN_LINK_PROTOCOL_VERSION = 4;
 
 export const LINK_LIMITS = {
   pingMs: 15_000,
@@ -17,7 +18,12 @@ export const LINK_LIMITS = {
   // (~10.7 MiB), and the rest is room for the streamed reply.
   channelBufferBytes: 32 * 1024 * 1024,
   flushMs: 16,
-  flushBytes: 256 * 1024,
+  /** Largest `part` line and binary frame payload (v5); an uplink text frame batches lines up to it. */
+  pieceBytes: 256 * 1024,
+  /** v5: a side sends queued lines and result pieces only while less than this is sent and not acked (spec D7), so a
+   * small message never waits behind more than this plus one piece in kernel, proxy or peer buffers (768 KiB: about
+   * 3.1 s at 2 Mbit). It also caps throughput at about this per round trip. Control lines go regardless. */
+  unackedBytes: 2 * 256 * 1024,
   uplinkBytes: 16 * 1024 * 1024,
   blobBytes: 64 * 1024 * 1024,
   inlineResultBytes: 1024 * 1024,
@@ -27,14 +33,8 @@ export const LINK_LIMITS = {
   pendingBytes: 1024 * 1024,
 };
 
-/** A POST carrying this header (value `1`) is the daemon's `hello`, in its body;
- * main answers `{helloId}`, and the downlink GET names that id in this header. */
-export const LINK_HELLO_HEADER = "x-omp-web-hello";
-/** Every uplink POST carries the highest downlink `seq` the daemon applied. */
-export const LINK_ACK_HEADER = "x-omp-web-ack";
-/** Uplink POSTs and blob uploads name the link (`welcome.nonce`) they belong to;
- * main refuses one from a link that was replaced since. */
-export const LINK_NONCE_HEADER = "x-omp-web-link";
+/** WebSocket close codes the link uses. */
+export const LINK_CLOSE = { goingAway: 1001, invalidData: 1007, policy: 1008, tooBig: 1009, replaced: 4409, versionMismatch: 4426 } as const;
 
 /** Named `req.args` keys for each session op, in parameter order. Named, not
  * positional, so an omitted optional argument never turns into `null`. */
@@ -76,15 +76,21 @@ export class HostOpError extends Error {
   }
 }
 
+/** v5: one slice of a sequenced line longer than `pieceBytes` (`LinkSender` cuts it, `PartJoiner` joins it): `data`
+ * starts at UTF-16 offset `at` of the line; `end` marks the last slice. */
+export type Part = { type: "part"; seq: number; at: number; end: boolean; data: string };
+
 export type DownMessage =
-  | { type: "welcome"; v: number; hostId: string; nonce: string }
+  | { type: "welcome"; v: number; hostId: string }
   | { type: "stdin"; seq: number; ch: string; line: string }
   | { type: "kill"; seq: number; ch: string; force: boolean }
   /** `op` is whatever the sender named: the daemon answers one it does not know with 501 `unknown_op`. */
   | { type: "req"; seq: number; id: string; op: string; args: unknown }
-  | { type: "replaced"; seq: number }
   | { type: "ping" }
-  | { type: "pong" };
+  | { type: "pong" }
+  /** Unsequenced: the highest uplink `seq` the hub applied. */
+  | { type: "ack"; ack: number }
+  | Part;
 
 /** `sessionId`: the session the child last reported (null before it named one); `cwd`: where the
  * daemon spawned it; `pending`: raw stdout lines of its open blocking requests, or null when over `pendingBytes`. */
@@ -115,7 +121,10 @@ export type UpMessage =
       error: { status: number; code: string; message: string };
     }
   | { type: "ping" }
-  | { type: "pong" };
+  | { type: "pong" }
+  /** Unsequenced: the highest downlink `seq` the daemon applied. */
+  | { type: "ack"; ack: number }
+  | Part;
 
 /** A message this side cannot decode by type (a newer peer's), or one that only the other side may send
  * (`wrongDirection`): receivers skip it, but ack its `seq` (null when it carries none) so it is never resent. */
@@ -130,6 +139,7 @@ export class LinkLimitError extends Error {
 }
 
 const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 
 export function encodeLine(message: DownMessage | UpMessage): string {
   const json = JSON.stringify(message);
@@ -137,6 +147,22 @@ export function encodeLine(message: DownMessage | UpMessage): string {
     throw new LinkLimitError(`link line exceeds ${LINK_LIMITS.maxLineBytes} bytes`);
   }
   return json + "\n";
+}
+
+/** A sequenced message before the link numbers it. */
+export type Unsequenced<M> = M extends { seq: number } ? Omit<M, "seq"> : never;
+
+const SEQ_TAIL = `${Number.MAX_SAFE_INTEGER}}\n`;
+
+/** A sequenced message's line before its `seq` is known: `LinkSender` numbers it as it goes out (`withSeq`). Encoded
+ * with the widest seq, so the real one never takes it past maxLineBytes. Throws LinkLimitError. */
+export function encodeQueued(body: Unsequenced<DownMessage | UpMessage>): string {
+  return encodeLine({ ...body, seq: Number.MAX_SAFE_INTEGER } as DownMessage | UpMessage);
+}
+
+/** `line` from encodeQueued with `seq` filled in (it is the last key). */
+export function withSeq(line: string, seq: number): string {
+  return `${line.slice(0, -SEQ_TAIL.length)}${seq}}\n`;
 }
 
 type Obj = Record<string, unknown>;
@@ -188,8 +214,8 @@ export function isHostOp(name: string): name is HostOpName {
   return (HOST_OP_NAMES as readonly string[]).includes(name);
 }
 
-const DOWN_TYPES: readonly string[] = ["welcome", "stdin", "kill", "req", "replaced", "ping", "pong"];
-const UP_TYPES: readonly string[] = ["hello", "stdout", "stderr", "exit", "resync", "res", "ping", "pong"];
+const DOWN_TYPES: readonly string[] = ["welcome", "stdin", "kill", "req", "ping", "pong", "ack"];
+const UP_TYPES: readonly string[] = ["hello", "stdout", "stderr", "exit", "resync", "res", "ping", "pong", "ack"];
 
 /** `otherDirection`: the types only the other direction decodes; one of those arrived on the wrong way. */
 function unknownMessage(o: Obj, otherDirection: readonly string[]): UnknownMessage {
@@ -250,33 +276,36 @@ export function decodeDown(line: string): DownMessage | UnknownMessage {
   const o = parseLine(line);
   switch (o.type) {
     case "welcome":
-      return { type: "welcome", v: int(o, "v"), hostId: str(o, "hostId"), nonce: str(o, "nonce") };
+      return { type: "welcome", v: int(o, "v"), hostId: str(o, "hostId") };
     case "stdin":
       return { type: "stdin", seq: seqNum(o, "seq"), ch: str(o, "ch"), line: str(o, "line") };
     case "kill":
       return { type: "kill", seq: seqNum(o, "seq"), ch: str(o, "ch"), force: bool(o, "force") };
     case "req":
       return { type: "req", seq: seqNum(o, "seq"), id: str(o, "id"), op: str(o, "op"), args: "args" in o ? o.args : fail("args must be present") };
-    case "replaced":
-      return { type: "replaced", seq: seqNum(o, "seq") };
     case "ping":
       return { type: "ping" };
     case "pong":
       return { type: "pong" };
+    case "ack":
+      return { type: "ack", ack: seqNum(o, "ack") };
+    case "part":
+      return part(o);
     default:
       return unknownMessage(o, UP_TYPES);
   }
 }
 
-/** A v2 hello's channels carry no `cwd` or `pending`: decoded with `pending: null`, which reattach kills instead of adopting. */
-function channels(o: Obj, v2: boolean): HelloChannel[] {
+function part(o: Obj): Part {
+  return { type: "part", seq: seqNum(o, "seq"), at: seqNum(o, "at"), end: bool(o, "end"), data: str(o, "data") };
+}
+
+function channels(o: Obj): HelloChannel[] {
   const list = o.channels;
   if (!Array.isArray(list)) fail("channels must be an array");
   return list.map((c: unknown) => {
     if (!isObj(c)) fail("channel must be an object");
-    const ch = str(c, "ch");
-    const sessionId = nullable(c, "sessionId", str);
-    return v2 ? { ch, sessionId, cwd: "", pending: null } : { ch, sessionId, cwd: str(c, "cwd"), pending: nullable(c, "pending", strings) };
+    return { ch: str(c, "ch"), sessionId: nullable(c, "sessionId", str), cwd: str(c, "cwd"), pending: nullable(c, "pending", strings) };
   });
 }
 
@@ -310,20 +339,17 @@ function res(o: Obj): UpMessage {
 export function decodeUp(line: string): UpMessage | UnknownMessage {
   const o = parseLine(line);
   switch (o.type) {
-    case "hello": {
-      const v = int(o, "v");
+    case "hello":
       return {
         type: "hello",
-        v,
+        v: int(o, "v"),
         ompVersion: nullable(o, "ompVersion", str),
         platform: str(o, "platform"),
         home: str(o, "home"),
-        // A v2 hello does not say: off until a spawn result reports it.
-        autoApproveExtension: v === 2 ? false : bool(o, "autoApproveExtension"),
+        autoApproveExtension: bool(o, "autoApproveExtension"),
         ack: seqNum(o, "ack"),
-        channels: channels(o, v === 2),
+        channels: channels(o),
       };
-    }
     case "stdout":
       return { type: "stdout", seq: seqNum(o, "seq"), ch: str(o, "ch"), line: str(o, "line") };
     case "stderr":
@@ -344,9 +370,32 @@ export function decodeUp(line: string): UpMessage | UnknownMessage {
       return { type: "ping" };
     case "pong":
       return { type: "pong" };
+    case "ack":
+      return { type: "ack", ack: seqNum(o, "ack") };
+    case "part":
+      return part(o);
     default:
       return unknownMessage(o, DOWN_TYPES);
   }
+}
+
+/** One binary WebSocket frame: `[n][id: n bytes][payload]`, n = UTF-8 length of the request id (1..255). */
+export function encodeBlobFrame(id: string, bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+  const idBytes = encoder.encode(id);
+  if (idBytes.byteLength === 0 || idBytes.byteLength > 255) fail("blob frame id must be 1..255 UTF-8 bytes");
+  const frame = new Uint8Array(1 + idBytes.byteLength + bytes.byteLength);
+  frame[0] = idBytes.byteLength;
+  frame.set(idBytes, 1);
+  frame.set(bytes, 1 + idBytes.byteLength);
+  return frame;
+}
+
+/** `bytes` is a view into `frame`, not a copy. */
+export function decodeBlobFrame(frame: Uint8Array): { id: string; bytes: Uint8Array } {
+  const n = frame[0];
+  if (!n) fail("blob frame has no id");
+  if (frame.byteLength < 1 + n) fail("blob frame is shorter than its header");
+  return { id: decoder.decode(frame.subarray(1, 1 + n)), bytes: frame.subarray(1 + n) };
 }
 
 // Receiving side keeps a high-water mark: a seq at or below it was already applied.
@@ -371,6 +420,8 @@ export class SeqWindow {
   }
 }
 
+/** Sent lines a side keeps until the peer acks them, in `seq` order (both sides push them in the order they number
+ * them). `ack` and `drop` return what they removed. */
 export class Outbox<M extends { seq: number }> {
   private items: M[] = [];
 
@@ -378,15 +429,144 @@ export class Outbox<M extends { seq: number }> {
     this.items.push(m);
   }
 
-  ack(upTo: number): void {
-    this.items = this.items.filter((m) => m.seq > upTo);
+  ack(upTo: number): M[] {
+    let n = 0;
+    while (n < this.items.length && this.items[n].seq <= upTo) n += 1;
+    return this.items.splice(0, n);
   }
 
+  /** A copy, in seq order. */
   pending(): M[] {
-    return [...this.items].sort((a, b) => a.seq - b.seq);
+    return this.items.slice();
   }
 
-  drop(predicate: (m: M) => boolean): void {
-    this.items = this.items.filter((m) => !predicate(m));
+  drop(predicate: (m: M) => boolean): M[] {
+    const dropped = this.items.filter(predicate);
+    if (dropped.length > 0) this.items = this.items.filter((m) => !predicate(m));
+    return dropped;
+  }
+}
+
+/** What `LinkSender` queues under a key: a line from `encodeQueued` (`size`: its UTF-8 bytes), or a result's bytes. */
+export type SendItem = { line: string; size: number } | { id: string; blob: Uint8Array };
+
+/** One unit from `LinkSender.next`; `done` when it was the last of `item`. A line (a whole message, or a `part` when
+ * `part`) carries the `seq` it was numbered with; a piece of result bytes is an unnumbered binary `frame`. */
+export type SendUnit<T extends SendItem> = { key: string; item: T; done: boolean } & ({ seq: number; line: string; part: boolean } | { frame: Uint8Array<ArrayBuffer> });
+
+/** The `part` line for `line` from `at`: as much of it as fits in pieceBytes once encoded. */
+function cutPart(line: string, at: number, seq: number): { line: string; at: number } {
+  for (let n = Math.min(line.length - at, LINK_LIMITS.pieceBytes); ;) {
+    const part: Part = { type: "part", seq, at, end: at + n >= line.length, data: line.slice(at, at + n) };
+    const encoded = `${JSON.stringify(part)}\n`;
+    const size = encoder.encode(encoded).byteLength;
+    if (size <= LINK_LIMITS.pieceBytes || n === 1) return { line: encoded, at: at + n };
+    n = Math.max(1, Math.floor((n * LINK_LIMITS.pieceBytes) / size) - 1);
+  }
+}
+
+/** The sending side of one link direction (spec D7): FIFO per key, keys served round-robin (Map order: a key that
+ * sent goes to the back), each turn one whole line, one `part` or one result piece. Lines are numbered as they go
+ * out, so wire order is `seq` order. One key at a time may be part-way through a multi-part line, so the receiver
+ * holds at most one partial line. `parts`: false for a v4 peer, which gets every line whole. */
+export class LinkSender<T extends SendItem> {
+  parts: boolean;
+  /** `at`: how far the item has gone out (UTF-16 units of `line`, bytes of `blob`); `line`: set while it goes in parts. */
+  private readonly queues = new Map<string, { item: T; at: number; line: string | null }[]>();
+  private active: string | null = null;
+
+  constructor(parts: boolean) {
+    this.parts = parts;
+  }
+
+  push(key: string, item: T): void {
+    const entry = { item, at: 0, line: null };
+    const queue = this.queues.get(key);
+    if (queue) queue.push(entry);
+    else this.queues.set(key, [entry]);
+  }
+
+  /** Forget what `key` queued, a line part-way out included: the receiver drops that partial line. */
+  drop(key: string): void {
+    this.queues.delete(key);
+    if (this.active === key) this.active = null;
+  }
+
+  /** Forget every result's bytes not sent yet, a result part-way out included, but not the `res` behind them: after a
+   * redial the server has failed those ops, or their `res` fails 502 host_blob_missing. */
+  dropBlobs(): void {
+    for (const [key, queue] of this.queues) {
+      const rest = queue.filter(({ item }) => !("blob" in item));
+      if (rest.length === 0) this.queues.delete(key);
+      else this.queues.set(key, rest);
+    }
+  }
+
+  /** The next unit, or null when nothing is queued; `nextSeq` numbers a line. */
+  next(nextSeq: () => number): SendUnit<T> | null {
+    for (const [key, queue] of this.queues) {
+      const head = queue[0];
+      const { item } = head;
+      let unit: SendUnit<T>;
+      if ("blob" in item) {
+        const piece = item.blob.subarray(head.at, head.at + LINK_LIMITS.pieceBytes);
+        head.at += piece.byteLength;
+        unit = { key, item, done: head.at >= item.blob.byteLength, frame: encodeBlobFrame(item.id, piece) };
+      } else if (!this.parts || item.size <= LINK_LIMITS.pieceBytes) {
+        // A line part-way out in parts when the peer turned out to be v4 goes whole from the start.
+        if (this.active === key) this.active = null;
+        const seq = nextSeq();
+        unit = { key, item, done: true, seq, line: withSeq(item.line, seq), part: false };
+      } else {
+        if (this.active !== null && this.active !== key) continue;
+        this.active = key;
+        // The joined line is applied without a dedup of its own (its parts had one), so its seq is 0.
+        head.line ??= withSeq(item.line, 0);
+        const seq = nextSeq();
+        const cut = cutPart(head.line, head.at, seq);
+        head.at = cut.at;
+        const done = head.at >= head.line.length;
+        if (done) this.active = null;
+        unit = { key, item, done, seq, line: cut.line, part: true };
+      }
+      if (unit.done) queue.shift();
+      this.queues.delete(key);
+      if (queue.length > 0) this.queues.set(key, queue);
+      return unit;
+    }
+    return null;
+  }
+}
+
+/** Joins `part`s back into their line (spec D7), one line at a time as `LinkSender` sends them. */
+export class PartJoiner {
+  /** Most parts in one line: a legitimate 8 MiB line needs about 200, even with every character escaped. */
+  static readonly maxParts = 512;
+  private chunks: string[] | null = null;
+  private at = 0;
+
+  /** The whole line once `part` ends it, else null. A part at 0 starts a new line, dropping a partial one; a part that
+   * does not continue the line in progress (its sender dropped the rest), or takes it past maxLineBytes or maxParts,
+   * is dropped with that line. */
+  add(part: Pick<Part, "at" | "end" | "data">): string | null {
+    if (part.at === 0) {
+      this.chunks = [];
+      this.at = 0;
+    }
+    if (
+      !this.chunks
+      || part.at !== this.at
+      || this.at + part.data.length > LINK_LIMITS.maxLineBytes
+      || this.chunks.length >= PartJoiner.maxParts
+    ) {
+      this.chunks = null;
+      return null;
+    }
+    this.chunks.push(part.data);
+    this.at += part.data.length;
+    if (!part.end) return null;
+    const line = this.chunks.join("");
+    this.chunks = null;
+    return line;
   }
 }
