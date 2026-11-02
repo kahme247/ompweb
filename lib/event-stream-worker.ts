@@ -1147,7 +1147,7 @@ function dropUpload(upload: Upload): void {
 }
 
 /** (Re)arms its stall deadline: whatever keeps it from moving (a link that stays down, a host that stopped acking)
- * fails it there. Nothing is aborted, so a Retry resumes it from the host's offset. */
+ * fails it there. Nothing is aborted, so the tab's automatic resume (`uploadFile`) continues it from the host's offset. */
 function watchUpload(upload: Upload): void {
   clearTimeout(upload.stallTimer);
   upload.stallTimer = setTimeout(() => {

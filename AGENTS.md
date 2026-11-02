@@ -1253,16 +1253,17 @@ during the wait.
   `uploadAbort` to the host and answers 404 `upload_missing`. A host-link drop
   fails each in-flight upload with 503 `host_offline`. `uploadFile`
   (`lib/event-stream.ts`) resumes 502/503/504 and HTTP network failures by
-  itself (same id, back-off, chip shows "Reconnecting…") until 5 min pass
-  without new bytes; other failures, and a bfcache pagehide (410), show Retry.
+  itself (same id, back-off restarting after new bytes, chip shows
+  "Reconnecting…") until an outage reaches 5 min, timed from its first
+  failure; other failures, and a bfcache pagehide (410), show Retry.
 - Limits on main: at most 32 unfinished uploads per owner (429
   `too_many_uploads`); an unfinished entry idle 10 min (no start, frame or ack)
   is dropped from the registry (a later `up_start` re-registers it). The worker
   fails an upload no start answer or ack advances for `UPLOAD_STALL_MS` (120 s)
   with 504 `upload_stalled` and forgets it without aborting it on the host, so
-  the tab's automatic resume continues it. Page navigation settles pending WebSocket-upload promises before
-  the worker's `bye`: a composer retained by bfcache shows Retry after restoration,
-  not a permanently uploading chip. This does not automatically resume navigation.
+  the tab's automatic resume continues it. Page navigation settles pending
+  WebSocket-upload promises before the worker's `bye`: a composer retained by
+  bfcache shows Retry after restoration, not a permanently uploading chip.
   The daemon's `sweep` deletes staged files older than 24 h and aborts open uploads
   idle (no start/write) over 24 h (`STAGED_MAX_AGE_MS`).
   `uploadAttach` has a 10-minute op timeout (a 2 GiB EXDEV copy), not

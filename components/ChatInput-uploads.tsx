@@ -156,8 +156,9 @@ export function ImageChip({ previewUrl, upload, canSwitch, onSwitch, onRemove, o
 }) {
   const { t } = useI18n();
   const failed = upload?.status === "error";
+  // Failed, or waiting to resume by itself: the tooltip says why.
   return (
-    <div style={{ position: "relative", flexShrink: 0 }} title={failed ? upload?.error ?? undefined : undefined}>
+    <div style={{ position: "relative", flexShrink: 0 }} title={upload?.error ?? undefined}>
       <div style={{ position: "relative", width: 56, height: 56, overflow: "hidden", borderRadius: 6, border: `1px solid ${failed ? "var(--status-error)" : "var(--border)"}` }}>
         {previewUrl && <img src={previewUrl} alt="" style={{ width: 56, height: 56, objectFit: "cover", display: "block" }} />}
         <button

@@ -324,7 +324,8 @@ export function newUploadId(): string {
 
 /** Back-off before each automatic resume; the last value repeats. */
 const RESUME_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 15_000];
-/** A transient failure with no new bytes on the host for this long stops resuming: the chip then shows Retry. */
+/** An outage (transient failures with no new bytes on the host in between) this long stops resuming: the chip then
+ * shows Retry. Measured from its first failure, so time the tab spent suspended before it does not count. */
 const RESUME_GIVE_UP_MS = 5 * 60_000;
 
 /**
@@ -343,13 +344,16 @@ export function uploadFile(
   const controller = new AbortController();
   let viaLink = false;
   let link: Transport | null = null;
-  let progressAt = Date.now();
   let highest = -1;
+  let failures = 0;
+  let outageAt: number | null = null;
   let waiting = false;
   const progress = (received: number) => {
+    // New bytes on the host end the outage: the next one starts its back-off and clock afresh.
     if (received > highest) {
       highest = received;
-      progressAt = Date.now();
+      failures = 0;
+      outageAt = null;
     }
     if (waiting) {
       waiting = false;
@@ -376,18 +380,19 @@ export function uploadFile(
     });
   });
   const promise = (async () => {
-    for (let failures = 0; ; failures++) {
+    for (;;) {
       try {
         return await attempt();
       } catch (error) {
         // The host link or the web server dropped (503, a proxy's 502/504, fetch's network TypeError), or the upload
         // stalled (504): starting the same id again resumes from the host's offset. Anything else needs the user.
         const resumable = error instanceof UploadFailedError ? error.status >= 502 && error.status <= 504 : error instanceof TypeError;
-        if (controller.signal.aborted || !resumable || Date.now() - progressAt >= RESUME_GIVE_UP_MS) throw error;
+        outageAt ??= Date.now();
+        if (controller.signal.aborted || !resumable || Date.now() - outageAt >= RESUME_GIVE_UP_MS) throw error;
         waiting = true;
         onReconnecting(error);
         await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, RESUME_DELAYS_MS[Math.min(failures, RESUME_DELAYS_MS.length - 1)]);
+          const timer = setTimeout(resolve, RESUME_DELAYS_MS[Math.min(failures++, RESUME_DELAYS_MS.length - 1)]);
           controller.signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
         });
         if (controller.signal.aborted) throw error;
