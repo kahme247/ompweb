@@ -251,7 +251,9 @@ async function stagePackage(d: HostUpdateDescriptor, staging: string): Promise<s
   const args = d.installMethod === "bun" ? ["add", "--cwd", prefix, "--production", "--exact", "--registry=https://registry.npmjs.org", packageName] : ["install", "--prefix", prefix, "--omit=dev", "--no-audit", "--no-fund", "--registry=https://registry.npmjs.org", packageName];
   const command = d.managerPath || d.installMethod;
   const windows = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
-  await exec(windows ? process.env.ComSpec || "cmd.exe" : command, windows ? ["/d", "/s", "/c", `"${command}" ${args.map((arg) => `"${arg.replaceAll('"', '')}"`).join(" ")}`] : args, { timeout: 300000, maxBuffer: 1024 * 1024, env: workerEnvironment(), windowsHide: true });
+  // `/s /c` strips one outer pair of quotes; verbatim so Node does not escape the inner ones (as Node's `shell: true`).
+  const line = [command, ...args].map((arg) => `"${arg.replaceAll('"', '')}"`).join(" ");
+  await exec(windows ? process.env.ComSpec || "cmd.exe" : command, windows ? ["/d", "/s", "/c", `"${line}"`] : args, { timeout: 300000, maxBuffer: 1024 * 1024, env: workerEnvironment(), windowsHide: true, windowsVerbatimArguments: windows });
   const modules = join(prefix, "node_modules");
   const packageDir = join(modules, "@kahme247", "ompweb");
   const metadata = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
