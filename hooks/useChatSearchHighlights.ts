@@ -11,8 +11,9 @@ const PAINT_DELAY_MS = 150;
 // Rendered text that is not in the message's markdown source, which the server counts hits in:
 // code-block headers (language label, Copy button), highlighted code's line-number gutter,
 // KaTeX's hidden MathML copy, Mermaid's loading/error notes (the same set MessageCopyActions
-// strips) and the charts generated from tables (they repeat the table's labels and values).
-const NOT_MESSAGE_TEXT = "button, .markdown-code-header, .linenumber, .katex-mathml, .mermaid-block-loading, .mermaid-block-error, [data-table-chart]";
+// strips), the charts generated from tables (they repeat the table's labels and values) and
+// GFM footnotes' generated numbers, back-links and "Footnotes" heading (their bodies stay).
+const NOT_MESSAGE_TEXT = "button, .markdown-code-header, .linenumber, .katex-mathml, .mermaid-block-loading, .mermaid-block-error, [data-table-chart], [data-footnote-ref], [data-footnote-backref], [data-footnotes] > h2";
 
 // Absent before Chrome 105 / Safari 17.2 / Firefox 140: hits are then not
 // painted, but jumping to one still works.
