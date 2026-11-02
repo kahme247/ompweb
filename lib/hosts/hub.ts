@@ -642,6 +642,8 @@ function onFrame(link: Link, ws: LinkSocket, data: string | Uint8Array): void {
     // past blobBytes none are kept, so its `res` then fails host_blob_missing.
     const pending = link.pending.get(result.id);
     if (pending) {
+      // The deadline is for silence: at one unacked window per round trip a valid 64 MiB result outlasts a fixed one.
+      pending.timer.refresh();
       pending.blobBytes += result.bytes.byteLength;
       if (pending.blobBytes <= LINK_LIMITS.blobBytes) pending.blob.push(result.bytes);
     }
@@ -651,15 +653,29 @@ function onFrame(link: Link, ws: LinkSocket, data: string | Uint8Array): void {
   }
   if (Buffer.byteLength(data) > LINK_LIMITS.uplinkBytes) return ws.close(LINK_CLOSE.tooBig, "Uplink frame too large");
   let messages: (UpMessage | UnknownMessage)[];
+  // The decoded line of each part that completes one.
+  const wholes = new Map<UpMessage | UnknownMessage, UpMessage | UnknownMessage>();
+  const parts = link.parts.clone();
   try {
-    // Decode the whole frame first: a frame with one bad line applies nothing.
-    messages = data.split("\n").filter(Boolean).map((line) => decodeUp(line));
+    // Decode the whole frame first, joined lines included: a frame with one bad line applies nothing. The parts go
+    // through a copy of the joiner, and applyUp's dedup is mirrored by a running high mark.
+    let high = link.up.acked;
+    messages = data.split("\n").filter(Boolean).map((line) => {
+      const message = decodeUp(line);
+      const seq = "seq" in message ? message.seq : null;
+      if (seq === null || seq <= high) return message;
+      high = seq;
+      const whole = message.type === "part" ? parts.add(message) : null;
+      if (whole !== null) wholes.set(message, decodeUp(whole));
+      return message;
+    });
   } catch {
     return ws.close(LINK_CLOSE.invalidData, "Malformed uplink frame");
   }
+  link.parts = parts;
   for (const message of messages) {
     if (message.type === "ack") ackDown(link, message.ack);
-    else applyUp(link, message);
+    else applyUp(link, message, wholes.get(message));
   }
   // One answer per frame, also to one with nothing sequenced in it: a v5 daemon counts its frames in flight by them.
   enqueue(link, encodeLine({ type: "ack", ack: link.up.acked }));
@@ -728,8 +744,9 @@ async function adopt(link: Link, child: RemoteRpcTransport, sessionId: string, c
   }
 }
 
-/** `joined`: a line whose `part`s were applied, so it gets no dedup of its own. */
-function applyUp(link: Link, message: UpMessage | UnknownMessage, joined = false): void {
+/** `whole`: for a `part` that completes a line, that line decoded. `joined`: that line itself, which gets no dedup of
+ * its own (its parts were deduped). */
+function applyUp(link: Link, message: UpMessage | UnknownMessage, whole?: UpMessage | UnknownMessage, joined = false): void {
   if (message.type === "ping") return enqueue(link, encodeLine({ type: "pong" }));
   if (message.type === "pong" || message.type === "hello" || message.type === "ack") return;
   if (message.type === "unknown") {
@@ -742,10 +759,8 @@ function applyUp(link: Link, message: UpMessage | UnknownMessage, joined = false
   // Already applied before a resend.
   if (!joined && !link.up.applied(message.seq)) return;
   switch (message.type) {
-    case "part": {
-      const line = joined ? null : link.parts.add(message);
-      return line === null ? undefined : applyUp(link, decodeUp(line), true);
-    }
+    case "part":
+      return whole ? applyUp(link, whole, undefined, true) : undefined;
     case "stdout":
       return link.channels.get(message.ch)?.deliverLine(message.line);
     case "stderr":

@@ -434,7 +434,9 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
 - **A failed op never runs later.** An op that times out (504) or whose
   downlink ends or host goes offline (503, at once, not at the 30 s timeout)
   drops its `req` from the outbox (`failOp` in `hub.ts`), so a delete the user
-  saw fail is never applied after a redial. `destroyAndWait` returns once the
+  saw fail is never applied after a redial. The 30 s op deadline counts silence:
+  each binary result frame restarts it, so a large result at a slow ack round
+  trip is no 504 (a timeout still drops the `req` as above). `destroyAndWait` returns once the
   session's host is offline (`untilHostDown`); the kill stays queued for the
   link. A wrapper therefore stays in the registry until its child really exits
   (a resume whose handshake failed is registered in the catch for this), so a

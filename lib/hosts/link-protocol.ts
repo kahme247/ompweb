@@ -610,6 +610,14 @@ export class PartJoiner {
   private chunks: string[] | null = null;
   private at = 0;
 
+  /** A copy to try a frame's parts on: the original stays as it was until the frame is known to decode. */
+  clone(): PartJoiner {
+    const copy = new PartJoiner();
+    copy.chunks = this.chunks && [...this.chunks];
+    copy.at = this.at;
+    return copy;
+  }
+
   /** The whole line once `part` ends it, else null. A part at 0 starts a new line, dropping a partial one; a part that
    * does not continue the line in progress (its sender dropped the rest), or takes it past maxLineBytes or maxParts,
    * is dropped with that line. */
