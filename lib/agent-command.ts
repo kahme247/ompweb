@@ -43,11 +43,21 @@ export function commandErrorResponse(error: unknown): Response {
   return apiErrorResponse(error);
 }
 
+declare global {
+  var __ompSendFences: Map<string, Promise<void>> | undefined;
+}
+
+// globalThis, like the rpc-manager registry: survives a `bun --hot` re-evaluation.
+function sendFences(): Map<string, Promise<void>> {
+  return (globalThis.__ompSendFences ??= new Map());
+}
+
 /** Everything POST /api/agent/[id] does once the body is parsed; shared with
  * the browser socket. `owner`: the caller's web session (lib/web-auth.ts
  * `requestOwner`), whose uploads a prompt may attach. Never throws: failures
  * become `commandErrorResponse`. */
 export async function runAgentCommand(id: string, body: unknown, advisor: boolean, owner: string): Promise<Response> {
+  let release = () => {}; // frees this command's send fence; idempotent
   try {
     const command = body as { type?: unknown; [key: string]: unknown } | null;
     if (typeof command?.type !== "string" || !command.type.trim()) {
@@ -56,9 +66,27 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
     const type = command.type;
     // Attached files go to the session's host first; nothing reaches omp when one fails (spec U3).
     const uploads = takeUploads(command, owner);
+    // A session's commands reach omp in arrival order: one with uploads holds a fence until its
+    // `session.send` is called, so a later Stop never overtakes a prompt still attaching.
+    const prior = sendFences().get(id);
+    if (uploads) {
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const fence = prior ? prior.then(() => gate) : gate;
+      sendFences().set(id, fence);
+      void fence.then(() => {
+        if (sendFences().get(id) === fence) sendFences().delete(id);
+      });
+    }
     const send = async (session: AgentSessionWrapper) => {
-      if (uploads) await attachUploads(uploads, owner, session, command);
-      const result = await session.send(command);
+      let sending: Promise<unknown>;
+      try {
+        await prior;
+        if (uploads) await attachUploads(uploads, owner, session, command);
+        sending = session.send(command);
+      } finally {
+        release();
+      }
+      const result = await sending;
       if (uploads) forgetUploads(uploads);
       return result;
     };
@@ -143,5 +171,7 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
     return Response.json({ success: true, data: result });
   } catch (error) {
     return commandErrorResponse(error);
+  } finally {
+    release();
   }
 }

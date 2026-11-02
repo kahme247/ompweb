@@ -1082,7 +1082,7 @@ interface Upload {
   type: string;
   /** Its latest up_start on the current socket was answered: chunks go out from `sent`. */
   started: boolean;
-  /** up_starts sent so far: each carries the count as `n`, and only the answer naming the latest (`start: n`) counts. */
+  /** `n` of its latest up_start (unique in the worker): only the answer naming it (`start: n`) counts. */
   opens: number;
   /** Bytes the host has written (its last ack), and bytes read and handed to the sender. */
   acked: number;
@@ -1093,6 +1093,9 @@ interface Upload {
   /** Fails it when no answer or ack moves it on for UPLOAD_STALL_MS. */
   stallTimer: ReturnType<typeof setTimeout> | undefined;
 }
+
+/** Worker-wide, so a Retry under a reused id never repeats an `n` that a stalled attempt's late answer carries. */
+let upStartSeq = 0;
 
 function addUpload(client: Client, message: Record<string, unknown>): void {
   const id = String(message.id);
@@ -1133,7 +1136,7 @@ function stopUpload(upload: Upload): void {
 function openUpload(upload: Upload): void {
   stopUpload(upload);
   const { id, host, name, type } = upload;
-  upload.opens += 1;
+  upload.opens = ++upStartSeq;
   queueUp(`up:${id}`, JSON.stringify({ type: "up_start", id, n: upload.opens, host, name, size: upload.blob.size, mime: type }));
 }
 
