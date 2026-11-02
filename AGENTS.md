@@ -410,7 +410,10 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   `part`, whole lines and no unacked window (`link.sender.parts`). Main keeps at least N-1, and
   dropping one is an explicit decision (a hello
   outside the range gets close 4426 with `{"serverVersion":N}`, a pre-WebSocket
-  daemon's POST gets 426; an update-only mode is planned). Upgrade order: web app
+  daemon's POST gets 426). Once the WebSocket experiments end, the first version
+  released after them is a floor: the handshake, version report and an update op
+  keep working for every daemon on it or newer, and `MIN_LINK_PROTOCOL_VERSION`
+  never goes above it (spec, "Decided: backward compatibility"). Upgrade order: web app
   first, then hosts; a daemon need not support a newer main (a v5 daemon gets
   4426 from a v4 server and exits 1). A daemon dialing a pre-WebSocket server
   keeps redialing with a hint.
