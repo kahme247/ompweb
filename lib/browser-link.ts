@@ -517,9 +517,10 @@ function runOnce(key: string, run: () => Promise<Reply>): { result: Promise<Repl
   if (known && known.expiresAt > now) return { result: known.result, deduped: true };
   for (const [stale, entry] of map) if (entry.expiresAt <= now) map.delete(stale);
   if (map.size >= DEDUPE_MAX) {
-    // The oldest settled goes first; one in flight (Infinity) only when none has settled.
+    // Only a settled entry goes, the oldest first: evicting one in flight (Infinity) would let a resend run it twice,
+    // so the map grows past DEDUPE_MAX while that many commands are running.
     let oldest: [string, Remembered] | undefined;
-    for (const item of map) if (!oldest || item[1].expiresAt < oldest[1].expiresAt) oldest = item;
+    for (const item of map) if (item[1].expiresAt !== Infinity && (!oldest || item[1].expiresAt < oldest[1].expiresAt)) oldest = item;
     if (oldest) map.delete(oldest[0]);
   }
   // Called now, not after an await: on the fast path the command reaches omp in the link's order.
