@@ -77,7 +77,7 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
 const sleep = (ms: number) => delay(ms, undefined, { signal: stop.signal }).catch(() => {});
 
 /** One API call; throws on a status outside 2xx unless `allow` lists it. `cleanup`: the call goes on after a stop
- * signal (it deletes what the run made). */
+ * signal (it deletes what the run made, or creates a session that must then be deleted). */
 async function api(path: string, init: { method?: string; body?: unknown; allow?: number[]; cleanup?: boolean } = {}): Promise<{ bytes: number; json: Record<string, unknown> }> {
   const method = init.method ?? (init.body === undefined ? "GET" : "POST");
   const response = await fetch(`${server}${path}`, {
@@ -161,7 +161,7 @@ async function promptAndAbort(session: string, body: Record<string, unknown>): P
 
 const created: string[] = [];
 async function newSession(withModel: boolean): Promise<string> {
-  const { json } = await api("/api/agent/new", { body: { cwd: values.cwd, hostId, type: "ensure_session", ...(withModel ? model : {}) } });
+  const { json } = await api("/api/agent/new", { body: { cwd: values.cwd, hostId, type: "ensure_session", ...(withModel ? model : {}) }, cleanup: true });
   if (typeof json.sessionId !== "string") throw new Error(`POST /api/agent/new: no sessionId in ${JSON.stringify(json).slice(0, 300)}`);
   created.push(json.sessionId);
   return json.sessionId;
@@ -178,6 +178,10 @@ async function phase(name: string, load: () => Promise<void>, c: string): Promis
   let rounds = 0;
   let timeouts = 0;
   console.log(`phase ${name}: ${seconds} s from ${start.toISOString()}`);
+  // The stop signal aborts the call in flight, which ends its loop; the partial results below still print.
+  const stopped = (error: unknown) => {
+    if (!signalled) throw error;
+  };
   await Promise.all([
     (async () => {
       while (running()) {
@@ -188,10 +192,10 @@ async function phase(name: string, load: () => Promise<void>, c: string): Promis
         small.push(performance.now() - sent);
         await sleep(SMALL_EVERY_MS);
       }
-    })(),
+    })().catch(stopped),
     (async () => {
       for (; running() && rounds < MAX_ROUNDS; rounds++) await load();
-    })(),
+    })().catch(stopped),
   ]);
   console.log(`phase ${name}: ${rounds} large rounds; get_state on C over HTTP n=${small.length} p50=${Math.round(percentile(small, 50) ?? 0)} ms p95=${Math.round(percentile(small, 95) ?? 0)} ms max=${Math.round(Math.max(0, ...small))} ms; ${timeouts} timed out (5 s); settling ${SETTLE_MS / 1000} s`);
   await sleep(SETTLE_MS);
@@ -226,8 +230,11 @@ try {
   if (!stop.signal.aborted) await phase("up", async () => { await api(`/api/sessions/${b}`); }, c);
   console.log(summaries.join("\n"));
 } catch (error) {
-  console.error(error instanceof Error ? error.message : error);
-  process.exitCode = 1;
+  // A stop signal aborts the call in flight: that is the stop, not a failure.
+  if (!signalled) {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  }
 } finally {
   // A failed call leaves the other loop of a phase running: end it before the sessions go.
   stop.abort();
