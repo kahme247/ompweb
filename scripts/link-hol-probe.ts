@@ -15,7 +15,8 @@
 //       a copy of a remote image after its first fetch, so only one read would cross the link; a session read is not
 //       cached.
 // A and B take one cheap model call per prompt (B one in total, before the phases; A at most 200 per phase); C none.
-// Each phase runs at most 200 large rounds and waits 70 s after its load stops, so its samples are written (the
+// Each phase runs at most 200 large rounds (a round that starts before --seconds is up runs to its end, so a phase may
+// overrun by one round) and waits 70 s after its load stops, so its samples are written (the
 // daemon reports every 30 s, the server then writes every 30 s) before the next one starts, then the probe prints the
 // summary command for its window. It deletes the three sessions it made, and nothing else, at the end (also on
 // Ctrl-C, SIGTERM or SIGHUP). The images stay in the host's blob store (omp's content-addressed `blobs/`, ~5 MB of
@@ -202,7 +203,9 @@ try {
   await command(b, storedPrompt);
   await waitIdle(b, SETUP_TIMEOUT_MS);
   const read = await api(`/api/sessions/${b}`);
-  console.log(`a read of B is ${(read.bytes / 1e6).toFixed(1)} MB${read.bytes < 1024 * 1024 ? " (under 1 MiB: did the model take the images? not a large frame)" : ""}`);
+  console.log(`a read of B is ${(read.bytes / 1e6).toFixed(1)} MB`);
+  // Under 1 MiB the read is one inline line, not a large frame: the up phase would time something else.
+  if (read.bytes < 1024 * 1024) throw new Error("a read of B is under 1 MiB: did the model take the images?");
 
   // Made only now: a session nobody watches is disposed after 2 min (disconnected-idle), shorter than B's setup on a
   // slow link.
