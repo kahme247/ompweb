@@ -610,9 +610,12 @@ function openLink(link: Link, ws: LinkSocket, hello: Hello): void {
   // Every sequenced uplink message answers a downlink one, so a daemon that
   // has applied none (ack 0) has sent none: it is a fresh process whose
   // uplink numbering starts again at 1.
-  if (hello.ack <= 0) link.up = new SeqWindow();
-  // An op the replaced socket was answering is answered again from byte 0 by a fresh daemon: its old pieces would prefix them.
-  for (const pending of link.pending.values()) Object.assign(pending, { blob: [], blobBytes: 0 });
+  if (hello.ack <= 0) {
+    link.up = new SeqWindow();
+    // Such a daemon is asked again and answers from byte 0: the pieces of the replaced socket would prefix its result. The
+    // same process (ack above 0) resends only the `res` of a result whose pieces already arrived.
+    for (const pending of link.pending.values()) Object.assign(pending, { blob: [], blobBytes: 0 });
+  }
   // After a restart of this server the daemon is ahead: number above its ack.
   link.downSeq = Math.max(link.downSeq, hello.ack);
   released(link, link.outbox.ack(hello.ack));
