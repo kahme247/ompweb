@@ -5104,6 +5104,21 @@ test("a prompt whose session socket dropped before the answer toasts that it may
   });
 });
 
+test("a `!` command whose session socket dropped before the answer toasts that it may have run and stays out of the composer", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession("socket-lost-bash", [userMsg("u0", "q")]);
+    const offered = [];
+    const w = await mountSession("socket-lost-bash", undefined, { chatInputRef: { current: { insertIfEmpty: (text) => offered.push(text) } } });
+    world.socketAnswer = (command) => command.type === "bash" ? { status: 503, body: SOCKET_LOST } : null;
+    await act(async () => { await w.latest.handleSend("!touch /tmp/once"); await sleep(30); });
+    assert.deepEqual(offered, [], "the composer must not bring the command back: it may run twice");
+    assert.deepEqual(toastCalls, [["info", translate("agentSession.transportLostMaybeSent")]]);
+    assert.equal(w.latest.notices.length, 0);
+  });
+});
+
 test("a steer whose session socket dropped before the answer is reported as taken", async () => {
   await inWebSocketMode(async () => {
     resetWorld();
