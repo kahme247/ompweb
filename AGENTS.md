@@ -92,6 +92,7 @@ app/api/
   sessions/search/route.ts        GET ?q= — NDJSON { scores } batches (titles + transcripts); closing the request stops the scan
   sessions/[id]/route.ts          GET/PATCH/DELETE session
   sessions/[id]/context/route.ts  GET ?leafId= — context for a specific leaf
+  sessions/[id]/matches/route.ts  GET ?q=&offset= — 10 search hits per page in the active conversation (best match, then newest)
   sessions/[id]/export/route.ts   GET exported HTML for a session
   agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? }
   agent/[id]/route.ts             GET state | POST any RPC command
@@ -176,6 +177,7 @@ lib/
   session-reader.ts    session .jsonl parsing + path cache + buildSessionContext
   session-search.ts    shared fuzzy/phrase query scorer for sidebar search (title weights ≫ transcript)
   session-content-search.ts  server: per-file transcript text cache (size+mtime) + searchSessions()
+  session-search-matches.ts  per-hit listing (snippet, per-message ordinal) for the sidebar's expandable search results
   session-resume.ts    running-session list for auto-resume after a restart
   web-auth.ts          password-hash check + session cookie signing
   web-auth-secret.ts   per-installation session-signing key (~/.omp/agent/omp-web/web-auth-secret.json)
@@ -197,6 +199,7 @@ components/
   ChatInput.tsx       input bar + model/thinking/tools/compact controls
   ComposerPanels.tsx  composer-attached /btw + todo + subagent panels (collapsible, live states)
   BtwPanel.tsx        /btw side-question panel (stream, cancel, copy, follow-up) + history dialog
+  SessionSearchMatches.tsx  a search result's hits under its sidebar row (10 per page + "Load more…")
   TodoList.tsx        todo phase grid with preview/show-all (used by ComposerPanels)
   SubagentTranscriptDialog.tsx  task + final output summary dialog (wide, screen-adaptive)
   MessageView.tsx     renders one message (user/assistant/toolCall/toolResult)
@@ -233,6 +236,7 @@ hooks/
   useNavigationHistory.ts  in-app back/forward stack (record/peek/commit/drop) for visited chat views
   useWordPrediction.ts     debounced omp predict_word ghost text + feedback
   useBtw.ts                /btw records/active panel/history dialog fed by btw_* SSE frames
+  useChatSearchHighlights.ts  find-in-page for the sidebar search: CSS Custom Highlight API paint + jump to a picked hit
 
 bin/
   bun-runtime.js      resolves the Bun binary (npm `@oven/bun-*`, else PATH, minimum version check); used by the launcher, scripts and nix
@@ -1030,6 +1034,29 @@ during the wait.
 - Programmatic smooth scrolling must respect `prefers-reduced-motion`
   (`usePrefersReducedMotion` in `hooks/usePrefersReducedMotion.ts` — also the
   only way to stop SVG SMIL animations, which CSS cannot).
+- A jump to a sidebar search hit calls `holdScrollPosition()` (`useAgentSession`):
+  it marks the initial scroll done and stops following, as a manual scroll-up
+  would, so the next frame does not pull the reader back to the bottom.
+
+### Search hits in the chat (`/api/sessions/[id]/matches`, `hooks/useChatSearchHighlights.ts`)
+- While the sidebar search has a query, each session row's chevron lists its
+  hits (`SessionSearchMatches`, 10 per page). The server ranks hits of the
+  active conversation's user text and assistant text blocks (quality, then
+  newest message) and builds snippets for the returned page only.
+- A hit is addressed as `(entryId, ordinal)`: its index among that message's
+  hits. The server counts in the markdown source (a user message's text blocks
+  joined with `\n`, each assistant text block separately); the chat counts in
+  the rendered `[data-message-text][data-entry-id]` text, skipping code-block
+  headers, buttons and KaTeX MathML (`NOT_MESSAGE_TEXT`). New chrome inside
+  message text must be excluded there too, or later ordinals shift. Text that
+  rendering drops (a link URL) still shifts them; the jump then lands on the
+  message.
+- Painting uses the CSS Custom Highlight API (`omp-search`,
+  `omp-search-current` in `globals.css`), repainted on DOM mutations; browsers
+  without it still jump. A jump widens the lazy render window
+  (`revealMessage`) first. Each click is a new target object used once:
+  `onSearchTargetHandled` drops it in AppShell, so reopening the session later
+  does not jump again. An empty query clears the highlights and the target.
 
 ### MCP configuration (`lib/omp/mcp-config.ts`, `/api/mcp`, `components/McpConfig.tsx`)
 - Project MCP config resolution order: `.omp/mcp.json`, `.omp/.mcp.json`,

@@ -9,6 +9,7 @@ import { ConfirmDialog } from "./ui/field";
 import { copyText } from "@/lib/clipboard";
 import { transcriptToMarkdown } from "@/lib/transcript";
 import { toast } from "./ui/toast";
+import { SessionSearchMatches, type SearchMatchTarget } from "./SessionSearchMatches";
 import { remoteHostId } from "@/lib/project-ordering";
 import {
   MAX_PROJECT_SESSIONS,
@@ -120,6 +121,9 @@ interface ProjectRowProps {
   onSelectSession: (s: SessionInfo) => void;
   onRenamed?: () => void;
   onSessionDeleted?: (id: string) => void;
+  /** The active search query; each session row can then list its hits. */
+  searchQuery?: string;
+  onOpenSearchMatch?: (session: SessionInfo, target: SearchMatchTarget) => void;
 }
 
 /** One project in the sidebar: a card row matching the session items' visual
@@ -153,6 +157,8 @@ function ProjectRow({
   onSelectSession,
   onRenamed,
   onSessionDeleted,
+  searchQuery,
+  onOpenSearchMatch,
 }: ProjectRowProps) {
   const { t } = useI18n();
   const [hovered, setHovered] = useState(false);
@@ -463,6 +469,8 @@ function ProjectRow({
                   onSelectSession={onSelectSession}
                   onRenamed={onRenamed}
                   onSessionDeleted={onSessionDeleted}
+                  searchQuery={searchQuery}
+                  onOpenSearchMatch={onOpenSearchMatch}
                   depth={0}
                 />
               ))}
@@ -514,6 +522,8 @@ const SessionTreeItem = memo(function SessionTreeItem({
   onSelectSession,
   onRenamed,
   onSessionDeleted,
+  searchQuery,
+  onOpenSearchMatch,
   depth,
 }: {
   node: SessionTreeNode;
@@ -526,9 +536,13 @@ const SessionTreeItem = memo(function SessionTreeItem({
   onSelectSession: (s: SessionInfo) => void;
   onRenamed?: () => void;
   onSessionDeleted?: (id: string) => void;
+  searchQuery?: string;
+  onOpenSearchMatch?: (session: SessionInfo, target: SearchMatchTarget) => void;
   depth: number;
 }) {
   const [collapsed, setCollapsed] = useState(false);
+  const [matchesOpen, setMatchesOpen] = useState(false);
+  if (matchesOpen && !searchQuery) setMatchesOpen(false);
   const hasChildren = node.children.length > 0;
   const sessionId = node.session.id;
 
@@ -551,6 +565,12 @@ const SessionTreeItem = memo(function SessionTreeItem({
   const handleToggleCollapse = useCallback(() => {
     setCollapsed((v) => !v);
   }, []);
+  const handleToggleMatches = useCallback(() => {
+    setMatchesOpen((v) => !v);
+  }, []);
+  const handleOpenMatch = useCallback((target: SearchMatchTarget) => {
+    onOpenSearchMatch?.(node.session, target);
+  }, [onOpenSearchMatch, node.session]);
 
   return (
     <div>
@@ -581,8 +601,13 @@ const SessionTreeItem = memo(function SessionTreeItem({
           hasChildren={hasChildren}
           collapsed={collapsed}
           onToggleCollapse={handleToggleCollapse}
+          matchesExpanded={matchesOpen}
+          onToggleMatches={searchQuery && onOpenSearchMatch ? handleToggleMatches : undefined}
         />
       </div>
+      {matchesOpen && searchQuery && onOpenSearchMatch && (
+        <SessionSearchMatches key={searchQuery} sessionId={sessionId} query={searchQuery} depth={depth} onOpen={handleOpenMatch} />
+      )}
       {hasChildren && !collapsed && (
         <div>
           {node.children.map((child) => (
@@ -598,6 +623,8 @@ const SessionTreeItem = memo(function SessionTreeItem({
               onSelectSession={onSelectSession}
               onRenamed={onRenamed}
               onSessionDeleted={onSessionDeleted}
+              searchQuery={searchQuery}
+              onOpenSearchMatch={onOpenSearchMatch}
               depth={depth + 1}
             />
           ))}
@@ -629,7 +656,9 @@ const SessionTreeItem = memo(function SessionTreeItem({
   if (prev.relativeTimeNow !== next.relativeTimeNow) return false;
   if (prev.onSelectSession !== next.onSelectSession
     || prev.onRenamed !== next.onRenamed
-    || prev.onSessionDeleted !== next.onSessionDeleted) return false;
+    || prev.onSessionDeleted !== next.onSessionDeleted
+    || prev.searchQuery !== next.searchQuery
+    || prev.onOpenSearchMatch !== next.onOpenSearchMatch) return false;
   return true;
 });
 const SessionItem = memo(function SessionItem({
@@ -647,6 +676,8 @@ const SessionItem = memo(function SessionItem({
   collapsed = false,
   relativeTimeNow,
   onToggleCollapse,
+  matchesExpanded = false,
+  onToggleMatches,
 }: {
   session: SessionInfo;
   isSelected: boolean;
@@ -662,6 +693,9 @@ const SessionItem = memo(function SessionItem({
   relativeTimeNow: number;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
+  /** Present while a search is active: shows the session's hits below the row. */
+  matchesExpanded?: boolean;
+  onToggleMatches?: () => void;
 }) {
   const { t, locale } = useI18n();
   const exitTitle = exited ? formatExitedSessionNotice(exited) : "";
@@ -804,6 +838,19 @@ const SessionItem = memo(function SessionItem({
             pointerEvents: "none",
           }}
         />
+      )}
+      {onToggleMatches && !renaming && (
+        <button
+          type="button"
+          className="session-item-icon-button"
+          onClick={(event) => { event.stopPropagation(); onToggleMatches(); }}
+          title={matchesExpanded ? t("sessionSidebar.hideMatches") : t("sessionSidebar.showMatches")}
+          aria-label={matchesExpanded ? t("sessionSidebar.hideMatches") : t("sessionSidebar.showMatches")}
+          aria-expanded={matchesExpanded}
+          style={{ position: "absolute", left: depth * 14, top: 3, display: "flex", alignItems: "center", justifyContent: "center", width: 20, height: 24, padding: 0, border: "none", background: "none", color: "var(--text-dim)", cursor: "pointer" }}
+        >
+          <ChevronRight size={12} strokeWidth={1.8} aria-hidden="true" style={{ transform: matchesExpanded ? "rotate(90deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }} />
+        </button>
       )}
       {renaming ? (
         <input ref={inputRef} autoFocus aria-label={t("sessionSidebar.rename")} value={renameValue} onChange={(event) => setRenameValue(event.target.value)} onBlur={commitRename} onKeyDown={(event) => { if (event.key === "Enter") void commitRename(); if (event.key === "Escape") { event.preventDefault(); renameCancelRef.current = true; setRenaming(false); } }} style={{ flex: 1, height: 25, padding: "3px 7px", border: "1px solid var(--accent)", borderRadius: "var(--radius-control)", outline: "none", background: "var(--bg)", color: "var(--text)", fontSize: 12 }} />

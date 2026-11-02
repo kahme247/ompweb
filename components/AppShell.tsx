@@ -10,6 +10,7 @@ import { useNavigationHistory } from "@/hooks/useNavigationHistory";
 import { isMacPlatform, navigateShortcutHint, NAVIGATION_HISTORY_MAX_ENTRIES } from "@/lib/navigation-history";
 import { useMobileSidebarGestures } from "@/hooks/useMobileSidebarGestures";
 import { SessionSidebar } from "./SessionSidebar";
+import type { SearchMatchTarget } from "./SessionSearchMatches";
 import type { WorktreeContext } from "./SessionSidebar-helpers";
 import { ToastProvider } from "./ui/toast";
 import { toast } from "./ui/toast";
@@ -1825,6 +1826,16 @@ export function AppShell({ appName }: { appName: string }) {
     return () => observer.disconnect();
   }, [windowTitle]);
 
+  // The sidebar search drives the chat's find-in-page highlights.
+  const [chatSearchQuery, setChatSearchQuery] = useState("");
+  // One jump per click: dropped once the chat used it, so reopening that session later starts at the bottom.
+  const [searchMatchTarget, setSearchMatchTarget] = useState<SearchMatchTarget | null>(null);
+  const clearSearchMatchTarget = useCallback(() => setSearchMatchTarget(null), []);
+  const handleSearchQueryChange = useCallback((query: string) => {
+    setChatSearchQuery(query);
+    if (!query) setSearchMatchTarget(null);
+  }, []);
+
   const sidebarContent = (
     <SessionSidebar
       selectedSessionId={selectedSession?.id ?? null}
@@ -1851,6 +1862,8 @@ export function AppShell({ appName }: { appName: string }) {
       navigation={sidebarNavigation}
       updateAvailable={Boolean(appUpdate?.updateAvailable) || ompUpdateAvailable}
       onClose={isMobile ? handleSidebarToggle : undefined}
+      onSearchQueryChange={handleSearchQueryChange}
+      onOpenSearchMatch={setSearchMatchTarget}
     />
   );
 
@@ -2578,6 +2591,9 @@ export function AppShell({ appName }: { appName: string }) {
               hideToolActivity={hideToolActivity}
               expandThinkingByDefault={expandThinkingByDefault}
               hideThinkingBlock={hideThinkingBlock}
+              searchQuery={chatSearchQuery}
+              searchTarget={searchMatchTarget && searchMatchTarget.sessionId === selectedSession?.id ? searchMatchTarget : null}
+              onSearchTargetHandled={clearSearchMatchTarget}
             />
           ) : initialCwdStatus === "validating" ? (
             <WorkspaceState
