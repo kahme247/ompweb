@@ -47,7 +47,7 @@ export function uploadRecovery(uploads: AttachedUpload[]): { uploads?: ChatDraft
 }
 
 export function uploadErrorMessage(error: unknown): string {
-  return error instanceof UploadFailedError ? formatApiError({ error: error.message, code: error.code }) : translate("chatInput.uploadFailed");
+  return error instanceof UploadFailedError ? formatApiError({ error: error.message, code: error.code }) : error instanceof TypeError ? translate("fileExplorer.uploadNetworkError") : translate("chatInput.uploadFailed");
 }
 
 const percentOf = (upload: AttachedUpload) => (upload.size > 0 ? Math.floor((upload.received * 100) / upload.size) : 100);

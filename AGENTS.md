@@ -1256,6 +1256,9 @@ during the wait.
   itself (same id, back-off restarting after new bytes, chip shows
   "Reconnecting…") until an outage reaches 5 min, timed from its first
   failure; other failures, and a bfcache pagehide (410), show Retry.
+  Back-off waits are capped to the remaining outage time and re-check the
+  deadline after waking; no retry starts at or past it. Network `TypeError`s
+  use the existing localized network-error explanation in upload chip tooltips.
 - Limits on main: at most 32 unfinished uploads per owner (429
   `too_many_uploads`); an unfinished entry idle 10 min (no start, frame or ack)
   is dropped from the registry (a later `up_start` re-registers it). The worker

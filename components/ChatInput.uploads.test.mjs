@@ -25,8 +25,10 @@ globalThis.fetch = async (url, init = {}) => {
   if (String(url).startsWith("/api/uploads/") && method === "PUT") {
     await gate;
     if (failNextPut) {
-      const { status, code } = failNextPut;
+      const failure = failNextPut;
       failNextPut = null;
+      if (failure instanceof Error) throw failure;
+      const { status, code } = failure;
       return json({ error: code, code }, status);
     }
     const offset = Number(new URL(String(url), "https://omp.test/").searchParams.get("offset"));
@@ -261,6 +263,16 @@ test("Retry on a failed chip resumes the same upload, then the chip finishes", a
   assert.equal(within(chipOf("data.zip")).queryByRole("button", { name: RETRY }), null);
   await act(async () => { screen.getByRole("button", { name: SEND }).click(); });
   assert.deepEqual(sent[0][2], [id]);
+});
+
+test("a reconnecting chip identifies a network failure instead of a generic upload failure", async () => {
+  failNextPut = new TypeError("Failed to fetch");
+  const ref = renderComposer("uploads-network-error", []);
+  await act(async () => { ref.current.addFiles([binaryFile("network.zip")]); });
+  await waitFor(() => assert.match(chipOf("network.zip").textContent, RECONNECTING));
+  assert.match(chipOf("network.zip").title, /network error/i);
+  assert.equal(within(chipOf("network.zip")).queryByRole("button", { name: RETRY }), null);
+  await act(async () => { within(chipOf("network.zip")).getByRole("button", { name: REMOVE_FILE }).click(); });
 });
 
 test("an image switches Inline -> As file -> Inline, and switching back aborts its upload", async () => {

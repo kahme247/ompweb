@@ -391,11 +391,12 @@ export function uploadFile(
         if (controller.signal.aborted || !resumable || Date.now() - outageAt >= RESUME_GIVE_UP_MS) throw error;
         waiting = true;
         onReconnecting(error);
+        const delay = Math.min(RESUME_DELAYS_MS[Math.min(failures++, RESUME_DELAYS_MS.length - 1)], RESUME_GIVE_UP_MS - (Date.now() - outageAt));
         await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, RESUME_DELAYS_MS[Math.min(failures++, RESUME_DELAYS_MS.length - 1)]);
+          const timer = setTimeout(resolve, delay);
           controller.signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
         });
-        if (controller.signal.aborted) throw error;
+        if (controller.signal.aborted || Date.now() - outageAt >= RESUME_GIVE_UP_MS) throw error;
       }
     }
   })();
