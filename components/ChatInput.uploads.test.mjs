@@ -81,6 +81,7 @@ const WAITING = /Waiting for 1 upload|chatInput\.uploadsWaiting/;
 const FAILED_BLOCK = /1 upload\(s\) failed|chatInput\.uploadsFailedBlock/;
 const UPLOAD_FAILED = /Upload failed|chatInput\.uploadFailed/;
 const RETRY = /^(Retry upload|chatInput\.uploadRetry)$/;
+const RECONNECTING = /Reconnecting…|chatInput\.uploadReconnecting/;
 const REMOVE_FILE = /^(Remove file|chatInput\.removeFile)$/;
 const TOO_LARGE = /skipped: files up to 2 GB|chatInput\.attachmentUploadTooLarge/;
 const UPLOAD_LIMIT = /at most 20 files|chatInput\.attachmentUploadLimit/;
@@ -194,7 +195,8 @@ test("Enter refuses to send while an upload is in flight, and while one failed",
   assert.match(screen.getByRole("alert").textContent, WAITING);
   assert.equal(sent.length, 0, "no send while it uploads");
 
-  failNextPut = { status: 503, code: "host_offline" };
+  // A full disk: waiting cannot fix it, so the chip fails instead of resuming by itself.
+  failNextPut = { status: 507, code: "upload_write_failed" };
   await release();
   await waitFor(() => assert.match(chipOf("data.zip").textContent, UPLOAD_FAILED));
   await pressEnter();
@@ -242,7 +244,7 @@ test("removing a chip aborts its upload in flight, or discards a finished one", 
 });
 
 test("Retry on a failed chip resumes the same upload, then the chip finishes", async () => {
-  failNextPut = { status: 503, code: "host_offline" };
+  failNextPut = { status: 507, code: "upload_write_failed" };
   const sent = [];
   const ref = renderComposer("uploads-retry", sent);
   await act(async () => { ref.current.addFiles([binaryFile("data.zip")]); });
@@ -342,7 +344,7 @@ test("a draft keeps finished uploads only, and restores them as done chips", asy
   assert.deepEqual(sent[0][2], [done.id]);
 });
 
-test("a stall the worker reports fails the chip with a Retry", async () => {
+test("a stall the worker reports shows Reconnecting… and resumes by itself under the same id", async () => {
   // The browser-link path: a fake shared worker, switched to `ws`, answers the upload with the worker's stall error.
   let port;
   globalThis.SharedWorker = class {
@@ -362,7 +364,16 @@ test("a stall the worker reports fails the chip with a Retry", async () => {
       return message;
     });
     await act(async () => { port.onmessage({ data: { up: upload.id, error: { status: 504, code: "upload_stalled", message: "The upload stalled" } } }); });
-    await waitFor(() => assert.ok(within(chipOf("data.zip")).getByRole("button", { name: RETRY })));
+    await waitFor(() => assert.match(chipOf("data.zip").textContent, RECONNECTING));
+    assert.equal(within(chipOf("data.zip")).queryByRole("button", { name: RETRY }), null, "no Retry while it waits");
+    const again = await waitFor(() => {
+      const starts = port.posted.filter((each) => each.op === "upload" && each.id === upload.id);
+      assert.equal(starts.length, 2, "started again after the back-off");
+      return starts[1];
+    }, { timeout: 3_000 });
+    await act(async () => { port.onmessage({ data: { up: again.id, received: 8, done: true } }); });
+    await waitFor(() => assert.equal(screen.getByRole("button", { name: SEND }).disabled, false));
+    assert.doesNotMatch(chipOf("data.zip").textContent, RECONNECTING);
   } finally {
     port.onmessage({ data: { transport: "sse" } });
   }

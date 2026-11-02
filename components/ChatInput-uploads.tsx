@@ -21,6 +21,7 @@ export interface AttachedUpload {
   /** Bytes the host has. */
   received: number;
   status: "uploading" | "done" | "error";
+  /** Why it failed; while `uploading`, the transient failure it waits to resume from. */
   error: string | null;
   /** An image sent As file: its thumbnail (an object URL). */
   previewUrl: string | null;
@@ -98,9 +99,10 @@ function ProgressBar({ upload }: { upload: AttachedUpload }) {
 export function UploadChip({ upload, onRemove, onRetry }: { upload: AttachedUpload; onRemove: () => void; onRetry: () => void }) {
   const { t } = useI18n();
   const failed = upload.status === "error";
+  const reconnecting = upload.status === "uploading" && upload.error !== null;
   return (
     <div
-      title={failed ? `${upload.name}: ${upload.error ?? ""}` : upload.name}
+      title={failed || reconnecting ? `${upload.name}: ${upload.error ?? ""}` : upload.name}
       style={{
         position: "relative", overflow: "hidden",
         display: "flex", alignItems: "center", gap: 7,
@@ -124,7 +126,7 @@ export function UploadChip({ upload, onRemove, onRetry }: { upload: AttachedUplo
         {upload.name}
       </span>
       <span style={{ flexShrink: 0, fontSize: 10, color: failed ? "var(--status-error)" : "var(--text-dim)" }}>
-        {failed ? t("chatInput.uploadFailed") : upload.status === "uploading" ? `${percentOf(upload)}%` : formatUploadSize(upload.size)}
+        {failed ? t("chatInput.uploadFailed") : reconnecting ? t("chatInput.uploadReconnecting") : upload.status === "uploading" ? `${percentOf(upload)}%` : formatUploadSize(upload.size)}
       </span>
       {failed && upload.file && (
         <ChipButton label={t("chatInput.uploadRetry")} onClick={onRetry}>

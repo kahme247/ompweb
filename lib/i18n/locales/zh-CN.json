@@ -361,6 +361,7 @@
   "chatInput.imageInlineTooLarge": "过大，无法内联发送",
   "chatInput.uploadFailed": "上传失败",
   "chatInput.uploadRetry": "重试上传",
+  "chatInput.uploadReconnecting": "正在重新连接…",
   "chatInput.uploadProgress": "正在上传 {name}",
   "chatInput.uploadsPending": "{count} 个上传中",
   "chatInput.uploadsWaiting": "正在等待 {count} 个上传完成。",

@@ -378,6 +378,7 @@
   "chatInput.imageInlineTooLarge": "Too large to send inline",
   "chatInput.uploadFailed": "Upload failed",
   "chatInput.uploadRetry": "Retry upload",
+  "chatInput.uploadReconnecting": "Reconnecting…",
   "chatInput.uploadProgress": "Uploading {name}",
   "chatInput.uploadsPending": "{count} uploading",
   "chatInput.uploadsWaiting": "Waiting for {count} upload(s) to finish.",

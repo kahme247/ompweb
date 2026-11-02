@@ -1251,14 +1251,16 @@ during the wait.
   per-id queue so an abort cannot be undone by an earlier attach's receipt.
   A start that finds the upload aborted sends
   `uploadAbort` to the host and answers 404 `upload_missing`. A host-link drop
-  fails each in-flight upload with 503 `host_offline`; the chip's Retry (same
-  id) resumes. No auto-retry.
+  fails each in-flight upload with 503 `host_offline`. `uploadFile`
+  (`lib/event-stream.ts`) resumes 502/503/504 and HTTP network failures by
+  itself (same id, back-off, chip shows "Reconnecting…") until 5 min pass
+  without new bytes; other failures, and a bfcache pagehide (410), show Retry.
 - Limits on main: at most 32 unfinished uploads per owner (429
   `too_many_uploads`); an unfinished entry idle 10 min (no start, frame or ack)
   is dropped from the registry (a later `up_start` re-registers it). The worker
   fails an upload no start answer or ack advances for `UPLOAD_STALL_MS` (120 s)
   with 504 `upload_stalled` and forgets it without aborting it on the host, so
-  Retry resumes. Page navigation settles pending WebSocket-upload promises before
+  the tab's automatic resume continues it. Page navigation settles pending WebSocket-upload promises before
   the worker's `bye`: a composer retained by bfcache shows Retry after restoration,
   not a permanently uploading chip. This does not automatically resume navigation.
   The daemon's `sweep` deletes staged files older than 24 h and aborts open uploads

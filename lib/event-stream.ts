@@ -104,9 +104,10 @@ class Transport {
     };
     this.holdLifetimeLock();
     window.addEventListener("pagehide", () => {
-      // The worker aborts these on bye, including when this page enters the bfcache.
+      // The worker aborts these on bye, including when this page enters the bfcache. 410, not a 5xx: the host copy is
+      // gone, so the chip offers Retry instead of resuming by itself (spec U2).
       for (const [id, listener] of [...this.uploads]) {
-        listener({ up: id, error: { status: 503, code: "upload_failed", message: "The upload failed. Retry it." } });
+        listener({ up: id, error: { status: 410, code: "upload_failed", message: "The upload failed. Retry it." } });
       }
       this.port.postMessage({ op: "bye" });
     });
@@ -321,30 +322,78 @@ export function newUploadId(): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+/** Back-off before each automatic resume; the last value repeats. */
+const RESUME_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 15_000];
+/** A transient failure with no new bytes on the host for this long stops resuming: the chip then shows Retry. */
+const RESUME_GIVE_UP_MS = 5 * 60_000;
+
 /**
  * Uploads `file` to `hostId`'s staging area (docs/specs/2026-11-02-file-uploads-design.md U4): over the worker's browser
  * link in the `ws` transport, else over HTTP. `onProgress` gets the bytes the host has. Passing the `id` of a failed
- * upload resumes it from the host's offset.
+ * upload resumes it from the host's offset. A transient failure resumes by itself after a back-off: `onReconnecting`
+ * gets its error while it waits, and null once the host answers again.
  */
-export function uploadFile(file: File, hostId: string, onProgress: (received: number) => void, id = newUploadId()): UploadHandle {
+export function uploadFile(
+  file: File,
+  hostId: string,
+  onProgress: (received: number) => void,
+  id = newUploadId(),
+  onReconnecting: (error: unknown) => void = () => {},
+): UploadHandle {
   const controller = new AbortController();
-  const link = transport?.mode === "ws" ? transport : null;
-  let viaLink = link !== null;
-  const promise = new Promise<void>((resolve, reject) => {
+  let viaLink = false;
+  let link: Transport | null = null;
+  let progressAt = Date.now();
+  let highest = -1;
+  let waiting = false;
+  const progress = (received: number) => {
+    if (received > highest) {
+      highest = received;
+      progressAt = Date.now();
+    }
+    if (waiting) {
+      waiting = false;
+      onReconnecting(null);
+    }
+    onProgress(received);
+  };
+  // One start: the transport is chosen anew each time (it may have changed while the upload waited).
+  const attempt = () => new Promise<void>((resolve, reject) => {
+    link = transport?.mode === "ws" ? transport : null;
     const overHttp = () => {
       viaLink = false;
-      uploadOverHttp(id, file, hostId, onProgress, controller.signal).then(resolve, reject);
+      uploadOverHttp(id, file, hostId, progress, controller.signal).then(resolve, reject);
     };
+    viaLink = link !== null;
     if (!link) return overHttp();
     link.upload(id, file, hostId, (message) => {
       if ("http" in message) overHttp();
       else if ("error" in message) reject(new UploadFailedError(message.error.status, message.error.code, message.error.message));
       else {
-        onProgress(message.received);
+        progress(message.received);
         if (message.done) resolve();
       }
     });
   });
+  const promise = (async () => {
+    for (let failures = 0; ; failures++) {
+      try {
+        return await attempt();
+      } catch (error) {
+        // The host link or the web server dropped (503, a proxy's 502/504, fetch's network TypeError), or the upload
+        // stalled (504): starting the same id again resumes from the host's offset. Anything else needs the user.
+        const resumable = error instanceof UploadFailedError ? error.status >= 502 && error.status <= 504 : error instanceof TypeError;
+        if (controller.signal.aborted || !resumable || Date.now() - progressAt >= RESUME_GIVE_UP_MS) throw error;
+        waiting = true;
+        onReconnecting(error);
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, RESUME_DELAYS_MS[Math.min(failures, RESUME_DELAYS_MS.length - 1)]);
+          controller.signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+        });
+        if (controller.signal.aborted) throw error;
+      }
+    }
+  })();
   return {
     id,
     promise,
