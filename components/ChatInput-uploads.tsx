@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { AlertCircle, File as FileIcon, Loader2, RotateCw, X } from "lucide-react";
+import { AlertCircle, File as FileIcon, Loader2, RotateCw, WifiOff, X } from "lucide-react";
 import type { ChatDraftUpload } from "@/lib/draft-store";
 import { UploadFailedError } from "@/lib/event-stream";
 import { formatUploadSize } from "@/lib/upload-limits";
@@ -156,6 +156,7 @@ export function ImageChip({ previewUrl, upload, canSwitch, onSwitch, onRemove, o
 }) {
   const { t } = useI18n();
   const failed = upload?.status === "error";
+  const reconnecting = upload?.status === "uploading" && upload.error !== null;
   // Failed, or waiting to resume by itself: the tooltip says why.
   return (
     <div style={{ position: "relative", flexShrink: 0 }} title={upload?.error ?? undefined}>
@@ -190,6 +191,16 @@ export function ImageChip({ previewUrl, upload, canSwitch, onSwitch, onRemove, o
         >
           <RotateCw size={11} strokeWidth={2} aria-hidden="true" />
         </ChipButton>
+      )}
+      {reconnecting && (
+        <span
+          role="img"
+          aria-label={t("chatInput.uploadReconnecting")}
+          title={t("chatInput.uploadReconnecting")}
+          style={{ position: "absolute", top: -5, left: -5, width: 24, height: 24, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 6, background: "var(--bg-panel)", border: "1px solid var(--border)", color: "var(--text-muted)" }}
+        >
+          <WifiOff size={11} strokeWidth={2} aria-hidden="true" />
+        </span>
       )}
       <ChipButton
         label={t("chatInput.removeImage")}

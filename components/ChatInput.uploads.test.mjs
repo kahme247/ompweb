@@ -283,6 +283,16 @@ test("an image switches Inline -> As file -> Inline, and switching back aborts i
   await release();
 });
 
+test("an image sent As file shows that it is reconnecting, without hovering", async () => {
+  const { ImageChip } = await import("./ChatInput-uploads.tsx");
+  const upload = { id: "u", name: "dot.png", size: 8, hostId: "local", file: null, received: 4, status: "uploading", error: "This machine is offline", previewUrl: null };
+  const props = { previewUrl: null, canSwitch: true, onSwitch() {}, onRemove() {} };
+  const { rerender } = render(React.createElement(ImageChip, { ...props, upload }));
+  assert.ok(screen.getByRole("img", { name: RECONNECTING }));
+  rerender(React.createElement(ImageChip, { ...props, upload: { ...upload, error: null } }));
+  assert.equal(screen.queryByRole("img", { name: RECONNECTING }), null, "gone once the host answers");
+});
+
 test(`only ${MAX_UPLOADS_PER_MESSAGE} files attach to one message`, async () => {
   const ref = renderComposer("uploads-count", []);
   const files = Array.from({ length: MAX_UPLOADS_PER_MESSAGE + 1 }, (_, index) => binaryFile(`f${index}.zip`));
