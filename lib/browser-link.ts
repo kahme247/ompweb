@@ -20,7 +20,7 @@ import { isTrustedProxyRequest, OMP_WEB_SESSION_COOKIE, OMP_WEB_TRUSTED_HEADER }
 // window. A link outlives its socket for LINK_RESUME_MS, so a reconnect resumes it instead of re-subscribing.
 
 /** Mutable so tests can shorten them. `helloMs`: a socket that has not said hello by then is closed. */
-export const browserLinkTimings = { pingMs: LINK_LIMITS.pingMs, offlineMs: LINK_LIMITS.offlineMs, resumeMs: LINK_RESUME_MS, helloMs: 10_000 };
+export const browserLinkTimings = { pingMs: LINK_LIMITS.pingMs, offlineMs: LINK_LIMITS.offlineMs, resumeMs: LINK_RESUME_MS, helloMs: 10_000, ackMs: 120_000 };
 /** Mutable so tests can shrink them. A link holding more than `backlogBytes` (sent and unacked, plus queued) is dropped;
  * past `totalBacklogBytes` across every link, the links whose sockets have been gone longest are dropped first. Either
  * way their browsers resync. */
@@ -88,7 +88,7 @@ interface BrowserLink {
   readonly up: SeqWindow;
   readonly parts: PartJoiner;
   offlineTimer: NodeJS.Timeout | undefined;
-  /** Runs while lines are unacked: offlineMs without an ack that frees any closes the socket (see `watchAcks`). */
+  /** Runs while lines are unacked: ackMs without an ack that frees any closes the socket (see `watchAcks`). */
   ackTimer: NodeJS.Timeout | undefined;
   expiryTimer: NodeJS.Timeout | undefined;
   disposed: boolean;
@@ -376,17 +376,18 @@ function dispose(link: BrowserLink, code: number): void {
   link.connection.close();
 }
 
-/** Bytes sent and unacked for offlineMs without any ack that frees some mean a stuck or hostile browser: pings alone
- * keep `sawBrowser` quiet, and the link would hold its backlog for nothing. The socket closes like a silent one (the
- * link stays resumable, so the total budget then applies to it). An honest browser acks every piece it applies, within
- * flushMs, so a slow link still acks long before the deadline. */
+/** Bytes sent and unacked for ackMs without any ack that frees some mean a stuck or hostile browser: pings alone keep
+ * `sawBrowser` quiet, and the link would hold its backlog for nothing. The socket closes like a silent one (the link
+ * stays resumable, so the total budget then applies to it). An honest browser acks only after a whole message has
+ * arrived, so ackMs (120 s) is the time one piece (256 KiB) may take: a link under about 2.2 KB/s (17 kbit/s) cannot
+ * finish one, and its partial piece is lost at each close. Any finite deadline bounds a hostile peer to backlogBytes. */
 function startAckTimer(link: BrowserLink): NodeJS.Timeout {
   const timer = setTimeout(() => {
     const ws = link.socket;
     if (!ws || link.unacked === 0) return;
     detach(link);
     ws.close();
-  }, browserLinkTimings.offlineMs);
+  }, browserLinkTimings.ackMs);
   timer.unref?.();
   return timer;
 }
