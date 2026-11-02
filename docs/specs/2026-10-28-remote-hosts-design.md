@@ -228,7 +228,7 @@ messages go again after the redial.
 | `ack {ack}` | both | Highest `seq` applied from the other side; unsequenced. |
 | `ping` / `pong` | both | Liveness: main pings every 15 s; each side drops the link after 30 s without a frame. |
 | `part {at, end, data}` | both | v5: the next slice of a line over 256 KiB (`at`: its UTF-16 offset in the line; `end`: the last). Main never sends one to a v4 daemon. |
-| `upload_ack {id, received, done, error?}` | up | v6: the daemon has written `received` bytes of upload `id` (`done` once all are written and synced; `error {status, code, message}` when it failed). Coalesced per upload; main relays it to the browser (`docs/specs/2026-11-02-file-uploads-design.md`, U5). |
+| `upload_ack {id, attempt, received, done, error?}` | up | v6: the daemon has written `received` bytes of upload `id` for the UUIDv4 `attempt` supplied by `uploadStart` (`done` once all are written and synced; `error {status, code, message}` when it failed). Coalesced per upload; main discards superseded-attempt acks before relaying to the browser (`docs/specs/2026-11-02-file-uploads-design.md`, U5). |
 
 A binary frame is `byte 0` = the UTF-8 length *n* of the request id (1 to 255),
 then the id, then result bytes (media bytes for `readMedia`, else the UTF-8
@@ -412,7 +412,7 @@ parts of those routes stay on main.
 | `validateCwd {path}` | `/api/cwd/validate` |
 | `spawn {ch, cwd, sessionFile, toolNames, advisor}` | `startRpcSession` spawn |
 | `sessionFileExists {path}` / `invalidateSessionLists {path}` | `AgentSessionWrapper` |
-| `uploadStart {id, name, size, type}` / `uploadAbort {id}` / `uploadAttach {id, sessionFile, sessionId}` | new in v6: composer uploads (`docs/specs/2026-11-02-file-uploads-design.md`, U3, U5) |
+| `uploadStart {id, name, size, type, attempt}` / `uploadAbort {id}` / `uploadAttach {id, sessionFile, sessionId}` | new in v6: composer uploads (`docs/specs/2026-11-02-file-uploads-design.md`, U3, U5) |
 
 Op timeout: 30 s of silence (each result byte frame that arrives restarts it), then 504 naming the host; `uploadAttach` gets 10 minutes (a 2 GiB copy across file systems).
 

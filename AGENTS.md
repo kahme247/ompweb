@@ -1191,8 +1191,15 @@ during the wait.
   web-server restart the worker re-sends `up_start {id, n, …}` (same id, `n` =
   its per-open counter) and continues from the host's `received` in the answer
   `up_ack {…, start: n}`; an answer whose `start` is not the latest `n` is
-  ignored. On main the latest of concurrent starts of one id wins (an older one
-  still answers its caller); a start that finds the upload aborted sends
+  ignored. On main the latest concurrent start wins; earlier starts still answer their callers.
+  Each host `uploadStart` also carries a fresh UUIDv4 `attempt`; the daemon
+  echoes it on progress, completion and error `upload_ack`s. Main discards
+  superseded-attempt acks even if they arrive after the newer start's reply.
+  Receipt replay and a start of an already-attached upload both require a
+  regular-file target; a missing or directory target gets `upload_missing`.
+  Receipt publication is atomic, and start/attach/abort controls share one
+  per-id queue so an abort cannot be undone by an earlier attach's receipt.
+  A start that finds the upload aborted sends
   `uploadAbort` to the host and answers 404 `upload_missing`. A host-link drop
   fails each in-flight upload with 503 `host_offline`; the chip's Retry (same
   id) resumes. No auto-retry.

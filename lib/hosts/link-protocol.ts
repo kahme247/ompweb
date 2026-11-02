@@ -3,6 +3,7 @@
 // worker it talks to, lib/event-stream-worker.ts) reuses its transport pieces: LINK_LIMITS' piece, window and liveness
 // values, LinkSender, PartJoiner, SeqWindow, Outbox, queuedLine and withSeq.
 import { isValidSessionId } from "../session-file-references-core";
+import { UPLOAD_ID_RE } from "../upload-limits";
 import type { SessionOps } from "./session-ops";
 
 /** 6: composer uploads (docs/specs/2026-11-02-file-uploads-design.md, U5): binary down frames carry upload bytes, the
@@ -133,9 +134,9 @@ export type UpMessage =
   /** The daemon's link samples, at most LINK_LIMITS.statsSamples; a hub that predates it skips the type. Advisory: the
    * receiver keeps the valid ones and counts the rest in `invalid` (decodeUp only; a sender leaves it out). */
   | { type: "stats"; seq: number; samples: LinkStatSample[]; invalid?: number }
-  /** v6: the daemon has written `received` bytes of upload `id`, `done` once all of them are written and synced; with
-   * `error` the upload failed and its staged file is gone. */
-  | { type: "upload_ack"; seq: number; id: string; received: number; done: boolean; error?: { status: number; code: string; message: string } }
+  /** v6: the daemon has written `received` bytes of upload `id` for this start `attempt`, `done` once all of them are
+   * written and synced; with `error` the upload failed and its staged file is gone. */
+  | { type: "upload_ack"; seq: number; id: string; attempt: string; received: number; done: boolean; error?: { status: number; code: string; message: string } }
   | { type: "res"; seq: number; id: string; ok: true; result?: unknown; blob?: { bytes: number } }
   | {
       type: "res";
@@ -414,7 +415,9 @@ export function decodeUp(line: string): UpMessage | UnknownMessage {
     case "stats":
       return stats(o);
     case "upload_ack": {
-      const ack = { type: "upload_ack" as const, seq: seqNum(o, "seq"), id: str(o, "id"), received: seqNum(o, "received"), done: bool(o, "done") };
+      const attempt = str(o, "attempt");
+      if (!UPLOAD_ID_RE.test(attempt)) fail("attempt must be a UUIDv4");
+      const ack = { type: "upload_ack" as const, seq: seqNum(o, "seq"), id: str(o, "id"), attempt, received: seqNum(o, "received"), done: bool(o, "done") };
       return o.error === undefined ? ack : { ...ack, error: errorBody(o.error) };
     }
     case "res":

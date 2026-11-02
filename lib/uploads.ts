@@ -1,6 +1,7 @@
 // Composer uploads on the main server (docs/specs/2026-11-02-file-uploads-design.md, U3 to U5): an in-memory registry
 // of the uploads browsers send through it, relaying their bytes to the target host's daemon and the host's acks back,
 // and attaching finished ones to a prompt. The server keeps no upload bytes on its own disk.
+import { randomUUID } from "node:crypto";
 import { RequestBodyTooLargeError } from "./bounded-form-data";
 import { dropUploadFrames, getHost, hostUploadOp, onUploadEvent, sendUploadFrame, type UploadAck } from "./hosts/hub";
 import { HostOpError, LINK_LIMITS } from "./hosts/link-protocol";
@@ -42,8 +43,8 @@ export function uploadErrorResponse(error: unknown): Response {
 
 /** `sent`: bytes forwarded to the host since the last uploadStart (≥ `received`); `live`: frames are forwarded (false
  * from a start until its answer, and after the host's socket ended); `attached`: where an attach put it, kept until
- * the prompt is sent so a retried send attaches it once; `starts`: uploadStarts so far (only the latest one's answer
- * sets the offset); `touched`: the last start, chunk or ack. */
+ * the prompt is sent so a retried send attaches it once; `attempt`: the latest uploadStart's UUID (only its answer and
+ * acks set the offset); `touched`: the last start, chunk or ack. */
 interface Upload {
   hostId: string;
   owner: string;
@@ -57,9 +58,7 @@ interface Upload {
   attached: { sessionFile: string; path: string; url: string } | null;
   /** The attach in flight, shared by overlapping attaches of this upload to this session file. */
   attaching?: { sessionFile: string; result: Promise<{ sessionFile: string; path: string; url: string }> } | null;
-  starts: number;
-  /** uploadStarts in flight: an error ack meanwhile is from an earlier attempt's write. */
-  opening: number;
+  attempt: string;
   touched: number;
 }
 
@@ -88,11 +87,8 @@ function onHostEvent(hostId: string, ack: UploadAck | null): void {
     return;
   }
   const upload = map.get(ack.id);
-  if (!upload || upload.hostId !== hostId) return;
+  if (!upload || upload.hostId !== hostId || upload.attempt !== ack.attempt) return;
   if (ack.error) {
-    // An error from a write of a superseded attempt may land on the newer one: while its start is in flight, that start's
-    // own answer rules (a disk that is really failing fails the new attempt's writes again).
-    if (upload.opening > 0) return;
     map.delete(ack.id);
     dropUploadFrames(hostId, ack.id);
     // A daemon's status is untrusted: Response.json throws on one outside 200-599.
@@ -144,27 +140,25 @@ export async function startUpload(req: UploadStartRequest): Promise<{ received: 
   if (upload && (upload.owner !== owner || upload.hostId !== hostId || upload.size !== size)) {
     throw new UploadError(409, "upload_id_conflict", "Another upload has this id");
   }
+  const attempt = randomUUID();
   if (upload) {
     // Bytes still queued would land after the offset this start reports: they go again from that offset instead.
     upload.live = false;
     dropUploadFrames(hostId, id);
     upload.sink = sink;
+    upload.attempt = attempt;
   } else {
     makeRoom(map, owner);
-    upload = { hostId, owner, size, type, received: 0, sent: 0, done: false, live: false, sink, attached: null, starts: 0, opening: 0, touched: 0 };
+    upload = { hostId, owner, size, type, received: 0, sent: 0, done: false, live: false, sink, attached: null, attempt, touched: 0 };
     map.set(id, upload);
   }
-  const start = ++upload.starts;
   upload.touched = Date.now();
-  upload.opening += 1;
   let result: unknown;
   try {
-    result = await hostUploadOp(hostId, "uploadStart", { id, name, size, type });
+    result = await hostUploadOp(hostId, "uploadStart", { id, name, size, type, attempt });
   } catch (error) {
-    if (!known && upload.starts === start && map.get(id) === upload) map.delete(id);
+    if (!known && upload.attempt === attempt && map.get(id) === upload) map.delete(id);
     throw error;
-  } finally {
-    upload.opening -= 1;
   }
   if (map.get(id) !== upload) {
     // Aborted while the host opened it (its ops run concurrently): what this start staged goes too.
@@ -174,7 +168,7 @@ export async function startUpload(req: UploadStartRequest): Promise<{ received: 
   if (!isRecord(result) || typeof result.received !== "number" || !Number.isSafeInteger(result.received) || result.received < 0 || result.received > size || typeof result.done !== "boolean") {
     throw new UploadError(502, "host_bad_result", "The host sent an invalid uploadStart result");
   }
-  if (upload.starts === start) {
+  if (upload.attempt === attempt) {
     upload.received = upload.sent = result.received;
     upload.done = result.done && result.received === size;
     upload.live = !upload.done;
