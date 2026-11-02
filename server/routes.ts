@@ -15,6 +15,7 @@ import * as cwdBrowse from "@/app/api/cwd/browse/route";
 import * as cwdValidate from "@/app/api/cwd/validate/route";
 import * as defaultCwd from "@/app/api/default-cwd/route";
 import * as events from "@/app/api/events/route";
+import * as eventsWs from "@/app/api/events/ws/route";
 import * as fileIndex from "@/app/api/file-index/route";
 import * as filesPath from "@/app/api/files/[...path]/route";
 import * as gitDiff from "@/app/api/git/diff/route";
@@ -64,21 +65,27 @@ import * as skillsUpdate from "@/app/api/skills/update/route";
 import * as sttJobIdAudio from "@/app/api/stt/[jobId]/audio/route";
 import * as sttJobId from "@/app/api/stt/[jobId]/route";
 import * as stt from "@/app/api/stt/route";
+import * as transportMetrics from "@/app/api/transport-metrics/route";
 import * as usage from "@/app/api/usage/route";
 import * as webAuthSession from "@/app/api/web-auth/session/route";
 import * as webSettings from "@/app/api/web-settings/route";
 import * as windowsService from "@/app/api/windows-service/route";
 import * as worktrees from "@/app/api/worktrees/route";
+import type { BrowserSocketData } from "@/lib/browser-socket";
 import type { LinkSocketData } from "@/lib/hosts/hub";
+
+/** What Bun keeps on an upgraded socket (`ws.data`): a host link's or a browser socket's. */
+export type ServerSocketData = LinkSocketData | BrowserSocketData;
 
 type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 // never: each handler narrows its own params; the router passes Record<string, string | string[]>.
 // disableIdleTimeout: a handler whose response stays open without traffic (a stream) keeps Bun's idle timeout off for
 // its socket; see handle() in server/app.ts.
-// upgrade: makes the request a host link WebSocket (server.upgrade); a handler that upgraded returns undefined.
+// upgrade: makes the request a WebSocket (server.upgrade), a host link or a browser socket; a handler that upgraded
+// returns undefined.
 export type RouteHandler = (
   request: Request,
-  context: { params: Promise<never>; disableIdleTimeout: () => void; upgrade: (data: LinkSocketData) => boolean },
+  context: { params: Promise<never>; disableIdleTimeout: () => void; upgrade: (data: ServerSocketData) => boolean },
 ) => Response | undefined | Promise<Response | undefined>;
 export type RouteModule = Partial<Record<Method, RouteHandler>>;
 
@@ -99,6 +106,7 @@ export const ROUTE_MODULES: Record<string, RouteModule> = {
   "cwd/validate": cwdValidate,
   "default-cwd": defaultCwd,
   "events": events,
+  "events/ws": eventsWs,
   "file-index": fileIndex,
   "files/[...path]": filesPath,
   "git/diff": gitDiff,
@@ -148,6 +156,7 @@ export const ROUTE_MODULES: Record<string, RouteModule> = {
   "stt/[jobId]/audio": sttJobIdAudio,
   "stt/[jobId]": sttJobId,
   "stt": stt,
+  "transport-metrics": transportMetrics,
   "usage": usage,
   "web-auth/session": webAuthSession,
   "web-settings": webSettings,
@@ -172,7 +181,7 @@ export async function dispatch(
   request: Request,
   params: Record<string, string | string[]>,
   disableIdleTimeout: () => void = () => {},
-  upgrade: (data: LinkSocketData) => boolean = () => false,
+  upgrade: (data: ServerSocketData) => boolean = () => false,
 ): Promise<Response | undefined> {
   const handler = mod[request.method as Method] ?? (request.method === "HEAD" ? mod.GET : undefined);
   if (!handler) {
