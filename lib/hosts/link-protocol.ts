@@ -12,7 +12,8 @@ import type { SessionOps } from "./session-ops";
  * binary frames large results, `ack` messages replace the ack header and the POST answer.
  * Rules for changing it: docs/specs/2026-10-28-remote-hosts-design.md, "Protocol versions and compatibility". */
 export const LINK_PROTOCOL_VERSION = 6;
-/** The first daemon link version that takes uploads: main answers 426 host_upgrade_required below it. */
+/** The first daemon link version that takes uploads: main answers 426 below it (host_upgrade_required, or
+ * host_restart_required on this machine, whose daemon an in-place upgrade leaves running). */
 export const UPLOADS_SINCE_VERSION = 6;
 /** The oldest daemon protocol the server still links (older ones get close 4426). Dropping one is an explicit decision. */
 export const MIN_LINK_PROTOCOL_VERSION = 4;

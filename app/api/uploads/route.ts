@@ -1,6 +1,7 @@
 import { parseJsonWithinLimit } from "@/lib/bounded-form-data";
 import { isRecord } from "@/lib/type-guards";
-import { requestOwner, startUpload, uploadErrorResponse } from "@/lib/uploads";
+import { startUpload, uploadErrorResponse } from "@/lib/uploads";
+import { requestOwner } from "@/lib/web-auth";
 
 /** The HTTP form waits on each chunk's ack in its PUT: a start has no one to tell. */
 const NO_SINK = { ack() {}, error() {} };

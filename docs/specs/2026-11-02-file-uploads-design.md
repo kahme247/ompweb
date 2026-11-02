@@ -11,7 +11,7 @@ The composer refuses every file that is neither an image nor text (a `.zip` cann
 
 ### U1. What the agent gets
 
-- An attached file is written into the session's `local://` root on the session's host: `<sessions>/<project>/<session file minus .jsonl>/local/uploads/<name>`. This is omp's `resolveLocalRoot`; on Windows, a root of 180 characters or more becomes `<tmp>/omp-local/<session id>`, as in omp. A taken name gets ` (1)`, ` (2)`, … before the extension. Names are reduced to one safe path segment of at most 120 characters.
+- An attached file is written into the session's `local://` root on the session's host: `<sessions>/<project>/<session file minus .jsonl>/local/uploads/<name>`. This is omp's `resolveLocalRoot`; on Windows, a root of 180 characters or more becomes `<tmp>/omp-local/<session id>`, as in omp. A taken name gets ` (1)`, ` (2)`, … before the extension. Names are reduced to one safe path segment (`sanitizeUploadName`, daemon): at most 200 UTF-8 bytes, cut between code points with the extension kept (room is left for ` (n)`); bidi control characters and trailing dots and spaces are stripped; a Windows reserved device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`, with or without an extension, any case) gets a `_` prefix.
 - When the prompt is sent, the server appends one block to the message:
   ```
   Attached files (this session's local:// directory):
@@ -34,10 +34,10 @@ The composer refuses every file that is neither an image nor text (a `.zip` cann
 Uploads go to a staging directory on the target host's daemon, `<agent dir>/omp-web/uploads/<id>.part` plus `<id>.json` (name, size, type, created). They are not written straight into a session because a new chat has no session yet when the file is attached.
 
 1. On send, the prompt command (`prompt`, `steer`, `follow_up`; WebSocket `cmd` or HTTP route alike, so in `runAgentCommand`) carries `uploads: [id, …]`.
-2. The server strips the field and calls the host op `uploadAttach {id, sessionFile, sessionId}` for each id. The daemon moves the staged file into the session's `local/uploads/` (a rename, with copy + unlink on `EXDEV`) and returns `{path, url}`.
+2. The server strips the field and calls the host op `uploadAttach {id, sessionFile, sessionId}` for each id. The daemon hard-links the staged file into the session's `local/uploads/` (a copy when the link fails, e.g. on `EXDEV`), deletes the staged one, and returns `{path, url}`. The op's timeout is 10 minutes (a 2 GiB copy across file systems), not the 30 s of other ops.
 3. The server then appends the U1 block to `message` and sends the command to omp.
 
-A failed attach fails the command: 404 `upload_missing`, or 409 `upload_incomplete`. Nothing goes to omp, and the composer keeps the draft. The daemon deletes staged files older than 24 h, at start and on every `uploadStart`.
+A failed attach fails the command: 404 `upload_missing`, or 409 `upload_incomplete`. Nothing goes to omp, and the composer keeps the draft. At start and on every `uploadStart` the daemon deletes staged files older than 24 h (`STAGED_MAX_AGE_MS`) and aborts open uploads idle (no start or write) for longer than that, deleting their files; a swept upload gets no `upload_ack`.
 
 ### U4. Browser → server (browser link)
 
@@ -45,15 +45,17 @@ The upload id is a client-generated UUID. It doubles as the binary frame id on b
 
 | Message | Dir | Seq | Key | Meaning |
 |---|---|---|---|---|
-| `up_start {id, host, name, size, type}` | ↑ | yes | `up:<id>` | open, or resume, an upload on `host` |
+| `up_start {id, n, host, name, size, mime}` | ↑ | yes | `up:<id>` | open, or resume, an upload on `host`; `n` is the worker's per-open counter for that upload (1, 2, …), `mime` the file's type (`type` is the message's) |
 | binary `[n][id][payload]` | ↑ | no | `up:<id>` | the next ≤ `pieceBytes` (256 KiB) of the file, in order |
 | `up_abort {id}` | ↑ | yes | `up:<id>` | cancel and delete the staged file |
-| `up_ack {id, received, done}` | ↓ | yes | `up:<id>` | the host has written `received` bytes; `done` once all `size` bytes are written and synced |
+| `up_ack {id, received, done, start?}` | ↓ | yes | `up:<id>` | the host has written `received` bytes; `done` once all `size` bytes are written and synced. The answer to `up_start` `n` carries `start: n` |
 | `up_error {id, status, code, message}` | ↓ | yes | `up:<id>` | the upload failed (host offline, disk full, too large, old host) |
 
 - Binary frames are units of the worker's `LinkSender` (it already carries `{id, blob}` items) under key `up:<id>`. A session's commands and replies therefore take turns with upload chunks and never wait behind a whole file.
-- **Flow control is end to end.** The worker keeps at most `UPLOAD_WINDOW` = 2 MiB per upload sent beyond the last `up_ack.received`. The server holds no more than that per upload and writes nothing to its own disk.
-- **Resume:** binary frames are not sequenced and are lost when the socket drops. After a resume or resync the worker sends `up_start` again with the same id; the host answers with its `received` offset, and the worker continues from there.
+- **Flow control is end to end.** The worker keeps at most `UPLOAD_WINDOW` = 2 MiB per upload sent beyond the last `up_ack.received`. The server holds no more than that per upload and writes nothing to its own disk: a frame that would put `sent − received` over `UPLOAD_WINDOW + pieceBytes` stops the upload with `up_error` 429 `upload_window_exceeded` (its frames are dropped until the next `up_start`; the socket stays open, and Retry resumes from the host's offset).
+- **Resume:** binary frames are not sequenced and are lost when the socket drops. After a resume or resync (a dropped browser link, a web-server restart) the worker sends `up_start` again with the same id and the next `n`; the host answers with its `received` offset, and the worker continues from there. The worker ignores a start answer whose `start` is not its latest `n`, so a replayed or stale answer cannot make it send from a wrong offset.
+- **Stall watchdog:** an upload that no start answer or ack advances for `UPLOAD_STALL_MS` = 120 s fails to the tab with 504 `upload_stalled`. The worker forgets it without aborting it on the host, so the chip's Retry (same id) resumes from the host's offset.
+- **Host-link drop:** each in-flight upload on that host fails with `up_error` 503 `host_offline`; the chip's Retry resumes from the host's offset. Nothing retries by itself.
 - The tab hands the worker `Blob` slices (`File.slice`, read in the worker) rather than buffers, so the tab holds no file bytes.
 - `lib/browser-link.ts` accepts binary frames only for an upload this link started, and only up to `pieceBytes` plus the header. Any other binary frame still closes with 1007. `BROWSER_LINK_VERSION` stays 1: the worker is served by the same server (content-hashed URL), and an old worker never sends the new types.
 
@@ -73,20 +75,25 @@ The upload id is a client-generated UUID. It doubles as the binary frame id on b
 - **Daemon writes** at the staged file's current length. A frame for an unknown or finished upload is dropped, and the next `uploadStart` reports the real offset. Bytes beyond `size` fail the upload.
 - **Version:**
   - `LINK_PROTOCOL_VERSION` goes to 6 (new down frames, new up type, new ops). `MIN_LINK_PROTOCOL_VERSION` stays 4.
-  - Main uploads only to links with `hostVersion >= 6`. For any other link it answers `up_error` 426 `host_upgrade_required` ("Update ompweb on <host> to attach files").
+  - Main uploads only to links with `hostVersion >= 6`. For any other link it answers `up_error` 426: `host_upgrade_required` on a remote host ("Update ompweb on <host> to attach files"), `host_restart_required` on this machine (`local`: "Restart the ompweb host service on this machine to attach files"). After an in-place upgrade the running local daemon keeps its old link version, which is still inside `[MIN, LINK]`, so the upgrade does not restart it.
   - A v5 main closes a v6 daemon with 4426, so the web app is upgraded first, as for every link version (remote-hosts spec, "Protocol versions and compatibility").
 - **Daemon errors:** `upload_ack` may carry `error {status, code, message}` (bytes beyond `size`, 507 `upload_write_failed` on a full disk); the hub turns it into `up_error`.
 - **Attach** uses a hard link plus unlink (never overwrites an existing name), falling back to an exclusive copy on `EXDEV`/`EPERM`/`ENOTSUP`/`ENOSYS`. Upload ids stay registered until the prompt reaches omp, so a retried send reuses the earlier attach.
 - **Registry on main** (in memory): id → `{hostId, owner, size, received, browser link or HTTP waiter}`.
-  - The owner is the browser link's owner (B5); for HTTP it is the same cookie-derived owner.
+  - The owner is the browser link's owner (B5); for HTTP it is the same cookie-derived owner (`requestOwner`, `lib/web-auth.ts`).
   - `uploadAttach` requires the same owner and the session's host.
+  - Concurrent starts of one id: the latest wins. An older start's host answer still goes to its caller but no longer sets the registry's offset or live state. A start that finds the upload removed (aborted) while it ran sends `uploadAbort` to the host and answers 404 `upload_missing`.
+  - At most 32 unfinished uploads per owner; a start past that is 429 `too_many_uploads`. An unfinished entry idle for 10 min (no start, frame or ack) is dropped from the registry to make room; a later `up_start` re-registers and resumes it.
   - A main restart forgets the registry. A finished staged upload then cannot be attached ("attach the file again"); an unfinished one resumes through `up_start`, which re-registers it.
+  - Another owner, host or size for a registered id is 409 `upload_id_conflict`.
 
 ## Limitations
 
 - The upload rate is bounded by `UPLOAD_WINDOW / RTT`: about 40 MB/s at 50 ms and 10 MB/s at 200 ms.
 - Upload chunks share the host link with session traffic. A Stop can wait for up to one window per active upload to drain on a slow link.
 - In-flight uploads do not survive a page reload, and finished ones do not survive a main restart (U2, U5).
+- A dropped host link fails every in-flight upload on that host (503 `host_offline`); each needs a manual Retry, which resumes from the host's offset.
+- If omp moves the session file on its first write, files already attached under the old `local/` root may stop resolving by their `local://` URL (the absolute path still works), and a retried send against the moved `sessionFile` gets 404 `upload_missing`.
 - Images sent inline are still resized by omp. Only As file keeps the original bytes.
 
 ## Acceptance
@@ -94,7 +101,7 @@ The upload id is a client-generated UUID. It doubles as the binary frame id on b
 1. `npm run typecheck && npm run lint && npm test` and `npm run build` pass.
 2. Tests:
    - A chunked upload over a slow browser link does not delay a command reply on the same link by more than a window.
-   - A socket dropped mid-upload resumes from the host's offset, and the file matches its SHA-256.
+   - A host link dropped mid-upload fails the upload with 503 `host_offline`; a new start (the Retry) resumes from the host's offset, and the attached file matches its SHA-256 (`lib/uploads.test.mjs`, real daemon and link). The browser-link side of a resume (`up_start` sent again on every welcome, a stale `start` answer ignored) is covered by `lib/event-stream-worker.test.mjs` and `lib/browser-link.test.mjs`.
    - An upload to a v5 daemon fails with 426.
    - `uploadAttach` with another owner's id fails with 404.
    - A taken name gets ` (1)`.

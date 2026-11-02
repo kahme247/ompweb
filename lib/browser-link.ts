@@ -9,10 +9,12 @@ import {
   parseEventStreamChannel,
   SUBSCRIPTION_ID_RE,
 } from "./event-stream-protocol";
-import { decodeBlobFrame, LINK_LIMITS, LinkSender, Outbox, PartJoiner, queuedLine, SeqWindow } from "./hosts/link-protocol";
+import { decodeBlobFrame, HostOpError, LINK_LIMITS, LinkSender, Outbox, PartJoiner, queuedLine, SeqWindow } from "./hosts/link-protocol";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "./image-attachments";
 import { isRecord } from "./type-guards";
-import { abortUpload, forwardUploadFrame, releaseUploadSink, requestOwner, startUpload, UPLOAD_ID_RE, UploadError, type UploadSink } from "./uploads";
+import { UPLOAD_ID_RE } from "./upload-limits";
+import { abortUpload, forwardUploadFrame, releaseUploadSink, startUpload, type UploadSink } from "./uploads";
+import { requestOwner } from "./web-auth";
 
 // The browser link (docs/specs/2026-11-01-browser-link-design.md): one WebSocket per browser at /api/events/link,
 // carrying every subscription and agent command with the host link's delivery (lib/hosts/link-protocol.ts): sequenced
@@ -475,18 +477,17 @@ function onUploadFrame(ws: BrowserSocket, data: Uint8Array): void {
   if (link.socket !== ws) return;
   // 256: the longest header (a length byte and 255 bytes of id).
   if (data.byteLength > LINK_LIMITS.pieceBytes + 256) return ws.close(CLOSE.tooBig, "Frame too large");
-  let id: string;
+  let frame: { id: string; bytes: Uint8Array };
   try {
-    const frame = decodeBlobFrame(data);
-    if (frame.bytes.byteLength > LINK_LIMITS.pieceBytes) return ws.close(CLOSE.tooBig, "Frame too large");
-    id = frame.id;
+    frame = decodeBlobFrame(data);
   } catch {
     return ws.close(CLOSE.invalidData, "Invalid binary frame");
   }
-  if (!link.uploads.has(id)) return ws.close(CLOSE.invalidData, "Not an upload of this link");
+  if (frame.bytes.byteLength > LINK_LIMITS.pieceBytes) return ws.close(CLOSE.tooBig, "Frame too large");
+  if (!link.uploads.has(frame.id)) return ws.close(CLOSE.invalidData, "Not an upload of this link");
   sawBrowser(link);
   // False once the upload ended on this server (failed): its up_error is on the way, and the chunk is dropped.
-  forwardUploadFrame(link.owner, data);
+  forwardUploadFrame(link.owner, frame.id, frame.bytes);
 }
 
 function onHello(ws: BrowserSocket, hello: Record<string, unknown>): void {
@@ -555,10 +556,11 @@ function apply(link: BrowserLink, ws: BrowserSocket, message: Record<string, unk
 }
 
 /** Opens, or resumes, an upload: its acks and failure go back under `up:<id>`. The answer to this up_start carries
- * `start: true`, so the worker can tell it from the acks of chunks sent before (it sends chunks from its `received`). */
+ * `start: n`, its `n` (the worker's count of up_starts for the upload), so the worker can tell it from the acks of chunks
+ * sent before and from the answer to an earlier up_start (it sends chunks from the answer's `received`). */
 function onUploadStart(link: BrowserLink, ws: BrowserSocket, message: Record<string, unknown>): void {
   // `mime`: the file's type (`type` is the message's).
-  const { id, host, name, size, mime } = message;
+  const { id, n, host, name, size, mime } = message;
   if (typeof id !== "string" || !UPLOAD_ID_RE.test(id)) return ws.close(CLOSE.invalidData, "Invalid upload id");
   const key = `up:${id}`;
   const sink: UploadSink = link.uploads.get(id) ?? {
@@ -566,13 +568,13 @@ function onUploadStart(link: BrowserLink, ws: BrowserSocket, message: Record<str
     error: (status, code, error) => void queue(link, key, JSON.stringify({ type: "up_error", id, status, code, message: error })),
   };
   link.uploads.set(id, sink);
-  if (typeof host !== "string" || typeof name !== "string" || !isSafeCount(size) || typeof mime !== "string") {
+  if (!isSafeCount(n) || typeof host !== "string" || typeof name !== "string" || !isSafeCount(size) || typeof mime !== "string") {
     return sink.error(400, "invalid_request", "Invalid upload");
   }
   startUpload({ id, hostId: host, owner: link.owner, name, size, type: mime, sink }).then(({ received }) => {
-    queue(link, key, JSON.stringify({ type: "up_ack", id, received, done: received >= size, start: true }));
+    queue(link, key, JSON.stringify({ type: "up_ack", id, received, done: received >= size, start: n }));
   }, (error: unknown) => {
-    if (error instanceof UploadError) return sink.error(error.status, error.code, error.message);
+    if (error instanceof HostOpError) return sink.error(error.status, error.code, error.message);
     console.error(`[omp-web] upload start failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
     sink.error(500, "upload_failed", "The upload could not start");
   });

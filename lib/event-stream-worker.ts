@@ -43,7 +43,7 @@ import {
 } from "./event-stream-protocol";
 import { LINK_LIMITS, LinkSender, Outbox, PartJoiner, queuedLine, SeqWindow, type Part } from "./hosts/link-protocol";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "./image-attachments";
-import { UPLOAD_WINDOW_BYTES } from "./upload-limits";
+import { UPLOAD_STALL_MS, UPLOAD_WINDOW_BYTES } from "./upload-limits";
 
 const CONNECTING = 0;
 const OPEN = 1;
@@ -1077,14 +1077,18 @@ interface Upload {
   host: string;
   name: string;
   type: string;
-  /** Its up_start on the current socket was answered: chunks go out from `sent`. */
+  /** Its latest up_start on the current socket was answered: chunks go out from `sent`. */
   started: boolean;
+  /** up_starts sent so far: each carries the count as `n`, and only the answer naming the latest (`start: n`) counts. */
+  opens: number;
   /** Bytes the host has written (its last ack), and bytes read and handed to the sender. */
   acked: number;
   sent: number;
   /** A read is in flight; one that finds `epoch` changed belongs to an earlier start and is dropped. */
   reading: boolean;
   epoch: number;
+  /** Fails it when no answer or ack moves it on for UPLOAD_STALL_MS. */
+  stallTimer: ReturnType<typeof setTimeout> | undefined;
 }
 
 function addUpload(client: Client, message: Record<string, unknown>): void {
@@ -1098,12 +1102,15 @@ function addUpload(client: Client, message: Record<string, unknown>): void {
     name: String(message.name),
     type: typeof message.type === "string" ? message.type : "",
     started: false,
+    opens: 0,
     acked: 0,
     sent: 0,
     reading: false,
     epoch: 0,
+    stallTimer: undefined,
   };
   uploads.set(id, upload);
+  watchUpload(upload);
   if (link.welcomed) openUpload(upload);
   ensureLink();
 }
@@ -1120,12 +1127,25 @@ function stopUpload(upload: Upload): void {
 function openUpload(upload: Upload): void {
   stopUpload(upload);
   const { id, host, name, type } = upload;
-  queueUp(`up:${id}`, JSON.stringify({ type: "up_start", id, host, name, size: upload.blob.size, mime: type }));
+  upload.opens += 1;
+  queueUp(`up:${id}`, JSON.stringify({ type: "up_start", id, n: upload.opens, host, name, size: upload.blob.size, mime: type }));
 }
 
 function dropUpload(upload: Upload): void {
   stopUpload(upload);
+  clearTimeout(upload.stallTimer);
   uploads.delete(upload.id);
+}
+
+/** (Re)arms its stall deadline: whatever keeps it from moving (a link that stays down, a host that stopped acking)
+ * fails it there. Nothing is aborted, so a Retry resumes it from the host's offset. */
+function watchUpload(upload: Upload): void {
+  clearTimeout(upload.stallTimer);
+  upload.stallTimer = setTimeout(() => {
+    dropUpload(upload);
+    post(upload.client, { up: upload.id, error: { status: 504, code: "upload_stalled", message: "The upload stopped making progress" } });
+    linkIdle();
+  }, UPLOAD_STALL_MS);
 }
 
 /** The tab removed it (or went away): the server deletes what the host staged. */
@@ -1163,8 +1183,9 @@ function pump(upload: Upload): void {
   });
 }
 
-/** An up_ack or up_error. Before its start's answer, an ack is of chunks sent before a drop: only the answer (`start`)
- * says where chunks go on from. */
+/** An up_ack or up_error. Before its start's answer, an ack is of chunks sent before a drop: only the answer to the
+ * latest up_start (`start: n`) says where chunks go on from; the answer to an earlier one (replayed after a resume) is
+ * dropped. */
 function onUploadLine(head: DownHead): void {
   const upload = typeof head.id === "string" ? uploads.get(head.id) : undefined;
   if (!upload) return;
@@ -1177,8 +1198,9 @@ function onUploadLine(head: DownHead): void {
   const received = Number(head.received);
   const done = head.done === true;
   if (!Number.isSafeInteger(received) || received < 0) return;
+  if (head.start !== undefined && head.start !== upload.opens) return;
   if (!upload.started) {
-    if (head.start !== true) return;
+    if (head.start === undefined) return;
     upload.started = true;
     upload.acked = upload.sent = received;
   } else if (received > upload.acked) {
@@ -1186,6 +1208,7 @@ function onUploadLine(head: DownHead): void {
   } else if (!done) {
     return;
   }
+  watchUpload(upload);
   post(upload.client, { up: upload.id, received: upload.acked, done });
   if (!done) return pump(upload);
   dropUpload(upload);

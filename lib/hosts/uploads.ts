@@ -1,6 +1,6 @@
 // Composer file uploads, the daemon's side (docs/specs/2026-11-02-file-uploads-design.md, U3 and U5): an upload is
 // staged as `<agent dir>/omp-web/uploads/<id>.part` plus `<id>.json`, written in order at the part's length, and on
-// attach moved into the session's `local://uploads/`.
+// attach hard-linked (or copied) into the session's `local://uploads/`.
 // Loaded by the daemon through jiti: no `@/` imports and no Bun APIs.
 import { constants as fsConstants } from "node:fs";
 import { appendFile, copyFile, link, mkdir, open, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -12,24 +12,43 @@ import { isRecord } from "../type-guards";
 import { MAX_UPLOAD_BYTES, UPLOAD_ID_RE } from "../upload-limits";
 import { HostOpError, LINK_LIMITS } from "./link-protocol";
 
-export { MAX_UPLOAD_BYTES };
 /** Uploads land in this subdirectory of the session's `local://` root. */
 export const UPLOADS_LOCAL_DIR = "uploads";
-const MAX_NAME_LENGTH = 120;
+// Leaves room for ` (n)` under the usual 255-byte file name limit.
+const MAX_NAME_BYTES = 200;
+const MAX_EXT_BYTES = 20;
 // omp's own rule (internal-urls/local-protocol.ts): long artifact paths move to the temp dir on Windows.
 const WINDOWS_LOCAL_ROOT_MAX_CHARS = 180;
-/** Staged files untouched this long are deleted (at start and on every uploadStart). */
+/** Staged files untouched this long, and open uploads idle this long, are deleted (at start and on every uploadStart). */
 export const STAGED_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
-/** A file name safe to create in one directory: no separators, control characters or dot-only names. */
-export function sanitizeUploadName(name: string): string {
-  let clean = basename(name.replace(/\\/g, "/")).replace(/[\u0000-\u001f\u007f<>:"/\\|?*]/g, "_").trim();
-  if (!clean || /^\.+$/.test(clean)) clean = "file";
-  if (clean.length > MAX_NAME_LENGTH) {
-    const ext = extname(clean).slice(0, 20);
-    clean = clean.slice(0, MAX_NAME_LENGTH - ext.length) + ext;
+/** The longest prefix of `text` within `bytes` UTF-8 bytes, cut between code points. */
+function clipUtf8(text: string, bytes: number): string {
+  let out = "";
+  let used = 0;
+  for (const char of text) {
+    used += Buffer.byteLength(char);
+    if (used > bytes) break;
+    out += char;
   }
-  return clean;
+  return out;
+}
+
+/** A file name safe to create in one directory on any OS: no separators, control or bidi characters, Windows device
+ * names or trailing dots and spaces, at most MAX_NAME_BYTES; never empty. */
+export function sanitizeUploadName(name: string): string {
+  let clean = basename(name.replace(/\\/g, "/"))
+    .replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
+    .replace(/[\u0000-\u001f\u007f<>:"|?*]/g, "_")
+    .trim()
+    .replace(/[. ]+$/, "");
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9]) *(\.|$)/i.test(clean)) clean = `_${clean}`;
+  if (Buffer.byteLength(clean) > MAX_NAME_BYTES) {
+    const ext = extname(clean);
+    const keptExt = clipUtf8(ext, MAX_EXT_BYTES);
+    clean = (clipUtf8(clean.slice(0, clean.length - ext.length), MAX_NAME_BYTES - Buffer.byteLength(keptExt)) + keptExt).replace(/[. ]+$/, "");
+  }
+  return clean || "file";
 }
 
 /** omp's `local://` root for a session (`resolveLocalRoot` in omp's local-protocol.ts). */
@@ -45,7 +64,7 @@ export function sessionLocalRoot(sessionFile: string, sessionId: string, platfor
 export type UploadAck = { id: string; received: number; done: boolean; error?: { status: number; code: string; message: string } };
 
 type Meta = { name: string; size: number; type: string; created: number };
-type OpenUpload = { size: number; received: number; chain: Promise<void>; timer: NodeJS.Timeout | undefined };
+type OpenUpload = { size: number; received: number; chain: Promise<void>; timer: NodeJS.Timeout | undefined; active: number };
 
 const errno = (error: unknown) => (error as NodeJS.ErrnoException | null)?.code;
 const isUploadId = (id: unknown): id is string => typeof id === "string" && UPLOAD_ID_RE.test(id);
@@ -95,8 +114,12 @@ export class StagedUploads {
     await rm(this.path(id, "json"), { force: true });
   }
 
-  /** Delete staged files older than STAGED_MAX_AGE_MS that no write is going to. */
+  /** Abort open uploads idle (no start, no write) longer than STAGED_MAX_AGE_MS, then delete staged files older than
+   * that which no write is going to. */
   async sweep(now = Date.now()): Promise<void> {
+    for (const [id, upload] of this.open) {
+      if (now - upload.active > STAGED_MAX_AGE_MS) await this.abort(id);
+    }
     let names: string[];
     try {
       names = await readdir(this.dir);
@@ -126,7 +149,10 @@ export class StagedUploads {
     if (known) {
       // Frames that came before this start are written first: they are part of the offset it reports.
       await known.chain;
-      if (this.open.get(id) === known) return { received: known.received, done: false };
+      if (this.open.get(id) === known) {
+        known.active = Date.now();
+        return { received: known.received, done: false };
+      }
     }
     await mkdir(this.dir, { recursive: true });
     const part = this.path(id, "part");
@@ -141,7 +167,7 @@ export class StagedUploads {
       await sync(part);
       return { received, done: true };
     }
-    this.open.set(id, { size, received, chain: Promise.resolve(), timer: undefined });
+    this.open.set(id, { size, received, chain: Promise.resolve(), timer: undefined, active: Date.now() });
     return { received, done: false };
   }
 
@@ -150,6 +176,7 @@ export class StagedUploads {
   write(id: string, bytes: Uint8Array): void {
     const upload = this.open.get(id);
     if (!upload) return;
+    upload.active = Date.now();
     upload.chain = upload.chain.then(async () => {
       if (this.open.get(id) !== upload) return;
       if (upload.received + bytes.byteLength > upload.size) throw new HostOpError(413, "upload_too_large", "The upload is larger than announced");
@@ -195,8 +222,8 @@ export class StagedUploads {
     return null;
   }
 
-  /** Op uploadAttach: move a finished upload into the session's `local://uploads/`, never over an existing file (a
-   * taken name gets ` (1)`, ` (2)`, ...). `sessionFile` is already confined to the sessions directory. */
+  /** Op uploadAttach: hard-link (or copy) a finished upload into the session's `local://uploads/`, never over an
+   * existing file (a taken name gets ` (1)`, ` (2)`, ...). `sessionFile` is already confined to the sessions directory. */
   async attach(id: unknown, sessionFile: string, sessionId: unknown): Promise<{ path: string; url: string }> {
     if (!isUploadId(id) || typeof sessionId !== "string" || !isValidSessionId(sessionId)) throw new HostOpError(400, "invalid_request", "Invalid upload attach");
     const part = this.path(id, "part");
@@ -221,7 +248,11 @@ export class StagedUploads {
         try {
           await copyFile(part, target, fsConstants.COPYFILE_EXCL);
         } catch (copyError) {
-          if (errno(copyError) === "EEXIST" && n < 1000) continue;
+          // EEXIST: the name is someone else's file, never ours to delete.
+          if (errno(copyError) === "EEXIST") {
+            if (n < 1000) continue;
+            throw copyError;
+          }
           await rm(target, { force: true });
           throw copyError;
         }

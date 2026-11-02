@@ -44,7 +44,7 @@ export function commandErrorResponse(error: unknown): Response {
 }
 
 /** Everything POST /api/agent/[id] does once the body is parsed; shared with
- * the browser socket. `owner`: the caller's web session (lib/uploads.ts
+ * the browser socket. `owner`: the caller's web session (lib/web-auth.ts
  * `requestOwner`), whose uploads a prompt may attach. Never throws: failures
  * become `commandErrorResponse`. */
 export async function runAgentCommand(id: string, body: unknown, advisor: boolean, owner: string): Promise<Response> {

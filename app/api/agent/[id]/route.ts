@@ -2,7 +2,7 @@ import { getRpcSession, WebRpcError } from "@/lib/rpc-manager";
 import { commandErrorResponse, runAgentCommand } from "@/lib/agent-command";
 import { parseJsonWithinLimit } from "@/lib/bounded-form-data";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "@/lib/image-attachments";
-import { requestOwner } from "@/lib/uploads";
+import { requestOwner } from "@/lib/web-auth";
 
 /** Stamp when the handler had the request and when it answered, so the browser
  * can split network time from server time. */

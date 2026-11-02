@@ -1,15 +1,17 @@
 // Composer uploads on the main server (docs/specs/2026-11-02-file-uploads-design.md, U3 to U5): an in-memory registry
 // of the uploads browsers send through it, relaying their bytes to the target host's daemon and the host's acks back,
 // and attaching finished ones to a prompt. The server keeps no upload bytes on its own disk.
-import { createHash } from "node:crypto";
 import { RequestBodyTooLargeError } from "./bounded-form-data";
 import { dropUploadFrames, getHost, hostUploadOp, onUploadEvent, sendUploadFrame, type UploadAck } from "./hosts/hub";
-import { decodeBlobFrame, HostOpError, LINK_LIMITS } from "./hosts/link-protocol";
+import { HostOpError, LINK_LIMITS } from "./hosts/link-protocol";
 import { isRecord } from "./type-guards";
 import { formatUploadSize, MAX_UPLOAD_BYTES, MAX_UPLOADS_PER_MESSAGE, UPLOAD_ID_RE, UPLOAD_WINDOW_BYTES } from "./upload-limits";
-import { isTrustedProxyRequest, OMP_WEB_SESSION_COOKIE, OMP_WEB_TRUSTED_HEADER } from "./web-auth";
 
-export { MAX_UPLOAD_BYTES, MAX_UPLOADS_PER_MESSAGE, UPLOAD_ID_RE, UPLOAD_WINDOW_BYTES };
+/** Unfinished uploads one owner may have registered: each may hold a window of bytes in its host link's queue. */
+const MAX_OPEN_UPLOADS_PER_OWNER = 32;
+/** An unfinished upload nothing touched this long (no start, chunk or ack) gives its place up: an up_start re-registers
+ * it and resumes from the host's offset. */
+const UPLOAD_IDLE_MS = 10 * 60_000;
 
 /** Who hears back about one upload: a browser link, or an HTTP request waiting for its chunk's ack. */
 export interface UploadSink {
@@ -38,16 +40,10 @@ export function uploadErrorResponse(error: unknown): Response {
   return Response.json({ error: error instanceof Error ? error.message : String(error), code: "upload_failed" }, { status: 500 });
 }
 
-/** The web session a request belongs to (B5): uploads and browser-link resumes are honored only for the same one. */
-export function requestOwner(request: Request): string {
-  const cookie = new Bun.CookieMap(request.headers.get("cookie") ?? "").get(OMP_WEB_SESSION_COOKIE);
-  if (cookie) return `session:${createHash("sha256").update(cookie).digest("base64url")}`;
-  return isTrustedProxyRequest(request.headers.get(OMP_WEB_TRUSTED_HEADER)) ? "trusted" : "open";
-}
-
 /** `sent`: bytes forwarded to the host since the last uploadStart (≥ `received`); `live`: frames are forwarded (false
  * from a start until its answer, and after the host's socket ended); `attached`: where an attach put it, kept until
- * the prompt is sent so a retried send attaches it once. */
+ * the prompt is sent so a retried send attaches it once; `starts`: uploadStarts so far (only the latest one's answer
+ * sets the offset); `touched`: the last start, chunk or ack. */
 interface Upload {
   hostId: string;
   owner: string;
@@ -59,6 +55,8 @@ interface Upload {
   live: boolean;
   sink: UploadSink | null;
   attached: { sessionFile: string; path: string; url: string } | null;
+  starts: number;
+  touched: number;
 }
 
 declare global {
@@ -95,16 +93,31 @@ function onHostEvent(hostId: string, ack: UploadAck | null): void {
   }
   upload.received = Math.min(upload.size, Math.max(upload.received, ack.received));
   upload.done = ack.done && upload.received === upload.size;
+  upload.touched = Date.now();
   if (upload.live) upload.sink?.ack(upload.received, upload.done);
-}
-
-function uploadError(error: unknown): unknown {
-  return error instanceof HostOpError ? new UploadError(error.status, error.code, error.message) : error;
 }
 
 const missing = () => new UploadError(404, "upload_missing", "The upload is gone: attach the file again");
 
-/** Register (or re-register, to resume) an upload and open it on its host; resolves the host's offset. */
+/** Room for one more unfinished upload of `owner`: its idle ones give their place up (an up_start re-registers them). */
+function makeRoom(map: Map<string, Upload>, owner: string): void {
+  const now = Date.now();
+  let open = 0;
+  for (const [id, upload] of map) {
+    if (upload.owner !== owner || upload.done) continue;
+    if (now - upload.touched < UPLOAD_IDLE_MS) open += 1;
+    else {
+      map.delete(id);
+      dropUploadFrames(upload.hostId, id);
+    }
+  }
+  if (open >= MAX_OPEN_UPLOADS_PER_OWNER) {
+    throw new UploadError(429, "too_many_uploads", `At most ${MAX_OPEN_UPLOADS_PER_OWNER} uploads may be in progress at once`);
+  }
+}
+
+/** Register (or re-register, to resume) an upload and open it on its host; resolves the host's offset. Of starts that
+ * overlap, the latest one's answer sets where the bytes go on from. Throws HostOpError. */
 export async function startUpload(req: UploadStartRequest): Promise<{ received: number }> {
   const { id, hostId, owner, name, size, type, sink } = req;
   if (
@@ -120,7 +133,7 @@ export async function startUpload(req: UploadStartRequest): Promise<{ received: 
   let upload = map.get(id);
   const known = upload !== undefined;
   if (upload && (upload.owner !== owner || upload.hostId !== hostId || upload.size !== size)) {
-    throw new UploadError(409, "upload_conflict", "Another upload has this id");
+    throw new UploadError(409, "upload_id_conflict", "Another upload has this id");
   }
   if (upload) {
     // Bytes still queued would land after the offset this start reports: they go again from that offset instead.
@@ -128,23 +141,32 @@ export async function startUpload(req: UploadStartRequest): Promise<{ received: 
     dropUploadFrames(hostId, id);
     upload.sink = sink;
   } else {
-    upload = { hostId, owner, size, type, received: 0, sent: 0, done: false, live: false, sink, attached: null };
+    makeRoom(map, owner);
+    upload = { hostId, owner, size, type, received: 0, sent: 0, done: false, live: false, sink, attached: null, starts: 0, touched: 0 };
     map.set(id, upload);
   }
+  const start = ++upload.starts;
+  upload.touched = Date.now();
   let result: unknown;
   try {
     result = await hostUploadOp(hostId, "uploadStart", { id, name, size, type });
   } catch (error) {
-    if (!known && map.get(id) === upload) map.delete(id);
-    throw uploadError(error);
+    if (!known && upload.starts === start && map.get(id) === upload) map.delete(id);
+    throw error;
   }
-  if (map.get(id) !== upload) throw missing();
+  if (map.get(id) !== upload) {
+    // Aborted while the host opened it (its ops run concurrently): what this start staged goes too.
+    if (!map.has(id)) hostUploadOp(hostId, "uploadAbort", { id }).catch(() => {});
+    throw missing();
+  }
   if (!isRecord(result) || typeof result.received !== "number" || !Number.isSafeInteger(result.received) || result.received < 0 || result.received > size || typeof result.done !== "boolean") {
     throw new UploadError(502, "host_bad_result", "The host sent an invalid uploadStart result");
   }
-  upload.received = upload.sent = result.received;
-  upload.done = result.done && result.received === size;
-  upload.live = !upload.done;
+  if (upload.starts === start) {
+    upload.received = upload.sent = result.received;
+    upload.done = result.done && result.received === size;
+    upload.live = !upload.done;
+  }
   return { received: result.received };
 }
 
@@ -160,26 +182,28 @@ function forward(id: string, upload: Upload, bytes: Uint8Array): void {
   // Not live: the next start reports the host's offset, so dropping these leaves no gap.
   if (!upload.live) return;
   if (upload.sent + bytes.byteLength > upload.size) return failUpload(id, upload, 413, "upload_too_large", "The upload is larger than announced");
+  // Past the window (a piece of slack) the sender is not waiting for acks: these bytes would only pile up in the host
+  // link's queue. It stops here, and a new start resumes it from the host's offset.
+  if (upload.sent + bytes.byteLength - upload.received > UPLOAD_WINDOW_BYTES + LINK_LIMITS.pieceBytes) {
+    upload.live = false;
+    upload.sink?.error(429, "upload_window_exceeded", "The upload ran past its window; start it again to resume it");
+    return;
+  }
   if (!sendUploadFrame(upload.hostId, id, bytes)) {
     upload.live = false;
     upload.sink?.error(503, "host_offline", "The host is offline");
     return;
   }
   upload.sent += bytes.byteLength;
+  upload.touched = Date.now();
 }
 
-/** Forward one binary frame `[n][id][payload]` to its upload's host. False when the id is not an upload of `owner`, or
- * the payload is over pieceBytes. */
-export function forwardUploadFrame(owner: string, frame: Uint8Array): boolean {
-  let decoded: { id: string; bytes: Uint8Array };
-  try {
-    decoded = decodeBlobFrame(frame);
-  } catch {
-    return false;
-  }
-  const upload = uploads().get(decoded.id);
-  if (!upload || upload.owner !== owner || decoded.bytes.byteLength > LINK_LIMITS.pieceBytes) return false;
-  forward(decoded.id, upload, decoded.bytes);
+/** Forward one chunk (a binary frame's payload) to its upload's host. False when `id` is not an upload of `owner`, or
+ * the chunk is over pieceBytes. */
+export function forwardUploadFrame(owner: string, id: string, bytes: Uint8Array): boolean {
+  const upload = uploads().get(id);
+  if (!upload || upload.owner !== owner || bytes.byteLength > LINK_LIMITS.pieceBytes) return false;
+  forward(id, upload, bytes);
   return true;
 }
 
@@ -260,7 +284,7 @@ export function takeUploads(command: Record<string, unknown>, owner: string): st
   return ids as string[];
 }
 
-/** Move each upload into the session's `local://uploads/` on its host and append the block naming them to the
+/** Link (or copy) each upload into the session's `local://uploads/` on its host and append the block naming them to the
  * command's `message` (spec U1). The uploads stay registered until forgetUploads, so a retried send reuses an attach. */
 export async function attachUploads(
   ids: string[],
@@ -276,12 +300,7 @@ export async function attachUploads(
     if (!upload || upload.owner !== owner) throw missing();
     if (upload.hostId !== session.host.id) throw new UploadError(409, "upload_wrong_host", "The file was uploaded to another host than the session's");
     if (upload.attached?.sessionFile !== sessionFile) {
-      let result: unknown;
-      try {
-        result = await hostUploadOp(upload.hostId, "uploadAttach", { id, sessionFile, sessionId });
-      } catch (error) {
-        throw uploadError(error);
-      }
+      const result = await hostUploadOp(upload.hostId, "uploadAttach", { id, sessionFile, sessionId });
       if (!isRecord(result) || typeof result.path !== "string" || typeof result.url !== "string") {
         throw new UploadError(502, "host_bad_result", "The host sent an invalid uploadAttach result");
       }

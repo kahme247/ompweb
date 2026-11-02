@@ -350,7 +350,8 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   design `docs/specs/2026-10-31-websocket-link-design.md`). **Text frames**
   carry the messages (hub → daemon one per frame; daemon → hub newline-separated
   batches flushed every 16 ms or at one 256 KiB piece), **binary frames** carry large op
-  results (daemon → hub, before the `res` naming them). Every line except
+  results (daemon → hub, before the `res` naming them) and, from v6, upload bytes
+  (hub → daemon, `up:<id>`). Every line except
   `hello`/`welcome`/`ack`/`ping`/`pong` has a per-direction `seq`; `ack {ack}`
   is a message: the first line of every daemon frame, and the hub answers every
   uplink frame (v5: binary ones too) with exactly one. **Pieces and fair sending
@@ -412,10 +413,13 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   field or a message type receivers skip is fine; a changed type or meaning, or
   a newly required field, needs a new version. Receivers skip unknown message
   types (acking their `seq`) and answer unknown ops 501 `unknown_op`, from v3 on.
-  v4 (the WebSocket link) dropped v3 before any release. v5 (pieces) keeps v4:
-  `MIN_LINK_PROTOCOL_VERSION` is 4 and `LINK_PROTOCOL_VERSION` 5 (literal
+  v4 (the WebSocket link) dropped v3 before any release. v5 (pieces) keeps v4;
+  v6 (uploads: hub → daemon binary frames, `upload_ack`, `uploadStart`/
+  `uploadAbort`/`uploadAttach`) keeps v4 and v5:
+  `MIN_LINK_PROTOCOL_VERSION` is 4 and `LINK_PROTOCOL_VERSION` 6 (literal
   one-liners: the deploy script parses them with `sed`); a v4 daemon gets no
-  `part`, whole lines and no unacked window (`link.sender.parts`). Main keeps at least N-1, and
+  `part`, whole lines and no unacked window (`link.sender.parts`); a v4/v5
+  daemon gets 426 for uploads. Main keeps at least N-1, and
   dropping one is an explicit decision (a hello
   outside the range gets close 4426 with `{"serverVersion":N}`, a pre-WebSocket
   daemon's POST gets 426). Once the WebSocket experiments end, the first version
@@ -1172,13 +1176,36 @@ during the wait.
   `up:<id>`; `lib/browser-link.ts` accepts them only for uploads that link
   started and hands the same bytes to `forwardUploadFrame` (`lib/uploads.ts`),
   which queues them as blob units on the host link (link v6; `hostVersion < 6`
-  → 426 `host_upgrade_required`). Blob units are outside both links' line
-  windows; the worker's per-upload `UPLOAD_WINDOW_BYTES` credit, refilled by
-  the daemon's `upload_ack`, is the only flow control. Binary frames are not
-  resent: after a drop the worker re-sends `up_start` (same id) and continues
-  from the host's `received`.
+  → 426 `host_upgrade_required` on a remote host, `host_restart_required` on
+  `local`: an in-place upgrade keeps a running v4/v5 daemon, which is inside
+  `[MIN, LINK]`, so "This machine" needs `ompweb-host` restarted). Blob units
+  are outside both links' line windows; the worker's per-upload
+  `UPLOAD_WINDOW_BYTES` credit, refilled by the daemon's `upload_ack`, is the
+  flow control, and main enforces it: a frame putting `sent - received` over
+  `UPLOAD_WINDOW_BYTES + pieceBytes` stops the upload with 429
+  `upload_window_exceeded` (frames dropped until the next start; the socket
+  stays open). Binary frames are not resent: after a browser-link drop or a
+  web-server restart the worker re-sends `up_start {id, n, …}` (same id, `n` =
+  its per-open counter) and continues from the host's `received` in the answer
+  `up_ack {…, start: n}`; an answer whose `start` is not the latest `n` is
+  ignored. On main the latest of concurrent starts of one id wins (an older one
+  still answers its caller); a start that finds the upload aborted sends
+  `uploadAbort` to the host and answers 404 `upload_missing`. A host-link drop
+  fails each in-flight upload with 503 `host_offline`; the chip's Retry (same
+  id) resumes. No auto-retry.
+- Limits on main: at most 32 unfinished uploads per owner (429
+  `too_many_uploads`); an unfinished entry idle 10 min (no start, frame or ack)
+  is dropped from the registry (a later `up_start` re-registers it). The worker
+  fails an upload no start answer or ack advances for `UPLOAD_STALL_MS` (120 s)
+  with 504 `upload_stalled` and forgets it without aborting it on the host, so
+  Retry resumes. The daemon's `sweep` deletes staged files older than 24 h and
+  aborts open uploads idle (no start/write) over 24 h (`STAGED_MAX_AGE_MS`).
+  `uploadAttach` has a 10-minute op timeout (a 2 GiB EXDEV copy), not
+  `opTimeoutMs`.
+- Error codes: composer uploads use `upload_id_conflict` (another upload has
+  this id); `upload_conflict` stays the file manager's.
 - SSE mode uses the same registry over HTTP (`/api/uploads`). Upload owner =
-  `requestOwner(req)` (`lib/uploads.ts`), the browser link's owner too; attach
+  `requestOwner(req)` (`lib/web-auth.ts`), the browser link's owner too; attach
   requires the same owner and the session's host.
 - The registry is in memory: a main restart loses finished-but-unsent uploads
   ("attach the file again"); unfinished ones resume. Switching chats aborts

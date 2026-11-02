@@ -1,5 +1,6 @@
 import { readBodyWithinLimit } from "@/lib/bounded-form-data";
-import { abortUpload, putUploadChunk, requestOwner, uploadErrorResponse } from "@/lib/uploads";
+import { abortUpload, putUploadChunk, uploadErrorResponse } from "@/lib/uploads";
+import { requestOwner } from "@/lib/web-auth";
 
 type Params = { params: Promise<{ id: string }> };
 
