@@ -90,7 +90,7 @@ The upload id is a client-generated UUID. It doubles as the binary frame id on b
   - Concurrent starts of one id: the latest wins. An older start's host answer still goes to its caller but no longer sets the registry's offset or live state. A start that finds the upload removed (aborted) while it ran sends `uploadAbort` to the host and answers 404 `upload_missing`.
   - At most 32 unfinished uploads per owner; a start past that is 429 `too_many_uploads`. An unfinished entry idle for 10 min (no start, frame or ack) is dropped from the registry to make room; a later `up_start` re-registers and resumes it.
   - A main restart forgets the registry. A finished staged upload then cannot be attached ("attach the file again"); an unfinished one resumes through `up_start`, which re-registers it.
-  - Another owner, host or size for a registered id is 409 `upload_id_conflict`.
+  - Another owner, host, name, MIME type or size for a registered id is 409 `upload_id_conflict`, checked before changing its live state, queued frames, sink or attempt identity. A rejected start leaves the original upload usable.
 
 ## Limitations
 

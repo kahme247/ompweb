@@ -48,6 +48,7 @@ export function uploadErrorResponse(error: unknown): Response {
 interface Upload {
   hostId: string;
   owner: string;
+  name: string;
   size: number;
   type: string;
   received: number;
@@ -137,7 +138,7 @@ export async function startUpload(req: UploadStartRequest): Promise<{ received: 
   const map = uploads();
   let upload = map.get(id);
   const known = upload !== undefined;
-  if (upload && (upload.owner !== owner || upload.hostId !== hostId || upload.size !== size)) {
+  if (upload && (upload.owner !== owner || upload.hostId !== hostId || upload.name !== name || upload.type !== type || upload.size !== size)) {
     throw new UploadError(409, "upload_id_conflict", "Another upload has this id");
   }
   const attempt = randomUUID();
@@ -149,7 +150,7 @@ export async function startUpload(req: UploadStartRequest): Promise<{ received: 
     upload.attempt = attempt;
   } else {
     makeRoom(map, owner);
-    upload = { hostId, owner, size, type, received: 0, sent: 0, done: false, live: false, sink, attached: null, attempt, touched: 0 };
+    upload = { hostId, owner, name, size, type, received: 0, sent: 0, done: false, live: false, sink, attached: null, attempt, touched: 0 };
     map.set(id, upload);
   }
   upload.touched = Date.now();
