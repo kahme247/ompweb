@@ -57,10 +57,14 @@ export const LINK_RESUME_MS = 120_000;
  * Longer than LINK_RESUME_MS, so a command resent after a resync to the same server still finds it. */
 export const COMMAND_DEDUPE_MS = 600_000;
 
-/** Commands that only read (`get_*`, `predict_word`): safe to send again after a resync, and not worth remembering for
- * the (session, rid) dedupe, where they would only take room from commands that change something. */
+const REPEATABLE_COMMANDS = ["predict_word", "predict_word_feedback", "set_host_tools", "set_host_uri_schemes"];
+
+/** Commands that are repeatable by nature: `get_*` and `predict_word` only read, and the others register or record the
+ * same thing again. Safe to send again after a resync, and not worth remembering for the (session, rid) dedupe, where
+ * they would only take room from commands that change something (and be refused at the cap). Never `abort`: a resent
+ * one could stop a prompt that ran after it. */
 export function isIdempotentCommand(type: string): boolean {
-  return type.startsWith("get_") || type === "predict_word";
+  return type.startsWith("get_") || REPEATABLE_COMMANDS.includes(type);
 }
 
 export type MuxControlFrame =

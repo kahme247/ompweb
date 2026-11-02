@@ -740,6 +740,8 @@
   "errors.skill_update_unsupported": "This skill cannot be updated automatically",
   "errors.source_required": "A plugin source is required",
   "errors.thinking_block_not_found": "Thinking block not found",
+  "errors.too_many_commands": "Too many commands were sent in the last few minutes. Wait a few minutes, then try again.",
+  "errors.request_too_large": "This request is too large to send.",
   "errors.transport_lost": "The connection to omp-web dropped before the answer arrived. The command may have run; check before sending it again.",
   "errors.transport_unavailable": "Not sent: no connection to omp-web. Try again.",
   "errors.upload_conflict": "One or more files already exist",

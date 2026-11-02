@@ -795,7 +795,8 @@ during the wait.
     all links together passed 256 MiB and this one's socket was gone longest, or the server restarted):
     `welcome {resumed: false}`, both sides start over, every stream gets CONNECTING and subscribes again
     (fresh snapshots, as an SSE reconnect). Sent commands go again (same `rid`) when idempotent
-    (`isIdempotentCommand`: `get_*`, `predict_word`; the server does not remember those) or when the
+    (`isIdempotentCommand`: `get_*`, `predict_word`, `predict_word_feedback`, `set_host_tools`,
+    `set_host_uri_schemes`; never `abort`; the server does not remember those) or when the
     server is the same and their first send was within `COMMAND_DEDUPE_MS` (10 min; the server's
     `(session, rid)` dedupe answers a repeat with `deduped: true`), else 503 `transport_lost`
     (`TransportLostError`). A command with no link for 15 s answers 503 `transport_unavailable`. A worker
