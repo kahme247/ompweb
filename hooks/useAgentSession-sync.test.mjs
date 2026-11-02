@@ -149,8 +149,11 @@ test("a snapshot no field takes still completes deltas that arrived without thei
   assert.equal(pipe.shown.at(-1), "abcd");
 });
 
-test("deltas without a message while reads fail fast send one context request per window, then the next delta retries", async (t) => {
-  t.mock.timers.enable({ apis: ["Date"] });
+// Base-less deltas through the coalescer into catch-up, reads failing at once, on a clock the test moves (performance.now and timers).
+function missingBasePipeline(t) {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let clock = 10_000;
+  t.mock.method(performance, "now", () => clock);
   const requests = [];
   t.mock.method(globalThis, "fetch", async (url) => {
     requests.push(url);
@@ -158,14 +161,54 @@ test("deltas without a message while reads fail fast send one context request pe
   });
   const catchUp = createSessionCatchUp({ sessionId: () => "s1", scope: () => "run", history() {}, subscribe: () => false, live() {} });
   const coalescer = createMessageUpdateCoalescer(() => {}, () => () => {}, () => catchUp.requestMissingBase());
-  const delta = (sequence) => ({ type: "message_update", messageId: "m1", message: { role: "assistant" }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x" }, web: { streamId: "s", sequence } });
-  for (let sequence = 1; sequence <= 20; sequence += 1) {
-    coalescer.push(delta(sequence));
-    await new Promise((resolve) => setImmediate(resolve)); // the failed read settles before the next delta
-  }
-  assert.equal(requests.length, 1, "twenty base-less deltas, one request");
-  t.mock.timers.tick(MISSING_BASE_RETRY_MS);
-  coalescer.push(delta(21));
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(requests.length, 2, "a window later the next delta asks again");
+  let sequence = 0;
+  const settle = () => new Promise((resolve) => setImmediate(resolve)); // the failed read ends
+  return {
+    requests,
+    catchUp,
+    async delta() {
+      sequence += 1;
+      coalescer.push({ type: "message_update", messageId: "m1", message: { role: "assistant" }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x" }, web: { streamId: "s", sequence } });
+      await settle();
+    },
+    async wait(ms) {
+      clock += ms;
+      t.mock.timers.tick(ms);
+      await settle();
+    },
+  };
+}
+
+test("deltas without a message while reads fail fast send one context request per window", async (t) => {
+  const pipe = missingBasePipeline(t);
+  for (let i = 0; i < 20; i += 1) await pipe.delta();
+  assert.equal(pipe.requests.length, 1, "twenty base-less deltas, one request");
+  await pipe.wait(MISSING_BASE_RETRY_MS);
+  assert.equal(pipe.requests.length, 2, "the window's end sends the one request the dropped deltas were owed");
+  await pipe.wait(MISSING_BASE_RETRY_MS);
+  assert.equal(pipe.requests.length, 2, "nothing more without another delta");
+  await pipe.delta();
+  assert.equal(pipe.requests.length, 3, "a delta after a quiet window asks at once");
+});
+
+test("a base-less delta dropped inside the window still gets a request when it ends, though no delta follows", async (t) => {
+  const pipe = missingBasePipeline(t);
+  await pipe.delta();
+  await pipe.delta();
+  assert.equal(pipe.requests.length, 1);
+  await pipe.wait(MISSING_BASE_RETRY_MS - 1);
+  assert.equal(pipe.requests.length, 1, "not before the window ends");
+  await pipe.wait(1);
+  assert.equal(pipe.requests.length, 2, "the trailing request, with the stream quiet");
+});
+
+test("invalidate (select, disconnect) starts a fresh window and drops the trailing request", async (t) => {
+  const pipe = missingBasePipeline(t);
+  await pipe.delta();
+  await pipe.delta();
+  pipe.catchUp.disconnect();
+  await pipe.wait(MISSING_BASE_RETRY_MS);
+  assert.equal(pipe.requests.length, 1, "the pending trailing request was cancelled");
+  await pipe.delta();
+  assert.equal(pipe.requests.length, 2, "and the window was reset: this delta asks at once");
 });
