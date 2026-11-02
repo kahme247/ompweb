@@ -127,6 +127,8 @@ app/api/
   stt/route.ts                    POST audio (+scope) → 202 { jobId } | GET ?scope= live jobs (lib/stt-jobs.ts)
   stt/[jobId]/route.ts            GET job state | POST retry with kept audio | DELETE ?claim= claim/discard
   stt/[jobId]/audio/route.ts      GET the kept recording (audio/* only) for playback
+  uploads/route.ts                POST { id, host, name, size, type } start/resume a composer upload (SSE-mode path of the browser link's `up_start`) → { received, done }
+  uploads/[id]/route.ts           PUT ?offset=N raw body ≤ 1 MiB, answered once the host acked it (409 `upload_offset` with { received }) | DELETE abort
   worktrees/route.ts              GET/POST/DELETE git worktrees
 
 lib/
@@ -139,6 +141,7 @@ lib/
     local-bootstrap.ts web server side of the local link: `localLinkUrl`, `ensureLocalHostLink` (the `local` record + `host.json`)
     host-login.ts      `host.json` (`loginHost`, `readHostLogin`) and `isLoopbackHost`, shared by the daemon and local-bootstrap
     session-ops.ts     file-reading half of the session/project routes, run on the owning host's daemon (this machine's too)
+    uploads.ts         daemon side of composer uploads: `StagedUploads` (staging dir `<agent dir>/omp-web/uploads/`, offset writes, 24 h sweep, attach into the session's `local/uploads/`), `sanitizeUploadName`, `sessionLocalRoot`
     link-protocol.ts   link messages, codec, binary blob frames, close codes, size limits, `HOST_OP_NAMES`, `SeqWindow`/`Outbox`, `LinkSender`/`PartJoiner` (pieces, fair sending)
     hub.ts             main side: the link's upgrade and `websocket` handler (`handleLinkUpgrade`, `hostLinkSocket`), `RemoteHost`, `getHost`, `listHosts`, adoption of live children (`reattach`/`adopt`), orphans, `freezeHostLinks`, `hosts` change events
     daemon.ts          daemon side: `runHostDaemon` (reconnect, buffering, op dispatch, hello with each child's `{sessionId, cwd, pending}`; follows a `host.json` url or token change when a dial fails; loopback redials at most 3 s apart)
@@ -1151,6 +1154,35 @@ during the wait.
 - Ghost state lives in a small external store (`useSyncExternalStore` in
   `GhostMirror`), not ChatInput state: re-rendering the composer per ghost
   change was the dominant per-keystroke cost.
+
+### Composer file uploads (`docs/specs/2026-11-02-file-uploads-design.md`)
+- Images and text files go inline while they fit the inline budgets
+  (`lib/image-attachments.ts`, `lib/chat-attachments.ts`); every other file,
+  an image switched to **As file**, and anything over a budget is uploaded
+  (2 GiB per file, 20 per message, `lib/upload-limits.ts`, browser-safe).
+- Uploads land in a staging dir on the **session's host** (the daemon), not on
+  main: a new chat has no session yet. The prompt command carries
+  `uploads: [id]`; `runAgentCommand` (`lib/agent-command.ts`) attaches each
+  through the host op `uploadAttach` (hard link into
+  `<session dir>/local/uploads/`, never overwriting; copy on EXDEV) and appends
+  the "Attached files" block with `local://` URL and absolute path. Ids stay
+  registered until the prompt reaches omp, so a retried send reuses the attach.
+- Bytes are forwarded, never re-encoded: the browser sends binary frames
+  `[n][id][payload]` (≤ `pieceBytes`) as `LinkSender` blob units keyed
+  `up:<id>`; `lib/browser-link.ts` accepts them only for uploads that link
+  started and hands the same bytes to `forwardUploadFrame` (`lib/uploads.ts`),
+  which queues them as blob units on the host link (link v6; `hostVersion < 6`
+  → 426 `host_upgrade_required`). Blob units are outside both links' line
+  windows; the worker's per-upload `UPLOAD_WINDOW_BYTES` credit, refilled by
+  the daemon's `upload_ack`, is the only flow control. Binary frames are not
+  resent: after a drop the worker re-sends `up_start` (same id) and continues
+  from the host's `received`.
+- SSE mode uses the same registry over HTTP (`/api/uploads`). Upload owner =
+  `requestOwner(req)` (`lib/uploads.ts`), the browser link's owner too; attach
+  requires the same owner and the session's host.
+- The registry is in memory: a main restart loses finished-but-unsent uploads
+  ("attach the file again"); unfinished ones resume. Switching chats aborts
+  in-flight uploads; drafts keep only finished ones (`sessionStorage`).
 
 ### Voice transcription jobs (`lib/stt-jobs.ts`, `/api/stt`, `hooks/useDictation.ts`)
 - The browser never waits on the STT endpoint: `POST /api/stt` keeps the

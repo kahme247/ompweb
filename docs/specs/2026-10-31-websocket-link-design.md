@@ -41,7 +41,7 @@ Non-goals: compression (`perMessageDeflate` stays off), an update-only mode for 
 
 ### D4. Versioning
 
-- `LINK_PROTOCOL_VERSION = 5` and `MIN_LINK_PROTOCOL_VERSION = 4` (both literal, one line each: the deploy script parses them with `sed`). v4 = "the link is one WebSocket: text frames carry the messages, binary frames large results, `ack` messages replace the ack header and the POST answer; `replaced` and `welcome.nonce` are gone"; v5 is described under Compatibility below. Dropping v3 is the explicit decision the policy asks for; v2/v1 acceptance code is deleted. The rules in remote-hosts "Protocol versions and compatibility" (compatible changes only within a released version, keep N-1 from the next bump on, web first) stay as written apart from the version history.
+- `LINK_PROTOCOL_VERSION = 6` and `MIN_LINK_PROTOCOL_VERSION = 4` (both literal, one line each: the deploy script parses them with `sed`). v4 = "the link is one WebSocket: text frames carry the messages, binary frames large results, `ack` messages replace the ack header and the POST answer; `replaced` and `welcome.nonce` are gone"; v5 is described under Compatibility below; v6 = composer uploads (`docs/specs/2026-11-02-file-uploads-design.md`, U5): binary down frames carry upload bytes, the `upload_ack` up message and the `uploadStart`/`uploadAbort`/`uploadAttach` ops (main uploads only to a v6 daemon, 426 `host_upgrade_required` otherwise; a v5 main closes a v6 daemon 4426 like any newer one, so the web app upgrades first). Dropping v3 is the explicit decision the policy asks for; v2/v1 acceptance code is deleted. The rules in remote-hosts "Protocol versions and compatibility" (compatible changes only within a released version, keep N-1 from the next bump on, web first) stay as written apart from the version history.
 - **Version check on the hello frame.** A hello whose `v` is outside `MIN..current` (checked on the raw JSON before decoding, as today) gets close **4426** with reason `{"serverVersion":5}`; Settings shows "needs upgrade (host vN, server v5)" unless the host has a healthy socket. The daemon reads `serverVersion` from the reason and logs, as today, either "update ompweb on this host" or "this host's ompweb is newer than the server's: update ompweb on the server", then exits 1.
 
 ### D5. Daemons from before the WebSocket (v3 builds, e.g. the user's Mac)
@@ -125,7 +125,7 @@ bytes 1..n    request id (the `req.id` the result answers)
 bytes n+1..   the result: media bytes for readMedia, else the UTF-8 JSON of the result
 ```
 
-`encodeBlobFrame(id, bytes)` / `decodeBlobFrame(frame)` in `lib/hosts/link-protocol.ts`; decoding never copies the payload. The hub stores the bytes on the pending op with that id; a frame for an unknown or already-filled id is ignored (the matching `res` then fails `host_blob_missing` if its op still waits). The hub never sends a binary frame and the daemon ignores one; a binary frame before the socket's hello closes 1008.
+`encodeBlobFrame(id, bytes)` / `decodeBlobFrame(frame)` in `lib/hosts/link-protocol.ts`; decoding never copies the payload. The hub stores the bytes on the pending op with that id; a frame for an unknown or already-filled id is ignored (the matching `res` then fails `host_blob_missing` if its op still waits). Up to v5 the hub never sends a binary frame and the daemon ignores one; from v6 a down binary frame carries upload bytes, its id the upload id. A binary frame before the socket's hello closes 1008.
 
 ### Close codes
 

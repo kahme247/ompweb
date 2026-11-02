@@ -6,6 +6,8 @@ export interface AttachedImage {
   data: string;   // base64, no prefix
   mimeType: string;
   previewUrl: string; // object URL for display
+  /** The picked file, so a switch to As file uploads its exact bytes; absent for one restored from a draft. */
+  file?: File;
 }
 
 export type AttachedTextFile = AttachedTextFileData;

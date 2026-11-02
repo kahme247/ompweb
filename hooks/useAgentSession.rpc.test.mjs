@@ -459,6 +459,26 @@ test("the queue panel shows omp's snapshot on load and follows queue_update, not
   assert.deepEqual(w.latest.queuedMessages, { steering: [], followUp: ["later"] });
 });
 
+test("upload ids ride the prompt and follow-up bodies; a files-only prompt is sent", async () => {
+  resetWorld();
+  primeSession("uploads", [userMsg("u0", "q")]);
+  const id = "0f0e0d0c-0b0a-4908-8706-050403020100";
+  const w = await mountSession("uploads");
+  let sending;
+  await act(async () => {
+    sending = w.latest.handleSend("", undefined, [id]);
+    await sleep(30);
+  });
+  await act(async () => {
+    lastEs().open();
+    await sending;
+  });
+  const prompt = callsTo("POST", "/api/agent/").find((call) => call.body?.type === "prompt");
+  assert.deepEqual(prompt?.body.uploads, [id]);
+  await act(async () => { await w.latest.handleFollowUp("and this", undefined, [id]); });
+  assert.deepEqual(callsTo("POST", "/api/agent/").find((call) => call.body?.type === "follow_up")?.body.uploads, [id]);
+});
+
 test("a prompt queued behind a running shell command drops the phantom turn and reports it", async () => {
   resetWorld();
   primeSession("bash-queue", [userMsg("u0", "q")]);
