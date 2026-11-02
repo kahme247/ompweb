@@ -642,10 +642,13 @@ function onFrame(link: Link, ws: LinkSocket, data: string | Uint8Array): void {
     // past blobBytes none are kept, so its `res` then fails host_blob_missing.
     const pending = link.pending.get(result.id);
     if (pending) {
-      // The deadline is for silence: at one unacked window per round trip a valid 64 MiB result outlasts a fixed one.
-      pending.timer.refresh();
       pending.blobBytes += result.bytes.byteLength;
-      if (pending.blobBytes <= LINK_LIMITS.blobBytes) pending.blob.push(result.bytes);
+      if (pending.blobBytes <= LINK_LIMITS.blobBytes) {
+        pending.blob.push(result.bytes);
+        // The deadline is for silence: at one unacked window per round trip a valid 64 MiB result outlasts a fixed one.
+        // Only bytes the hub keeps count, so empty or surplus frames cannot hold an op open.
+        if (result.bytes.byteLength > 0) pending.timer.refresh();
+      }
     }
     // A v5 daemon counts its frames in flight by these answers, binary ones included.
     if ((link.hostVersion ?? 0) >= 5) enqueue(link, encodeLine({ type: "ack", ack: link.up.acked }));

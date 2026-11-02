@@ -391,7 +391,7 @@ parts of those routes stay on main.
 | `spawn {ch, cwd, sessionFile, toolNames, advisor}` | `startRpcSession` spawn |
 | `sessionFileExists {path}` / `invalidateSessionLists {path}` | `AgentSessionWrapper` |
 
-Op timeout: 30 s, then 504 naming the host.
+Op timeout: 30 s of silence (each result byte frame that arrives restarts it), then 504 naming the host.
 
 ## Data flow
 
@@ -500,7 +500,7 @@ asks ("Send a message from a session on <host> to session <id> on
 | Link returns, children alive | Wrappers reattach; `get_state` reconcile runs; `resync` channels reconcile too. |
 | Daemon restarted, children gone | Synthesized `process_exit` per missing channel, which raises the existing "Run failed" notification. With `autoResumeSessions` on, main restarts sessions that were mid-run and sends `RESUME_PROMPT` (Rules → Reattach). |
 | Second daemon with the same token | Newest link wins; the old socket is closed 4409 and its daemon exits 0. |
-| Host op over 30 s | 504 naming the host; the sidebar keeps that host's last list. |
+| Host op silent for 30 s (a result still arriving counts as activity) | 504 naming the host; the sidebar keeps that host's last list. |
 | Version mismatch | Close 4426 (hello frame) or 426 (a pre-WebSocket daemon's POST); host status `needs-upgrade`. |
 | `omp` missing on the host | Host status `omp-missing`; new sessions there are disabled. |
 | Host revoked while sessions run | Link closed; its wrappers are destroyed; its sessions leave the list. The omp children on that machine are killed by the daemon when it sees the 401 on reconnect. |
