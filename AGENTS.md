@@ -800,6 +800,10 @@ during the wait.
     `(session, rid)` dedupe answers a repeat with `deduped: true`), else 503 `transport_lost`
     (`TransportLostError`). A command with no link for 15 s answers 503 `transport_unavailable`. A worker
     done with its link closes it 1000 (the server drops it at once); 4000 is its own redial.
+    The server answers a command whose JSON is over the route's 8 MiB body cap (UTF-8 bytes; the worker
+    checks first, the server again for a joined line, whose cap leaves room for the envelope) 413
+    `request_too_large`, and a command that changes something 429 `too_many_commands` while `DEDUPE_MAX`
+    (500) remembered ones are all still inside `COMMAND_DEDUPE_MS`: neither runs, neither is remembered.
   - **Fallback.** A socket that closes before it opens gets a plain `GET /api/events/link`: offline, 401,
     502, 503 or 504 redial. Any other answer (426: a proxy that drops Upgrade, but also a healthy server's
     answer to a dial that failed as the network came back) is a refusal: 3 in a row, with no open between

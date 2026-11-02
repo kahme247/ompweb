@@ -25,8 +25,8 @@ export const browserLinkTimings = { pingMs: LINK_LIMITS.pingMs, offlineMs: LINK_
  * past `totalBacklogBytes` across every link, the links whose sockets have been gone longest are dropped first. Either
  * way their browsers resync. */
 export const browserLinkLimits = { backlogBytes: 32 * 1024 * 1024, totalBacklogBytes: 256 * 1024 * 1024 };
-/** Remembered commands kept for a resend. Settled ones are evicted past it; the map can exceed it only by the commands in
- * flight, each of which the rpc command timeout bounds. */
+/** Remembered commands, kept COMMAND_DEDUPE_MS for a resend. At the cap, a command that changes something is answered
+ * 429 `too_many_commands` until one expires: forgetting a remembered one early would let its resend run it twice. */
 export const DEDUPE_MAX = 500;
 /** The longest joined command line: the route's body cap plus room for the envelope. */
 const MAX_COMMAND_CHARS = MAX_AGENT_COMMAND_REQUEST_BYTES + 64 * 1024;
@@ -460,7 +460,7 @@ function onFrame(ws: BrowserSocket, data: string | Uint8Array): void {
           return ws.close(CLOSE.invalidData, "Invalid JSON");
         }
         if (!isRecord(joined)) return ws.close(CLOSE.invalidData, "Not a message");
-        apply(link, ws, joined);
+        apply(link, ws, joined, Buffer.byteLength(line));
       }
     }
   }
@@ -499,7 +499,7 @@ function onHello(ws: BrowserSocket, hello: Record<string, unknown>): void {
 
 const isSubscriptionId = (id: unknown): id is string => typeof id === "string" && SUBSCRIPTION_ID_RE.test(id);
 
-function apply(link: BrowserLink, ws: BrowserSocket, message: Record<string, unknown>): void {
+function apply(link: BrowserLink, ws: BrowserSocket, message: Record<string, unknown>, lineBytes = 0): void {
   const { connection } = link;
   switch (message.type) {
     case "sub": {
@@ -517,12 +517,12 @@ function apply(link: BrowserLink, ws: BrowserSocket, message: Record<string, unk
       if (!isSubscriptionId(message.id)) return ws.close(CLOSE.invalidData, "Invalid subscription id");
       return connection.unsubscribe(message.id);
     case "cmd":
-      return onCommand(link, ws, message);
+      return onCommand(link, ws, message, lineBytes);
     // A newer browser's message type: skipped, but its seq is acked so it is never resent.
   }
 }
 
-function onCommand(link: BrowserLink, ws: BrowserSocket, message: Record<string, unknown>): void {
+function onCommand(link: BrowserLink, ws: BrowserSocket, message: Record<string, unknown>, lineBytes: number): void {
   const { rid, session } = message;
   if (typeof rid !== "string" || !rid || rid.length > MAX_RID_LENGTH) return ws.close(CLOSE.invalidData, "Invalid rid");
   const recvAt = Date.now();
@@ -534,6 +534,11 @@ function onCommand(link: BrowserLink, ws: BrowserSocket, message: Record<string,
   };
   // A bad session fails only this command: the link carries other sessions' commands.
   if (typeof session !== "string" || !session || session.length > MAX_SESSION_ID_LENGTH) return reply({ status: 400, body: INVALID_REQUEST }, false);
+  // The route's cap on the request body, on the command: the line's cap leaves room for the envelope, and only a joined
+  // line can pass it. Not remembered, so a resend is refused again.
+  if (lineBytes > MAX_AGENT_COMMAND_REQUEST_BYTES && Buffer.byteLength(JSON.stringify(message.command)) > MAX_AGENT_COMMAND_REQUEST_BYTES) {
+    return reply({ status: 413, body: { error: "Agent command is too large", code: "request_too_large" } }, false);
+  }
   // Scoped to the session, not the link: a resend after a resync comes on a new link, and a rid another session
   // happens to use never replays this one's reply. JSON keeps the pair unambiguous for any session id. A read-only
   // command is safe to run again and is not remembered, so it never takes the room of one that changes something.
@@ -541,24 +546,21 @@ function onCommand(link: BrowserLink, ws: BrowserSocket, message: Record<string,
     const response = await runAgentCommand(session, message.command, message.advisor === true);
     return { status: response.status, body: await response.json() };
   };
-  const { result, deduped } = isIdempotentCommand(type) ? { result: run(), deduped: false } : runOnce(JSON.stringify([session, rid]), run);
-  result.then((answer) => reply(answer, deduped)).catch((error: unknown) => fail(ws, error));
+  const started = isIdempotentCommand(type) ? { result: run(), deduped: false } : runOnce(JSON.stringify([session, rid]), run);
+  // Every remembered command is still inside its window: forgetting one would let its resend run it twice.
+  if (!started) return reply({ status: 429, body: { error: "Too many commands in the last 10 minutes", code: "too_many_commands" } }, false);
+  started.result.then((answer) => reply(answer, started.deduped)).catch((error: unknown) => fail(ws, error));
 }
 
-/** One run per key: a known key joins the run in flight or replays its settled reply (a resend after a lost reply). */
-function runOnce(key: string, run: () => Promise<Reply>): { result: Promise<Reply>; deduped: boolean } {
+/** One run per key: a known key joins the run in flight or replays its settled reply (a resend after a lost reply).
+ * Undefined when DEDUPE_MAX commands are remembered and none has expired: nothing is forgotten early. */
+function runOnce(key: string, run: () => Promise<Reply>): { result: Promise<Reply>; deduped: boolean } | undefined {
   const map = (globalThis.__ompBrowserCommands ??= new Map());
   const now = Date.now();
   const known = map.get(key);
   if (known && known.expiresAt > now) return { result: known.result, deduped: true };
   for (const [stale, entry] of map) if (entry.expiresAt <= now) map.delete(stale);
-  if (map.size >= DEDUPE_MAX) {
-    // Only a settled entry goes, the oldest first: evicting one in flight (Infinity) would let a resend run it twice,
-    // so the map grows past DEDUPE_MAX while that many commands are running.
-    let oldest: [string, Remembered] | undefined;
-    for (const item of map) if (item[1].expiresAt !== Infinity && (!oldest || item[1].expiresAt < oldest[1].expiresAt)) oldest = item;
-    if (oldest) map.delete(oldest[0]);
-  }
+  if (map.size >= DEDUPE_MAX) return undefined;
   // Called now, not after an await: on the fast path the command reaches omp in the link's order.
   const entry: Remembered = { result: run(), expiresAt: Infinity };
   const settle = () => {
