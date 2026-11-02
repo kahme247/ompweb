@@ -64,14 +64,17 @@ function isolation(s: Sample): "other" | "same" | "clear" | "unknown" | undefine
   return fields.every((field) => asNumber(field) !== undefined) ? "clear" : "unknown";
 }
 
+// A req is only unique within one client, so the hang/action lookups key on both.
+const reqKey = (s: Sample) => `${asString(s.clientId)}\0${asString(s.req)}`;
+
 /**
  * A WS hang is a missed ack: the transport stalled. An HTTP hang is a missed response, so it is a stall only when the
  * transport alone took the ack formula's time (its action's transportMs ≥ waitedMs), else the server's time made the
  * command slow; unclassified without that action's times.
  */
-function hangKind(s: Sample, transportByReq: Map<unknown, number | undefined>): string {
+function hangKind(s: Sample, transportByReq: Map<string, number | undefined>): string {
   if (s.via !== "http") return "stalled";
-  const transportMs = transportByReq.get(s.req);
+  const transportMs = transportByReq.get(reqKey(s));
   const waitedMs = asNumber(s.waitedMs);
   if (transportMs === undefined || waitedMs === undefined) return "unclassified";
   return transportMs >= waitedMs ? "stalled" : "slow command";
@@ -123,10 +126,10 @@ export function summarize(samples: Sample[], options: SummaryOptions): SummaryRo
   // A hang counts as answered later when the same command ended in a reply (ok or error), not a loss. Built from every
   // sample, so a since/until/client filter that cuts the reply off does not turn it into a hang that was never answered.
   const answered = new Set(
-    samples.filter((s) => s.metric === "action" && typeof s.req === "string" && (s.outcome === "ok" || s.outcome === "error")).map((s) => s.req),
+    samples.filter((s) => s.metric === "action" && typeof s.req === "string" && (s.outcome === "ok" || s.outcome === "error")).map(reqKey),
   );
   const clients = new Map<string, { samples: number; types: Set<string>; ua: string }>();
-  const transportByReq = new Map(samples.filter((s) => s.metric === "action" && typeof s.req === "string").map((s) => [s.req, transportMsOf(s)]));
+  const transportByReq = new Map(samples.filter((s) => s.metric === "action" && typeof s.req === "string").map((s) => [reqKey(s), transportMsOf(s)]));
 
   for (const s of kept) {
     const transport = asString(s.transport) ?? "unknown";
@@ -152,7 +155,10 @@ export function summarize(samples: Sample[], options: SummaryOptions): SummaryRo
         addValue(section, transport, "all", value);
         if (type) addValue(section, transport, type, value);
       }
-      if (type?.startsWith("abort")) addValue("abort behind upload", transport, (asNumber(s.behindBytes) ?? 0) >= LARGE_FRAME_BYTES ? "yes" : "no", totalMs);
+      if (type?.startsWith("abort")) {
+        const behindBytes = asNumber(s.behindBytes);
+        addValue("abort behind upload", transport, behindBytes === undefined ? "unknown" : behindBytes >= LARGE_FRAME_BYTES ? "yes" : "no", totalMs);
+      }
       // transportMs, not totalMs: the server's time differs by command type, not by what the pipe was carrying.
       if (isolated) addValue("isolation action ms", transport, isolated, transportMs);
       add("outcome", transport, asString(s.outcome) ?? "unknown");
@@ -174,7 +180,7 @@ export function summarize(samples: Sample[], options: SummaryOptions): SummaryRo
       addValue("rebalance settledMs", transport, reason, asNumber(s.settledMs));
     } else if (s.metric === "hang") {
       add("hang", transport, "total");
-      if (answered.has(s.req)) add("hang", transport, "answered later");
+      if (answered.has(reqKey(s))) add("hang", transport, "answered later");
       add("hang", transport, hangKind(s, transportByReq));
     }
   }

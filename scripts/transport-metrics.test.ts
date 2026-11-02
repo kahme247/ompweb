@@ -94,6 +94,24 @@ test("an abort behind an upload lands in its own row", () => {
   }
 });
 
+test("an abort whose POST got no response has no behindBytes and lands under unknown, not no", () => {
+  const rows = summarize([{ ...at(1), metric: "action", transport: "sse", type: "abort", req: "a", outcome: "error", sentAt: 0, gotAt: 70, offset: 0 }], {});
+  assert.equal(row(rows, "abort behind upload", "sse", "unknown")?.max, 70);
+  assert.equal(row(rows, "abort behind upload", "sse", "no"), undefined);
+});
+
+test("a req shared by two clients is looked up per client for answered later and the hang class", () => {
+  const hang = { ...at(1), metric: "hang", transport: "sse", req: "r1", type: "prompt", via: "http", bytes: 1, waitedMs: 100 };
+  const action = (clientId: string, outcome: string, gotAt: number) =>
+    ({ ...at(1), clientId, metric: "action", transport: "sse", req: "r1", type: "prompt", outcome, sentAt: 0, recvAt: 0, repliedAt: 0, gotAt });
+  // c2 answered r1 slowly (stalled would need transportMs ≥ 100); c1's r1 was lost and its own action was fast.
+  const rows = summarize([hang, action("c1", "lost", 10), action("c2", "ok", 5_000)], { client: "c1" });
+  assert.equal(row(rows, "hang", "sse", "total")?.count, 1);
+  assert.equal(row(rows, "hang", "sse", "answered later"), undefined);
+  assert.equal(row(rows, "hang", "sse", "slow command")?.count, 1);
+  assert.equal(row(rows, "hang", "sse", "stalled"), undefined);
+});
+
 test("a hang stays answered later when its reply is outside the filter, and a hang without req never is", () => {
   const rows = summarize(
     [
