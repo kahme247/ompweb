@@ -58,6 +58,8 @@ interface Upload {
   /** The attach in flight, shared by overlapping attaches of this upload to this session file. */
   attaching?: { sessionFile: string; result: Promise<{ sessionFile: string; path: string; url: string }> } | null;
   starts: number;
+  /** uploadStarts in flight: an error ack meanwhile is from an earlier attempt's write. */
+  opening: number;
   touched: number;
 }
 
@@ -88,6 +90,9 @@ function onHostEvent(hostId: string, ack: UploadAck | null): void {
   const upload = map.get(ack.id);
   if (!upload || upload.hostId !== hostId) return;
   if (ack.error) {
+    // An error from a write of a superseded attempt may land on the newer one: while its start is in flight, that start's
+    // own answer rules (a disk that is really failing fails the new attempt's writes again).
+    if (upload.opening > 0) return;
     map.delete(ack.id);
     dropUploadFrames(hostId, ack.id);
     // A daemon's status is untrusted: Response.json throws on one outside 200-599.
@@ -146,17 +151,20 @@ export async function startUpload(req: UploadStartRequest): Promise<{ received: 
     upload.sink = sink;
   } else {
     makeRoom(map, owner);
-    upload = { hostId, owner, size, type, received: 0, sent: 0, done: false, live: false, sink, attached: null, starts: 0, touched: 0 };
+    upload = { hostId, owner, size, type, received: 0, sent: 0, done: false, live: false, sink, attached: null, starts: 0, opening: 0, touched: 0 };
     map.set(id, upload);
   }
   const start = ++upload.starts;
   upload.touched = Date.now();
+  upload.opening += 1;
   let result: unknown;
   try {
     result = await hostUploadOp(hostId, "uploadStart", { id, name, size, type });
   } catch (error) {
     if (!known && upload.starts === start && map.get(id) === upload) map.delete(id);
     throw error;
+  } finally {
+    upload.opening -= 1;
   }
   if (map.get(id) !== upload) {
     // Aborted while the host opened it (its ops run concurrently): what this start staged goes too.
@@ -231,7 +239,8 @@ export function putUploadChunk(id: string, owner: string, offset: number, body: 
   };
   const sink: UploadSink = {
     ack(received, done) {
-      if (received >= target || done) finish(null, received, done);
+      // The last byte resolves on `done` only: the host's final fsync may outlast its ack coalescing, and a send needs the file finished.
+      if ((received >= target && target < upload.size) || done) finish(null, received, done);
       else timer.refresh();
     },
     error(status, code, message) {

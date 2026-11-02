@@ -63,7 +63,9 @@ export function sessionLocalRoot(sessionFile: string, sessionId: string, platfor
 /** What the daemon sends up as `upload_ack`. */
 export type UploadAck = { id: string; received: number; done: boolean; error?: { status: number; code: string; message: string } };
 
-type Meta = { name: string; size: number; type: string; created: number };
+type Receipt = { sessionFile: string; path: string; url: string };
+/** `attached`: the receipt of a finished attach, kept (the `.part` is gone) so an attach retried after a lost reply is answered again. */
+type Meta = { name: string; size: number; type: string; created: number; attached?: Receipt };
 type OpenUpload = { name: string; type: string; size: number; received: number; chain: Promise<void>; timer: NodeJS.Timeout | undefined; active: number };
 
 const errno = (error: unknown) => (error as NodeJS.ErrnoException | null)?.code;
@@ -105,7 +107,10 @@ export class StagedUploads {
   private async meta(id: string): Promise<Meta | null> {
     try {
       const meta: unknown = JSON.parse(await readFile(this.path(id, "json"), "utf8"));
-      return isRecord(meta) && typeof meta.name === "string" && Number.isSafeInteger(meta.size) && typeof meta.type === "string" ? meta as Meta : null;
+      if (!isRecord(meta) || typeof meta.name !== "string" || !Number.isSafeInteger(meta.size) || typeof meta.type !== "string") return null;
+      const { attached } = meta;
+      if (attached !== undefined && !(isRecord(attached) && typeof attached.sessionFile === "string" && typeof attached.path === "string" && typeof attached.url === "string")) return null;
+      return meta as Meta;
     } catch {
       return null;
     }
@@ -173,6 +178,10 @@ export class StagedUploads {
     await mkdir(this.dir, { recursive: true });
     const part = this.path(id, "part");
     const meta = await this.meta(id);
+    if (meta?.attached) {
+      if (meta.name !== name || meta.type !== type || meta.size !== size) throw new HostOpError(409, "upload_id_conflict", "The upload id is in use for another file");
+      return { received: size, done: true };
+    }
     let received = meta?.name === name && meta.type === type && meta.size === size ? await sizeOf(part) : null;
     if (received === null || received > size) {
       await writeFile(part, new Uint8Array(0));
@@ -244,6 +253,11 @@ export class StagedUploads {
     if (!isUploadId(id) || typeof sessionId !== "string" || !isValidSessionId(sessionId)) throw new HostOpError(400, "invalid_request", "Invalid upload attach");
     const part = this.path(id, "part");
     const meta = await this.meta(id);
+    if (meta?.attached) {
+      // Attached already (the reply was lost): the same session file gets the same answer, any other one finds it gone.
+      if (meta.attached.sessionFile === sessionFile && await sizeOf(meta.attached.path) !== null) return { path: meta.attached.path, url: meta.attached.url };
+      throw new HostOpError(404, "upload_missing", "The upload is gone: attach the file again");
+    }
     const size = meta ? await sizeOf(part) : null;
     if (!meta || size === null) throw new HostOpError(404, "upload_missing", "The upload is gone: attach the file again");
     if (this.open.has(id) || size !== meta.size) throw new HostOpError(409, "upload_incomplete", "The upload has not finished");
@@ -273,8 +287,11 @@ export class StagedUploads {
           throw copyError;
         }
       }
-      await this.remove(id);
-      return { path: target, url: `local://${UPLOADS_LOCAL_DIR}/${fileName}` };
+      // The receipt replaces the metadata first, then the part goes: a crash between leaves a receipt that still answers a retry.
+      const receipt: Receipt = { sessionFile, path: target, url: `local://${UPLOADS_LOCAL_DIR}/${fileName}` };
+      await writeFile(this.path(id, "json"), JSON.stringify({ ...meta, attached: receipt } satisfies Meta));
+      await rm(part, { force: true });
+      return { path: target, url: receipt.url };
     }
   }
 }

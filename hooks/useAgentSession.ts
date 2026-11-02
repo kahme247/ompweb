@@ -3239,7 +3239,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           value: loaded && !value.trim() ? content : value,
           images: destination ? [...draft.images, ...destination.images] : draft.images,
           files: destination ? [...draft.files, ...destination.files] : draft.files,
-          uploads: destination ? [...(draft.uploads ?? []), ...(destination.uploads ?? [])] : draft.uploads,
+          // The same upload may sit in both drafts (an id is one file): keep its first occurrence.
+          uploads: destination
+            ? [...(draft.uploads ?? []), ...(destination.uploads ?? [])].filter((upload, at, all) => all.findIndex((other) => other.id === upload.id) === at)
+            : draft.uploads,
         });
         onSessionMoved?.(sid, edit.sessionId, draft);
       }

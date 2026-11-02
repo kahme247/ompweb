@@ -3081,6 +3081,35 @@ test("relocation keeps the source and existing target finished uploads", async (
   assert.equal(getDraft(sid), null);
 });
 
+test("relocation merges an upload both drafts hold once", async (t) => {
+  resetWorld();
+  const { getDraft, setDraft, clearDraft, subscribeDrafts } = await import("@/lib/draft-store");
+  const sid = "edit-move-shared-upload", target = `${sid}-owned`;
+  t.after(() => { clearDraft(sid); clearDraft(target); });
+  const shared = { id: "up-shared", name: "shared.bin", size: 10, hostId: "local" };
+  const targetOnly = { id: "up-target", name: "target.bin", size: 20, hostId: "local" };
+  setDraft(sid, { value: "", images: [], files: [], uploads: [shared] });
+  setDraft(target, { value: "Existing target text", images: [], files: [], uploads: [{ ...shared, name: "target-shared.bin" }, targetOnly] });
+  const native = primeEditableHistory(sid);
+  native.moveTo = target;
+  await attachEditableWrapper(t, native);
+  const w = await mountMovableChat(sid);
+  const persistedUploads = [];
+  t.after(subscribeDrafts(() => {
+    if (getDraft(sid) === null) persistedUploads.push(getDraft(target)?.uploads ?? []);
+  }));
+  await confirmEdit(w.view, w.editButton());
+  await until(() => w.selectedId === target, "the confirmed target must become selected");
+  await settle();
+  assert.deepEqual(getDraft(target)?.uploads?.map((upload) => upload.id).sort(), [shared.id, targetOnly.id]);
+  assert.equal(getDraft(target)?.uploads?.find((upload) => upload.id === shared.id)?.name, shared.name, "the source occurrence wins");
+  assert.ok(persistedUploads.length > 0);
+  for (const saved of persistedUploads) {
+    assert.equal(saved.filter((upload) => upload.id === shared.id).length, 1, "no persisted snapshot contains the shared id twice");
+  }
+  assert.equal(getDraft(sid), null);
+});
+
 test("relocation adopts existing target text without prefilling over it", async (t) => {
   resetWorld();
   const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");

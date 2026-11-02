@@ -26,7 +26,7 @@ The composer refuses every file that is neither an image nor text (a `.zip` cann
 - **Text files** are still inlined while they fit the text budget (4 MB); past it they go As file instead of being refused.
 - **Everything else** (archives, PDFs, binaries) goes As file. The "files skipped" refusals are gone, except for the 2 GiB and 20-file limits.
 - Uploading starts on attach. A chip shows progress, then done, or an error with retry. Removing a chip aborts its upload. **Send** waits until every attached upload is done (the button shows the pending count).
-- A draft keeps finished uploads (id, name, size, host); an upload still in flight is lost on reload and must be attached again.
+- A draft keeps finished uploads (id, name, size, host); an upload still in flight is lost on reload and must be attached again. Edit-move merges source and destination uploads by id, keeping the first occurrence (source first).
 - The target host is the open session's host, or for a new chat the host selected on the new-session screen.
 
 ### U3. Staging on the host, attach on send
@@ -38,6 +38,8 @@ Uploads go to a staging directory on the target host's daemon, `<agent dir>/omp-
 3. The server then appends the U1 block to `message` and sends the command to omp.
 
 A failed attach fails the command: 404 `upload_missing`, or 409 `upload_incomplete`. Nothing goes to omp, and the composer keeps the draft. At start and on every `uploadStart` the daemon deletes staged files older than 24 h (`STAGED_MAX_AGE_MS`) and aborts open uploads idle (no start or write) for longer than that, deleting their files; a swept upload gets no `upload_ack`.
+
+A reply to `uploadAttach` can be lost (the link drops after the daemon linked the file). So the daemon keeps a receipt: it rewrites `<id>.json` with `attached: {sessionFile, path, url}` and deletes only the `.part`. A retried `uploadAttach` for the same session file, while the linked file still exists, returns that receipt (one file, no ` (1)` twin); any other session file gets 404 `upload_missing`. An `uploadStart` for an attached id with the same name, type and size answers `{received: size, done: true}`; different metadata gets 409 `upload_id_conflict` without replacing the receipt. The 24 h sweep removes receipts like other staged files.
 
 ### U4. Browser → server (browser link)
 
@@ -61,7 +63,7 @@ The upload id is a client-generated UUID. It doubles as the binary frame id on b
 
 **SSE mode (and the WebSocket fallback)** uses HTTP with the same semantics:
 - `POST /api/uploads {id, host, name, size, type}` corresponds to `up_start` and answers `{received}`.
-- `PUT /api/uploads/<id>?offset=N` carries a body of up to 1 MiB. The server cuts it into ≤ 256 KiB frames, forwards them, and answers once the host has acked through `N + length`, which is the HTTP form of the window.
+- `PUT /api/uploads/<id>?offset=N` carries a body of up to 1 MiB. The server cuts it into ≤ 256 KiB frames, forwards them, and answers once the host has acked through `N + length`, which is the HTTP form of the window. The final PUT waits for `done: true`, not just `received == size`, so it does not finish ahead of the daemon's final fsync.
 - `DELETE /api/uploads/<id>` corresponds to `up_abort`.
 
 ### U5. Server → host (host link v6)
@@ -77,7 +79,7 @@ The upload id is a client-generated UUID. It doubles as the binary frame id on b
   - `LINK_PROTOCOL_VERSION` goes to 6 (new down frames, new up type, new ops). `MIN_LINK_PROTOCOL_VERSION` stays 4.
   - Main uploads only to links with `hostVersion >= 6`. For any other link it answers `up_error` 426: `host_upgrade_required` on a remote host ("Update ompweb on <host> to attach files"), `host_restart_required` on this machine (`local`: "Restart the ompweb host service on this machine to attach files"). After an in-place upgrade the running local daemon keeps its old link version, which is still inside `[MIN, LINK]`, so the upgrade does not restart it.
   - A v5 main closes a v6 daemon with 4426, so the web app is upgraded first, as for every link version (remote-hosts spec, "Protocol versions and compatibility").
-- **Daemon errors:** `upload_ack` may carry `error {status, code, message}` (bytes beyond `size`, 507 `upload_write_failed` on a full disk); the hub turns it into `up_error`.
+- **Daemon errors:** `upload_ack` may carry `error {status, code, message}` (bytes beyond `size`, 507 `upload_write_failed` on a full disk); the hub turns it into `up_error`. While an `uploadStart` for that id is in flight on main, main ignores error acks: they may come from an earlier attempt's writes, and the start's own answer is authoritative. Once the start has answered, write errors fail the upload normally.
 - **Attach** uses a hard link plus unlink (never overwrites an existing name), falling back to an exclusive copy on `EXDEV`/`EPERM`/`ENOTSUP`/`ENOSYS`. Upload ids stay registered until the prompt reaches omp, so a retried send reuses the earlier attach.
 - **Registry on main** (in memory): id → `{hostId, owner, size, received, browser link or HTTP waiter}`.
   - The owner is the browser link's owner (B5); for HTTP it is the same cookie-derived owner (`requestOwner`, `lib/web-auth.ts`).
