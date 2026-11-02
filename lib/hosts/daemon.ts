@@ -41,6 +41,9 @@ import {
 import { localHost, resolveSpawnCwdResult } from "./local-host";
 import { PendingRequests } from "./pending-requests";
 import { sessionOps } from "./session-ops";
+import packageJson from "../../package.json";
+import { acknowledgeHostUpdateHealth, checkHostUpdates, configureHostUpdateSafety, getHostUpdateOperation, HostUpdateError, startHostUpdate } from "./updates";
+import type { HostUpdateCompatibility, HostUpdateOperation } from "./update-types";
 import { StagedUploads } from "./uploads";
 
 const FIRST_RETRY_MS = 1_000;
@@ -141,6 +144,14 @@ function sessionsPath(value: unknown): string {
   return target;
 }
 
+function updateCompatibility(value: unknown): HostUpdateCompatibility {
+  if (!isRecord(value) || !Number.isSafeInteger(value.min) || !Number.isSafeInteger(value.max)
+    || Number(value.min) < 1 || Number(value.max) < Number(value.min)) {
+    throw new HostOpError(400, "invalid_request", "Invalid web-server protocol range");
+  }
+  return { min: Number(value.min), max: Number(value.max) };
+}
+
 /** Dial the main server and keep the link up until stopped, revoked (exit 1),
  * outdated (close 4426, exit 1) or replaced by a newer link with this token (close 4409, exit 0). */
 export function runHostDaemon(options: { url: string; token: string; allowHttp: boolean }): { stop(): Promise<void>; done: Promise<number> } {
@@ -153,6 +164,12 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   let authorization = `Bearer ${options.token}`;
 
   const channels = new Map<string, Channel>();
+  // Spawns not yet in `channels`: their omp child may already be running.
+  let spawnsInFlight = 0;
+  configureHostUpdateSafety(() => channels.size > 0 || spawnsInFlight > 0
+    ? "Close this host's sessions before updating its daemon; sessions and subagents must not be interrupted."
+    : null);
+  let updateStateWarningLogged = false;
   // Upload acks go under the upload's own key, fair with the channels.
   const uploads = new StagedUploads((ack) => void queue({ type: "upload_ack", ...ack }, `up:${ack.id}`));
   void uploads.sweep();
@@ -403,6 +420,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     switch (message.type) {
       case "welcome":
         log(`linked to ${serverUrl}`);
+        acknowledgeHostUpdateHealth();
         unknownLog.reset();
         linked = socket;
         redialDelay = FIRST_RETRY_MS;
@@ -499,6 +517,8 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     } catch (error) {
       const failure = error instanceof HostOpError
         ? { status: error.status, code: error.code, message: error.message }
+        : error instanceof HostUpdateError
+          ? { status: error.httpStatus, code: error.code, message: error.message }
         // A rejected project path is a bad request, as the local projects route answers.
         : error instanceof ProjectPathError
           ? { status: 400, code: error.code, message: error.message }
@@ -518,6 +538,12 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         return localHost.sessionFileExists(sessionsPath(args.path));
       case "invalidateSessionLists":
         return localHost.invalidateSessionLists(args.path === undefined ? undefined : sessionsPath(args.path));
+      case "checkUpdates":
+        if (args.force !== undefined && typeof args.force !== "boolean") throw new HostOpError(400, "invalid_request", "force must be a boolean");
+        return checkHostUpdates(updateCompatibility(args.compatibility), args.force === true);
+      case "updateSoftware":
+        if ((args.target !== "ompweb" && args.target !== "omp") || typeof args.version !== "string") throw new HostOpError(400, "invalid_request", "Invalid host update");
+        return startHostUpdate(args.target, args.version, updateCompatibility(args.compatibility));
       case "uploadStart":
         return uploads.start(args);
       case "uploadAbort":
@@ -532,7 +558,23 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   }
 
   async function spawnChannel(args: Record<string, unknown>): Promise<unknown> {
+    spawnsInFlight += 1;
+    try { return await openChannel(args); } finally { spawnsInFlight -= 1; }
+  }
+
+  async function openChannel(args: Record<string, unknown>): Promise<unknown> {
     const { ch, cwd, recordedCwd, sessionFile, toolNames, advisor, spawnModel } = args;
+    let operation: HostUpdateOperation | null = null;
+    try {
+      operation = getHostUpdateOperation();
+    } catch (error) {
+      // The installer also refuses unreadable state; a broken status file must not disable ordinary sessions.
+      if (!updateStateWarningLogged) log(`could not read host update status: ${reason(error)}`);
+      updateStateWarningLogged = true;
+    }
+    if (operation?.target === "ompweb" && operation.state === "running") {
+      throw new HostOpError(409, "host_updating", "This host is updating its daemon; new sessions must wait");
+    }
     if (typeof ch !== "string" || !ch || channels.has(ch)) throw new HostOpError(400, "invalid_request", "Invalid channel id");
     if (
       typeof cwd !== "string"
@@ -640,6 +682,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
           type: "hello",
           v: LINK_PROTOCOL_VERSION,
           ompVersion,
+          ompwebVersion: packageJson.version,
           platform: process.platform,
           home: homedir(),
           autoApproveExtension: localHost.autoApproveExtension(),

@@ -39,6 +39,8 @@ import {
 } from "./link-protocol";
 import { customLocalLabel, DEFAULT_LOCAL_LABEL, HostRegistryUnreadableError, hostForToken, LOCAL_HOST_ID, loadHosts, touchHost, type HostRecord } from "./registry";
 import type { SessionOps } from "./session-ops";
+import type { HostSoftwareUpdate, HostUpdateInfo, HostUpdateOperation, HostUpdateTarget } from "./update-types";
+import { isUpdateDisabled } from "../update-policy";
 
 /** Liveness and op timeouts from LINK_LIMITS; tests shorten them. */
 export const linkTimings = {
@@ -110,6 +112,7 @@ interface Link {
   /** Link protocol version the daemon last presented (Settings shows it on a 426). */
   hostVersion: number | null;
   ompVersion: string | null;
+  ompwebVersion: string | null;
   platform: string | null;
   lastSeenAt: string | null;
   autoApprove: boolean;
@@ -195,6 +198,7 @@ function linkFor(id: string): Link {
       status: "offline",
       hostVersion: null,
       ompVersion: null,
+      ompwebVersion: null,
       platform: null,
       lastSeenAt: null,
       autoApprove: false,
@@ -660,6 +664,7 @@ function openLink(link: Link, ws: LinkSocket, hello: Hello): void {
   reattach(link, hello.channels);
 
   link.ompVersion = hello.ompVersion;
+  link.ompwebVersion = hello.ompwebVersion ?? null;
   link.platform = hello.platform;
   link.autoApprove = hello.autoApproveExtension;
   sawDaemon(link);
@@ -1189,11 +1194,66 @@ export function getHost(id: string): Host | null {
   return id === LOCAL_HOST_ID || loadHosts().some((h) => h.id === id) ? linkFor(id).host : null;
 }
 
+const updateCompatibility = () => ({ min: MIN_LINK_PROTOCOL_VERSION, max: LINK_PROTOCOL_VERSION });
+
+function requireUpdateHost(id: string): void {
+  if (!getHost(id)) throw new HostOpError(404, "host_not_found", "Unknown host");
+  if (isUpdateDisabled()) throw new HostOpError(403, "updates_disabled", "Updates are disabled on this web server");
+}
+
+function softwareUpdate(value: unknown): value is HostSoftwareUpdate & Record<string, unknown> {
+  return isRecord(value) && nullableString(value.currentVersion) && nullableString(value.availableVersion)
+    && typeof value.updateAvailable === "boolean" && typeof value.canUpdate === "boolean"
+    && nullableString(value.blockedReason) && typeof value.updateCommand === "string";
+}
+
+function updateOperation(value: unknown): value is HostUpdateOperation {
+  return isRecord(value) && typeof value.id === "string" && value.id.length > 0 && value.id.length <= 128
+    && (value.target === "ompweb" || value.target === "omp") && typeof value.version === "string"
+    && ["running", "succeeded", "failed"].includes(String(value.state))
+    && (value.error === undefined || typeof value.error === "string");
+}
+
+/** Every machine, including this one, checks on its daemon. Never fall back to the web server's installation. */
+export async function getHostSoftwareUpdates(id: string, force = false): Promise<HostUpdateInfo> {
+  requireUpdateHost(id);
+  const result = await request(id, "checkUpdates", { compatibility: updateCompatibility(), force });
+  if (!isRecord(result) || !softwareUpdate(result.ompweb) || !softwareUpdate(result.omp)
+    || !["npm", "bun", "binary"].includes(String(result.ompweb.installMethod))
+    || !(result.ompweb.protocolVersion === null || (Number.isSafeInteger(result.ompweb.protocolVersion) && Number(result.ompweb.protocolVersion) > 0))
+    || !(result.operation === null || updateOperation(result.operation))) {
+    throw new HostOpError(502, "host_bad_result", "The host returned an invalid update status");
+  }
+  const info = result as unknown as HostUpdateInfo;
+  const protocol = info.ompweb.protocolVersion;
+  if (info.ompweb.updateAvailable && (protocol === null || protocol < MIN_LINK_PROTOCOL_VERSION || protocol > LINK_PROTOCOL_VERSION)) {
+    return { ...info, ompweb: { ...info.ompweb, canUpdate: false, blockedReason: protocol === null
+      ? "The target release's link protocol could not be verified. Update is blocked."
+      : `Update ompweb on this server first: this host update uses link protocol v${protocol}; the server supports v${MIN_LINK_PROTOCOL_VERSION}–v${LINK_PROTOCOL_VERSION}.` } };
+  }
+  return info;
+}
+
+export async function updateHostSoftware(id: string, target: HostUpdateTarget, version: string): Promise<{ accepted: true; operation: HostUpdateOperation }> {
+  const checked = await getHostSoftwareUpdates(id, true);
+  const candidate = checked[target];
+  if (!candidate.updateAvailable || !candidate.canUpdate || candidate.availableVersion !== version) {
+    throw new HostOpError(409, "host_update_blocked", candidate.blockedReason ?? "The available version changed; check for updates again");
+  }
+  const result = await request(id, "updateSoftware", { target, version, compatibility: updateCompatibility() });
+  if (!isRecord(result) || result.accepted !== true || !updateOperation(result.operation)
+    || result.operation.target !== target || result.operation.version !== version) {
+    throw new HostOpError(502, "host_bad_result", "The host returned an invalid update operation");
+  }
+  return { accepted: true, operation: result.operation };
+}
+
 export interface LinkedHostRow {
   id: string;
   label: string;
   status: HostStatus;
   ompVersion: string | null;
+  ompwebVersion?: string | null;
   platform: string | null;
   lastSeenAt: string | null;
   allowAgentStart: boolean;
@@ -1210,6 +1270,7 @@ export function listHosts(): LinkedHostRow[] {
       label: record.label,
       status: link?.status ?? "offline",
       ompVersion: link?.ompVersion ?? null,
+      ompwebVersion: link?.ompwebVersion ?? null,
       platform: link?.platform ?? null,
       lastSeenAt: link?.lastSeenAt ?? record.lastSeenAt,
       allowAgentStart: record.allowAgentStart,
@@ -1225,6 +1286,7 @@ export interface LocalHostRow {
   label: string;
   status: HostStatus;
   ompVersion: string | null;
+  ompwebVersion?: string | null;
   platform: string | null;
   lastSeenAt: null;
   hostVersion: number | null;
@@ -1245,6 +1307,7 @@ export function hostsSnapshot(): { hosts: HostRow[] } {
     label: customLocalLabel(),
     status: link?.status ?? "offline",
     ompVersion: link?.ompVersion ?? null,
+    ompwebVersion: link?.ompwebVersion ?? null,
     platform: link?.platform ?? null,
     lastSeenAt: null,
     hostVersion: link?.hostVersion ?? null,
