@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-const { createSessionCatchUp } = await import("./useAgentSession-sync.ts");
+const { createSessionCatchUp, MISSING_BASE_RETRY_MS } = await import("./useAgentSession-sync.ts");
 
 test("a newer user delivery cannot block recovery of an unrelated assistant partial", async (t) => {
   const timeoutDescriptor = Object.getOwnPropertyDescriptor(AbortSignal, "timeout");
@@ -147,4 +147,25 @@ test("a snapshot no field takes still completes deltas that arrived without thei
   assert.deepEqual(pipe.liveCalls.at(-1), { message: false, lifecycle: false, tools: null });
   pipe.fire();
   assert.equal(pipe.shown.at(-1), "abcd");
+});
+
+test("deltas without a message while reads fail fast send one context request per window, then the next delta retries", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"] });
+  const requests = [];
+  t.mock.method(globalThis, "fetch", async (url) => {
+    requests.push(url);
+    throw new TypeError("Failed to fetch");
+  });
+  const catchUp = createSessionCatchUp({ sessionId: () => "s1", scope: () => "run", history() {}, subscribe: () => false, live() {} });
+  const coalescer = createMessageUpdateCoalescer(() => {}, () => () => {}, () => catchUp.requestMissingBase());
+  const delta = (sequence) => ({ type: "message_update", messageId: "m1", message: { role: "assistant" }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x" }, web: { streamId: "s", sequence } });
+  for (let sequence = 1; sequence <= 20; sequence += 1) {
+    coalescer.push(delta(sequence));
+    await new Promise((resolve) => setImmediate(resolve)); // the failed read settles before the next delta
+  }
+  assert.equal(requests.length, 1, "twenty base-less deltas, one request");
+  t.mock.timers.tick(MISSING_BASE_RETRY_MS);
+  coalescer.push(delta(21));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests.length, 2, "a window later the next delta asks again");
 });
