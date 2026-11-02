@@ -77,7 +77,8 @@ const reqKey = (s: Sample) => `${asString(s.clientId)}\0${asString(s.req)}`;
  * the command slow; unclassified without that action's times.
  */
 function hangKind(s: Sample, transportByReq: Map<string, number | undefined>): string {
-  const transportMs = transportByReq.get(reqKey(s));
+  // A hang without a req has no action to look up (reqKey would read it as the string "undefined").
+  const transportMs = typeof s.req === "string" ? transportByReq.get(reqKey(s)) : undefined;
   const waitedMs = asNumber(s.waitedMs);
   if (transportMs === undefined || waitedMs === undefined) return "unclassified";
   return transportMs >= waitedMs ? "stalled" : "slow command";
@@ -197,7 +198,7 @@ export function summarize(samples: Sample[], options: SummaryOptions): SummaryRo
       if (typeof s.resumed === "boolean") add("reconnect resumed", transport, s.resumed ? "yes" : "no");
     } else if (s.metric === "hang") {
       add("hang", transport, "total");
-      if (answered.has(reqKey(s))) add("hang", transport, "answered later");
+      if (typeof s.req === "string" && answered.has(reqKey(s))) add("hang", transport, "answered later");
       add("hang", transport, hangKind(s, transportByReq));
     }
   }

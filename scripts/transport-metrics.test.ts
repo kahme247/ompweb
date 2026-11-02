@@ -318,3 +318,16 @@ test("the CLI prints the table for a file, reading .1 before the file, and the a
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a hang without a req is neither answered later nor classed by an action whose req is the string \"undefined\"", () => {
+  const rows = summarize(
+    [
+      { ...at(1), metric: "hang", transport: "sse", type: "prompt", via: "http", bytes: 1, waitedMs: 100 },
+      { ...at(1), metric: "action", transport: "sse", type: "prompt", req: "undefined", outcome: "ok", sentAt: 0, recvAt: 0, repliedAt: 0, gotAt: 5_000 },
+    ],
+    {},
+  );
+  assert.equal(row(rows, "hang", "sse", "total")?.count, 1);
+  assert.equal(row(rows, "hang", "sse", "answered later"), undefined);
+  assert.equal(row(rows, "hang", "sse", "unclassified")?.count, 1);
+});
