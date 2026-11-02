@@ -125,8 +125,11 @@ export function summarize(samples: Sample[], options: SummaryOptions): SummaryRo
 
   // A hang counts as answered later when the same command ended in a reply (ok or error), not a loss. Built from every
   // sample, so a since/until/client filter that cuts the reply off does not turn it into a hang that was never answered.
+  // An `error` with status 0 is a fetch that got no response at all: the command was never answered.
   const answered = new Set(
-    samples.filter((s) => s.metric === "action" && typeof s.req === "string" && (s.outcome === "ok" || s.outcome === "error")).map(reqKey),
+    samples
+      .filter((s) => s.metric === "action" && typeof s.req === "string" && (s.outcome === "ok" || (s.outcome === "error" && s.status !== 0)))
+      .map(reqKey),
   );
   const clients = new Map<string, { samples: number; types: Set<string>; ua: string }>();
   const transportByReq = new Map(samples.filter((s) => s.metric === "action" && typeof s.req === "string").map((s) => [reqKey(s), transportMsOf(s)]));

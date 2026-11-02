@@ -77,11 +77,16 @@ test("a hang whose command was never answered is not counted as answered later",
     [
       { ...at(1), metric: "hang", transport: "websocket", req: "x", type: "prompt", via: "ws", bytes: 1, waitedMs: 1 },
       { ...at(1), metric: "action", transport: "websocket", req: "x", type: "prompt", outcome: "lost" },
+      // A fetch that got no response at all records an error with status 0.
+      { ...at(1), metric: "hang", transport: "sse", req: "y", type: "prompt", via: "http", bytes: 1, waitedMs: 1 },
+      { ...at(1), metric: "action", transport: "sse", req: "y", type: "prompt", outcome: "error", status: 0 },
     ],
     {},
   );
   assert.equal(row(rows, "hang", "websocket", "total")?.count, 1);
   assert.equal(row(rows, "hang", "websocket", "answered later"), undefined);
+  assert.equal(row(rows, "hang", "sse", "total")?.count, 1);
+  assert.equal(row(rows, "hang", "sse", "answered later"), undefined);
 });
 
 test("an abort behind an upload lands in its own row", () => {
