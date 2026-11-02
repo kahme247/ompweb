@@ -506,13 +506,13 @@ function numberedBytes(size: number, seq: number): number {
   return size - (SEQ_TAIL.length - 2) + String(seq).length;
 }
 
-/** The `part` line for `line` from `at`: as much of it as fits in pieceBytes once encoded; `size` its UTF-8 bytes. */
-function cutPart(line: string, at: number, seq: number): { line: string; at: number; size: number } {
+/** The `part` line for `line` from `at`: as much of it as fits in pieceBytes once encoded. */
+function cutPart(line: string, at: number, seq: number): { line: string; at: number } {
   for (let n = Math.min(line.length - at, LINK_LIMITS.pieceBytes); ;) {
     const part: Part = { type: "part", seq, at, end: at + n >= line.length, data: line.slice(at, at + n) };
     const encoded = `${JSON.stringify(part)}\n`;
     const size = encoder.encode(encoded).byteLength;
-    if (size <= LINK_LIMITS.pieceBytes || n === 1) return { line: encoded, at: at + n, size };
+    if (size <= LINK_LIMITS.pieceBytes || n === 1) return { line: encoded, at: at + n };
     n = Math.max(1, Math.floor((n * LINK_LIMITS.pieceBytes) / size) - 1);
   }
 }
@@ -595,12 +595,14 @@ export class LinkSender<T extends SendItem> {
         // The joined line is applied without a dedup of its own (its parts had one), so its seq is 0.
         head.line ??= withSeq(item.line, 0);
         const seq = nextSeq();
-        const cut = cutPart(head.line, head.at, seq);
+        const from = head.at;
+        const cut = cutPart(head.line, from, seq);
         head.at = cut.at;
         const done = head.at >= head.line.length;
         if (done) this.active = null;
         unit = { key, item, done, seq, line: cut.line, part: true, messageBytes: numberedBytes(item.size, 0) };
-        this.sent(head, done, cut.size);
+        // `left` counts the line's own bytes: what the part consumed of it, not the part's size with its envelope.
+        this.sent(head, done, done ? 0 : encoder.encode(head.line.slice(from, cut.at)).byteLength);
       }
       if (unit.done) queue.shift();
       this.queues.delete(key);
