@@ -10,10 +10,20 @@ export interface ChatDraftFile {
   size: number;
 }
 
+/** A finished upload staged on `hostId` (docs/specs/2026-11-02-file-uploads-design.md U2). */
+export interface ChatDraftUpload {
+  id: string;
+  name: string;
+  size: number;
+  hostId: string;
+}
+
 export interface ChatDraft {
   value: string;
   images: ChatDraftImage[];
   files: ChatDraftFile[];
+  /** Finished uploads; unlike images and files they survive a reload (only their ids are stored). */
+  uploads?: ChatDraftUpload[];
 }
 
 /** Content to put back in a composer. `replace` merges a later recovery with
@@ -24,6 +34,7 @@ export interface DraftRecovery {
   text: string;
   replace?: { lead: string; fallback: string };
   images?: ChatDraftImage[];
+  uploads?: ChatDraftUpload[];
 }
 
 /** The `{ data, mimeType }` images in an omp RPC payload; anything else is dropped. */
@@ -53,6 +64,15 @@ declare global {
 
 const MAX_DRAFTS = 50;
 const STORAGE_PREFIX = "omp-draft-";
+const UPLOADS_STORAGE_PREFIX = "omp-uploads-draft-";
+
+function isDraftUpload(value: unknown): value is ChatDraftUpload {
+  if (!value || typeof value !== "object") return false;
+  const upload = value as Record<string, unknown>;
+  return typeof upload.id === "string" && typeof upload.name === "string" && typeof upload.hostId === "string"
+    && Number.isSafeInteger(upload.size) && (upload.size as number) >= 0;
+}
+
 const drafts: Map<string, ChatDraft> = (globalThis.__ompChatDrafts ??= readStoredDrafts());
 
 function readStoredDrafts(): Map<string, ChatDraft> {
@@ -72,6 +92,23 @@ function readStoredDrafts(): Map<string, ChatDraft> {
       } else {
         sessionStorage.removeItem(storageKey);
       }
+    }
+    // A draft's uploads, under their own key: with its text, or alone.
+    for (const storageKey of storageKeys) {
+      if (!storageKey?.startsWith(UPLOADS_STORAGE_PREFIX)) continue;
+      const key = storageKey.slice(UPLOADS_STORAGE_PREFIX.length);
+      let uploads: unknown;
+      try {
+        uploads = JSON.parse(sessionStorage.getItem(storageKey) ?? "");
+      } catch {
+        uploads = null;
+      }
+      const draft = stored.get(key) ?? (stored.size < MAX_DRAFTS ? { value: "", images: [], files: [] } : null);
+      if (!draft || !Array.isArray(uploads) || !uploads.every(isDraftUpload) || uploads.length === 0) {
+        sessionStorage.removeItem(storageKey);
+        continue;
+      }
+      stored.set(key, { ...draft, uploads });
     }
   } catch {
     // Storage may be unavailable (SSR or browser policy); keep drafts in memory.
@@ -101,11 +138,12 @@ function cloneDraft(draft: ChatDraft): ChatDraft {
     value: draft.value,
     images: draft.images.map((image) => ({ ...image })),
     files: draft.files.map((file) => ({ ...file })),
+    ...(draft.uploads?.length ? { uploads: draft.uploads.map((upload) => ({ ...upload })) } : {}),
   };
 }
 
 function isEmptyDraft(draft: ChatDraft): boolean {
-  return !draft.value && draft.images.length === 0 && draft.files.length === 0;
+  return !draft.value && draft.images.length === 0 && draft.files.length === 0 && !draft.uploads?.length;
 }
 
 export function getDraft(key: string): ChatDraft | null {
@@ -120,6 +158,7 @@ export function recoverDraft(key: string, recovery: DraftRecovery): void {
       ...draft,
       value: mergeRecoveredText(draft.value, recovery),
       images: [...draft.images, ...(recovery.images ?? [])],
+      uploads: [...(draft.uploads ?? []), ...(recovery.uploads ?? [])],
     });
   }
   // Publish the recovery intent separately: ordinary persistence must not
@@ -132,7 +171,7 @@ export function getDraftSummary(key: string): { text: string; hasAttachments: bo
   if (!draft) return { text: "", hasAttachments: false };
   return {
     text: draft.value,
-    hasAttachments: draft.images.length > 0 || draft.files.length > 0,
+    hasAttachments: draft.images.length > 0 || draft.files.length > 0 || Boolean(draft.uploads?.length),
   };
 }
 
@@ -150,6 +189,8 @@ export function setDraft(key: string, draft: ChatDraft): void {
     // Persist only text: attachment payloads can exhaust the tab's storage quota.
     if (draft.value) sessionStorage.setItem(STORAGE_PREFIX + key, draft.value);
     else sessionStorage.removeItem(STORAGE_PREFIX + key);
+    if (draft.uploads?.length) sessionStorage.setItem(UPLOADS_STORAGE_PREFIX + key, JSON.stringify(draft.uploads));
+    else sessionStorage.removeItem(UPLOADS_STORAGE_PREFIX + key);
   } catch {
     // Preserve the in-memory draft if storage is unavailable or full.
   }
@@ -160,6 +201,7 @@ export function clearDraft(key: string): void {
   const deleted = drafts.delete(key);
   try {
     sessionStorage.removeItem(STORAGE_PREFIX + key);
+    sessionStorage.removeItem(UPLOADS_STORAGE_PREFIX + key);
   } catch {
     // Storage may be unavailable.
   }

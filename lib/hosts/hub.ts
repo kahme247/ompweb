@@ -28,6 +28,7 @@ import {
   SeqWindow,
   SESSION_OP_PARAMS,
   type DownMessage,
+  UPLOADS_SINCE_VERSION,
   type HelloChannel,
   type HostOpName,
   type UnknownMessage,
@@ -62,6 +63,8 @@ export interface LinkSocket {
 
 type Hello = Extract<UpMessage, { type: "hello" }>;
 type Res = Extract<UpMessage, { type: "res" }>;
+/** An `upload_ack` as lib/uploads.ts sees it. */
+export type UploadAck = Omit<Extract<UpMessage, { type: "upload_ack" }>, "type" | "seq">;
 
 interface PendingOp {
   op: HostOpName;
@@ -97,6 +100,9 @@ interface DownSample {
   session: string | null;
 }
 
+/** A downlink line queued in the sender. */
+type DownLine = { line: string; size: number; sample: DownSample };
+
 interface Link {
   readonly id: string;
   readonly host: RemoteHost;
@@ -111,8 +117,9 @@ interface Link {
   socket: LinkSocket | null;
   /** Last downlink seq handed out. Lines stay in `outbox` until the daemon acks them. */
   downSeq: number;
-  /** Downlink messages not numbered yet, per channel or request, sent fair (spec D7). */
-  sender: LinkSender<{ line: string; size: number; sample: DownSample }>;
+  /** Downlink messages not numbered yet, per channel or request, sent fair (spec D7); from v6 also upload bytes under
+   * `up:<id>`, which go as binary frames outside the line window (the browser's upload window bounds them). */
+  sender: LinkSender<DownLine | { id: string; blob: Uint8Array }>;
   outbox: Outbox<Sent>;
   /** Bytes of the outbox lines, sent or waiting for a resend. */
   outboxBytes: number;
@@ -154,6 +161,8 @@ interface HubState {
   /** This server is shutting down (freezeHostLinks): links neither send nor apply anything. */
   frozen: boolean;
   linkSamples: LinkSampleBatch;
+  /** lib/uploads.ts: each host's `upload_ack`, and null when its socket ended (upload bytes in flight are lost). */
+  uploadListeners: Set<(hostId: string, ack: UploadAck | null) => void>;
 }
 
 declare global {
@@ -168,9 +177,11 @@ function hub(): HubState {
     helloListeners: new Set(),
     frozen: false,
     linkSamples: { samples: [], file: "", timer: undefined },
+    uploadListeners: new Set(),
   };
   // A state kept from before a field existed (`bun --hot`) lacks it.
   globalThis.__ompHostHub.linkSamples ??= { samples: [], file: "", timer: undefined };
+  globalThis.__ompHostHub.uploadListeners ??= new Set();
   return globalThis.__ompHostHub;
 }
 
@@ -275,11 +286,17 @@ function flush(link: Link): void {
   }
   while (link.unacked < limit) {
     const unit = link.sender.next(() => ++link.downSeq);
-    // The hub queues lines only, so every unit is a line.
-    if (!unit || !("line" in unit)) return;
-    const whole = unit.part && unit.done ? unit.item.line : null;
+    if (!unit) return;
+    if ("frame" in unit) {
+      // Upload bytes (v6): unsequenced and outside the line window; lost with the socket, resumed by the next uploadStart.
+      if (ws.send(unit.frame) > 0) continue;
+      link.awaitingDrain = true;
+      return;
+    }
+    const queued = unit.item as DownLine;
+    const whole = unit.part && unit.done ? queued.line : null;
     // One sample per message: a split one carries it on its last part.
-    const item: Sent = { seq: unit.seq, line: unit.line, key: unit.key, bytes: Buffer.byteLength(unit.line), part: unit.part, whole, sample: unit.done ? { ...unit.item.sample, bytes: unit.messageBytes } : null };
+    const item: Sent = { seq: unit.seq, line: unit.line, key: unit.key, bytes: Buffer.byteLength(unit.line), part: unit.part, whole, sample: unit.done ? { ...queued.sample, bytes: unit.messageBytes } : null };
     link.outbox.push(item);
     link.outboxBytes += item.bytes;
     if (!write(item)) return;
@@ -410,7 +427,10 @@ function failAllOps(link: Link, error: () => Error): void {
 function endSocket(link: Link): void {
   link.socket = null;
   recordDropped(link);
+  // Upload bytes not sent yet go nowhere now: each upload resumes from the host's offset (uploadStart).
+  link.sender.dropBlobs();
   failAllOps(link, () => new HostOpError(503, "host_offline", `${labelOf(link.id)} is offline`));
+  notify(hub().uploadListeners, link.id, null);
 }
 
 function stopTimers(link: Link): void {
@@ -609,6 +629,11 @@ function openLink(link: Link, ws: LinkSocket, hello: Hello): void {
   const previous = link.socket;
   link.socket = ws;
   previous?.close(LINK_CLOSE.replaced, "replaced by a newer link");
+  if (previous) {
+    // Upload bytes the old socket may have lost must not be followed by later ones on this socket: they resume instead.
+    link.sender.dropBlobs();
+    notify(hub().uploadListeners, link.id, null);
+  }
   // Every sequenced uplink message answers a downlink one, so a daemon that
   // has applied none (ack 0) has sent none: it is a fresh process whose
   // uplink numbering starts again at 1.
@@ -795,6 +820,8 @@ function applyUp(link: Link, message: UpMessage | UnknownMessage, whole?: UpMess
     }
     case "res":
       return settle(link, message);
+    case "upload_ack":
+      return notify(hub().uploadListeners, link.id, message);
     case "stats":
       return applyStats(link, message);
   }
@@ -825,7 +852,7 @@ function settle(link: Link, message: Res): void {
   }
 }
 
-function request(hostId: string, op: HostOpName, args: Record<string, unknown>): Promise<unknown> {
+function request(hostId: string, op: HostOpName, args: Record<string, unknown>, timeoutMs = linkTimings.opTimeoutMs): Promise<unknown> {
   const link = linkFor(hostId);
   const label = labelOf(hostId);
   if (hub().frozen) return Promise.reject(new HostOpError(503, "server_stopping", "omp-web is shutting down"));
@@ -834,7 +861,7 @@ function request(hostId: string, op: HostOpName, args: Record<string, unknown>):
   }
   const { promise, resolve, reject } = Promise.withResolvers<unknown>();
   const id = randomUUID();
-  const timer = setTimeout(() => failOp(link, id, new HostOpError(504, "host_timeout", `${label} did not answer ${op} in time`)), linkTimings.opTimeoutMs);
+  const timer = setTimeout(() => failOp(link, id, new HostOpError(504, "host_timeout", `${label} did not answer ${op} in time`)), timeoutMs);
   // A deadline, like the ping and offline timers: never what keeps the server running.
   timer.unref?.();
   const pending: PendingOp = { op, resolve, reject, timer, blob: [], blobBytes: 0 };
@@ -991,6 +1018,8 @@ export class RemoteRpcTransport implements RpcTransport {
       sendDown(linkFor(this.hostId), { type: "stdin", ch: this.ch, line }, this.ch);
       callback(null);
     } catch (error) {
+      // Nothing was queued: a command too large for the link is refused like an oversize request body.
+      if (error instanceof LinkLimitError) return callback(new HostOpError(413, "request_too_large", "Agent command is too large"));
       callback(error instanceof Error ? error : new Error(String(error)));
     }
   }
@@ -1286,6 +1315,44 @@ export async function orphanExit(hostId: string, sessionId: string): Promise<voi
   } finally {
     link.statusListeners.delete(onStatus);
   }
+}
+
+/** An attach may copy 2 GiB (to another device): far longer than an op's usual deadline. */
+const UPLOAD_ATTACH_TIMEOUT_MS = 10 * 60_000;
+
+/** An upload op on `hostId`'s daemon; a daemon older than v6 fails 426 (an offline one 503). */
+export function hostUploadOp(hostId: string, op: "uploadStart" | "uploadAbort" | "uploadAttach", args: Record<string, unknown>): Promise<unknown> {
+  const link = linkFor(hostId);
+  if (link.socket && isLinkUp(link.status) && (link.hostVersion ?? 0) < UPLOADS_SINCE_VERSION) {
+    // This machine's binary may be new already: an upgrade keeps a daemon running while its link version is in range.
+    return Promise.reject(hostId === LOCAL_HOST_ID
+      ? new HostOpError(426, "host_restart_required", "Restart the ompweb host service on this machine to attach files")
+      : new HostOpError(426, "host_upgrade_required", `Update ompweb on ${labelOf(hostId)} to attach files`));
+  }
+  return request(hostId, op, args, op === "uploadAttach" ? UPLOAD_ATTACH_TIMEOUT_MS : linkTimings.opTimeoutMs);
+}
+
+/** Queue upload bytes (at most pieceBytes) for `hostId`'s daemon, fair with its other traffic; false when it has no socket. */
+export function sendUploadFrame(hostId: string, id: string, bytes: Uint8Array): boolean {
+  const link = hub().links.get(hostId);
+  if (!link?.socket || hub().frozen) return false;
+  link.sender.push(`up:${id}`, { id, blob: bytes });
+  flush(link);
+  return true;
+}
+
+/** Forget upload bytes of `id` not sent yet (a resume or an abort). */
+export function dropUploadFrames(hostId: string, id: string): void {
+  hub().links.get(hostId)?.sender.drop(`up:${id}`);
+}
+
+/** Every host's `upload_ack`s, and null when a host's socket ends (its upload bytes in flight are lost). */
+export function onUploadEvent(listener: (hostId: string, ack: UploadAck | null) => void): () => void {
+  const listeners = hub().uploadListeners;
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
 }
 
 /** End a host's link now (revoke). Its daemon gets 401 when it redials and stops its children. */

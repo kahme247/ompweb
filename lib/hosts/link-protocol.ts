@@ -3,13 +3,19 @@
 // worker it talks to, lib/event-stream-worker.ts) reuses its transport pieces: LINK_LIMITS' piece, window and liveness
 // values, LinkSender, PartJoiner, SeqWindow, Outbox, queuedLine and withSeq.
 import { isValidSessionId } from "../session-file-references-core";
+import { UPLOAD_ID_RE } from "../upload-limits";
 import type { SessionOps } from "./session-ops";
 
-/** 5: a line over `pieceBytes` goes as `part` messages and a large result as several binary frames, both sent fair
- * across channels (docs/specs/2026-10-31-websocket-link-design.md, D7). 4: the link is one WebSocket: text frames carry
- * the messages, binary frames large results, `ack` messages replace the ack header and the POST answer.
+/** 6: composer uploads (docs/specs/2026-11-02-file-uploads-design.md, U5): binary down frames carry upload bytes, the
+ * `upload_ack` up message, the `uploadStart`/`uploadAbort`/`uploadAttach` ops. 5: a line over `pieceBytes` goes as
+ * `part` messages and a large result as several binary frames, both sent fair across channels
+ * (docs/specs/2026-10-31-websocket-link-design.md, D7). 4: the link is one WebSocket: text frames carry the messages,
+ * binary frames large results, `ack` messages replace the ack header and the POST answer.
  * Rules for changing it: docs/specs/2026-10-28-remote-hosts-design.md, "Protocol versions and compatibility". */
-export const LINK_PROTOCOL_VERSION = 5;
+export const LINK_PROTOCOL_VERSION = 6;
+/** The first daemon link version that takes uploads: main answers 426 below it (host_upgrade_required, or
+ * host_restart_required on this machine, whose daemon an in-place upgrade leaves running). */
+export const UPLOADS_SINCE_VERSION = 6;
 /** The oldest daemon protocol the server still links (older ones get close 4426). Dropping one is an explicit decision. */
 export const MIN_LINK_PROTOCOL_VERSION = 4;
 
@@ -66,8 +72,8 @@ export const SESSION_OP_PARAMS: { readonly [K in keyof SessionOps]: readonly str
   validateCwd: ["path"],
 };
 
-/** Every op a daemon answers: the session ops plus three on the host itself. */
-export const HOST_OP_NAMES = [...(Object.keys(SESSION_OP_PARAMS) as (keyof SessionOps)[]), "spawn", "sessionFileExists", "invalidateSessionLists"] as const;
+/** Every op a daemon answers: the session ops plus those on the host itself (the upload ops from v6). */
+export const HOST_OP_NAMES = [...(Object.keys(SESSION_OP_PARAMS) as (keyof SessionOps)[]), "spawn", "sessionFileExists", "invalidateSessionLists", "uploadStart", "uploadAbort", "uploadAttach"] as const;
 
 export type HostOpName = (typeof HOST_OP_NAMES)[number];
 
@@ -128,6 +134,9 @@ export type UpMessage =
   /** The daemon's link samples, at most LINK_LIMITS.statsSamples; a hub that predates it skips the type. Advisory: the
    * receiver keeps the valid ones and counts the rest in `invalid` (decodeUp only; a sender leaves it out). */
   | { type: "stats"; seq: number; samples: LinkStatSample[]; invalid?: number }
+  /** v6: the daemon has written `received` bytes of upload `id` for this start `attempt`, `done` once all of them are
+   * written and synced; with `error` the upload failed and its staged file is gone. */
+  | { type: "upload_ack"; seq: number; id: string; attempt: string; received: number; done: boolean; error?: { status: number; code: string; message: string } }
   | { type: "res"; seq: number; id: string; ok: true; result?: unknown; blob?: { bytes: number } }
   | {
       type: "res";
@@ -236,7 +245,7 @@ export function isHostOp(name: string): name is HostOpName {
 }
 
 const DOWN_TYPES: readonly string[] = ["welcome", "stdin", "kill", "req", "ping", "pong", "ack"];
-const UP_TYPES: readonly string[] = ["hello", "stdout", "stderr", "exit", "resync", "stats", "res", "ping", "pong", "ack"];
+const UP_TYPES: readonly string[] = ["hello", "stdout", "stderr", "exit", "resync", "stats", "res", "upload_ack", "ping", "pong", "ack"];
 
 /** `otherDirection`: the types only the other direction decodes; one of those arrived on the wrong way. */
 function unknownMessage(o: Obj, otherDirection: readonly string[]): UnknownMessage {
@@ -353,6 +362,11 @@ function stats(o: Obj): UpMessage {
   return { type: "stats", seq, samples, invalid: list.length - samples.length };
 }
 
+function errorBody(error: unknown): { status: number; code: string; message: string } {
+  if (!isObj(error)) fail("error must be an object");
+  return { status: int(error, "status"), code: str(error, "code"), message: str(error, "message") };
+}
+
 function res(o: Obj): UpMessage {
   const seq = seqNum(o, "seq");
   const id = str(o, "id");
@@ -366,17 +380,7 @@ function res(o: Obj): UpMessage {
       ? { type: "res", seq, id, ok: true, result: o.result }
       : { type: "res", seq, id, ok: true };
   }
-  if (o.ok === false) {
-    const error = o.error;
-    if (!isObj(error)) fail("error must be an object");
-    return {
-      type: "res",
-      seq,
-      id,
-      ok: false,
-      error: { status: int(error, "status"), code: str(error, "code"), message: str(error, "message") },
-    };
-  }
+  if (o.ok === false) return { type: "res", seq, id, ok: false, error: errorBody(o.error) };
   return fail("ok must be true or false");
 }
 
@@ -410,6 +414,12 @@ export function decodeUp(line: string): UpMessage | UnknownMessage {
       return { type: "resync", seq: seqNum(o, "seq"), ch: str(o, "ch") };
     case "stats":
       return stats(o);
+    case "upload_ack": {
+      const attempt = str(o, "attempt");
+      if (!UPLOAD_ID_RE.test(attempt)) fail("attempt must be a UUIDv4");
+      const ack = { type: "upload_ack" as const, seq: seqNum(o, "seq"), id: str(o, "id"), attempt, received: seqNum(o, "received"), done: bool(o, "done") };
+      return o.error === undefined ? ack : { ...ack, error: errorBody(o.error) };
+    }
     case "res":
       return res(o);
     case "ping":
@@ -545,6 +555,12 @@ export class LinkSender<T extends SendItem> {
     const queue = this.queues.get(key);
     if (queue) queue.push(entry);
     else this.queues.set(key, [entry]);
+  }
+
+  /** Whether any key starting with `prefix` has something queued. */
+  hasKeyWith(prefix: string): boolean {
+    for (const key of this.queues.keys()) if (key.startsWith(prefix)) return true;
+    return false;
   }
 
   /** Forget what `key` queued, a line part-way out included: the receiver drops that partial line. */

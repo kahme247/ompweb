@@ -127,6 +127,8 @@ app/api/
   stt/route.ts                    POST audio (+scope) → 202 { jobId } | GET ?scope= live jobs (lib/stt-jobs.ts)
   stt/[jobId]/route.ts            GET job state | POST retry with kept audio | DELETE ?claim= claim/discard
   stt/[jobId]/audio/route.ts      GET the kept recording (audio/* only) for playback
+  uploads/route.ts                POST { id, host, name, size, type } start/resume a composer upload (SSE-mode path of the browser link's `up_start`) → { received, done }
+  uploads/[id]/route.ts           PUT ?offset=N raw body ≤ 1 MiB, answered once the host acked it (409 `upload_offset` with { received }) | DELETE abort
   worktrees/route.ts              GET/POST/DELETE git worktrees
 
 lib/
@@ -139,6 +141,7 @@ lib/
     local-bootstrap.ts web server side of the local link: `localLinkUrl`, `ensureLocalHostLink` (the `local` record + `host.json`)
     host-login.ts      `host.json` (`loginHost`, `readHostLogin`) and `isLoopbackHost`, shared by the daemon and local-bootstrap
     session-ops.ts     file-reading half of the session/project routes, run on the owning host's daemon (this machine's too)
+    uploads.ts         daemon side of composer uploads: `StagedUploads` (staging dir `<agent dir>/omp-web/uploads/`, offset writes, 24 h sweep, attach into the session's `local/uploads/`), `sanitizeUploadName`, `sessionLocalRoot`
     link-protocol.ts   link messages, codec, binary blob frames, close codes, size limits, `HOST_OP_NAMES`, `SeqWindow`/`Outbox`, `LinkSender`/`PartJoiner` (pieces, fair sending)
     hub.ts             main side: the link's upgrade and `websocket` handler (`handleLinkUpgrade`, `hostLinkSocket`), `RemoteHost`, `getHost`, `listHosts`, adoption of live children (`reattach`/`adopt`), orphans, `freezeHostLinks`, `hosts` change events
     daemon.ts          daemon side: `runHostDaemon` (reconnect, buffering, op dispatch, hello with each child's `{sessionId, cwd, pending}`; follows a `host.json` url or token change when a dial fails; loopback redials at most 3 s apart)
@@ -299,8 +302,8 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   `IDLE_DESTROY_MS` (10 min) and `DISCONNECT_DESTROY_MS`
   (`OMP_WEB_DISCONNECT_DESTROY_MS`, 2 min, `0` disables). The shorter one only
   fires once a session has been genuinely abandoned — no `onEvent` listener, no
-  run in flight, no startup handshake, no unanswered `send()`. The last
-  `onEvent` detach *starts* that window rather than exposing the last frame's,
+  run in flight, no startup handshake, no unanswered `send()` or command preparation.
+  The last `onEvent` detach *starts* that window rather than exposing the last frame's,
   so a reload reattaching seconds later does not 409. Both are fed by
   `resetIdleTimer()`, the single activity choke point for `send()` and every
   child frame: adding a new call path must route activity through it.
@@ -347,7 +350,8 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   design `docs/specs/2026-10-31-websocket-link-design.md`). **Text frames**
   carry the messages (hub → daemon one per frame; daemon → hub newline-separated
   batches flushed every 16 ms or at one 256 KiB piece), **binary frames** carry large op
-  results (daemon → hub, before the `res` naming them). Every line except
+  results (daemon → hub, before the `res` naming them) and, from v6, upload bytes
+  (hub → daemon, `up:<id>`). Every line except
   `hello`/`welcome`/`ack`/`ping`/`pong` has a per-direction `seq`; `ack {ack}`
   is a message: the first line of every daemon frame, and the hub answers every
   uplink frame (v5: binary ones too) with exactly one. **Pieces and fair sending
@@ -409,10 +413,13 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   field or a message type receivers skip is fine; a changed type or meaning, or
   a newly required field, needs a new version. Receivers skip unknown message
   types (acking their `seq`) and answer unknown ops 501 `unknown_op`, from v3 on.
-  v4 (the WebSocket link) dropped v3 before any release. v5 (pieces) keeps v4:
-  `MIN_LINK_PROTOCOL_VERSION` is 4 and `LINK_PROTOCOL_VERSION` 5 (literal
+  v4 (the WebSocket link) dropped v3 before any release. v5 (pieces) keeps v4;
+  v6 (uploads: hub → daemon binary frames, `upload_ack`, `uploadStart`/
+  `uploadAbort`/`uploadAttach`) keeps v4 and v5:
+  `MIN_LINK_PROTOCOL_VERSION` is 4 and `LINK_PROTOCOL_VERSION` 6 (literal
   one-liners: the deploy script parses them with `sed`); a v4 daemon gets no
-  `part`, whole lines and no unacked window (`link.sender.parts`). Main keeps at least N-1, and
+  `part`, whole lines and no unacked window (`link.sender.parts`); a v4/v5
+  daemon gets 426 for uploads. Main keeps at least N-1, and
   dropping one is an explicit decision (a hello
   outside the range gets close 4426 with `{"serverVersion":N}`, a pre-WebSocket
   daemon's POST gets 426). Once the WebSocket experiments end, the first version
@@ -1151,6 +1158,84 @@ during the wait.
 - Ghost state lives in a small external store (`useSyncExternalStore` in
   `GhostMirror`), not ChatInput state: re-rendering the composer per ghost
   change was the dominant per-keystroke cost.
+
+### Composer file uploads (`docs/specs/2026-11-02-file-uploads-design.md`)
+- Images and text files go inline while they fit the inline budgets
+  (`lib/image-attachments.ts`, `lib/chat-attachments.ts`); every other file,
+  an image switched to **As file**, and anything over a budget is uploaded
+  (2 GiB per file, 20 per message, `lib/upload-limits.ts`, browser-safe).
+  The composer re-checks the inline budget per chip on every render, so an
+  image's decoded size comes from `attachedImageBytes` (scanned once per
+  image object), never a fresh base64 scan.
+- Uploads land in a staging dir on the **session's host** (the daemon), not on
+  main: a new chat has no session yet. The prompt command carries
+  `uploads: [id]`; `runAgentCommand` (`lib/agent-command.ts`) attaches each
+  through the host op `uploadAttach` (hard link into
+  `<session dir>/local/uploads/`, never overwriting; copy on EXDEV) and appends
+  the "Attached files" block with `local://` URL and absolute path. Ids stay
+  registered until the prompt reaches omp, so a retried send reuses the attach.
+  Attachment preparation uses the wrapper's pending-command protection too, so
+  disconnect and idle cleanup cannot dispose a submitted prompt's session while
+  a slow copy is still running. Later commands await the send fence before
+  selecting/replacing the wrapper, so Stop and an Advisor change cannot overtake it;
+  a command through any registry alias of the same wrapper (`getRpcSessionKeys`)
+  waits too. The Attached files block can push a prompt past the host link's
+  line cap: the transport then refuses it before queueing with 413
+  `request_too_large`, and the uploads stay registered for a shorter resend.
+- Bytes are forwarded, never re-encoded: the browser sends binary frames
+  `[n][id][payload]` (≤ `pieceBytes`) as `LinkSender` blob units keyed
+  `up:<id>`; `lib/browser-link.ts` accepts them only for uploads that link
+  started and hands the same bytes to `forwardUploadFrame` (`lib/uploads.ts`) with
+  that link's sink; frames are forwarded only while it is the upload's current
+  sink, so a WS sender superseded by an HTTP resume or newer start is refused;
+  `forwardUploadFrame` queues them as blob units on the host link (link v6; `hostVersion < 6`
+  → 426 `host_upgrade_required` on a remote host, `host_restart_required` on
+  `local`: an in-place upgrade keeps a running v4/v5 daemon, which is inside
+  `[MIN, LINK]`, so "This machine" needs `ompweb-host` restarted). Blob units
+  are outside both links' line windows; the worker's per-upload
+  `UPLOAD_WINDOW_BYTES` credit, refilled by the daemon's `upload_ack`, is the
+  flow control, and main enforces it: a frame putting `sent - received` over
+  `UPLOAD_WINDOW_BYTES + pieceBytes` stops the upload with 429
+  `upload_window_exceeded` (frames dropped until the next start; the socket
+  stays open). Binary frames are not resent: after a browser-link drop or a
+  web-server restart the worker re-sends `up_start {id, n, …}` (same id, `n` =
+  a worker-wide increasing sequence) and continues from the host's `received` in
+  the answer `up_ack {…, start: n}`. Each start has a fresh sink whose progress,
+  completion and errors retain `start: n`, including messages already queued
+  before a Retry. The worker ignores any mismatched generation before applying
+  an ack or error. On main the latest concurrent start wins; earlier starts
+  still answer their callers.
+  Each host `uploadStart` also carries a fresh UUIDv4 `attempt`; the daemon
+  echoes it on progress, completion and error `upload_ack`s. Main discards
+  superseded-attempt acks even if they arrive after the newer start's reply.
+  Receipt replay and a start of an already-attached upload both require a
+  regular-file target; a missing or directory target gets `upload_missing`.
+  Receipt publication is atomic, and start/attach/abort controls share one
+  per-id queue so an abort cannot be undone by an earlier attach's receipt.
+  A start that finds the upload aborted sends
+  `uploadAbort` to the host and answers 404 `upload_missing`. A host-link drop
+  fails each in-flight upload with 503 `host_offline`; the chip's Retry (same
+  id) resumes. No auto-retry.
+- Limits on main: at most 32 unfinished uploads per owner (429
+  `too_many_uploads`); an unfinished entry idle 10 min (no start, frame or ack)
+  is dropped from the registry (a later `up_start` re-registers it). The worker
+  fails an upload no start answer or ack advances for `UPLOAD_STALL_MS` (120 s)
+  with 504 `upload_stalled` and forgets it without aborting it on the host, so
+  Retry resumes. Page navigation settles pending WebSocket-upload promises before
+  the worker's `bye`: a composer retained by bfcache shows Retry after restoration,
+  not a permanently uploading chip. This does not automatically resume navigation.
+  The daemon's `sweep` deletes staged files older than 24 h and aborts open uploads
+  idle (no start/write) over 24 h (`STAGED_MAX_AGE_MS`).
+  `uploadAttach` has a 10-minute op timeout (a 2 GiB EXDEV copy), not
+  `opTimeoutMs`.
+- Error codes: composer uploads use `upload_id_conflict` (another upload has
+  this id); `upload_conflict` stays the file manager's.
+- SSE mode uses the same registry over HTTP (`/api/uploads`). Upload owner =
+  `requestOwner(req)` (`lib/web-auth.ts`), the browser link's owner too; attach
+  requires the same owner and the session's host.
+- The registry is in memory: a main restart loses finished-but-unsent uploads
+  ("attach the file again"); unfinished ones resume. Switching chats aborts
+  in-flight uploads; drafts keep only finished ones (`sessionStorage`).
 
 ### Voice transcription jobs (`lib/stt-jobs.ts`, `/api/stt`, `hooks/useDictation.ts`)
 - The browser never waits on the STT endpoint: `POST /api/stt` keeps the
