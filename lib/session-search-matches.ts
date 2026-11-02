@@ -59,9 +59,12 @@ export function listSessionMatches(messages: AgentMessage[], entryIds: string[],
     const timestamp = typeof message.timestamp === "number" ? message.timestamp : null;
     let ordinal = 0;
     for (const text of messageTextBlocks(message)) {
-      // GFM footnote references and definition labels render as generated text the chat skips.
-      // shortcut: also skips `[^x]` written inside code, which the chat shows; rare in chat text.
-      const footnotes = [...text.matchAll(/\[\^[^\]\s]+\]:?/g)].map((m) => [m.index, m.index + m[0].length]);
+      // GFM footnote references and definition labels render as generated text the chat skips;
+      // inside code (fenced blocks, inline backticks) they stay literal text the chat shows.
+      const code = [...text.matchAll(/```[\s\S]*?(?:```|$)|`[^`\n]+`/g)].map((m) => [m.index, m.index + m[0].length]);
+      const footnotes = [...text.matchAll(/\[\^[^\]\s]+\]:?/g)]
+        .map((m) => [m.index, m.index + m[0].length])
+        .filter(([from]) => !code.some(([codeFrom, codeTo]) => from >= codeFrom && from < codeTo));
       for (const { start, end, quality } of findSearchMatches(text, query)) {
         if (footnotes.some(([from, to]) => start < to && end > from)) continue;
         hits.push({ entryId, ordinal: ordinal++, quality, timestamp, text, start, end });
