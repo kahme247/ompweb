@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createJiti } from "jiti";
 
-const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
 const {
   DEFAULT_UI_SCALE,
   STORAGE_KEY,
@@ -10,7 +8,7 @@ const {
   resolveUiScaleFactor,
   resolveUiScalePercent,
   storedUiScalePreference,
-} = await jiti.import("./useUiScale.ts");
+} = await import("./useUiScale.ts");
 
 test("has expected constants", () => {
   assert.equal(DEFAULT_UI_SCALE, "standard");

@@ -1,9 +1,6 @@
-import { NextResponse } from "next/server";
-import { resolveSessionPathOr404 } from "@/lib/api-utils";
-import { extractSubagentHistory } from "@/lib/subagent-history";
+import { apiErrorResponse, opErrorResponse, resolveSessionHostOr404 } from "@/lib/api-utils";
+import { HostOpError } from "@/lib/hosts/link-protocol";
 import { getRpcSession } from "@/lib/rpc-manager";
-
-export const dynamic = "force-dynamic";
 
 /**
  * GET /api/sessions/[id]/subagents
@@ -17,22 +14,22 @@ export async function GET(
 ) {
   const { id } = await params;
   try {
-    const resolved = await resolveSessionPathOr404(id);
+    const resolved = await resolveSessionHostOr404(id);
     if ("response" in resolved) {
       // A brand-new session's file can land just after the prompt
       // acknowledgement; while its RPC wrapper is alive that is "no on-disk
       // history yet", not "unknown session". The client treats an empty
       // roster the same as a 404, so answer 200 to keep the console clean.
       if (getRpcSession(id)?.isAlive()) {
-        return NextResponse.json({ subagents: [] });
+        return Response.json({ subagents: [] });
       }
       return resolved.response;
     }
-    const filePath = resolved.filePath;
-    const subagents = extractSubagentHistory(filePath);
-    return NextResponse.json({ subagents });
+    const result = await resolved.host.sessionOps.readSubagentHistory(id);
+    return result.ok ? Response.json(result.value) : opErrorResponse(result);
   } catch (error) {
-    return NextResponse.json(
+    if (error instanceof HostOpError) return apiErrorResponse(error);
+    return Response.json(
       { error: error instanceof Error ? error.message : String(error) },
       { status: 500 },
     );

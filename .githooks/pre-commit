@@ -1,0 +1,20 @@
+#!/bin/sh
+# Enable once per clone: sh scripts/setup-hooks.sh
+
+# graphify: rebuild graphify-out/graph.json and commit it with the code that changed it.
+# The graph is tracked, so a missing one is rebuilt too rather than skipped.
+if [ "${GRAPHIFY_SKIP_HOOK:-0}" != 1 ] &&
+	! git diff --cached --quiet -- . ':!graphify-out/graph.json'; then
+	# `git commit <path>` stages into a temporary index (next-index-*.lock): the rebuilt graph would reach the
+	# commit but not the real index, and the next commit would restore the old graph from it.
+	case ${GIT_INDEX_FILE##*/} in next-index-*)
+		echo "pre-commit: commit with \`git add\` and a plain \`git commit\`, not \`git commit <path>\`, so the rebuilt graph stays staged; GRAPHIFY_SKIP_HOOK=1 skips the rebuild." >&2
+		exit 1
+		;;
+	esac
+	command -v graphify >/dev/null || {
+		echo "pre-commit: graphify is not on PATH (see CONTRIBUTING.md); GRAPHIFY_SKIP_HOOK=1 commits without the graph rebuild." >&2
+		exit 1
+	}
+	{ PYTHONHASHSEED=0 graphify update . && git add graphify-out/graph.json; } || exit 1
+fi

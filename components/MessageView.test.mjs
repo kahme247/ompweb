@@ -2,18 +2,13 @@ import assert from "node:assert/strict";
 import "../tests/setup-dom.mjs";
 import test, { afterEach } from "node:test";
 import React from "react";
-import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react/pure.js";
+const { act, cleanup, fireEvent, render, waitFor } = await import("@testing-library/react/pure.js");
 import { renderToStaticMarkup } from "react-dom/server";
-import { createJiti } from "jiti";
 
-const jiti = createJiti(import.meta.url, {
-  jsx: { runtime: "automatic" },
-  tsconfigPaths: true,
-});
-const { MessageView, SafeMarkdownBody, TaskResultPanel, isInterruptedMessage } = await jiti.import("./MessageView.tsx");
-const { CodeBlock } = await jiti.import("./MermaidBlock.tsx");
-const { buildSessionContext } = await jiti.import("../lib/session-reader.ts");
-const { collectToolResults, planTranscriptRows } = await jiti.import("../lib/chat-transcript-plan.ts");
+const { MessageView, SafeMarkdownBody, TaskResultPanel, isInterruptedMessage } = await import("./MessageView.tsx");
+const { CodeBlock } = await import("./MermaidBlock.tsx");
+const { buildSessionContext } = await import("../lib/session-reader.ts");
+const { collectToolResults, planTranscriptRows } = await import("../lib/chat-transcript-plan.ts");
 afterEach(cleanup);
 
 test("sent messages without timestamps or branch metadata still offer copy", () => {
@@ -641,6 +636,18 @@ test("thinking blocks stay collapsed by default and open with the expand prefere
   assert.match(html({ expandThinkingByDefault: true, isStreaming: true }), /weighing the options/);
 });
 
+test("the model label hides on activity-only rows but stays on a row that also carries reply text", () => {
+  const html = (content) => renderToStaticMarkup(React.createElement(MessageView, {
+    message: { role: "assistant", provider: "t", model: "label-model", content },
+    modelNames: { "t:label-model": "Label Model" },
+  }));
+  const labelShown = (markup) => /display:flex[^>]*><span>Label Model<\/span>/.test(markup);
+  assert.equal(labelShown(html([{ type: "thinking", thinking: "plan" }])), false);
+  // Unfolded thinking rides in the reply's segment; the reply keeps its attribution.
+  assert.equal(labelShown(html([{ type: "thinking", thinking: "plan" }, { type: "text", text: "Answer" }])), true);
+  assert.equal(labelShown(html([{ type: "text", text: "Answer" }])), true);
+});
+
 test("an expanded thinking block collapses and re-expands by hand", async () => {
   const message = {
     role: "assistant",
@@ -888,7 +895,7 @@ test("agent replies offer copy and fork at their resolved target", async (t) => 
     else delete window.matchMedia;
   });
   const forked = [];
-  const view = render(React.createElement(MessageView, {
+  const props = {
     message: { role: "assistant", model: "test", provider: "test", content: [{ type: "text", text: "Done." }] },
     entryId: "assistant-1",
     // Resolved by resolveForkTargets: the newest reply falls back to its own
@@ -896,10 +903,21 @@ test("agent replies offer copy and fork at their resolved target", async (t) => 
     forkEntryId: "user-1",
     forkEditsPrompt: true,
     onFork: (entryId, editPrompt) => forked.push([entryId, editPrompt]),
-  }));
+  };
+  const view = render(React.createElement(MessageView, props));
   assert.ok(view.getByRole("button", { name: "Copy message" }));
   await act(async () => { fireEvent.click(view.getByRole("button", { name: FORK_LABEL })); });
+  assert.deepEqual(forked, [], "the fork button only asks for confirmation");
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "Cancel" })); });
+  assert.deepEqual(forked, []);
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: FORK_LABEL })); });
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "Fork" })); });
   assert.deepEqual(forked, [["user-1", true]]);
+
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: FORK_LABEL })); });
+  view.rerender(React.createElement(MessageView, { ...props, forkDisabled: true }));
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "Fork" })); });
+  assert.deepEqual(forked, [["user-1", true]], "a row blocked while the dialog was open does not fork");
   view.unmount();
 });
 
@@ -947,6 +965,78 @@ test("user messages fork at their own entry and edit the prompt", async (t) => {
     onFork: (entryId, editPrompt) => forked.push([entryId, editPrompt]),
   }));
   await act(async () => { fireEvent.click(view.getByRole("button", { name: FORK_LABEL })); });
+  assert.deepEqual(forked, []);
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "Fork" })); });
   assert.deepEqual(forked, [["user-7", true]]);
+  view.unmount();
+});
+
+test("user-message Edit only runs after confirmation, and not once blocked", async (t) => {
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+  t.after(() => {
+    if (originalMatchMedia) window.matchMedia = originalMatchMedia;
+    else delete window.matchMedia;
+  });
+  const edited = [];
+  const props = {
+    message: { role: "user", content: "Rewind to here." },
+    entryId: "user-9",
+    onEdit: async (entryId, content) => { edited.push([entryId, content]); return true; },
+  };
+  const view = render(React.createElement(MessageView, props));
+  const editButton = view.getByRole("button", { name: "Jump back here and edit this message" });
+  await act(async () => { fireEvent.click(editButton); });
+  assert.deepEqual(edited, [], "the Edit button only asks for confirmation");
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "Cancel" })); });
+  assert.deepEqual(edited, []);
+  await act(async () => { fireEvent.click(editButton); });
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "Edit" })); });
+  assert.deepEqual(edited, [["user-9", "Rewind to here."]]);
+
+  await act(async () => { fireEvent.click(editButton); });
+  view.rerender(React.createElement(MessageView, { ...props, editDisabled: true }));
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "Edit" })); });
+  assert.deepEqual(edited, [["user-9", "Rewind to here."]], "a row blocked while the dialog was open does not edit");
+  assert.equal(view.queryByRole("button", { name: "Edit" }), null, "confirming closes the dialog");
+  view.unmount();
+});
+
+test("an open confirmation closes when the row starts showing another message", async (t) => {
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+  t.after(() => {
+    if (originalMatchMedia) window.matchMedia = originalMatchMedia;
+    else delete window.matchMedia;
+  });
+  const calls = [];
+  const row = (entryId, content) => React.createElement(MessageView, {
+    message: { role: "user", content },
+    entryId,
+    onEdit: async (id, text) => { calls.push(["edit", id, text]); return true; },
+    onFork: (id) => calls.push(["fork", id]),
+  });
+  // ChatWindow keys rows by index, so a history swap reuses this component for another entry.
+  const view = render(row("user-1", "Selected."));
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "Jump back here and edit this message" })); });
+  view.rerender(row("user-2", "Someone else."));
+  assert.equal(view.queryByRole("button", { name: "Edit" }), null, "the Edit dialog closes");
+
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: FORK_LABEL })); });
+  view.rerender(row("user-3", "Another one."));
+  assert.equal(view.queryByRole("button", { name: "Fork" }), null, "the Fork dialog closes");
+
+  view.rerender(row("user-1", "Selected."));
+  assert.equal(view.queryByRole("button", { name: "Edit" }), null, "returning to the entry does not reopen its Edit dialog");
+  view.rerender(row("user-2", "Someone else."));
+  view.rerender(row("user-3", "Another one."));
+  assert.equal(view.queryByRole("button", { name: "Fork" }), null, "returning to the entry does not reopen its Fork dialog");
+
+  // Edit can drop out (onEdit withdrawn) while its dialog is open; it must not come back by itself.
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "Jump back here and edit this message" })); });
+  view.rerender(React.createElement(MessageView, { message: { role: "user", content: "Another one." }, entryId: "user-3" }));
+  view.rerender(row("user-3", "Another one."));
+  assert.equal(view.queryByRole("button", { name: "Edit" }), null, "Edit returning does not reopen its dialog");
+  assert.deepEqual(calls, []);
   view.unmount();
 });

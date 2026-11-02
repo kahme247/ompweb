@@ -1,14 +1,16 @@
 "use client";
 
-import { memo, useCallback, useRef, useState } from "react";
+import { memo, useCallback, useId, useRef, useState, type ReactNode } from "react";
 import type { AgentMessage, ExitedRpcSession, ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
 import { formatExitedSessionNotice, useI18n } from "@/lib/i18n";
-import { ChevronDown, ChevronRight, Folder, GitBranch, MoreHorizontal, Pin } from "lucide-react";
+import { ChevronDown, ChevronRight, Folder, GitBranch, MoreHorizontal, Pin, Plus } from "lucide-react";
 import { Tooltip } from "./ui/primitives";
 import { ConfirmDialog } from "./ui/field";
 import { copyText } from "@/lib/clipboard";
 import { transcriptToMarkdown } from "@/lib/transcript";
 import { toast } from "./ui/toast";
+import { SessionSearchMatches, type SearchMatchTarget } from "./SessionSearchMatches";
+import { remoteHostId } from "@/lib/project-ordering";
 import {
   MAX_PROJECT_SESSIONS,
   formatRelativeTime,
@@ -20,6 +22,7 @@ import {
   RecentlyCompletedIndicator,
   RunningSessionIndicator,
   SIDEBAR_BUTTON_TRANSITION,
+  SidebarIconButton,
   SidebarPortalMenu,
   UnreadSessionIndicator,
 } from "./SessionSidebar-chrome";
@@ -32,6 +35,61 @@ import {
  */
 const SIDEBAR_STATUS_SLOT = 12;
 const SIDEBAR_STATUS_GAP = 2;
+
+/** One host's workspaces: a collapsible header (name, status dot) around the
+ *  usual project list. An unreachable host keeps its last list, dimmed, with
+ *  the reason in a tooltip; adding a workspace there is disabled. */
+function HostGroup({ name, color, statusText, unavailableReason, collapsed, onToggle, onAdd, empty, children }: {
+  name: string;
+  color: string | undefined;
+  statusText: string | null;
+  unavailableReason: string | null;
+  collapsed: boolean;
+  onToggle: () => void;
+  onAdd: () => void;
+  /** Shown instead of the list when the host has no workspaces. */
+  empty: string | null;
+  children: ReactNode;
+}) {
+  const { t } = useI18n();
+  // The tooltip is invisible to keyboards and screen readers: say it in text too.
+  const reasonId = useId();
+  return (
+    <section aria-label={name} style={{ marginBottom: 6 }}>
+      {unavailableReason && <span id={reasonId} style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", clip: "rect(0, 0, 0, 0)", whiteSpace: "nowrap" }}>{unavailableReason}</span>}
+      <div style={{ display: "flex", alignItems: "center", gap: 2, padding: "4px 0 2px" }} title={unavailableReason ?? undefined}>
+        <button
+          type="button"
+          className="ui-focus-ring"
+          aria-expanded={!collapsed}
+          aria-describedby={unavailableReason ? reasonId : undefined}
+          aria-label={t(collapsed ? "hosts.expandGroup" : "hosts.collapseGroup", { host: name })}
+          onClick={onToggle}
+          style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 6, padding: "3px 4px", border: "none", borderRadius: 6, background: "none", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", opacity: unavailableReason ? 0.7 : 1 }}
+        >
+          <ChevronRight size={12} strokeWidth={2.2} aria-hidden="true" style={{ flexShrink: 0, transform: collapsed ? undefined : "rotate(90deg)", transition: "transform var(--dur-fast) var(--ease-out-warm)" }} />
+          <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: "50%", flexShrink: 0, background: color ?? "var(--text-dim)" }} />
+          <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11, fontWeight: 600, letterSpacing: "0.04em", textTransform: "uppercase" }}>{name}</span>
+          {statusText && <span style={{ flexShrink: 0, fontSize: 10.5, color: "var(--text-dim)", textTransform: "none", letterSpacing: 0 }}>{statusText}</span>}
+        </button>
+        <SidebarIconButton label={t("hosts.addWorkspaceOn", { host: name })} onClick={onAdd} disabled={unavailableReason !== null}>
+          <Plus size={14} strokeWidth={1.9} aria-hidden="true" />
+        </SidebarIconButton>
+      </div>
+      {!collapsed && (
+        <div
+          role="group"
+          aria-label={name}
+          aria-describedby={unavailableReason ? reasonId : undefined}
+          title={unavailableReason ?? undefined}
+          style={{ opacity: unavailableReason ? 0.55 : 1 }}
+        >
+          {empty ? <div style={{ padding: "6px 4px", color: "var(--text-dim)", fontSize: 11.5 }}>{empty}</div> : children}
+        </div>
+      )}
+    </section>
+  );
+}
 
 interface ProjectRowProps {
   project: ManagedProject;
@@ -47,14 +105,14 @@ interface ProjectRowProps {
   recentlyCompletedIds?: Set<string>;
   exitedSessions: Map<string, ExitedRpcSession>;
   relativeTimeNow: number;
-  onActivate: (path: string) => void;
-  onToggleExpand: (path: string) => void;
-  onRemoveProject: (path: string) => void;
+  onActivate: (project: ManagedProject) => void;
+  onToggleExpand: (project: ManagedProject) => void;
+  onRemoveProject: (project: ManagedProject) => void;
   onEditLaunchConfig: (project: ManagedProject) => void;
-  onUpdatePresentation: (path: string, updates: { alias?: string | null; sortOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }) => void;
-  onDragPathChange: (path: string | null) => void;
-  onDropProject: (path: string) => void;
-  onMoveProject: (path: string, delta: -1 | 1) => void;
+  onUpdatePresentation: (project: ManagedProject, updates: { alias?: string | null; sortOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }) => void;
+  onDragProjectChange: (project: ManagedProject | null) => void;
+  onDropProject: (project: ManagedProject) => void;
+  onMoveProject: (project: ManagedProject, delta: -1 | 1) => void;
   /** A sort is active: show the pin toggle; only pinned rows reorder by hand. */
   pinnable: boolean;
   onTogglePin: (project: ManagedProject) => Promise<void>;
@@ -63,6 +121,9 @@ interface ProjectRowProps {
   onSelectSession: (s: SessionInfo) => void;
   onRenamed?: () => void;
   onSessionDeleted?: (id: string) => void;
+  /** The active search query; each session row can then list its hits. */
+  searchQuery?: string;
+  onOpenSearchMatch?: (session: SessionInfo, target: SearchMatchTarget) => void;
 }
 
 /** One project in the sidebar: a card row matching the session items' visual
@@ -86,7 +147,7 @@ function ProjectRow({
   onRemoveProject,
   onEditLaunchConfig,
   onUpdatePresentation,
-  onDragPathChange,
+  onDragProjectChange,
   onDropProject,
   onMoveProject,
   pinnable,
@@ -96,6 +157,8 @@ function ProjectRow({
   onSelectSession,
   onRenamed,
   onSessionDeleted,
+  searchQuery,
+  onOpenSearchMatch,
 }: ProjectRowProps) {
   const { t } = useI18n();
   const [hovered, setHovered] = useState(false);
@@ -123,8 +186,8 @@ function ProjectRow({
     const alias = aliasValue.trim();
     setAliasEditing(false);
     if (alias === (project.alias ?? "")) return;
-    void onUpdatePresentation(project.path, { alias });
-  }, [aliasValue, project.alias, project.path, onUpdatePresentation]);
+    void onUpdatePresentation(project, { alias });
+  }, [aliasValue, project, onUpdatePresentation]);
   const label = project.alias ?? projectLabel(project.path);
   const pinned = pinnable && project.pinOrder !== undefined;
   const canReorder = !pinnable || pinned;
@@ -147,16 +210,16 @@ function ProjectRow({
         onConfirm={() => {
           if (removeBusy) return;
           setConfirmRemove(false);
-          onRemoveProject(project.path);
+          onRemoveProject(project);
         }}
       />
       <div
         className="sidebar-project-header"
         draggable={!aliasEditing && canReorder}
-        onDragStart={(event) => { event.dataTransfer.setData("text/plain", project.path); event.dataTransfer.effectAllowed = "move"; onDragPathChange(project.path); }}
+        onDragStart={(event) => { event.dataTransfer.setData("text/plain", project.path); event.dataTransfer.effectAllowed = "move"; onDragProjectChange(project); }}
         onDragOver={(event) => { if (isDragTarget) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }}
-        onDrop={(event) => { event.preventDefault(); onDropProject(project.path); }}
-        onDragEnd={() => onDragPathChange(null)}
+        onDrop={(event) => { event.preventDefault(); onDropProject(project); }}
+        onDragEnd={() => onDragProjectChange(null)}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
         onKeyDown={(event) => {
@@ -237,7 +300,7 @@ function ProjectRow({
             >
             <button
               className="sidebar-project-identity"
-              onClick={() => onActivate(project.path)}
+              onClick={() => onActivate(project)}
               aria-current={isActive ? "true" : undefined}
               title={project.path}
               style={{
@@ -348,10 +411,10 @@ function ProjectRow({
             </button>
             {canReorder && (
               <>
-                <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { setActionMenuOpen(false); void onMoveProject(project.path, -1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
+                <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { setActionMenuOpen(false); void onMoveProject(project, -1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
                   {t("projects.moveUp")}
                 </button>
-                <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { setActionMenuOpen(false); void onMoveProject(project.path, 1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
+                <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { setActionMenuOpen(false); void onMoveProject(project, 1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
                   {t("projects.moveDown")}
                 </button>
               </>
@@ -363,7 +426,7 @@ function ProjectRow({
         </div>
         <button
           className="sidebar-project-toggle"
-          onClick={() => onToggleExpand(project.path)}
+          onClick={() => onToggleExpand(project)}
           aria-label={isExpanded ? t("projects.collapseProject", { name: label }) : t("projects.expandProject", { name: label })}
           aria-expanded={isExpanded}
           title={isExpanded ? t("projects.collapseProjectTitle", { path: project.path }) : t("projects.expandProjectTitle", { path: project.path })}
@@ -406,6 +469,8 @@ function ProjectRow({
                   onSelectSession={onSelectSession}
                   onRenamed={onRenamed}
                   onSessionDeleted={onSessionDeleted}
+                  searchQuery={searchQuery}
+                  onOpenSearchMatch={onOpenSearchMatch}
                   depth={0}
                 />
               ))}
@@ -457,6 +522,8 @@ const SessionTreeItem = memo(function SessionTreeItem({
   onSelectSession,
   onRenamed,
   onSessionDeleted,
+  searchQuery,
+  onOpenSearchMatch,
   depth,
 }: {
   node: SessionTreeNode;
@@ -469,9 +536,13 @@ const SessionTreeItem = memo(function SessionTreeItem({
   onSelectSession: (s: SessionInfo) => void;
   onRenamed?: () => void;
   onSessionDeleted?: (id: string) => void;
+  searchQuery?: string;
+  onOpenSearchMatch?: (session: SessionInfo, target: SearchMatchTarget) => void;
   depth: number;
 }) {
   const [collapsed, setCollapsed] = useState(false);
+  const [matchesOpen, setMatchesOpen] = useState(false);
+  if (matchesOpen && !searchQuery) setMatchesOpen(false);
   const hasChildren = node.children.length > 0;
   const sessionId = node.session.id;
 
@@ -494,6 +565,12 @@ const SessionTreeItem = memo(function SessionTreeItem({
   const handleToggleCollapse = useCallback(() => {
     setCollapsed((v) => !v);
   }, []);
+  const handleToggleMatches = useCallback(() => {
+    setMatchesOpen((v) => !v);
+  }, []);
+  const handleOpenMatch = useCallback((target: SearchMatchTarget) => {
+    onOpenSearchMatch?.(node.session, target);
+  }, [onOpenSearchMatch, node.session]);
 
   return (
     <div>
@@ -524,8 +601,13 @@ const SessionTreeItem = memo(function SessionTreeItem({
           hasChildren={hasChildren}
           collapsed={collapsed}
           onToggleCollapse={handleToggleCollapse}
+          matchesExpanded={matchesOpen}
+          onToggleMatches={searchQuery && onOpenSearchMatch ? handleToggleMatches : undefined}
         />
       </div>
+      {matchesOpen && searchQuery && onOpenSearchMatch && (
+        <SessionSearchMatches key={searchQuery} sessionId={sessionId} query={searchQuery} depth={depth} onOpen={handleOpenMatch} />
+      )}
       {hasChildren && !collapsed && (
         <div>
           {node.children.map((child) => (
@@ -541,6 +623,8 @@ const SessionTreeItem = memo(function SessionTreeItem({
               onSelectSession={onSelectSession}
               onRenamed={onRenamed}
               onSessionDeleted={onSessionDeleted}
+              searchQuery={searchQuery}
+              onOpenSearchMatch={onOpenSearchMatch}
               depth={depth + 1}
             />
           ))}
@@ -572,7 +656,9 @@ const SessionTreeItem = memo(function SessionTreeItem({
   if (prev.relativeTimeNow !== next.relativeTimeNow) return false;
   if (prev.onSelectSession !== next.onSelectSession
     || prev.onRenamed !== next.onRenamed
-    || prev.onSessionDeleted !== next.onSessionDeleted) return false;
+    || prev.onSessionDeleted !== next.onSessionDeleted
+    || prev.searchQuery !== next.searchQuery
+    || prev.onOpenSearchMatch !== next.onOpenSearchMatch) return false;
   return true;
 });
 const SessionItem = memo(function SessionItem({
@@ -590,6 +676,8 @@ const SessionItem = memo(function SessionItem({
   collapsed = false,
   relativeTimeNow,
   onToggleCollapse,
+  matchesExpanded = false,
+  onToggleMatches,
 }: {
   session: SessionInfo;
   isSelected: boolean;
@@ -605,6 +693,9 @@ const SessionItem = memo(function SessionItem({
   relativeTimeNow: number;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
+  /** Present while a search is active: shows the session's hits below the row. */
+  matchesExpanded?: boolean;
+  onToggleMatches?: () => void;
 }) {
   const { t, locale } = useI18n();
   const exitTitle = exited ? formatExitedSessionNotice(exited) : "";
@@ -663,6 +754,9 @@ const SessionItem = memo(function SessionItem({
  toast.error(t("sessionSidebar.archiveFailed"));
  }
  }, [session.id, onDeleted, t]);
+  // The Archived Sessions browser lists this machine's archive only, so a remote archive could not be restored.
+  const archiveBlocked = hasChildren || remoteHostId(session.hostId) !== undefined;
+  const archiveTitle = hasChildren ? t("sessionSidebar.archiveLeafOnly") : archiveBlocked ? t("hosts.notAvailableRemote") : t("sessionSidebar.archive");
 
   const handleDelete = useCallback(async () => {
     if (deleting) return;
@@ -745,6 +839,19 @@ const SessionItem = memo(function SessionItem({
           }}
         />
       )}
+      {onToggleMatches && !renaming && (
+        <button
+          type="button"
+          className="session-item-icon-button"
+          onClick={(event) => { event.stopPropagation(); onToggleMatches(); }}
+          title={matchesExpanded ? t("sessionSidebar.hideMatches") : t("sessionSidebar.showMatches")}
+          aria-label={matchesExpanded ? t("sessionSidebar.hideMatches") : t("sessionSidebar.showMatches")}
+          aria-expanded={matchesExpanded}
+          style={{ position: "absolute", left: depth * 14, top: 3, display: "flex", alignItems: "center", justifyContent: "center", width: 20, height: 24, padding: 0, border: "none", background: "none", color: "var(--text-dim)", cursor: "pointer" }}
+        >
+          <ChevronRight size={12} strokeWidth={1.8} aria-hidden="true" style={{ transform: matchesExpanded ? "rotate(90deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }} />
+        </button>
+      )}
       {renaming ? (
         <input ref={inputRef} autoFocus aria-label={t("sessionSidebar.rename")} value={renameValue} onChange={(event) => setRenameValue(event.target.value)} onBlur={commitRename} onKeyDown={(event) => { if (event.key === "Enter") void commitRename(); if (event.key === "Escape") { event.preventDefault(); renameCancelRef.current = true; setRenaming(false); } }} style={{ flex: 1, height: 25, padding: "3px 7px", border: "1px solid var(--accent)", borderRadius: "var(--radius-control)", outline: "none", background: "var(--bg)", color: "var(--text)", fontSize: 12 }} />
       ) : (
@@ -778,7 +885,7 @@ const SessionItem = memo(function SessionItem({
                   <MoreHorizontal size={14} strokeWidth={2} aria-hidden="true" />
                 </button>
                 <SidebarPortalMenu anchor={menuButtonRef} open={actionMenuOpen} onClose={() => setActionMenuOpen(false)} placement="below" minWidth={128}>
- <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleArchive(); }} disabled={hasChildren} title={hasChildren ? t("sessionSidebar.archiveLeafOnly") : t("sessionSidebar.archive")} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: hasChildren ? "var(--text-dim)" : "var(--text-muted)", cursor: hasChildren ? "not-allowed" : "pointer", textAlign: "left", fontSize: 11, opacity: hasChildren ? 0.55 : 1 }}>{t("sessionSidebar.archive")}</button>
+ <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleArchive(); }} disabled={archiveBlocked} title={archiveTitle} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: archiveBlocked ? "var(--text-dim)" : "var(--text-muted)", cursor: archiveBlocked ? "not-allowed" : "pointer", textAlign: "left", fontSize: 11, opacity: archiveBlocked ? 0.55 : 1 }}>{t("sessionSidebar.archive")}</button>
                   <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { startRename(event); setActionMenuOpen(false); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.rename")}</button>
                   <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleCopyTranscript(); }} disabled={copyingTranscript} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: copyingTranscript ? "default" : "pointer", textAlign: "left", fontSize: 11, opacity: copyingTranscript ? 0.55 : 1 }}>{t("sessionSidebar.copyTranscript")}</button>
                   <button type="button" role="menuitem" className="sidebar-menu-item" disabled={deleting} onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); setConfirmDelete(true); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--status-error)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.delete")}</button>
@@ -804,6 +911,7 @@ const SessionItem = memo(function SessionItem({
   );
 });
 export {
+  HostGroup,
   ProjectRow,
   SessionItem,
   SessionTreeItem,

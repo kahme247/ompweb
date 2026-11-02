@@ -1,18 +1,18 @@
-import { NextResponse } from "next/server";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { deleteMcpServer, parseMcpListOutput, readDiscoveredMcpServers, readMcpConfig, readUserMcpConfig, type McpLiveServer, validateMcpServer, writeMcpServer } from "@/lib/omp/mcp-config";
-import { readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
-import { WebRpcError, getRpcSession, resolveSpawnCwdResult, startRpcSession } from "@/lib/rpc-manager";
+import { WebRpcError, getRpcSession, startRpcSession } from "@/lib/rpc-manager";
+import { getHost } from "@/lib/hosts/hub";
+import { LOCAL_HOST_ID } from "@/lib/hosts/registry";
+import { sessionSpawnTarget } from "@/lib/hosts/session-index";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { redactMcpServer } from "@/lib/omp/mcp-config";
 
-export const dynamic = "force-dynamic";
 const MAX_MCP_REQUEST_BYTES = 1024 * 1024;
 
 function mcpErrorResponse(error: unknown) {
   const status = error instanceof RequestBodyTooLargeError ? 413 : 400;
-  return NextResponse.json({ error: error instanceof RequestBodyTooLargeError ? "MCP request is too large" : error instanceof Error ? error.message : String(error) }, { status });
+  return Response.json({ error: error instanceof RequestBodyTooLargeError ? "MCP request is too large" : error instanceof Error ? error.message : String(error) }, { status });
 }
 
 /** Stable client-safe message for the GET liveError field: raw child-process
@@ -91,21 +91,21 @@ export async function GET(request: Request) {
       try {
         let session = getRpcSession(sessionId);
         if (!session?.isAlive()) {
-          const sessionFile = await resolveSessionPath(sessionId);
-          if (!sessionFile) throw new Error("Session not found");
-          const header = readSessionHeader(sessionFile);
-          const { cwd } = resolveSpawnCwdResult(header?.cwd);
+          // MCP settings are this machine's only.
+          const host = getHost(LOCAL_HOST_ID);
+          const target = await sessionSpawnTarget(sessionId, host);
+          if (!target) throw new Error("Session not found");
           // Fresh spawn only (an alive child is reused above): apply the
           // caller's advisor opinion so a racing prompt doesn't inherit a
           // wrong-flag child for its whole turn.
-          ({ session } = await startRpcSession(sessionId, sessionFile, cwd, undefined, advisor, header?.cwd));
+          ({ session } = await startRpcSession(sessionId, target.sessionFile, target.cwd, undefined, advisor, target.recordedCwd, undefined, host));
         }
         liveServers = mergeMcpServers(parseMcpListOutput(await session.getMcpList()), inventory);
       } catch (error) {
         liveError = sanitizeMcpLiveError(error);
       }
     }
-    return NextResponse.json({ root: file?.root ?? null, path: file?.path ?? null, exists: file?.exists ?? false, servers: Object.entries(file?.config.mcpServers ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([name, config]) => ({ name, config: redactMcpServer(config) })), user: safeUser, inventory, liveServers, liveError });
+    return Response.json({ root: file?.root ?? null, path: file?.path ?? null, exists: file?.exists ?? false, servers: Object.entries(file?.config.mcpServers ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([name, config]) => ({ name, config: redactMcpServer(config) })), user: safeUser, inventory, liveServers, liveError });
   } catch (error) {
     return mcpErrorResponse(error);
   }
@@ -117,7 +117,7 @@ export async function POST(request: Request) {
     const cwd = await allowedCwd(body.cwd);
     validateMcpServer(body.name, body.server);
     if (body.previousName !== undefined && typeof body.previousName !== "string") throw new Error("previousName must be a string");
-    return NextResponse.json({ success: true, ...writeMcpServer(cwd, body.name as string, body.server, body.previousName) });
+    return Response.json({ success: true, ...writeMcpServer(cwd, body.name as string, body.server, body.previousName) });
   } catch (error) {
     return mcpErrorResponse(error);
   }
@@ -127,7 +127,7 @@ export async function PUT(request: Request) {
   try {
     const body = await parseJsonWithinLimit<{ name?: unknown; server?: unknown }>(request, MAX_MCP_REQUEST_BYTES);
     validateMcpServer(body.name, body.server);
-    return NextResponse.json({ success: true, message: "MCP server configuration is valid" });
+    return Response.json({ success: true, message: "MCP server configuration is valid" });
   } catch (error) {
     return mcpErrorResponse(error);
   }
@@ -138,7 +138,7 @@ export async function DELETE(request: Request) {
     const body = await parseJsonWithinLimit<{ cwd?: unknown; name?: unknown }>(request, MAX_MCP_REQUEST_BYTES);
     const cwd = await allowedCwd(body.cwd);
     if (typeof body.name !== "string") throw new Error("name is required");
-    return NextResponse.json({ success: true, ...deleteMcpServer(cwd, body.name) });
+    return Response.json({ success: true, ...deleteMcpServer(cwd, body.name) });
   } catch (error) {
     return mcpErrorResponse(error);
   }
@@ -155,16 +155,15 @@ export async function PATCH(request: Request) {
     // Do not create a different session or apply the caller's arbitrary cwd.
     let session = getRpcSession(body.sessionId);
     if (!session?.isAlive()) {
-      const sessionFile = await resolveSessionPath(body.sessionId);
-      if (!sessionFile) throw new Error("Session not found");
-      const header = readSessionHeader(sessionFile);
-      const { cwd } = resolveSpawnCwdResult(header?.cwd);
-      ({ session } = await startRpcSession(body.sessionId, sessionFile, cwd, undefined, undefined, header?.cwd));
+      const host = getHost(LOCAL_HOST_ID);
+      const target = await sessionSpawnTarget(body.sessionId, host);
+      if (!target) throw new Error("Session not found");
+      ({ session } = await startRpcSession(body.sessionId, target.sessionFile, target.cwd, undefined, undefined, target.recordedCwd, undefined, host));
     }
-    if (session.isRunning()) return NextResponse.json({ error: "Wait for the current run to finish before changing MCP servers." }, { status: 409 });
+    if (session.isRunning()) return Response.json({ error: "Wait for the current run to finish before changing MCP servers." }, { status: 409 });
     await session.changeMcp(body.action, typeof body.name === "string" ? body.name : undefined);
-    return NextResponse.json({ success: true });
+    return Response.json({ success: true });
   } catch (error) {
-    return NextResponse.json({ error: sanitizeMcpLiveError(error) }, { status: error instanceof WebRpcError && error.code === "session_busy" ? 409 : 400 });
+    return Response.json({ error: sanitizeMcpLiveError(error) }, { status: error instanceof WebRpcError && error.code === "session_busy" ? 409 : 400 });
   }
 }

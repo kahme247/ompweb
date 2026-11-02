@@ -15,13 +15,17 @@ import type {
 import { normalizeToolCalls } from "@/lib/normalize";
 import { hasVisibleAssistantContent } from "@/lib/assistant-response";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
-import { sendAgentCommand, setSessionAdvisorSpawn } from "@/lib/agent-client";
+import { HostOfflineError, TransportLostError, sendAgentCommand, setSessionAdvisorSpawn } from "@/lib/agent-client";
+import type { HostStatus } from "@/lib/hosts/host";
+import { newChatDraftKey, remoteHostId } from "@/lib/project-ordering";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "@/lib/skill-diagnostics";
 import { clearDraft, getDraft, mergeRecoveredText, recoverDraft, setDraft, toDraftImages, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
 import { formatExitedSessionNotice, translate } from "@/lib/i18n";
+import { formatApiError } from "@/lib/i18n/api-error";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { toastBtwError, useBtw } from "@/hooks/useBtw";
 import { createMessageUpdateCoalescer, type MessageUpdateCoalescer } from "@/lib/message-update-coalescer";
+import { displayMessage } from "@/lib/message-delta";
 import { looksLikeRunningTurn } from "@/lib/chat-transcript-plan";
 import { createReconcileGuard, type ReconcileGuard } from "@/lib/reconcile-guard";
 import { getToolNamesForPreset, type ToolPreset } from "@/lib/tool-presets";
@@ -177,6 +181,8 @@ function readTerminalAgentError(event: AgentEvent): string | null {
 export interface UseAgentSessionOptions {
   session: SessionInfo | null;
   newSessionCwd: string | null;
+  /** Host a fresh chat is created on; a started session carries its own `hostId`. This machine when absent. */
+  newSessionHostId?: string;
   advisorEnabled?: boolean;
   onAgentEnd?: () => void;
   onSessionCreated?: (session: SessionInfo) => void;
@@ -197,9 +203,27 @@ export interface UseAgentSessionOptions {
   onOpenUrl?: (url: string) => string;
 }
 
+/** Toast a send its connection stopped: the host's link (HostOfflineError) or
+ *  this browser's session socket (TransportLostError). True when it may have
+ *  left and still run, so the composer must not offer it again; null for any
+ *  other error, which the caller reports itself. `promptIssued` false: the error
+ *  came from a command before the prompt (get_state, set_model), so nothing was
+ *  sent that could still run and the text goes back. */
+function toastStoppedSend(error: unknown, promptIssued = true): boolean | null {
+  if (error instanceof TransportLostError) {
+    if (!promptIssued) return null;
+    toast.info(translate("agentSession.transportLostMaybeSent"));
+    return true;
+  }
+  if (!(error instanceof HostOfflineError)) return null;
+  if (error.mayHaveRun && promptIssued) toast.info(translate("agentSession.hostOfflineMaybeSent", { detail: error.message }));
+  else toast.error(translate("agentSession.hostOfflineSend", { detail: error.message }));
+  return error.mayHaveRun && promptIssued;
+}
+
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
-    session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved,
+    session, newSessionCwd, newSessionHostId, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsPanelOpen,
     onOpenFile, onOpenUrl,
   } = opts;
@@ -221,6 +245,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const streamStateRef = useRef(streamState);
   streamStateRef.current = streamState;
   const [agentRunning, setAgentRunning] = useState(false);
+  // The latest link-status change the session's host reported; tagged with the
+  // session so a frame never outlives the chat it described.
+  const [hostFrame, setHostFrame] = useState<{ sessionId: string | null; status: HostStatus } | null>(null);
   const [bashRunning, setBashRunning] = useState(false);
   const [pendingBash, setPendingBash] = useState<{ command: string; excludeFromContext: boolean } | null>(null);
   // False once this hook instance unmounts: background loops (prompt/bash
@@ -422,6 +449,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const ignoreProgrammaticScrollUntilRef = useRef(0);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  // A jump to a search hit: skip the initial scroll and stop following new output,
+  // exactly as if the reader had scrolled up.
+  const holdScrollPosition = useCallback(() => {
+    initialScrollDoneRef.current = true;
+    completionScrollAllowedRef.current = false;
+  }, []);
   const ensuringNewSessionRef = useRef<Promise<string | null> | null>(null);
   const newSessionPromotedRef = useRef(false);
   // Raw child-session events stream at token rate; coalesce the per-subagent
@@ -470,7 +503,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   if (eventCoalescerRef.current === null) {
     eventCoalescerRef.current = createMessageUpdateCoalescer((event) => {
       handleAgentEventRef.current?.(event as AgentEvent);
-    });
+    }, undefined, () => catchUpRef.current?.requestMissingBase());
   }
   const eventCoalescer = eventCoalescerRef.current;
   const authoritativeModelSeqRef = useRef(0);
@@ -1007,8 +1040,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       modified: new Date().toISOString(),
       messageCount,
       firstMessage,
+      ...(newSessionHostId ? { hostId: newSessionHostId } : {}),
     });
-  }, [isNew, newSessionCwd, onSessionCreated]);
+  }, [isNew, newSessionCwd, newSessionHostId, onSessionCreated]);
 
   // Assigned after connectEvents is defined. A runtime created for an empty
   // chat emits its startup frames before any stream exists, so it must be
@@ -1029,6 +1063,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           cwd: newSessionCwd,
+          ...(newSessionHostId ? { hostId: newSessionHostId } : {}),
           type: "ensure_session",
           toolNames,
           ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
@@ -1036,9 +1071,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           ...(advisorEnabled ? { advisor: true } : {}),
         }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const result = await res.json() as { sessionId: string };
-      const realId = result.sessionId;
+      const body = await res.json().catch(() => ({})) as { sessionId?: unknown; error?: string; code?: string; hostOffline?: boolean; delivery?: string };
+      const offline = res.status === 503 && body.hostOffline === true;
+      if (!res.ok && !offline) throw new Error(`HTTP ${res.status}`);
+      // A host that dropped after the spawn keeps the session (503 with its id):
+      // adopt it, so a retry sends there instead of starting a second session.
+      const realId = typeof body.sessionId === "string" && body.sessionId ? body.sessionId : null;
+      if (!realId) {
+        if (offline) throw new HostOfflineError(formatApiError(body), body.delivery === "unknown");
+        return null;
+      }
       sessionIdRef.current = realId;
       // The toggle handler could not persist while the chat had no id; carry
       // the pre-prompt choice over so it survives a reload after this point.
@@ -1055,6 +1097,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (hookAliveRef.current && !promptDispatchPendingRef.current && !btwAskPendingRef.current) {
         observeCreatedSessionRef.current?.(realId);
       }
+      if (offline) throw new HostOfflineError(formatApiError(body), body.delivery === "unknown");
       return realId;
     })();
 
@@ -1064,7 +1107,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       ensuringNewSessionRef.current = null;
     }
-  }, [advisorEnabled, isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel]);
+  }, [advisorEnabled, isNew, newSessionCwd, newSessionHostId, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel]);
 
   // The system panel may initialize a dormant session, but must not create a
   // prompt or model run just to inspect the resolved system prompt.
@@ -2005,6 +2048,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         applySkillDiagnosticsSnapshot(revision, event.data);
         break;
       }
+      case "host_status":
+        setHostFrame({ sessionId: sessionIdRef.current, status: event.status as HostStatus });
+        break;
       case "queue_update": {
         const snapshot = readQueueSnapshot(event);
         if (snapshot) {
@@ -2642,7 +2688,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       if (fields.message) {
         dispatch(snapshot.streamingMessage
-          ? { type: "update", message: normalizeToolCalls(snapshot.streamingMessage as AgentMessage) }
+          ? { type: "update", message: normalizeToolCalls(displayMessage(snapshot.streamingMessage) as AgentMessage) }
           // Between message_end and its saved copy the server has no message:
           // a held reply stays.
           : { type: "idle", streaming: snapshot.isStreaming });
@@ -2650,6 +2696,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const messageError = readAgentError(snapshot.streamingMessage);
         if (messageError) lastRunErrorRef.current = messageError;
       }
+      // omp's next delta applies to this snapshot, or completes deltas that arrived without their message.
+      eventCoalescer.seed(snapshot.streamingMessageId ?? null, snapshot.streamingMessage, snapshot.cursor.sequence, fields.message);
       if (fields.tools) {
         const preserve = fields.tools;
         setLiveToolResults((current) => new Map([...current].filter(([id]) => preserve.has(id))));
@@ -2683,12 +2731,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return snapshot.entryIds;
   }, []);
 
-  const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<PromptSubmissionResult> => {
+  const handleSend = useCallback(async (message: string, images?: AttachedImage[], uploads?: string[]): Promise<PromptSubmissionResult> => {
     const trimmedMessage = message.trim();
-    if (!trimmedMessage && !images?.length) return { status: "rejected" };
+    if (!trimmedMessage && !images?.length && !uploads?.length) return { status: "rejected" };
     if (agentRunningRef.current || bashRunningRef.current || editInFlightRef.current) return { status: "rejected" };
     if (initialHydrationPendingRef.current) return { status: "rejected" };
-    const isSlashCommandPrompt = !images?.length && trimmedMessage.startsWith("/");
+    const isSlashCommandPrompt = !images?.length && !uploads?.length && trimmedMessage.startsWith("/");
     // omp runs TUI-only commands such as `/guided-goal` nowhere but its own
     // terminal, so over RPC the text is sent as an ordinary prompt and the turn
     // looks like it obeyed. Say so once per name instead of staying silent
@@ -2702,7 +2750,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     }
 
-    const isBashCommand = !images?.length && trimmedMessage.startsWith("!");
+    const isBashCommand = !images?.length && !uploads?.length && trimmedMessage.startsWith("!");
     if (isBashCommand) {
       const isExcluded = trimmedMessage.startsWith("!!");
       const bashCmd = (isExcluded ? trimmedMessage.slice(2) : trimmedMessage.slice(1)).trim();
@@ -2750,7 +2798,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // not a request to stop following the response that this prompt starts.
     userScrollIntentUntilRef.current = 0;
 
-    let recoveryKey = sessionIdRef.current ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined);
+    let recoveryKey = sessionIdRef.current ?? (newSessionCwd ? newChatDraftKey(newSessionCwd, newSessionHostId) : undefined);
+    // Set just before the prompt goes out: a lost reply from any earlier command (get_state, set_model) ran no prompt.
+    let promptIssued = false;
     try {
       let sentSessionId: string | null = null;
       // The agent route degrades a prompt into omp's follow-up queue when a
@@ -2793,10 +2843,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             const previousEntryIds = await snapshotRunEntries(sid);
             if (promptRunIdRef.current === promptRunId) runPreviousEntryIdsRef.current = previousEntryIds;
           }
+          promptIssued = true;
           queuedBehindShell = isQueuedWhileShellRunning(await sendAgentCommand(sid, {
             type: "prompt",
             message,
             ...(piImages?.length ? { images: piImages } : {}),
+            ...(uploads?.length ? { uploads } : {}),
           }));
         }
       } else if (session) {
@@ -2813,10 +2865,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (promptRunIdRef.current === promptRunId && sessionIdRef.current === sid) {
           runPreviousEntryIdsRef.current = previousEntryIds;
         }
+        promptIssued = true;
         queuedBehindShell = isQueuedWhileShellRunning(await sendAgentCommand(sid, {
           type: "prompt",
           message,
           ...(piImages?.length ? { images: piImages } : {}),
+          ...(uploads?.length ? { uploads } : {}),
         }));
       }
       if (promptRunIdRef.current === promptRunId) promptDispatchPendingRef.current = false;
@@ -2848,14 +2902,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       promptDispatchPendingRef.current = false;
       console.error("Failed to send message:", e);
       // Every failure here (stream connect, startup, set_model, or the prompt
-      // POST itself) means the prompt never started, so roll back the optimistic bubble.
+      // POST itself) leaves no run to show, so roll back the optimistic bubble.
       setOptimisticUserMessage(null);
-      addNotice({
-        type: "error",
-        message: e instanceof EventStreamConnectionError
-          ? e.message
-          : translate("agentSession.sendFailed", { detail: e instanceof Error ? e.message : String(e) }),
-      });
+      const mayHaveRun = toastStoppedSend(e, promptIssued);
+      if (mayHaveRun === null) {
+        addNotice({
+          type: "error",
+          message: e instanceof EventStreamConnectionError
+            ? e.message
+            : translate("agentSession.sendFailed", { detail: e instanceof Error ? e.message : String(e) }),
+        });
+      }
       // The composer owns refused-send recovery (text, file contents and images)
       // using the draft key captured at submission, including after navigation.
       agentRunningRef.current = false;
@@ -2868,9 +2925,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       lastRunErrorRef.current = null;
       slashCommandRunRef.current = false;
       dispatch({ type: "end" });
-      return { status: "rejected", recoveryKey };
+      return mayHaveRun ? { status: "accepted" } : { status: "rejected", recoveryKey };
     }
-  }, [catchUp, eventCoalescer, isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, onSessionCreated, waitForPromptSettlement, addNotice, refreshSubagentRoster, registerHostTools, registerHostUriSchemes, clearLiveToolResults, clearTerminalReconcileTimer, snapshotRunEntries]);
+  }, [catchUp, eventCoalescer, isNew, newSessionCwd, newSessionHostId, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, onSessionCreated, waitForPromptSettlement, addNotice, refreshSubagentRoster, registerHostTools, registerHostUriSchemes, clearLiveToolResults, clearTerminalReconcileTimer, snapshotRunEntries]);
 
   /** Abort the running agent and send the message as a fresh prompt
    * (abort_and_prompt). Only valid mid-run; the old turn's agent_end is
@@ -2931,9 +2988,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       interruptReplyPendingRef.current = false;
       setOptimisticUserMessage(null);
-      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
-      // Mirror handleSend: the interrupt never started, so hand the text back
-      // instead of losing it with the rolled-back bubble.
+      // The reply may be lost after the interrupt ran: the composer must not offer the text again (a resend would
+      // interrupt the replacement turn), as in handleSend. Otherwise the interrupt never started: hand the text back.
+      const mayHaveRun = toastStoppedSend(e);
+      if (mayHaveRun === null) addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      if (mayHaveRun) return true;
       if (trimmedMessage) opts.chatInputRef?.current?.insertIfEmpty(trimmedMessage);
       return false;
     }
@@ -2961,8 +3020,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     } catch (e) {
       console.error("Failed to execute shell command:", e);
-      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
-      opts.chatInputRef?.current?.insertIfEmpty(inputText);
+      // A stopped connection may have delivered the command: it toasts and the composer does not offer it again.
+      const mayHaveRun = toastStoppedSend(e);
+      if (mayHaveRun === null) addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      if (!mayHaveRun) opts.chatInputRef?.current?.insertIfEmpty(inputText);
     } finally {
       bashRunningRef.current = false;
       setPendingBash(null);
@@ -3178,6 +3239,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           value: loaded && !value.trim() ? content : value,
           images: destination ? [...draft.images, ...destination.images] : draft.images,
           files: destination ? [...draft.files, ...destination.files] : draft.files,
+          // The same upload may sit in both drafts (an id is one file): keep its first occurrence.
+          uploads: destination
+            ? [...(draft.uploads ?? []), ...(destination.uploads ?? [])].filter((upload, at, all) => all.findIndex((other) => other.id === upload.id) === at)
+            : draft.uploads,
         });
         onSessionMoved?.(sid, edit.sessionId, draft);
       }
@@ -3480,10 +3545,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [isCompacting, loadSession, refreshLiveModelState]);
 
+  // A remote workspace's path means nothing on this machine: its models come from the global list.
+  const remoteWorkspace = session ? remoteHostId(session.hostId) !== undefined : newSessionHostId !== undefined;
   const loadModels = useCallback(async (signal?: AbortSignal) => {
     setModelsLoading(true);
     try {
-      const modelCwd = newSessionCwd ?? session?.cwd ?? "";
+      const modelCwd = remoteWorkspace ? "" : newSessionCwd ?? session?.cwd ?? "";
       const modelsUrl = modelCwd ? `/api/models?cwd=${encodeURIComponent(modelCwd)}` : "/api/models";
       const res = await fetch(modelsUrl, { cache: "no-store", ...(signal ? { signal } : {}) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -3509,7 +3576,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       setModelsLoading(false);
     }
-  }, [isNew, newSessionCwd, session?.cwd]);
+  }, [isNew, newSessionCwd, remoteWorkspace, session?.cwd]);
 
   /** Ask a side question, or a follow-up in `recordId`'s topic. It runs beside
    * any main turn and never enters the transcript. False = refused (toasted),
@@ -3701,7 +3768,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // optimistic chat bubble here would duplicate the queue panel and turn into
   // a ghost message if the queue is recalled.
   const toPiImages = (images?: AttachedImage[]) => images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
-  const handleSteer = useCallback(async (message: string, images?: AttachedImage[]) => {
+  /** A refused steer/follow-up: a stopped connection toasts (the composer keeps the text), anything else is a chat notice.
+   *  True when the send may have left before the connection stopped: it may still run, so the composer drops the text. */
+  const reportQueueFailure = useCallback((e: unknown): boolean => {
+    const mayHaveRun = toastStoppedSend(e);
+    if (mayHaveRun !== null) return mayHaveRun;
+    addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+    return false;
+  }, [addNotice]);
+  const handleSteer = useCallback(async (message: string, images?: AttachedImage[], uploads?: string[]) => {
     const sid = sessionIdRef.current;
     if (!sid || editInFlightRef.current) return false;
     const piImages = toPiImages(images);
@@ -3710,6 +3785,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         type: "steer",
         message,
         ...(piImages?.length ? { images: piImages } : {}),
+        ...(uploads?.length ? { uploads } : {}),
       });
       // A `!!` shell command owned the session: the agent route put the text
       // into omp's follow-up queue instead of steering a (nonexistent) turn.
@@ -3717,15 +3793,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return true;
     } catch (e) {
       console.error("Failed to steer:", e);
-      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
-      return false;
+      return reportQueueFailure(e);
     }
-  }, [addNotice]);
+  }, [addNotice, reportQueueFailure]);
 
   const handlePromptWithStreamingBehavior = useCallback(async (
     message: string,
     behavior: "steer" | "followUp",
     images?: AttachedImage[],
+    uploads?: string[],
   ) => {
     const sid = sessionIdRef.current;
     if (!sid || editInFlightRef.current) return false;
@@ -3736,6 +3812,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         message,
         streamingBehavior: behavior,
         ...(piImages?.length ? { images: piImages } : {}),
+        ...(uploads?.length ? { uploads } : {}),
       });
       // Same degradation as `handleSteer`: queued behind the running shell
       // command rather than delivered into this run.
@@ -3743,12 +3820,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return true;
     } catch (e) {
       console.error("Failed to queue prompt:", e);
-      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
-      return false;
+      return reportQueueFailure(e);
     }
-  }, [addNotice]);
+  }, [addNotice, reportQueueFailure]);
 
-  const handleFollowUp = useCallback(async (message: string, images?: AttachedImage[]) => {
+  const handleFollowUp = useCallback(async (message: string, images?: AttachedImage[], uploads?: string[]) => {
     const sid = sessionIdRef.current;
     if (!sid || editInFlightRef.current) return false;
     const piImages = toPiImages(images);
@@ -3757,14 +3833,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         type: "follow_up",
         message,
         ...(piImages?.length ? { images: piImages } : {}),
+        ...(uploads?.length ? { uploads } : {}),
       });
       return true;
     } catch (e) {
       console.error("Failed to follow up:", e);
-      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
-      return false;
+      return reportQueueFailure(e);
     }
-  }, [addNotice]);
+  }, [reportQueueFailure]);
 
   const handleAbortCompaction = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -4088,6 +4164,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setSessionStatsOverride(null);
   }, [messages.length, contextUsage?.tokens, contextUsage?.percent, contextUsage?.contextWindow]);
 
+  const hostStatus = hostFrame && hostFrame.sessionId === sessionIdRef.current ? hostFrame.status : null;
+
   return {
     // State
     data, loading, error, activeLeafId, messages, entryIds, showPreCompactionHistory, streamState,
@@ -4095,7 +4173,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     liveModelMeta,
     retryInfo, contextUsage, systemPrompt, skillDiagnostics, forkingEntryId, editingEntryId,
     isCompacting, compactError, compactResult, tokensPerSecond, currentModel, displayModel, isAutoModelSelection: !displayModel, sessionStats, agentPhase,
-    slashCommands, slashCommandsLoading, queuedMessages,
+    slashCommands, slashCommandsLoading, queuedMessages, hostStatus,
     notices: noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     advisorActive: advisorActiveAt > 0, advisorEnabled, handleAdvisorChange,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
@@ -4103,7 +4181,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     isNew,
     // Refs
     sessionIdRef, messagesEndRef, scrollContainerRef,
-    pendingScrollToUserRef, initialScrollDoneRef,
+    pendingScrollToUserRef, initialScrollDoneRef, holdScrollPosition,
     // Actions
     handleSend, handleAbort, handleFork, handleEdit, handleModelChange, handleFastModeChange, handleSlowModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply, setSkillStartupDiagnostics,
     retrySession: () => { const sid = sessionIdRef.current; if (sid) void loadSession(sid, true, true); },

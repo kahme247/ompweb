@@ -2,9 +2,9 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
 import React from "react";
-import { fileURLToPath } from "node:url";
-import { createJiti } from "jiti";
-import { act, cleanup, fireEvent, render, renderHook, within } from "@testing-library/react/pure.js";
+import { existsSync, readFileSync } from "node:fs";
+import { mock } from "bun:test";
+const { act, cleanup, fireEvent, render, renderHook, within } = await import("@testing-library/react/pure.js");
 
 // useAgentSession is the chat state machine. These tests drive it through a
 // controllable fake shared-worker event stream + fetch router mounted via React
@@ -58,7 +58,10 @@ class FakeStream {
   }
 }
 
-/** Speaks the tab<->worker protocol of public/event-stream-worker.js. */
+/** The port of the worker the tab's transport started; tests flip its transport. */
+let workerPort = null;
+
+/** Speaks the tab<->worker protocol of lib/event-stream-worker.ts. */
 class FakeSharedWorker {
   constructor() {
     const streams = new Map();
@@ -73,10 +76,23 @@ class FakeSharedWorker {
           if (!stream) return;
           stream.closedByCaller = true;
           stream.readyState = FakeStream.CLOSED;
+        } else if (message.op === "cmd") {
+          void answerCommand(this.port, message);
         }
       },
     };
+    workerPort = this.port;
   }
+}
+
+/** A command over the session socket: `world.socketAnswer` may answer it as the worker would (e.g. transport_lost), else the agent route does. */
+async function answerCommand(port, { n, sessionId, advisor, body }) {
+  let answer = world.socketAnswer?.(JSON.parse(body));
+  if (!answer) {
+    const res = await fetchStub(`/api/agent/${encodeURIComponent(sessionId)}${advisor ? "?advisor=1" : ""}`, { method: "POST", body });
+    answer = { status: res.status, body: await res.json() };
+  }
+  port.onmessage?.({ data: { cmd: n, recvAt: null, repliedAt: null, attempts: 1, deduped: false, behindBytes: 0, ...answer } });
 }
 
 function safeParse(text) {
@@ -269,26 +285,35 @@ afterEach(async () => {
   }
 });
 
-// The hook chain includes components/ui/toast.tsx, whose JSX jiti cannot parse
-// in this environment and whose DOM toasts must never fire inside Node tests.
-const jiti = createJiti(import.meta.url, {
-  tryNative: false,
-  jsx: { runtime: "automatic" },
-  alias: {
-    "@/components/ui/toast": fileURLToPath(new URL("./__fixtures__/toast-stub.mjs", import.meta.url)),
-    "@/": fileURLToPath(new URL("../", import.meta.url)),
-  },
-});
-const { useAgentSession } = await jiti.import("../hooks/useAgentSession.ts");
-const { selectSessionHistory } = await jiti.import("@/lib/session-sync");
-const { publishSessionsChanged } = await jiti.import("@/lib/session-change-bus");
-const { AgentSessionWrapper } = await jiti.import("@/lib/rpc-manager");
-const { isUnknownSlashCommand, slashCommandName, runHostTool } = await jiti.import("@/hooks/useAgentSession-stream");
-const { toastCalls } = await jiti.import("@/components/ui/toast");
-const { MessageView } = await jiti.import("@/components/MessageView");
-const { translate } = await jiti.import("@/lib/i18n");
-const { ChatWindow } = await jiti.import("@/components/ChatWindow");
-const { SESSION_EDIT_COMMAND, SESSION_EDIT_RESPONSE_PREFIX } = await jiti.import("@/lib/omp/session-edit-extension.mjs");
+// The hook chain includes components/ui/toast.tsx, whose DOM toasts must never fire in tests.
+mock.module("@/components/ui/toast", () => import("./__fixtures__/toast-stub.mjs"));
+const { useAgentSession } = await import("../hooks/useAgentSession.ts");
+const { selectSessionHistory } = await import("@/lib/session-sync");
+const { publishSessionsChanged } = await import("@/lib/session-change-bus");
+const { AgentSessionWrapper } = await import("@/lib/rpc-manager");
+// Wrappers built directly need an online host: this machine's, as its daemon answers, minus spawning.
+const onlineHost = {
+  id: "local",
+  label: "This machine",
+  sessionOps: {},
+  status: () => "online",
+  onStatus: () => () => {},
+  spawnRpc: async () => { throw new Error("this test never spawns"); },
+  sessionFileExists: async (path) => existsSync(path),
+  invalidateSessionLists() {},
+  autoApproveExtension: () => false,
+};
+const { isUnknownSlashCommand, slashCommandName, runHostTool } = await import("@/hooks/useAgentSession-stream");
+const { toastCalls } = await import("@/components/ui/toast");
+const { MessageView } = await import("@/components/MessageView");
+const { translate } = await import("@/lib/i18n");
+const { ChatWindow } = await import("@/components/ChatWindow");
+const { SESSION_EDIT_COMMAND, SESSION_EDIT_RESPONSE_PREFIX } = await import("@/lib/omp/session-edit-extension.mjs");
+// Edit only opens a confirm dialog; the edit starts from its confirm button.
+async function confirmEdit(view, button) {
+  await act(async () => { fireEvent.click(button); });
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: translate("messageView.editFromHere") })); });
+}
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -434,6 +459,26 @@ test("the queue panel shows omp's snapshot on load and follows queue_update, not
   assert.deepEqual(w.latest.queuedMessages, { steering: [], followUp: ["later"] });
 });
 
+test("upload ids ride the prompt and follow-up bodies; a files-only prompt is sent", async () => {
+  resetWorld();
+  primeSession("uploads", [userMsg("u0", "q")]);
+  const id = "0f0e0d0c-0b0a-4908-8706-050403020100";
+  const w = await mountSession("uploads");
+  let sending;
+  await act(async () => {
+    sending = w.latest.handleSend("", undefined, [id]);
+    await sleep(30);
+  });
+  await act(async () => {
+    lastEs().open();
+    await sending;
+  });
+  const prompt = callsTo("POST", "/api/agent/").find((call) => call.body?.type === "prompt");
+  assert.deepEqual(prompt?.body.uploads, [id]);
+  await act(async () => { await w.latest.handleFollowUp("and this", undefined, [id]); });
+  assert.deepEqual(callsTo("POST", "/api/agent/").find((call) => call.body?.type === "follow_up")?.body.uploads, [id]);
+});
+
 test("a prompt queued behind a running shell command drops the phantom turn and reports it", async () => {
   resetWorld();
   primeSession("bash-queue", [userMsg("u0", "q")]);
@@ -569,7 +614,7 @@ test("a promotion answered after navigation does not notify the new session", as
 // queued steer as soon as an abort lands (#130 saw follow-ups replay after the
 // next reply). Withdraw first, like the TUI's Esc, and hand the text back.
 test("Stop withdraws pending queued messages into the session draft before aborting", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   resetWorld();
   clearDraft("abort-withdraw");
   primeSession("abort-withdraw", [userMsg("u0", "loaded question")]);
@@ -594,7 +639,7 @@ test("Stop withdraws pending queued messages into the session draft before abort
 });
 
 test("a slow withdrawal does not hold Stop, and its late answer still recovers the text", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   resetWorld();
   clearDraft("abort-slow");
   primeSession("abort-slow", [userMsg("u0", "loaded question")]);
@@ -618,7 +663,7 @@ test("a slow withdrawal does not hold Stop, and its late answer still recovers t
 });
 
 test("Stop saves confirmed text early and still restores the queue in order", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   resetWorld();
   clearDraft("abort-mixed");
   primeSession("abort-mixed", [userMsg("u0", "loaded question")]);
@@ -646,7 +691,7 @@ test("Stop saves confirmed text early and still restores the queue in order", as
 });
 
 test("Stop withdraws a follow-up that a concurrent promotion already moved to steering", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   resetWorld();
   clearDraft("abort-promoted");
   primeSession("abort-promoted", [userMsg("u0", "loaded question")]);
@@ -2123,7 +2168,7 @@ function attachNativeWrapper(t, sid) {
     },
     sendFrame() {},
     async dispose() {},
-  }, process.cwd());
+  }, process.cwd(), null, false, "", undefined, onlineHost);
   wrapper.start();
   world.wrappers.set(sid, wrapper);
   t.after(() => wrapper.destroyAndWait());
@@ -2516,13 +2561,13 @@ test("forking carries the advisor choice to the child's next native command", as
   await act(async () => { await w.latest.handleFork("e0", false); });
   assert.deepEqual(forked, ["advisor-child"]);
   assert.equal(localStorage.getItem("omp-advisor-enabled:advisor-child"), "true");
-  const { sendAgentCommand } = await jiti.import("@/lib/agent-client");
+  const { sendAgentCommand } = await import("@/lib/agent-client");
   await sendAgentCommand("advisor-child", { type: "get_state" });
   assert.ok(world.calls.some((call) => call.url === "/api/agent/advisor-child?advisor=1"));
 });
 
 test("an edit-and-resend fork puts the branched prompt into the child's composer", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   for (const [editPrompt, child] of [[true, "edit-child"], [false, "keep-child"]]) {
     resetWorld();
     primeSession("fork-parent", [userMsg("u0", "q")]);
@@ -2742,7 +2787,7 @@ async function attachEditableWrapper(t, native, { holdHistory = false } = {}) {
     },
     sendFrame() {},
     async dispose() { listeners.clear(); },
-  }, process.cwd());
+  }, process.cwd(), null, false, "", undefined, onlineHost);
   t.after(() => wrapper.destroyAndWait());
   native.onMove = () => emitNative({ type: "notice", source: "session-persistence", level: "warning", message: "Session moved to a sibling file because another process owns the original" });
   wrapper.onIdentityChange((oldId, newId, options) => {
@@ -2816,7 +2861,7 @@ async function mountMovableChat(initialId) {
 }
 
 async function mountEditableSession(sid, options = {}) {
-  const { getDraft, setDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft } = await import("@/lib/draft-store");
   const session = sessionInfo(sid);
   const chatInputRef = options.chatInputRef ?? React.createRef();
   let latest;
@@ -2876,7 +2921,7 @@ async function mountObservedEditableSession(sid, options = {}) {
 for (const order of ["identity/history before HTTP", "HTTP before history delivery"]) {
   test(`native Edit relocation keeps the prefix, composer and resend (${order})`, async (t) => {
     resetWorld();
-    const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+    const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
     const sid = `edit-move-${order.startsWith("identity") ? "early" : "late"}`;
     const target = `${sid}-owned`;
     for (const id of [sid, target]) clearDraft(id);
@@ -2907,7 +2952,7 @@ for (const order of ["identity/history before HTTP", "HTTP before history delive
         },
       });
     }
-    await act(async () => { fireEvent.click(w.editButton()); });
+    await confirmEdit(w.view, w.editButton());
     await until(() => server.identityChanges.length === 1, "native identity machinery must confirm the copy-on-write move");
     assert.deepEqual(server.identityChanges, [{ oldId: sid, newId: target, keepOldId: true }]);
     assert.equal(world.wrappers.get(sid), world.wrappers.get(target), "the existing alias registry retains the originating observer");
@@ -2973,7 +3018,7 @@ for (const order of ["identity/history before HTTP", "HTTP before history delive
 
 test("relocation merges existing target attachments and preserves typing added while reload awaits", async (t) => {
   resetWorld();
-  const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
   const sid = "edit-move-new-typing", target = `${sid}-owned`;
   t.after(() => { clearDraft(sid); clearDraft(target); });
   const sourceImage = { data: "AAAA", mimeType: "image/png" };
@@ -2995,7 +3040,7 @@ test("relocation merges existing target attachments and preserves typing added w
       leafId: native.leafId, context: world.sessions.get(target),
     } }); }),
   });
-  await act(async () => { fireEvent.click(w.editButton()); });
+  await confirmEdit(w.view, w.editButton());
   await until(() => release, "confirmed target history must be awaiting its load");
   await act(async () => {
     fireEvent.change(w.view.getByRole("textbox"), { target: { value: "new source typing" } });
@@ -3004,17 +3049,70 @@ test("relocation merges existing target attachments and preserves typing added w
   await until(() => getDraft(sid)?.files.length === 2, "attachment reads completed during the reload must join the moved draft");
   await act(async () => { release(); });
   await until(() => w.selectedId === target, "the confirmed move must transition its composer");
+  // Bun appends ";charset=utf-8" to a text File's type, so the type is pinned by its prefix.
+  const mimeType = getDraft(target)?.files[1]?.mimeType ?? "";
+  assert.ok(mimeType.startsWith("text/plain"), mimeType);
   assert.deepEqual(getDraft(target), {
     value: "new source typing\n\nexisting target draft", images: [sourceImage, targetImage],
-    files: [sourceFile, { name: "new.txt", mimeType: "text/plain", content: "new file while waiting", size: 22 }, targetFile],
+    files: [sourceFile, { name: "new.txt", mimeType, content: "new file while waiting", size: 22 }, targetFile],
   });
   assert.equal(w.view.getByRole("textbox").value, "new source typing\n\nexisting target draft");
   assert.equal(getDraft(sid), null);
 });
 
+test("relocation keeps the source and existing target finished uploads", async (t) => {
+  resetWorld();
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
+  const sid = "edit-move-uploads", target = `${sid}-owned`;
+  t.after(() => { clearDraft(sid); clearDraft(target); });
+  const sourceUpload = { id: "up-source", name: "source.bin", size: 10, hostId: "local" };
+  const targetUpload = { id: "up-target", name: "target.bin", size: 20, hostId: "local" };
+  setDraft(sid, { value: "", images: [], files: [], uploads: [sourceUpload] });
+  setDraft(target, { value: "Existing target text", images: [], files: [], uploads: [targetUpload] });
+  const native = primeEditableHistory(sid);
+  native.moveTo = target;
+  await attachEditableWrapper(t, native);
+  const w = await mountMovableChat(sid);
+  await confirmEdit(w.view, w.editButton());
+  await until(() => w.selectedId === target, "the confirmed target must become selected");
+  await settle();
+  // The composer re-persists the merged list in its own order.
+  assert.deepEqual(getDraft(target)?.uploads?.map((upload) => upload.id).sort(), [sourceUpload.id, targetUpload.id]);
+  assert.equal(getDraft(sid), null);
+});
+
+test("relocation merges an upload both drafts hold once", async (t) => {
+  resetWorld();
+  const { getDraft, setDraft, clearDraft, subscribeDrafts } = await import("@/lib/draft-store");
+  const sid = "edit-move-shared-upload", target = `${sid}-owned`;
+  t.after(() => { clearDraft(sid); clearDraft(target); });
+  const shared = { id: "up-shared", name: "shared.bin", size: 10, hostId: "local" };
+  const targetOnly = { id: "up-target", name: "target.bin", size: 20, hostId: "local" };
+  setDraft(sid, { value: "", images: [], files: [], uploads: [shared] });
+  setDraft(target, { value: "Existing target text", images: [], files: [], uploads: [{ ...shared, name: "target-shared.bin" }, targetOnly] });
+  const native = primeEditableHistory(sid);
+  native.moveTo = target;
+  await attachEditableWrapper(t, native);
+  const w = await mountMovableChat(sid);
+  const persistedUploads = [];
+  t.after(subscribeDrafts(() => {
+    if (getDraft(sid) === null) persistedUploads.push(getDraft(target)?.uploads ?? []);
+  }));
+  await confirmEdit(w.view, w.editButton());
+  await until(() => w.selectedId === target, "the confirmed target must become selected");
+  await settle();
+  assert.deepEqual(getDraft(target)?.uploads?.map((upload) => upload.id).sort(), [shared.id, targetOnly.id]);
+  assert.equal(getDraft(target)?.uploads?.find((upload) => upload.id === shared.id)?.name, shared.name, "the source occurrence wins");
+  assert.ok(persistedUploads.length > 0);
+  for (const saved of persistedUploads) {
+    assert.equal(saved.filter((upload) => upload.id === shared.id).length, 1, "no persisted snapshot contains the shared id twice");
+  }
+  assert.equal(getDraft(sid), null);
+});
+
 test("relocation adopts existing target text without prefilling over it", async (t) => {
   resetWorld();
-  const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
   const sid = "edit-move-target-text", target = `${sid}-owned`;
   t.after(() => { clearDraft(sid); clearDraft(target); });
   const sourceImage = { data: "AAAA", mimeType: "image/png" };
@@ -3027,7 +3125,7 @@ test("relocation adopts existing target text without prefilling over it", async 
   const w = await mountMovableChat(sid);
   const composer = w.view.getByRole("textbox");
   assert.equal(composer.value, "");
-  await act(async () => { fireEvent.click(w.editButton()); });
+  await confirmEdit(w.view, w.editButton());
   await until(() => w.selectedId === target, "the confirmed target must become selected");
   await settle();
   assert.equal(w.view.getByRole("textbox"), composer, "the existing composer adopts its new draft identity");
@@ -3038,7 +3136,7 @@ test("relocation adopts existing target text without prefilling over it", async 
 
 test("relocation at draft capacity preserves every unrelated draft and its attachments", async (t) => {
   resetWorld();
-  const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
   const sid = "edit-move-full-drafts", target = `${sid}-owned`;
   const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
   const unrelated = Array.from({ length: 49 }, (_, index) => {
@@ -3065,7 +3163,7 @@ test("relocation at draft capacity preserves every unrelated draft and its attac
   await attachEditableWrapper(t, native);
   const w = await mountMovableChat(sid);
   const composer = w.view.getByRole("textbox");
-  await act(async () => { fireEvent.click(w.editButton()); });
+  await confirmEdit(w.view, w.editButton());
   await until(() => w.selectedId === target, "Edit must move the selected conversation at full draft capacity");
   await settle();
   assert.equal(w.view.getByRole("textbox"), composer);
@@ -3086,7 +3184,7 @@ test("relocation at draft capacity preserves every unrelated draft and its attac
 for (const phase of ["HTTP response", "target reload"]) {
 test(`navigation during a moved Edit's ${phase} is not hijacked or prefilled`, async (t) => {
   resetWorld();
-  const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
   const sid = `edit-move-leave-${phase.startsWith("HTTP") ? "http" : "reload"}`, target = `${sid}-owned`, other = `${sid}-other`;
   t.after(() => { for (const id of [sid, target, other]) clearDraft(id); });
   setDraft(sid, { value: "origin draft", images: [], files: [] });
@@ -3115,7 +3213,7 @@ test(`navigation during a moved Edit's ${phase} is not hijacked or prefilled`, a
       } }); }),
     });
   }
-  await act(async () => { fireEvent.click(w.editButton()); });
+  await confirmEdit(w.view, w.editButton());
   await until(() => release, "the old instance must await the moved Edit");
   await act(async () => { w.navigate(other); });
   await settle();
@@ -3133,7 +3231,7 @@ test(`navigation during a moved Edit's ${phase} is not hijacked or prefilled`, a
 
 test("a moved conversation whose reload fails preserves attachments without prefilling and reports failure", async (t) => {
   resetWorld();
-  const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
   const sid = "edit-move-load-failed", target = `${sid}-owned`;
   t.after(() => { clearDraft(sid); clearDraft(target); });
   const draft = { value: "", images: [{ data: "AAAA", mimeType: "image/png" }],
@@ -3147,7 +3245,7 @@ test("a moved conversation whose reload fails preserves attachments without pref
     match: (method, url) => method === "GET" && url.startsWith(`/api/sessions/${target}?`),
     produce: async () => ({ status: 503, value: {} }),
   });
-  await act(async () => { fireEvent.click(w.editButton()); });
+  await confirmEdit(w.view, w.editButton());
   await until(() => w.selectedId === target, "authoritative identity must survive a failed read of the moved history");
   await settle();
   assert.equal(new URL(window.location.href).searchParams.get("session"), target);
@@ -3158,7 +3256,7 @@ test("a moved conversation whose reload fails preserves attachments without pref
 
 test("observed edit-time persistence errors preserve the real composer and complete draft", async (t) => {
   resetWorld();
-  const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
   const sid = "edit-native-disk-error";
   t.after(() => clearDraft(sid));
   const draft = { value: "keep unsent text", images: [{ data: "AAAA", mimeType: "image/png" }],
@@ -3170,7 +3268,7 @@ test("observed edit-time persistence errors preserve the real composer and compl
   await attachEditableWrapper(t, native);
   const w = await mountMovableChat(sid);
   const composer = w.view.getByRole("textbox");
-  await act(async () => { fireEvent.click(w.editButton()); });
+  await confirmEdit(w.view, w.editButton());
   await until(() => w.view.queryAllByText(/Could not append session file: disk full/).length > 0, "native persistence failure must be displayed");
   await settle();
   assert.equal(w.selectedId, sid);
@@ -3183,7 +3281,7 @@ test("observed edit-time persistence errors preserve the real composer and compl
 
 test("Edit rewinds and resends in the same persisted session while retaining the old branch", async (t) => {
   resetWorld();
-  const { clearDraft } = await jiti.import("@/lib/draft-store");
+  const { clearDraft } = await import("@/lib/draft-store");
   const sid = "edit-same-session";
   clearDraft(sid);
   t.after(() => clearDraft(sid));
@@ -3197,7 +3295,7 @@ test("Edit rewinds and resends in the same persisted session while retaining the
   const release = native.holdEdit();
   t.after(release);
   const edit = w.editButton("entry-u2");
-  await act(async () => { fireEvent.click(edit); });
+  await confirmEdit(w.view, edit);
   await until(() => native.edits.length === 1, "the actual Edit button must reach native history navigation");
   assert.equal(w.latest.editingEntryId, "entry-u2");
   assert.equal(edit.disabled, true);
@@ -3270,7 +3368,7 @@ test("Edit rewinds and resends in the same persisted session while retaining the
 for (const order of ["HTTP first", "SSE first"]) {
   test(`a handled Edit echo preserves a later historical selection (${order})`, async (t) => {
     resetWorld();
-    const { clearDraft } = await jiti.import("@/lib/draft-store");
+    const { clearDraft } = await import("@/lib/draft-store");
     const sid = `edit-echo-branch-${order === "HTTP first" ? "http" : "sse"}`;
     clearDraft(sid);
     t.after(() => clearDraft(sid));
@@ -3279,7 +3377,7 @@ for (const order of ["HTTP first", "SSE first"]) {
     const { w, stream } = await mountObservedEditableSession(sid);
     const releaseReply = order === "SSE first" ? native.holdEditReply() : null;
     if (releaseReply) t.after(releaseReply);
-    await act(async () => { fireEvent.click(w.editButton("entry-u2")); });
+    await confirmEdit(w.view, w.editButton("entry-u2"));
     await until(() => native.leafId === "edit-marker-1", "the real native history must persist the Edit marker");
     const ownLeafId = native.leafId;
     if (releaseReply) {
@@ -3332,7 +3430,7 @@ for (const order of ["HTTP first", "SSE first"]) {
 }
 
 test("an HTTP-first Edit echo cannot reset the next replacement prompt", async (t) => {
-  const { clearDraft } = await jiti.import("@/lib/draft-store");
+  const { clearDraft } = await import("@/lib/draft-store");
   for (const phase of ["dispatch pending", "streaming"]) {
     await t.test(phase, async (t) => {
       resetWorld();
@@ -3342,7 +3440,7 @@ test("an HTTP-first Edit echo cannot reset the next replacement prompt", async (
       const native = primeEditableHistory(sid);
       const original = structuredClone(world.sessions.get(sid));
       const { w, stream: observer } = await mountObservedEditableSession(sid);
-      await act(async () => { fireEvent.click(w.editButton("entry-u2")); });
+      await confirmEdit(w.view, w.editButton("entry-u2"));
       await until(() => w.latest.editingEntryId === null && w.latest.activeLeafId === "edit-marker-1", "HTTP success and its reload must precede the next send");
       await settle();
       const ownLeafId = native.leafId;
@@ -3404,7 +3502,7 @@ test("an HTTP-first Edit echo cannot reset the next replacement prompt", async (
 });
 
 test("history notifications received during an unsuccessful Edit remain effective", async (t) => {
-  const { clearDraft } = await jiti.import("@/lib/draft-store");
+  const { clearDraft } = await import("@/lib/draft-store");
   for (const outcome of ["cancelled", "error", "wrong-session"]) {
     await t.test(outcome, async (t) => {
       resetWorld();
@@ -3441,7 +3539,7 @@ test("history notifications received during an unsuccessful Edit remain effectiv
           return { status: response.status, value };
         },
       });
-      await act(async () => { fireEvent.click(w.editButton("entry-u2")); });
+      await confirmEdit(w.view, w.editButton("entry-u2"));
       await until(() => replyReady, "the native Edit must settle before its HTTP reply is released");
       if (outcome !== "wrong-session") {
         // A separate client successfully navigates while this client's
@@ -3473,7 +3571,7 @@ test("history notifications received during an unsuccessful Edit remain effectiv
 });
 
 test("cancelled and failed Edits preserve history selection and draft, then release the guard", async (t) => {
-  const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
   for (const outcome of ["cancelled", "error"]) {
     await t.test(outcome, async (t) => {
       resetWorld();
@@ -3489,7 +3587,7 @@ test("cancelled and failed Edits preserve history selection and draft, then rele
       await act(async () => { await w.changeLeaf("entry-a2"); });
       const selectedIds = [...w.latest.entryIds];
       const selectedMessages = structuredClone(w.latest.messages);
-      await act(async () => { fireEvent.click(w.editButton("entry-u2")); });
+      await confirmEdit(w.view, w.editButton("entry-u2"));
       await until(() => native.edits.length === 1 && w.latest.editingEntryId === null, "the unsuccessful Edit must settle");
       assert.equal(w.latest.sessionIdRef.current, sid);
       assert.equal(w.latest.activeLeafId, "entry-a2");
@@ -3502,7 +3600,7 @@ test("cancelled and failed Edits preserve history selection and draft, then rele
       assert.deepEqual(w.latest.notices.map((notice) => notice.type), outcome === "error" ? ["error"] : []);
 
       native.editOutcome = "success";
-      await act(async () => { fireEvent.click(w.editButton("entry-u2")); });
+      await confirmEdit(w.view, w.editButton("entry-u2"));
       await until(() => native.edits.length === 2 && w.latest.editingEntryId === null, "a settled refusal must allow another Edit");
       assert.deepEqual(world.sessions.get(sid).entryIds, ["entry-u1", "entry-a1"]);
       assert.deepEqual(w.latest.entryIds, ["entry-u1", "entry-a1"]);
@@ -3518,7 +3616,7 @@ test("cancelled and failed Edits preserve history selection and draft, then rele
 
 test("an Edit completed after unmount cannot fill the current composer or change its view", async (t) => {
   resetWorld();
-  const { clearDraft } = await jiti.import("@/lib/draft-store");
+  const { clearDraft } = await import("@/lib/draft-store");
   const sid = "edit-abandoned";
   const currentSid = "edit-current-view";
   for (const id of [sid, currentSid]) clearDraft(id);
@@ -3531,7 +3629,7 @@ test("an Edit completed after unmount cannot fill the current composer or change
   const old = await mountEditableSession(sid, options);
   const release = native.holdEdit();
   t.after(release);
-  await act(async () => { fireEvent.click(old.editButton("entry-u2")); });
+  await confirmEdit(old.view, old.editButton("entry-u2"));
   await until(() => native.edits.length === 1, "Edit must be waiting on native before leaving");
   old.unmount();
   const current = await mountEditableSession(currentSid, options);
@@ -4425,7 +4523,7 @@ test("REVIEW a 404 boundary on a live session (unreadable file / wrapper died) s
 // withdrew it and omp ran it as a new turn after the abort. omp's atomic Esc
 // takes back everything it holds, listed here or not.
 test("Stop takes queued input back through omp in one step, including a steer the snapshot missed", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   resetWorld();
   clearDraft("abort-atomic");
   primeSession("abort-atomic", [userMsg("u0", "loaded question")]);
@@ -4453,7 +4551,7 @@ test("Stop takes queued input back through omp in one step, including a steer th
 const isAtomicStop = (method, _url, body) => method === "POST" && body?.type === "abort_and_restore_queue";
 
 test("a failed atomic Stop is retried once and restores what omp still held", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   resetWorld();
   clearDraft("abort-atomic-retry");
   primeSession("abort-atomic-retry", [userMsg("u0", "loaded question")]);
@@ -4514,7 +4612,7 @@ test("a failed atomic Stop never retries into a run started after the click", as
 });
 
 test("overlapping Stops share one atomic withdrawal; an image-only entry does not come back as text", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   resetWorld();
   clearDraft("abort-atomic-twice");
   primeSession("abort-atomic-twice", [userMsg("u0", "loaded question")]);
@@ -4905,4 +5003,366 @@ test("a failed HTTP response overtaken by a completed turn and newer send is sup
   assert.deepEqual(receipt, { status: "superseded" });
   assert.equal(w.latest.agentRunning, true, "the stale response cannot reset the newer run");
   assert.equal(w.latest.notices.some((notice) => notice.message.includes("late failed response")), false);
+});
+
+test("host_status frames report the session's host going offline and coming back", async () => {
+  resetWorld();
+  primeSession("remote-link", [userMsg("u0", "q")]);
+  const { w, es } = await startRun("remote-link", "hello");
+  assert.equal(w.latest.hostStatus, null, "no change reported yet");
+  await act(() => es.emit({ type: "host_status", hostId: "h1", status: "offline" }));
+  assert.equal(w.latest.hostStatus, "offline");
+  assert.equal(w.latest.agentRunning, true, "the run continues on the host while its link is down");
+  await act(() => es.emit({ type: "host_status", hostId: "h1", status: "online" }));
+  assert.equal(w.latest.hostStatus, "online");
+});
+
+test("a send to an offline host toasts and leaves the draft to the composer without an error notice", async () => {
+  resetWorld();
+  toastCalls.length = 0;
+  world.holds.push({
+    match: (method, url) => method === "POST" && url.includes("/api/agent/remote-off"),
+    produce: async () => ({ status: 503, value: { error: "Build box is offline", code: "host_offline", hostOffline: true } }),
+  });
+  const w = await mountSession("remote-off");
+  let receipt;
+  await act(async () => { receipt = await w.latest.handleSend("keep me"); await sleep(30); });
+  assert.deepEqual(receipt, { status: "rejected", recoveryKey: "remote-off" });
+  assert.equal(w.latest.agentRunning, false);
+  assert.deepEqual(toastCalls, [["error", translate("agentSession.hostOfflineSend", { detail: "Build box is offline" })]]);
+  assert.equal(w.latest.notices.length, 0, "the toast replaces the chat notice");
+});
+
+test("a fresh chat on a remote host creates its session there and toasts when that host is offline", async () => {
+  resetWorld();
+  toastCalls.length = 0;
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ status: 503, value: { error: "Build box is offline", code: "host_offline", hostOffline: true } }),
+  });
+  const w = await mountSession(null, undefined, { newSessionCwd: "/remote/work", newSessionHostId: "h1" });
+  let receipt;
+  await act(async () => { receipt = await w.latest.handleSend("first"); await sleep(30); });
+  // Drafts for one path on two hosts must not share a composer key.
+  assert.deepEqual(receipt, { status: "rejected", recoveryKey: "new:h1:/remote/work" });
+  assert.deepEqual(callsTo("POST", "/api/agent/new").map((call) => [call.body.cwd, call.body.hostId]), [["/remote/work", "h1"]]);
+  assert.equal(toastCalls[0]?.[0], "error");
+  assert.equal(w.latest.notices.length, 0);
+});
+
+test("a fresh chat whose host drops after the spawn adopts the kept session, so a retry starts no second one", async () => {
+  resetWorld();
+  toastCalls.length = 0;
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ status: 503, value: { error: "Build box is offline", code: "host_offline", hostOffline: true, delivery: "refused", sessionId: "kept-remote" } }),
+  });
+  const w = await mountSession(null, undefined, { newSessionCwd: "/remote/work", newSessionHostId: "h1", onSessionCreated: () => {} });
+  let first;
+  await act(async () => { first = await w.latest.handleSend("first"); await sleep(30); });
+  assert.equal(first.status, "rejected");
+  assert.equal(toastCalls[0]?.[0], "error");
+  let retry;
+  await act(async () => { retry = w.latest.handleSend("first"); await sleep(30); });
+  await act(async () => { lastEs()?.open(); retry = await retry; });
+  w.unmount();
+  assert.equal(retry.status, "accepted");
+  assert.equal(callsTo("POST", "/api/agent/new").length, 1, "the retry reuses the kept session");
+  assert.equal(callsTo("POST", "/api/agent/kept-remote").some((call) => call.body?.type === "prompt"), true);
+});
+
+test("a fresh local chat sends no host id and keeps the pre-hosts draft key", async () => {
+  resetWorld();
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ status: 500, value: { error: "stop here" } }),
+  });
+  const w = await mountSession(null, undefined, { newSessionCwd: "/workspace" });
+  let receipt;
+  await act(async () => { receipt = await w.latest.handleSend("first"); await sleep(30); });
+  assert.equal("hostId" in callsTo("POST", "/api/agent/new")[0].body, false);
+  assert.deepEqual(receipt, { status: "rejected", recoveryKey: "new:/workspace" });
+});
+
+for (const [name, method, command] of [["steer", "handleSteer", "steer"], ["follow-up", "handleFollowUp", "follow_up"], ["streaming-behavior prompt", "handlePromptWithStreamingBehavior", "prompt"]]) {
+  test(`a ${name} to an offline host toasts and reports the refusal so the composer keeps its draft`, async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession(`remote-queue-${command}`, [userMsg("u0", "q")]);
+    const w = await mountSession(`remote-queue-${command}`);
+    world.holds.push({
+      match: (httpMethod, url, body) => httpMethod === "POST" && url.includes(`/api/agent/remote-queue-${command}`) && body?.type === command,
+      produce: async () => ({ status: 503, value: { error: "Build box is offline", code: "host_offline", hostOffline: true } }),
+    });
+    let accepted;
+    await act(async () => {
+      accepted = method === "handlePromptWithStreamingBehavior"
+        ? await w.latest[method]("queued text", "steer")
+        : await w.latest[method]("queued text");
+      await sleep(30);
+    });
+    assert.equal(accepted, false);
+    assert.deepEqual(toastCalls, [["error", translate("agentSession.hostOfflineSend", { detail: "Build box is offline" })]]);
+    assert.equal(w.latest.notices.length, 0);
+  });
+}
+
+test("a prompt the dropped link may have delivered toasts that it may still run and leaves no draft to restore", async () => {
+  resetWorld();
+  toastCalls.length = 0;
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url.includes("/api/agent/remote-maybe") && body?.type === "prompt",
+    produce: async () => ({ status: 503, value: { error: "Build box is offline", code: "host_offline", hostOffline: true, delivery: "unknown" } }),
+  });
+  const w = await mountSession("remote-maybe");
+  let receipt;
+  await act(async () => { receipt = w.latest.handleSend("maybe sent"); await sleep(30); });
+  await act(async () => { lastEs()?.open(); receipt = await receipt; });
+  w.unmount();
+  assert.notEqual(receipt.status, "rejected", "the composer must not bring the text back: it may run twice");
+  assert.equal(w.latest.agentRunning, false);
+  assert.deepEqual(toastCalls, [["info", translate("agentSession.hostOfflineMaybeSent", { detail: "Build box is offline" })]]);
+  assert.equal(w.latest.notices.length, 0);
+});
+
+test("a streaming-behavior prompt the dropped link may have delivered is reported as taken", async () => {
+  resetWorld();
+  toastCalls.length = 0;
+  primeSession("remote-maybe-queue", [userMsg("u0", "q")]);
+  const w = await mountSession("remote-maybe-queue");
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url.includes("/api/agent/remote-maybe-queue") && body?.type === "prompt",
+    produce: async () => ({ status: 503, value: { error: "Build box is offline", code: "host_offline", hostOffline: true, delivery: "unknown" } }),
+  });
+  let accepted;
+  await act(async () => { accepted = await w.latest.handlePromptWithStreamingBehavior("queued text", "followUp"); await sleep(30); });
+  assert.equal(accepted, true);
+  assert.deepEqual(toastCalls, [["info", translate("agentSession.hostOfflineMaybeSent", { detail: "Build box is offline" })]]);
+});
+
+// What the worker answers when the session socket dropped after sending a command (spec D5).
+const SOCKET_LOST = { error: "The connection to omp-web dropped before the answer arrived; the command may have run.", code: "transport_lost" };
+
+/** Runs a test with the worker in WebSocket mode, so agent commands go to it instead of fetch. */
+async function inWebSocketMode(run) {
+  const { openEventStream } = await import("@/lib/event-stream");
+  openEventStream({ kind: "running" }).close(); // the tab's transport exists before the hook mounts
+  workerPort.onmessage({ data: { transport: "ws" } });
+  try {
+    await run();
+  } finally {
+    workerPort.onmessage({ data: { transport: "sse" } });
+    world.socketAnswer = null;
+  }
+}
+
+test("a prompt whose session socket dropped before the answer toasts that it may have run and leaves no draft to restore", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    world.socketAnswer = (command) => command.type === "prompt" ? { status: 503, body: SOCKET_LOST } : null;
+    const w = await mountSession("socket-lost");
+    let receipt;
+    await act(async () => { receipt = w.latest.handleSend("maybe sent"); await sleep(30); });
+    await act(async () => { lastEs()?.open(); receipt = await receipt; });
+    w.unmount();
+    assert.notEqual(receipt.status, "rejected", "the composer must not bring the text back: it may run twice");
+    assert.equal(w.latest.agentRunning, false);
+    assert.deepEqual(toastCalls, [["info", translate("agentSession.transportLostMaybeSent")]]);
+    assert.equal(w.latest.notices.length, 0);
+    assert.equal(callsTo("POST", "/api/agent/socket-lost").some((call) => call.body?.type === "prompt"), false, "the prompt went over the socket");
+  });
+});
+
+test("a `!` command whose session socket dropped before the answer toasts that it may have run and stays out of the composer", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession("socket-lost-bash", [userMsg("u0", "q")]);
+    const offered = [];
+    const w = await mountSession("socket-lost-bash", undefined, { chatInputRef: { current: { insertIfEmpty: (text) => offered.push(text) } } });
+    world.socketAnswer = (command) => command.type === "bash" ? { status: 503, body: SOCKET_LOST } : null;
+    await act(async () => { await w.latest.handleSend("!touch /tmp/once"); await sleep(30); });
+    assert.deepEqual(offered, [], "the composer must not bring the command back: it may run twice");
+    assert.deepEqual(toastCalls, [["info", translate("agentSession.transportLostMaybeSent")]]);
+    assert.equal(w.latest.notices.length, 0);
+  });
+});
+
+test("a `!` command the route refused is offered back to the composer with an error notice", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession("socket-refused-bash", [userMsg("u0", "q")]);
+    const offered = [];
+    const w = await mountSession("socket-refused-bash", undefined, { chatInputRef: { current: { insertIfEmpty: (text) => offered.push(text) } } });
+    world.socketAnswer = (command) => command.type === "bash" ? { status: 400, body: { error: "Shell is busy" } } : null;
+    await act(async () => { await w.latest.handleSend("!touch /tmp/once"); await sleep(30); });
+    assert.deepEqual(offered, ["!touch /tmp/once"], "it never ran, so the composer gets it back");
+    assert.deepEqual(toastCalls, []);
+    assert.deepEqual(w.latest.notices.map((notice) => notice.type), ["error"]);
+  });
+});
+
+test("a steer whose session socket dropped before the answer is reported as taken", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession("socket-lost-steer", [userMsg("u0", "q")]);
+    const w = await mountSession("socket-lost-steer");
+    world.socketAnswer = (command) => command.type === "steer" ? { status: 503, body: SOCKET_LOST } : null;
+    let accepted;
+    await act(async () => { accepted = await w.latest.handleSteer("steer text"); await sleep(30); });
+    assert.equal(accepted, true, "the composer drops the text: it may run");
+    assert.deepEqual(toastCalls, [["info", translate("agentSession.transportLostMaybeSent")]]);
+    assert.equal(w.latest.notices.length, 0);
+  });
+});
+
+test("a get_state whose reply was lost before the prompt went out gives the draft back: no prompt ran", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession("socket-lost-state", [userMsg("u0", "q")]);
+    const w = await mountSession("socket-lost-state");
+    world.socketAnswer = (command) => command.type === "get_state" ? { status: 503, body: SOCKET_LOST } : null;
+    let receipt;
+    await act(async () => { receipt = await w.latest.handleSend("never sent"); await sleep(30); });
+    assert.deepEqual(receipt, { status: "rejected", recoveryKey: "socket-lost-state" });
+    assert.deepEqual(toastCalls, [], "no prompt was sent, so nothing may have been delivered");
+    assert.deepEqual(w.latest.notices.map((notice) => notice.type), ["error"]);
+    assert.equal(w.latest.agentRunning, false);
+    assert.equal(callsTo("POST", "/api/agent/socket-lost-state").some((call) => call.body?.type === "prompt"), false);
+  });
+});
+
+test("an interrupt-and-reply whose abort_and_prompt reply was lost is reported as taken and the text is not offered again", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession("socket-lost-interrupt", [userMsg("u0", "q")]);
+    const offered = [];
+    const { w, es } = await startRun("socket-lost-interrupt", "q1", false, { chatInputRef: { current: { insertIfEmpty: (text) => offered.push(text) } } });
+    await act(async () => { es.emit({ type: "agent_start" }); await Promise.resolve(); });
+    world.socketAnswer = (command) => command.type === "abort_and_prompt" ? { status: 503, body: SOCKET_LOST } : null;
+    let interrupt;
+    await act(async () => { interrupt = w.latest.handleInterruptAndReply("replacement"); await sleep(30); });
+    let accepted;
+    await act(async () => { lastEs().open(); accepted = await interrupt; });
+    assert.equal(accepted, true, "the replacement may be running: the composer drops the text");
+    assert.deepEqual(offered, [], "a resend would interrupt the replacement turn");
+    assert.deepEqual(toastCalls, [["info", translate("agentSession.transportLostMaybeSent")]]);
+  });
+});
+
+test("the hosts channel decides the offline banner; a frame only speaks before its first snapshot", async () => {
+  resetWorld();
+  primeSession("remote-banner", [userMsg("u0", "q")]);
+  world.agents.set("remote-banner", { running: true, state: {} }); // a running chat attaches its stream on load
+  const bannerText = translate("hosts.offlineBanner", { host: "Build box" });
+  const mount = async (hostStatus) => {
+    const view = ownRoot(render(React.createElement(ChatWindow, {
+      session: { ...sessionInfo("remote-banner"), hostId: "h1" }, newSessionCwd: null, hostLabel: "Build box", ...(hostStatus ? { hostStatus } : {}),
+    }), { wrapper: TestRoot }));
+    await settle();
+    await act(async () => { lastEs()?.open(); });
+    await settle();
+    return view;
+  };
+  const withChannel = await mount("online");
+  await act(async () => { lastEs().emit({ type: "host_status", hostId: "h1", status: "offline" }); });
+  assert.equal(withChannel.queryByText(bannerText), null, "a frame cannot override the channel's online status");
+  withChannel.unmount();
+
+  resetWorld();
+  primeSession("remote-banner", [userMsg("u0", "q")]);
+  world.agents.set("remote-banner", { running: true, state: {} }); // a running chat attaches its stream on load
+  const beforeSnapshot = await mount(undefined);
+  await act(async () => { lastEs().emit({ type: "host_status", hostId: "h1", status: "offline" }); });
+  assert.ok(beforeSnapshot.queryByText(bannerText), "without a channel snapshot the frame shows the banner");
+  beforeSnapshot.unmount();
+
+  resetWorld();
+  primeSession("remote-banner", [userMsg("u0", "q")]);
+  world.agents.set("remote-banner", { running: true, state: {} }); // a running chat attaches its stream on load
+  const offlineChannel = await mount("offline");
+  assert.ok(offlineChannel.queryByText(bannerText), "a chat opened during an outage shows the banner from the channel");
+});
+
+// omp's delta message updates (lib/message-delta.ts, lib/message-update-coalescer.ts).
+const recordedFrames = readFileSync(new URL("../tests/fixtures/omp-delta-stream.ndjson", import.meta.url), "utf8")
+  .trim().split("\n").map((line) => JSON.parse(line)).filter((frame) => frame.type !== "response");
+
+/** What omp's full mode sends for the same run, at each block end: the message as streamed so far. */
+function fullFramesOf(frames) {
+  const open = new Map();
+  const out = [];
+  for (const frame of frames) {
+    if (frame.type === "message_start") open.set(frame.messageId, structuredClone(frame.message));
+    if (frame.type !== "message_update") {
+      out.push(frame);
+      continue;
+    }
+    const message = open.get(frame.messageId);
+    const event = frame.assistantMessageEvent;
+    if (event.type === "text_end") message.content[event.contentIndex] = { ...event.block, text: event.content };
+    else if (event.type === "thinking_end") message.content[event.contentIndex] = { ...event.block, thinking: event.content };
+    else if (event.type === "toolcall_end") message.content[event.contentIndex] = event.toolCall;
+    else continue;
+    out.push({ type: "message_update", messageId: frame.messageId, message: structuredClone(message), assistantMessageEvent: { ...event, partial: message } });
+  }
+  return out;
+}
+
+async function streamRecorded(frames) {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  const { w, es } = await startRun("s1", recordedFrames[0].message.content[0].text);
+  await act(async () => { es.emit({ type: "agent_start" }); });
+  const shown = [];
+  let toolArguments;
+  for (const frame of frames) {
+    if (frame.type === "message_end" && frame.message.role === "assistant") {
+      await settle(90);
+      shown.push(structuredClone(w.latest.streamState.streamingMessage?.content));
+    }
+    await act(async () => { es.emit(frame); await Promise.resolve(); });
+    if (frame.assistantMessageEvent?.type === "toolcall_delta" && toolArguments === undefined) {
+      await settle(90);
+      toolArguments = structuredClone(w.latest.streamState.streamingMessage?.content[2]);
+    }
+  }
+  await settle(90);
+  return { shown, toolArguments, messages: structuredClone(w.latest.messages) };
+}
+
+test("a run streamed as omp's delta updates renders exactly what its full updates render", async () => {
+  const deltas = await streamRecorded(recordedFrames);
+  const full = await streamRecorded(fullFramesOf(recordedFrames));
+  assert.equal(deltas.shown.length, 2);
+  assert.deepEqual(deltas.shown, full.shown, "each reply as it stood before message_end");
+  assert.deepEqual(deltas.messages, full.messages, "the committed transcript");
+  assert.deepEqual(deltas.shown[0].map((block) => block.type), ["thinking", "text", "toolCall"]);
+  assert.equal(deltas.toolArguments.toolName, "read", "a streaming tool call shows its name from its first delta");
+  assert.deepEqual(deltas.toolArguments.input, { path: "note.txt" }, "and the arguments streamed so far");
+});
+
+test("deltas that reach a tab without their message wait for the server's snapshot, then apply on top of it", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  const { w, es } = await startRun("s1", "go");
+  await act(async () => { es.emit({ type: "agent_start" }); });
+  await settle(90);
+  world.agents.set("s1", { running: true, state: { isStreaming: true } });
+  const sequence = world.streams.get("s1").sequence;
+  world.live.set("s1", { ...liveSnapshot("s1", sequence, { role: "assistant", content: [{ type: "text", text: "hello" }] }), streamingMessageId: "msg-2" });
+  const syncs = callsTo("GET", "/api/sessions/s1/context").length;
+  const delta = (text) => ({ type: "message_update", messageId: "msg-2", message: { role: "assistant" }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: text } });
+  await act(async () => {
+    es.emit(delta(" there"));
+    es.emit(delta("!"));
+  });
+  await settle(150);
+  assert.ok(callsTo("GET", "/api/sessions/s1/context").length > syncs, "a delta without its message asks for the snapshot");
+  assert.equal(w.latest.streamState.streamingMessage?.content[0].text, "hello there!");
 });

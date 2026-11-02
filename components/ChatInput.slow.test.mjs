@@ -2,13 +2,11 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
 import React from "react";
-import { cleanup, render, screen } from "@testing-library/react/pure.js";
-import userEvent from "@testing-library/user-event";
-import { createJiti } from "jiti";
+const { cleanup, render, screen } = await import("@testing-library/react/pure.js");
+const { default: userEvent } = await import("@testing-library/user-event");
 
-const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
-const { ChatInput } = await jiti.import("./ChatInput.tsx");
-const enModule = await jiti.import("@/lib/i18n/locales/en.json");
+const { ChatInput } = await import("./ChatInput.tsx");
+const enModule = await import("@/lib/i18n/locales/en.json");
 const en = enModule.default ?? enModule;
 
 beforeEach(() => {

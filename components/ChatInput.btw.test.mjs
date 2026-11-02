@@ -2,13 +2,11 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
 import React, { act } from "react";
-import { cleanup, render, screen, waitFor } from "@testing-library/react/pure.js";
-import userEvent from "@testing-library/user-event";
-import { createJiti } from "jiti";
+const { cleanup, render, screen, waitFor } = await import("@testing-library/react/pure.js");
+const { default: userEvent } = await import("@testing-library/user-event");
 
-const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
-const { ChatInput } = await jiti.import("./ChatInput.tsx");
-const { clearDraft, getDraft } = await jiti.import("@/lib/draft-store");
+const { ChatInput } = await import("./ChatInput.tsx");
+const { clearDraft, getDraft } = await import("@/lib/draft-store");
 
 beforeEach(() => {
   window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });

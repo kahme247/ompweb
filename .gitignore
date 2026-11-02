@@ -13,11 +13,10 @@
 # testing
 coverage/
 
-# next.js
-/.next/
-/out/
+# build output
 /build
 /dist
+/release
 .turbo/
 .cache/
 
@@ -34,8 +33,6 @@ screenshots/
 # debug
 .logs/
 *.log
-/.next-dev.log
-/.next-dev-error.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -50,7 +47,6 @@ yarn-error.log*
 
 # typescript
 *.tsbuildinfo
-next-env.d.ts
 
 # editor / IDE
 .idea/
@@ -92,3 +88,7 @@ bin/tray-publish/
 
 # npm packaging archives
 *.tgz
+
+# graphify: track only the graph; each clone rebuilds the rest
+graphify-out/*
+!graphify-out/graph.json

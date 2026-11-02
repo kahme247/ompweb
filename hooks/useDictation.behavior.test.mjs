@@ -1,9 +1,7 @@
 import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
-import { fileURLToPath } from "node:url";
-import { createJiti } from "jiti";
-import { act, cleanup, renderHook } from "@testing-library/react/pure.js";
+const { act, cleanup, renderHook } = await import("@testing-library/react/pure.js");
 
 // These tests execute the dictation state machine against fake
 // getUserMedia/MediaRecorder/AudioContext implementations. They assert the
@@ -11,11 +9,7 @@ import { act, cleanup, renderHook } from "@testing-library/react/pure.js";
 // isReviewing, live analyser, active-time accounting, blob-URL lifetime) —
 // the states the composer and RecordingDeck actually read.
 
-const jiti = createJiti(import.meta.url, {
-  tryNative: false,
-  alias: { "@/": fileURLToPath(new URL("../", import.meta.url)) },
-});
-const { useDictation } = await jiti.import("../hooks/useDictation.ts");
+const { useDictation } = await import("../hooks/useDictation.ts");
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /** Settles until `condition` holds; fails after `timeoutMs` instead of racing a fixed sleep. */
@@ -237,6 +231,43 @@ test("starting capture puts the hook in the recording state with a live analyser
   assert.equal(world.recorders[0].timeslice, 100, "timeslice keeps chunks flowing for preview");
   assert.notEqual(view.result.current.captureRef.current.analyser, null, "waveform needs a live analyser");
   assert.ok(view.result.current.captureRef.current.startedAt > 0, "timer needs a start stamp");
+});
+
+test("the meter's audio context is resumed inside the click, and again if the mic session suspends it", async () => {
+  // After the await the click's activation may be gone; a context the browser
+  // then keeps suspended feeds the waveform silence while recording works.
+  const events = [];
+  const contexts = [];
+  class TrackingAudioContext extends FakeAudioContext {
+    constructor() {
+      super();
+      contexts.push(this);
+    }
+    resume() {
+      events.push("resume");
+      this.state = "running";
+      return super.resume();
+    }
+  }
+  override(window, "AudioContext", TrackingAudioContext);
+  override(globalThis, "AudioContext", TrackingAudioContext);
+  override(navigator, "mediaDevices", {
+    getUserMedia: async () => {
+      events.push("getUserMedia");
+      // Safari interrupts the context while the microphone session starts.
+      contexts[0].state = "suspended";
+      return { getTracks: () => [new FakeTrack()] };
+    },
+  });
+  const { view } = mountDictation();
+
+  await act(async () => {
+    view.result.current.toggle();
+  });
+  await settle();
+
+  assert.deepEqual(events, ["resume", "getUserMedia", "resume"]);
+  assert.notEqual(view.result.current.captureRef.current.analyser, null);
 });
 
 test("pause then resume keeps the timer base and analyser while accumulating paused time", async () => {

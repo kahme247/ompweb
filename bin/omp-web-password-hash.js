@@ -2,7 +2,7 @@
 
 // The `OMP_WEB_PASSWORD_HASH` format, in one place. This file must stay plain
 // CJS JS with no dependencies beyond node:crypto: the packaged launcher
-// (bin/omp-web.js) validates and hashes before Next.js exists, lib/web-password-hash.ts
+// (bin/omp-web.js) validates and hashes before the server exists, lib/web-password-hash.ts
 // is the typed view of it for the server, and the service installers hash the
 // password they write. See issue #239.
 

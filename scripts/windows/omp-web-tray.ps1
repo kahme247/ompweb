@@ -76,9 +76,9 @@ if ($OpenBrowser) {
     $ShouldOpenBrowser = $true
 }
 
-# Fallback: if in start mode but .next directory does not exist, fall back to dev mode
-$NextDir = Join-Path $RepoRoot ".next"
-if ($EffectiveMode -eq "start" -and !(Test-Path $NextDir)) {
+# Fallback: if in start mode but the client build (dist\index.html) does not exist, fall back to dev mode
+$BuildIndex = Join-Path $RepoRoot "dist\index.html"
+if ($EffectiveMode -eq "start" -and !(Test-Path $BuildIndex)) {
     $EffectiveMode = "dev"
     if ($EffectivePort -eq 30177) {
         $EffectivePort = 30178
@@ -246,8 +246,7 @@ function Start-WebServer {
         $launcherJs = Join-Path $RepoRoot "bin\omp-web.js"
         $inner = "`"$NodeExe`" `"$launcherJs`" -p $EffectivePort -H $EffectiveHostname --no-open"
     } else {
-        $nextBin = Join-Path $RepoRoot "node_modules\next\dist\bin\next"
-        $inner = "`"$NodeExe`" `"$nextBin`" dev -H $EffectiveHostname -p $EffectivePort"
+        $inner = "`"$NodeExe`" `"$(Join-Path $RepoRoot 'bin\bun-runtime.js')`" --hot server\dev.ts -H $EffectiveHostname -p $EffectivePort"
     }
     $psi.FileName = $env:ComSpec
     $psi.Arguments = "/d /s /c `"$inner >> `"$childOutLog`" 2>&1`""
@@ -431,6 +430,12 @@ $script:MenuItemStatus.Text = "  Status: Starting (Port $EffectivePort)"
 $script:MenuItemStatus.Enabled = $false
 $contextMenu.Items.Add($script:MenuItemStatus) | Out-Null
 
+# Item 2b: Host daemon indicator (`ompweb host`, registered as the omp-web-host task)
+$script:MenuItemDaemon = New-Object System.Windows.Forms.ToolStripMenuItem
+$script:MenuItemDaemon.Text = "  Daemon: Checking..."
+$script:MenuItemDaemon.Enabled = $false
+$contextMenu.Items.Add($script:MenuItemDaemon) | Out-Null
+
 $contextMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
 
 # Item 3: Open in Browser
@@ -463,7 +468,7 @@ $contextMenu.Items.Add($script:MenuItemRestart) | Out-Null
 
 # Item 6: Toggle Start/Stop Server
 $script:MenuItemToggle = New-Object System.Windows.Forms.ToolStripMenuItem
-$script:MenuItemToggle.Text = "Stop Server"
+$script:MenuItemToggle.Text = "Stop Server (omp runs keep going)"
 $script:MenuItemToggle.add_Click({
     if ($script:State -eq "Running" -or $script:State -eq "Starting") {
         Stop-WebServer
@@ -542,6 +547,23 @@ $script:NotifyIcon.add_DoubleClick({
     try { [System.Diagnostics.Process]::Start($ServerUrl) | Out-Null } catch { }
 })
 
+# The supervisor (omp-web-host.ps1) holds a named mutex while it runs: opening it is an in-process
+# check. Only when it is not held do we shell out to schtasks to tell "Stopped" from "Not installed".
+function Get-HostDaemonState {
+    try {
+        $held = $null
+        if ([System.Threading.Mutex]::TryOpenExisting("Local\OmpWebHostDaemon_Instance_Mutex", [ref]$held)) {
+            $held.Dispose()
+            return "Running"
+        }
+        schtasks.exe /query /tn "omp-web-host" 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) { return "Not installed" }
+        return "Stopped"
+    } catch { return "Unknown" }
+}
+$script:DaemonTicks = 0
+$script:DaemonState = "Checking..."
+
 function Update-TrayUI {
     $statusText = switch ($script:State) {
         "Running"  { "Running ($EffectivePort)" }
@@ -552,6 +574,7 @@ function Update-TrayUI {
     }
 
     $script:MenuItemStatus.Text = "  Status: $statusText"
+    $script:MenuItemDaemon.Text = "  Daemon: $($script:DaemonState)"
 
     # Limit tooltip text length (Windows NotifyIcon.Text max 63 characters)
     $tipText = "omp-web ($statusText)"
@@ -559,7 +582,7 @@ function Update-TrayUI {
     $script:NotifyIcon.Text = $tipText
 
     if ($script:State -eq "Running" -or $script:State -eq "Starting") {
-        $script:MenuItemToggle.Text = "Stop Server"
+        $script:MenuItemToggle.Text = "Stop Server (omp runs keep going)"
         $script:MenuItemRestart.Enabled = $true
     } else {
         $script:MenuItemToggle.Text = "Start Server"
@@ -576,6 +599,16 @@ $script:Timer.Interval = 3000
 
 $script:Timer.add_Tick({
     if ($script:IsExiting) { return }
+
+    # Every 5th tick (15 s) is enough for the daemon state.
+    if ($script:DaemonTicks % 5 -eq 0) {
+        $newDaemonState = Get-HostDaemonState
+        if ($newDaemonState -ne $script:DaemonState) {
+            $script:DaemonState = $newDaemonState
+            Update-TrayUI
+        }
+    }
+    $script:DaemonTicks++
 
     # Check child process state
     if ($script:ChildProcess -and $script:ChildProcess.HasExited) {

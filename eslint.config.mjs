@@ -1,9 +1,10 @@
-import coreWebVitals from "eslint-config-next/core-web-vitals";
-import typescript from "eslint-config-next/typescript";
+import reactHooks from "eslint-plugin-react-hooks";
+import tseslint from "typescript-eslint";
 
-const eslintConfig = [
-  ...coreWebVitals,
-  ...typescript,
+export default tseslint.config(
+  { ignores: ["dist/**", "release/**"] },
+  ...tseslint.configs.recommended,
+  reactHooks.configs.flat.recommended,
   {
     rules: {
       "react-hooks/immutability": "off",
@@ -11,6 +12,4 @@ const eslintConfig = [
       "react-hooks/set-state-in-effect": "off",
     },
   },
-];
-
-export default eslintConfig;
+);

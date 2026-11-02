@@ -18,7 +18,7 @@ function runWorker(t, { npmExit = 0, startExit = 0, activeExit = 0 } = {}) {
   writeFileSync(join(dir, "npm"), `#!/bin/sh\necho "npm $*" >> "${log}"\nexit ${npmExit}\n`, { mode: 0o755 });
   writeFileSync(join(dir, "status.json"), JSON.stringify({ attemptId: ATTEMPT, state: "running" }), { mode: 0o600 });
   writeFileSync(join(dir, `${ATTEMPT}.go`), "{}", { mode: 0o600 });
-  const result = spawnSync(process.execPath, [
+  const result = spawnSync("node", [
     WORKER,
     "--attempt", ATTEMPT,
     "--root", dir,

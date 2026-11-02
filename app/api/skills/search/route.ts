@@ -1,9 +1,6 @@
-import { NextResponse } from "next/server";
 import { runNpx } from "@/lib/npx";
 import { createChildProcessEnvironment } from "@/lib/project-command-env";
 import type { SkillSearchResult } from "@/lib/api-types";
-
-export const dynamic = "force-dynamic";
 
 const ANSI_RE = /\x1B\[[0-9;]*m/g;
 const DEFAULT_LIMIT = 50;
@@ -57,7 +54,8 @@ function parseSearchOutput(raw: string): SkillSearchResult[] {
 
 async function searchSkillsApi(query: string, limit: number): Promise<SkillSearchResult[]> {
   const url = `${SEARCH_API_BASE}/api/search?q=${encodeURIComponent(query)}&limit=${limit}`;
-  const res = await fetch(url, { cache: "no-store" });
+  // A stalled skills.sh falls through to the CLI search instead of hanging the request.
+  const res = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(10_000) });
   if (!res.ok) throw new Error(`skills.sh search failed: HTTP ${res.status}`);
 
   const data = (await res.json()) as SkillsApiResponse;
@@ -92,12 +90,12 @@ function parseInstallCount(installs: string): number {
 export async function POST(req: Request) {
   try {
     const { query, limit: rawLimit } = await req.json() as { query?: string; limit?: unknown };
-    if (!query?.trim()) return NextResponse.json({ error: "query required", code: "query_required" }, { status: 400 });
+    if (!query?.trim()) return Response.json({ error: "query required", code: "query_required" }, { status: 400 });
     const limit = parseLimit(rawLimit);
 
     try {
       const results = await searchSkillsApi(query.trim(), limit);
-      return NextResponse.json({ results });
+      return Response.json({ results });
     } catch {
       const { stdout, stderr } = await runNpx(["skills", "find", query.trim()], {
         timeout: 20000,
@@ -105,13 +103,13 @@ export async function POST(req: Request) {
       });
 
       const results = parseSearchOutput(stdout + stderr).slice(0, limit);
-      return NextResponse.json({ results });
+      return Response.json({ results });
     }
   } catch (e: unknown) {
     const err = e as { stdout?: string; stderr?: string; message?: string };
     const raw = (err.stdout ?? "") + (err.stderr ?? "");
     const results = raw ? parseSearchOutput(raw) : [];
-    if (results.length > 0) return NextResponse.json({ results });
-    return NextResponse.json({ error: err.message ?? String(e) }, { status: 500 });
+    if (results.length > 0) return Response.json({ results });
+    return Response.json({ error: err.message ?? String(e) }, { status: 500 });
   }
 }

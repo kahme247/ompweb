@@ -4,8 +4,6 @@ import { enableProvider } from "@/lib/omp/model-roles";
 import { RpcProcess, type RpcFrame } from "@/lib/omp/rpc-process";
 import { disposeUtilityRpc } from "@/lib/omp/rpc-utility";
 
-export const dynamic = "force-dynamic";
-
 /**
  * Interactive login over a dedicated `omp --mode rpc-ui` process. omp drives
  * the flow with extension_ui_request frames: `open_url` carries the OAuth URL,
@@ -66,8 +64,9 @@ export async function POST(
 // GET /api/auth/login/[provider] — SSE stream for the login flow
 export async function GET(
   req: Request,
-  { params }: { params: Promise<{ provider: string }> }
+  { params, disableIdleTimeout }: { params: Promise<{ provider: string }>; disableIdleTimeout: () => void }
 ) {
+  disableIdleTimeout();
   const { provider } = await params;
   const token = `${provider}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const registry = getLoginRegistry();
@@ -85,7 +84,7 @@ export async function GET(
         }
       };
       // OAuth flows sit idle while the user is in the browser; keep the SSE
-      // connection alive past proxy/Next idle timeouts.
+      // connection alive past reverse-proxy idle timeouts.
       const heartbeat = setInterval(() => {
         if (closed) return;
         try {

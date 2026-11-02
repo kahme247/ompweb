@@ -6,6 +6,7 @@ import { ArrowDown, ChevronDown, ChevronUp, Layers, Paperclip, Square } from "lu
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
 import { collectToolResults, isGroupAnchor, planTranscriptRows, type ActivityPiece, type TranscriptRow } from "@/lib/chat-transcript-plan";
+import { isReplyBlock } from "@/lib/message-display";
 import { resolveForkTargets } from "@/lib/chat-fork";
 import { MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
@@ -20,6 +21,8 @@ import { CHAT_COLUMN_MAX_WIDTH, MINIMAP_WIDTH } from "@/lib/chat-layout";
 import { WorkspaceState } from "./AppShell-layout";
 import { useAgentSession, type AgentPhase, type NoticeItem, type SubagentInfo } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
+import { useChatSearchHighlights } from "@/hooks/useChatSearchHighlights";
+import type { SearchMatchTarget } from "./SessionSearchMatches";
 import { useSpeechSynthesis, SpeechSynthesisProvider } from "@/hooks/useSpeechSynthesis";
 import { GithubRepoContext } from "@/lib/github-refs";
 import { useDragDrop } from "@/hooks/useDragDrop";
@@ -38,14 +41,26 @@ import {
   VISIBLE_PAGE_SIZE,
 } from "@/lib/chat-lazy-load";
 import { getDraftSummary, type ChatDraft } from "@/lib/draft-store";
+import { isLinkUp, type HostStatus } from "@/lib/hosts/host";
+import { newChatDraftKey, remoteHostId } from "@/lib/project-ordering";
 
 interface Props {
   session: SessionInfo | null;
   newSessionCwd: string | null;
+  /** Host a fresh chat starts on (this machine when absent). */
+  newSessionHostId?: string;
+  /** The chat's host from the `hosts` channel: the source of truth until a
+   *  `host_status` frame reports a change, and for a chat opened mid-outage. */
+  hostStatus?: HostStatus;
+  hostLabel?: string;
   newSessionWorkspace?: ReactNode;
   toolCallsDefaultCollapsed?: boolean;
   /** UI `hideToolActivity`: fold a running turn's tool calls into one row. */
   hideToolActivity?: boolean;
+  /** UI `neverFoldActivity`: render every turn flat, no Process details rows. */
+  neverFoldActivity?: boolean;
+  /** UI `showToolCallsUnfolded`: tool call rows stay out of Process details. */
+  showToolCallsUnfolded?: boolean;
   /** "Expand thinking blocks by default": open each thinking block on mount. */
   expandThinkingByDefault?: boolean;
   /** omp `hideThinkingBlock`: omit thinking from the transcript. */
@@ -69,6 +84,12 @@ interface Props {
   onGenerationSpeedChange?: (speed: GenerationSpeedInfo | null) => void;
   /** Open Settings → API Keys & Providers (from the model picker). */
   onOpenProviders?: () => void;
+  /** The sidebar search query: its hits are highlighted ("" for none). */
+  searchQuery?: string;
+  /** A hit picked in the sidebar for this session: scrolled to and marked current. */
+  searchTarget?: SearchMatchTarget | null;
+  /** The target was used; the owner drops it so a later remount does not jump again. */
+  onSearchTargetHandled?: () => void;
 }
 
 function phaseLabel(phase: AgentPhase): string {
@@ -278,6 +299,8 @@ interface CommittedTranscriptProps {
   toolCallsDefaultCollapsed: boolean;
   /** Fold a running turn's tool calls; off restores the flat live tail. */
   hideToolActivity: boolean;
+  neverFoldActivity: boolean;
+  showToolCallsUnfolded: boolean;
   expandThinkingByDefault: boolean;
   hideThinkingBlock: boolean;
   visibleCount: number;
@@ -299,7 +322,7 @@ interface CommittedTranscriptProps {
 const CommittedTranscript = memo(function CommittedTranscript({
   messages, entryIds, conversationMeta, messageRefs, isStreaming, sessionBusy, isCompacting, externalRunActive, isNew, forkingEntryId, editingEntryId,
   handleFork, handleEdit, modelNames, messageCwd, onOpenFile, sessionId,
-  toolCallsDefaultCollapsed, hideToolActivity, expandThinkingByDefault, hideThinkingBlock, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
+  toolCallsDefaultCollapsed, hideToolActivity, neverFoldActivity, showToolCallsUnfolded, expandThinkingByDefault, hideThinkingBlock, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
 }: CommittedTranscriptProps) {
   const { t } = useI18n();
   const { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage } = conversationMeta;
@@ -310,7 +333,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
     messageRefs.current[refIndex] = el;
   };
 
-  const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[] } = {}): ReactNode => {
+  const renderMessage: RenderMessage = (idx, options = {}) => {
     const msg = options.messageOverride ?? messages[idx];
     const isVisible = msg.role === "user" || msg.role === "assistant";
     const currentRefIdx = visibleRefIndexByMessage.get(idx);
@@ -330,7 +353,10 @@ const CommittedTranscript = memo(function CommittedTranscript({
     }
     if (options.showTimestamp !== undefined) showTimestamp = options.showTimestamp;
     const forkTarget = forkTargets[idx];
-    const canOfferFork = !sessionBusy && !isNew && !!forkTarget;
+    // Assistant rows fork from reply text or a visible error, not from each thinking/tool step:
+    // every row of a turn forks at the same prompt, so the extra buttons were only clutter.
+    const forkableRow = msg.role !== "assistant" || !!msg.errorMessage?.trim() || (Array.isArray(msg.content) && msg.content.some(isReplyBlock));
+    const canOfferFork = !sessionBusy && !isNew && !!forkTarget && forkableRow;
     const canOfferEdit = !sessionBusy && !isCompacting && !isNew && msg.role === "user" && !msg.branchSummary && !!entryIds[idx];
     const historyMutationPending = forkingEntryId !== null || editingEntryId !== null;
     const view = (
@@ -371,12 +397,17 @@ const CommittedTranscript = memo(function CommittedTranscript({
   // visible window. Invisible history never allocates React elements, so long
   // sessions pay element cost proportional to the visible window instead of
   // the whole transcript.
-  const rows = useMemo<TranscriptRow[]>(() => planTranscriptRows(messages, { hideThinking: hideThinkingBlock }), [messages, hideThinkingBlock]);
-  const isLiveTail = (row: TranscriptRow): boolean => {
+  // Expanded-by-default thinking, and tool calls when asked, stay out of the
+  // fold: folding on commit would hide the block the preference just opened.
+  const rows = useMemo<TranscriptRow[]>(
+    () => planTranscriptRows(messages, { hideThinking: hideThinkingBlock, showThinking: expandThinkingByDefault, showToolCalls: showToolCallsUnfolded, neverFold: neverFoldActivity }),
+    [messages, hideThinkingBlock, expandThinkingByDefault, showToolCallsUnfolded, neverFoldActivity],
+  );
+  const rendersFlat = (row: TranscriptRow): boolean => {
+    if (row.kind !== "group") return false;
     // With "Hide tool activity while working" on (the default) the running turn
     // folds like a finished one; off restores the flat tail.
     if (hideToolActivity) return false;
-    if (row.kind !== "group") return false;
     // `sessionBusy` only goes true for a run omp-web owns, so a session driven
     // by another `omp` process would never get a live tail; the transcript-tail
     // heuristic supplies that missing case.
@@ -411,9 +442,9 @@ const CommittedTranscript = memo(function CommittedTranscript({
     }
     const { userIndex: userIdx, endIndex: endIdx, segments } = row;
 
-    if (isLiveTail(row)) {
-      // Live tail: render the running turn flat so streaming updates and tool
-      // progress stay in view; it folds once the run ends.
+    if (rendersFlat(row)) {
+      // Live tail: stays flat so streaming updates and tool progress stay in
+      // view, and folds once the run ends.
       for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
         rendered.push(renderMessage(renderIdx));
       }
@@ -433,6 +464,8 @@ const CommittedTranscript = memo(function CommittedTranscript({
           keyPrefix: `text-${segmentIdx}`,
           messageOverride: override,
           ...(segment.last ? {} : { showTimestamp: false }),
+          // Thinking can ride in a text segment; deferred text loads by source index.
+          sourceBlockIndices: segment.blocks.map((block) => msg.content.indexOf(block)),
         }));
         attached.add(segment.index);
         return;
@@ -471,7 +504,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
   );
 });
 
-export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatus: channelHostStatus, hostLabel, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, neverFoldActivity = false, showToolCallsUnfolded = false, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders, searchQuery = "", searchTarget = null, onSearchTargetHandled }: Props) {
   const { t, tn } = useI18n();
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -526,8 +559,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     agentPhase, activeGoal, activePlan,
     liveToolResults,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
-    isNew,
-    sessionIdRef, messagesEndRef, scrollContainerRef,
+    isNew, hostStatus: frameHostStatus,
+    sessionIdRef, messagesEndRef, scrollContainerRef, holdScrollPosition,
     handleSend, handleAbort, handleFork, handleEdit, handleModelChange, retrySession,
     handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction, handleCompact,
     removeQueuedMessage, promoteQueuedToSteer,
@@ -536,7 +569,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     handleToolPresetChange,
     btw, askBtw,
   } = useAgentSession({
-    session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked, onSessionMoved: handleSessionMoved,
+    session, newSessionCwd, newSessionHostId, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked, onSessionMoved: handleSessionMoved,
     modelsRefreshKey, chatInputRef: composerRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsPanelOpen,
     onOpenFile, onOpenUrl,
   });
@@ -669,7 +702,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
   // top, load another page while keeping the scroll position stable.
   const [visibleCount, setVisibleCount] = useState(VISIBLE_PAGE_SIZE);
   const prevSessionKeyForPagingRef = useRef<string | null>(null);
-  const sessionKeyForPaging = session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : "empty");
+  const draftKey = session?.id ?? (newSessionCwd ? newChatDraftKey(newSessionCwd, newSessionHostId) : undefined);
+  const sessionKeyForPaging = draftKey ?? "empty";
   useEffect(() => {
     if (prevSessionKeyForPagingRef.current !== sessionKeyForPaging) {
       prevSessionKeyForPagingRef.current = sessionKeyForPaging;
@@ -692,6 +726,29 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
   // The empty new-session screen has its own scroller, so the conversation's
   // scroller mounts after the first send without a remount or a load.
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
+  // Widen the lazy render window until it includes the message's transcript row.
+  const revealMessage = useCallback((messageIndex: number) => {
+    const rows = planTranscriptRows(messages, { hideThinking: hideThinkingBlock, showThinking: expandThinkingByDefault, showToolCalls: showToolCallsUnfolded, neverFold: neverFoldActivity });
+    const rowIndex = rows.findIndex((row) => (row.kind === "message" ? row.index === messageIndex : messageIndex >= row.userIndex && messageIndex < row.endIndex));
+    const needed = rows.length - Math.max(0, rowIndex);
+    if (needed <= visibleCount) return true;
+    setVisibleCount(needed);
+    return false;
+  }, [messages, hideThinkingBlock, expandThinkingByDefault, showToolCallsUnfolded, neverFoldActivity, visibleCount]);
+  useChatSearchHighlights({
+    container: scrollContainerRef,
+    query: searchQuery,
+    target: searchTarget,
+    ready: !loading && !isEmptyNew,
+    entryIds,
+    revealMessage,
+    holdScrollPosition,
+    onTargetHandled: onSearchTargetHandled,
+  });
+  const remoteWorkspace = session ? remoteHostId(session.hostId) !== undefined : newSessionHostId !== undefined;
+  // The hosts channel is the source of truth; a frame only speaks before its first snapshot.
+  const currentHostStatus = channelHostStatus ?? frameHostStatus;
+  const hostBanner = currentHostStatus && !isLinkUp(currentHostStatus) ? <HostOfflineBanner host={hostLabel ?? ""} /> : null;
   useEffect(() => {
     if (loading || isEmptyNew) return;
     const el = scrollContainerRef.current;
@@ -971,17 +1028,18 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
   }, [advisorEnabled]);
 
   // GitHub repo of the session checkout, so bare `#123` in messages links to it.
+  // A remote session's cwd is a path on its host, which this server cannot inspect.
   const [githubRepo, setGithubRepo] = useState<string | null>(null);
   useEffect(() => {
     setGithubRepo(null);
-    if (!messageCwd) return;
+    if (!messageCwd || remoteWorkspace) return;
     const controller = new AbortController();
     fetch(`/api/github-repo?cwd=${encodeURIComponent(messageCwd)}`, { signal: controller.signal })
       .then((response) => response.ok ? response.json() as Promise<{ repo?: string | null }> : null)
       .then((data) => setGithubRepo(data?.repo ?? null))
       .catch(() => {});
     return () => controller.abort();
-  }, [messageCwd]);
+  }, [messageCwd, remoteWorkspace]);
 
   const advisorModelMeta = useMemo(() => {
     if (!advisorRoleSelector) return null;
@@ -1117,8 +1175,10 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       onLoadSlashCommands={loadSlashCommands}
       onBuiltinCommand={handleBuiltinSlashCommand}
       onAudioUnlock={unlockAudio}
-      draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
-      cwd={session?.cwd ?? newSessionCwd}
+      draftKey={draftKey}
+      uploadHostId={session ? session.hostId : newSessionHostId}
+      // @-mentions and skill lookups read this machine's disk: not for a remote workspace yet.
+      cwd={remoteWorkspace ? null : session?.cwd ?? newSessionCwd}
       /* The pill bar and chevron only render in the non-empty layout; don't
          accept Escape-to-minimize in the fresh-chat branch where there is
          nothing to collapse. */
@@ -1242,7 +1302,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
               </div>
               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, flexShrink: 0 }}>
                 <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                  web <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}</span>
+                  web <span style={{ color: "var(--text)" }}>v{process.env.OMP_WEB_PUBLIC_APP_VERSION ?? "0.0.0"}</span>
                 </span>
                 <OmpRuntimeVersion />
               </div>
@@ -1252,6 +1312,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
               <p>{t("appShell.newSessionDescription")}</p>
             </div>
             {newSessionWorkspace}
+            {hostBanner}
             <NoticeShelf notices={notices} onDismiss={dismissNotice} align="right" />
             <SkillDiagnosticsNotice snapshot={skillDiagnostics} onDisable={() => setSkillStartupDiagnostics(false)} />
             <ComposerPanels todoPhases={[]} subagents={[]} onSelectSubagent={setSelectedSubagent} btw={btwPanel} />
@@ -1263,6 +1324,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
         </div>
       ) : (
       <>
+      {hostBanner}
       <div className="relative flex flex-1 overflow-hidden" style={{ minHeight: 0 }}>
         <div
           style={{
@@ -1332,6 +1394,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
               sessionId={session?.id ?? sessionIdRef.current ?? undefined}
               toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
               hideToolActivity={hideToolActivity}
+              neverFoldActivity={neverFoldActivity}
+              showToolCallsUnfolded={showToolCallsUnfolded}
               expandThinkingByDefault={expandThinkingByDefault}
               hideThinkingBlock={hideThinkingBlock}
               visibleCount={visibleCount}
@@ -1418,7 +1482,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       {/* Minimized pill bar - shown when composer is collapsed */}
       {composerMinimized && (
         <MinimizedComposerBar
-          draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
+          draftKey={draftKey}
           isStreaming={sessionBusy}
           isCompacting={isCompacting}
           statusText={composerStatusText}
@@ -1551,6 +1615,18 @@ function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: st
           ))}
         </pre>
       ))}
+    </div>
+  );
+}
+
+function HostOfflineBanner({ host }: { host: string }) {
+  const { t } = useI18n();
+  return (
+    <div
+      role="status"
+      style={{ flexShrink: 0, margin: `0 ${CHAT_COLUMN_PADDING}px 8px`, padding: "7px 10px", border: "1px solid color-mix(in srgb, var(--status-warning) 40%, var(--border))", borderRadius: "var(--radius-control)", background: "color-mix(in srgb, var(--status-warning) 8%, var(--bg))", color: "var(--text)", fontSize: 12, lineHeight: 1.4 }}
+    >
+      {t("hosts.offlineBanner", { host })}
     </div>
   );
 }

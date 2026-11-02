@@ -4,30 +4,48 @@ Thanks for your interest in contributing!
 
 ## Setup
 
-- Node.js 24 or newer
+- Node.js 24 or newer (the server runs on [Bun](https://bun.sh), which `npm install` provides)
 - The [omp](https://github.com/can1357/oh-my-pi) binary on your `PATH` (or set `OMP_WEB_OMP_BIN`)
 
 ```bash
 npm install
-npm run dev   # http://127.0.0.1:30178
+npm run dev   # http://127.0.0.1:30178, Bun hot reload
 ```
+
+The repository tracks a [graphify](https://github.com/Graphify-Labs/graphify) code
+graph in `graphify-out/graph.json`. To keep it current, install the graphify release
+that built it (`uv tool install graphifyy==0.9.99`; releases build different graphs
+from the same code, so bump this together with a rebuilt graph) and run
+`sh scripts/setup-hooks.sh` once per clone. The script enables the tracked
+`.githooks/pre-commit`, which rebuilds the graph and stages it with every commit
+that stages anything else, and registers graphify's merge driver for `graph.json`.
+The first commit in a new clone or worktree rebuilds from scratch (about two
+minutes); later ones take about a second. Set `GRAPHIFY_SKIP_HOOK=1` to commit
+without the rebuild. The rebuild reads the working tree, so unstaged code ends up in
+the committed graph: to commit only part of your changes, `git stash --keep-index
+--include-untracked` first. The hook refuses `git commit <path>`, whose temporary
+index would leave the rebuilt graph unstaged; stage with `git add` and run a plain
+`git commit`. Git runs no pre-commit hook for rebases, cherry-picks or
+merges that complete without conflicts: run `PYTHONHASHSEED=0 graphify update .`
+afterwards and commit the graph.
 
 ## Checks (must pass before submitting)
 
 ```bash
-npx tsc --noEmit                                   # type check
+npm run typecheck                                  # type check
 npm run lint                                       # ESLint, zero warnings
-npm test                                           # unit tests
+npm test                                           # unit tests (bun test --parallel)
 ```
 
-Avoid `npm run build` during local development — it writes to `.next/` and
-interferes with the dev server. Builds are for release work.
+`npm run build` bundles the browser app into `dist/` and `npm run smoke`
+starts the built server and checks it; the dev server never reads `dist/`.
 
 ### React tests
 
-Tests use `node:test` and `jiti`; no Jest or Vitest configuration is required.
+Tests use `bun test` with `node:test`-style `test()` calls; no Jest or Vitest configuration is required.
+Mock a Node builtin with `mockBuiltin` (`tests/mock-builtin.mjs`, built on `mock.module`) and import the module under test afterwards with a fresh `?fresh=N` query.
 For interactive components and hooks, import `tests/setup-dom.mjs` before
-`@testing-library/react/pure.js`, and register `cleanup` with `afterEach`.
+`@testing-library/react/pure.js` (both imported dynamically, in that order), and register `cleanup` with `afterEach`.
 Use DOM queries and `@testing-library/user-event` for component interactions,
 and `renderHook` for hook state and lifecycle tests. Keep the real jsdom
 `window` and `document`; mock only the browser or network APIs a scenario needs.
