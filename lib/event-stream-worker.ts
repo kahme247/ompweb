@@ -689,9 +689,11 @@ function fallBack(): void {
     applyMode();
   }, FALLBACK_MS);
   applyMode();
-  // applyMode handed the unsent commands back to their tabs. A sent one has no reply deadline and no link to carry its
-  // reply, so it ends here: it may have run.
-  for (const command of [...pending.values()]) settle(command, failure(command, TRANSPORT_LOST));
+  // applyMode handed the unsent commands back to their tabs. A sent idempotent one goes back too (the tab POSTs it,
+  // running it again is harmless); any other has no link to carry its reply and may have run.
+  for (const command of [...pending.values()]) {
+    settle(command, isIdempotentCommand(command.type) ? { cmd: command.n, http: true } : failure(command, TRANSPORT_LOST));
+  }
 }
 
 function sendControl(message: Record<string, unknown>): void {
