@@ -24,6 +24,8 @@ export interface SessionLiveSnapshot {
   isPromptRunning: boolean;
   isCompacting: boolean;
   streamingMessage: Partial<AgentMessage> | null;
+  /** omp's messageId of `streamingMessage`: the message its delta updates apply to. */
+  streamingMessageId?: string | null;
   toolEvents: SessionLiveToolEvent[];
   /** Positive run-scoped evidence survives message_end's delayed file write. */
   responseObserved?: boolean;

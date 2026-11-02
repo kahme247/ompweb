@@ -9,10 +9,16 @@
 // Stream framing (SSE):
 //   event: mux      data: MuxControlFrame       connection/subscription control
 //   event: <subId>  data: <channel payload>     one subscription's frames
+// Every frame also carries `id: <server ms at emit>`, read as `lastEventId`.
 // Subscriptions are added/removed with POST /api/events (EventStreamRequest).
 //
-// public/event-stream-worker.js is a plain script (not bundled) and mirrors
-// these constants; keep the two in sync.
+// The browser link (`browserTransport` "ws"; lib/browser-link.ts, docs/specs/2026-11-01-browser-link-design.md):
+// one WebSocket per browser at GET /api/events/link, carrying every subscription and every agent command with the
+// host link's sequencing, pieces and fair queues (lib/hosts/link-protocol.ts). Its `e` messages carry exactly the
+// SSE frames above (name, emit time, data).
+// Every hello and the `transport` control frame carry the setting; the worker switches on it.
+//
+// lib/event-stream-worker.ts imports this module (bundled by server/client-env.ts).
 
 import { isValidNotificationId } from "./notification-events";
 
@@ -33,10 +39,41 @@ export type EventStreamChannel =
   /** Settings → Hosts: the `GET /api/hosts` body on subscribe and after every change. */
   | { kind: "hosts" };
 
+/** How the browser's shared worker reaches the server: SSE + HTTP POST, or the browser link (one WebSocket). */
+export type BrowserTransport = "sse" | "ws";
+
+export const BROWSER_TRANSPORTS: readonly BrowserTransport[] = ["sse", "ws"];
+
+/** The setting every hello and `transport` frame carries. */
+export interface BrowserTransportState {
+  transport: BrowserTransport;
+}
+
+export const BROWSER_LINK_PATH = "/api/events/link";
+export const BROWSER_LINK_VERSION = 1;
+/** How long the server keeps a link whose socket is gone, so the browser can resume it. */
+export const LINK_RESUME_MS = 120_000;
+/** How long the server remembers a command's reply by (session, rid): a resend within it is answered, not run again.
+ * Longer than LINK_RESUME_MS, so a command resent after a resync to the same server still finds it. */
+export const COMMAND_DEDUPE_MS = 600_000;
+
+const REPEATABLE_COMMANDS = ["predict_word", "predict_word_feedback", "set_host_tools", "set_host_uri_schemes"];
+
+/** Commands that are repeatable by nature: `get_*` and `predict_word` only read, and the others register or record the
+ * same thing again. Safe to send again after a resync, and not worth remembering for the (session, rid) dedupe, where
+ * they would only take room from commands that change something (and be refused at the cap). Never `abort`: a resent
+ * one could stop a prompt that ran after it. */
+export function isIdempotentCommand(type: string): boolean {
+  return type.startsWith("get_") || REPEATABLE_COMMANDS.includes(type);
+}
+
 export type MuxControlFrame =
-  | { type: "hello"; connectionId: string }
+  | ({ type: "hello"; connectionId: string; serverId: string } & BrowserTransportState)
   | { type: "open"; sub: string }
-  | { type: "end"; sub: string };
+  | { type: "end"; sub: string }
+  | { type: "refused"; sub: string; status: number; error: string; code: string }
+  /** The setting changed; the worker switches transport. */
+  | ({ type: "transport" } & BrowserTransportState);
 
 export type EventStreamRequest =
   | { connectionId: string; subscribe: { id: string; channel: EventStreamChannel } }

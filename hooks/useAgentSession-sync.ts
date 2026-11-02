@@ -1,5 +1,6 @@
 import { historyCursor, type SessionHistoryCursor, type SessionLiveSnapshot, type SessionStreamCursor, type SessionSyncResponse } from "@/lib/session-sync";
 import type { SessionContext } from "@/lib/types";
+import { isDeltaUpdate } from "@/lib/message-delta";
 import type { AgentEvent } from "./useAgentSession-stream";
 
 type SessionView = { leafId: string | null; includePreCompaction: boolean };
@@ -13,6 +14,8 @@ export interface SessionLiveFields {
 
 export interface SessionCatchUp {
   request(): Promise<SessionContext | null>;
+  /** A live delta found no message to apply to: reads at most once per MISSING_BASE_RETRY_MS, however many such deltas arrive. */
+  requestMissingBase(): void;
   seed(context: SessionContext, position?: SessionHistoryCursor | null): SessionContext;
   invalidate(): void;
   view(): SessionView;
@@ -22,6 +25,9 @@ export interface SessionCatchUp {
   disconnect(): void;
   observe(event: AgentEvent): "epoch" | "stale" | null;
 }
+
+/** While reads fail fast, every base-less delta would send its own context request; one per window instead, then the next delta retries. */
+export const MISSING_BASE_RETRY_MS = 2000;
 
 /** One durable cursor per selected view. Live ordering is independent of disk pagination. */
 export function createSessionCatchUp(options: {
@@ -48,11 +54,17 @@ export function createSessionCatchUp(options: {
     toolSequences.clear();
   };
   let requested = false;
+  // performance.now() of the last missing-base request, and the one trailing request waiting for its window to end.
+  let missingBaseAt = -Infinity;
+  let missingBaseTimer: ReturnType<typeof setTimeout> | undefined;
   let pending: Promise<SessionContext | null> | null = null;
 
   const invalidate = () => {
     revision += 1;
     if (pending) requested = true;
+    clearTimeout(missingBaseTimer);
+    missingBaseTimer = undefined;
+    missingBaseAt = -Infinity;
   };
   const seed = (next: SessionContext, position: SessionHistoryCursor | null = cursor) => {
     // A newer completed sync may reflect truncation, not just an append.
@@ -160,7 +172,8 @@ export function createSessionCatchUp(options: {
                 if (fields.message) messageSequence = sequence;
                 if (fields.lifecycle) lifecycleSequence = sequence;
                 stream = { ...stream, sequence: Math.max(stream.sequence, sequence) };
-                if (fields.message || fields.lifecycle || fields.tools) options.live(page.live, fields);
+                // Even with no field to apply, the snapshot can complete deltas that arrived without their message.
+                options.live(page.live, fields);
               }
             }
             break;
@@ -180,8 +193,23 @@ export function createSessionCatchUp(options: {
     return pending;
   };
 
+  const requestMissingBase = () => {
+    const wait = missingBaseAt + MISSING_BASE_RETRY_MS - performance.now();
+    if (wait > 0) {
+      // The last episode still gets its request, once the window ends: a quiet stream sends no further delta to retry.
+      missingBaseTimer ??= setTimeout(() => {
+        missingBaseTimer = undefined;
+        requestMissingBase();
+      }, wait);
+      return;
+    }
+    missingBaseAt = performance.now();
+    void request();
+  };
+
   return {
     request,
+    requestMissingBase,
     seed,
     invalidate,
     view: () => view,
@@ -212,7 +240,8 @@ export function createSessionCatchUp(options: {
       const floor = lifecycle ? Math.max(lifecycleSequence, messageSequence, latestToolSequence)
         : message ? Math.max(lifecycleSequence, messageSequence)
         : tool ? Math.max(lifecycleSequence, toolsSnapshotSequence, toolSequences.get(tool) ?? 0) : 0;
-      if (next.sequence < floor) return "stale";
+      // A catch-up snapshot at sequence S already holds delta S: applying its frame again would repeat it.
+      if (next.sequence < floor || (message && next.sequence === floor && isDeltaUpdate(event))) return "stale";
       if (lifecycle) {
         lifecycleSequence = next.sequence;
         toolSequences.clear();

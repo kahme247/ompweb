@@ -7,6 +7,7 @@ import { readBodyWithinLimit } from "../bounded-form-data";
 import type { RpcTransport } from "../omp/rpc-transport";
 import type { ProjectRegistryEntry } from "../project-registry";
 import { isValidSessionId } from "../session-file-references-core";
+import { appendTransportSamples, transportMetricsPath } from "../transport-metrics";
 import { isRecord } from "../type-guards";
 import type { SessionInfo } from "../types";
 import { isLinkUp, type Host, type HostStatus, type SpawnRequest, type SpawnResult } from "./host";
@@ -74,7 +75,7 @@ interface PendingOp {
 
 /** A downlink line sent (or to resend) and not acked yet. `key`: the `sender` key it went out under; `bytes`: its
  * UTF-8 size; `part`: a `part` line; `whole`: on the last part of a line, that line as queued, which a v4 daemon gets
- * instead (partsToWhole). */
+ * instead (partsToWhole); `sample`: on the line that completes a message, its link sample. */
 interface Sent {
   seq: number;
   line: string;
@@ -82,6 +83,18 @@ interface Sent {
   bytes: number;
   part: boolean;
   whole: string | null;
+  sample: DownSample | null;
+}
+
+/** What a downlink message's link sample needs, taken when it is queued: the time (wall and monotonic), its UTF-8 size, the bytes queued
+ * or unacked ahead of it then, and the session it serves. */
+interface DownSample {
+  at: number;
+  /** `at` on the monotonic clock, for ackMs. */
+  t: number;
+  bytes: number;
+  bytesAhead: number;
+  session: string | null;
 }
 
 interface Link {
@@ -99,8 +112,10 @@ interface Link {
   /** Last downlink seq handed out. Lines stay in `outbox` until the daemon acks them. */
   downSeq: number;
   /** Downlink messages not numbered yet, per channel or request, sent fair (spec D7). */
-  sender: LinkSender<{ line: string; size: number }>;
+  sender: LinkSender<{ line: string; size: number; sample: DownSample }>;
   outbox: Outbox<Sent>;
+  /** Bytes of the outbox lines, sent or waiting for a resend. */
+  outboxBytes: number;
   /** Highest outbox seq written to the current socket; `flush` sends what is past it. */
   sentSeq: number;
   /** Bytes of the outbox lines written to the current socket: the unacked window (spec D7). */
@@ -112,11 +127,24 @@ interface Link {
   parts: PartJoiner;
   /** What this link has already logged about messages it skipped. */
   unknownLog: UnknownMessageLog;
+  /** This link's `up` samples in the current statsFlushMs window (STATS_BUDGET_FACTOR × statsSamples at most) and those
+   * dropped past it; `start` is a monotonic time. */
+  statsWindow: { start: number; used: number; dropped: number };
+  /** A malformed `stats` sample was logged on this link (once per link). */
+  statsWarned: boolean;
   pending: Map<string, PendingOp>;
   channels: Map<string, RemoteRpcTransport>;
   pingTimer: NodeJS.Timeout | undefined;
   offlineTimer: NodeJS.Timeout | undefined;
   statusListeners: Set<(status: HostStatus) => void>;
+}
+
+/** Link samples (metric "link") waiting to be written, and the file they go to, resolved when the batch started so a
+ * later flush never re-resolves the agent dir (a test's may be gone by then). */
+interface LinkSampleBatch {
+  samples: Record<string, unknown>[];
+  file: string;
+  timer: NodeJS.Timeout | undefined;
 }
 
 interface HubState {
@@ -125,6 +153,7 @@ interface HubState {
   helloListeners: Set<(hostId: string, channels: HelloChannel[]) => void>;
   /** This server is shutting down (freezeHostLinks): links neither send nor apply anything. */
   frozen: boolean;
+  linkSamples: LinkSampleBatch;
 }
 
 declare global {
@@ -133,7 +162,15 @@ declare global {
 
 // globalThis, like the rpc-manager registry: survives a `bun --hot` re-evaluation.
 function hub(): HubState {
-  globalThis.__ompHostHub ??= { links: new Map(), changeListeners: new Set(), helloListeners: new Set(), frozen: false };
+  globalThis.__ompHostHub ??= {
+    links: new Map(),
+    changeListeners: new Set(),
+    helloListeners: new Set(),
+    frozen: false,
+    linkSamples: { samples: [], file: "", timer: undefined },
+  };
+  // A state kept from before a field existed (`bun --hot`) lacks it.
+  globalThis.__ompHostHub.linkSamples ??= { samples: [], file: "", timer: undefined };
   return globalThis.__ompHostHub;
 }
 
@@ -154,12 +191,15 @@ function linkFor(id: string): Link {
       downSeq: 0,
       sender: new LinkSender(true),
       outbox: new Outbox(),
+      outboxBytes: 0,
       sentSeq: 0,
       unacked: 0,
       awaitingDrain: false,
       up: new SeqWindow(),
       parts: new PartJoiner(),
       unknownLog: new UnknownMessageLog("daemon"),
+      statsWindow: { start: 0, used: 0, dropped: 0 },
+      statsWarned: false,
       pending: new Map(),
       channels: new Map(),
       pingTimer: undefined,
@@ -204,7 +244,10 @@ function enqueue(link: Link, line: string): void {
 
 /** Lines that left the outbox (acked or dropped): those written to the current socket leave the unacked window. */
 function released(link: Link, items: Sent[]): void {
-  for (const item of items) if (item.seq <= link.sentSeq) link.unacked -= item.bytes;
+  for (const item of items) {
+    link.outboxBytes -= item.bytes;
+    if (item.seq <= link.sentSeq) link.unacked -= item.bytes;
+  }
 }
 
 /** Send outbox lines past `sentSeq` (a resend after a redial), then the sender's next units, while the unacked window
@@ -235,8 +278,10 @@ function flush(link: Link): void {
     // The hub queues lines only, so every unit is a line.
     if (!unit || !("line" in unit)) return;
     const whole = unit.part && unit.done ? unit.item.line : null;
-    const item: Sent = { seq: unit.seq, line: unit.line, key: unit.key, bytes: Buffer.byteLength(unit.line), part: unit.part, whole };
+    // One sample per message: a split one carries it on its last part.
+    const item: Sent = { seq: unit.seq, line: unit.line, key: unit.key, bytes: Buffer.byteLength(unit.line), part: unit.part, whole, sample: unit.done ? { ...unit.item.sample, bytes: unit.messageBytes } : null };
     link.outbox.push(item);
+    link.outboxBytes += item.bytes;
     if (!write(item)) return;
   }
 }
@@ -245,11 +290,12 @@ function flush(link: Link): void {
  * part's seq; the parts of a line still going out are dropped, and the sender sends it whole from the start. */
 function partsToWhole(link: Link): void {
   for (const item of link.outbox.drop(() => true)) {
-    if (!item.part) link.outbox.push(item);
-    else if (item.whole !== null) {
-      const line = withSeq(item.whole, item.seq);
-      link.outbox.push({ ...item, line, bytes: Buffer.byteLength(line), part: false, whole: null });
-    }
+    link.outboxBytes -= item.bytes;
+    if (item.part && item.whole === null) continue;
+    const line = item.part && item.whole !== null ? withSeq(item.whole, item.seq) : item.line;
+    const bytes = Buffer.byteLength(line);
+    link.outbox.push({ ...item, line, bytes, part: false, whole: null });
+    link.outboxBytes += bytes;
   }
 }
 
@@ -259,8 +305,88 @@ function partsToWhole(link: Link): void {
 function sendDown(link: Link, body: Unsequenced<DownMessage>, key: string): void {
   if (hub().frozen) return;
   const line = encodeQueued(body);
-  link.sender.push(key, { line, size: Buffer.byteLength(line) });
+  const size = Buffer.byteLength(line);
+  // Ahead of it: what is queued or unacked on this link (counters, no scan); fairness may send it before some of that.
+  const sample = { at: Date.now(), t: performance.now(), bytes: size, bytesAhead: link.outboxBytes + link.sender.queuedBytes, session: sessionOf(link, body) };
+  link.sender.push(key, { line, size, sample });
   flush(link);
+}
+
+/** The session a downlink message serves: a session op's `id`, else its channel's child's; null for host ops. */
+function sessionOf(link: Link, body: Unsequenced<DownMessage>): string | null {
+  if (body.type !== "req") return "ch" in body ? link.channels.get(body.ch)?.session ?? null : null;
+  return isRecord(body.args) && typeof body.args.id === "string" && isValidSessionId(body.args.id) ? body.args.id : null;
+}
+
+/** Batch link samples: written at LINK_LIMITS.statsSamples, after statsFlushMs, or when the hub stops. */
+function recordLinkSamples(samples: Record<string, unknown>[]): void {
+  const batch = hub().linkSamples;
+  for (const sample of samples) {
+    if (batch.samples.length === 0) {
+      batch.file = transportMetricsPath();
+      batch.timer = setTimeout(flushLinkSamples, LINK_LIMITS.statsFlushMs);
+      batch.timer.unref?.();
+    }
+    batch.samples.push(sample);
+    if (batch.samples.length >= LINK_LIMITS.statsSamples) flushLinkSamples();
+  }
+}
+
+/** Write the batch now. Measurement only: a failed write is logged and dropped, never touches a link. */
+export function flushLinkSamples(): void {
+  const batch = hub().linkSamples;
+  clearTimeout(batch.timer);
+  batch.timer = undefined;
+  if (batch.samples.length === 0) return;
+  try {
+    appendTransportSamples(batch.samples.splice(0), null, batch.file);
+  } catch (error) {
+    console.warn(`[omp-web] could not write host link samples: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** The daemon applied the downlink through `ack`: each message it acks now (a split one at its last part) becomes a
+ * `down` sample; the lines leave the outbox and the unacked window. `ackMs` is monotonic: a wall-clock step between
+ * queueing and ack does not show in it. */
+function ackDown(link: Link, ack: number): void {
+  const now = performance.now();
+  const samples: Record<string, unknown>[] = [];
+  const acked = link.outbox.ack(ack);
+  for (const { sample } of acked) {
+    if (sample) samples.push({ metric: "link", dir: "down", host: link.id, session: sample.session, bytes: sample.bytes, bytesAhead: sample.bytesAhead, ackMs: Math.max(0, Math.round(now - sample.t)), at: sample.at });
+  }
+  released(link, acked);
+  recordLinkSamples(samples);
+}
+
+/** `up` samples one link may write per statsFlushMs, in multiples of statsSamples (a daemon reports about one `stats`
+ * per window): a daemon cannot flood the shared metrics file. */
+const STATS_BUDGET_FACTOR = 8;
+
+/** Write the samples dropped past the link's budget as one `{dropped}` sample. */
+function recordDropped(link: Link): void {
+  const window = link.statsWindow;
+  if (window.dropped > 0) recordLinkSamples([{ metric: "link", dir: "up", host: link.id, dropped: window.dropped, at: Date.now() }]);
+  window.dropped = 0;
+}
+
+/** A daemon's `stats`: valid samples within the link's budget become `up` samples; the excess is dropped and written as
+ * one `{dropped}` sample when the next window starts, or when the link ends or the hub freezes. Malformed samples (already dropped by decodeUp) are logged once. */
+function applyStats(link: Link, message: Extract<UpMessage, { type: "stats" }>): void {
+  if (message.invalid && !link.statsWarned) {
+    link.statsWarned = true;
+    console.warn(`[omp-web] ${labelOf(link.id)}: dropped ${message.invalid} malformed link samples (not logged again for this host)`);
+  }
+  const window = link.statsWindow;
+  const now = performance.now();
+  if (now - window.start >= LINK_LIMITS.statsFlushMs) {
+    recordDropped(link);
+    Object.assign(window, { start: now, used: 0 });
+  }
+  const taken = message.samples.slice(0, Math.max(0, STATS_BUDGET_FACTOR * LINK_LIMITS.statsSamples - window.used));
+  window.used += taken.length;
+  window.dropped += message.samples.length - taken.length;
+  recordLinkSamples(taken.map((sample) => ({ ...sample, metric: "link", dir: "up", host: link.id })));
 }
 
 /** Fail an op for good: a `req` not yet acked is never resent, nor the rest of one going in parts (one already
@@ -283,6 +409,7 @@ function failAllOps(link: Link, error: () => Error): void {
 /** The socket is gone: ops in flight fail now rather than at their timeout. */
 function endSocket(link: Link): void {
   link.socket = null;
+  recordDropped(link);
   failAllOps(link, () => new HostOpError(503, "host_offline", `${labelOf(link.id)} is offline`));
 }
 
@@ -346,7 +473,12 @@ const stopping = () => json({ error: "omp-web is shutting down" }, 503);
  */
 export function freezeHostLinks(): void {
   hub().frozen = true;
-  for (const link of hub().links.values()) link.socket?.close(LINK_CLOSE.goingAway, "omp-web is restarting");
+  for (const link of hub().links.values()) {
+    recordDropped(link);
+    link.socket?.close(LINK_CLOSE.goingAway, "omp-web is restarting");
+  }
+  // The process exits next: keep what was measured.
+  flushLinkSamples();
 }
 
 /** GET /api/hosts/link: the daemon's WebSocket. The token is checked before the upgrade, so no unknown caller gets a
@@ -480,10 +612,15 @@ function openLink(link: Link, ws: LinkSocket, hello: Hello): void {
   // Every sequenced uplink message answers a downlink one, so a daemon that
   // has applied none (ack 0) has sent none: it is a fresh process whose
   // uplink numbering starts again at 1.
-  if (hello.ack <= 0) link.up = new SeqWindow();
+  if (hello.ack <= 0) {
+    link.up = new SeqWindow();
+    // Such a daemon is asked again and answers from byte 0: the pieces of the replaced socket would prefix its result. The
+    // same process (ack above 0) resends only the `res` of a result whose pieces already arrived.
+    for (const pending of link.pending.values()) Object.assign(pending, { blob: [], blobBytes: 0 });
+  }
   // After a restart of this server the daemon is ahead: number above its ack.
   link.downSeq = Math.max(link.downSeq, hello.ack);
-  link.outbox.ack(hello.ack);
+  released(link, link.outbox.ack(hello.ack));
   link.unknownLog.reset();
   // The version this link speaks: from 5 on, lines over pieceBytes go in parts.
   link.hostVersion = hello.v;
@@ -524,7 +661,12 @@ function onFrame(link: Link, ws: LinkSocket, data: string | Uint8Array): void {
     const pending = link.pending.get(result.id);
     if (pending) {
       pending.blobBytes += result.bytes.byteLength;
-      if (pending.blobBytes <= LINK_LIMITS.blobBytes) pending.blob.push(result.bytes);
+      if (pending.blobBytes <= LINK_LIMITS.blobBytes) {
+        pending.blob.push(result.bytes);
+        // The deadline is for silence: at one unacked window per round trip a valid 64 MiB result outlasts a fixed one.
+        // Only bytes the hub keeps count, so empty or surplus frames cannot hold an op open.
+        if (result.bytes.byteLength > 0) pending.timer.refresh();
+      }
     }
     // A v5 daemon counts its frames in flight by these answers, binary ones included.
     if ((link.hostVersion ?? 0) >= 5) enqueue(link, encodeLine({ type: "ack", ack: link.up.acked }));
@@ -532,15 +674,29 @@ function onFrame(link: Link, ws: LinkSocket, data: string | Uint8Array): void {
   }
   if (Buffer.byteLength(data) > LINK_LIMITS.uplinkBytes) return ws.close(LINK_CLOSE.tooBig, "Uplink frame too large");
   let messages: (UpMessage | UnknownMessage)[];
+  // The decoded line of each part that completes one.
+  const wholes = new Map<UpMessage | UnknownMessage, UpMessage | UnknownMessage>();
+  const parts = link.parts.clone();
   try {
-    // Decode the whole frame first: a frame with one bad line applies nothing.
-    messages = data.split("\n").filter(Boolean).map((line) => decodeUp(line));
+    // Decode the whole frame first, joined lines included: a frame with one bad line applies nothing. The parts go
+    // through a copy of the joiner, and applyUp's dedup is mirrored by a running high mark.
+    let high = link.up.acked;
+    messages = data.split("\n").filter(Boolean).map((line) => {
+      const message = decodeUp(line);
+      const seq = "seq" in message ? message.seq : null;
+      if (seq === null || seq <= high) return message;
+      high = seq;
+      const whole = message.type === "part" ? parts.add(message) : null;
+      if (whole !== null) wholes.set(message, decodeUp(whole));
+      return message;
+    });
   } catch {
     return ws.close(LINK_CLOSE.invalidData, "Malformed uplink frame");
   }
+  link.parts = parts;
   for (const message of messages) {
-    if (message.type === "ack") released(link, link.outbox.ack(message.ack));
-    else applyUp(link, message);
+    if (message.type === "ack") ackDown(link, message.ack);
+    else applyUp(link, message, wholes.get(message));
   }
   // One answer per frame, also to one with nothing sequenced in it: a v5 daemon counts its frames in flight by them.
   enqueue(link, encodeLine({ type: "ack", ack: link.up.acked }));
@@ -609,8 +765,9 @@ async function adopt(link: Link, child: RemoteRpcTransport, sessionId: string, c
   }
 }
 
-/** `joined`: a line whose `part`s were applied, so it gets no dedup of its own. */
-function applyUp(link: Link, message: UpMessage | UnknownMessage, joined = false): void {
+/** `whole`: for a `part` that completes a line, that line decoded. `joined`: that line itself, which gets no dedup of
+ * its own (its parts were deduped). */
+function applyUp(link: Link, message: UpMessage | UnknownMessage, whole?: UpMessage | UnknownMessage, joined = false): void {
   if (message.type === "ping") return enqueue(link, encodeLine({ type: "pong" }));
   if (message.type === "pong" || message.type === "hello" || message.type === "ack") return;
   if (message.type === "unknown") {
@@ -623,10 +780,8 @@ function applyUp(link: Link, message: UpMessage | UnknownMessage, joined = false
   // Already applied before a resend.
   if (!joined && !link.up.applied(message.seq)) return;
   switch (message.type) {
-    case "part": {
-      const line = joined ? null : link.parts.add(message);
-      return line === null ? undefined : applyUp(link, decodeUp(line), true);
-    }
+    case "part":
+      return whole ? applyUp(link, whole, undefined, true) : undefined;
     case "stdout":
       return link.channels.get(message.ch)?.deliverLine(message.line);
     case "stderr":
@@ -640,6 +795,8 @@ function applyUp(link: Link, message: UpMessage | UnknownMessage, joined = false
     }
     case "res":
       return settle(link, message);
+    case "stats":
+      return applyStats(link, message);
   }
 }
 
@@ -797,6 +954,8 @@ export class RemoteRpcTransport implements RpcTransport {
   }
   /** Set for a child of a previous run the daemon listed in `hello` (the session it runs); null for children this server spawned. */
   readonly sessionId: string | null;
+  /** The session the child last named in a get_state answer, else `sessionId`: tags its link samples. */
+  session: string | null;
   /** The daemon confirmed the spawn (or listed the channel); until then a `hello` without it is not a loss. */
   spawned = false;
   /** The daemon stopped listing this child: it died while the link was down. Set before the synthesized exit. */
@@ -820,6 +979,7 @@ export class RemoteRpcTransport implements RpcTransport {
     this.hostId = hostId;
     this.ch = ch;
     this.sessionId = sessionId;
+    this.session = sessionId;
   }
 
   write(line: string, callback: (error?: Error | null) => void): void {
@@ -880,6 +1040,7 @@ export class RemoteRpcTransport implements RpcTransport {
   }
 
   deliverLine(line: string): void {
+    if (line.includes('"get_state"')) this.noteSession(line);
     if (this.orphaned) return;
     if (this.lineListeners.length > 0) return notify(this.lineListeners, line);
     const bytes = this.holdable(line);
@@ -905,6 +1066,19 @@ export class RemoteRpcTransport implements RpcTransport {
     if (this.exitInfo) return;
     this.exitInfo = [code, signal];
     notify(this.exitListeners, code, signal);
+  }
+
+  private noteSession(line: string): void {
+    let frame: unknown;
+    try {
+      frame = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (isRecord(frame) && frame.type === "response" && frame.command === "get_state" && frame.success === true && isRecord(frame.data)) {
+      const { sessionId } = frame.data;
+      if (typeof sessionId === "string" && isValidSessionId(sessionId)) this.session = sessionId;
+    }
   }
 }
 

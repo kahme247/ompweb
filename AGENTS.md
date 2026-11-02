@@ -96,6 +96,8 @@ app/api/
   agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? }
   agent/[id]/route.ts             GET state | POST any RPC command
   events/route.ts                 GET multiplexed SSE | POST subscribe/unsubscribe channels
+  events/link/route.ts            GET WebSocket upgrade: the browser link (lib/browser-link.ts), bound to the request's web session; gated like every API route, 426 without an upgrade
+  transport-metrics/route.ts      GET { now } (the SSE clock probe) | POST { samples } → <agent dir>/omp-web/transport-metrics.jsonl
   hosts/route.ts                  GET hosts (this machine first) | POST { label } → token once + login command | PATCH { id, label?, allowAgentStart? } (`local`: label only, empty resets to "This machine") | DELETE ?id= revoke (registry first, then close the link); 503 if hosts.json is unreadable
   hosts/link/route.ts             GET WebSocket upgrade (the `ompweb host` daemon; bearer checked before the upgrade, skipped by the `proxy.ts` gate) | POST 426 for pre-WebSocket daemons
   notifications/devices/route.ts  GET VAPID key + subscribed | PUT { deviceId, prefs, subscription? }
@@ -113,7 +115,7 @@ app/api/
   models-config/route.ts          GET/PUT — read/write ~/.omp/agent/models.yml
   models-config/test/route.ts     POST test a configured model/provider
   omp-settings/route.ts           GET/PUT native config.yml settings (allow-listed)
-  web-settings/route.ts           GET/PUT omp-web's own server settings (auto-resume)
+  web-settings/route.ts           GET/PUT omp-web's own server settings (auto-resume, agent tools, agent env, browser transport; a transport change is pushed to every open browser)
   mcp/route.ts                    GET/POST/PUT/DELETE project MCP servers
   plugins/route.ts                GET/POST plugin management (shells out to `omp plugin`)
   projects/route.ts               GET registered+discovered projects | POST add | DELETE hide
@@ -143,11 +145,14 @@ lib/
     registry.ts        `<agent dir>/omp-web/hosts.json`: create/update/revoke, token hashing and lookup; the `local` record (`rotateLocalHostToken`, `customLocalLabel`)
     session-index.ts   sessions and projects across hosts, cached per host; `hostForSessionId`, `sessionSpawnTarget`, `invalidateLocalSessionLists`
   provider-accounts.ts distinct omp accounts per provider from `omp usage` reports (Models → provider detail)
-  agent-client.ts      typed fetch helper for /api/agent commands
+  agent-client.ts      agent commands from the tab: POST /api/agent/[id], or the worker's browser link in the `ws` transport; records each command's `action` sample
+  agent-command.ts     `runAgentCommand`: the one command path behind POST /api/agent/[id] and a browser link's `cmd`
+  browser-link.ts      `/api/events/link`: Bun `websocket` handler for the browser link (sequencing, pieces, resume, `(session, rid)` dedupe)
   btw.ts               /btw side-question records + pure frame/snapshot merge (order-safe)
   draft-store.ts       local draft persistence helpers
   event-stream.ts      tab-side EventSource-shaped streams over the shared worker
-  event-stream-hub.ts  server connections + running/session/file channels for /api/events
+  event-stream-worker.ts  the shared worker: the one EventSource or browser link per browser (bundled by server/client-env.ts)
+  event-stream-hub.ts  server connections + running/session/file channels for /api/events (SSE) and the browser link (`FrameSink`); `broadcastBrowserTransport`
   event-stream-protocol.ts  wire contract shared by hub, route, and facade
   file-access.ts       allowed file roots for /api/files and worktrees
   file-authorization.ts  single allow-list gate for /api/files and the file channel
@@ -176,6 +181,7 @@ lib/
   web-auth-secret.ts   per-installation session-signing key (~/.omp/agent/omp-web/web-auth-secret.json)
   web-password-hash.ts typed view of bin/omp-web-password-hash.js (the scrypt hash format)
   web-settings.ts      omp-web server settings (~/.omp/agent/omp-web-settings.json)
+  transport-metrics.ts transport samples → `<agent dir>/omp-web/transport-metrics.jsonl` (renamed to `.jsonl.1` above 20 MiB)
   skills-service.ts    skill listing via `omp skill list --json`; pure-Node replica scan as fallback
   tool-presets.ts      PRESET_NONE/DEFAULT/FULL + getToolNamesForPreset()
   types.ts             shared TypeScript types
@@ -236,6 +242,8 @@ scripts/
   build-client.ts     `npm run build`: bundles app/index.html into dist/ (Bun.build + tailwind-plugin.ts; fonts emitted as /assets files)
   tailwind-plugin.ts  bun-plugin-tailwind minus Tailwind's color-mix() polyfill (Bun 1.4.4 drops repeated @supports rules); build and dev
   smoke.ts            `npm run smoke`: starts the built server (or `--binary <path>`) and `ompweb host` with a throwaway HOME; checks the SPA, an asset, the API, a session listed through the daemon and SSE
+  transport-metrics.ts `bun scripts/transport-metrics.ts [--since 2h|<ISO>] [--until <ISO>] [--client <id>] [--session <id>] [--file <path>]`: per-transport summary of the browser transport samples and per host and direction of the host link samples (`--session`: link samples of one session; default: the last 24 h of the agent dir's file)
+  link-hol-probe.ts   `bun scripts/link-hol-probe.ts --host <id> --model <provider/modelId>`: head-of-line load on one host link (large prompts down, large session reads up, get_state beside them) for the link samples; usage at its top
   build-binary.ts     `npm run build:binary`: compiles server/binary.ts (NODE_ENV define, no .env/bunfig autoload) into release/ompweb-<os>-<arch>/ beside dist/, public/, the KaTeX files, the session-edit extension and the licenses; archives it
   build-release-binaries.sh  the five release targets (one list), run by publish.yml and prerelease.yml (a prerelease per verified `main` commit, titled by build time; one concurrency group per commit, so no commit's run is dropped)
   licenses.ts         the release's `licenses/`: license files of every npm package the server and client bundles hold (Bun.build metafiles; build-client.ts writes build/client-packages.json) and `bun-LICENSE-<version>.md`, the vendored license of the embedded Bun runtime. Bumping Bun: vendor its LICENSE.md for the new version, or build-binary.ts stops
@@ -256,7 +264,7 @@ bunfig.toml           Bun dev-server bundling: tailwind plugin and the OMP_WEB_P
 The table is static imports, not a runtime glob, so `bun build --compile` (`scripts/build-binary.ts`) bundles every handler. `dispatch` answers HEAD from `GET`, OPTIONS and a missing method (405 with `allow`), passes `params` as a promise (plus `disableIdleTimeout`, below), and turns a throw into a 500 JSON body.
 
 ### Bun server (`server/`)
-- Bun's 10 s `idleTimeout` stays on: it reaps sockets that stall before or during a request, and it also cuts a handler still working after 10 s. So `handle` (`server/app.ts`) calls `server.timeout(request, 0)` for an `/api/` request that `proxy()` reports as `"authenticated"` (never `"public"`) and puts the 10 s back once the handler returns or throws: the setting outlives the response on a keep-alive socket. A handler whose response stays open without traffic (SSE `/api/events`, the login SSE, the clone/search/bash-output/file streams) calls `disableIdleTimeout` from the route context (`dispatch`, `server/routes.ts`) to keep it off until that stream ends or is cancelled; a new stream must do the same, or it is cut after 10 s idle. The host link is no longer an idle-lift stream: it is a WebSocket, and an upgraded socket is outside the HTTP idle timeout. `server/app.ts` passes `upgrade` in the route context (`server.upgrade(request, { data })`) and `Bun.serve({ websocket: hostLinkSocket })`; a handler that upgraded returns `undefined`, which `dispatch` and `handle` pass through without `finalizeResponse` or the idle-timeout restore. `maxRequestBodySize` is left at Bun's 128 MiB default, above the 101 MB upload cap; do not lower it.
+- Bun's 10 s `idleTimeout` stays on: it reaps sockets that stall before or during a request, and it also cuts a handler still working after 10 s. So `handle` (`server/app.ts`) calls `server.timeout(request, 0)` for an `/api/` request that `proxy()` reports as `"authenticated"` (never `"public"`) and puts the 10 s back once the handler returns or throws: the setting outlives the response on a keep-alive socket. A handler whose response stays open without traffic (SSE `/api/events`, the login SSE, the clone/search/bash-output/file streams) calls `disableIdleTimeout` from the route context (`dispatch`, `server/routes.ts`) to keep it off until that stream ends or is cancelled; a new stream must do the same, or it is cut after 10 s idle. The host link is no longer an idle-lift stream: it is a WebSocket, and an upgraded socket is outside the HTTP idle timeout (so is the browser link, `/api/events/link`). `server/app.ts` passes `upgrade` in the route context (`server.upgrade(request, { data })`) and one `websocket` handler: a socket whose `ws.data.kind` is `"browser"` goes to `browserLink` (`lib/browser-link.ts`, with the close code: 1000/1001 end the link, anything else keeps it for a resume), any other to `hostLinkSocket`. Bun's WebSocket limits (`maxPayloadLength`, `backpressureLimit`, `idleTimeout`) are per server, so browser links share the host link's; `browserLink` caps its own frames at a piece (256 KiB). A handler that upgraded returns `undefined`, which `dispatch` and `handle` pass through without `finalizeResponse` or the idle-timeout restore. `maxRequestBodySize` is left at Bun's 128 MiB default, above the 101 MB upload cap; do not lower it.
 - Bun's router matches the **raw** path, while `request.url` is normalized (`..` and `%2e%2e` resolved). The gate and handlers read `request.url`, so each route re-matches the normalized path against its own `URLPattern` after the gate and answers 404 if it no longer matches. Never serve a gated route under an ungated path.
 - Redirects carry a relative `Location` (`request.url` is always `http://` under Bun, so an absolute URL would leave https behind a TLS proxy).
 - `Response.redirect()` headers are immutable; `finalizeResponse` (`server/http.ts`) copies every answer into a fresh `Response` to set the security headers and gzip. Do not mutate a handler's response headers elsewhere.
@@ -272,8 +280,9 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
 - `readSttConfig` lives in server-only `lib/stt-jobs.ts`; the browser bundle must never import it.
 - Browser code must not import `next/*`: use `lib/dynamic.tsx` and `lib/navigation.ts`.
 
-### Tests (`bun test`)
-- DOM tests import `tests/setup-dom.mjs` first and then import Testing Library dynamically, so its queries bind to that document. `bun test --parallel` gives every file a fresh global; nothing is torn down.
+### Tests (`npm test`, or `bun test --parallel`)
+- `--parallel` is required, not just faster: Bun gives each file a fresh global/module registry. The transport singleton (`lib/event-stream.ts`) and each file's `SharedWorker`/fetch/DOM fakes otherwise leak into the next file; a shared-process run can send commands to another file's fake worker. These fixtures are deliberately file-isolated rather than reset between files. Use `--parallel` even for a multi-file subset.
+- DOM tests import `tests/setup-dom.mjs` first and then import Testing Library dynamically, so its queries bind to that document. Nothing is torn down.
 - A module under test that must see a fake builtin is imported with a fresh query (`?fresh=N`) after `mockBuiltin(t, name, overrides)` (`tests/mock-builtin.mjs`, built on `mock.module`; Bun's `mock.restore()` does not undo `mock.module`, so the helper restores by hand).
 
 ### RPC session lifecycle (`lib/rpc-manager.ts`)
@@ -371,6 +380,25 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   4426 version (`LINK_CLOSE`). Wire shapes and size limits live in
   `lib/hosts/link-protocol.ts` (one op allow-list, `HOST_OP_NAMES`, shared by
   both sides); the summary spec is `docs/specs/2026-10-28-remote-hosts-design.md`.
+- **Link head-of-line samples** (`metric: "link"` in `<agent dir>/omp-web/transport-metrics.jsonl`, measurement
+  only). Each side samples every sequenced message once, when it is queued: time, UTF-8 size, session (a session
+  op's `id`, else the channel's child as its `get_state` answers name it) and `bytesAhead`, the bytes queued or
+  unacked on that link then (`LinkSender.queuedBytes` plus an unacked counter, never a scan; a queued line counts at
+  its size before its seq is filled in, up to 15 bytes over). The sample is made when the message is acked: a line
+  sent in parts at its last part, with the joined size; a `res` counts its result bytes as its own. The hub writes
+  its `down` samples; the daemon reports its `up` ones in sequenced `stats` messages of at most
+  `LINK_LIMITS.statsSamples`, queued under their own sender key (fair and inside the unacked window like any
+  message). The samples are advisory: the hub keeps the valid ones, drops a malformed one (logged once per host) without
+  failing the frame, and writes at most 8 × `statsSamples` `up` samples per host per `statsFlushMs` (the excess is
+  written as one `{dropped}` record when the next window starts, or when the link ends or the hub freezes). `ackMs` is monotonic (`performance.now()`) on both
+  sides, `at` the wall clock. Both sides batch (`statsSamples` or `statsFlushMs`, 30 s): the hub's batch lives in its
+  `globalThis` state, resolves its file when it starts and is written in `freezeHostLinks`; the daemon queues what it
+  holds when it stops (best effort). Tests that drive the hub call
+  `flushLinkSamples()` before they restore `PI_CODING_AGENT_DIR`. `ackMs` is a round trip: a v5 daemon acks the
+  downlink within `flushMs` (an ack-only frame if need be) and the hub's ack rides the downlink.
+  `bun scripts/link-hol-probe.ts` makes the load; `scripts/transport-metrics.ts` prints `link small ackMs` (`clear`
+  vs `behind-large`, 64 KiB ahead), `link bytesAhead` and `link dropped` per host and direction (`--session` for one
+  session's link samples).
 - **Link protocol versions** (spec "Protocol versions and compatibility"). A
   released `LINK_PROTOCOL_VERSION` changes only compatibly: an added optional
   field or a message type receivers skip is fine; a changed type or meaning, or
@@ -382,7 +410,10 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   `part`, whole lines and no unacked window (`link.sender.parts`). Main keeps at least N-1, and
   dropping one is an explicit decision (a hello
   outside the range gets close 4426 with `{"serverVersion":N}`, a pre-WebSocket
-  daemon's POST gets 426; an update-only mode is planned). Upgrade order: web app
+  daemon's POST gets 426). Once the WebSocket experiments end, the first version
+  released after them is a floor: the handshake, version report and an update op
+  keep working for every daemon on it or newer, and `MIN_LINK_PROTOCOL_VERSION`
+  never goes above it (spec, "Decided: backward compatibility"). Upgrade order: web app
   first, then hosts; a daemon need not support a newer main (a v5 daemon gets
   4426 from a v4 server and exits 1). A daemon dialing a pre-WebSocket server
   keeps redialing with a hint.
@@ -407,7 +438,9 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
 - **A failed op never runs later.** An op that times out (504) or whose
   downlink ends or host goes offline (503, at once, not at the 30 s timeout)
   drops its `req` from the outbox (`failOp` in `hub.ts`), so a delete the user
-  saw fail is never applied after a redial. `destroyAndWait` returns once the
+  saw fail is never applied after a redial. The 30 s op deadline counts silence:
+  each binary result frame restarts it, so a large result at a slow ack round
+  trip is no 504 (a timeout still drops the `req` as above). `destroyAndWait` returns once the
   session's host is offline (`untilHostDown`); the kill stays queued for the
   link. A wrapper therefore stays in the registry until its child really exits
   (a resume whose handshake failed is registered in the catch for this), so a
@@ -485,7 +518,7 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
 - **Local link bootstrap** (`lib/hosts/local-bootstrap.ts`, called from `instrumentation.node.ts`). `localLinkUrl()` builds the daemon's URL from `OMP_WEB_PORT`/`OMP_WEB_HOSTNAME` (set by `startProduction` from its listen address, so the launcher, the binary and `npm start` all link; wildcard binds map to `127.0.0.1`, a non-loopback bind gets no link and a console warning). `ensureLocalHostLink()` makes sure the `local` record exists (`registry.ts`, `rotateLocalHostToken`) and writes `<agent dir>/omp-web/host.json` (`{url, token}`, 0600). A `host.json` whose token the registry still accepts and whose url matches is left alone, so a web restart does not make the daemon redial. It throws, and startup only logs, when `host.json` points to a non-loopback server (a remote-host login on this machine): it is never overwritten. The daemon re-reads `host.json` when its link gets 401 and exits only if the file still holds the rejected token.
 - **Dev mode does not take the daemon.** With `NODE_ENV=development` `ensureLocalHostLink` is skipped, so the daemon stays linked to production and the dev server shows "This machine" offline. The local row of `GET /api/hosts` carries `daemonManaged: false` there, which hides the install banner.
 - **`local` is a registry record like any host**, with three exceptions: it is listed first, `PATCH` takes `label` only (`allowAgentStart` is fixed), and it cannot be revoked. Renaming "This machine" is a `PATCH /api/hosts {id: "local", label}`; an empty label resets it (`registry.ts` stores `""`; `customLocalLabel()` / `DEFAULT_LOCAL_LABEL` map it). `getHost("local")` works without the record: it is the daemon link, offline while none is linked, and "needs upgrade" on a protocol mismatch (`hostVersion` in the row is the daemon's).
-- **Adoption on hello** (`reattach`/`adopt` in `hub.ts`, `adoptRpcSession` in `rpc-manager.ts`). Each listed `{ch, sessionId, cwd, pending}` channel that has no transport on this server is a child of a previous server and is taken over by a new `AgentSessionWrapper` (`adopted: true`, `RpcProcess` option `adopted`). There is no session-list lookup: the spawn `cwd` comes from the hello, and the session identity from the child's own `get_state` (`applyIdentity`), so a new session whose file is not written yet is adoptable. The daemon names each child's current session in the hello (`PendingRequests.sessionId`: the file's header id at spawn, then the last successful `get_state`). Re-sync (`AgentSessionWrapper.adopt`): `negotiate_protocol`, `set_subagent_subscription`, `set_ask_dialog`, `get_state`, `get_subagents`, `get_btw_history`, then `replay` of the `pending` lines and `release` of the frames held meanwhile. Every command is bounded by `GET_STATE_TIMEOUT_MS`.
+- **Adoption on hello** (`reattach`/`adopt` in `hub.ts`, `adoptRpcSession` in `rpc-manager.ts`). Each listed `{ch, sessionId, cwd, pending}` channel that has no transport on this server is a child of a previous server and is taken over by a new `AgentSessionWrapper` (`adopted: true`, `RpcProcess` option `adopted`). There is no session-list lookup: the spawn `cwd` comes from the hello, and the session identity from the child's own `get_state` (`applyIdentity`), so a new session whose file is not written yet is adoptable. The daemon names each child's current session in the hello (`PendingRequests.sessionId`: the file's header id at spawn, then the last successful `get_state`). Re-sync (`AgentSessionWrapper.adopt`): `negotiate_protocol`, `set_subagent_subscription`, `set_ask_dialog`, `set_event_filter` (delta message updates, see "Streaming message updates"), `get_state`, `get_subagents`, `get_btw_history`, then `replay` of the `pending` lines and `release` of the frames held meanwhile. Every command is bounded by `GET_STATE_TIMEOUT_MS`.
 - **The daemon replays open blocking requests** (`pending-requests.ts`): `host_tool_call`, `host_uri_request` and blocking `extension_ui_request` lines, until answered or cancelled, capped at `LINK_LIMITS.pendingBytes` per channel. An adopted wrapper feeds them through `handleFrame` (`replaying`; agent tools are not re-run), so dialogs reappear and browser tool calls wait for the next tab (`hostToolsUnknown`, `parkHostTool`). A request opened while the old server stopped is also resent unacked: `RpcProcess.release` skips held requests the replay already delivered, so it is handled once. The hello also carries `autoApproveExtension`, which an adopted run has no spawn result for.
 - **A child is killed only when it cannot be adopted:** its hello entry has no session id or lost its `pending` lines to the cap (`killOrphan`), or a re-sync command times out or the child exits, its held output overflows, or its real session (after `get_state`) is already started on this server (`adoptRpcSession` kills it: its wrapper's dispose). Auto-resume (`resumeOnHostLink`) first awaits `adoptedChild()` and resumes a session only if it was not adopted.
 - **Shutdown freezes the links and never kills daemon children.** The `cleanup` in `rpc-manager.ts` runs `markShuttingDown()` and `freezeHostLinks()`: link sockets are closed 1001 and from then on a link neither sends nor applies anything (no kill, no rejection of open host tool calls as tabs close); new upgrades get 503 "omp-web is shutting down". A real SIGTERM exits in the same tick (`process.exit` in `instrumentation.node.ts`), before Bun writes the close frame, so daemons usually see 1006 or ECONNREFUSED rather than 1001 and redial the same way. The daemon keeps the output unacked and redials for the next server. An adoption that fails after the freeze leaves its child to the next server instead of killing it.
@@ -559,7 +592,9 @@ wait for that commit:
   the switch to do anything. The fold row is the expand affordance, so a hidden
   tool call is one click away rather than gone.
 - `tool_execution_update` is coalesced per tool call at display rate in
-  `lib/message-update-coalescer.ts` (chatty commands emit ~10-100+ frames/s).
+  `lib/message-update-coalescer.ts` (chatty commands emit ~10-100+ frames/s),
+  like `message_update` (which carries omp deltas, see "Streaming message
+  updates").
   `message_end` drops the pending `message_update` (the committed message
   supersedes it) but must NOT drop buffered tool updates.
 - Live entries are cleared on `agent_start`, terminal `agent_end`, prompt
@@ -594,6 +629,56 @@ wait for that commit:
   applies EXIF orientation, and cached next to the copies; full image if the
   bytes do not decode) and opens the full
   image in the lightbox. The route serves only PNG/JPEG/GIF/WebP by magic bytes.
+
+### Streaming message updates (omp deltas)
+A full `message_update` carries the whole message twice (`message` and
+`assistantMessageEvent.partial`), 7-11 KB per frame at several frames per
+second. omp >= 18.13.2 sends rebuildable deltas instead, and omp-web uses them
+end to end:
+- Every session start (spawn, restart, adoption) sends `set_event_filter`
+  `{ events: null, messageUpdates: "delta" }`. omp accepts the option since
+  18.4.5 and sends rebuildable deltas (with block shells) since 18.13.2; an omp
+  that rejects or ignores it keeps full updates, which every consumer below
+  still handles (a frame is a delta when its `message` has no `content`). The
+  reply is not read: the first delta that does not fit tells.
+- `lib/message-delta.ts` is the one reducer, shared by server and browser: a
+  `*_start` carries the opened block, `*_delta` appends at `contentIndex`,
+  `*_end` carries the final block, `start` restarts from a whole message.
+  `toolcall_delta` text accumulates in the block's `partialJson`; the arguments
+  are parsed from it only for display and snapshots (`withStreamedArguments`,
+  read as omp's `parseStreamingJson` does). It returns null for anything it
+  cannot place, and nobody renders a guess. `message_end` stays authoritative
+  (omp adds `intent` there; block kinds with no start event arrive only there).
+- The wrapper (`rpc-manager.ts`) keeps each open assistant message by
+  `messageId` and rebuilds it. Only `message_start` and a rebuilt delta set that
+  base: a full update drops it (its tool calls have no streamed JSON, and its
+  snapshot can be ahead of the next delta). `getStreamSnapshot()` (HTTP catch-up) carries it
+  with `streamingMessageId`, and `onEvent` replays it as one whole
+  `message_update` to a tab that attaches mid-message, before any later delta.
+- No base (adopted child after a server restart, frames lost on the host link —
+  `reconcileAfterGap` drops every base): the delta is not forwarded and the
+  wrapper switches omp to full updates until that assistant message ends (or the
+  run ends), then back to deltas. A delta that does not fit a message the
+  wrapper does have (an omp from 18.4.5 to 18.13.1 sends no block shells), or a
+  `set_event_filter` switch that fails, leaves the session on full updates for
+  good; after a failed switch the next lost delta asks for full updates again.
+- Backpressure (`event-stream-hub.ts`, SSE and WebSocket sinks): a behind socket
+  queues `message_update` frames; consecutive deltas of one block concatenate,
+  a whole message replaces the queued updates of its message, and nothing is
+  dropped or reordered. Merged frames keep the latest frame's sequence and emit
+  time and carry `web.first`, their first piece's sequence. Deltas of different
+  blocks never merge past each other: that would break the sequence order.
+- Browser (`lib/message-update-coalescer.ts`): applies each delta on arrival and
+  dispatches the whole message at display rate, so `useAgentSession` only ever
+  sees whole messages. A delta with no base is held and triggers a catch-up; the
+  HTTP live snapshot (`seed`) re-bases the coalescer whenever it is applied, and
+  otherwise completes held deltas newer than it when it is not older than them.
+  At most 1000 deltas are held; past that they are dropped, and only a snapshot
+  that covers them takes the deltas held afterwards.
+  A snapshot at S already holds delta S, so catch-up drops that frame as stale
+  (`useAgentSession-sync.ts`); a merged frame with `web.first <= S < sequence`
+  is held for the next snapshot instead of applied. Streamed tool arguments are
+  re-parsed for display only after 2 KB more JSON or 100 ms.
 
 ### Event protocol differences vs pi
 omp emits no `prompt_done` / `prompt_error` / `compaction_start` /
@@ -646,12 +731,14 @@ during the wait.
   SSE response pins one for its lifetime. Per-stream SSE (sidebar + host
   tools + chat + file watch per tab) froze everything after ~2 tabs, so
   **never add a new `EventSource`** for live data: add a channel instead.
-- `public/event-stream-worker.js` (plain script, SharedWorker; dedicated
-  Worker where SharedWorker is missing) holds the only `/api/events`
-  EventSource and multiplexes every tab's subscriptions: frames arrive as
-  `event: <subId>`, control frames as `event: mux` (`hello`/`open`/`end`).
-  Subscriptions are attached with `POST /api/events`. Its URL carries a
-  content hash (`server/client-env.ts`) so a changed worker never serves stale tabs.
+- `lib/event-stream-worker.ts` (SharedWorker; dedicated Worker where
+  SharedWorker is missing) holds the browser's one connection: by default the browser link below, one WebSocket;
+  the only `/api/events` EventSource is the fallback (a stored `sse` setting, or a proxy that refuses the upgrade). It multiplexes every tab's subscriptions:
+  frames arrive as `event: <subId>`, control frames as `event: mux`
+  (`hello`/`open`/`end`). Subscriptions are attached with `POST /api/events`.
+  `buildEventStreamWorker` (`server/client-env.ts`) bundles it into one classic
+  script (`dist/event-stream-worker.js`; the dev server serves it from memory),
+  and its URL carries the bundle's content hash so a changed worker never serves stale tabs.
 - Tabs use `openEventStream(channel)` (`lib/event-stream.ts`), which keeps
   EventSource semantics: `onerror` + CONNECTING = reconnecting on its own,
   CLOSED = fatal (e.g. 409 for a wrapper-less session; the chat hook then
@@ -662,14 +749,88 @@ during the wait.
   notifications, keyed by its `clientId`), `hosts` (the `GET /api/hosts` body on
   subscribe and on every link or registry change), `host-tools` (cross-session
   `open_url`/`notify`/`open_file` calls), `session` (observer-only, never
-  spawns omp; keeps the latest-wins `message_update` coalescing under
-  backpressure), `file` (viewer watch, same allow-list as `/api/files`). A
+  spawns omp; queues and merges `message_update` frames under backpressure,
+  see "Streaming message updates"), `file` (viewer watch, same allow-list as `/api/files`). A
   failing frame ends only its own subscription, never the shared socket.
 - Split channels by consumer, lifetime, key and access check, not by which
   stream happens to be open: a subscription costs one `POST`, not a socket, so
   never piggyback a frame type on another consumer's channel. `notifications`
   and `host-tools` are subscribed from `AppShell`, so they outlive the sidebar
   (which unmounts while Settings is open).
+- **Browser link** (`browserTransport: "ws"`; `docs/specs/2026-11-01-browser-link-design.md`). The server's
+  setting (`omp-web-settings.json`, `lib/web-settings.ts`; `"ws"` default, any other stored value except `"sse"`, the
+  old `ws-*` experiment modes included, reads as `"ws"`) picks the worker's connection. With `sse` everything
+  above holds and the worker opens no WebSocket. Switch it in Settings → Interface & Behavior → "Browser
+  connection" or with `PUT /api/web-settings {"browserTransport":"ws"|"sse"}`; a change
+  broadcasts a `transport` control frame on every connection and every `hello` carries it. From a shell
+  (production on 127.0.0.1:30185, the trusted header from the pr-watcher env file; no `Origin`, so no
+  origin check):
+  ```bash
+  curl -sS -X PUT http://127.0.0.1:30185/api/web-settings \
+    -H "x-omp-web-auth: $(sed -n 's/^OMP_WEB_TRUSTED_HEADER_SECRET=//p' /opt/omp-deployment/pr-watcher.env)" \
+    -H 'content-type: application/json' -d '{"browserTransport":"ws"}'
+  ```
+  - **One WebSocket per browser** at `GET /api/events/link` (`lib/browser-link.ts`), gated like every API
+    route, carries every subscription and every agent command and reply. Reconcile polls, `POST
+    /api/agent/new`, files, settings and the metrics POST stay HTTP.
+  - **The host link's delivery, reused** from `lib/hosts/link-protocol.ts`: sequenced lines both ways
+    (`LinkSender`, `SeqWindow`, `Outbox`), acked and resent after a reconnect; lines over 256 KiB as `part`s
+    (`PartJoiner`); per-key queues served round-robin (a subscription's frames, a session's commands or
+    replies, `mux`); a session's commands stay in order, so Stop never overtakes the prompt it stops. The
+    server keeps at most about 1 s of the measured ack rate unacked below the socket (64 KiB to 512 KiB,
+    `measure` in `lib/browser-link.ts`; only a stretch where the window or the socket's backpressure held lines back resizes it), the
+    worker at most 512 KiB. `welcome`/`ack`/`ping`/`pong` skip the queues. So a command's reply waits behind
+    about a second of the link plus a piece per busy key, never behind a snapshot. The pacing loops
+    are the browser link's own copies: the server's mirrors the hub's (`send` → `-1` → `drain`), the
+    worker's the daemon's (`bufferedAmount` under 2 pieces); a fix to either original must be carried over
+    (`lib/browser-link.integration.test.mjs` runs the real worker against the real server end). A socket
+    that has not said hello within 10 s is closed 1008.
+  - **Liveness is ping/pong only**: the server pings every 15 s, each side drops a socket after 30 s
+    without any frame. A command waiting for its reply never redials. Wakes: `online` and a network
+    change redial at once and reset the dial backoff to 1 s (the first dial as a network returns often
+    fails), `visible` pings and redials a socket silent for 3 s.
+  - **Resume.** The link outlives its socket for 2 min (`LINK_RESUME_MS`): the worker's `hello` carries
+    its token and `ack`, the server (same web session only: SHA-256 of the session cookie, else
+    `trusted`/`open`) reattaches and both sides resend what the other missed. Subscriptions stay open on
+    the server, so the tabs see nothing: no `error`, no second `open`, no snapshot. While the socket is
+    gone or lines wait for the window, `message_update`s merge (`queueUpdate`) and go on the next ack. A socket that holds unacked bytes and gets no ack for 120 s (`ackMs`; pings do not count) is closed: its link detaches, resumable, and falls under the total budget. A link slower than about 17 kbit/s cannot finish a 256 KiB piece before that deadline.
+  - **Resync** when the gap is gone (2 min passed, the backlog passed 32 MiB and the socket closed 4410,
+    all links together passed 256 MiB and this one's socket was gone longest, or the server restarted):
+    `welcome {resumed: false}`, both sides start over, every stream gets CONNECTING and subscribes again
+    (fresh snapshots, as an SSE reconnect). Sent commands go again (same `rid`) when idempotent
+    (`isIdempotentCommand`: `get_*`, `predict_word`, `predict_word_feedback`, `set_host_tools`,
+    `set_host_uri_schemes`; never `abort`; the server does not remember those) or when the
+    server is the same and their first send was within `COMMAND_DEDUPE_MS` (10 min; the server's
+    `(session, rid)` dedupe answers a repeat with `deduped: true`), else 503 `transport_lost`
+    (`TransportLostError`). A command with no link for 15 s answers 503 `transport_unavailable`. A worker
+    done with its link closes it 1000 (the server drops it at once); 4000 is its own redial.
+    The server answers a command whose JSON is over the route's 8 MiB body cap (UTF-8 bytes; the worker
+    checks first, the server again for a joined line, whose cap leaves room for the envelope) 413
+    `request_too_large`, and a command that changes something 429 `too_many_commands` while `DEDUPE_MAX`
+    (500) remembered ones are all still inside `COMMAND_DEDUPE_MS`: neither runs, neither is remembered.
+  - **Fallback.** A socket that closes before it opens gets a plain `GET /api/events/link`: offline, 401,
+    502, 503 or 504 redial. Any other answer (426: a proxy that drops Upgrade, but also a healthy server's
+    answer to a dial that failed as the network came back) is a refusal: 3 in a row, with no open between
+    and none while `navigator.onLine` is false, put this worker on SSE for 5 min. Close 4426 (another link
+    version) falls back at once.
+  - **One command path.** `runAgentCommand` (`lib/agent-command.ts`) is what `POST /api/agent/[id]` runs
+    after parsing and what a link `cmd` runs, so both answer identically. Command logic goes there.
+  - **Metrics** (both transports). Tabs and the worker record `action`, `event`, `reconnect` (with
+    `resumed` on the link), `hang` (HTTP only) and `dropped` samples tagged `transport` (`sse`/`ws`),
+    `socket`/`conn` (`sse`, `link`, `http`, `worker`) and `sockets`; the worker POSTs them to
+    `/api/transport-metrics` every 30 s or 200 samples (a probe not answered within 10 s is abandoned, a POST within 10 s plus its body at 2 KB/s; a failed POST keeps its samples, so a timeout after the server processed it can duplicate them). The route appends JSONL to `<agent
+    dir>/omp-web/transport-metrics.jsonl` (`.jsonl.1` above 20 MiB). One worker-wide clock (the
+    lowest-RTT of the last 20 link pings and SSE probes, at most 5 min old) times every sample.
+    `bun scripts/transport-metrics.ts --since 2h` prints the per-transport summary (also `--until`,
+    `--client`, `--file`).
+  - **Worker rules.** Browser code: no `AbortSignal.timeout`/`any` or `Promise.withResolvers` (a test checks
+    the bundle). Every global the worker uses must be injectable into the `vm` context of
+    `lib/event-stream-worker.test.mjs`. The link URL is absolute (`new URL(path, self.location.href)`,
+    `http`→`ws`). Ids are `Math.random().toString(36).slice(2, 12) + Date.now().toString(36)`: insecure LAN
+    origins have no `crypto.randomUUID`.
+  - **Limits:** a socket stays authorized after logout until it closes; Bun buffers a browser frame up to the host
+    link's 64 MiB `maxPayloadLength` (per server) before the handler refuses it; a notification routed to a tab whose
+    link then resyncs is not shown there.
 
 ### Running state + reconciliation
 - The sidebar subscribes to the `running` channel, backed by `subscribeRunningSessions()` in `lib/rpc-manager.ts`, so running badges update without polling.

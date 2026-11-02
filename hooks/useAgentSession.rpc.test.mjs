@@ -2,7 +2,7 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
 import React from "react";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mock } from "bun:test";
 const { act, cleanup, fireEvent, render, renderHook, within } = await import("@testing-library/react/pure.js");
 
@@ -58,7 +58,10 @@ class FakeStream {
   }
 }
 
-/** Speaks the tab<->worker protocol of public/event-stream-worker.js. */
+/** The port of the worker the tab's transport started; tests flip its transport. */
+let workerPort = null;
+
+/** Speaks the tab<->worker protocol of lib/event-stream-worker.ts. */
 class FakeSharedWorker {
   constructor() {
     const streams = new Map();
@@ -73,10 +76,23 @@ class FakeSharedWorker {
           if (!stream) return;
           stream.closedByCaller = true;
           stream.readyState = FakeStream.CLOSED;
+        } else if (message.op === "cmd") {
+          void answerCommand(this.port, message);
         }
       },
     };
+    workerPort = this.port;
   }
+}
+
+/** A command over the session socket: `world.socketAnswer` may answer it as the worker would (e.g. transport_lost), else the agent route does. */
+async function answerCommand(port, { n, sessionId, advisor, body }) {
+  let answer = world.socketAnswer?.(JSON.parse(body));
+  if (!answer) {
+    const res = await fetchStub(`/api/agent/${encodeURIComponent(sessionId)}${advisor ? "?advisor=1" : ""}`, { method: "POST", body });
+    answer = { status: res.status, body: await res.json() };
+  }
+  port.onmessage?.({ data: { cmd: n, recvAt: null, repliedAt: null, attempts: 1, deduped: false, behindBytes: 0, ...answer } });
 }
 
 function safeParse(text) {
@@ -5054,6 +5070,121 @@ test("a streaming-behavior prompt the dropped link may have delivered is reporte
   assert.deepEqual(toastCalls, [["info", translate("agentSession.hostOfflineMaybeSent", { detail: "Build box is offline" })]]);
 });
 
+// What the worker answers when the session socket dropped after sending a command (spec D5).
+const SOCKET_LOST = { error: "The connection to omp-web dropped before the answer arrived; the command may have run.", code: "transport_lost" };
+
+/** Runs a test with the worker in WebSocket mode, so agent commands go to it instead of fetch. */
+async function inWebSocketMode(run) {
+  const { openEventStream } = await import("@/lib/event-stream");
+  openEventStream({ kind: "running" }).close(); // the tab's transport exists before the hook mounts
+  workerPort.onmessage({ data: { transport: "ws" } });
+  try {
+    await run();
+  } finally {
+    workerPort.onmessage({ data: { transport: "sse" } });
+    world.socketAnswer = null;
+  }
+}
+
+test("a prompt whose session socket dropped before the answer toasts that it may have run and leaves no draft to restore", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    world.socketAnswer = (command) => command.type === "prompt" ? { status: 503, body: SOCKET_LOST } : null;
+    const w = await mountSession("socket-lost");
+    let receipt;
+    await act(async () => { receipt = w.latest.handleSend("maybe sent"); await sleep(30); });
+    await act(async () => { lastEs()?.open(); receipt = await receipt; });
+    w.unmount();
+    assert.notEqual(receipt.status, "rejected", "the composer must not bring the text back: it may run twice");
+    assert.equal(w.latest.agentRunning, false);
+    assert.deepEqual(toastCalls, [["info", translate("agentSession.transportLostMaybeSent")]]);
+    assert.equal(w.latest.notices.length, 0);
+    assert.equal(callsTo("POST", "/api/agent/socket-lost").some((call) => call.body?.type === "prompt"), false, "the prompt went over the socket");
+  });
+});
+
+test("a `!` command whose session socket dropped before the answer toasts that it may have run and stays out of the composer", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession("socket-lost-bash", [userMsg("u0", "q")]);
+    const offered = [];
+    const w = await mountSession("socket-lost-bash", undefined, { chatInputRef: { current: { insertIfEmpty: (text) => offered.push(text) } } });
+    world.socketAnswer = (command) => command.type === "bash" ? { status: 503, body: SOCKET_LOST } : null;
+    await act(async () => { await w.latest.handleSend("!touch /tmp/once"); await sleep(30); });
+    assert.deepEqual(offered, [], "the composer must not bring the command back: it may run twice");
+    assert.deepEqual(toastCalls, [["info", translate("agentSession.transportLostMaybeSent")]]);
+    assert.equal(w.latest.notices.length, 0);
+  });
+});
+
+test("a `!` command the route refused is offered back to the composer with an error notice", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession("socket-refused-bash", [userMsg("u0", "q")]);
+    const offered = [];
+    const w = await mountSession("socket-refused-bash", undefined, { chatInputRef: { current: { insertIfEmpty: (text) => offered.push(text) } } });
+    world.socketAnswer = (command) => command.type === "bash" ? { status: 400, body: { error: "Shell is busy" } } : null;
+    await act(async () => { await w.latest.handleSend("!touch /tmp/once"); await sleep(30); });
+    assert.deepEqual(offered, ["!touch /tmp/once"], "it never ran, so the composer gets it back");
+    assert.deepEqual(toastCalls, []);
+    assert.deepEqual(w.latest.notices.map((notice) => notice.type), ["error"]);
+  });
+});
+
+test("a steer whose session socket dropped before the answer is reported as taken", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession("socket-lost-steer", [userMsg("u0", "q")]);
+    const w = await mountSession("socket-lost-steer");
+    world.socketAnswer = (command) => command.type === "steer" ? { status: 503, body: SOCKET_LOST } : null;
+    let accepted;
+    await act(async () => { accepted = await w.latest.handleSteer("steer text"); await sleep(30); });
+    assert.equal(accepted, true, "the composer drops the text: it may run");
+    assert.deepEqual(toastCalls, [["info", translate("agentSession.transportLostMaybeSent")]]);
+    assert.equal(w.latest.notices.length, 0);
+  });
+});
+
+test("a get_state whose reply was lost before the prompt went out gives the draft back: no prompt ran", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession("socket-lost-state", [userMsg("u0", "q")]);
+    const w = await mountSession("socket-lost-state");
+    world.socketAnswer = (command) => command.type === "get_state" ? { status: 503, body: SOCKET_LOST } : null;
+    let receipt;
+    await act(async () => { receipt = await w.latest.handleSend("never sent"); await sleep(30); });
+    assert.deepEqual(receipt, { status: "rejected", recoveryKey: "socket-lost-state" });
+    assert.deepEqual(toastCalls, [], "no prompt was sent, so nothing may have been delivered");
+    assert.deepEqual(w.latest.notices.map((notice) => notice.type), ["error"]);
+    assert.equal(w.latest.agentRunning, false);
+    assert.equal(callsTo("POST", "/api/agent/socket-lost-state").some((call) => call.body?.type === "prompt"), false);
+  });
+});
+
+test("an interrupt-and-reply whose abort_and_prompt reply was lost is reported as taken and the text is not offered again", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession("socket-lost-interrupt", [userMsg("u0", "q")]);
+    const offered = [];
+    const { w, es } = await startRun("socket-lost-interrupt", "q1", false, { chatInputRef: { current: { insertIfEmpty: (text) => offered.push(text) } } });
+    await act(async () => { es.emit({ type: "agent_start" }); await Promise.resolve(); });
+    world.socketAnswer = (command) => command.type === "abort_and_prompt" ? { status: 503, body: SOCKET_LOST } : null;
+    let interrupt;
+    await act(async () => { interrupt = w.latest.handleInterruptAndReply("replacement"); await sleep(30); });
+    let accepted;
+    await act(async () => { lastEs().open(); accepted = await interrupt; });
+    assert.equal(accepted, true, "the replacement may be running: the composer drops the text");
+    assert.deepEqual(offered, [], "a resend would interrupt the replacement turn");
+    assert.deepEqual(toastCalls, [["info", translate("agentSession.transportLostMaybeSent")]]);
+  });
+});
+
 test("the hosts channel decides the offline banner; a frame only speaks before its first snapshot", async () => {
   resetWorld();
   primeSession("remote-banner", [userMsg("u0", "q")]);
@@ -5086,4 +5217,82 @@ test("the hosts channel decides the offline banner; a frame only speaks before i
   world.agents.set("remote-banner", { running: true, state: {} }); // a running chat attaches its stream on load
   const offlineChannel = await mount("offline");
   assert.ok(offlineChannel.queryByText(bannerText), "a chat opened during an outage shows the banner from the channel");
+});
+
+// omp's delta message updates (lib/message-delta.ts, lib/message-update-coalescer.ts).
+const recordedFrames = readFileSync(new URL("../tests/fixtures/omp-delta-stream.ndjson", import.meta.url), "utf8")
+  .trim().split("\n").map((line) => JSON.parse(line)).filter((frame) => frame.type !== "response");
+
+/** What omp's full mode sends for the same run, at each block end: the message as streamed so far. */
+function fullFramesOf(frames) {
+  const open = new Map();
+  const out = [];
+  for (const frame of frames) {
+    if (frame.type === "message_start") open.set(frame.messageId, structuredClone(frame.message));
+    if (frame.type !== "message_update") {
+      out.push(frame);
+      continue;
+    }
+    const message = open.get(frame.messageId);
+    const event = frame.assistantMessageEvent;
+    if (event.type === "text_end") message.content[event.contentIndex] = { ...event.block, text: event.content };
+    else if (event.type === "thinking_end") message.content[event.contentIndex] = { ...event.block, thinking: event.content };
+    else if (event.type === "toolcall_end") message.content[event.contentIndex] = event.toolCall;
+    else continue;
+    out.push({ type: "message_update", messageId: frame.messageId, message: structuredClone(message), assistantMessageEvent: { ...event, partial: message } });
+  }
+  return out;
+}
+
+async function streamRecorded(frames) {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  const { w, es } = await startRun("s1", recordedFrames[0].message.content[0].text);
+  await act(async () => { es.emit({ type: "agent_start" }); });
+  const shown = [];
+  let toolArguments;
+  for (const frame of frames) {
+    if (frame.type === "message_end" && frame.message.role === "assistant") {
+      await settle(90);
+      shown.push(structuredClone(w.latest.streamState.streamingMessage?.content));
+    }
+    await act(async () => { es.emit(frame); await Promise.resolve(); });
+    if (frame.assistantMessageEvent?.type === "toolcall_delta" && toolArguments === undefined) {
+      await settle(90);
+      toolArguments = structuredClone(w.latest.streamState.streamingMessage?.content[2]);
+    }
+  }
+  await settle(90);
+  return { shown, toolArguments, messages: structuredClone(w.latest.messages) };
+}
+
+test("a run streamed as omp's delta updates renders exactly what its full updates render", async () => {
+  const deltas = await streamRecorded(recordedFrames);
+  const full = await streamRecorded(fullFramesOf(recordedFrames));
+  assert.equal(deltas.shown.length, 2);
+  assert.deepEqual(deltas.shown, full.shown, "each reply as it stood before message_end");
+  assert.deepEqual(deltas.messages, full.messages, "the committed transcript");
+  assert.deepEqual(deltas.shown[0].map((block) => block.type), ["thinking", "text", "toolCall"]);
+  assert.equal(deltas.toolArguments.toolName, "read", "a streaming tool call shows its name from its first delta");
+  assert.deepEqual(deltas.toolArguments.input, { path: "note.txt" }, "and the arguments streamed so far");
+});
+
+test("deltas that reach a tab without their message wait for the server's snapshot, then apply on top of it", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  const { w, es } = await startRun("s1", "go");
+  await act(async () => { es.emit({ type: "agent_start" }); });
+  await settle(90);
+  world.agents.set("s1", { running: true, state: { isStreaming: true } });
+  const sequence = world.streams.get("s1").sequence;
+  world.live.set("s1", { ...liveSnapshot("s1", sequence, { role: "assistant", content: [{ type: "text", text: "hello" }] }), streamingMessageId: "msg-2" });
+  const syncs = callsTo("GET", "/api/sessions/s1/context").length;
+  const delta = (text) => ({ type: "message_update", messageId: "msg-2", message: { role: "assistant" }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: text } });
+  await act(async () => {
+    es.emit(delta(" there"));
+    es.emit(delta("!"));
+  });
+  await settle(150);
+  assert.ok(callsTo("GET", "/api/sessions/s1/context").length > syncs, "a delta without its message asks for the snapshot");
+  assert.equal(w.latest.streamState.streamingMessage?.content[0].text, "hello there!");
 });

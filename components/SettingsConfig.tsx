@@ -32,6 +32,7 @@ import {
   updateNotificationPrefs,
   type NotificationSupport,
 } from "@/lib/notification-client";
+import { BROWSER_TRANSPORTS, type BrowserTransport } from "@/lib/event-stream-protocol";
 const SettingsTabLoading = () => {
   const { t } = useI18n();
   return <div role="status" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>{t("settingsConfig.loadingSettings")}</div>;
@@ -172,6 +173,7 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { id: "touch-targets", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.touchTargets", descKey: "settingsConfig.touchTargetsDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Touch Targets", fallbackDesc: "Adjust interactive target sizes for buttons and toolbar controls.", scope: "UI" },
   { id: "message-during-active-run", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.messageDuringActiveRun", descKey: "settingsConfig.messageDuringActiveRunDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Message during active run", fallbackDesc: "What composer does on submit while agent runs. Steer interrupts; Queue follow-up delivers after finish.", scope: "UI" },
   { id: "word-completion", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.wordCompletion", descKey: "settingsConfig.wordCompletionDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Word completion", fallbackDesc: "Ghost text from omp's word prediction; Tab or → accepts. Auto enables it only with a mouse or trackpad (not on touch keyboards).", scope: "UI" },
+  { id: "browser-transport", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.browserTransport", descKey: "settingsConfig.browserTransportDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Browser connection", fallbackDesc: "How browsers receive live updates and send chat commands: one WebSocket that picks up where it left off after a dropped connection (the default), or server-sent events + HTTP. A browser whose proxy blocks WebSockets falls back to server-sent events on its own. Every open browser switches within a few seconds.", scope: "UI" },
   // Tool Safety & Approvals
   { id: "approval-mode", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.approvalMode", descKey: "settingsConfig.approvalModeDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Approval Mode", fallbackDesc: "Choose when OMP asks before tool calls.", scope: "Native OMP" },
   { id: "bash-override", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.bashOverride", descKey: "settingsConfig.bashOverrideDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Bash Override", fallbackDesc: "Override default approval policy specifically for terminal commands.", scope: "Native OMP" },
@@ -346,6 +348,65 @@ function AgentToolsSetting() {
   return (
     <NativeSetting searchId="agent-tools-cross-session" label={t("settingsConfig.agentTools")} description={t("settingsConfig.agentToolsDesc")}>
       <ToggleSwitch checked={enabled === true} disabled={enabled === null} onChange={(next) => void change(next)} />
+    </NativeSetting>
+  );
+}
+
+const BROWSER_TRANSPORT_LABELS: Record<BrowserTransport, string> = {
+  sse: "settingsConfig.browserTransportSse",
+  ws: "settingsConfig.browserTransportWs",
+};
+
+/** Server-side omp-web setting (lib/web-settings.ts): every open browser follows a save within a few seconds. */
+function BrowserTransportSetting() {
+  const { t } = useI18n();
+  const [transport, setTransport] = useState<BrowserTransport | null>(null);
+  // Blocks a second change until the save lands: two PUTs in flight could finish out of order and leave the older one saved.
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/web-settings")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { browserTransport?: BrowserTransport } | null) => {
+        if (alive) setTransport(data?.browserTransport ?? "ws");
+      })
+      .catch(() => { if (alive) setTransport("ws"); });
+    return () => { alive = false; };
+  }, []);
+  const change = async (next: BrowserTransport) => {
+    if (!transport) return;
+    const previous = transport;
+    setTransport(next);
+    setSaving(true);
+    try {
+      const res = await fetch("/api/web-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ browserTransport: next }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch (error) {
+      setTransport(previous);
+      toast.error(t("settingsConfig.browserTransportSaveFailed"), error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <NativeSetting searchId="browser-transport" label={t("settingsConfig.browserTransport")} description={t("settingsConfig.browserTransportDesc")} scope="UI">
+      <select
+        style={nativeSelectStyle}
+        value={transport ?? "ws"}
+        disabled={transport === null || saving}
+        onChange={(event) => {
+          const next = BROWSER_TRANSPORTS.find((mode) => mode === event.target.value);
+          if (next) void change(next);
+        }}
+      >
+        {BROWSER_TRANSPORTS.map((mode) => (
+          <option key={mode} value={mode} style={nativeOptionStyle}>{t(BROWSER_TRANSPORT_LABELS[mode])}</option>
+        ))}
+      </select>
     </NativeSetting>
   );
 }
@@ -1391,6 +1452,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                       <option value="off" style={nativeOptionStyle}>{t("settingsConfig.wordCompletionOff")}</option>
                     </select>
                   </NativeSetting>
+                  <BrowserTransportSetting />
                 </div>
               </div>
             )}
