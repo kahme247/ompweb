@@ -19,6 +19,7 @@
 //                 { op: "cmd", n, req, sessionId, advisor, body, type }  (an agent command; body: its JSON text, type: its type)
 //                 { op: "metric", sample }  (a transport sample of the tab's: tagged, buffered and POSTed here)
 //                 { op: "upload", id, host, name, type, blob }  (a file to upload over the link; blob: the File)
+//                 { op: "up_pause", id }  (stop this tab's upload; keep the host's staged bytes for Retry)
 //                 { op: "up_abort", id }
 // Worker -> tab:  { id, type: "open" }
 //                 { id, type: "message", data }   (raw JSON string)
@@ -1517,6 +1518,14 @@ function attach(port: Port): void {
       case "upload":
         addUpload(client, data);
         break;
+      case "up_pause": {
+        const upload = uploads.get(String(data.id));
+        if (upload?.client === client) {
+          dropUpload(upload);
+          linkIdle();
+        }
+        break;
+      }
       case "up_abort":
         abortUpload(String(data.id));
         break;

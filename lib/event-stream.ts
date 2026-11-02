@@ -170,6 +170,12 @@ class Transport {
     this.port.postMessage({ op: "up_abort", id });
   }
 
+  /** Stop the sender but retain the host's staged bytes for a later Retry. */
+  pauseUpload(id: string): void {
+    this.uploads.delete(id);
+    this.port.postMessage({ op: "up_pause", id });
+  }
+
   /** The worker script failed to load/run: fail every stream (fatal), so the
    * next openEventStream starts a fresh worker instead of hanging silently. */
   fail(): void {
@@ -306,7 +312,7 @@ export interface UploadHandle {
   id: string;
   /** Resolves once the host has every byte (synced); rejects with UploadFailedError, or a network error over HTTP. */
   promise: Promise<void>;
-  /** Stops it and has the server delete what the host staged; the promise then never settles (or rejects, over HTTP). */
+  /** Stops it, requests deletion of the staged file, and rejects a pending upload. */
   abort(): void;
 }
 
@@ -344,10 +350,11 @@ export function uploadFile(
   const controller = new AbortController();
   let viaLink = false;
   let link: Transport | null = null;
-  let highest = -1;
+  let highest = 0;
   let failures = 0;
   let outageAt: number | null = null;
   let waiting = false;
+  let expired = false;
   const progress = (received: number) => {
     // New bytes on the host end the outage: the next one starts its back-off and clock afresh.
     if (received > highest) {
@@ -363,20 +370,65 @@ export function uploadFile(
   };
   // One start: the transport is chosen anew each time (it may have changed while the upload waited).
   const attempt = () => new Promise<void>((resolve, reject) => {
+    const request = new AbortController();
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let deadline = outageAt === null ? null : outageAt + RESUME_GIVE_UP_MS;
+    const finish = (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      controller.signal.removeEventListener("abort", cancel);
+      if (error === undefined) resolve();
+      else reject(error);
+    };
+    const cancel = () => {
+      finish(new DOMException("The upload was cancelled", "AbortError"));
+      request.abort();
+    };
+    const expire = () => {
+      if (settled) return;
+      expired = true;
+      finish(new UploadFailedError(504, "upload_stalled", "The upload stopped making progress"));
+      request.abort();
+      if (viaLink) link?.pauseUpload(id);
+    };
+    const armDeadline = () => {
+      clearTimeout(timer);
+      if (deadline !== null) timer = setTimeout(expire, Math.max(0, deadline - Date.now()));
+    };
+    const report = (received: number): boolean => {
+      if (settled) return false;
+      // A suspended page can receive an ack before its overdue timer gets to run.
+      if (deadline !== null && Date.now() >= deadline) {
+        expire();
+        return false;
+      }
+      const advanced = received > highest;
+      progress(received);
+      if (advanced && deadline !== null) {
+        deadline = Date.now() + RESUME_GIVE_UP_MS;
+        armDeadline();
+      }
+      return true;
+    };
+    controller.signal.addEventListener("abort", cancel, { once: true });
+    if (controller.signal.aborted) return cancel();
+    if (deadline !== null && Date.now() >= deadline) return expire();
+    armDeadline();
     link = transport?.mode === "ws" ? transport : null;
     const overHttp = () => {
+      if (settled) return;
       viaLink = false;
-      uploadOverHttp(id, file, hostId, progress, controller.signal).then(resolve, reject);
+      uploadOverHttp(id, file, hostId, report, request.signal).then(() => finish(), finish);
     };
     viaLink = link !== null;
     if (!link) return overHttp();
     link.upload(id, file, hostId, (message) => {
+      if (settled) return;
       if ("http" in message) overHttp();
-      else if ("error" in message) reject(new UploadFailedError(message.error.status, message.error.code, message.error.message));
-      else {
-        progress(message.received);
-        if (message.done) resolve();
-      }
+      else if ("error" in message) finish(new UploadFailedError(message.error.status, message.error.code, message.error.message));
+      else if (report(message.received) && message.done) finish();
     });
   });
   const promise = (async () => {
@@ -388,7 +440,7 @@ export function uploadFile(
         // stalled (504): starting the same id again resumes from the host's offset. Anything else needs the user.
         const resumable = error instanceof UploadFailedError ? error.status >= 502 && error.status <= 504 : error instanceof TypeError;
         outageAt ??= Date.now();
-        if (controller.signal.aborted || !resumable || Date.now() - outageAt >= RESUME_GIVE_UP_MS) throw error;
+        if (controller.signal.aborted || expired || !resumable || Date.now() - outageAt >= RESUME_GIVE_UP_MS) throw error;
         waiting = true;
         onReconnecting(error);
         const delay = Math.min(RESUME_DELAYS_MS[Math.min(failures++, RESUME_DELAYS_MS.length - 1)], RESUME_GIVE_UP_MS - (Date.now() - outageAt));
@@ -423,7 +475,10 @@ export function discardUpload(id: string): void {
  * last reported (a 409 `upload_offset` says where to go on from). */
 async function uploadOverHttp(id: string, file: File, hostId: string, onProgress: (received: number) => void, signal: AbortSignal): Promise<void> {
   const answer = async (response: Response, from: number): Promise<number> => {
-    const body = await response.json().catch(() => ({})) as { received?: unknown; error?: string; code?: string };
+    const body = await response.json().catch((error: unknown) => {
+      if (!(error instanceof SyntaxError)) throw error;
+      return {};
+    }) as { received?: unknown; error?: string; code?: string };
     if (!response.ok && !(response.status === 409 && body.code === "upload_offset")) {
       throw new UploadFailedError(response.status, body.code ?? "upload_failed", body.error ?? `HTTP ${response.status}`);
     }
