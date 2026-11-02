@@ -405,7 +405,9 @@ export function uploadFile(
     abort() {
       if (controller.signal.aborted) return;
       controller.abort();
-      if (viaLink) link?.abortUpload(id);
+      // The transport may have changed since the last attempt (it waits to resume): the worker drops an up_abort once
+      // it has left `ws`, so only a link that is still the live transport takes it.
+      if (viaLink && link && transport === link && link.mode === "ws") link.abortUpload(id);
       else discardUpload(id);
     },
   };
