@@ -361,6 +361,8 @@ const BROWSER_TRANSPORT_LABELS: Record<BrowserTransport, string> = {
 function BrowserTransportSetting() {
   const { t } = useI18n();
   const [transport, setTransport] = useState<BrowserTransport | null>(null);
+  // Blocks a second change until the save lands: two PUTs in flight could finish out of order and leave the older one saved.
+  const [saving, setSaving] = useState(false);
   useEffect(() => {
     let alive = true;
     fetch("/api/web-settings")
@@ -375,6 +377,7 @@ function BrowserTransportSetting() {
     if (!transport) return;
     const previous = transport;
     setTransport(next);
+    setSaving(true);
     try {
       const res = await fetch("/api/web-settings", {
         method: "PUT",
@@ -385,6 +388,8 @@ function BrowserTransportSetting() {
     } catch (error) {
       setTransport(previous);
       toast.error(t("settingsConfig.browserTransportSaveFailed"), error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
     }
   };
   return (
@@ -392,7 +397,7 @@ function BrowserTransportSetting() {
       <select
         style={nativeSelectStyle}
         value={transport ?? "sse"}
-        disabled={transport === null}
+        disabled={transport === null || saving}
         onChange={(event) => {
           const next = BROWSER_TRANSPORTS.find((mode) => mode === event.target.value);
           if (next) void change(next);
