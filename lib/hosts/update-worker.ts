@@ -414,11 +414,15 @@ async function controlService(d: HostUpdateDescriptor, action: "stop" | "start")
   if (!d.systemd) return;
   await exec("systemctl", [...(d.systemd.user ? ["--user"] : []), action, d.systemd.unit], { timeout: 15000, env: workerEnvironment(), maxBuffer: 1024 * 1024 });
 }
+/** The service's main process (the daemon itself: its ExecStart is verified to be the host runtime); 0 when none. */
+async function servicePid(service: NonNullable<HostUpdateDescriptor["systemd"]>): Promise<number> {
+  const { stdout } = await exec("systemctl", [...(service.user ? ["--user"] : []), "show", "--property=MainPID", "--value", service.unit], { timeout: 5000, env: workerEnvironment() });
+  return Number(stdout.trim()) || 0;
+}
 async function stopDaemon(d: HostUpdateDescriptor, pid: number): Promise<void> {
   if (d.systemd) {
     await verifyHostServiceInstall(d.systemd, d.installDir, d.installMethod === "binary", d.runtime);
-    const { stdout } = await exec("systemctl", [...(d.systemd.user ? ["--user"] : []), "show", "--property=MainPID", "--value", d.systemd.unit], { timeout: 5000, env: workerEnvironment() });
-    if (Number(stdout.trim()) !== pid) throw new Error("Host service main process changed during update; refusing to stop it");
+    if (await servicePid(d.systemd) !== pid) throw new Error("Host service main process changed during update; refusing to stop it");
     await controlService(d, "stop");
   } else if (isHostUpdateProcessAlive(pid)) {
     const current = await processStartIdentity(pid);
@@ -450,7 +454,9 @@ async function launchDaemon(d: HostUpdateDescriptor, health: string, expected: s
       if (existsSync(health)) {
         assertOwnedPath(health);
         const marker = JSON.parse(readFileSync(health, "utf8"));
-        if (marker.id === d.id && isHostUpdateProcessAlive(marker.pid)) {
+        // Only the daemon launched here may vouch for this attempt, not another daemon sharing the agent directory.
+        const launched = child ? child.pid : await servicePid(d.systemd!);
+        if (marker.id === d.id && marker.pid === launched && isHostUpdateProcessAlive(marker.pid)) {
           if (marker.version !== expected) throw new Error(`Host acknowledged version ${marker.version}, expected ${expected}`);
           return marker.pid;
         }
