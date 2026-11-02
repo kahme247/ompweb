@@ -15,6 +15,7 @@ import { isLinkUp } from "@/lib/hosts/host";
 import { useHostRows } from "@/hooks/useHostRows";
 import { HOST_STATUS_COLOR, hostName, hostStatusText } from "./host-status";
 import { comparableProjectPath } from "@/lib/comparable-path";
+import type { SearchMatchTarget } from "./SessionSearchMatches";
 import { compileSearchQuery, FIRST_MESSAGE_WEIGHT, scoreSearchFields, searchField, TITLE_WEIGHT } from "@/lib/session-search";
 import { Archive, ArrowDownUp, ArrowLeft, ArrowRight, Check, ChevronRight, FileUp, Loader2, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, X } from "lucide-react";
 import { publishSessionsChanged } from "@/lib/session-change-bus";
@@ -111,6 +112,10 @@ interface Props {
   settingsOpen?: boolean;
   /** Mobile full-screen drawer only: shows a top-left close control. */
   onClose?: () => void;
+  /** The trimmed search query ("" while no search runs): the chat highlights its hits. */
+  onSearchQueryChange?: (query: string) => void;
+  /** A hit picked from a session's match list; the session is opened too. */
+  onOpenSearchMatch?: (target: SearchMatchTarget) => void;
 }
 
 
@@ -132,7 +137,7 @@ function loadCollapsedHosts(): Set<string> {
   }
 }
 
-export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, selectedHostId: selectedHostIdProp, onCwdChange, onWorkspaceOptionsChange, onWorktreeContextChange, addProjectOpen, addProjectHostId = LOCAL_HOST_ID, setAddProjectOpen, usageVisible = true, onOpenSettings, onOpenArchive, navigation, updateAvailable, settingsOpen = false, onClose }: Props) {
+export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, selectedHostId: selectedHostIdProp, onCwdChange, onWorkspaceOptionsChange, onWorktreeContextChange, addProjectOpen, addProjectHostId = LOCAL_HOST_ID, setAddProjectOpen, usageVisible = true, onOpenSettings, onOpenArchive, navigation, updateAvailable, settingsOpen = false, onClose, onSearchQueryChange, onOpenSearchMatch }: Props) {
 
 
   const { t } = useI18n();
@@ -907,6 +912,9 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     };
   }, [trimmedSearchQuery]);
   const currentTranscriptSearch = transcriptSearch?.query === trimmedSearchQuery ? transcriptSearch : null;
+  useEffect(() => {
+    onSearchQueryChange?.(trimmedSearchQuery);
+  }, [trimmedSearchQuery, onSearchQueryChange]);
   const visibleProjectEntries = useMemo(() => {
     const query = compileSearchQuery(trimmedSearchQuery);
     const serverScores = currentTranscriptSearch?.scores;
@@ -1287,6 +1295,11 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     expandProject(workspaceKeyOf(s), hostOf(s));
     onSelectSession(s);
   }, [onSelectSession, expandProject, hostUnavailableReason]);
+  const handleOpenSearchMatch = useCallback((s: SessionInfo, target: SearchMatchTarget) => {
+    handleSelectSessionFromList(s);
+    // An unreachable host refused the selection (with a toast): leave no pending jump behind.
+    if (!hostUnavailableReason(hostOf(s))) onOpenSearchMatch?.(target);
+  }, [handleSelectSessionFromList, onOpenSearchMatch, hostUnavailableReason]);
 
   const handleNewSession = useCallback(() => {
     if (!selectedCwd || hostUnavailableReason(selectedHostId)) return;
@@ -1754,6 +1767,8 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
                   isDragTarget={draggedProject !== null && hostOf(draggedProject) === hostOf(project) && hostProjectKey(draggedProject.hostId, draggedProject.path) !== projectKey && (!pinsActive || project.pinOrder !== undefined)}
                   removeBusy={removeProjectKey === projectKey}
                   onSelectSession={handleSelectSessionFromList}
+                  searchQuery={trimmedSearchQuery || undefined}
+                  onOpenSearchMatch={onOpenSearchMatch ? handleOpenSearchMatch : undefined}
                   onRenamed={loadSessions}
                   onSessionDeleted={handleSessionDeleted}
                 />

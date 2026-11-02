@@ -20,6 +20,8 @@ import { CHAT_COLUMN_MAX_WIDTH, MINIMAP_WIDTH } from "@/lib/chat-layout";
 import { WorkspaceState } from "./AppShell-layout";
 import { useAgentSession, type AgentPhase, type NoticeItem, type SubagentInfo } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
+import { useChatSearchHighlights } from "@/hooks/useChatSearchHighlights";
+import type { SearchMatchTarget } from "./SessionSearchMatches";
 import { useSpeechSynthesis, SpeechSynthesisProvider } from "@/hooks/useSpeechSynthesis";
 import { GithubRepoContext } from "@/lib/github-refs";
 import { useDragDrop } from "@/hooks/useDragDrop";
@@ -77,6 +79,12 @@ interface Props {
   onGenerationSpeedChange?: (speed: GenerationSpeedInfo | null) => void;
   /** Open Settings → API Keys & Providers (from the model picker). */
   onOpenProviders?: () => void;
+  /** The sidebar search query: its hits are highlighted ("" for none). */
+  searchQuery?: string;
+  /** A hit picked in the sidebar for this session: scrolled to and marked current. */
+  searchTarget?: SearchMatchTarget | null;
+  /** The target was used; the owner drops it so a later remount does not jump again. */
+  onSearchTargetHandled?: () => void;
 }
 
 function phaseLabel(phase: AgentPhase): string {
@@ -479,7 +487,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
   );
 });
 
-export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatus: channelHostStatus, hostLabel, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatus: channelHostStatus, hostLabel, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders, searchQuery = "", searchTarget = null, onSearchTargetHandled }: Props) {
   const { t, tn } = useI18n();
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -535,7 +543,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
     liveToolResults,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
     isNew, hostStatus: frameHostStatus,
-    sessionIdRef, messagesEndRef, scrollContainerRef,
+    sessionIdRef, messagesEndRef, scrollContainerRef, holdScrollPosition,
     handleSend, handleAbort, handleFork, handleEdit, handleModelChange, retrySession,
     handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction, handleCompact,
     removeQueuedMessage, promoteQueuedToSteer,
@@ -701,6 +709,25 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
   // The empty new-session screen has its own scroller, so the conversation's
   // scroller mounts after the first send without a remount or a load.
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
+  // Widen the lazy render window until it includes the message's transcript row.
+  const revealMessage = useCallback((messageIndex: number) => {
+    const rows = planTranscriptRows(messages, { hideThinking: hideThinkingBlock });
+    const rowIndex = rows.findIndex((row) => (row.kind === "message" ? row.index === messageIndex : messageIndex >= row.userIndex && messageIndex < row.endIndex));
+    const needed = rows.length - Math.max(0, rowIndex);
+    if (needed <= visibleCount) return true;
+    setVisibleCount(needed);
+    return false;
+  }, [messages, hideThinkingBlock, visibleCount]);
+  useChatSearchHighlights({
+    container: scrollContainerRef,
+    query: searchQuery,
+    target: searchTarget,
+    ready: !loading && !isEmptyNew,
+    entryIds,
+    revealMessage,
+    holdScrollPosition,
+    onTargetHandled: onSearchTargetHandled,
+  });
   const remoteWorkspace = session ? remoteHostId(session.hostId) !== undefined : newSessionHostId !== undefined;
   // The hosts channel is the source of truth; a frame only speaks before its first snapshot.
   const currentHostStatus = channelHostStatus ?? frameHostStatus;

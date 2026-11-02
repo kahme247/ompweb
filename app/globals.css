@@ -4716,3 +4716,21 @@ html[data-touch-targets="accessible"] .extension-dialog-footer > button {
 @media (prefers-reduced-motion: reduce) { .mcp-spin { animation: none; } .mcp-management * { transition: none !important; } }
 
 .settings-card.mcp-source-card, .settings-card.mcp-other-configs, .settings-card.mcp-editor-card { display: block; padding: 0; margin-bottom: 0; }
+
+/* Sidebar search hits in the chat (CSS Custom Highlight API, set by
+   useChatSearchHighlights) and in the sidebar's match list. */
+::highlight(omp-search),
+.session-search-match-hit {
+  background-color: color-mix(in srgb, var(--status-warning) 32%, transparent);
+  color: inherit;
+}
+::highlight(omp-search-current) {
+  background-color: var(--status-warning);
+  color: var(--bg);
+}
+.session-search-match {
+  background: none;
+}
+.session-search-match:hover:not(:disabled) {
+  background: var(--bg-hover);
+}

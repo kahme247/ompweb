@@ -449,6 +449,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const ignoreProgrammaticScrollUntilRef = useRef(0);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  // A jump to a search hit: skip the initial scroll and stop following new output,
+  // exactly as if the reader had scrolled up.
+  const holdScrollPosition = useCallback(() => {
+    initialScrollDoneRef.current = true;
+    completionScrollAllowedRef.current = false;
+  }, []);
   const ensuringNewSessionRef = useRef<Promise<string | null> | null>(null);
   const newSessionPromotedRef = useRef(false);
   // Raw child-session events stream at token rate; coalesce the per-subagent
@@ -4165,7 +4171,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     isNew,
     // Refs
     sessionIdRef, messagesEndRef, scrollContainerRef,
-    pendingScrollToUserRef, initialScrollDoneRef,
+    pendingScrollToUserRef, initialScrollDoneRef, holdScrollPosition,
     // Actions
     handleSend, handleAbort, handleFork, handleEdit, handleModelChange, handleFastModeChange, handleSlowModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply, setSkillStartupDiagnostics,
     retrySession: () => { const sid = sessionIdRef.current; if (sid) void loadSession(sid, true, true); },
