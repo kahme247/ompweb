@@ -232,6 +232,8 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     if (channel.buffered > LINK_LIMITS.channelBufferBytes) {
       // The uplink lags too far: drop this child's backlog, a line part-way out included (main drops that partial
       // line). The resync goes out ahead of the channel's later output.
+      // lib/hosts/daemon.test.mjs parses this line (`dropped N bytes`) to wait for the overflow.
+      log(`channel ${ch}: dropped ${channel.buffered} bytes of output the server has not taken; resync`);
       sender.drop(ch);
       for (const item of outbox.drop((item) => item.key === ch)) unackedBytes -= item.unacked;
       resend = resend.slice(resendAt).filter((item) => item.key !== ch);
