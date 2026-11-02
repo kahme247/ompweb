@@ -70,6 +70,9 @@ const TRANSPORT_LOST = { error: "The connection to omp-web dropped before the an
 // Transport samples (spec D6 of the experiment): POSTed in batches to the metrics route, whose GET is the SSE clock probe.
 const METRICS_PATH = "/api/transport-metrics";
 const METRICS_FLUSH_MS = 30000;
+/** A metrics request (clock probe or sample POST) not answered in full by then is abandoned, so one hung request never
+ * stops the probe chain or keeps `flushing` set. */
+const METRICS_TIMEOUT_MS = 10000;
 const METRICS_FLUSH_COUNT = 200;
 const METRICS_BUFFER_MAX = 2000;
 const EVENT_SAMPLE_MS = 1000;
@@ -527,6 +530,7 @@ function close(client: Client, streamId: number): void {
 }
 
 function dropClient(client: Client): void {
+  clients.delete(client);
   for (const streamId of [...client.streams.keys()]) close(client, streamId);
 }
 
@@ -1054,14 +1058,24 @@ function scheduleSseProbe(current: string): void {
   }, SSE_CLOCK_PROBE_MS);
 }
 
+/** Runs `run` with a signal that aborts after `ms` (no AbortSignal.timeout: older browsers lack it). */
+async function withDeadline<T>(ms: number, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try {
+    return await run(controller.signal);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function probeClock(): Promise<void> {
   const c = Date.now();
   try {
-    const response = await fetch(METRICS_PATH, { cache: "no-store" });
-    const body = await response.json();
+    const body = await withDeadline(METRICS_TIMEOUT_MS, async (signal) => (await fetch(METRICS_PATH, { cache: "no-store", signal })).json());
     clockSample(c, body.now, Date.now());
   } catch {
-    // Offline or refused: the next probe tries again.
+    // Offline, refused or no answer in time: the next probe tries again.
   }
 }
 
@@ -1231,12 +1245,13 @@ function flushSamples(): void {
   const droppedCount = droppedSamples;
   droppedSamples = 0;
   flushing = true;
-  fetch(METRICS_PATH, {
+  withDeadline(METRICS_TIMEOUT_MS, async (signal) => (await fetch(METRICS_PATH, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ samples: droppedCount > 0 ? batch.concat(stamp({ metric: "dropped", count: droppedCount })) : batch }),
-  })
-    .then((response) => response.ok, () => false)
+    signal,
+  })).ok)
+    .catch(() => false)
     .then((ok) => {
       flushing = false;
       if (ok && samples.length >= METRICS_FLUSH_COUNT) {
@@ -1263,6 +1278,11 @@ function attach(port: Port): void {
     const data = message as Record<string, unknown>;
     switch (data.op) {
       case "open":
+        // A tab back from the bfcache resumes its streams after its `bye` removed it: it missed any mode change since.
+        if (!clients.has(client)) {
+          clients.add(client);
+          post(client, { transport: mode });
+        }
         open(client, Number(data.id), data.channel as EventStreamChannel);
         break;
       case "close":
@@ -1287,7 +1307,6 @@ function attach(port: Port): void {
         // whole life; it is granted to us only once that tab is gone
         // (closed, crashed, discarded), however it died.
         void scope.navigator.locks?.request(String(data.name), () => {
-          clients.delete(client);
           dropClient(client);
         });
         break;
