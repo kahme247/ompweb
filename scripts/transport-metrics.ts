@@ -196,7 +196,8 @@ export function summarize(samples: Sample[], options: SummaryOptions): SummaryRo
     count: g.count,
     p50: percentile(g.values, 50),
     p95: percentile(g.values, 95),
-    max: g.values.length ? Math.max(...g.values) : null,
+    // A reduce, not Math.max(...values): a group of about a million samples overflows the call stack.
+    max: g.values.length ? g.values.reduce((a, b) => (b > a ? b : a)) : null,
     ...(g.batches.length ? { meanBatch: g.batches.reduce((a, b) => a + b, 0) / g.batches.length } : {}),
   }));
   return rows.sort((a, b) => a.transport.localeCompare(b.transport) || SECTION_ORDER.indexOf(a.section) - SECTION_ORDER.indexOf(b.section) || a.key.localeCompare(b.key));
