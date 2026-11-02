@@ -176,9 +176,10 @@ export interface SearchMatchSpan {
 export function findSearchMatches(text: string, query: CompiledSearchQuery): SearchMatchSpan[] {
   const spans: SearchMatchSpan[] = [];
   for (const phrase of query.phrases) {
-    // Whitespace within one paragraph (a single line break at most): a blank line splits the
-    // rendered text into separate paragraphs, where the chat could not find the phrase.
-    const pattern = phrase.split(" ").map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[^\\S\\n]*(?:\\n[^\\S\\n]*|[^\\S\\n])");
+    // Whitespace within one rendered line of text: at most one space before a line break. A blank
+    // line (new paragraph) or a hard break (2+ trailing spaces, or a backslash) renders the words
+    // in separate text nodes, where the chat could not find the phrase.
+    const pattern = phrase.split(" ").map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("(?:[^\\S\\n]+|[^\\S\\n]?\\n[^\\S\\n]*)");
     for (const match of text.matchAll(new RegExp(pattern, "giu"))) spans.push({ start: match.index, end: match.index + match[0].length, quality: 1 });
   }
   if (query.terms.length > 0) {

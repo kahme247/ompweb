@@ -59,7 +59,13 @@ export function listSessionMatches(messages: AgentMessage[], entryIds: string[],
     const timestamp = typeof message.timestamp === "number" ? message.timestamp : null;
     let ordinal = 0;
     for (const text of messageTextBlocks(message)) {
-      for (const { start, end, quality } of findSearchMatches(text, query)) hits.push({ entryId, ordinal: ordinal++, quality, timestamp, text, start, end });
+      // GFM footnote references and definition labels render as generated text the chat skips.
+      // shortcut: also skips `[^x]` written inside code, which the chat shows; rare in chat text.
+      const footnotes = [...text.matchAll(/\[\^[^\]\s]+\]:?/g)].map((m) => [m.index, m.index + m[0].length]);
+      for (const { start, end, quality } of findSearchMatches(text, query)) {
+        if (footnotes.some(([from, to]) => start < to && end > from)) continue;
+        hits.push({ entryId, ordinal: ordinal++, quality, timestamp, text, start, end });
+      }
     }
   });
   hits.sort((a, b) => b.quality - a.quality || (b.timestamp ?? 0) - (a.timestamp ?? 0));
