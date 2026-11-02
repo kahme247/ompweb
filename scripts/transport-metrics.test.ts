@@ -17,23 +17,23 @@ const fixture: Record<string, unknown>[] = [
   // sse: total 100, server 30 → transport 70; up = 1020 − (1000 + 10) = 10
   { ...at(1_000), metric: "action", transport: "sse", type: "prompt", req: "r1", outcome: "ok", attempts: 1, sentAt: 1000, recvAt: 1020, repliedAt: 1050, gotAt: 1100, offset: 10 },
   { ...at(1_000), metric: "action", transport: "sse", type: "get_state", req: "r2", outcome: "ok", attempts: 2, deduped: true, sentAt: 2000, recvAt: 2020, repliedAt: 2030, gotAt: 2300, offset: 0 },
-  { ...at(1_000), metric: "action", transport: "websocket", type: "prompt", req: "r3", outcome: "ok", attempts: 1, sentAt: 1000, recvAt: 1005, repliedAt: 1015, gotAt: 1040, offset: 0 },
+  { ...at(1_000), metric: "action", transport: "ws", type: "prompt", req: "r3", outcome: "ok", attempts: 1, sentAt: 1000, recvAt: 1005, repliedAt: 1015, gotAt: 1040, offset: 0 },
   // never answered: no gotAt → no totalMs, still counted in outcomes
-  { ...at(1_000), metric: "action", transport: "websocket", type: "prompt", req: "r4", outcome: "lost", attempts: 1, sentAt: 5000 },
+  { ...at(1_000), metric: "action", transport: "ws", type: "prompt", req: "r4", outcome: "lost", attempts: 1, sentAt: 5000 },
   // abort behind an upload vs alone
-  { ...at(1_000), metric: "action", transport: "websocket", type: "abort", req: "r5", outcome: "ok", behindBytes: 8_000_000, sentAt: 0, gotAt: 900, offset: 0 },
-  { ...at(1_000), metric: "action", transport: "websocket", type: "abort_bash", req: "r6", outcome: "ok", behindBytes: 0, sentAt: 0, gotAt: 50, offset: 0 },
-  // event ms = gotAt + offset − at = 500 + 20 − 400
-  { ...at(1_000), metric: "event", transport: "websocket", conn: "session", channel: "session:s1", at: 400, gotAt: 500, offset: 20 },
+  { ...at(1_000), metric: "action", transport: "ws", type: "abort", req: "r5", outcome: "ok", behindBytes: 8_000_000, sentAt: 0, gotAt: 900, offset: 0 },
+  { ...at(1_000), metric: "action", transport: "ws", type: "abort_bash", req: "r6", outcome: "ok", behindBytes: 0, sentAt: 0, gotAt: 50, offset: 0 },
+  // event ms = gotAt + offset − at
+  { ...at(1_000), metric: "event", transport: "ws", conn: "link", channel: "session", at: 400, gotAt: 500, offset: 20 },
   // reconnect: ms = 900 − 200, fromDropMs = 900 − 100
-  { ...at(1_000), metric: "reconnect", transport: "websocket", conn: "general", trigger: "online", dropAt: 100, startAt: 200, firstFrameAt: 900, batch: 3 },
-  { ...at(1_000), metric: "reconnect", transport: "websocket", conn: "general", trigger: "online", dropAt: 100, startAt: 200, firstFrameAt: 500, batch: 1 },
-  // r2 was answered later (its action is above); r9 never was
+  { ...at(1_000), metric: "reconnect", transport: "ws", conn: "link", trigger: "online", dropAt: 100, startAt: 200, firstFrameAt: 900, batch: 3, resumed: true },
+  { ...at(1_000), metric: "reconnect", transport: "ws", conn: "link", trigger: "online", dropAt: 100, startAt: 200, firstFrameAt: 500, batch: 1, resumed: false },
+  // r2 was answered later (its action is above); r9 never was (a POST after the link fell back to SSE)
   { ...at(1_000), metric: "hang", transport: "sse", req: "r2", type: "get_state", via: "http", bytes: 10, waitedMs: 10_000 },
-  { ...at(1_000), metric: "hang", transport: "websocket", req: "r9", type: "prompt", via: "ws", bytes: 10, waitedMs: 10_000 },
+  { ...at(1_000), metric: "hang", transport: "ws", req: "r9", type: "prompt", via: "http", bytes: 10, waitedMs: 10_000 },
   // outside the window / another client
-  { ...at(9_000), metric: "event", transport: "websocket", conn: "general", channel: "running", at: 0, gotAt: 7, offset: 0 },
-  { ...at(1_000), metric: "event", transport: "websocket", conn: "general", channel: "running", at: 0, gotAt: 3, offset: 0, clientId: "c2", effectiveType: null },
+  { ...at(9_000), metric: "event", transport: "ws", conn: "link", channel: "running", at: 0, gotAt: 7, offset: 0 },
+  { ...at(1_000), metric: "event", transport: "ws", conn: "link", channel: "running", at: 0, gotAt: 3, offset: 0, clientId: "c2", effectiveType: null },
 ];
 
 const row = (rows: SummaryRow[], section: string, transport: string, key: string) => rows.find((r) => r.section === section && r.transport === transport && r.key === key);
@@ -42,7 +42,7 @@ test("summarize derives the action latencies per transport and type", () => {
   const rows = summarize(fixture, {});
   assert.deepEqual(row(rows, "action totalMs", "sse", "all"), { section: "action totalMs", transport: "sse", key: "all", count: 2, p50: 100, p95: 300, max: 300 });
   assert.equal(row(rows, "action totalMs", "sse", "prompt")?.max, 100);
-  assert.equal(row(rows, "action totalMs", "websocket", "prompt")?.p50, 40);
+  assert.equal(row(rows, "action totalMs", "ws", "prompt")?.p50, 40);
   // total − (repliedAt − recvAt)
   assert.equal(row(rows, "action transportMs", "sse", "prompt")?.p50, 70);
   assert.equal(row(rows, "action transportMs", "sse", "get_state")?.p50, 290);
@@ -50,49 +50,51 @@ test("summarize derives the action latencies per transport and type", () => {
   assert.equal(row(rows, "action upMs", "sse", "prompt")?.p50, 10);
 });
 
-test("summarize derives event and reconnect times", () => {
+test("summarize derives event and reconnect times, and counts resumed links apart from resyncs", () => {
   const rows = summarize(fixture, { since: 0, until: 5_000 });
-  assert.equal(row(rows, "event ms", "websocket", "session session:s1")?.p50, 120);
-  const reconnect = row(rows, "reconnect ms", "websocket", "online/visible")!;
+  assert.equal(row(rows, "event ms", "ws", "link session")?.p50, 120);
+  const reconnect = row(rows, "reconnect ms", "ws", "online/visible")!;
   assert.equal(reconnect.count, 2);
   assert.equal(reconnect.max, 700);
   assert.equal(reconnect.meanBatch, 2);
-  assert.equal(row(rows, "reconnect fromDropMs", "websocket", "online/visible")?.max, 800);
+  assert.equal(row(rows, "reconnect fromDropMs", "ws", "online/visible")?.max, 800);
+  assert.deepEqual(["yes", "no"].map((key) => row(rows, "reconnect resumed", "ws", key)?.count), [1, 1]);
+  assert.equal(rows.some((r) => r.section === "reconnect resumed" && r.transport === "sse"), false, "SSE never resumes");
 });
 
 test("summarize counts hangs, answered-later hangs, resends, deduped and outcomes", () => {
   const rows = summarize(fixture, {});
   assert.equal(row(rows, "hang", "sse", "total")?.count, 1);
   assert.equal(row(rows, "hang", "sse", "answered later")?.count, 1);
-  assert.equal(row(rows, "hang", "websocket", "total")?.count, 1);
-  assert.equal(row(rows, "hang", "websocket", "answered later"), undefined);
+  assert.equal(row(rows, "hang", "ws", "total")?.count, 1);
+  assert.equal(row(rows, "hang", "ws", "answered later"), undefined);
   assert.equal(row(rows, "resend", "sse", "attempts>1")?.count, 1);
   assert.equal(row(rows, "deduped", "sse", "deduped")?.count, 1);
-  assert.equal(row(rows, "outcome", "websocket", "lost")?.count, 1);
-  assert.equal(row(rows, "outcome", "websocket", "ok")?.count, 3);
+  assert.equal(row(rows, "outcome", "ws", "lost")?.count, 1);
+  assert.equal(row(rows, "outcome", "ws", "ok")?.count, 3);
 });
 
 test("a hang whose command was never answered is not counted as answered later", () => {
   const rows = summarize(
     [
-      { ...at(1), metric: "hang", transport: "websocket", req: "x", type: "prompt", via: "ws", bytes: 1, waitedMs: 1 },
-      { ...at(1), metric: "action", transport: "websocket", req: "x", type: "prompt", outcome: "lost" },
+      { ...at(1), metric: "hang", transport: "ws", req: "x", type: "prompt", via: "http", bytes: 1, waitedMs: 1 },
+      { ...at(1), metric: "action", transport: "ws", req: "x", type: "prompt", outcome: "lost" },
       // A fetch that got no response at all records an error with status 0.
       { ...at(1), metric: "hang", transport: "sse", req: "y", type: "prompt", via: "http", bytes: 1, waitedMs: 1 },
       { ...at(1), metric: "action", transport: "sse", req: "y", type: "prompt", outcome: "error", status: 0 },
     ],
     {},
   );
-  assert.equal(row(rows, "hang", "websocket", "total")?.count, 1);
-  assert.equal(row(rows, "hang", "websocket", "answered later"), undefined);
+  assert.equal(row(rows, "hang", "ws", "total")?.count, 1);
+  assert.equal(row(rows, "hang", "ws", "answered later"), undefined);
   assert.equal(row(rows, "hang", "sse", "total")?.count, 1);
   assert.equal(row(rows, "hang", "sse", "answered later"), undefined);
 });
 
 test("an abort behind an upload lands in its own row", () => {
   const rows = summarize(fixture, {});
-  assert.equal(row(rows, "abort behind upload", "websocket", "yes")?.max, 900);
-  assert.equal(row(rows, "abort behind upload", "websocket", "no")?.max, 50);
+  assert.equal(row(rows, "abort behind upload", "ws", "yes")?.max, 900);
+  assert.equal(row(rows, "abort behind upload", "ws", "no")?.max, 50);
   for (const behindBytes of [1_000, 65_535, 65_536]) {
     const boundary = summarize([{ ...at(1), metric: "action", transport: "sse", type: "abort", req: "a", outcome: "ok", behindBytes, sentAt: 0, gotAt: 70, offset: 0 }], {});
     assert.equal(row(boundary, "abort behind upload", "sse", behindBytes < 65_536 ? "no" : "yes")?.max, 70, `blocking starts at 64 KiB, not at ${behindBytes} bytes`);
@@ -122,29 +124,29 @@ test("a hang stays answered later when its reply is outside the filter, and a ha
     [
       { ...at(5_000), metric: "hang", transport: "sse", req: "x", type: "prompt", via: "http", bytes: 1, waitedMs: 1 },
       { ...at(9_000), metric: "action", transport: "sse", req: "x", type: "prompt", outcome: "ok" },
-      { ...at(5_000), metric: "hang", transport: "websocket", type: "prompt", via: "ws", bytes: 1, waitedMs: 1 },
-      { ...at(5_000), metric: "action", transport: "websocket", type: "prompt", outcome: "ok" },
+      { ...at(5_000), metric: "hang", transport: "ws", type: "prompt", via: "http", bytes: 1, waitedMs: 1 },
+      { ...at(5_000), metric: "action", transport: "ws", type: "prompt", outcome: "ok" },
     ],
     { until: 6_000 },
   );
   assert.equal(row(rows, "hang", "sse", "answered later")?.count, 1);
-  assert.equal(row(rows, "hang", "websocket", "total")?.count, 1);
-  assert.equal(row(rows, "hang", "websocket", "answered later"), undefined);
+  assert.equal(row(rows, "hang", "ws", "total")?.count, 1);
+  assert.equal(row(rows, "hang", "ws", "answered later"), undefined);
 });
 
 test("the report keeps one section order whatever the order of the samples", () => {
   const forward = summarize(fixture, {});
   assert.deepEqual(summarize([...fixture].reverse(), {}), forward);
   assert.deepEqual(
-    [...new Set(forward.filter((r) => r.transport === "websocket").map((r) => r.section))],
-    ["action totalMs", "action transportMs", "action upMs", "abort behind upload", "event ms", "reconnect ms", "reconnect fromDropMs", "hang", "outcome"],
+    [...new Set(forward.filter((r) => r.transport === "ws").map((r) => r.section))],
+    ["action totalMs", "action transportMs", "action upMs", "abort behind upload", "event ms", "reconnect ms", "reconnect fromDropMs", "reconnect resumed", "hang", "outcome"],
   );
 });
 
-test("isolation, sockets, pool size and rebalance rows per transport", () => {
-  const transports = ["sse", "ws-client", "ws-client-split", "ws-session", "ws-pool"];
+test("isolation and sockets rows per transport", () => {
+  const transports = ["sse", "ws"];
   const samples = transports.flatMap((transport, index) => {
-    const tagged = (fields: Record<string, unknown>) => ({ ...at(1_000), transport, pool: transport === "ws-pool" ? 2 : null, sockets: index + 1, ...fields });
+    const tagged = (fields: Record<string, unknown>) => ({ ...at(1_000), transport, sockets: index + 1, ...fields });
     // event ms = gotAt + offset − at
     const event = (gotAt: number, behindSameBytes: number | null, behindOtherBytes: number | null) =>
       tagged({ metric: "event", conn: "session", channel: "session", at: 0, gotAt, offset: 0, behindSameBytes, behindOtherBytes });
@@ -170,8 +172,7 @@ test("isolation, sockets, pool size and rebalance rows per transport", () => {
       tagged({ metric: "action", type: "prompt", outcome: "unavailable", sentAt: 0, gotAt: 15_000, behindSameBytes: null, behindOtherBytes: null, replyBehindOtherBytes: null }),
     ];
   });
-  const rebalance = (reason: string, moved: number, settledMs: number) => ({ ...at(1_000), metric: "rebalance", transport: "ws-pool", pool: 2, sockets: 2, reason, moved, settledMs });
-  const rows = summarize([...samples, rebalance("grow", 1, 50), rebalance("grow", 3, 150), rebalance("shrink", 2, 20)], {});
+  const rows = summarize(samples, {});
   const keys = ["other", "same", "clear", "unknown"];
 
   for (const [index, transport] of transports.entries()) {
@@ -180,48 +181,32 @@ test("isolation, sockets, pool size and rebalance rows per transport", () => {
     assert.deepEqual(keys.map((key) => row(rows, "isolation action ms", transport, key)?.p50), [300, 200, 100, 150], transport);
     assert.deepEqual(keys.map((key) => row(rows, "isolation action ms", transport, key)?.count), [2, 1, 1, 1], "the never-sent command is in no isolation row");
     assert.equal(row(rows, "sockets", transport, "all")?.max, index + 1);
-    assert.equal(row(rows, "pool size", transport, "all")?.p50, transport === "ws-pool" ? 2 : undefined);
   }
-  const grow = row(rows, "rebalance moved", "ws-pool", "grow");
-  assert.deepEqual([grow?.count, grow?.p50, grow?.max], [2, 1, 3]);
-  assert.equal(row(rows, "rebalance moved", "ws-pool", "shrink")?.p50, 2);
-  assert.equal(row(rows, "rebalance settledMs", "ws-pool", "grow")?.max, 150);
   assert.deepEqual(
-    [...new Set(rows.filter((r) => r.transport === "ws-pool").map((r) => r.section))],
-    ["action totalMs", "action transportMs", "event ms", "isolation event ms", "isolation action ms", "sockets", "pool size", "rebalance moved", "rebalance settledMs", "outcome"],
+    [...new Set(rows.filter((r) => r.transport === "ws").map((r) => r.section))],
+    ["action totalMs", "action transportMs", "event ms", "isolation event ms", "isolation action ms", "sockets", "outcome"],
   );
 });
 
-test("a WS hang is a stall; an HTTP hang is a stall only when the transport alone took the ack formula's time", () => {
+test("an HTTP hang is a stall only when the transport alone took the hang formula's time", () => {
   const action = (req: string, transportMs: number, serverMs: number) =>
     ({ ...at(1), metric: "action", transport: "sse", req, type: "prompt", outcome: "ok", sentAt: 0, recvAt: 5, repliedAt: 5 + serverMs, gotAt: transportMs + serverMs });
-  const hang = (transport: string, req: string, via: string) => ({ ...at(1), metric: "hang", transport, req, type: "prompt", via, bytes: 10, waitedMs: 10_000 });
-  const rows = summarize(
-    [
-      action("stalled", 12_000, 50),
-      action("slow", 200, 15_000),
-      hang("sse", "stalled", "http"),
-      hang("sse", "slow", "http"),
-      hang("sse", "never answered", "http"),
-      hang("ws-client", "acked never", "ws"),
-    ],
-    {},
-  );
+  const hang = (req: string) => ({ ...at(1), metric: "hang", transport: "sse", req, type: "prompt", via: "http", bytes: 10, waitedMs: 10_000 });
+  const rows = summarize([action("stalled", 12_000, 50), action("slow", 200, 15_000), hang("stalled"), hang("slow"), hang("never answered")], {});
   assert.deepEqual(["total", "stalled", "slow command", "unclassified"].map((key) => row(rows, "hang", "sse", key)?.count), [3, 1, 1, 1]);
-  assert.deepEqual(["total", "stalled", "slow command"].map((key) => row(rows, "hang", "ws-client", key)?.count), [1, 1, undefined]);
 });
 
-test("reconnect rows group triggers by family, keep silence and hang apart, split network wakes by a changed effective type, and the clock RTT is printed", () => {
+test("reconnect rows group triggers by family, keep the link's silence apart, split network wakes by a changed effective type, and the clock RTT is printed", () => {
   const reconnect = (transport: string, trigger: string, effectiveTypeBefore = "4g", effectiveType = "4g") =>
-    ({ ...at(1), metric: "reconnect", transport, conn: transport === "sse" ? "sse" : "client", trigger, dropAt: 0, startAt: 0, firstFrameAt: 100, batch: 1, effectiveTypeBefore, effectiveType });
+    ({ ...at(1), metric: "reconnect", transport, conn: transport === "sse" ? "sse" : "link", trigger, dropAt: 0, startAt: 0, firstFrameAt: 100, batch: 1, effectiveTypeBefore, effectiveType });
   const rows = summarize(
     [
       reconnect("sse", "error"),
-      ...["close", "silence", "hang"].map((trigger) => reconnect("ws-client", trigger)),
-      reconnect("ws-client", "network", "4g", "3g"),
-      reconnect("ws-client", "network"),
-      reconnect("ws-client", "online"),
-      reconnect("ws-client", "visible"),
+      ...["close", "silence"].map((trigger) => reconnect("ws", trigger)),
+      reconnect("ws", "network", "4g", "3g"),
+      reconnect("ws", "network"),
+      reconnect("ws", "online"),
+      reconnect("ws", "visible"),
       { ...at(1), metric: "event", transport: "sse", conn: "sse", channel: "running", at: 0, gotAt: 1, offset: 0, offsetRtt: 10 },
       { ...at(1), metric: "event", transport: "sse", conn: "sse", channel: "running", at: 0, gotAt: 1, offset: 0, offsetRtt: 30 },
       { ...at(1), metric: "action", transport: "sse", type: "get_state", outcome: "ok", offset: 0, offsetRtt: 20 },
@@ -230,19 +215,18 @@ test("reconnect rows group triggers by family, keep silence and hang apart, spli
     {},
   );
   assert.equal(row(rows, "reconnect ms", "sse", "error/close")?.count, 1);
-  assert.equal(row(rows, "reconnect ms", "ws-client", "error/close")?.count, 1);
-  // A socket's own detectors can fire behind a large downlink frame on a slow link: kept apart so they show.
-  assert.equal(row(rows, "reconnect ms", "ws-client", "silence")?.count, 1);
-  assert.equal(row(rows, "reconnect ms", "ws-client", "hang")?.count, 1);
-  assert.equal(row(rows, "reconnect ms", "ws-client", "network (type changed)")?.count, 1);
-  assert.equal(row(rows, "reconnect fromDropMs", "ws-client", "network (same type)")?.count, 1);
-  assert.equal(row(rows, "reconnect ms", "ws-client", "online/visible")?.count, 2);
+  assert.equal(row(rows, "reconnect ms", "ws", "error/close")?.count, 1);
+  // The link's own detector: kept apart, SSE has none.
+  assert.equal(row(rows, "reconnect ms", "ws", "silence")?.count, 1);
+  assert.equal(row(rows, "reconnect ms", "ws", "network (type changed)")?.count, 1);
+  assert.equal(row(rows, "reconnect fromDropMs", "ws", "network (same type)")?.count, 1);
+  assert.equal(row(rows, "reconnect ms", "ws", "online/visible")?.count, 2);
   const rtt = row(rows, "clock offsetRtt", "sse", "all");
   assert.deepEqual([rtt?.count, rtt?.p50, rtt?.max], [3, 20, 30]);
 });
 
 test("since, until and client filter on serverAt and clientId", () => {
-  const eventRows = (options: Parameters<typeof summarize>[1]) => row(summarize(fixture, options), "event ms", "websocket", "general running");
+  const eventRows = (options: Parameters<typeof summarize>[1]) => row(summarize(fixture, options), "event ms", "ws", "link running");
   assert.equal(eventRows({})?.count, 2);
   assert.equal(eventRows({ until: 5_000 })?.count, 1);
   assert.equal(eventRows({ since: 5_000 })?.count, 1);
@@ -307,20 +291,22 @@ test("formatReport prints one line per row", () => {
   const rows = summarize(fixture, {});
   const report = formatReport(rows);
   assert.equal(report.split("\n").length, rows.length);
-  assert.match(report, /websocket +action totalMs +prompt +n=1 +p50=40 +p95=40 +max=40/);
+  assert.match(report, /ws +action totalMs +prompt +n=1 +p50=40 +p95=40 +max=40/);
 });
 
 test("the CLI prints the table for a file, reading .1 before the file, and the ackMs note under link rows", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "omp-web-transport-summary-"));
   try {
     const file = path.join(dir, "m.jsonl");
-    const sample = (req: string, serverAt: number) => JSON.stringify({ metric: "action", transport: "sse", type: "prompt", clientId: "c", req, outcome: "ok", sentAt: 0, gotAt: 10, serverAt });
-    writeFileSync(`${file}.1`, `${sample("a", 1_000)}\n`);
-    writeFileSync(file, `${sample("b", 2_000)}\nnot json\n`);
+    const sample = (req: string, serverAt: number, ua: string) => JSON.stringify({ metric: "action", transport: "sse", type: "prompt", clientId: "c", req, outcome: "ok", sentAt: 0, gotAt: 10, serverAt, ua });
+    writeFileSync(`${file}.1`, `${sample("a", 1_000, "old-agent")}\n`);
+    writeFileSync(file, `${sample("b", 2_000, "new-agent")}\nnot json\n`);
     const summary = () => Bun.spawnSync([process.execPath, path.join(import.meta.dir, "transport-metrics.ts"), "--file", file, "--since", "1970-01-01T00:00:00Z"]);
     const run = summary();
     assert.equal(run.exitCode, 0, run.stderr.toString());
     assert.match(run.stdout.toString(), /sse +action totalMs +all +n=2 +p50=10/);
+    // The client row keeps the last user agent it read: the file's, only if .1 was read first.
+    assert.match(run.stdout.toString(), /all +client +c null new-agent +n=2/);
     assert.doesNotMatch(run.stdout.toString(), /round trip/);
     writeFileSync(file, `${JSON.stringify({ metric: "link", dir: "down", host: "mac", session: null, bytes: 200, bytesAhead: 0, ackMs: 10, at: 0, serverAt: 3_000 })}\n`, { flag: "a" });
     const withLink = summary().stdout.toString();

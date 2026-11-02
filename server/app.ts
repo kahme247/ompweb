@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { browserSocket, type BrowserSocketData } from "@/lib/browser-socket";
+import { browserLink, type BrowserLinkData } from "@/lib/browser-link";
 import { hostLinkSocket, type LinkSocketData } from "@/lib/hosts/hub";
 import { proxy } from "@/proxy";
 import { register } from "../instrumentation.node";
@@ -21,11 +21,11 @@ const text = (body: string, status: number) => new Response(body, { status, head
 const IDLE_TIMEOUT = 10;
 
 type ServerSocket = Bun.ServerWebSocket<ServerSocketData>;
-/** Browser sockets and host links share Bun's one `websocket` handler; `ws.data` tells them apart. */
-function isBrowserSocket(ws: ServerSocket): ws is Bun.ServerWebSocket<BrowserSocketData> {
+/** Browser links and host links share Bun's one `websocket` handler; `ws.data` tells them apart. */
+function isBrowserSocket(ws: ServerSocket): ws is Bun.ServerWebSocket<BrowserLinkData> {
   return "kind" in ws.data && ws.data.kind === "browser";
 }
-// Not a browser socket: a host link (the only other upgrade).
+// Not a browser link: a host link (the only other upgrade).
 const asLink = (ws: ServerSocket) => ws as Bun.ServerWebSocket<LinkSocketData>;
 
 function decodable(pathname: string): boolean {
@@ -117,8 +117,9 @@ async function devIndex(server: Bun.Server<ServerSocketData>): Promise<string> {
   return stylesheetFirst(await (await fetch(url, { proxy: false })).text());
 }
 
-export function startServer(options: { port: number; hostname: string; dev: boolean; root: string; html?: Bun.HTMLBundle }): Bun.Server<ServerSocketData> {
-  const { dev, root, html } = options;
+/** `worker`: the event-stream worker bundle (server/client-env.ts) dev serves from memory; prod serves dist/'s copy. */
+export function startServer(options: { port: number; hostname: string; dev: boolean; root: string; html?: Bun.HTMLBundle; worker?: string }): Bun.Server<ServerSocketData> {
+  const { dev, root, html, worker } = options;
   // Dev serves the SPA from the HTML import (`html`) and never reads dist/.
   const index = dev ? null : readFileSync(path.join(root, "dist", "index.html"), "utf8");
 
@@ -150,15 +151,15 @@ export function startServer(options: { port: number; hostname: string; dev: bool
     reusePort: false,
     idleTimeout: IDLE_TIMEOUT,
     routes,
-    // Bun's limits are per server: browser sockets inherit the link's (lib/browser-socket.ts caps its own frames).
+    // Bun's limits are per server: browser links inherit the host link's (lib/browser-link.ts caps its own frames).
     websocket: {
       ...hostLinkSocket,
       open: (ws: ServerSocket) => {
-        if (isBrowserSocket(ws)) browserSocket.open(ws);
+        if (isBrowserSocket(ws)) browserLink.open(ws);
       },
-      message: (ws: ServerSocket, data: string | Uint8Array) => (isBrowserSocket(ws) ? browserSocket.message(ws, data) : hostLinkSocket.message(asLink(ws), data)),
-      drain: (ws: ServerSocket) => (isBrowserSocket(ws) ? browserSocket.drain(ws) : hostLinkSocket.drain(asLink(ws))),
-      close: (ws: ServerSocket) => (isBrowserSocket(ws) ? browserSocket.close(ws) : hostLinkSocket.close(asLink(ws))),
+      message: (ws: ServerSocket, data: string | Uint8Array) => (isBrowserSocket(ws) ? browserLink.message(ws, data) : hostLinkSocket.message(asLink(ws), data)),
+      drain: (ws: ServerSocket) => (isBrowserSocket(ws) ? browserLink.drain(ws) : hostLinkSocket.drain(asLink(ws))),
+      close: (ws: ServerSocket, code: number) => (isBrowserSocket(ws) ? browserLink.close(ws, code) : hostLinkSocket.close(asLink(ws))),
     },
     fetch: async (request, server) => {
       const response = await handle(request, server, async ({ gate }) => {
@@ -166,6 +167,9 @@ export function startServer(options: { port: number; hostname: string; dev: bool
         // No route matched: /x/ goes to /x as Next did. Leading slashes collapse, so //host/ never becomes //host.
         if (pathname.length > 1 && pathname.endsWith("/")) {
           return new Response(null, { status: 308, headers: { location: `/${pathname.replace(/^\/+|\/+$/g, "")}${search}` } });
+        }
+        if (worker !== undefined && pathname === "/event-stream-worker.js") {
+          return new Response(worker, { headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache" } });
         }
         const file = await serveFile(request, root, dev);
         if (file) return file;

@@ -8,7 +8,21 @@ const { SettingsConfig } = await import("./SettingsConfig");
 const noop = () => {};
 const settle = () => act(() => new Promise((resolve) => setTimeout(resolve, 20)));
 
-test("the browser transport control shows the saved mode, saves changes and shows pool numbers only for ws-pool", async (t) => {
+const settingsProps = {
+  activeTab: "general",
+  toolCallsDefaultCollapsed: false, onToolCallsDefaultCollapsedChange: noop,
+  hideToolActivity: false, onHideToolActivityChange: noop,
+  expandThinkingByDefault: false, onExpandThinkingByDefaultChange: noop, onHideThinkingBlockChange: noop,
+  providerUsageVisible: false, onProviderUsageVisibleChange: noop,
+  scopeNativeSelectAll: false, onScopeNativeSelectAllChange: noop,
+  openUrlAutomatically: false, onOpenUrlAutomaticallyChange: noop,
+  cwd: null, remoteHost: false, sessionId: null,
+  onModelsSaved: noop, onPluginsReloaded: noop,
+  appUpdate: null, onRefreshAppUpdate: async () => null, onOmpUpdateAvailabilityChange: noop,
+  onRequestAppUpdate: noop, onSelectTab: noop, onClose: noop,
+};
+
+test("the browser transport control offers SSE and the WebSocket link, saves a change and restores a failed one", async (t) => {
   const puts = [];
   let putStatus = 200;
   const originalFetch = globalThis.fetch;
@@ -18,75 +32,69 @@ test("the browser transport control shows the saved mode, saves changes and show
       puts.push(init.body);
       return Response.json({}, { status: putStatus });
     }
-    return Response.json({ browserTransport: "sse", browserTransportPerSocket: 4, browserTransportMaxSockets: 16 });
+    return Response.json({ browserTransport: "sse" });
   };
   t.after(() => {
     cleanup();
     globalThis.fetch = originalFetch;
   });
-  const { container } = render(createElement(SettingsConfig, {
-    activeTab: "general",
-    toolCallsDefaultCollapsed: false, onToolCallsDefaultCollapsedChange: noop,
-    hideToolActivity: false, onHideToolActivityChange: noop,
-    expandThinkingByDefault: false, onExpandThinkingByDefaultChange: noop, onHideThinkingBlockChange: noop,
-    providerUsageVisible: false, onProviderUsageVisibleChange: noop,
-    scopeNativeSelectAll: false, onScopeNativeSelectAllChange: noop,
-    openUrlAutomatically: false, onOpenUrlAutomaticallyChange: noop,
-    cwd: null, remoteHost: false, sessionId: null,
-    onModelsSaved: noop, onPluginsReloaded: noop,
-    appUpdate: null, onRefreshAppUpdate: async () => null, onOmpUpdateAvailabilityChange: noop,
-    onRequestAppUpdate: noop, onSelectTab: noop, onClose: noop,
-  }));
+  const { container } = render(createElement(SettingsConfig, settingsProps));
   await settle();
   const page = within(container);
-  const select = page.getByRole("combobox", { name: "Browser connection (experiment)" });
-  const perSocket = () => page.queryByRole("spinbutton", { name: "Sessions per connection" });
-  const maxSockets = () => page.queryByRole("spinbutton", { name: "Most connections" });
-
+  const select = page.getByRole("combobox", { name: "Browser connection" });
+  assert.deepEqual([...select.options].map((option) => [option.value, option.textContent]), [["sse", "Server-sent events + HTTP"], ["ws", "WebSocket link (default)"]]);
   assert.equal(select.value, "sse");
   assert.equal(select.disabled, false);
-  assert.equal(perSocket(), null);
-  assert.equal(maxSockets(), null);
 
-  fireEvent.change(select, { target: { value: "ws-pool" } });
+  fireEvent.change(select, { target: { value: "ws" } });
   await settle();
-  assert.deepEqual(puts, ['{"browserTransport":"ws-pool"}']);
-  assert.equal(perSocket()?.value, "4");
-  assert.equal(maxSockets()?.value, "16");
-
-  fireEvent.change(perSocket(), { target: { value: "8" } });
-  await settle();
-  assert.equal(puts.length, 1, "typing alone saves nothing");
-  assert.equal(perSocket()?.value, "8");
-  fireEvent.blur(perSocket());
-  await settle();
-  assert.deepEqual(puts.slice(1), ['{"browserTransportPerSocket":8}'], "leaving the field saves once");
-  fireEvent.blur(perSocket());
-  await settle();
-  assert.equal(puts.length, 2, "an unchanged number is not saved again");
-
-  fireEvent.change(perSocket(), { target: { value: "" } });
-  assert.equal(perSocket()?.value, "", "the field can be emptied while typing");
-  for (const value of ["", "0", "1.5", "65"]) {
-    fireEvent.change(perSocket(), { target: { value } });
-    fireEvent.blur(perSocket());
-    await settle();
-    assert.equal(puts.length, 2, `${JSON.stringify(value)} is not saved`);
-    assert.equal(perSocket()?.value, "8", "the field shows the saved number again");
-  }
-
-  fireEvent.change(maxSockets(), { target: { value: "2" } });
-  fireEvent.keyDown(maxSockets(), { key: "Enter" });
-  await settle();
-  assert.deepEqual(puts.slice(2), ['{"browserTransportMaxSockets":2}'], "Enter saves");
-  fireEvent.blur(maxSockets());
-  await settle();
-  assert.equal(puts.length, 3, "and the blur after it does not save again");
+  assert.deepEqual(puts, ['{"browserTransport":"ws"}']);
+  assert.equal(select.value, "ws");
 
   putStatus = 500;
-  fireEvent.change(select, { target: { value: "ws-client" } });
+  fireEvent.change(select, { target: { value: "sse" } });
   await settle();
-  assert.equal(puts.at(-1), '{"browserTransport":"ws-client"}');
-  assert.equal(select.value, "ws-pool", "a failed save restores the previous mode");
-  assert.equal(perSocket()?.value, "8");
+  assert.equal(puts.at(-1), '{"browserTransport":"sse"}');
+  assert.equal(select.value, "ws", "a failed save restores the previous mode");
+});
+
+test("the browser transport control is disabled while its save is in flight, so two saves cannot finish out of order", async (t) => {
+  let releasePut;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    if (String(url) !== "/api/web-settings") return Response.json({});
+    if (init?.method === "PUT") {
+      await new Promise((resolve) => { releasePut = resolve; });
+      return Response.json({});
+    }
+    return Response.json({ browserTransport: "sse" });
+  };
+  t.after(() => {
+    cleanup();
+    globalThis.fetch = originalFetch;
+  });
+  const { container } = render(createElement(SettingsConfig, settingsProps));
+  await settle();
+  const select = within(container).getByRole("combobox", { name: "Browser connection" });
+  fireEvent.change(select, { target: { value: "ws" } });
+  await settle();
+  assert.equal(select.disabled, true, "a second change cannot start while the first save is in flight");
+  await act(async () => { releasePut(); });
+  await settle();
+  assert.equal(select.disabled, false);
+});
+
+test("the browser transport control shows the WebSocket link when the server sends no value or the read fails", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    cleanup();
+    globalThis.fetch = originalFetch;
+  });
+  for (const answer of [() => Response.json({}), () => Response.json({}, { status: 500 }), () => Promise.reject(new Error("offline"))]) {
+    globalThis.fetch = async (url) => (String(url) === "/api/web-settings" ? answer() : Response.json({}));
+    const { container, unmount } = render(createElement(SettingsConfig, settingsProps));
+    await settle();
+    assert.equal(within(container).getByRole("combobox", { name: "Browser connection" }).value, "ws");
+    unmount();
+  }
 });

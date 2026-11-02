@@ -206,16 +206,19 @@ export interface UseAgentSessionOptions {
 /** Toast a send its connection stopped: the host's link (HostOfflineError) or
  *  this browser's session socket (TransportLostError). True when it may have
  *  left and still run, so the composer must not offer it again; null for any
- *  other error, which the caller reports itself. */
-function toastStoppedSend(error: unknown): boolean | null {
+ *  other error, which the caller reports itself. `promptIssued` false: the error
+ *  came from a command before the prompt (get_state, set_model), so nothing was
+ *  sent that could still run and the text goes back. */
+function toastStoppedSend(error: unknown, promptIssued = true): boolean | null {
   if (error instanceof TransportLostError) {
+    if (!promptIssued) return null;
     toast.info(translate("agentSession.transportLostMaybeSent"));
     return true;
   }
   if (!(error instanceof HostOfflineError)) return null;
-  if (error.mayHaveRun) toast.info(translate("agentSession.hostOfflineMaybeSent", { detail: error.message }));
+  if (error.mayHaveRun && promptIssued) toast.info(translate("agentSession.hostOfflineMaybeSent", { detail: error.message }));
   else toast.error(translate("agentSession.hostOfflineSend", { detail: error.message }));
-  return error.mayHaveRun;
+  return error.mayHaveRun && promptIssued;
 }
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
@@ -2790,6 +2793,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     userScrollIntentUntilRef.current = 0;
 
     let recoveryKey = sessionIdRef.current ?? (newSessionCwd ? newChatDraftKey(newSessionCwd, newSessionHostId) : undefined);
+    // Set just before the prompt goes out: a lost reply from any earlier command (get_state, set_model) ran no prompt.
+    let promptIssued = false;
     try {
       let sentSessionId: string | null = null;
       // The agent route degrades a prompt into omp's follow-up queue when a
@@ -2832,6 +2837,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             const previousEntryIds = await snapshotRunEntries(sid);
             if (promptRunIdRef.current === promptRunId) runPreviousEntryIdsRef.current = previousEntryIds;
           }
+          promptIssued = true;
           queuedBehindShell = isQueuedWhileShellRunning(await sendAgentCommand(sid, {
             type: "prompt",
             message,
@@ -2852,6 +2858,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (promptRunIdRef.current === promptRunId && sessionIdRef.current === sid) {
           runPreviousEntryIdsRef.current = previousEntryIds;
         }
+        promptIssued = true;
         queuedBehindShell = isQueuedWhileShellRunning(await sendAgentCommand(sid, {
           type: "prompt",
           message,
@@ -2889,7 +2896,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Every failure here (stream connect, startup, set_model, or the prompt
       // POST itself) leaves no run to show, so roll back the optimistic bubble.
       setOptimisticUserMessage(null);
-      const mayHaveRun = toastStoppedSend(e);
+      const mayHaveRun = toastStoppedSend(e, promptIssued);
       if (mayHaveRun === null) {
         addNotice({
           type: "error",
@@ -2973,9 +2980,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       interruptReplyPendingRef.current = false;
       setOptimisticUserMessage(null);
-      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
-      // Mirror handleSend: the interrupt never started, so hand the text back
-      // instead of losing it with the rolled-back bubble.
+      // The reply may be lost after the interrupt ran: the composer must not offer the text again (a resend would
+      // interrupt the replacement turn), as in handleSend. Otherwise the interrupt never started: hand the text back.
+      const mayHaveRun = toastStoppedSend(e);
+      if (mayHaveRun === null) addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      if (mayHaveRun) return true;
       if (trimmedMessage) opts.chatInputRef?.current?.insertIfEmpty(trimmedMessage);
       return false;
     }
@@ -3003,8 +3012,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     } catch (e) {
       console.error("Failed to execute shell command:", e);
-      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
-      opts.chatInputRef?.current?.insertIfEmpty(inputText);
+      // A stopped connection may have delivered the command: it toasts and the composer does not offer it again.
+      const mayHaveRun = toastStoppedSend(e);
+      if (mayHaveRun === null) addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      if (!mayHaveRun) opts.chatInputRef?.current?.insertIfEmpty(inputText);
     } finally {
       bashRunningRef.current = false;
       setPendingBash(null);

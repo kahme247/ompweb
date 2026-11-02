@@ -1,5 +1,7 @@
 # Browser transport experiment (SSE + HTTP vs WebSockets) — design
 
+> **Retired in part (2026-11-01).** The four WebSocket modes (`ws-client`, `ws-client-split`, `ws-session`, `ws-pool`) and everything that served them are gone: D1's `ws-*` values and pool numbers, D2, D3's socket handler, D4's WebSocket wire format, D5, the `rebalance`/`pool`/WebSocket `hang` metrics and the socket limitations. Measured, a command's ack queued behind event frames, the ack timer then killed healthy sockets and every redial replayed snapshots. One browser WebSocket built like the host link replaces them: `docs/specs/2026-11-01-browser-link-design.md` (`browserTransport: "sse" | "ws"`). What stays from here: the live switch (D1), the SSE `id:` emit times, `runAgentCommand`, and the measurement (D6) for `sse` and `ws`. The text below is the experiment as it was built.
+
 Date: 2026-10-31. Branch: `feat/browser-ws` (stacked on `feat/ws-link`, #347). Plan: `docs/plans/2026-10-31-browser-transport-experiment.md`.
 Builds on: AGENTS.md "Live event stream: one socket per browser", "Queued messages are omp-owned", "Running state + reconciliation", "RPC session lifecycle"; `docs/specs/2026-10-31-websocket-link-design.md` (the host link's WebSocket, whose `Bun.serve` `websocket` handler this shares).
 

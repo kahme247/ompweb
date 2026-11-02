@@ -1,5 +1,7 @@
 # Browser Transport Experiment Implementation Plan
 
+> **Superseded (2026-11-01):** the WebSocket modes this plan built were removed; see `docs/specs/2026-11-01-browser-link-design.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A server-side switch `browserTransport: "sse" | "ws-client" | "ws-session" | "ws-pool"` that moves the browser's channel frames, channel (un)subscribe and the `POST /api/agent/[id]` command path onto WebSockets assigned per browser, per session, or to a pool sized from the active sessions, with the same latency/reconnect/isolation instrumentation in every transport stored server-side and summarized by a script.
