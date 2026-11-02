@@ -61,7 +61,7 @@ class FakeStream {
 /** The port of the worker the tab's transport started; tests flip its transport. */
 let workerPort = null;
 
-/** Speaks the tab<->worker protocol of public/event-stream-worker.js. */
+/** Speaks the tab<->worker protocol of lib/event-stream-worker.ts. */
 class FakeSharedWorker {
   constructor() {
     const streams = new Map();
@@ -5077,7 +5077,7 @@ const SOCKET_LOST = { error: "The connection to omp-web dropped before the answe
 async function inWebSocketMode(run) {
   const { openEventStream } = await import("@/lib/event-stream");
   openEventStream({ kind: "running" }).close(); // the tab's transport exists before the hook mounts
-  workerPort.onmessage({ data: { transport: "ws-session" } });
+  workerPort.onmessage({ data: { transport: "ws" } });
   try {
     await run();
   } finally {
@@ -5104,6 +5104,36 @@ test("a prompt whose session socket dropped before the answer toasts that it may
   });
 });
 
+test("a `!` command whose session socket dropped before the answer toasts that it may have run and stays out of the composer", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession("socket-lost-bash", [userMsg("u0", "q")]);
+    const offered = [];
+    const w = await mountSession("socket-lost-bash", undefined, { chatInputRef: { current: { insertIfEmpty: (text) => offered.push(text) } } });
+    world.socketAnswer = (command) => command.type === "bash" ? { status: 503, body: SOCKET_LOST } : null;
+    await act(async () => { await w.latest.handleSend("!touch /tmp/once"); await sleep(30); });
+    assert.deepEqual(offered, [], "the composer must not bring the command back: it may run twice");
+    assert.deepEqual(toastCalls, [["info", translate("agentSession.transportLostMaybeSent")]]);
+    assert.equal(w.latest.notices.length, 0);
+  });
+});
+
+test("a `!` command the route refused is offered back to the composer with an error notice", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession("socket-refused-bash", [userMsg("u0", "q")]);
+    const offered = [];
+    const w = await mountSession("socket-refused-bash", undefined, { chatInputRef: { current: { insertIfEmpty: (text) => offered.push(text) } } });
+    world.socketAnswer = (command) => command.type === "bash" ? { status: 400, body: { error: "Shell is busy" } } : null;
+    await act(async () => { await w.latest.handleSend("!touch /tmp/once"); await sleep(30); });
+    assert.deepEqual(offered, ["!touch /tmp/once"], "it never ran, so the composer gets it back");
+    assert.deepEqual(toastCalls, []);
+    assert.deepEqual(w.latest.notices.map((notice) => notice.type), ["error"]);
+  });
+});
+
 test("a steer whose session socket dropped before the answer is reported as taken", async () => {
   await inWebSocketMode(async () => {
     resetWorld();
@@ -5116,6 +5146,42 @@ test("a steer whose session socket dropped before the answer is reported as take
     assert.equal(accepted, true, "the composer drops the text: it may run");
     assert.deepEqual(toastCalls, [["info", translate("agentSession.transportLostMaybeSent")]]);
     assert.equal(w.latest.notices.length, 0);
+  });
+});
+
+test("a get_state whose reply was lost before the prompt went out gives the draft back: no prompt ran", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession("socket-lost-state", [userMsg("u0", "q")]);
+    const w = await mountSession("socket-lost-state");
+    world.socketAnswer = (command) => command.type === "get_state" ? { status: 503, body: SOCKET_LOST } : null;
+    let receipt;
+    await act(async () => { receipt = await w.latest.handleSend("never sent"); await sleep(30); });
+    assert.deepEqual(receipt, { status: "rejected", recoveryKey: "socket-lost-state" });
+    assert.deepEqual(toastCalls, [], "no prompt was sent, so nothing may have been delivered");
+    assert.deepEqual(w.latest.notices.map((notice) => notice.type), ["error"]);
+    assert.equal(w.latest.agentRunning, false);
+    assert.equal(callsTo("POST", "/api/agent/socket-lost-state").some((call) => call.body?.type === "prompt"), false);
+  });
+});
+
+test("an interrupt-and-reply whose abort_and_prompt reply was lost is reported as taken and the text is not offered again", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession("socket-lost-interrupt", [userMsg("u0", "q")]);
+    const offered = [];
+    const { w, es } = await startRun("socket-lost-interrupt", "q1", false, { chatInputRef: { current: { insertIfEmpty: (text) => offered.push(text) } } });
+    await act(async () => { es.emit({ type: "agent_start" }); await Promise.resolve(); });
+    world.socketAnswer = (command) => command.type === "abort_and_prompt" ? { status: 503, body: SOCKET_LOST } : null;
+    let interrupt;
+    await act(async () => { interrupt = w.latest.handleInterruptAndReply("replacement"); await sleep(30); });
+    let accepted;
+    await act(async () => { lastEs().open(); accepted = await interrupt; });
+    assert.equal(accepted, true, "the replacement may be running: the composer drops the text");
+    assert.deepEqual(offered, [], "a resend would interrupt the replacement turn");
+    assert.deepEqual(toastCalls, [["info", translate("agentSession.transportLostMaybeSent")]]);
   });
 });
 

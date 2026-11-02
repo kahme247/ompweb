@@ -1,13 +1,13 @@
 "use client";
 
-import { isWebSocketTransport, type BrowserTransport, type EventStreamChannel } from "./event-stream-protocol";
+import type { BrowserTransport, EventStreamChannel } from "./event-stream-protocol";
 
 export type { EventStreamChannel } from "./event-stream-protocol";
 
 // Tab side of the live-event multiplexer: EventSource-shaped streams whose
-// frames travel over the connections held by public/event-stream-worker.js
-// (the one `/api/events` EventSource, or WebSockets; see
-// lib/event-stream-protocol.ts for why).
+// frames travel over the connection held by the shared worker
+// (lib/event-stream-worker.ts: the one `/api/events` EventSource, or the browser
+// link; see lib/event-stream-protocol.ts for why).
 // Semantics follow EventSource: `onerror` with readyState CONNECTING means
 // the stream is reconnecting on its own (a later `onopen` follows);
 // CLOSED is fatal and the caller decides whether to open a new stream.
@@ -34,7 +34,7 @@ type WorkerMessage =
 /** The worker's transport, on attach once known and on every change. */
 type TransportMessage = { transport: BrowserTransport };
 
-/** An agent command's answer: the server's (over the session socket or HTTP) or a local 413/503 from the worker. */
+/** An agent command's answer: the server's (over the browser link or HTTP) or a local 413/503 from the worker. */
 export interface CommandReply {
   status: number;
   body: unknown;
@@ -44,7 +44,7 @@ export interface CommandReply {
   attempts: number;
   deduped: boolean;
   behindBytes: number;
-  /** The socket key it went over (`session:<id>`, `pool:<n>`, …), `"http"` for a POST. */
+  /** What it went over: `"link"`, or `"http"` for a POST. */
   socket: string;
   /** Bytes queued ahead of it at send that were this or other sessions' commands (spec D6 "Uplink"); null when never sent. */
   behindSameBytes: number | null;
@@ -103,7 +103,7 @@ class Transport {
       // Back from the bfcache: pagehide already released our subscriptions.
       if (event.persisted) for (const stream of this.streams.values()) stream.resume();
     });
-    // The worker redials its sockets when the network or the page comes back.
+    // The worker redials its link when the network or the page comes back.
     this.wake("init");
     document.addEventListener("visibilitychange", () => this.wake(document.visibilityState === "visible" ? "visible" : "hidden"));
     window.addEventListener("online", () => this.wake("online"));
@@ -257,9 +257,9 @@ export function recordTransportSample(sample: Record<string, unknown>): void {
   transport?.post({ op: "metric", sample });
 }
 
-/** Sends an agent command over the worker's socket for its session (any `ws-*` transport): null (or a promise of null,
- * when the worker turns out to be in SSE mode) means the caller POSTs it instead. `type` is the command's, so the
- * worker never parses a body of up to 8 MB to learn it. */
+/** Sends an agent command over the worker's browser link (transport `ws`): null (or a promise of null, when the worker
+ * turns out to be on SSE) means the caller POSTs it instead. `type` is the command's, so the worker never parses a
+ * body of up to 8 MB to learn it. */
 export function sendSessionCommand(sessionId: string, req: string, body: string, advisor: boolean, type: string): Promise<CommandReply | null> | null {
-  return transport && isWebSocketTransport(transport.mode) ? transport.command(sessionId, req, body, advisor, type) : null;
+  return transport?.mode === "ws" ? transport.command(sessionId, req, body, advisor, type) : null;
 }

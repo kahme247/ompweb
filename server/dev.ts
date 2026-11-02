@@ -1,6 +1,6 @@
 // Dev entry (`npm run dev`): API plus the SPA from Bun's HTML import with HMR, bundled in memory; never reads dist/.
 import html from "../app/index.html";
-import { clientEnv } from "./client-env";
+import { buildEventStreamWorker, clientEnv } from "./client-env";
 
 declare global {
   var __ompWebRegistered: Promise<void> | undefined;
@@ -8,7 +8,9 @@ declare global {
 }
 
 const root = process.env.OMP_WEB_PACKAGE_DIR ?? process.cwd();
-const env = clientEnv(root);
+// Bundled on each start (and each --hot re-evaluation); its hash, like a build's, versions the worker's URL.
+const worker = await buildEventStreamWorker(root);
+const env = clientEnv(root, worker);
 if (Object.keys(env).some((name) => !process.env[name])) {
   // bunfig.toml's [serve.static] env inlines OMP_WEB_PUBLIC_* from the environment Bun started with, so setting them
   // now is too late: run once more with them set and the same flags (--hot). The guard survives a --hot re-evaluation.
@@ -22,7 +24,7 @@ if (Object.keys(env).some((name) => !process.env[name])) {
 
 Object.assign(process.env, { NODE_ENV: "development" });
 const { parseListenArgs, startServer } = await import("./app");
-const server = startServer({ ...parseListenArgs(Bun.argv.slice(2), 30178), dev: true, root, html });
+const server = startServer({ ...parseListenArgs(Bun.argv.slice(2), 30178), dev: true, root, html, worker });
 // `bun --hot` re-evaluates this file on every edit; register() must run once per process.
 globalThis.__ompWebRegistered ??= import("../instrumentation.node").then(({ register }) => register());
 await globalThis.__ompWebRegistered;

@@ -1,5 +1,7 @@
 // Wire format between the main omp-web server and the `ompweb host` daemon.
-// Pure: no I/O and no Next or `@/` imports, so both sides share it.
+// Pure: no I/O and no Next or `@/` imports, so both sides share it. The browser link (lib/browser-link.ts and the
+// worker it talks to, lib/event-stream-worker.ts) reuses its transport pieces: LINK_LIMITS' piece, window and liveness
+// values, LinkSender, PartJoiner, SeqWindow, Outbox, queuedLine and withSeq.
 import { isValidSessionId } from "../session-file-references-core";
 import type { SessionOps } from "./session-ops";
 
@@ -23,7 +25,8 @@ export const LINK_LIMITS = {
   pieceBytes: 256 * 1024,
   /** v5: a side sends queued lines and result pieces only while less than this is sent and not acked (spec D7), so a
    * small message never waits behind more than this plus one piece in kernel, proxy or peer buffers (768 KiB: about
-   * 3.1 s at 2 Mbit). It also caps throughput at about this per round trip. Control lines go regardless. */
+   * 3.1 s at 2 Mbit). It also caps throughput at about this per round trip. Control lines go regardless. The browser
+   * link's server side uses it as a cap: its window follows the link below it (lib/browser-link.ts `measure`). */
   unackedBytes: 2 * 256 * 1024,
   uplinkBytes: 16 * 1024 * 1024,
   blobBytes: 64 * 1024 * 1024,
@@ -176,6 +179,11 @@ export function encodeQueued(body: Unsequenced<DownMessage | UpMessage>): string
 /** `line` from encodeQueued with `seq` filled in (it is the last key). */
 export function withSeq(line: string, seq: number): string {
   return `${line.slice(0, -SEQ_TAIL.length)}${seq}}\n`;
+}
+
+/** A JSON object's text as a line `LinkSender` numbers (`withSeq`), like encodeQueued without the typed message. */
+export function queuedLine(json: string): string {
+  return `${json.slice(0, -1)},"seq":${SEQ_TAIL}`;
 }
 
 type Obj = Record<string, unknown>;
@@ -610,16 +618,19 @@ export class PartJoiner {
   private chunks: string[] | null = null;
   private at = 0;
 
+  /** `maxChars`: the longest joined line in UTF-16 units (the browser link's commands are up to 8 MiB plus their envelope). */
+  constructor(private readonly maxChars: number = LINK_LIMITS.maxLineBytes) {}
+
   /** A copy to try a frame's parts on: the original stays as it was until the frame is known to decode. */
   clone(): PartJoiner {
-    const copy = new PartJoiner();
+    const copy = new PartJoiner(this.maxChars);
     copy.chunks = this.chunks && [...this.chunks];
     copy.at = this.at;
     return copy;
   }
 
   /** The whole line once `part` ends it, else null. A part at 0 starts a new line, dropping a partial one; a part that
-   * does not continue the line in progress (its sender dropped the rest), or takes it past maxLineBytes or maxParts,
+   * does not continue the line in progress (its sender dropped the rest), or takes it past maxChars or maxParts,
    * is dropped with that line. */
   add(part: Pick<Part, "at" | "end" | "data">): string | null {
     if (part.at === 0) {
@@ -629,7 +640,7 @@ export class PartJoiner {
     if (
       !this.chunks
       || part.at !== this.at
-      || this.at + part.data.length > LINK_LIMITS.maxLineBytes
+      || this.at + part.data.length > this.maxChars
       || this.chunks.length >= PartJoiner.maxParts
     ) {
       this.chunks = null;

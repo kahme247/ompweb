@@ -24,10 +24,10 @@ type Sample = Record<string, unknown>;
 // The report's section order, fixed so two runs over different data line up.
 const SECTION_ORDER = [
   "action totalMs", "action transportMs", "action upMs", "abort behind upload", "event ms", "reconnect ms", "reconnect fromDropMs",
-  "isolation event ms", "isolation action ms", "sockets", "pool size", "clock offsetRtt", "rebalance moved", "rebalance settledMs",
+  "reconnect resumed", "isolation event ms", "isolation action ms", "sockets", "clock offsetRtt",
   "hang", "resend", "deduped", "outcome", "link small ackMs", "link bytesAhead", "link dropped", "client",
 ];
-// Mirrors public/event-stream-worker.js: the downlink logs frames from this size, and the uplink counts as blocking from it.
+// Mirrors lib/event-stream-worker.ts: the downlink logs frames from this size, and the uplink counts as blocking from it.
 const LARGE_FRAME_BYTES = 64 * 1024;
 /** Printed under a report with link rows: what a `down` ackMs can include. */
 export const LINK_ACK_NOTE = "note: link down ackMs is a round trip; a v5 host acks within about 16 ms, a v4 host only with its next uplink frame (output, a result, or its pong within 15 s), so there a line that makes no output can wait up to 15 s.";
@@ -72,12 +72,11 @@ function isolation(s: Sample): "other" | "same" | "clear" | "unknown" | undefine
 const reqKey = (s: Sample) => `${asString(s.clientId)}\0${asString(s.req)}`;
 
 /**
- * A WS hang is a missed ack: the transport stalled. An HTTP hang is a missed response, so it is a stall only when the
- * transport alone took the ack formula's time (its action's transportMs ≥ waitedMs), else the server's time made the
- * command slow; unclassified without that action's times.
+ * A hang is an HTTP command's missed response (the tab's timer; the browser link has none), so it is a stall only when
+ * the transport alone took the hang formula's time (its action's transportMs ≥ waitedMs), else the server's time made
+ * the command slow; unclassified without that action's times.
  */
 function hangKind(s: Sample, transportByReq: Map<string, number | undefined>): string {
-  if (s.via !== "http") return "stalled";
   const transportMs = transportByReq.get(reqKey(s));
   const waitedMs = asNumber(s.waitedMs);
   if (transportMs === undefined || waitedMs === undefined) return "unclassified";
@@ -85,10 +84,10 @@ function hangKind(s: Sample, transportByReq: Map<string, number | undefined>): s
 }
 
 /**
- * A reconnect's trigger family, so the rows line up across transports: a socket's `close` is what an EventSource
- * reports as `error`; a socket's own `silence` and `hang` detectors keep their rows (SSE has neither, and both can fire
- * on a healthy socket behind a large downlink frame on a slow link); a network wake is split by whether the effective
- * type changed (`navigator.connection` `change` also fires on RTT or downlink drift, when WS redials healthy sockets).
+ * A reconnect's trigger family, so the rows line up across transports: the link's `close` is what an EventSource
+ * reports as `error`; the link's own `silence` detector (30 s without a frame) keeps its row (SSE has none); a network
+ * wake is split by whether the effective type changed (`navigator.connection` `change` also fires on RTT or downlink
+ * drift, when the link redials a healthy socket).
  */
 function reconnectFamily(s: Sample): string {
   switch (s.trigger) {
@@ -161,7 +160,6 @@ export function summarize(samples: Sample[], options: SummaryOptions): SummaryRo
     client.ua = asString(s.ua) ?? client.ua;
     clients.set(clientId, client);
     addValue("sockets", transport, "all", asNumber(s.sockets));
-    addValue("pool size", transport, "all", asNumber(s.pool));
     addValue("clock offsetRtt", transport, "all", asNumber(s.offsetRtt));
     const isolated = isolation(s);
 
@@ -195,10 +193,8 @@ export function summarize(samples: Sample[], options: SummaryOptions): SummaryRo
       const key = reconnectFamily(s);
       addValue("reconnect ms", transport, key, diff(s.firstFrameAt, s.startAt), asNumber(s.batch));
       addValue("reconnect fromDropMs", transport, key, diff(s.firstFrameAt, s.dropAt));
-    } else if (s.metric === "rebalance") {
-      const reason = asString(s.reason) ?? "unknown";
-      addValue("rebalance moved", transport, reason, asNumber(s.moved));
-      addValue("rebalance settledMs", transport, reason, asNumber(s.settledMs));
+      // The browser link resumed (nothing re-subscribed) or resynced (every stream again, with fresh snapshots).
+      if (typeof s.resumed === "boolean") add("reconnect resumed", transport, s.resumed ? "yes" : "no");
     } else if (s.metric === "hang") {
       add("hang", transport, "total");
       if (answered.has(reqKey(s))) add("hang", transport, "answered later");
