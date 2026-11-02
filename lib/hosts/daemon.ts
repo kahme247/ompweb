@@ -164,7 +164,9 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   let authorization = `Bearer ${options.token}`;
 
   const channels = new Map<string, Channel>();
-  configureHostUpdateSafety(() => channels.size > 0
+  // Spawns not yet in `channels`: their omp child may already be running.
+  let spawnsInFlight = 0;
+  configureHostUpdateSafety(() => channels.size > 0 || spawnsInFlight > 0
     ? "Close this host's sessions before updating its daemon; sessions and subagents must not be interrupted."
     : null);
   let updateStateWarningLogged = false;
@@ -556,6 +558,11 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   }
 
   async function spawnChannel(args: Record<string, unknown>): Promise<unknown> {
+    spawnsInFlight += 1;
+    try { return await openChannel(args); } finally { spawnsInFlight -= 1; }
+  }
+
+  async function openChannel(args: Record<string, unknown>): Promise<unknown> {
     const { ch, cwd, recordedCwd, sessionFile, toolNames, advisor, spawnModel } = args;
     let operation: HostUpdateOperation | null = null;
     try {

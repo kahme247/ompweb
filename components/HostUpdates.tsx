@@ -133,6 +133,8 @@ export function HostUpdates({ host }: { host: HostRow }) {
       if (!mounted.current) return;
       if (!response.ok) {
         if (response.status === 501) setUnsupported(true);
+        // A lost or late answer (host offline, timed out, unreadable) may follow an update that started: reconcile.
+        else if (response.status >= 500) throw new Error(data.error || `HTTP ${response.status}`);
         setError(t("hostUpdates.updateFailed", { error: data.error || `HTTP ${response.status}` }));
         return;
       }

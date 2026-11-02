@@ -244,24 +244,31 @@ test("a failed manual check keeps known versions but never claims up to date", a
   assert.ok(screen.getByRole("button", { name: "Retry" }));
 });
 
-test("lost update response requests status before another POST and shows the real failure", async (t) => {
-  const calls = [];
-  let operation = null;
-  t.mock.method(globalThis, "fetch", async (url, init) => {
-    calls.push(init?.method ?? "GET");
-    if (init?.method === "POST") {
-      operation = { id: "lost", target: "omp", version: "1.1.0", state: "failed", error: "Install failed; restored previous runtime" };
-      throw new TypeError("Connection lost");
-    }
-    return Response.json(updateInfo({ operation }));
+for (const [lost, answer] of [
+  ["a dropped connection", () => { throw new TypeError("Connection lost"); }],
+  ["an offline host (503)", () => Response.json({ error: "Build box is offline", code: "host_offline" }, { status: 503 })],
+  ["a timed-out host (504)", () => Response.json({ error: "Build box did not answer updateSoftware in time", code: "host_timeout" }, { status: 504 })],
+]) {
+  test(`after ${lost}, status is requested before another POST and shows the real failure`, async (t) => {
+    const calls = [];
+    let operation = null;
+    t.mock.method(globalThis, "fetch", async (url, init) => {
+      calls.push(init?.method ?? "GET");
+      if (init?.method === "POST") {
+        // The host received the request and started the update; only its answer was lost.
+        operation = { id: "lost", target: "omp", version: "1.1.0", state: "failed", error: "Install failed; restored previous runtime" };
+        return answer();
+      }
+      return Response.json(updateInfo({ operation }));
+    });
+    await showHosts([hostRow()]);
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "Update omp runtime" }));
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Update" }));
+    await screen.findByText(/Install failed; restored previous runtime/, {}, { timeout: 3500 });
+    assert.deepEqual(calls, ["GET", "POST", "GET"]);
   });
-  await showHosts([hostRow()]);
-  const user = userEvent.setup();
-  await user.click(await screen.findByRole("button", { name: "Update omp runtime" }));
-  await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Update" }));
-  await screen.findByText(/Install failed; restored previous runtime/, {}, { timeout: 3500 });
-  assert.deepEqual(calls, ["GET", "POST", "GET"]);
-});
+}
 
 test("an unknown update outcome keeps Update disabled until a status read succeeds, then allows one fresh attempt", async (t) => {
   const methods = [];
