@@ -14,6 +14,8 @@ import {
   type MuxControlFrame,
 } from "./event-stream-protocol";
 import { browserTransportState } from "./web-settings";
+import { isDeltaUpdate, mergeDeltaUpdates } from "./message-delta";
+import { isRecord } from "./type-guards";
 
 // Server half of the multiplexed live-event stream (see event-stream-protocol).
 // One EventStreamConnection = one `/api/events` SSE response = one browser
@@ -33,13 +35,11 @@ const SUBSCRIBED: SubscribeResult = { ok: true };
 class Subscription {
   active = true;
   detach: (() => void) | null = null;
-  // Backpressure slot (session channels): while the socket is behind,
-  // replaceable `message_update` frames collapse to the latest one — omp sends
-  // the FULL accumulated message each time, so latest-wins is safe. Every
-  // other frame flushes this first so per-subscription order is preserved.
-  pendingUpdate: unknown | null = null;
-  /** Emit time of `pendingUpdate`, the latest coalesced frame's, so the stamp keeps measuring server-to-peer delay. */
-  pendingAt: number | null = null;
+  // Backpressure queue (session channels): while the socket is behind,
+  // `message_update` frames wait here and merge (see queueUpdate) instead of
+  // being written. Every other frame flushes it first, so per-subscription
+  // order is preserved.
+  pendingUpdates: QueuedUpdate[] = [];
 
   constructor(readonly id: string, readonly coalescesMessageUpdates: boolean) {}
 }
@@ -226,7 +226,7 @@ export class EventStreamConnection {
 
   private release(subscription: Subscription): void {
     subscription.active = false;
-    subscription.pendingUpdate = null;
+    subscription.pendingUpdates = [];
     const detach = subscription.detach;
     subscription.detach = null;
     runDetach(detach);
@@ -264,11 +264,10 @@ export class EventStreamConnection {
   }
 
   private flush(subscription: Subscription): boolean {
-    const data = subscription.pendingUpdate;
-    const at = subscription.pendingAt ?? undefined;
-    subscription.pendingUpdate = null;
-    subscription.pendingAt = null;
-    return data === null || this.writeFrame(subscription, data, at);
+    const queued = subscription.pendingUpdates;
+    subscription.pendingUpdates = [];
+    for (const { data, at } of queued) if (!this.writeFrame(subscription, data, at)) return false;
+    return true;
   }
 
   /** The peer drained: deliver coalesced updates now rather than waiting for the next event or heartbeat. */
@@ -285,15 +284,42 @@ export class EventStreamConnection {
     if (!subscription.active || this.closed) return;
     if (
       subscription.coalescesMessageUpdates
-      && (data as { type?: unknown } | null)?.type === "message_update"
+      && isRecord(data)
+      && data.type === "message_update"
       && this.sink.backpressured()
     ) {
-      // Coalesce while backpressured; never buffer unboundedly.
-      subscription.pendingUpdate = data;
-      subscription.pendingAt = Date.now();
+      queueUpdate(subscription.pendingUpdates, data, Date.now());
       return;
     }
     if (this.flush(subscription)) this.writeFrame(subscription, data);
+  }
+}
+
+type QueuedUpdate = { data: Record<string, unknown>; at: number };
+
+/**
+ * Merge a `message_update` into a backpressure queue without losing anything:
+ * a whole message replaces the queued updates of that message (it holds them
+ * all), and a delta joins the last queued delta of the same block. Each entry
+ * keeps the emit time and sequence of its latest frame (and `web.first`, its
+ * first piece's), so the stamp keeps measuring server-to-peer delay and
+ * sequences stay in order. Deltas interleaved across blocks do not merge:
+ * joining a delta to an earlier entry would put it before frames it follows
+ * and break the sequence fence the browser relies on.
+ */
+function queueUpdate(queue: QueuedUpdate[], data: Record<string, unknown>, at: number): void {
+  if (!isDeltaUpdate(data)) {
+    for (let i = queue.length - 1; i >= 0; i--) if (queue[i].data.messageId === data.messageId) queue.splice(i, 1);
+    queue.push({ data, at });
+    return;
+  }
+  const last = queue.at(-1);
+  const merged = last && isDeltaUpdate(last.data) ? mergeDeltaUpdates(last.data, data) : null;
+  if (last && merged) {
+    last.data = merged;
+    last.at = at;
+  } else {
+    queue.push({ data, at });
   }
 }
 

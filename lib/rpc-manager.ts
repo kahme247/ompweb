@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import { validateAgentImages } from "./image-attachments";
 import { hasVisibleAssistantContent } from "./assistant-response";
+import { applyMessageDelta, isDeltaUpdate, withStreamedArguments } from "./message-delta";
 import { invalidateModelsCache } from "./models-cache";
 import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame } from "./omp/rpc-process";
 import type { RpcTransport } from "./omp/rpc-transport";
@@ -259,6 +260,13 @@ export class AgentSessionWrapper {
   private streamId = randomUUID();
   private streamSequence = 0;
   private streamingMessage: Partial<AgentMessage> | null = null;
+  private streamingMessageId: string | null = null;
+  /** Assistant messages omp is streaming, by messageId: what its delta updates apply to (lib/message-delta.ts). */
+  private openMessages = new Map<string, Partial<AgentMessage>>();
+  /** False once omp's deltas did not fit a message it started, or switching updates failed: full updates for good. */
+  private deltasFit = true;
+  /** A delta found no message to apply to: omp sends full updates until the message ends. */
+  private recoveringUpdates = false;
   private liveToolEvents = new Map<string, SessionLiveToolEvent>();
   /** Positive evidence for this run, retained after native completion but before disk append. */
   private responseObserved = false;
@@ -463,13 +471,16 @@ export class AgentSessionWrapper {
       isPromptRunning: this.promptRunning,
       isCompacting: this.compacting,
       responseObserved: this.responseObserved,
-      streamingMessage: this.streamingMessage ? { ...this.streamingMessage } : null,
+      streamingMessage: this.streamingMessage ? { ...withStreamedArguments(this.streamingMessage) } : null,
+      streamingMessageId: this.streamingMessageId,
       toolEvents: Array.from(this.liveToolEvents.values(), (event) => ({ ...event })),
     };
   }
 
   private clearLiveSnapshots(): void {
     this.streamingMessage = null;
+    this.streamingMessageId = null;
+    this.openMessages.clear();
     this.liveToolEvents.clear();
     this.streamSequence += 1;
   }
@@ -528,6 +539,8 @@ export class AgentSessionWrapper {
 
   /** Frames may have been lost (link down, `resync`): re-read omp's state, as the client's get_state reconcile does. */
   private async reconcileAfterGap(): Promise<void> {
+    // A lost delta would corrupt its message silently: rebuild from the next full update instead.
+    this.openMessages.clear();
     try {
       const state = await this.getStateWithTimeout();
       if (!this._alive) return;
@@ -566,6 +579,7 @@ export class AgentSessionWrapper {
       // and keeps the per-question select/editor fallback.
       // Bounded like get_state so a child that never answers cannot stall startup.
       await this.proc.sendCommand({ type: "set_ask_dialog", enabled: true }, GET_STATE_TIMEOUT_MS).catch(() => {});
+      await this.enableDeltaUpdates(this.proc);
       const state = await this.getStateWithTimeout();
       this.applyIdentity(state);
       // Warn when the spawn cwd differs from the session's recorded directory.
@@ -590,6 +604,44 @@ export class AgentSessionWrapper {
   }
 
   /**
+   * omp >= 18.4.5 accepts `messageUpdates: "delta"`; from 18.13.2 its deltas carry the block shells that make them
+   * rebuildable (an omp in between is caught at its first block, see loseDeltaBase). An older omp rejects or
+   * ignores the option and keeps full updates.
+   */
+  private async enableDeltaUpdates(proc: RpcProcess): Promise<void> {
+    this.recoveringUpdates = false;
+    this.deltasFit = true;
+    await proc.sendCommand({ type: "set_event_filter", events: null, messageUpdates: "delta" }, GET_STATE_TIMEOUT_MS).catch(() => {});
+  }
+
+  private setMessageUpdates(messageUpdates: "full" | "delta"): void {
+    void this.proc.sendCommand({ type: "set_event_filter", events: null, messageUpdates }, GET_STATE_TIMEOUT_MS).catch(() => {
+      // The next delta that finds no base asks again; nothing switches back to deltas.
+      this.recoveringUpdates = false;
+      this.deltasFit = false;
+    });
+  }
+
+  /**
+   * A delta found no message to apply to (attached mid-message, adopted child,
+   * frames lost on the link): full updates until the message ends rebuild it.
+   * `incompatible`: the message was there, so this omp's deltas do not fit
+   * what it started (one before 18.13.2 sends no block shells): full updates for good.
+   */
+  private loseDeltaBase(incompatible: boolean): void {
+    if (incompatible) this.deltasFit = false;
+    if (this.recoveringUpdates) return;
+    this.recoveringUpdates = true;
+    this.setMessageUpdates("full");
+  }
+
+  private resumeDeltaUpdates(): void {
+    if (!this.recoveringUpdates) return;
+    this.recoveringUpdates = false;
+    if (this.deltasFit) this.setMessageUpdates("delta");
+  }
+
+  /**
    * Re-sync a child that outlived the server that spawned it (adoptRpcSession):
    * the startup handshake minus the ready wait, every command bounded so a
    * wedged child fails the adoption, then the daemon's lines of its open requests.
@@ -606,6 +658,7 @@ export class AgentSessionWrapper {
       await this.proc.negotiateProtocol(await this.proc.waitReady(), GET_STATE_TIMEOUT_MS);
       await optional({ type: "set_subagent_subscription", level: "events" });
       await optional({ type: "set_ask_dialog", enabled: true });
+      await this.enableDeltaUpdates(this.proc);
       // omp's state has no shell-command flag: a `!!` command the lost server started
       // leaves bashRunning false, and its result arrives as an unsolicited response.
       this.applyIdentity(await this.getStateWithTimeout());
@@ -1293,6 +1346,7 @@ export class AgentSessionWrapper {
         this.promptRunning = false;
         this.compacting = false;
         this.clearLiveSnapshots();
+        this.resumeDeltaUpdates();
         break;
       case "prompt_error":
       case "prompt_result":
@@ -1301,19 +1355,45 @@ export class AgentSessionWrapper {
         this.compacting = false;
         this.promptRunning = false;
         this.clearLiveSnapshots();
+        this.resumeDeltaUpdates();
         break;
       case "message_start":
       case "message_update": {
-        const message = event.message as Partial<AgentMessage> | undefined;
-        if (message && message.role !== "user") this.streamingMessage = message;
+        let message = event.message as Partial<AgentMessage> | undefined;
+        const messageId = typeof event.messageId === "string" ? event.messageId : null;
+        if (isDeltaUpdate(event)) {
+          const base = messageId === null ? undefined : this.openMessages.get(messageId);
+          const rebuilt = applyMessageDelta(base, event.assistantMessageEvent);
+          // Never forward a delta nobody can apply: tabs get the message again from omp's full updates.
+          if (!rebuilt) {
+            this.loseDeltaBase(base !== undefined);
+            return;
+          }
+          message = rebuilt;
+        }
+        // Only a start or a rebuilt delta is a base: a full update's tool calls have no streamed JSON, and its
+        // snapshot can be ahead of the deltas that follow it, so a delta after one recovers instead.
+        if (messageId !== null && message?.role === "assistant") {
+          if (event.type === "message_start" || isDeltaUpdate(event)) this.openMessages.set(messageId, message);
+          else this.openMessages.delete(messageId);
+        }
+        if (message && message.role !== "user") {
+          this.streamingMessage = message;
+          this.streamingMessageId = messageId;
+        }
         if (this.responseRunActive && hasVisibleAssistantContent(message)) this.responseObserved = true;
         break;
       }
       case "message_end": {
         const message = event.message as Partial<AgentMessage> | undefined;
         if (this.responseRunActive && hasVisibleAssistantContent(message)) this.responseObserved = true;
-        if (message?.role && message.role === this.streamingMessage?.role) this.streamingMessage = null;
+        if (typeof event.messageId === "string") this.openMessages.delete(event.messageId);
+        if (message?.role && message.role === this.streamingMessage?.role) {
+          this.streamingMessage = null;
+          this.streamingMessageId = null;
+        }
         if (message?.role === "toolResult" && message.toolCallId) this.liveToolEvents.delete(message.toolCallId);
+        if (message?.role === "assistant") this.resumeDeltaUpdates();
         break;
       }
       case "tool_execution_start":
@@ -1422,6 +1502,15 @@ export class AgentSessionWrapper {
     this.listeners.push(listener);
     this.noteActivity();
     const now = Date.now();
+    // A tab attaching mid-message needs the whole message before omp's next delta.
+    if (!internal && this.streamingMessage?.role === "assistant" && this.streamingMessageId !== null) {
+      listener({
+        type: "message_update",
+        messageId: this.streamingMessageId,
+        message: withStreamedArguments(this.streamingMessage),
+        web: { streamId: this.streamId, sequence: this.streamSequence },
+      });
+    }
     for (const [id, event] of this.pendingUiRequests) {
       const expiresAt = event.expiresAt as number | undefined;
       if (expiresAt !== undefined && expiresAt <= now) {
@@ -1920,6 +2009,7 @@ export class AgentSessionWrapper {
         // the live roster/transcript event stream before reading its state.
         await proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
         await proc.sendCommand({ type: "set_ask_dialog", enabled: true }, GET_STATE_TIMEOUT_MS).catch(() => {});
+        await this.enableDeltaUpdates(proc);
         const state = await proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS);
         this.applyIdentity(state);
         // Same fresh-spawn guard as startRpcSession: a sessionless wrapper

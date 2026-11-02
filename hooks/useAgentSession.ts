@@ -25,6 +25,7 @@ import { formatApiError } from "@/lib/i18n/api-error";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { toastBtwError, useBtw } from "@/hooks/useBtw";
 import { createMessageUpdateCoalescer, type MessageUpdateCoalescer } from "@/lib/message-update-coalescer";
+import { displayMessage } from "@/lib/message-delta";
 import { looksLikeRunningTurn } from "@/lib/chat-transcript-plan";
 import { createReconcileGuard, type ReconcileGuard } from "@/lib/reconcile-guard";
 import { getToolNamesForPreset, type ToolPreset } from "@/lib/tool-presets";
@@ -493,7 +494,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   if (eventCoalescerRef.current === null) {
     eventCoalescerRef.current = createMessageUpdateCoalescer((event) => {
       handleAgentEventRef.current?.(event as AgentEvent);
-    });
+    }, undefined, () => void catchUpRef.current?.request());
   }
   const eventCoalescer = eventCoalescerRef.current;
   const authoritativeModelSeqRef = useRef(0);
@@ -2678,7 +2679,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       if (fields.message) {
         dispatch(snapshot.streamingMessage
-          ? { type: "update", message: normalizeToolCalls(snapshot.streamingMessage as AgentMessage) }
+          ? { type: "update", message: normalizeToolCalls(displayMessage(snapshot.streamingMessage) as AgentMessage) }
           // Between message_end and its saved copy the server has no message:
           // a held reply stays.
           : { type: "idle", streaming: snapshot.isStreaming });
@@ -2686,6 +2687,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const messageError = readAgentError(snapshot.streamingMessage);
         if (messageError) lastRunErrorRef.current = messageError;
       }
+      // omp's next delta applies to this snapshot, or completes deltas that arrived without their message.
+      eventCoalescer.seed(snapshot.streamingMessageId ?? null, snapshot.streamingMessage, snapshot.cursor.sequence, fields.message);
       if (fields.tools) {
         const preserve = fields.tools;
         setLiveToolResults((current) => new Map([...current].filter(([id]) => preserve.has(id))));

@@ -514,7 +514,7 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
 - **Local link bootstrap** (`lib/hosts/local-bootstrap.ts`, called from `instrumentation.node.ts`). `localLinkUrl()` builds the daemon's URL from `OMP_WEB_PORT`/`OMP_WEB_HOSTNAME` (set by `startProduction` from its listen address, so the launcher, the binary and `npm start` all link; wildcard binds map to `127.0.0.1`, a non-loopback bind gets no link and a console warning). `ensureLocalHostLink()` makes sure the `local` record exists (`registry.ts`, `rotateLocalHostToken`) and writes `<agent dir>/omp-web/host.json` (`{url, token}`, 0600). A `host.json` whose token the registry still accepts and whose url matches is left alone, so a web restart does not make the daemon redial. It throws, and startup only logs, when `host.json` points to a non-loopback server (a remote-host login on this machine): it is never overwritten. The daemon re-reads `host.json` when its link gets 401 and exits only if the file still holds the rejected token.
 - **Dev mode does not take the daemon.** With `NODE_ENV=development` `ensureLocalHostLink` is skipped, so the daemon stays linked to production and the dev server shows "This machine" offline. The local row of `GET /api/hosts` carries `daemonManaged: false` there, which hides the install banner.
 - **`local` is a registry record like any host**, with three exceptions: it is listed first, `PATCH` takes `label` only (`allowAgentStart` is fixed), and it cannot be revoked. Renaming "This machine" is a `PATCH /api/hosts {id: "local", label}`; an empty label resets it (`registry.ts` stores `""`; `customLocalLabel()` / `DEFAULT_LOCAL_LABEL` map it). `getHost("local")` works without the record: it is the daemon link, offline while none is linked, and "needs upgrade" on a protocol mismatch (`hostVersion` in the row is the daemon's).
-- **Adoption on hello** (`reattach`/`adopt` in `hub.ts`, `adoptRpcSession` in `rpc-manager.ts`). Each listed `{ch, sessionId, cwd, pending}` channel that has no transport on this server is a child of a previous server and is taken over by a new `AgentSessionWrapper` (`adopted: true`, `RpcProcess` option `adopted`). There is no session-list lookup: the spawn `cwd` comes from the hello, and the session identity from the child's own `get_state` (`applyIdentity`), so a new session whose file is not written yet is adoptable. The daemon names each child's current session in the hello (`PendingRequests.sessionId`: the file's header id at spawn, then the last successful `get_state`). Re-sync (`AgentSessionWrapper.adopt`): `negotiate_protocol`, `set_subagent_subscription`, `set_ask_dialog`, `get_state`, `get_subagents`, `get_btw_history`, then `replay` of the `pending` lines and `release` of the frames held meanwhile. Every command is bounded by `GET_STATE_TIMEOUT_MS`.
+- **Adoption on hello** (`reattach`/`adopt` in `hub.ts`, `adoptRpcSession` in `rpc-manager.ts`). Each listed `{ch, sessionId, cwd, pending}` channel that has no transport on this server is a child of a previous server and is taken over by a new `AgentSessionWrapper` (`adopted: true`, `RpcProcess` option `adopted`). There is no session-list lookup: the spawn `cwd` comes from the hello, and the session identity from the child's own `get_state` (`applyIdentity`), so a new session whose file is not written yet is adoptable. The daemon names each child's current session in the hello (`PendingRequests.sessionId`: the file's header id at spawn, then the last successful `get_state`). Re-sync (`AgentSessionWrapper.adopt`): `negotiate_protocol`, `set_subagent_subscription`, `set_ask_dialog`, `set_event_filter` (delta message updates, see "Streaming message updates"), `get_state`, `get_subagents`, `get_btw_history`, then `replay` of the `pending` lines and `release` of the frames held meanwhile. Every command is bounded by `GET_STATE_TIMEOUT_MS`.
 - **The daemon replays open blocking requests** (`pending-requests.ts`): `host_tool_call`, `host_uri_request` and blocking `extension_ui_request` lines, until answered or cancelled, capped at `LINK_LIMITS.pendingBytes` per channel. An adopted wrapper feeds them through `handleFrame` (`replaying`; agent tools are not re-run), so dialogs reappear and browser tool calls wait for the next tab (`hostToolsUnknown`, `parkHostTool`). A request opened while the old server stopped is also resent unacked: `RpcProcess.release` skips held requests the replay already delivered, so it is handled once. The hello also carries `autoApproveExtension`, which an adopted run has no spawn result for.
 - **A child is killed only when it cannot be adopted:** its hello entry has no session id or lost its `pending` lines to the cap (`killOrphan`), or a re-sync command times out or the child exits, its held output overflows, or its real session (after `get_state`) is already started on this server (`adoptRpcSession` kills it: its wrapper's dispose). Auto-resume (`resumeOnHostLink`) first awaits `adoptedChild()` and resumes a session only if it was not adopted.
 - **Shutdown freezes the links and never kills daemon children.** The `cleanup` in `rpc-manager.ts` runs `markShuttingDown()` and `freezeHostLinks()`: link sockets are closed 1001 and from then on a link neither sends nor applies anything (no kill, no rejection of open host tool calls as tabs close); new upgrades get 503 "omp-web is shutting down". A real SIGTERM exits in the same tick (`process.exit` in `instrumentation.node.ts`), before Bun writes the close frame, so daemons usually see 1006 or ECONNREFUSED rather than 1001 and redial the same way. The daemon keeps the output unacked and redials for the next server. An adoption that fails after the freeze leaves its child to the next server instead of killing it.
@@ -588,7 +588,9 @@ wait for that commit:
   the switch to do anything. The fold row is the expand affordance, so a hidden
   tool call is one click away rather than gone.
 - `tool_execution_update` is coalesced per tool call at display rate in
-  `lib/message-update-coalescer.ts` (chatty commands emit ~10-100+ frames/s).
+  `lib/message-update-coalescer.ts` (chatty commands emit ~10-100+ frames/s),
+  like `message_update` (which carries omp deltas, see "Streaming message
+  updates").
   `message_end` drops the pending `message_update` (the committed message
   supersedes it) but must NOT drop buffered tool updates.
 - Live entries are cleared on `agent_start`, terminal `agent_end`, prompt
@@ -623,6 +625,56 @@ wait for that commit:
   applies EXIF orientation, and cached next to the copies; full image if the
   bytes do not decode) and opens the full
   image in the lightbox. The route serves only PNG/JPEG/GIF/WebP by magic bytes.
+
+### Streaming message updates (omp deltas)
+A full `message_update` carries the whole message twice (`message` and
+`assistantMessageEvent.partial`), 7-11 KB per frame at several frames per
+second. omp >= 18.13.2 sends rebuildable deltas instead, and omp-web uses them
+end to end:
+- Every session start (spawn, restart, adoption) sends `set_event_filter`
+  `{ events: null, messageUpdates: "delta" }`. omp accepts the option since
+  18.4.5 and sends rebuildable deltas (with block shells) since 18.13.2; an omp
+  that rejects or ignores it keeps full updates, which every consumer below
+  still handles (a frame is a delta when its `message` has no `content`). The
+  reply is not read: the first delta that does not fit tells.
+- `lib/message-delta.ts` is the one reducer, shared by server and browser: a
+  `*_start` carries the opened block, `*_delta` appends at `contentIndex`,
+  `*_end` carries the final block, `start` restarts from a whole message.
+  `toolcall_delta` text accumulates in the block's `partialJson`; the arguments
+  are parsed from it only for display and snapshots (`withStreamedArguments`,
+  read as omp's `parseStreamingJson` does). It returns null for anything it
+  cannot place, and nobody renders a guess. `message_end` stays authoritative
+  (omp adds `intent` there; block kinds with no start event arrive only there).
+- The wrapper (`rpc-manager.ts`) keeps each open assistant message by
+  `messageId` and rebuilds it. Only `message_start` and a rebuilt delta set that
+  base: a full update drops it (its tool calls have no streamed JSON, and its
+  snapshot can be ahead of the next delta). `getStreamSnapshot()` (HTTP catch-up) carries it
+  with `streamingMessageId`, and `onEvent` replays it as one whole
+  `message_update` to a tab that attaches mid-message, before any later delta.
+- No base (adopted child after a server restart, frames lost on the host link —
+  `reconcileAfterGap` drops every base): the delta is not forwarded and the
+  wrapper switches omp to full updates until that assistant message ends (or the
+  run ends), then back to deltas. A delta that does not fit a message the
+  wrapper does have (an omp from 18.4.5 to 18.13.1 sends no block shells), or a
+  `set_event_filter` switch that fails, leaves the session on full updates for
+  good; after a failed switch the next lost delta asks for full updates again.
+- Backpressure (`event-stream-hub.ts`, SSE and WebSocket sinks): a behind socket
+  queues `message_update` frames; consecutive deltas of one block concatenate,
+  a whole message replaces the queued updates of its message, and nothing is
+  dropped or reordered. Merged frames keep the latest frame's sequence and emit
+  time and carry `web.first`, their first piece's sequence. Deltas of different
+  blocks never merge past each other: that would break the sequence order.
+- Browser (`lib/message-update-coalescer.ts`): applies each delta on arrival and
+  dispatches the whole message at display rate, so `useAgentSession` only ever
+  sees whole messages. A delta with no base is held and triggers a catch-up; the
+  HTTP live snapshot (`seed`) re-bases the coalescer whenever it is applied, and
+  otherwise completes held deltas newer than it when it is not older than them.
+  At most 1000 deltas are held; past that they are dropped, and only a snapshot
+  that covers them takes the deltas held afterwards.
+  A snapshot at S already holds delta S, so catch-up drops that frame as stale
+  (`useAgentSession-sync.ts`); a merged frame with `web.first <= S < sequence`
+  is held for the next snapshot instead of applied. Streamed tool arguments are
+  re-parsed for display only after 2 KB more JSON or 100 ms.
 
 ### Event protocol differences vs pi
 omp emits no `prompt_done` / `prompt_error` / `compaction_start` /
@@ -691,8 +743,8 @@ during the wait.
   notifications, keyed by its `clientId`), `hosts` (the `GET /api/hosts` body on
   subscribe and on every link or registry change), `host-tools` (cross-session
   `open_url`/`notify`/`open_file` calls), `session` (observer-only, never
-  spawns omp; keeps the latest-wins `message_update` coalescing under
-  backpressure), `file` (viewer watch, same allow-list as `/api/files`). A
+  spawns omp; queues and merges `message_update` frames under backpressure,
+  see "Streaming message updates"), `file` (viewer watch, same allow-list as `/api/files`). A
   failing frame ends only its own subscription, never the shared socket.
 - Split channels by consumer, lifetime, key and access check, not by which
   stream happens to be open: a subscription costs one `POST`, not a socket, so
