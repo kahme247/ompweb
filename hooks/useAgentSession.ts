@@ -497,7 +497,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   if (eventCoalescerRef.current === null) {
     eventCoalescerRef.current = createMessageUpdateCoalescer((event) => {
       handleAgentEventRef.current?.(event as AgentEvent);
-    }, undefined, () => void catchUpRef.current?.request());
+    }, undefined, () => catchUpRef.current?.requestMissingBase());
   }
   const eventCoalescer = eventCoalescerRef.current;
   const authoritativeModelSeqRef = useRef(0);
