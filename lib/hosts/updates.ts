@@ -96,10 +96,15 @@ let windowsParentLookup: Promise<{ name: string; commandLine: string } | null> |
 function windowsParent(): Promise<{ name: string; commandLine: string } | null> {
   windowsParentLookup ??= (async () => {
     try {
-      const { stdout } = await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `Get-CimInstance Win32_Process -Filter "ProcessId=${process.ppid}" | Select-Object Name,CommandLine | ConvertTo-Json -Compress`], { timeout: 10000, windowsHide: true });
+      // A cold CIM query can take over 10 s on a busy machine.
+      const { stdout } = await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `Get-CimInstance Win32_Process -Filter "ProcessId=${process.ppid}" | Select-Object Name,CommandLine | ConvertTo-Json -Compress`], { timeout: 20000, windowsHide: true });
       const row = JSON.parse(stdout) as { Name?: unknown; CommandLine?: unknown } | null;
       return typeof row?.Name === "string" ? { name: row.Name, commandLine: typeof row.CommandLine === "string" ? row.CommandLine : "" } : null;
-    } catch { return null; }
+    } catch {
+      // Ask again next time: a slow or failed query must not block updates until the daemon restarts.
+      windowsParentLookup = undefined;
+      return null;
+    }
   })();
   return windowsParentLookup;
 }
@@ -124,7 +129,7 @@ function macParentCommand(): Promise<string | null> {
     try {
       const { stdout } = await exec("ps", ["-o", "command=", "-p", String(process.ppid)], { timeout: 5000, env: { ...process.env, LC_ALL: "C" } });
       return stdout.trim() || null;
-    } catch { return null; }
+    } catch { macParentLookup = undefined; return null; }
   })();
   return macParentLookup;
 }
