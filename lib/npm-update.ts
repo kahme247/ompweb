@@ -42,7 +42,7 @@ export function isNewerVersion(availableVersion: string, currentVersion: string)
 export async function checkNpmUpdate(force = false): Promise<NpmUpdateStatus> {
   const currentVersion = packageJson.version;
   const packageDir = process.env.OMP_WEB_PACKAGE_DIR ?? process.cwd();
-  const installMethod = Bun.isStandaloneExecutable ? "binary" : detectInstallMethod(packageDir);
+  const installMethod = typeof Bun !== "undefined" && Bun.isStandaloneExecutable ? "binary" : detectInstallMethod(packageDir);
   const updateCommand = installMethod === "binary" ? RELEASES_URL : installMethod === "bun" ? "bun add -g @kahme247/ompweb" : "npm install -g @kahme247/ompweb";
 
   if (isUpdateDisabled()) {

@@ -72,8 +72,8 @@ export const SESSION_OP_PARAMS: { readonly [K in keyof SessionOps]: readonly str
   validateCwd: ["path"],
 };
 
-/** Every op a daemon answers: the session ops plus those on the host itself (the upload ops from v6). */
-export const HOST_OP_NAMES = [...(Object.keys(SESSION_OP_PARAMS) as (keyof SessionOps)[]), "spawn", "sessionFileExists", "invalidateSessionLists", "uploadStart", "uploadAbort", "uploadAttach"] as const;
+/** Every op a daemon answers. Older daemons refuse newer ops with unknown_op; upload ops require v6. */
+export const HOST_OP_NAMES = [...(Object.keys(SESSION_OP_PARAMS) as (keyof SessionOps)[]), "spawn", "sessionFileExists", "invalidateSessionLists", "checkUpdates", "updateSoftware", "uploadStart", "uploadAbort", "uploadAttach"] as const;
 
 export type HostOpName = (typeof HOST_OP_NAMES)[number];
 
@@ -120,6 +120,8 @@ export type UpMessage =
       type: "hello";
       v: number;
       ompVersion: string | null;
+      /** Running daemon's application version; absent on older hosts. */
+      ompwebVersion?: string;
       platform: string;
       home: string;
       /** omp's `tools.approval.extension: allow` on the host: a run adopted after a web restart had no spawn to report it. */
@@ -392,6 +394,7 @@ export function decodeUp(line: string): UpMessage | UnknownMessage {
         type: "hello",
         v: int(o, "v"),
         ompVersion: nullable(o, "ompVersion", str),
+        ...(o.ompwebVersion === undefined ? {} : { ompwebVersion: str(o, "ompwebVersion") }),
         platform: str(o, "platform"),
         home: str(o, "home"),
         autoApproveExtension: bool(o, "autoApproveExtension"),
