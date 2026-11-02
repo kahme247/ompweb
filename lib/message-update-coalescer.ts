@@ -105,7 +105,8 @@ export function createMessageUpdateCoalescer(
     if (live && live.messageId === messageId && firstOf(event) <= live.since) live = null;
     const message = live && live.messageId === messageId ? applyMessageDelta(live.message, event.assistantMessageEvent) : null;
     if (!live || !message) {
-      // Past the limit the held deltas go; the next held delta restarts the set with a floor that covers them.
+      // Past the limit the held deltas go; emptying the set makes this delta the first of a new one, so the
+      // floor below moves to the newest sequence seen before it, which covers the dropped deltas.
       if (held.length >= HELD_DELTA_LIMIT) held = [];
       if (held.length === 0) heldFloor = floor;
       held.push(event);
