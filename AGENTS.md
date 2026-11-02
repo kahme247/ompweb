@@ -790,7 +790,7 @@ during the wait.
     its token and `ack`, the server (same web session only: SHA-256 of the session cookie, else
     `trusted`/`open`) reattaches and both sides resend what the other missed. Subscriptions stay open on
     the server, so the tabs see nothing: no `error`, no second `open`, no snapshot. While the socket is
-    gone or lines wait for the window, `message_update`s merge (`queueUpdate`) and go on the next ack.
+    gone or lines wait for the window, `message_update`s merge (`queueUpdate`) and go on the next ack. A socket that holds unacked bytes and gets no ack for 30 s (pings do not count) is closed: its link detaches, resumable, and falls under the total budget.
   - **Resync** when the gap is gone (2 min passed, the backlog passed 32 MiB and the socket closed 4410,
     all links together passed 256 MiB and this one's socket was gone longest, or the server restarted):
     `welcome {resumed: false}`, both sides start over, every stream gets CONNECTING and subscribes again

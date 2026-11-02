@@ -88,6 +88,8 @@ interface BrowserLink {
   readonly up: SeqWindow;
   readonly parts: PartJoiner;
   offlineTimer: NodeJS.Timeout | undefined;
+  /** Runs while lines are unacked: offlineMs without an ack that frees any closes the socket (see `watchAcks`). */
+  ackTimer: NodeJS.Timeout | undefined;
   expiryTimer: NodeJS.Timeout | undefined;
   disposed: boolean;
   /** When its socket went, in detach order (Infinity while it has never been detached): the budget drops the oldest. */
@@ -213,6 +215,7 @@ function createLink(owner: string): BrowserLink {
     up: new SeqWindow(),
     parts: new PartJoiner(MAX_COMMAND_CHARS),
     offlineTimer: undefined,
+    ackTimer: undefined,
     expiryTimer: undefined,
     detachedAt: Infinity,
     disposed: false,
@@ -261,7 +264,7 @@ function queue(link: BrowserLink, key: string, json: string): boolean {
 
 /** Past totalBacklogBytes across every link, the detached links whose sockets are gone longest go first, and only ones
  * holding bytes: dropping an empty one frees nothing. Attached links are never dropped here: each stays under
- * backlogBytes, and its browser is reading. */
+ * backlogBytes, and `watchAcks` detaches one whose browser stops acking, which makes it droppable here. */
 function enforceBudget(): void {
   const held = (link: BrowserLink) => link.outboxBytes + link.sender.queuedBytes;
   let total = 0;
@@ -289,6 +292,7 @@ function flush(link: BrowserLink): void {
     if (sent !== 0) {
       link.sentSeq = item.seq;
       link.unacked += item.bytes;
+      link.ackTimer ??= startAckTimer(link);
     }
     if (sent > 0) return true;
     // The kernel's buffer is full: the link, not the browser's traffic, sets the ack rate now.
@@ -350,6 +354,8 @@ function detach(link: BrowserLink): void {
   link.detachedAt = ++detachCount;
   link.awaitingDrain = false;
   clearTimeout(link.offlineTimer);
+  clearTimeout(link.ackTimer);
+  link.ackTimer = undefined;
   clearTimeout(link.expiryTimer);
   link.expiryTimer = setTimeout(() => dispose(link, CLOSE.gone), browserLinkTimings.resumeMs);
   link.expiryTimer.unref?.();
@@ -361,11 +367,34 @@ function dispose(link: BrowserLink, code: number): void {
   link.disposed = true;
   links().delete(link.token);
   clearTimeout(link.offlineTimer);
+  clearTimeout(link.ackTimer);
+  link.ackTimer = undefined;
   clearTimeout(link.expiryTimer);
   const ws = link.socket;
   link.socket = null;
   ws?.close(code, "Browser link gone");
   link.connection.close();
+}
+
+/** Bytes sent and unacked for offlineMs without any ack that frees some mean a stuck or hostile browser: pings alone
+ * keep `sawBrowser` quiet, and the link would hold its backlog for nothing. The socket closes like a silent one (the
+ * link stays resumable, so the total budget then applies to it). An honest browser acks every piece it applies, within
+ * flushMs, so a slow link still acks long before the deadline. */
+function startAckTimer(link: BrowserLink): NodeJS.Timeout {
+  const timer = setTimeout(() => {
+    const ws = link.socket;
+    if (!ws || link.unacked === 0) return;
+    detach(link);
+    ws.close();
+  }, browserLinkTimings.offlineMs);
+  timer.unref?.();
+  return timer;
+}
+
+/** Restarts the ack deadline after progress; nothing unacked leaves it stopped. */
+function watchAcks(link: BrowserLink): void {
+  clearTimeout(link.ackTimer);
+  link.ackTimer = link.unacked > 0 ? startAckTimer(link) : undefined;
 }
 
 /** Any frame proves the browser alive; offlineMs of silence drops the socket (the link stays resumable). */
@@ -399,13 +428,17 @@ function onFrame(ws: BrowserSocket, data: string | Uint8Array): void {
   if (link.socket !== ws) return;
   sawBrowser(link);
   switch (message.type) {
-    case "ack":
+    case "ack": {
       if (!isSafeCount(message.ack)) return ws.close(CLOSE.invalidData, "Invalid ack");
-      measure(link, released(link, link.outbox.ack(message.ack)));
+      const freed = released(link, link.outbox.ack(message.ack));
+      // Progress restarts the deadline; an ack that frees nothing does not.
+      if (freed > 0) watchAcks(link);
+      measure(link, freed);
       flush(link);
       // The window moved: merged updates go now.
       link.connection.resume();
       return;
+    }
     case "ping":
       return control(ws, { type: "pong", c: message.c, at: Date.now() });
     case "pong":
