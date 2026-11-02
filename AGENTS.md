@@ -1049,7 +1049,7 @@ during the wait.
   hits. The server counts in the markdown source (a user message's text blocks
   joined with `\n`, each assistant text block separately); the chat counts in
   the rendered `[data-message-text][data-entry-id]` text, skipping code-block
-  headers, buttons, KaTeX MathML and table charts (`NOT_MESSAGE_TEXT`). New chrome inside
+  headers, buttons, line numbers, KaTeX MathML, Mermaid notes and table charts (`NOT_MESSAGE_TEXT`). New chrome inside
   message text must be excluded there too, or later ordinals shift. Text that
   rendering drops (a link URL) or splits into glyph nodes (KaTeX math) still
   shifts them; the jump then lands on the message.

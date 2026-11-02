@@ -9,9 +9,10 @@ const CURRENT_HIT = "omp-search-current";
 // Typing settles before the transcript is walked again.
 const PAINT_DELAY_MS = 150;
 // Rendered text that is not in the message's markdown source, which the server counts hits in:
-// code-block headers (language label, Copy button), KaTeX's hidden MathML copy and the
-// charts generated from tables (they repeat the table's labels and values).
-const NOT_MESSAGE_TEXT = "button, .markdown-code-header, .katex-mathml, [data-table-chart]";
+// code-block headers (language label, Copy button), highlighted code's line-number gutter,
+// KaTeX's hidden MathML copy, Mermaid's loading/error notes (the same set MessageCopyActions
+// strips) and the charts generated from tables (they repeat the table's labels and values).
+const NOT_MESSAGE_TEXT = "button, .markdown-code-header, .linenumber, .katex-mathml, .mermaid-block-loading, .mermaid-block-error, [data-table-chart]";
 
 // Absent before Chrome 105 / Safari 17.2 / Firefox 140: hits are then not
 // painted, but jumping to one still works.
