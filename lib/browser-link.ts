@@ -488,7 +488,8 @@ function onUploadFrame(ws: BrowserSocket, data: Uint8Array): void {
   sawBrowser(link);
   // False once the upload ended on this server (failed, aborted or evicted idle): say so instead of letting it stall.
   // A failed start already sent its up_error; the worker ignores errors for an upload it dropped.
-  if (!forwardUploadFrame(link.owner, frame.id, frame.bytes)) link.uploads.get(frame.id)?.error(404, "upload_missing", "The upload is no longer open");
+  const sink = link.uploads.get(frame.id)!;
+  if (!forwardUploadFrame(link.owner, frame.id, frame.bytes, sink)) sink.error(404, "upload_missing", "The upload is no longer open");
 }
 
 function onHello(ws: BrowserSocket, hello: Record<string, unknown>): void {

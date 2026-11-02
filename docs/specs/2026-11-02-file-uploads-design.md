@@ -63,7 +63,7 @@ The upload id is a client-generated UUID. It doubles as the binary frame id on b
 - **Stall watchdog:** an upload that no start answer or ack advances for `UPLOAD_STALL_MS` = 120 s fails to the tab with 504 `upload_stalled`. The worker forgets it without aborting it on the host, so the chip's Retry (same id) resumes from the host's offset.
 - **Host-link drop:** each in-flight upload on that host fails with `up_error` 503 `host_offline`; the chip's Retry resumes from the host's offset. Nothing retries by itself.
 - The tab hands the worker `Blob` slices (`File.slice`, read in the worker) rather than buffers, so the tab holds no file bytes.
-- `lib/browser-link.ts` accepts binary frames only for an upload this link started, and only up to `pieceBytes` plus the header. Any other binary frame still closes with 1007. `BROWSER_LINK_VERSION` stays 1: the worker is served by the same server (content-hashed URL), and an old worker never sends the new types.
+- `lib/browser-link.ts` accepts binary frames only for an upload this link started, and only up to `pieceBytes` plus the header. Any other binary frame still closes with 1007. Main forwards a frame only while the sending link's sink is the upload's current sink: after a WS→HTTP handoff (or a newer start) the old socket's late frames are refused, never appended after the offset the new start reported. `BROWSER_LINK_VERSION` stays 1: the worker is served by the same server (content-hashed URL), and an old worker never sends the new types.
 
 **SSE mode (and the WebSocket fallback)** uses HTTP with the same semantics:
 - `POST /api/uploads {id, host, name, size, type}` corresponds to `up_start` and answers `{received}`.

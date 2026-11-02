@@ -1178,8 +1178,10 @@ during the wait.
 - Bytes are forwarded, never re-encoded: the browser sends binary frames
   `[n][id][payload]` (≤ `pieceBytes`) as `LinkSender` blob units keyed
   `up:<id>`; `lib/browser-link.ts` accepts them only for uploads that link
-  started and hands the same bytes to `forwardUploadFrame` (`lib/uploads.ts`),
-  which queues them as blob units on the host link (link v6; `hostVersion < 6`
+  started and hands the same bytes to `forwardUploadFrame` (`lib/uploads.ts`) with
+  that link's sink; frames are forwarded only while it is the upload's current
+  sink, so a WS sender superseded by an HTTP resume or newer start is refused;
+  `forwardUploadFrame` queues them as blob units on the host link (link v6; `hostVersion < 6`
   → 426 `host_upgrade_required` on a remote host, `host_restart_required` on
   `local`: an in-place upgrade keeps a running v4/v5 daemon, which is inside
   `[MIN, LINK]`, so "This machine" needs `ompweb-host` restarted). Blob units

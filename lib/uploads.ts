@@ -207,11 +207,12 @@ function forward(id: string, upload: Upload, bytes: Uint8Array): void {
   upload.touched = Date.now();
 }
 
-/** Forward one chunk (a binary frame's payload) to its upload's host. False when `id` is not an upload of `owner`, or
- * the chunk is over pieceBytes. */
-export function forwardUploadFrame(owner: string, id: string, bytes: Uint8Array): boolean {
+/** Forward one chunk (a binary frame's payload) to its upload's host. False when `id` is not an upload of `owner`,
+ * `sink` is not its current sender (a WS link superseded by an HTTP resume or a newer start: its late frames would land
+ * after the offset that start reported), or the chunk is over pieceBytes. */
+export function forwardUploadFrame(owner: string, id: string, bytes: Uint8Array, sink: UploadSink): boolean {
   const upload = uploads().get(id);
-  if (!upload || upload.owner !== owner || bytes.byteLength > LINK_LIMITS.pieceBytes) return false;
+  if (!upload || upload.owner !== owner || upload.sink !== sink || bytes.byteLength > LINK_LIMITS.pieceBytes) return false;
   forward(id, upload, bytes);
   return true;
 }
