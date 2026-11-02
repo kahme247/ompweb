@@ -10,6 +10,7 @@ import { getSessionsDir } from "../omp/paths";
 import type { RpcTransport } from "../omp/rpc-transport";
 import { readSessionHeaderSync } from "../omp/session-files";
 import { ProjectPathError } from "../project-registry";
+import { isValidSessionId } from "../session-file-references-core";
 import { isRecord } from "../type-guards";
 import { isLoopbackHost, readHostLogin } from "./host-login";
 import {
@@ -29,6 +30,7 @@ import {
   SeqWindow,
   SESSION_OP_PARAMS,
   type DownMessage,
+  type LinkStatSample,
   type SendItem,
   type UnknownMessage,
   UnknownMessageLog,
@@ -67,10 +69,19 @@ interface Queued {
   key: string;
   /** Child output bytes this ack releases from its channel's buffer (on a message's last part). */
   bytes: number;
+  /** Bytes this ack takes out of `unackedBytes`: the line's own, plus on a `res` the result bytes sent ahead of it. */
+  unacked: number;
+  /** Its link sample, set on the line that completes a message (a whole line, or its last part), with `t`, its queue
+   * time on the monotonic clock. Null for a `stats` message and for a part before the last. */
+  sample: (Omit<LinkStatSample, "ackMs"> & { t: number }) | null;
 }
 
+/** A message's link sample as taken when it is queued: the time (wall and monotonic), the bytes of a result queued ahead of this `res`
+ * (else 0), the bytes queued or unacked ahead of it, and the session it serves. */
+type UpSample = { at: number; t: number; blob: number; bytesAhead: number; session: string | null };
+
 /** `counted`: child output, held against its channel's buffer until acked. */
-type Pending = Extract<SendItem, { line: string }> & { counted: boolean } | Extract<SendItem, { blob: Uint8Array }>;
+type Pending = Extract<SendItem, { line: string }> & { counted: boolean; sample: UpSample | null } | Extract<SendItem, { blob: Uint8Array }>;
 
 /** How a socket closed; `opened` is false for a dial the server refused or never answered. A string instead: why
  * the daemon gave the socket up itself. */
@@ -157,6 +168,11 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
    * frame, text or binary, with one `ack`. */
   let inFlight: number[] = [];
   let inFlightBytes = 0;
+  /** Bytes of the messages sent and not acked (lines as sent, and result bytes until their `res` is acked): with
+   * `sender.queuedBytes`, the bytes ahead of a new message in its link sample. */
+  let unackedBytes = 0;
+  /** Result bytes sent per request id, until its `res` goes out and takes them over. */
+  const sentResult = new Map<string, number>();
   let unsentBytes = 0;
   let pongOwed = false;
   /** A downlink message was applied since the last frame: the next frame carries its ack, an ack-only one if need be. */
@@ -173,10 +189,19 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   let stopping: Promise<void> | undefined;
   const stopSignal = new AbortController();
   const { promise: done, resolve: finish } = Promise.withResolvers<number>();
+  /** Link samples of acked messages, waiting for their `stats` message. */
+  const samples: LinkStatSample[] = [];
+  let statsTimer: NodeJS.Timeout | undefined;
 
-  /** Queue an uplink message under `key` (its channel, or the request id of a `res`); its byte size, or null when it
-   * exceeds the line limit. */
-  function queue(body: Unsequenced<UpMessage>, key: string, counted = false): number | null {
+  /** Queue an uplink message under `key` (its channel, the request id of a `res`, or "stats"); its byte size, or null
+   * when it exceeds the line limit. `counted`: child output, held against its channel's buffer. `session`, `blob` (the
+   * bytes of a result queued ahead of this `res`) and `ahead` (the bytes ahead of it, measured before that result was
+   * queued) go into its link sample. */
+  function queue(
+    body: Unsequenced<UpMessage>,
+    key: string,
+    { counted = false, session = null, blob = 0, ahead }: { counted?: boolean; session?: string | null; blob?: number; ahead?: number } = {},
+  ): number | null {
     let line: string;
     try {
       line = encodeQueued(body);
@@ -185,7 +210,10 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       throw error;
     }
     const size = Buffer.byteLength(line);
-    sender.push(key, { line, size, counted });
+    // Ahead of it: what is unacked and what is queued to go (counters, no scan; a queued line counts at its size before
+    // its seq is filled in). A `stats` message is not measured itself: its sample would need another one.
+    const sample = body.type === "stats" ? null : { at: Date.now(), t: performance.now(), blob, bytesAhead: Math.max(0, ahead ?? unackedBytes + sender.queuedBytes), session };
+    sender.push(key, { line, size, counted, sample });
     unsentBytes += size;
     scheduleFlush();
     return size;
@@ -194,7 +222,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   function output(ch: string, body: Unsequenced<Extract<UpMessage, { type: "stdout" | "stderr" }>>): void {
     const channel = channels.get(ch);
     if (!channel) return;
-    const bytes = queue(body, ch, true);
+    const bytes = queue(body, ch, { counted: true, session: channel.pending.sessionId });
     if (bytes === null) {
       // One line over the link limit: drop it and let main reconcile.
       queue({ type: "resync", ch }, ch);
@@ -205,7 +233,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       // The uplink lags too far: drop this child's backlog, a line part-way out included (main drops that partial
       // line). The resync goes out ahead of the channel's later output.
       sender.drop(ch);
-      outbox.drop((item) => item.key === ch);
+      for (const item of outbox.drop((item) => item.key === ch)) unackedBytes -= item.unacked;
       resend = resend.slice(resendAt).filter((item) => item.key !== ch);
       resendAt = 0;
       channel.buffered = 0;
@@ -215,10 +243,31 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
 
   function acked(ack: number): void {
     ackedUp = Math.max(ackedUp, ack);
+    // Monotonic: a wall-clock step (time sync, a VM resuming) never makes a negative or inflated ackMs.
+    const now = performance.now();
     for (const item of outbox.ack(ack)) {
       const channel = channels.get(item.key);
       if (channel) channel.buffered -= item.bytes;
+      unackedBytes -= item.unacked;
+      // One sample per message: a split one carries it on its last part, acked with the whole message.
+      if (item.sample) {
+        const { t, ...sample } = item.sample;
+        samples.push({ ...sample, ackMs: Math.max(0, Math.round(now - t)) });
+      }
     }
+    if (samples.length >= LINK_LIMITS.statsSamples) sendStats();
+    else if (samples.length > 0 && !statsTimer) {
+      statsTimer = setTimeout(sendStats, LINK_LIMITS.statsFlushMs);
+      statsTimer.unref?.();
+    }
+  }
+
+  /** The samples so far, as `stats` messages of at most statsSamples each (one ack can cover more), queued under their
+   * own key: about 40 KB each, sent in turn with the channels and inside the unacked window like any message. */
+  function sendStats(): void {
+    clearTimeout(statsTimer);
+    statsTimer = undefined;
+    while (samples.length > 0 && !stopped) queue({ type: "stats", samples: samples.splice(0, LINK_LIMITS.statsSamples) }, "stats");
   }
 
   function scheduleFlush(): void {
@@ -238,9 +287,24 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     resendAt = 0;
     const unit = sender.next(() => ++upSeq);
     if (!unit) return null;
-    if ("frame" in unit) return unit.frame;
-    const bytes = unit.done && "counted" in unit.item && unit.item.counted ? unit.item.size : 0;
-    outbox.push({ seq: unit.seq, line: unit.line, key: unit.key, bytes });
+    if ("frame" in unit) {
+      // Result bytes stay unacked until their `res` is (it takes them over in `unacked`).
+      const piece = unit.frame.byteLength - 1 - Buffer.byteLength(unit.key);
+      sentResult.set(unit.key, (sentResult.get(unit.key) ?? 0) + piece);
+      unackedBytes += piece;
+      return unit.frame;
+    }
+    // A unit carrying a line is a line item's.
+    const item = unit.item as Extract<Pending, { line: string }>;
+    const bytes = unit.done && item.counted ? item.size : 0;
+    const size = Buffer.byteLength(unit.line);
+    const sentBlob = unit.done ? sentResult.get(unit.key) ?? 0 : 0;
+    if (sentBlob) sentResult.delete(unit.key);
+    const sample = unit.done && item.sample
+      ? { session: item.sample.session, bytes: unit.messageBytes + item.sample.blob, bytesAhead: item.sample.bytesAhead, at: item.sample.at, t: item.sample.t }
+      : null;
+    outbox.push({ seq: unit.seq, line: unit.line, key: unit.key, bytes, unacked: size + sentBlob, sample });
+    unackedBytes += size;
     return unit.line;
   }
 
@@ -406,21 +470,25 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   }
 
   async function answer(id: string, op: string, args: unknown): Promise<void> {
+    // A session op names its session `id`; host ops serve none.
+    const session = isRecord(args) && typeof args.id === "string" && isValidSessionId(args.id) ? args.id : null;
     try {
       const result = await runOp(op, args);
       const media = op === "readMedia" && isRecord(result) && result.ok === true && result.value instanceof Uint8Array ? result.value : null;
       const json = media ? undefined : JSON.stringify(result);
       const blob = media ?? (json !== undefined && Buffer.byteLength(json) > LINK_LIMITS.inlineResultBytes ? Buffer.from(json) : null);
       if (!blob) {
-        queue({ type: "res", id, ok: true, result }, id);
+        queue({ type: "res", id, ok: true, result }, id, { session });
         return;
       }
       if (blob.byteLength > LINK_LIMITS.blobBytes) throw new HostOpError(413, "result_too_large", "The result is too large for the host link");
       // The bytes go ahead of their `res`, in pieces. Pieces still go after a redial; the hub ignores those for an op it
       // no longer waits on (it failed its ops when the socket closed). A half-open socket the hub replaced keeps its
       // pending ops, so there a piece lost with the old socket makes the `res` fail 502 host_blob_missing.
+      // The `res` sample counts the result's bytes as its own, not as bytes ahead of it.
+      const ahead = unackedBytes + sender.queuedBytes;
       sender.push(id, { id, blob });
-      queue({ type: "res", id, ok: true, blob: { bytes: blob.byteLength } }, id);
+      queue({ type: "res", id, ok: true, blob: { bytes: blob.byteLength } }, id, { session, blob: blob.byteLength, ahead });
     } catch (error) {
       const failure = error instanceof HostOpError
         ? { status: error.status, code: error.code, message: error.message }
@@ -428,7 +496,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         : error instanceof ProjectPathError
           ? { status: 400, code: error.code, message: error.message }
           : { status: 500, code: "host_op_failed", message: reason(error) };
-      queue({ type: "res", id, ok: false, error: failure }, id);
+      queue({ type: "res", id, ok: false, error: failure }, id, { session });
     }
   }
 
@@ -617,11 +685,17 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   }
 
   function shutdown(code: number): Promise<void> {
+    // Best effort: the samples so far go in one last frame, when the unacked window lets them.
+    if (!stopped && linked && samples.length > 0) {
+      sendStats();
+      flush();
+    }
     stopped = true;
     stopping ??= (async () => {
       stopSignal.abort();
       socket?.close();
       clearTimeout(flushTimer);
+      clearTimeout(statsTimer);
       const live = [...channels.values()].map(({ transport }) => transport);
       const exits = live.map((transport) => {
         const { promise, resolve } = Promise.withResolvers<void>();

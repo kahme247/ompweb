@@ -241,7 +241,8 @@ scripts/
   build-client.ts     `npm run build`: bundles app/index.html into dist/ (Bun.build + tailwind-plugin.ts; fonts emitted as /assets files)
   tailwind-plugin.ts  bun-plugin-tailwind minus Tailwind's color-mix() polyfill (Bun 1.4.4 drops repeated @supports rules); build and dev
   smoke.ts            `npm run smoke`: starts the built server (or `--binary <path>`) and `ompweb host` with a throwaway HOME; checks the SPA, an asset, the API, a session listed through the daemon and SSE
-  transport-metrics.ts `bun scripts/transport-metrics.ts [--since 2h|<ISO>] [--until <ISO>] [--client <id>] [--file <path>]`: per-transport summary of the browser transport samples (default: the last 24 h of the agent dir's file)
+  transport-metrics.ts `bun scripts/transport-metrics.ts [--since 2h|<ISO>] [--until <ISO>] [--client <id>] [--session <id>] [--file <path>]`: per-transport summary of the browser transport samples and per host and direction of the host link samples (`--session`: link samples of one session; default: the last 24 h of the agent dir's file)
+  link-hol-probe.ts   `bun scripts/link-hol-probe.ts --host <id> --model <provider/modelId>`: head-of-line load on one host link (large prompts down, large session reads up, get_state beside them) for the link samples; usage at its top
   build-binary.ts     `npm run build:binary`: compiles server/binary.ts (NODE_ENV define, no .env/bunfig autoload) into release/ompweb-<os>-<arch>/ beside dist/, public/, the KaTeX files, the session-edit extension and the licenses; archives it
   build-release-binaries.sh  the five release targets (one list), run by publish.yml and prerelease.yml (a prerelease per verified `main` commit, titled by build time; one concurrency group per commit, so no commit's run is dropped)
   licenses.ts         the release's `licenses/`: license files of every npm package the server and client bundles hold (Bun.build metafiles; build-client.ts writes build/client-packages.json) and `bun-LICENSE-<version>.md`, the vendored license of the embedded Bun runtime. Bumping Bun: vendor its LICENSE.md for the new version, or build-binary.ts stops
@@ -378,6 +379,25 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   4426 version (`LINK_CLOSE`). Wire shapes and size limits live in
   `lib/hosts/link-protocol.ts` (one op allow-list, `HOST_OP_NAMES`, shared by
   both sides); the summary spec is `docs/specs/2026-10-28-remote-hosts-design.md`.
+- **Link head-of-line samples** (`metric: "link"` in `<agent dir>/omp-web/transport-metrics.jsonl`, measurement
+  only). Each side samples every sequenced message once, when it is queued: time, UTF-8 size, session (a session
+  op's `id`, else the channel's child as its `get_state` answers name it) and `bytesAhead`, the bytes queued or
+  unacked on that link then (`LinkSender.queuedBytes` plus an unacked counter, never a scan; a queued line counts at
+  its size before its seq is filled in, up to 15 bytes over). The sample is made when the message is acked: a line
+  sent in parts at its last part, with the joined size; a `res` counts its result bytes as its own. The hub writes
+  its `down` samples; the daemon reports its `up` ones in sequenced `stats` messages of at most
+  `LINK_LIMITS.statsSamples`, queued under their own sender key (fair and inside the unacked window like any
+  message). The samples are advisory: the hub keeps the valid ones, drops a malformed one (logged once per host) without
+  failing the frame, and writes at most 8 × `statsSamples` `up` samples per host per `statsFlushMs` (the excess is
+  written as one `{dropped}` record when the next window starts, or when the link ends or the hub freezes). `ackMs` is monotonic (`performance.now()`) on both
+  sides, `at` the wall clock. Both sides batch (`statsSamples` or `statsFlushMs`, 30 s): the hub's batch lives in its
+  `globalThis` state, resolves its file when it starts and is written in `freezeHostLinks`; the daemon queues what it
+  holds when it stops (best effort). Tests that drive the hub call
+  `flushLinkSamples()` before they restore `PI_CODING_AGENT_DIR`. `ackMs` is a round trip: a v5 daemon acks the
+  downlink within `flushMs` (an ack-only frame if need be) and the hub's ack rides the downlink.
+  `bun scripts/link-hol-probe.ts` makes the load; `scripts/transport-metrics.ts` prints `link small ackMs` (`clear`
+  vs `behind-large`, 64 KiB ahead), `link bytesAhead` and `link dropped` per host and direction (`--session` for one
+  session's link samples).
 - **Link protocol versions** (spec "Protocol versions and compatibility"). A
   released `LINK_PROTOCOL_VERSION` changes only compatibly: an added optional
   field or a message type receivers skip is fine; a changed type or meaning, or
@@ -414,7 +434,9 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
 - **A failed op never runs later.** An op that times out (504) or whose
   downlink ends or host goes offline (503, at once, not at the 30 s timeout)
   drops its `req` from the outbox (`failOp` in `hub.ts`), so a delete the user
-  saw fail is never applied after a redial. `destroyAndWait` returns once the
+  saw fail is never applied after a redial. The 30 s op deadline counts silence:
+  each binary result frame restarts it, so a large result at a slow ack round
+  trip is no 504 (a timeout still drops the `req` as above). `destroyAndWait` returns once the
   session's host is offline (`untilHostDown`); the kill stays queued for the
   link. A wrapper therefore stays in the registry until its child really exits
   (a resume whose handshake failed is registered in the catch for this), so a

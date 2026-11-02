@@ -1,5 +1,6 @@
 // Wire format between the main omp-web server and the `ompweb host` daemon.
 // Pure: no I/O and no Next or `@/` imports, so both sides share it.
+import { isValidSessionId } from "../session-file-references-core";
 import type { SessionOps } from "./session-ops";
 
 /** 5: a line over `pieceBytes` goes as `part` messages and a large result as several binary frames, both sent fair
@@ -31,6 +32,10 @@ export const LINK_LIMITS = {
   maxLineBytes: 8 * 1024 * 1024,
   /** Per channel: open blocking requests past this are not replayed (the channel is not adoptable). */
   pendingBytes: 1024 * 1024,
+  /** Link head-of-line samples (metric "link"): each side writes or reports them at this count, else after statsFlushMs.
+   * Also the most one `stats` message may carry, which bounds it to about 40 KB. */
+  statsSamples: 256,
+  statsFlushMs: 30_000,
 };
 
 /** WebSocket close codes the link uses. */
@@ -96,6 +101,11 @@ export type DownMessage =
  * daemon spawned it; `pending`: raw stdout lines of its open blocking requests, or null when over `pendingBytes`. */
 export type HelloChannel = { ch: string; sessionId: string | null; cwd: string; pending: string[] | null };
 
+/** One uplink message the daemon measured: enqueued at `at` (its wall clock) with `bytesAhead` bytes unacked ahead of
+ * it (messages and result blobs), `bytes` its own size (with its blob), acked by the hub `ackMs` later (a monotonic
+ * interval). */
+export type LinkStatSample = { session: string | null; bytes: number; bytesAhead: number; ackMs: number; at: number };
+
 export type UpMessage =
   | {
       type: "hello";
@@ -112,6 +122,9 @@ export type UpMessage =
   | { type: "stderr"; seq: number; ch: string; chunk: string }
   | { type: "exit"; seq: number; ch: string; code: number | null; signal: string | null }
   | { type: "resync"; seq: number; ch: string }
+  /** The daemon's link samples, at most LINK_LIMITS.statsSamples; a hub that predates it skips the type. Advisory: the
+   * receiver keeps the valid ones and counts the rest in `invalid` (decodeUp only; a sender leaves it out). */
+  | { type: "stats"; seq: number; samples: LinkStatSample[]; invalid?: number }
   | { type: "res"; seq: number; id: string; ok: true; result?: unknown; blob?: { bytes: number } }
   | {
       type: "res";
@@ -181,7 +194,7 @@ function str(o: Obj, key: string): string {
   return v;
 }
 
-/** A `seq` or `ack`: a safe non-negative integer, so one line cannot push a window out of reach of every later message. */
+/** A `seq`, an `ack` or a count: a safe non-negative integer, so one line cannot push a window out of reach of every later message. */
 function seqNum(o: Obj, key: string): number {
   const v = o[key];
   if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 0) fail(`${key} must be a non-negative safe integer`);
@@ -215,7 +228,7 @@ export function isHostOp(name: string): name is HostOpName {
 }
 
 const DOWN_TYPES: readonly string[] = ["welcome", "stdin", "kill", "req", "ping", "pong", "ack"];
-const UP_TYPES: readonly string[] = ["hello", "stdout", "stderr", "exit", "resync", "res", "ping", "pong", "ack"];
+const UP_TYPES: readonly string[] = ["hello", "stdout", "stderr", "exit", "resync", "stats", "res", "ping", "pong", "ack"];
 
 /** `otherDirection`: the types only the other direction decodes; one of those arrived on the wrong way. */
 function unknownMessage(o: Obj, otherDirection: readonly string[]): UnknownMessage {
@@ -309,6 +322,29 @@ function channels(o: Obj): HelloChannel[] {
   });
 }
 
+/** One sample's fixed fields, or null when one is missing or out of range. Extra fields are dropped. */
+function statSample(s: unknown): LinkStatSample | null {
+  if (!isObj(s)) return null;
+  const { session, bytes, bytesAhead, ackMs, at } = s;
+  const count = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+  if (!(session === null || (typeof session === "string" && isValidSessionId(session)))) return null;
+  return count(bytes) && count(bytesAhead) && count(ackMs) && count(at) ? { session, bytes, bytesAhead, ackMs, at } : null;
+}
+
+/** Samples are advisory: a bad one (or one past statsSamples) is dropped and counted, never fails the line, so a
+ * daemon's measuring bug cannot stop its link. */
+function stats(o: Obj): UpMessage {
+  const seq = seqNum(o, "seq");
+  const list = Array.isArray(o.samples) ? o.samples : null;
+  if (!list) return { type: "stats", seq, samples: [], invalid: 1 };
+  const samples: LinkStatSample[] = [];
+  for (const s of list.slice(0, LINK_LIMITS.statsSamples)) {
+    const sample = statSample(s);
+    if (sample) samples.push(sample);
+  }
+  return { type: "stats", seq, samples, invalid: list.length - samples.length };
+}
+
 function res(o: Obj): UpMessage {
   const seq = seqNum(o, "seq");
   const id = str(o, "id");
@@ -364,6 +400,8 @@ export function decodeUp(line: string): UpMessage | UnknownMessage {
       };
     case "resync":
       return { type: "resync", seq: seqNum(o, "seq"), ch: str(o, "ch") };
+    case "stats":
+      return stats(o);
     case "res":
       return res(o);
     case "ping":
@@ -451,16 +489,22 @@ export class Outbox<M extends { seq: number }> {
 export type SendItem = { line: string; size: number } | { id: string; blob: Uint8Array };
 
 /** One unit from `LinkSender.next`; `done` when it was the last of `item`. A line (a whole message, or a `part` when
- * `part`) carries the `seq` it was numbered with; a piece of result bytes is an unnumbered binary `frame`. */
-export type SendUnit<T extends SendItem> = { key: string; item: T; done: boolean } & ({ seq: number; line: string; part: boolean } | { frame: Uint8Array<ArrayBuffer> });
+ * `part`) carries the `seq` it was numbered with and `messageBytes`, the UTF-8 size of its whole message as numbered
+ * (seq 0 for one sent in parts); a piece of result bytes is an unnumbered binary `frame`. */
+export type SendUnit<T extends SendItem> = { key: string; item: T; done: boolean } & ({ seq: number; line: string; part: boolean; messageBytes: number } | { frame: Uint8Array<ArrayBuffer> });
 
-/** The `part` line for `line` from `at`: as much of it as fits in pieceBytes once encoded. */
-function cutPart(line: string, at: number, seq: number): { line: string; at: number } {
+/** The UTF-8 size of a line from encodeQueued (`size`) once numbered `seq`. */
+function numberedBytes(size: number, seq: number): number {
+  return size - (SEQ_TAIL.length - 2) + String(seq).length;
+}
+
+/** The `part` line for `line` from `at`: as much of it as fits in pieceBytes once encoded; `size` its UTF-8 bytes. */
+function cutPart(line: string, at: number, seq: number): { line: string; at: number; size: number } {
   for (let n = Math.min(line.length - at, LINK_LIMITS.pieceBytes); ;) {
     const part: Part = { type: "part", seq, at, end: at + n >= line.length, data: line.slice(at, at + n) };
     const encoded = `${JSON.stringify(part)}\n`;
     const size = encoder.encode(encoded).byteLength;
-    if (size <= LINK_LIMITS.pieceBytes || n === 1) return { line: encoded, at: at + n };
+    if (size <= LINK_LIMITS.pieceBytes || n === 1) return { line: encoded, at: at + n, size };
     n = Math.max(1, Math.floor((n * LINK_LIMITS.pieceBytes) / size) - 1);
   }
 }
@@ -471,16 +515,25 @@ function cutPart(line: string, at: number, seq: number): { line: string; at: num
  * holds at most one partial line. `parts`: false for a v4 peer, which gets every line whole. */
 export class LinkSender<T extends SendItem> {
   parts: boolean;
-  /** `at`: how far the item has gone out (UTF-16 units of `line`, bytes of `blob`); `line`: set while it goes in parts. */
-  private readonly queues = new Map<string, { item: T; at: number; line: string | null }[]>();
+  /** `at`: how far the item has gone out (UTF-16 units of `line`, bytes of `blob`); `line`: set while it goes in parts;
+   * `left`: its bytes still counted in queuedBytes. */
+  private readonly queues = new Map<string, { item: T; at: number; line: string | null; left: number }[]>();
   private active: string | null = null;
+  private queued = 0;
 
   constructor(parts: boolean) {
     this.parts = parts;
   }
 
+  /** Bytes queued and not sent yet (a line's `size`, a result's bytes; a line going in parts less the parts sent). */
+  get queuedBytes(): number {
+    return this.queued;
+  }
+
   push(key: string, item: T): void {
-    const entry = { item, at: 0, line: null };
+    const left = "blob" in item ? item.blob.byteLength : item.size;
+    this.queued += left;
+    const entry = { item, at: 0, line: null, left };
     const queue = this.queues.get(key);
     if (queue) queue.push(entry);
     else this.queues.set(key, [entry]);
@@ -488,6 +541,7 @@ export class LinkSender<T extends SendItem> {
 
   /** Forget what `key` queued, a line part-way out included: the receiver drops that partial line. */
   drop(key: string): void {
+    for (const { left } of this.queues.get(key) ?? []) this.queued -= left;
     this.queues.delete(key);
     if (this.active === key) this.active = null;
   }
@@ -497,9 +551,17 @@ export class LinkSender<T extends SendItem> {
   dropBlobs(): void {
     for (const [key, queue] of this.queues) {
       const rest = queue.filter(({ item }) => !("blob" in item));
+      for (const entry of queue) if ("blob" in entry.item) this.queued -= entry.left;
       if (rest.length === 0) this.queues.delete(key);
       else this.queues.set(key, rest);
     }
+  }
+
+  /** `bytes` of an entry went out (all of what it has left when `done`). */
+  private sent(entry: { left: number }, done: boolean, bytes: number): void {
+    const gone = done ? entry.left : Math.min(entry.left, bytes);
+    entry.left -= gone;
+    this.queued -= gone;
   }
 
   /** The next unit, or null when nothing is queued; `nextSeq` numbers a line. */
@@ -512,11 +574,13 @@ export class LinkSender<T extends SendItem> {
         const piece = item.blob.subarray(head.at, head.at + LINK_LIMITS.pieceBytes);
         head.at += piece.byteLength;
         unit = { key, item, done: head.at >= item.blob.byteLength, frame: encodeBlobFrame(item.id, piece) };
+        this.sent(head, unit.done, piece.byteLength);
       } else if (!this.parts || item.size <= LINK_LIMITS.pieceBytes) {
         // A line part-way out in parts when the peer turned out to be v4 goes whole from the start.
         if (this.active === key) this.active = null;
         const seq = nextSeq();
-        unit = { key, item, done: true, seq, line: withSeq(item.line, seq), part: false };
+        unit = { key, item, done: true, seq, line: withSeq(item.line, seq), part: false, messageBytes: numberedBytes(item.size, seq) };
+        this.sent(head, true, 0);
       } else {
         if (this.active !== null && this.active !== key) continue;
         this.active = key;
@@ -527,7 +591,8 @@ export class LinkSender<T extends SendItem> {
         head.at = cut.at;
         const done = head.at >= head.line.length;
         if (done) this.active = null;
-        unit = { key, item, done, seq, line: cut.line, part: true };
+        unit = { key, item, done, seq, line: cut.line, part: true, messageBytes: numberedBytes(item.size, 0) };
+        this.sent(head, done, cut.size);
       }
       if (unit.done) queue.shift();
       this.queues.delete(key);
@@ -544,6 +609,14 @@ export class PartJoiner {
   static readonly maxParts = 512;
   private chunks: string[] | null = null;
   private at = 0;
+
+  /** A copy to try a frame's parts on: the original stays as it was until the frame is known to decode. */
+  clone(): PartJoiner {
+    const copy = new PartJoiner();
+    copy.chunks = this.chunks && [...this.chunks];
+    copy.at = this.at;
+    return copy;
+  }
 
   /** The whole line once `part` ends it, else null. A part at 0 starts a new line, dropping a partial one; a part that
    * does not continue the line in progress (its sender dropped the rest), or takes it past maxLineBytes or maxParts,
