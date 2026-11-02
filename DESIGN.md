@@ -86,9 +86,9 @@ through the link described below. The implementation on the web server is
 the machine whose omp it owns.
 
 ```
-Browser ─▶ ompweb ◀── link (loopback) ── ompweb host ── spawn omp --mode rpc-ui (stdio)
-                 ◀── link (HTTP)     ── ompweb host on another machine
-                                          └─ spawn omp --mode rpc-ui
+Browser ─▶ ompweb ◀── link (loopback)  ── ompweb host ── spawn omp --mode rpc-ui (stdio)
+                 ◀── link (WebSocket) ── ompweb host on another machine
+                                           └─ spawn omp --mode rpc-ui
 ```
 
 "This machine" is the host with the fixed id `local`, linked to the daemon

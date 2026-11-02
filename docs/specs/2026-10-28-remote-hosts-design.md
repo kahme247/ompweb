@@ -43,8 +43,8 @@ flag.
 ```
 Browser ─▶ main omp-web ──┬─ LocalHost ── spawn omp --mode rpc-ui (stdio)
                           │
-                          └─ RemoteHost ◀── link (HTTP) ── ompweb host (daemon)
-                                                            └─ spawn omp --mode rpc-ui
+                          └─ RemoteHost ◀── link (WebSocket) ── ompweb host (daemon)
+                                                               └─ spawn omp --mode rpc-ui
 ```
 
 ### Daemon: `ompweb host`
