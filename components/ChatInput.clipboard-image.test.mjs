@@ -90,9 +90,10 @@ function clipboardImage(type, bytes) {
 const PLUS_MENU = /More actions|chatInput\.plusMenu/;
 const PASTE_ITEM = /Paste image|chatInput\.pasteImage/;
 const FAILURE = /No image could be pasted|chatInput\.clipboardImageFailed/;
-const SKIPPED = /skipped|chatInput\.attachmentImagesSkipped/;
+const AS_FILE = /too large to send inline|chatInput\.imagesAsFile/;
+const SWITCH_TO_INLINE = /Switch to Inline|chatInput\.imageSwitchToInline/;
 // Any notice the composer raises about the batch it was handed.
-const NOTICE = /No image could be pasted|skipped|chatInput\.(clipboardImageFailed|attachmentImagesSkipped)/;
+const NOTICE = /No image could be pasted|too large to send inline|chatInput\.(clipboardImageFailed|imagesAsFile)/;
 
 function previews(container) {
   return [...container.querySelectorAll("img")].filter((img) => img.getAttribute("src")?.startsWith("blob:"));
@@ -163,14 +164,14 @@ test("attaches a clipboard image through the shared composer attachment path", a
   assert.equal(screen.queryByRole("menuitem", { name: PASTE_ITEM }), null);
 });
 
-test("keeps the pasted image inside the same byte cap as the file picker", async () => {
+test("an oversized pasted image goes As file, as from the file picker", async () => {
   setClipboard({ read: async () => [clipboardImage("image/png", MAX_ATTACHED_IMAGE_BYTES + 1)] });
   const container = await pasteFromClipboard(renderComposer());
 
-  // Rejected before any preview URL exists, exactly like an oversized drop.
-  assert.equal(previews(container).length, 0);
-  assert.equal(objectUrls.created.length, 0);
-  assert.match(container.textContent, SKIPPED);
+  // Past the inline budget it is uploaded instead (spec U2): its chip keeps the thumbnail.
+  assert.equal(previews(container).length, 1);
+  assert.match(container.textContent, AS_FILE);
+  assert.ok(screen.getByRole("button", { name: SWITCH_TO_INLINE }));
 });
 
 test("reports a clean failure when the clipboard holds no image", async () => {
@@ -206,17 +207,17 @@ test("reports a clean failure when the clipboard read is denied", async () => {
   assert.match(container.textContent, FAILURE);
 });
 
-test("keeps one oversized clipboard image from displacing an in-range one", async () => {
+test("an oversized clipboard image goes As file beside an in-range one that stays inline", async () => {
   setClipboard({
     read: async () => [
       clipboardImage("image/png", MAX_ATTACHED_IMAGE_BYTES + 1),
       clipboardImage("image/png", 8),
     ],
   });
-  const container = await pasteFromClipboard(renderComposer());
+  const container = await pasteFromClipboard(renderComposer(), () => objectUrls.created.length >= 2);
 
-  assert.equal(previews(container).length, 1, "only the in-range image is attached");
-  assert.equal(objectUrls.created.length, 1);
+  assert.equal(previews(container).length, 2, "both are attached");
+  assert.equal(screen.getAllByRole("button", { name: SWITCH_TO_INLINE }).length, 1, "only the oversized one As file");
 });
 
 test("revokes pasted image previews on unmount", async () => {

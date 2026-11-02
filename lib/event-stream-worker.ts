@@ -18,6 +18,8 @@
 //                 { op: "wake", reason, visible, clientId }  (reason: init | visible | hidden | online | network)
 //                 { op: "cmd", n, req, sessionId, advisor, body, type }  (an agent command; body: its JSON text, type: its type)
 //                 { op: "metric", sample }  (a transport sample of the tab's: tagged, buffered and POSTed here)
+//                 { op: "upload", id, host, name, type, blob }  (a file to upload over the link; blob: the File)
+//                 { op: "up_abort", id }
 // Worker -> tab:  { id, type: "open" }
 //                 { id, type: "message", data }   (raw JSON string)
 //                 { id, type: "error", readyState: 0 | 2 }  (EventSource semantics)
@@ -25,6 +27,8 @@
 //                 { cmd: n, http: true }  (SSE mode: the tab POSTs the command itself)
 //                 { cmd: n, status, body, recvAt, repliedAt, attempts, deduped, behindBytes,
 //                   socket, behindSameBytes, behindOtherBytes, replyBehindOtherBytes }
+//                 { up: id, received, done } | { up: id, error: { status, code, message } }  (an upload's progress, failure)
+//                 { up: id, http: true }  (SSE mode: the tab uploads it over HTTP itself)
 import {
   BROWSER_LINK_PATH,
   BROWSER_LINK_VERSION,
@@ -39,6 +43,7 @@ import {
 } from "./event-stream-protocol";
 import { LINK_LIMITS, LinkSender, Outbox, PartJoiner, queuedLine, SeqWindow, type Part } from "./hosts/link-protocol";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "./image-attachments";
+import { UPLOAD_STALL_MS, UPLOAD_WINDOW_BYTES } from "./upload-limits";
 
 const CONNECTING = 0;
 const OPEN = 1;
@@ -192,8 +197,8 @@ interface Clock {
   takenAt: number;
 }
 
-/** A line the link's sender queues; `rid` marks an agent command's. */
-type UpItem = { line: string; size: number; rid?: string };
+/** A line the link's sender queues (`rid` marks an agent command's), or an upload's chunk (a binary unit). */
+type UpItem = { line: string; size: number; rid?: string } | { id: string; blob: Uint8Array };
 type Sent = { seq: number; line: string; bytes: number };
 
 /** A server line's header: everything but `data`, which `decode` hands on as the raw text it is. */
@@ -211,6 +216,12 @@ interface DownHead {
   resumed?: unknown;
   ack?: unknown;
   c?: unknown;
+  id?: unknown;
+  received?: unknown;
+  done?: unknown;
+  start?: unknown;
+  code?: unknown;
+  message?: unknown;
 }
 
 interface ControlFrame {
@@ -273,6 +284,8 @@ const link = {
 };
 /** Agent commands not answered yet, by rid, in the order the tabs sent them. */
 const pending = new Map<string, Command>();
+/** Uploads in flight over the link, by id (docs/specs/2026-11-02-file-uploads-design.md U4). */
+const uploads = new Map<string, Upload>();
 let silenceTimer: ReturnType<typeof setInterval> | undefined;
 /** Samples waiting for the next flush, oldest first, and how many overflow dropped since the last one. */
 let samples: Sample[] = [];
@@ -445,6 +458,11 @@ function applyMode(): void {
     link.sender.drop(subscription.id);
     if (link.token !== null) queueUp(subscription.id, JSON.stringify({ type: "unsub", id: subscription.id }));
   }
+  // Uploads go back too: the tab resumes each over HTTP from the host's offset.
+  for (const upload of [...uploads.values()]) {
+    dropUpload(upload);
+    post(upload.client, { up: upload.id, http: true });
+  }
   for (const command of [...pending.values()]) {
     if (command.sent) continue;
     link.sender.drop(`cmd:${command.session}`);
@@ -535,12 +553,14 @@ function close(client: Client, streamId: number): void {
 function dropClient(client: Client): void {
   clients.delete(client);
   for (const streamId of [...client.streams.keys()]) close(client, streamId);
+  // A closed tab's uploads cannot be sent with any prompt.
+  for (const upload of [...uploads.values()]) if (upload.client === client) abortUpload(upload.id);
 }
 
 // ---- The browser link (spec B3-B5) ----
 
 function linkWanted(): boolean {
-  if (mode === "ws") return subscriptions.size > 0 || pending.size > 0;
+  if (mode === "ws") return subscriptions.size > 0 || pending.size > 0 || uploads.size > 0 || link.sender.hasKeyWith("up:");
   // On SSE the link stays only until the commands sent on it are answered.
   for (const command of pending.values()) if (command.sent) return true;
   return false;
@@ -640,6 +660,8 @@ function giveUp(trigger: string): boolean {
   clearTimeout(link.ackTimer);
   link.ackTimer = undefined;
   link.appliedBytes = 0;
+  // Chunks on the dropped socket may be lost: each upload goes on from the host's offset after the next welcome.
+  for (const upload of uploads.values()) stopUpload(upload);
   if (!linkWanted()) {
     shutLink();
     return false;
@@ -748,6 +770,8 @@ function flushLink(): void {
     link.sentSeq = item.seq;
     link.unacked += item.bytes;
   };
+  // An up_abort still queued keeps the link wanted: closing it first would lose the abort and leave the host's copy staged.
+  const hadUp = link.sender.hasKeyWith("up:");
   let full = false;
   for (const item of link.outbox.pending()) {
     if (item.seq <= link.sentSeq) continue;
@@ -759,11 +783,17 @@ function flushLink(): void {
   }
   while (!full && room()) {
     const unit = link.sender.next(() => ++link.upSeq);
-    if (!unit || !("line" in unit)) break;
+    if (!unit) break;
+    // An upload's chunk: not sequenced, so outside the window; the socket's buffer and the upload's window bound it.
+    if ("frame" in unit) {
+      ws.send(unit.frame);
+      continue;
+    }
     const item = { seq: unit.seq, line: unit.line, bytes: encoder.encode(unit.line).byteLength };
     link.outbox.push(item);
     write(item);
-    const command = unit.done && unit.item.rid !== undefined ? pending.get(unit.item.rid) : undefined;
+    const rid = "rid" in unit.item ? unit.item.rid : undefined;
+    const command = unit.done && rid !== undefined ? pending.get(rid) : undefined;
     if (command) {
       command.sent = true;
       command.seq = unit.seq;
@@ -772,6 +802,7 @@ function flushLink(): void {
     }
   }
   if (ws.bufferedAmount >= SEND_BUFFER_BYTES) link.flushTimer = setTimeout(flushLink, LINK_LIMITS.flushMs);
+  if (hadUp && !link.sender.hasKeyWith("up:")) linkIdle();
 }
 
 /** `data` is the last field of a server line before its `seq`: the header parses without it, `data` stays raw text. */
@@ -836,6 +867,8 @@ function apply({ head, data }: { head: DownHead; data: string }, now: number): v
     const clock = currentClock(now);
     const behind = clock && Number.isFinite(at) ? behindFrames(linkConn.largeFrames, command.session, at, now, clock, entry).other : null;
     settle(command, reply(command, Number(head.status), JSON.parse(data), Number(head.recvAt), at, head.deduped === true, behind));
+  } else if (head.type === "up_ack" || head.type === "up_error") {
+    onUploadLine(head);
   }
 }
 
@@ -895,6 +928,8 @@ function onWelcome(welcome: DownHead): void {
     else if (isIdempotentCommand(command.type) || (sameServer && now - command.sentAt < COMMAND_DEDUPE_MS)) sendCommand(command);
     else settle(command, failure(command, TRANSPORT_LOST));
   }
+  // Every upload starts again (or for the first time): its up_start's answer says where its chunks go from.
+  for (const upload of uploads.values()) openUpload(upload);
   const reconnect = linkConn.reconnect;
   if (reconnect) {
     reconnect.hello = true;
@@ -1032,6 +1067,162 @@ function settle(command: Command, message: unknown): void {
   clearTimeout(command.deadline);
   pending.delete(command.rid);
   post(command.client, message);
+  linkIdle();
+}
+
+// ---- Uploads (docs/specs/2026-11-02-file-uploads-design.md U4): an upload's up_start, chunks and up_abort ride the
+// link under `up:<id>`, taking turns with the other keys. The worker reads the File itself, a window at a time. ----
+
+interface Upload {
+  id: string;
+  client: Client;
+  blob: Blob;
+  host: string;
+  name: string;
+  type: string;
+  /** Its latest up_start on the current socket was answered: chunks go out from `sent`. */
+  started: boolean;
+  /** `n` of its latest up_start (unique in the worker): only the answer naming it (`start: n`) counts. */
+  opens: number;
+  /** Bytes the host has written (its last ack), and bytes read and handed to the sender. */
+  acked: number;
+  sent: number;
+  /** A read is in flight; one that finds `epoch` changed belongs to an earlier start and is dropped. */
+  reading: boolean;
+  epoch: number;
+  /** Fails it when no answer or ack moves it on for UPLOAD_STALL_MS. */
+  stallTimer: ReturnType<typeof setTimeout> | undefined;
+}
+
+/** Worker-wide, so a Retry under a reused id never repeats an `n` that a stalled attempt's late answer carries. */
+let upStartSeq = 0;
+
+function addUpload(client: Client, message: Record<string, unknown>): void {
+  const id = String(message.id);
+  if (mode !== "ws") return post(client, { up: id, http: true });
+  const upload: Upload = {
+    id,
+    client,
+    blob: message.blob as Blob,
+    host: String(message.host),
+    name: String(message.name),
+    type: typeof message.type === "string" ? message.type : "",
+    started: false,
+    opens: 0,
+    acked: 0,
+    sent: 0,
+    reading: false,
+    epoch: 0,
+    stallTimer: undefined,
+  };
+  // A retry reuses the id: the earlier attempt's stall timer must not fire on this one.
+  const earlier = uploads.get(id);
+  if (earlier) dropUpload(earlier);
+  uploads.set(id, upload);
+  watchUpload(upload);
+  if (link.welcomed) openUpload(upload);
+  ensureLink();
+}
+
+/** Stops sending: its queued chunks are dropped, and a read in flight is discarded. */
+function stopUpload(upload: Upload): void {
+  upload.started = false;
+  upload.epoch += 1;
+  link.sender.drop(`up:${upload.id}`);
+}
+
+/** up_start: opens the upload, or resumes it at the host's offset. The file's MIME type goes as `mime` (`type` is the
+ * message's). */
+function openUpload(upload: Upload): void {
+  stopUpload(upload);
+  const { id, host, name, type } = upload;
+  upload.opens = ++upStartSeq;
+  queueUp(`up:${id}`, JSON.stringify({ type: "up_start", id, n: upload.opens, host, name, size: upload.blob.size, mime: type }));
+}
+
+function dropUpload(upload: Upload): void {
+  stopUpload(upload);
+  clearTimeout(upload.stallTimer);
+  uploads.delete(upload.id);
+}
+
+/** (Re)arms its stall deadline: whatever keeps it from moving (a link that stays down, a host that stopped acking)
+ * fails it there. Nothing is aborted, so a Retry resumes it from the host's offset. */
+function watchUpload(upload: Upload): void {
+  clearTimeout(upload.stallTimer);
+  upload.stallTimer = setTimeout(() => {
+    if (uploads.get(upload.id) !== upload) return;
+    dropUpload(upload);
+    post(upload.client, { up: upload.id, error: { status: 504, code: "upload_stalled", message: "The upload stopped making progress" } });
+    linkIdle();
+  }, UPLOAD_STALL_MS);
+}
+
+/** The tab removed it (or went away): the server deletes what the host staged. */
+function abortUpload(id: string): void {
+  const upload = uploads.get(id);
+  if (upload) dropUpload(upload);
+  if (link.token !== null) queueUp(`up:${id}`, JSON.stringify({ type: "up_abort", id }));
+  linkIdle();
+}
+
+/**
+ * Reads the next chunk while the upload's window has room: at most UPLOAD_WINDOW_BYTES beyond the host's last ack, in
+ * whole pieces but the file's last. The sender cuts it into pieces.
+ */
+function pump(upload: Upload): void {
+  if (!upload.started || upload.reading || uploads.get(upload.id) !== upload) return;
+  const { epoch, sent } = upload;
+  const left = upload.blob.size - sent;
+  const room = Math.min(left, UPLOAD_WINDOW_BYTES - (sent - upload.acked));
+  const bytes = room === left ? room : room - (room % LINK_LIMITS.pieceBytes);
+  if (bytes <= 0) return;
+  upload.reading = true;
+  upload.blob.slice(sent, sent + bytes).arrayBuffer().then((buffer) => {
+    upload.reading = false;
+    if (upload.epoch !== epoch || uploads.get(upload.id) !== upload) return pump(upload);
+    upload.sent = sent + buffer.byteLength;
+    link.sender.push(`up:${upload.id}`, { id: upload.id, blob: new Uint8Array(buffer) });
+    flushLink();
+    pump(upload);
+  }, () => {
+    upload.reading = false;
+    if (uploads.get(upload.id) !== upload) return;
+    post(upload.client, { up: upload.id, error: { status: 0, code: "upload_read_failed", message: "The file could not be read" } });
+    abortUpload(upload.id);
+  });
+}
+
+/** An up_ack or up_error. Before its start's answer, an ack is of chunks sent before a drop: only the answer to the
+ * latest up_start (`start: n`) says where chunks go on from; the answer to an earlier one (replayed after a resume) is
+ * dropped. */
+function onUploadLine(head: DownHead): void {
+  const upload = typeof head.id === "string" ? uploads.get(head.id) : undefined;
+  if (!upload) return;
+  // An answer to an earlier up_start (replayed after a resume) says nothing of the latest one. Untagged errors are the upload's own.
+  if (head.start !== undefined && head.start !== upload.opens) return;
+  if (head.type === "up_error") {
+    dropUpload(upload);
+    post(upload.client, { up: upload.id, error: { status: Number(head.status), code: String(head.code), message: String(head.message) } });
+    linkIdle();
+    return;
+  }
+  const received = Number(head.received);
+  const done = head.done === true;
+  if (!Number.isSafeInteger(received) || received < 0) return;
+  if (!upload.started) {
+    if (head.start === undefined) return;
+    upload.started = true;
+    upload.acked = upload.sent = received;
+  } else if (received > upload.acked) {
+    upload.acked = received;
+  } else if (!done) {
+    return;
+  }
+  watchUpload(upload);
+  post(upload.client, { up: upload.id, received: upload.acked, done });
+  if (!done) return pump(upload);
+  dropUpload(upload);
   linkIdle();
 }
 
@@ -1322,6 +1513,12 @@ function attach(port: Port): void {
         break;
       case "cmd":
         queueCommand(client, data);
+        break;
+      case "upload":
+        addUpload(client, data);
+        break;
+      case "up_abort":
+        abortUpload(String(data.id));
         break;
       case "lock":
         // MessagePort has no close event. The tab holds this lock for its

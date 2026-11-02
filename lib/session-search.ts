@@ -160,3 +160,55 @@ export function scoreSearchFields(fields: SearchField[], query: CompiledSearchQu
   }
   return score;
 }
+
+export interface SearchMatchSpan {
+  start: number;
+  end: number;
+  /** termQuality's ladder (1 exact … 0.3 two typos); quoted phrases count as exact. */
+  quality: number;
+}
+
+/**
+ * Every span of `text` the query matches, in text order and never overlapping:
+ * each quoted phrase verbatim, and each word that matches a term, fuzzy hits
+ * included. Unlike scoreSearchFields, one matching term is enough.
+ */
+export function findSearchMatches(text: string, query: CompiledSearchQuery): SearchMatchSpan[] {
+  const spans: SearchMatchSpan[] = [];
+  for (const phrase of query.phrases) {
+    // Whitespace within one rendered line of text: at most one space before a line break. A blank
+    // line (new paragraph) or a hard break (2+ trailing spaces, or a backslash) renders the words
+    // in separate text nodes, where the chat could not find the phrase.
+    const pattern = phrase.split(" ").map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("(?:[^\\S\\n]+|[^\\S\\n]?\\n[^\\S\\n]*)");
+    for (const match of text.matchAll(new RegExp(pattern, "giu"))) spans.push({ start: match.index, end: match.index + match[0].length, quality: 1 });
+  }
+  if (query.terms.length > 0) {
+    for (const match of text.matchAll(WORD_RE)) {
+      const word = normalize(match[0]);
+      let best = 0;
+      let bestTerm = "";
+      for (const term of query.terms) {
+        const quality = term.quality(word);
+        if (quality > best) {
+          best = quality;
+          bestTerm = term.text;
+        }
+      }
+      if (best === 0) continue;
+      let start = match.index;
+      let end = start + match[0].length;
+      // Exact, prefix and substring hits mark only the typed term, as browser find does;
+      // typo hits (and words whose case folding changes length) mark the whole word.
+      const at = best >= 0.6 && word.length === match[0].length ? word.indexOf(bestTerm) : -1;
+      if (at >= 0) {
+        start += at;
+        end = start + bestTerm.length;
+      }
+      spans.push({ start, end, quality: best });
+    }
+  }
+  spans.sort((a, b) => a.start - b.start || b.end - a.end);
+  const merged: SearchMatchSpan[] = [];
+  for (const span of spans) if (span.start >= (merged.at(-1)?.end ?? 0)) merged.push(span);
+  return merged;
+}

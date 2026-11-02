@@ -86,19 +86,6 @@ export function selectTextAttachments<T extends { size: number }>(
   return { accepted, tooLarge, overBudget };
 }
 
-/** Banner text for a batch that produced no usable attachments. */
-export function describeTextAttachmentSkip(
-  selection: Pick<TextAttachmentSelection<unknown>, "tooLarge" | "overBudget">,
-): string | null {
-  if (selection.tooLarge > 0) {
-    return `${selection.tooLarge} file(s) skipped: files up to ${formatAttachmentBytes(MAX_ATTACHED_TEXT_BYTES)} are supported.`;
-  }
-  if (selection.overBudget > 0) {
-    return `${selection.overBudget} file(s) skipped: attachments are limited to ${formatAttachmentBytes(MAX_TOTAL_ATTACHED_TEXT_BYTES)} per message.`;
-  }
-  return null;
-}
-
 export function isTextAttachmentFile(file: Pick<File, "name" | "type">): boolean {
   return file.type === "text/plain"
     || file.type === "text/markdown"

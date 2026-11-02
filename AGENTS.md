@@ -92,6 +92,7 @@ app/api/
   sessions/search/route.ts        GET ?q= — NDJSON { scores } batches (titles + transcripts); closing the request stops the scan
   sessions/[id]/route.ts          GET/PATCH/DELETE session
   sessions/[id]/context/route.ts  GET ?leafId= — context for a specific leaf
+  sessions/[id]/matches/route.ts  GET ?q=&limit= — best `limit` search hits in the active conversation (best match, then newest); Load more asks for a longer prefix
   sessions/[id]/export/route.ts   GET exported HTML for a session
   agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? }
   agent/[id]/route.ts             GET state | POST any RPC command
@@ -126,6 +127,8 @@ app/api/
   stt/route.ts                    POST audio (+scope) → 202 { jobId } | GET ?scope= live jobs (lib/stt-jobs.ts)
   stt/[jobId]/route.ts            GET job state | POST retry with kept audio | DELETE ?claim= claim/discard
   stt/[jobId]/audio/route.ts      GET the kept recording (audio/* only) for playback
+  uploads/route.ts                POST { id, host, name, size, type } start/resume a composer upload (SSE-mode path of the browser link's `up_start`) → { received, done }
+  uploads/[id]/route.ts           PUT ?offset=N raw body ≤ 1 MiB, answered once the host acked it (409 `upload_offset` with { received }) | DELETE abort
   worktrees/route.ts              GET/POST/DELETE git worktrees
 
 lib/
@@ -138,6 +141,7 @@ lib/
     local-bootstrap.ts web server side of the local link: `localLinkUrl`, `ensureLocalHostLink` (the `local` record + `host.json`)
     host-login.ts      `host.json` (`loginHost`, `readHostLogin`) and `isLoopbackHost`, shared by the daemon and local-bootstrap
     session-ops.ts     file-reading half of the session/project routes, run on the owning host's daemon (this machine's too)
+    uploads.ts         daemon side of composer uploads: `StagedUploads` (staging dir `<agent dir>/omp-web/uploads/`, offset writes, 24 h sweep, attach into the session's `local/uploads/`), `sanitizeUploadName`, `sessionLocalRoot`
     link-protocol.ts   link messages, codec, binary blob frames, close codes, size limits, `HOST_OP_NAMES`, `SeqWindow`/`Outbox`, `LinkSender`/`PartJoiner` (pieces, fair sending)
     hub.ts             main side: the link's upgrade and `websocket` handler (`handleLinkUpgrade`, `hostLinkSocket`), `RemoteHost`, `getHost`, `listHosts`, adoption of live children (`reattach`/`adopt`), orphans, `freezeHostLinks`, `hosts` change events
     daemon.ts          daemon side: `runHostDaemon` (reconnect, buffering, op dispatch, hello with each child's `{sessionId, cwd, pending}`; follows a `host.json` url or token change when a dial fails; loopback redials at most 3 s apart)
@@ -176,6 +180,8 @@ lib/
   session-reader.ts    session .jsonl parsing + path cache + buildSessionContext
   session-search.ts    shared fuzzy/phrase query scorer for sidebar search (title weights ≫ transcript)
   session-content-search.ts  server: per-file transcript text cache (size+mtime) + searchSessions()
+  session-search-matches.ts  shared types/constants of the sidebar's per-session search hits
+  session-match-listing.ts   server: lists a session's search hits counted per rendered text node (remark parse)
   session-resume.ts    running-session list for auto-resume after a restart
   web-auth.ts          password-hash check + session cookie signing
   web-auth-secret.ts   per-installation session-signing key (~/.omp/agent/omp-web/web-auth-secret.json)
@@ -197,6 +203,7 @@ components/
   ChatInput.tsx       input bar + model/thinking/tools/compact controls
   ComposerPanels.tsx  composer-attached /btw + todo + subagent panels (collapsible, live states)
   BtwPanel.tsx        /btw side-question panel (stream, cancel, copy, follow-up) + history dialog
+  SessionSearchMatches.tsx  a search result's hits under its sidebar row (10 at a time + "Load more…")
   TodoList.tsx        todo phase grid with preview/show-all (used by ComposerPanels)
   SubagentTranscriptDialog.tsx  task + final output summary dialog (wide, screen-adaptive)
   MessageView.tsx     renders one message (user/assistant/toolCall/toolResult)
@@ -233,6 +240,7 @@ hooks/
   useNavigationHistory.ts  in-app back/forward stack (record/peek/commit/drop) for visited chat views
   useWordPrediction.ts     debounced omp predict_word ghost text + feedback
   useBtw.ts                /btw records/active panel/history dialog fed by btw_* SSE frames
+  useChatSearchHighlights.ts  find-in-page for the sidebar search: CSS Custom Highlight API paint + jump to a picked hit
 
 bin/
   bun-runtime.js      resolves the Bun binary (npm `@oven/bun-*`, else PATH, minimum version check); used by the launcher, scripts and nix
@@ -294,8 +302,8 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   `IDLE_DESTROY_MS` (10 min) and `DISCONNECT_DESTROY_MS`
   (`OMP_WEB_DISCONNECT_DESTROY_MS`, 2 min, `0` disables). The shorter one only
   fires once a session has been genuinely abandoned — no `onEvent` listener, no
-  run in flight, no startup handshake, no unanswered `send()`. The last
-  `onEvent` detach *starts* that window rather than exposing the last frame's,
+  run in flight, no startup handshake, no unanswered `send()` or command preparation.
+  The last `onEvent` detach *starts* that window rather than exposing the last frame's,
   so a reload reattaching seconds later does not 409. Both are fed by
   `resetIdleTimer()`, the single activity choke point for `send()` and every
   child frame: adding a new call path must route activity through it.
@@ -342,7 +350,8 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   design `docs/specs/2026-10-31-websocket-link-design.md`). **Text frames**
   carry the messages (hub → daemon one per frame; daemon → hub newline-separated
   batches flushed every 16 ms or at one 256 KiB piece), **binary frames** carry large op
-  results (daemon → hub, before the `res` naming them). Every line except
+  results (daemon → hub, before the `res` naming them) and, from v6, upload bytes
+  (hub → daemon, `up:<id>`). Every line except
   `hello`/`welcome`/`ack`/`ping`/`pong` has a per-direction `seq`; `ack {ack}`
   is a message: the first line of every daemon frame, and the hub answers every
   uplink frame (v5: binary ones too) with exactly one. **Pieces and fair sending
@@ -404,10 +413,13 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   field or a message type receivers skip is fine; a changed type or meaning, or
   a newly required field, needs a new version. Receivers skip unknown message
   types (acking their `seq`) and answer unknown ops 501 `unknown_op`, from v3 on.
-  v4 (the WebSocket link) dropped v3 before any release. v5 (pieces) keeps v4:
-  `MIN_LINK_PROTOCOL_VERSION` is 4 and `LINK_PROTOCOL_VERSION` 5 (literal
+  v4 (the WebSocket link) dropped v3 before any release. v5 (pieces) keeps v4;
+  v6 (uploads: hub → daemon binary frames, `upload_ack`, `uploadStart`/
+  `uploadAbort`/`uploadAttach`) keeps v4 and v5:
+  `MIN_LINK_PROTOCOL_VERSION` is 4 and `LINK_PROTOCOL_VERSION` 6 (literal
   one-liners: the deploy script parses them with `sed`); a v4 daemon gets no
-  `part`, whole lines and no unacked window (`link.sender.parts`). Main keeps at least N-1, and
+  `part`, whole lines and no unacked window (`link.sender.parts`); a v4/v5
+  daemon gets 426 for uploads. Main keeps at least N-1, and
   dropping one is an explicit decision (a hello
   outside the range gets close 4426 with `{"serverVersion":N}`, a pre-WebSocket
   daemon's POST gets 426). Once the WebSocket experiments end, the first version
@@ -591,6 +603,16 @@ wait for that commit:
   finished turn. `AppShell` must pass `hideToolActivity` into `ChatWindow` for
   the switch to do anything. The fold row is the expand affordance, so a hidden
   tool call is one click away rather than gone.
+- Two more UI switches shape the fold, both planned in
+  `planTurnSegments` (`lib/chat-transcript-plan.ts`): `showThinking`
+  (driven by "Expand thinking blocks by default") and `showToolCalls` ("Show
+  tool calls outside Process details", `omp-web:show-tool-calls-unfolded`)
+  treat those blocks like text, so they never fold. A text segment can
+  therefore carry thinking, and `ChatWindow` passes its `sourceBlockIndices`
+  so deferred thinking loads the right block. "Never fold tool activity"
+  (`omp-web:never-fold-activity`, planner option `neverFold`) plans every turn
+  as standalone message rows, so the render window still counts messages and a
+  long turn never mounts at once; it overrides "Hide tool activity while working".
 - `tool_execution_update` is coalesced per tool call at display rate in
   `lib/message-update-coalescer.ts` (chatty commands emit ~10-100+ frames/s),
   like `message_update` (which carries omp deltas, see "Streaming message
@@ -613,6 +635,9 @@ wait for that commit:
 - Auto-expanded historical blocks are `deferred` (thinking text is fetched on
   demand), so a mount effect loads their content through the same loader the
   click path uses — one request per mount, cached per (session, entry, block).
+- While the preference is on, thinking never folds into **Process details**:
+  a streamed block mounts expanded, and folding it when the step commits would
+  hide it in a closed row, which reads as the block collapsing on its own.
 
 ### Tool-result images (`lib/media-cache.ts`, `/api/media/[hash]`)
 - Tool-result images never reach the browser as base64. History (`deferMedia`)
@@ -1030,6 +1055,39 @@ during the wait.
 - Programmatic smooth scrolling must respect `prefers-reduced-motion`
   (`usePrefersReducedMotion` in `hooks/usePrefersReducedMotion.ts` — also the
   only way to stop SVG SMIL animations, which CSS cannot).
+- A jump to a sidebar search hit calls `holdScrollPosition()` (`useAgentSession`):
+  it marks the initial scroll done and stops following, as a manual scroll-up
+  would, so the next frame does not pull the reader back to the bottom.
+
+### Search hits in the chat (`/api/sessions/[id]/matches`, `hooks/useChatSearchHighlights.ts`)
+- While the sidebar search has a query, each session row's chevron lists its
+  hits (`SessionSearchMatches`, 10 at a time). The server ranks hits of the
+  active conversation's user text and assistant text blocks (quality, then
+  newest message) and builds snippets for the returned hits only. "Load more"
+  asks for a longer prefix (`limit`), never an offset: a running session
+  re-ranks between requests, so offsets would repeat or skip hits.
+- A hit is addressed as `(entryId, ordinal)`: its index among that message's
+  hits, counted per rendered text node in rendered order on both sides. The
+  server (`lib/session-match-listing.ts`) parses each body that has a hit in its
+  source (a user message's text blocks joined with `\n`, each assistant text
+  block separately) with the chat's remark parser and counts in text, inline
+  code and code nodes; link targets, image alt text, raw HTML and math render
+  no searchable text, and footnote definitions come last in reference order.
+  The chat counts in the rendered `[data-message-text][data-entry-id]` text,
+  skipping code-block headers, buttons, line numbers, KaTeX, Mermaid notes,
+  table charts and generated footnote labels (`NOT_MESSAGE_TEXT`). New chrome
+  inside message text must be excluded there too, and new markdown syntax
+  that renders text must be counted in `renderedTextNodes`, or later ordinals
+  shift. Known gaps: a phrase across syntax-highlighting tokens or a linked
+  `#123`/`agent://` ref, and block-level raw HTML; the jump then lands near it.
+- Painting uses the CSS Custom Highlight API (`omp-search`,
+  `omp-search-current` in `globals.css`), repainted on DOM mutations; browsers
+  without it still jump. A jump widens the lazy render window
+  (`revealMessage`) first. Each click is a new target object used once:
+  `onSearchTargetHandled` drops it in AppShell, so reopening the session later
+  does not jump again. AppShell also drops a pending target when the query
+  changes or another session opens, and the hook drops one whose entry the
+  loaded branch lacks. An empty query clears the highlights and the target.
 
 ### MCP configuration (`lib/omp/mcp-config.ts`, `/api/mcp`, `components/McpConfig.tsx`)
 - Project MCP config resolution order: `.omp/mcp.json`, `.omp/.mcp.json`,
@@ -1113,6 +1171,84 @@ during the wait.
 - Ghost state lives in a small external store (`useSyncExternalStore` in
   `GhostMirror`), not ChatInput state: re-rendering the composer per ghost
   change was the dominant per-keystroke cost.
+
+### Composer file uploads (`docs/specs/2026-11-02-file-uploads-design.md`)
+- Images and text files go inline while they fit the inline budgets
+  (`lib/image-attachments.ts`, `lib/chat-attachments.ts`); every other file,
+  an image switched to **As file**, and anything over a budget is uploaded
+  (2 GiB per file, 20 per message, `lib/upload-limits.ts`, browser-safe).
+  The composer re-checks the inline budget per chip on every render, so an
+  image's decoded size comes from `attachedImageBytes` (scanned once per
+  image object), never a fresh base64 scan.
+- Uploads land in a staging dir on the **session's host** (the daemon), not on
+  main: a new chat has no session yet. The prompt command carries
+  `uploads: [id]`; `runAgentCommand` (`lib/agent-command.ts`) attaches each
+  through the host op `uploadAttach` (hard link into
+  `<session dir>/local/uploads/`, never overwriting; copy on EXDEV) and appends
+  the "Attached files" block with `local://` URL and absolute path. Ids stay
+  registered until the prompt reaches omp, so a retried send reuses the attach.
+  Attachment preparation uses the wrapper's pending-command protection too, so
+  disconnect and idle cleanup cannot dispose a submitted prompt's session while
+  a slow copy is still running. Later commands await the send fence before
+  selecting/replacing the wrapper, so Stop and an Advisor change cannot overtake it;
+  a command through any registry alias of the same wrapper (`getRpcSessionKeys`)
+  waits too. The Attached files block can push a prompt past the host link's
+  line cap: the transport then refuses it before queueing with 413
+  `request_too_large`, and the uploads stay registered for a shorter resend.
+- Bytes are forwarded, never re-encoded: the browser sends binary frames
+  `[n][id][payload]` (≤ `pieceBytes`) as `LinkSender` blob units keyed
+  `up:<id>`; `lib/browser-link.ts` accepts them only for uploads that link
+  started and hands the same bytes to `forwardUploadFrame` (`lib/uploads.ts`) with
+  that link's sink; frames are forwarded only while it is the upload's current
+  sink, so a WS sender superseded by an HTTP resume or newer start is refused;
+  `forwardUploadFrame` queues them as blob units on the host link (link v6; `hostVersion < 6`
+  → 426 `host_upgrade_required` on a remote host, `host_restart_required` on
+  `local`: an in-place upgrade keeps a running v4/v5 daemon, which is inside
+  `[MIN, LINK]`, so "This machine" needs `ompweb-host` restarted). Blob units
+  are outside both links' line windows; the worker's per-upload
+  `UPLOAD_WINDOW_BYTES` credit, refilled by the daemon's `upload_ack`, is the
+  flow control, and main enforces it: a frame putting `sent - received` over
+  `UPLOAD_WINDOW_BYTES + pieceBytes` stops the upload with 429
+  `upload_window_exceeded` (frames dropped until the next start; the socket
+  stays open). Binary frames are not resent: after a browser-link drop or a
+  web-server restart the worker re-sends `up_start {id, n, …}` (same id, `n` =
+  a worker-wide increasing sequence) and continues from the host's `received` in
+  the answer `up_ack {…, start: n}`. Each start has a fresh sink whose progress,
+  completion and errors retain `start: n`, including messages already queued
+  before a Retry. The worker ignores any mismatched generation before applying
+  an ack or error. On main the latest concurrent start wins; earlier starts
+  still answer their callers.
+  Each host `uploadStart` also carries a fresh UUIDv4 `attempt`; the daemon
+  echoes it on progress, completion and error `upload_ack`s. Main discards
+  superseded-attempt acks even if they arrive after the newer start's reply.
+  Receipt replay and a start of an already-attached upload both require a
+  regular-file target; a missing or directory target gets `upload_missing`.
+  Receipt publication is atomic, and start/attach/abort controls share one
+  per-id queue so an abort cannot be undone by an earlier attach's receipt.
+  A start that finds the upload aborted sends
+  `uploadAbort` to the host and answers 404 `upload_missing`. A host-link drop
+  fails each in-flight upload with 503 `host_offline`; the chip's Retry (same
+  id) resumes. No auto-retry.
+- Limits on main: at most 32 unfinished uploads per owner (429
+  `too_many_uploads`); an unfinished entry idle 10 min (no start, frame or ack)
+  is dropped from the registry (a later `up_start` re-registers it). The worker
+  fails an upload no start answer or ack advances for `UPLOAD_STALL_MS` (120 s)
+  with 504 `upload_stalled` and forgets it without aborting it on the host, so
+  Retry resumes. Page navigation settles pending WebSocket-upload promises before
+  the worker's `bye`: a composer retained by bfcache shows Retry after restoration,
+  not a permanently uploading chip. This does not automatically resume navigation.
+  The daemon's `sweep` deletes staged files older than 24 h and aborts open uploads
+  idle (no start/write) over 24 h (`STAGED_MAX_AGE_MS`).
+  `uploadAttach` has a 10-minute op timeout (a 2 GiB EXDEV copy), not
+  `opTimeoutMs`.
+- Error codes: composer uploads use `upload_id_conflict` (another upload has
+  this id); `upload_conflict` stays the file manager's.
+- SSE mode uses the same registry over HTTP (`/api/uploads`). Upload owner =
+  `requestOwner(req)` (`lib/web-auth.ts`), the browser link's owner too; attach
+  requires the same owner and the session's host.
+- The registry is in memory: a main restart loses finished-but-unsent uploads
+  ("attach the file again"); unfinished ones resume. Switching chats aborts
+  in-flight uploads; drafts keep only finished ones (`sessionStorage`).
 
 ### Voice transcription jobs (`lib/stt-jobs.ts`, `/api/stt`, `hooks/useDictation.ts`)
 - The browser never waits on the STT endpoint: `POST /api/stt` keeps the

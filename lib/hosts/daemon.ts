@@ -14,6 +14,7 @@ import { isValidSessionId } from "../session-file-references-core";
 import { isRecord } from "../type-guards";
 import { isLoopbackHost, readHostLogin } from "./host-login";
 import {
+  decodeBlobFrame,
   decodeDown,
   encodeLine,
   encodeQueued,
@@ -40,6 +41,7 @@ import {
 import { localHost, resolveSpawnCwdResult } from "./local-host";
 import { PendingRequests } from "./pending-requests";
 import { sessionOps } from "./session-ops";
+import { StagedUploads } from "./uploads";
 
 const FIRST_RETRY_MS = 1_000;
 const MAX_RETRY_MS = 60_000;
@@ -151,6 +153,9 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   let authorization = `Bearer ${options.token}`;
 
   const channels = new Map<string, Channel>();
+  // Upload acks go under the upload's own key, fair with the channels.
+  const uploads = new StagedUploads((ack) => void queue({ type: "upload_ack", ...ack }, `up:${ack.id}`));
+  void uploads.sweep();
   // Uplink messages wait in `sender` until they go out, then here until main acks them; a dropped socket resends
   // them after the next welcome.
   const sender = new LinkSender<Pending>(true);
@@ -513,6 +518,12 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         return localHost.sessionFileExists(sessionsPath(args.path));
       case "invalidateSessionLists":
         return localHost.invalidateSessionLists(args.path === undefined ? undefined : sessionsPath(args.path));
+      case "uploadStart":
+        return uploads.start(args);
+      case "uploadAbort":
+        return uploads.abort(args.id);
+      case "uploadAttach":
+        return uploads.attach(args.id, sessionsPath(args.sessionFile), args.sessionId);
       default: {
         const run = sessionOps[op] as (...params: unknown[]) => Promise<unknown>;
         return run.apply(sessionOps, SESSION_OP_PARAMS[op].map((name) => args[name]));
@@ -594,9 +605,13 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       if (socket !== ws) return;
       alive();
       try {
-        // One message per text frame; the hub sends no binary frames. An applied one is acked soon, at once past a
-        // piece, so main's unacked window moves (spec D7).
-        if (typeof data !== "string") return;
+        // A binary frame carries upload bytes (v6), written in order. One message per text frame; an applied one is
+        // acked soon, at once past a piece, so main's unacked window moves (spec D7).
+        if (typeof data !== "string") {
+          const { id, bytes } = decodeBlobFrame(new Uint8Array(data as ArrayBuffer));
+          uploads.write(id, bytes);
+          return;
+        }
         const applied = down.acked;
         handleDown(data);
         if (down.acked !== applied) {

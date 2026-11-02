@@ -49,6 +49,7 @@ import * as sessionsIdAutoName from "@/app/api/sessions/[id]/auto-name/route";
 import * as sessionsIdContext from "@/app/api/sessions/[id]/context/route";
 import * as sessionsIdEntriesEntryIdThinking from "@/app/api/sessions/[id]/entries/[entryId]/thinking/route";
 import * as sessionsIdExport from "@/app/api/sessions/[id]/export/route";
+import * as sessionsIdMatches from "@/app/api/sessions/[id]/matches/route";
 import * as sessionsId from "@/app/api/sessions/[id]/route";
 import * as sessionsIdState from "@/app/api/sessions/[id]/state/route";
 import * as sessionsIdSubagentsSubagentId from "@/app/api/sessions/[id]/subagents/[subagentId]/route";
@@ -66,6 +67,8 @@ import * as sttJobIdAudio from "@/app/api/stt/[jobId]/audio/route";
 import * as sttJobId from "@/app/api/stt/[jobId]/route";
 import * as stt from "@/app/api/stt/route";
 import * as transportMetrics from "@/app/api/transport-metrics/route";
+import * as uploadsId from "@/app/api/uploads/[id]/route";
+import * as uploads from "@/app/api/uploads/route";
 import * as usage from "@/app/api/usage/route";
 import * as webAuthSession from "@/app/api/web-auth/session/route";
 import * as webSettings from "@/app/api/web-settings/route";
@@ -140,6 +143,7 @@ export const ROUTE_MODULES: Record<string, RouteModule> = {
   "sessions/[id]/context": sessionsIdContext,
   "sessions/[id]/entries/[entryId]/thinking": sessionsIdEntriesEntryIdThinking,
   "sessions/[id]/export": sessionsIdExport,
+  "sessions/[id]/matches": sessionsIdMatches,
   "sessions/[id]": sessionsId,
   "sessions/[id]/state": sessionsIdState,
   "sessions/[id]/subagents/[subagentId]": sessionsIdSubagentsSubagentId,
@@ -157,6 +161,8 @@ export const ROUTE_MODULES: Record<string, RouteModule> = {
   "stt/[jobId]": sttJobId,
   "stt": stt,
   "transport-metrics": transportMetrics,
+  "uploads/[id]": uploadsId,
+  "uploads": uploads,
   "usage": usage,
   "web-auth/session": webAuthSession,
   "web-settings": webSettings,

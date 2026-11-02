@@ -449,6 +449,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const ignoreProgrammaticScrollUntilRef = useRef(0);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  // A jump to a search hit: skip the initial scroll and stop following new output,
+  // exactly as if the reader had scrolled up.
+  const holdScrollPosition = useCallback(() => {
+    initialScrollDoneRef.current = true;
+    completionScrollAllowedRef.current = false;
+  }, []);
   const ensuringNewSessionRef = useRef<Promise<string | null> | null>(null);
   const newSessionPromotedRef = useRef(false);
   // Raw child-session events stream at token rate; coalesce the per-subagent
@@ -2725,12 +2731,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return snapshot.entryIds;
   }, []);
 
-  const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<PromptSubmissionResult> => {
+  const handleSend = useCallback(async (message: string, images?: AttachedImage[], uploads?: string[]): Promise<PromptSubmissionResult> => {
     const trimmedMessage = message.trim();
-    if (!trimmedMessage && !images?.length) return { status: "rejected" };
+    if (!trimmedMessage && !images?.length && !uploads?.length) return { status: "rejected" };
     if (agentRunningRef.current || bashRunningRef.current || editInFlightRef.current) return { status: "rejected" };
     if (initialHydrationPendingRef.current) return { status: "rejected" };
-    const isSlashCommandPrompt = !images?.length && trimmedMessage.startsWith("/");
+    const isSlashCommandPrompt = !images?.length && !uploads?.length && trimmedMessage.startsWith("/");
     // omp runs TUI-only commands such as `/guided-goal` nowhere but its own
     // terminal, so over RPC the text is sent as an ordinary prompt and the turn
     // looks like it obeyed. Say so once per name instead of staying silent
@@ -2744,7 +2750,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     }
 
-    const isBashCommand = !images?.length && trimmedMessage.startsWith("!");
+    const isBashCommand = !images?.length && !uploads?.length && trimmedMessage.startsWith("!");
     if (isBashCommand) {
       const isExcluded = trimmedMessage.startsWith("!!");
       const bashCmd = (isExcluded ? trimmedMessage.slice(2) : trimmedMessage.slice(1)).trim();
@@ -2842,6 +2848,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             type: "prompt",
             message,
             ...(piImages?.length ? { images: piImages } : {}),
+            ...(uploads?.length ? { uploads } : {}),
           }));
         }
       } else if (session) {
@@ -2863,6 +2870,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           type: "prompt",
           message,
           ...(piImages?.length ? { images: piImages } : {}),
+          ...(uploads?.length ? { uploads } : {}),
         }));
       }
       if (promptRunIdRef.current === promptRunId) promptDispatchPendingRef.current = false;
@@ -3231,6 +3239,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           value: loaded && !value.trim() ? content : value,
           images: destination ? [...draft.images, ...destination.images] : draft.images,
           files: destination ? [...draft.files, ...destination.files] : draft.files,
+          // The same upload may sit in both drafts (an id is one file): keep its first occurrence.
+          uploads: destination
+            ? [...(draft.uploads ?? []), ...(destination.uploads ?? [])].filter((upload, at, all) => all.findIndex((other) => other.id === upload.id) === at)
+            : draft.uploads,
         });
         onSessionMoved?.(sid, edit.sessionId, draft);
       }
@@ -3764,7 +3776,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
     return false;
   }, [addNotice]);
-  const handleSteer = useCallback(async (message: string, images?: AttachedImage[]) => {
+  const handleSteer = useCallback(async (message: string, images?: AttachedImage[], uploads?: string[]) => {
     const sid = sessionIdRef.current;
     if (!sid || editInFlightRef.current) return false;
     const piImages = toPiImages(images);
@@ -3773,6 +3785,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         type: "steer",
         message,
         ...(piImages?.length ? { images: piImages } : {}),
+        ...(uploads?.length ? { uploads } : {}),
       });
       // A `!!` shell command owned the session: the agent route put the text
       // into omp's follow-up queue instead of steering a (nonexistent) turn.
@@ -3788,6 +3801,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     message: string,
     behavior: "steer" | "followUp",
     images?: AttachedImage[],
+    uploads?: string[],
   ) => {
     const sid = sessionIdRef.current;
     if (!sid || editInFlightRef.current) return false;
@@ -3798,6 +3812,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         message,
         streamingBehavior: behavior,
         ...(piImages?.length ? { images: piImages } : {}),
+        ...(uploads?.length ? { uploads } : {}),
       });
       // Same degradation as `handleSteer`: queued behind the running shell
       // command rather than delivered into this run.
@@ -3809,7 +3824,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [addNotice, reportQueueFailure]);
 
-  const handleFollowUp = useCallback(async (message: string, images?: AttachedImage[]) => {
+  const handleFollowUp = useCallback(async (message: string, images?: AttachedImage[], uploads?: string[]) => {
     const sid = sessionIdRef.current;
     if (!sid || editInFlightRef.current) return false;
     const piImages = toPiImages(images);
@@ -3818,6 +3833,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         type: "follow_up",
         message,
         ...(piImages?.length ? { images: piImages } : {}),
+        ...(uploads?.length ? { uploads } : {}),
       });
       return true;
     } catch (e) {
@@ -4165,7 +4181,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     isNew,
     // Refs
     sessionIdRef, messagesEndRef, scrollContainerRef,
-    pendingScrollToUserRef, initialScrollDoneRef,
+    pendingScrollToUserRef, initialScrollDoneRef, holdScrollPosition,
     // Actions
     handleSend, handleAbort, handleFork, handleEdit, handleModelChange, handleFastModeChange, handleSlowModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply, setSkillStartupDiagnostics,
     retrySession: () => { const sid = sessionIdRef.current; if (sid) void loadSession(sid, true, true); },

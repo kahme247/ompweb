@@ -32,7 +32,7 @@ The pacing loops stay per endpoint, as hub and daemon already differ: the server
 
 ### B3. Wire format
 
-Text frames only; one line per frame, both directions. Messages are JSON objects keyed by `type`; sequenced ones end with `"seq":N}` (numbered by `LinkSender`). A line over `pieceBytes` goes as `part {seq, at, end, data}` lines, exactly as on the host link.
+Text frames carry the messages, one line per frame, both directions. Messages are JSON objects keyed by `type`; sequenced ones end with `"seq":N}` (numbered by `LinkSender`). A line over `pieceBytes` goes as `part {seq, at, end, data}` lines, exactly as on the host link. Binary frames go browser → server only and carry upload chunks (`[n][id][payload]`, ≤ `pieceBytes`, unsequenced; `docs/specs/2026-11-02-file-uploads-design.md`, U4); the server accepts one only for an upload that link started.
 
 Browser → server:
 
@@ -43,6 +43,7 @@ Browser → server:
 | `ping {c}` | no | — | clock ping (on open and in answer to every server `ping`); also liveness |
 | `sub {id, channel}`, `unsub {id}` | yes | subscription id | (un)subscribe, as `POST /api/events` |
 | `cmd {rid, session, advisor, command}` | yes | `cmd:<session>` | an agent command; `command` is the tab's JSON body, embedded unparsed by the worker |
+| `up_start {id, n, host, name, size, mime}`, `up_abort {id}` | yes | `up:<id>` | open or resume (`n`: the worker's per-open counter), or cancel, a composer upload (uploads spec, U4) |
 
 Server → browser:
 
@@ -54,10 +55,11 @@ Server → browser:
 | `pong {c, at}` | no | — | answer to a clock ping |
 | `e {name, at, data}` | yes | subscription id (`mux` frames: their `sub`, else `mux`) | one `EventStreamConnection` frame, exactly what SSE writes as `event: name / id: at / data: data`; `data` is the raw frame JSON |
 | `reply {rid, status, recvAt, at, deduped, data}` | yes | `cmd:<session>` | a command's answer; `data` the route's JSON body, `recvAt` when the `cmd` was applied, `at` when the reply was queued |
+| `up_ack {id, received, done, start?}`, `up_error {id, status, code, message}` | yes | `up:<id>` | an upload's progress (`start: n` on the answer to `up_start` `n`) or failure (uploads spec, U4) |
 
 `data` is always the last field before `seq`, so the worker reads the header with one small `JSON.parse` and passes `data` on as the substring it is (no parse of a large snapshot in the worker, as with SSE). A `part` line is parsed whole (≤ 256 KiB).
 
-Close codes: 1000/1001 from the browser end the link at once (it is done with it: nothing left to carry, a switch to SSE, the worker going away); any other close keeps it for a resume (the worker's own redial uses 4000). From the server: 1007 malformed frame, 1008 first frame not a `hello` or no `hello` within `helloMs` = 10 s of the upgrade, 1009 frame over `pieceBytes`, 1011 handler failure, 4409 replaced by a newer socket of the same link, 4410 link gone (its backlog or the process-wide budget), 4426 `hello.v` not 1.
+Close codes: 1000/1001 from the browser end the link at once (it is done with it: nothing left to carry, a switch to SSE, the worker going away); any other close keeps it for a resume (the worker's own redial uses 4000). From the server: 1007 malformed frame (also a binary frame for an upload this link did not start), 1008 first frame not a `hello` or no `hello` within `helloMs` = 10 s of the upgrade, 1009 frame over `pieceBytes` (a binary one: over a piece plus its header), 1011 handler failure, 4409 replaced by a newer socket of the same link, 4410 link gone (its backlog or the process-wide budget), 4426 `hello.v` not 1.
 
 Frame size: Bun's `maxPayloadLength` is per server, and the host link needs `blobBytes` + 256 (64 MiB) while it accepts v4 daemons, which send a large result as one binary frame. So Bun still buffers a browser frame up to 64 MiB before `lib/browser-link.ts` closes it 1009 for being over a piece. Only authenticated browsers reach the upgrade, and the hello deadline bounds how long a socket that never says hello stays open. Lowering the limit waits for dropping v4 (`MIN_LINK_PROTOCOL_VERSION` 5: every v5 frame is at most a piece plus its header).
 

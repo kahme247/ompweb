@@ -56,6 +56,9 @@ export interface CommandReply {
 /** The worker's answer to a `cmd`; `http` when it is in SSE mode, so the tab POSTs the command itself. */
 type CommandMessage = { cmd: number; http: true } | ({ cmd: number } & Omit<CommandReply, "via">);
 
+/** The worker about an upload: progress (the bytes the host has), its failure, or `http` (SSE mode: the tab uploads it). */
+type UploadMessage = { up: string; received: number; done: boolean } | { up: string; error: { status: number; code: string; message: string } } | { up: string; http: true };
+
 type WakeReason = "init" | "visible" | "hidden" | "online" | "network";
 
 interface WorkerPort {
@@ -88,17 +91,25 @@ class Transport {
   private nextId = 1;
   private readonly streams = new Map<number, MultiplexedEventStream>();
   private readonly commands = new Map<number, (reply: CommandReply | null) => void>();
+  private readonly uploads = new Map<string, (message: UploadMessage) => void>();
   mode: BrowserTransport = "sse";
 
   constructor(private readonly port: WorkerPort) {
     port.onmessage = (event) => {
-      const message = event.data as WorkerMessage | TransportMessage | CommandMessage;
+      const message = event.data as WorkerMessage | TransportMessage | CommandMessage | UploadMessage;
       if ("transport" in message) this.mode = message.transport;
       else if ("cmd" in message) this.answer(message);
+      else if ("up" in message) this.uploads.get(message.up)?.(message);
       else this.streams.get(message.id)?.receive(message);
     };
     this.holdLifetimeLock();
-    window.addEventListener("pagehide", () => this.port.postMessage({ op: "bye" }));
+    window.addEventListener("pagehide", () => {
+      // The worker aborts these on bye, including when this page enters the bfcache.
+      for (const [id, listener] of [...this.uploads]) {
+        listener({ up: id, error: { status: 503, code: "upload_failed", message: "The upload failed. Retry it." } });
+      }
+      this.port.postMessage({ op: "bye" });
+    });
     window.addEventListener("pageshow", (event) => {
       // Back from the bfcache: pagehide already released our subscriptions.
       if (event.persisted) for (const stream of this.streams.values()) stream.resume();
@@ -143,6 +154,21 @@ class Transport {
     resolve?.("http" in reply ? null : { ...reply, via: "ws" });
   }
 
+  /** Hands the worker the File itself: it reads the bytes, so the tab holds none. `listener` hears until done, a
+   * failure or `http`. */
+  upload(id: string, file: File, hostId: string, listener: (message: UploadMessage) => void): void {
+    this.uploads.set(id, (message) => {
+      if (!("received" in message) || message.done) this.uploads.delete(id);
+      listener(message);
+    });
+    this.port.postMessage({ op: "upload", id, host: hostId, name: file.name, type: file.type, blob: file });
+  }
+
+  abortUpload(id: string): void {
+    this.uploads.delete(id);
+    this.port.postMessage({ op: "up_abort", id });
+  }
+
   /** The worker script failed to load/run: fail every stream (fatal), so the
    * next openEventStream starts a fresh worker instead of hanging silently. */
   fail(): void {
@@ -150,6 +176,10 @@ class Transport {
     const streams = [...this.streams.values()];
     this.streams.clear();
     for (const stream of streams) stream.receive({ id: stream.id, type: "error", readyState: EVENT_STREAM_CLOSED });
+    // The dead worker's uploads go on over HTTP from the host's offset.
+    const uploads = [...this.uploads.entries()];
+    this.uploads.clear();
+    for (const [id, listener] of uploads) listener({ up: id, http: true });
     // The dead worker may have sent them: answered like a socket that dropped before the reply.
     for (const resolve of this.commands.values()) {
       resolve({
@@ -262,4 +292,100 @@ export function recordTransportSample(sample: Record<string, unknown>): void {
  * body of up to 8 MB to learn it. */
 export function sendSessionCommand(sessionId: string, req: string, body: string, advisor: boolean, type: string): Promise<CommandReply | null> | null {
   return transport?.mode === "ws" ? transport.command(sessionId, req, body, advisor, type) : null;
+}
+
+/** A failed upload: the server's (or host's) status and code, or status 0 when the file could not be read. */
+export class UploadFailedError extends Error {
+  constructor(readonly status: number, readonly code: string, message: string) {
+    super(message);
+  }
+}
+
+export interface UploadHandle {
+  id: string;
+  /** Resolves once the host has every byte (synced); rejects with UploadFailedError, or a network error over HTTP. */
+  promise: Promise<void>;
+  /** Stops it and has the server delete what the host staged; the promise then never settles (or rejects, over HTTP). */
+  abort(): void;
+}
+
+/** HTTP PUT bodies in SSE mode (spec U4). */
+const HTTP_UPLOAD_BYTES = 1024 * 1024;
+
+/** A UUID v4, lowercase (UPLOAD_ID_RE); no crypto.randomUUID (insecure LAN origins lack it). */
+export function newUploadId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/**
+ * Uploads `file` to `hostId`'s staging area (docs/specs/2026-11-02-file-uploads-design.md U4): over the worker's browser
+ * link in the `ws` transport, else over HTTP. `onProgress` gets the bytes the host has. Passing the `id` of a failed
+ * upload resumes it from the host's offset.
+ */
+export function uploadFile(file: File, hostId: string, onProgress: (received: number) => void, id = newUploadId()): UploadHandle {
+  const controller = new AbortController();
+  const link = transport?.mode === "ws" ? transport : null;
+  let viaLink = link !== null;
+  const promise = new Promise<void>((resolve, reject) => {
+    const overHttp = () => {
+      viaLink = false;
+      uploadOverHttp(id, file, hostId, onProgress, controller.signal).then(resolve, reject);
+    };
+    if (!link) return overHttp();
+    link.upload(id, file, hostId, (message) => {
+      if ("http" in message) overHttp();
+      else if ("error" in message) reject(new UploadFailedError(message.error.status, message.error.code, message.error.message));
+      else {
+        onProgress(message.received);
+        if (message.done) resolve();
+      }
+    });
+  });
+  return {
+    id,
+    promise,
+    abort() {
+      if (controller.signal.aborted) return;
+      controller.abort();
+      if (viaLink) link?.abortUpload(id);
+      else discardUpload(id);
+    },
+  };
+}
+
+/** Deletes a finished (or failed) upload the composer no longer attaches: the host drops what it staged. */
+export function discardUpload(id: string): void {
+  fetch(`/api/uploads/${id}`, { method: "DELETE" }).catch(() => {});
+}
+
+/** POST opens or resumes it at the host's offset; each PUT carries up to HTTP_UPLOAD_BYTES from the offset the server
+ * last reported (a 409 `upload_offset` says where to go on from). */
+async function uploadOverHttp(id: string, file: File, hostId: string, onProgress: (received: number) => void, signal: AbortSignal): Promise<void> {
+  const answer = async (response: Response, from: number): Promise<number> => {
+    const body = await response.json().catch(() => ({})) as { received?: unknown; error?: string; code?: string };
+    if (!response.ok && !(response.status === 409 && body.code === "upload_offset")) {
+      throw new UploadFailedError(response.status, body.code ?? "upload_failed", body.error ?? `HTTP ${response.status}`);
+    }
+    const received = Number(body.received);
+    // An offset that does not move would loop forever.
+    if (!Number.isSafeInteger(received) || received < 0 || received > file.size || (from >= 0 && received === from)) {
+      throw new UploadFailedError(response.status, "upload_failed", "The server reported no progress");
+    }
+    onProgress(received);
+    return received;
+  };
+  let received = await answer(await fetch("/api/uploads", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id, host: hostId, name: file.name, size: file.size, type: file.type }),
+    signal,
+  }), -1);
+  while (received < file.size) {
+    const body = file.slice(received, received + HTTP_UPLOAD_BYTES);
+    received = await answer(await fetch(`/api/uploads/${id}?offset=${received}`, { method: "PUT", body, signal }), received);
+  }
 }

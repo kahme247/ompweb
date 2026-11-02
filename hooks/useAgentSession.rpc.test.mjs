@@ -459,6 +459,26 @@ test("the queue panel shows omp's snapshot on load and follows queue_update, not
   assert.deepEqual(w.latest.queuedMessages, { steering: [], followUp: ["later"] });
 });
 
+test("upload ids ride the prompt and follow-up bodies; a files-only prompt is sent", async () => {
+  resetWorld();
+  primeSession("uploads", [userMsg("u0", "q")]);
+  const id = "0f0e0d0c-0b0a-4908-8706-050403020100";
+  const w = await mountSession("uploads");
+  let sending;
+  await act(async () => {
+    sending = w.latest.handleSend("", undefined, [id]);
+    await sleep(30);
+  });
+  await act(async () => {
+    lastEs().open();
+    await sending;
+  });
+  const prompt = callsTo("POST", "/api/agent/").find((call) => call.body?.type === "prompt");
+  assert.deepEqual(prompt?.body.uploads, [id]);
+  await act(async () => { await w.latest.handleFollowUp("and this", undefined, [id]); });
+  assert.deepEqual(callsTo("POST", "/api/agent/").find((call) => call.body?.type === "follow_up")?.body.uploads, [id]);
+});
+
 test("a prompt queued behind a running shell command drops the phantom turn and reports it", async () => {
   resetWorld();
   primeSession("bash-queue", [userMsg("u0", "q")]);
@@ -3037,6 +3057,56 @@ test("relocation merges existing target attachments and preserves typing added w
     files: [sourceFile, { name: "new.txt", mimeType, content: "new file while waiting", size: 22 }, targetFile],
   });
   assert.equal(w.view.getByRole("textbox").value, "new source typing\n\nexisting target draft");
+  assert.equal(getDraft(sid), null);
+});
+
+test("relocation keeps the source and existing target finished uploads", async (t) => {
+  resetWorld();
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
+  const sid = "edit-move-uploads", target = `${sid}-owned`;
+  t.after(() => { clearDraft(sid); clearDraft(target); });
+  const sourceUpload = { id: "up-source", name: "source.bin", size: 10, hostId: "local" };
+  const targetUpload = { id: "up-target", name: "target.bin", size: 20, hostId: "local" };
+  setDraft(sid, { value: "", images: [], files: [], uploads: [sourceUpload] });
+  setDraft(target, { value: "Existing target text", images: [], files: [], uploads: [targetUpload] });
+  const native = primeEditableHistory(sid);
+  native.moveTo = target;
+  await attachEditableWrapper(t, native);
+  const w = await mountMovableChat(sid);
+  await confirmEdit(w.view, w.editButton());
+  await until(() => w.selectedId === target, "the confirmed target must become selected");
+  await settle();
+  // The composer re-persists the merged list in its own order.
+  assert.deepEqual(getDraft(target)?.uploads?.map((upload) => upload.id).sort(), [sourceUpload.id, targetUpload.id]);
+  assert.equal(getDraft(sid), null);
+});
+
+test("relocation merges an upload both drafts hold once", async (t) => {
+  resetWorld();
+  const { getDraft, setDraft, clearDraft, subscribeDrafts } = await import("@/lib/draft-store");
+  const sid = "edit-move-shared-upload", target = `${sid}-owned`;
+  t.after(() => { clearDraft(sid); clearDraft(target); });
+  const shared = { id: "up-shared", name: "shared.bin", size: 10, hostId: "local" };
+  const targetOnly = { id: "up-target", name: "target.bin", size: 20, hostId: "local" };
+  setDraft(sid, { value: "", images: [], files: [], uploads: [shared] });
+  setDraft(target, { value: "Existing target text", images: [], files: [], uploads: [{ ...shared, name: "target-shared.bin" }, targetOnly] });
+  const native = primeEditableHistory(sid);
+  native.moveTo = target;
+  await attachEditableWrapper(t, native);
+  const w = await mountMovableChat(sid);
+  const persistedUploads = [];
+  t.after(subscribeDrafts(() => {
+    if (getDraft(sid) === null) persistedUploads.push(getDraft(target)?.uploads ?? []);
+  }));
+  await confirmEdit(w.view, w.editButton());
+  await until(() => w.selectedId === target, "the confirmed target must become selected");
+  await settle();
+  assert.deepEqual(getDraft(target)?.uploads?.map((upload) => upload.id).sort(), [shared.id, targetOnly.id]);
+  assert.equal(getDraft(target)?.uploads?.find((upload) => upload.id === shared.id)?.name, shared.name, "the source occurrence wins");
+  assert.ok(persistedUploads.length > 0);
+  for (const saved of persistedUploads) {
+    assert.equal(saved.filter((upload) => upload.id === shared.id).length, 1, "no persisted snapshot contains the shared id twice");
+  }
   assert.equal(getDraft(sid), null);
 });
 
