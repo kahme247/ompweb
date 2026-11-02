@@ -575,9 +575,11 @@ function onUploadStart(link: BrowserLink, ws: BrowserSocket, message: Record<str
   startUpload({ id, hostId: host, owner: link.owner, name, size, type: mime, sink }).then(({ received }) => {
     queue(link, key, JSON.stringify({ type: "up_ack", id, received, done: received >= size, start: n }));
   }, (error: unknown) => {
-    if (error instanceof HostOpError) return sink.error(error.status, error.code, error.message);
+    // Tagged with this start's n: a failure of an earlier up_start, delivered after a newer one went out, is not the newer one's.
+    const fail = (status: number, code: string, text: string) => queue(link, key, JSON.stringify({ type: "up_error", id, status, code, message: text, start: n }));
+    if (error instanceof HostOpError) return fail(error.status, error.code, error.message);
     console.error(`[omp-web] upload start failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
-    sink.error(500, "upload_failed", "The upload could not start");
+    fail(500, "upload_failed", "The upload could not start");
   });
 }
 

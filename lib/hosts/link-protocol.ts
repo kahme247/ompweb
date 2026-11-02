@@ -554,6 +554,12 @@ export class LinkSender<T extends SendItem> {
     else this.queues.set(key, [entry]);
   }
 
+  /** Whether any key starting with `prefix` has something queued. */
+  hasKeyWith(prefix: string): boolean {
+    for (const key of this.queues.keys()) if (key.startsWith(prefix)) return true;
+    return false;
+  }
+
   /** Forget what `key` queued, a line part-way out included: the receiver drops that partial line. */
   drop(key: string): void {
     for (const { left } of this.queues.get(key) ?? []) this.queued -= left;

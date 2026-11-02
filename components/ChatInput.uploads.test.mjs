@@ -290,6 +290,16 @@ test(`only ${MAX_UPLOADS_PER_MESSAGE} files attach to one message`, async () => 
   assert.equal(requests.filter((each) => each.method === "POST").length, MAX_UPLOADS_PER_MESSAGE);
 });
 
+test("a PDF goes As file even when its bytes decode as text; a JSON file stays inline", async () => {
+  const ref = renderComposer("uploads-pdf", []);
+  const pdf = new File(["%PDF-1.4 plain ascii body"], "doc.pdf", { type: "application/pdf" });
+  const json = new File(['{"a":1}'], "data.json", { type: "application/json" });
+  await act(async () => { ref.current.addFiles([pdf, json]); });
+  await opened("doc.pdf");
+  await waitFor(() => assert.ok(screen.getByText("data.json"), "the JSON chip"));
+  assert.deepEqual(requests.filter((each) => each.method === "POST").map((each) => JSON.parse(each.body).name), ["doc.pdf"]);
+});
+
 test("a file over 2 GiB is refused, its sibling attaches", async () => {
   const ref = renderComposer("uploads-size", []);
   const huge = binaryFile("disk.iso");

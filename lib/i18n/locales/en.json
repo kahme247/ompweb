@@ -381,7 +381,7 @@
   "chatInput.attachmentImageReadFailed": "One or more images could not be read. Try a different file.",
   "chatInput.attachmentTextReadFailed": "One or more files could not be read. Try a different file.",
   "chatInput.attachmentUploadTooLarge": "{count} file(s) skipped: files up to {size} can be attached.",
-  "chatInput.attachmentUploadLimit": "A message can attach at most {count} files.",
+  "chatInput.attachmentUploadLimit": "A message can send at most {count} files As file.",
   "chatInput.imagesAsFile": "{count} image(s) too large to send inline: attached as files instead.",
   "chatInput.imageInline": "Inline",
   "chatInput.imageAsFile": "As file",

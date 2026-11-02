@@ -3060,6 +3060,27 @@ test("relocation merges existing target attachments and preserves typing added w
   assert.equal(getDraft(sid), null);
 });
 
+test("relocation keeps the source and existing target finished uploads", async (t) => {
+  resetWorld();
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
+  const sid = "edit-move-uploads", target = `${sid}-owned`;
+  t.after(() => { clearDraft(sid); clearDraft(target); });
+  const sourceUpload = { id: "up-source", name: "source.bin", size: 10, hostId: "local" };
+  const targetUpload = { id: "up-target", name: "target.bin", size: 20, hostId: "local" };
+  setDraft(sid, { value: "", images: [], files: [], uploads: [sourceUpload] });
+  setDraft(target, { value: "Existing target text", images: [], files: [], uploads: [targetUpload] });
+  const native = primeEditableHistory(sid);
+  native.moveTo = target;
+  await attachEditableWrapper(t, native);
+  const w = await mountMovableChat(sid);
+  await confirmEdit(w.view, w.editButton());
+  await until(() => w.selectedId === target, "the confirmed target must become selected");
+  await settle();
+  // The composer re-persists the merged list in its own order.
+  assert.deepEqual(getDraft(target)?.uploads?.map((upload) => upload.id).sort(), [sourceUpload.id, targetUpload.id]);
+  assert.equal(getDraft(sid), null);
+});
+
 test("relocation adopts existing target text without prefilling over it", async (t) => {
   resetWorld();
   const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");

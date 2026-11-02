@@ -560,7 +560,7 @@ function dropClient(client: Client): void {
 // ---- The browser link (spec B3-B5) ----
 
 function linkWanted(): boolean {
-  if (mode === "ws") return subscriptions.size > 0 || pending.size > 0 || uploads.size > 0;
+  if (mode === "ws") return subscriptions.size > 0 || pending.size > 0 || uploads.size > 0 || link.sender.hasKeyWith("up:");
   // On SSE the link stays only until the commands sent on it are answered.
   for (const command of pending.values()) if (command.sent) return true;
   return false;
@@ -770,6 +770,8 @@ function flushLink(): void {
     link.sentSeq = item.seq;
     link.unacked += item.bytes;
   };
+  // An up_abort still queued keeps the link wanted: closing it first would lose the abort and leave the host's copy staged.
+  const hadUp = link.sender.hasKeyWith("up:");
   let full = false;
   for (const item of link.outbox.pending()) {
     if (item.seq <= link.sentSeq) continue;
@@ -800,6 +802,7 @@ function flushLink(): void {
     }
   }
   if (ws.bufferedAmount >= SEND_BUFFER_BYTES) link.flushTimer = setTimeout(flushLink, LINK_LIMITS.flushMs);
+  if (hadUp && !link.sender.hasKeyWith("up:")) linkIdle();
 }
 
 /** `data` is the last field of a server line before its `seq`: the header parses without it, `data` stays raw text. */
@@ -1193,6 +1196,8 @@ function pump(upload: Upload): void {
 function onUploadLine(head: DownHead): void {
   const upload = typeof head.id === "string" ? uploads.get(head.id) : undefined;
   if (!upload) return;
+  // An answer to an earlier up_start (replayed after a resume) says nothing of the latest one. Untagged errors are the upload's own.
+  if (head.start !== undefined && head.start !== upload.opens) return;
   if (head.type === "up_error") {
     dropUpload(upload);
     post(upload.client, { up: upload.id, error: { status: Number(head.status), code: String(head.code), message: String(head.message) } });
@@ -1202,7 +1207,6 @@ function onUploadLine(head: DownHead): void {
   const received = Number(head.received);
   const done = head.done === true;
   if (!Number.isSafeInteger(received) || received < 0) return;
-  if (head.start !== undefined && head.start !== upload.opens) return;
   if (!upload.started) {
     if (head.start === undefined) return;
     upload.started = true;

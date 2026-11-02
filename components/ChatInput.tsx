@@ -723,11 +723,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     }
   }, [attachAsFiles, fitsInline, t]);
 
-  /** Text is inlined while it fits the text budget; past it, or when it turns out binary, it goes As file. */
+  /** Text is inlined while it fits the text budget; past it, when it turns out binary, and always for a PDF (omp reads
+   *  it as a document; its decoded bytes are not text), it goes As file. */
   const processTextFiles = useCallback(async (files: File[]) => {
     // In-flight batches reserve their bytes too, so two overlapping drops
     // cannot each fit under the aggregate budget on their own.
-    const { accepted: textFiles } = selectTextAttachments(files, {
+    const { accepted: textFiles } = selectTextAttachments(files.filter((file) => file.type !== "application/pdf"), {
       usedBytes: attachedTextFilesRef.current.reduce((total, file) => total + file.size, 0) + pendingTextFileBytesRef.current,
       usedSlots: attachedTextFilesRef.current.length + pendingTextFileCountRef.current,
     });

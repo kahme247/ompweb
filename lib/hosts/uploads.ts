@@ -64,7 +64,7 @@ export function sessionLocalRoot(sessionFile: string, sessionId: string, platfor
 export type UploadAck = { id: string; received: number; done: boolean; error?: { status: number; code: string; message: string } };
 
 type Meta = { name: string; size: number; type: string; created: number };
-type OpenUpload = { size: number; received: number; chain: Promise<void>; timer: NodeJS.Timeout | undefined; active: number };
+type OpenUpload = { name: string; type: string; size: number; received: number; chain: Promise<void>; timer: NodeJS.Timeout | undefined; active: number };
 
 const errno = (error: unknown) => (error as NodeJS.ErrnoException | null)?.code;
 const isUploadId = (id: unknown): id is string => typeof id === "string" && UPLOAD_ID_RE.test(id);
@@ -90,6 +90,8 @@ async function sync(path: string): Promise<void> {
 /** This daemon's staged uploads. Frames for one upload are written in arrival order; `send` gets each `upload_ack`. */
 export class StagedUploads {
   private readonly open = new Map<string, OpenUpload>();
+  /** The tail of each upload id's starts in flight: two starts for one id run one after the other. */
+  private readonly starts = new Map<string, Promise<void>>();
 
   constructor(
     private readonly send: (ack: UploadAck) => void,
@@ -144,9 +146,23 @@ export class StagedUploads {
       throw new HostOpError(400, "invalid_request", "Invalid upload");
     }
     if (size > MAX_UPLOAD_BYTES) throw new HostOpError(413, "upload_too_large", "The file is larger than 2 GiB");
+    // One start at a time per id: two for a new id must not both truncate the staged files and install an upload.
+    const run = (this.starts.get(id) ?? Promise.resolve()).then(() => this.begin(id, name, size, type));
+    const tail = run.then(() => {}, () => {});
+    this.starts.set(id, tail);
+    try {
+      return await run;
+    } finally {
+      if (this.starts.get(id) === tail) this.starts.delete(id);
+    }
+  }
+
+  private async begin(id: string, name: string, size: number, type: string): Promise<{ received: number; done: boolean }> {
     await this.sweep();
     const known = this.open.get(id);
     if (known) {
+      // An id names one file: the same id with another name, type or size is a different upload.
+      if (known.name !== name || known.type !== type || known.size !== size) throw new HostOpError(409, "upload_id_conflict", "The upload id is in use for another file");
       // Frames that came before this start are written first: they are part of the offset it reports.
       await known.chain;
       if (this.open.get(id) === known) {
@@ -157,7 +173,7 @@ export class StagedUploads {
     await mkdir(this.dir, { recursive: true });
     const part = this.path(id, "part");
     const meta = await this.meta(id);
-    let received = meta?.size === size ? await sizeOf(part) : null;
+    let received = meta?.name === name && meta.type === type && meta.size === size ? await sizeOf(part) : null;
     if (received === null || received > size) {
       await writeFile(part, new Uint8Array(0));
       await writeFile(this.path(id, "json"), JSON.stringify({ name, size, type, created: Date.now() } satisfies Meta));
@@ -167,7 +183,7 @@ export class StagedUploads {
       await sync(part);
       return { received, done: true };
     }
-    this.open.set(id, { size, received, chain: Promise.resolve(), timer: undefined, active: Date.now() });
+    this.open.set(id, { name, type, size, received, chain: Promise.resolve(), timer: undefined, active: Date.now() });
     return { received, done: false };
   }
 

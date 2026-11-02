@@ -364,7 +364,7 @@
   "chatInput.attachmentImageReadFailed": "画像を読み取れませんでした。別のファイルを試してください。",
   "chatInput.attachmentTextReadFailed": "ファイルを読み取れませんでした。別のファイルを試してください。",
   "chatInput.attachmentUploadTooLarge": "{count} 件のファイルをスキップしました：添付できるのは {size} 以下のファイルです。",
-  "chatInput.attachmentUploadLimit": "1 件のメッセージに添付できるファイルは最大 {count} 件です。",
+  "chatInput.attachmentUploadLimit": "1 件のメッセージでファイルとして送れるのは最大 {count} 件です。",
   "chatInput.imagesAsFile": "{count} 件の画像はインラインで送るには大きすぎるため、ファイルとして添付しました。",
   "chatInput.imageInline": "インライン",
   "chatInput.imageAsFile": "ファイル",

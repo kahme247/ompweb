@@ -364,7 +364,7 @@
   "chatInput.attachmentImageReadFailed": "无法读取一张或多张图片，请尝试其他文件。",
   "chatInput.attachmentTextReadFailed": "无法读取一个或多个文件，请尝试其他文件。",
   "chatInput.attachmentUploadTooLarge": "已跳过 {count} 个文件：仅可附加不超过 {size} 的文件。",
-  "chatInput.attachmentUploadLimit": "一条消息最多附加 {count} 个文件。",
+  "chatInput.attachmentUploadLimit": "一条消息最多可作为文件发送 {count} 个文件。",
   "chatInput.imagesAsFile": "{count} 张图片过大，无法内联发送，已改为作为文件附加。",
   "chatInput.imageInline": "内联",
   "chatInput.imageAsFile": "作为文件",

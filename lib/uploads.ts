@@ -55,6 +55,8 @@ interface Upload {
   live: boolean;
   sink: UploadSink | null;
   attached: { sessionFile: string; path: string; url: string } | null;
+  /** The attach in flight, shared by overlapping attaches of this upload to this session file. */
+  attaching?: { sessionFile: string; result: Promise<{ sessionFile: string; path: string; url: string }> } | null;
   starts: number;
   touched: number;
 }
@@ -302,13 +304,22 @@ export async function attachUploads(
     if (!upload || upload.owner !== owner) throw missing();
     if (upload.hostId !== session.host.id) throw new UploadError(409, "upload_wrong_host", "The file was uploaded to another host than the session's");
     if (upload.attached?.sessionFile !== sessionFile) {
-      const result = await hostUploadOp(upload.hostId, "uploadAttach", { id, sessionFile, sessionId });
-      if (!isRecord(result) || typeof result.path !== "string" || typeof result.url !== "string") {
-        throw new UploadError(502, "host_bad_result", "The host sent an invalid uploadAttach result");
+      // One host op per upload and session file: an overlapping attach awaits it, or the host links a second ` (1)` copy.
+      if (upload.attaching?.sessionFile !== sessionFile) {
+        const result = hostUploadOp(upload.hostId, "uploadAttach", { id, sessionFile, sessionId }).then((answer) => {
+          if (!isRecord(answer) || typeof answer.path !== "string" || typeof answer.url !== "string") {
+            throw new UploadError(502, "host_bad_result", "The host sent an invalid uploadAttach result");
+          }
+          return { sessionFile, path: answer.path, url: answer.url };
+        });
+        upload.attaching = { sessionFile, result };
+        const settled = () => { if (upload.attaching?.result === result) upload.attaching = null; };
+        result.then(settled, settled);
       }
-      upload.attached = { sessionFile, path: result.path, url: result.url };
+      upload.attached = await upload.attaching!.result;
     }
-    lines.push(`- ${upload.attached.url} (${upload.attached.path}, ${formatUploadSize(upload.size)}, ${upload.type || "application/octet-stream"})`);
+    const { url, path } = upload.attached!;
+    lines.push(`- ${url} (${path}, ${formatUploadSize(upload.size)}, ${upload.type || "application/octet-stream"})`);
   }
   const block = `Attached files (this session's local:// directory):\n${lines.join("\n")}`;
   const message = typeof command.message === "string" ? command.message : "";
