@@ -19,7 +19,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Fixes & Improvements
 
-- **Uploads no longer leave submitted messages or restored pages stuck.** A slow attachment copy keeps its session alive even after you switch chats. Returning through browser Back/Forward shows Retry for an interrupted upload instead of leaving Send permanently blocked.
+- **Uploads no longer leave submitted messages or restored pages stuck.** A slow attachment copy keeps its session alive even after you switch chats. Commands that change Advisor wait until that preparation is dispatched before they may replace the session's child. Returning through browser Back/Forward shows Retry for an interrupted upload instead of leaving Send permanently blocked.
 - **Attachment retries no longer accept missing files or stale upload errors.** An attachment removed or replaced by a directory is reported as missing before it is marked complete. Failed receipt writes leave the staged file available to retry without creating a duplicate, and cancellation cannot be undone by an attachment still finishing. Replies from earlier upload attempts no longer fail a newer Retry. Retrying also waits for failed-write cleanup, so an old attempt cannot delete the new attempt's staged files.
 - **A conflicting upload start no longer interrupts the original file.** Reusing an upload ID with another filename or MIME type is rejected before changing the active transfer, so the original upload continues normally.
 - **PDFs stay file attachments when the browser omits their MIME type.** Filenames ending in `.pdf` (any case) no longer have their raw contents inserted into the prompt as text.

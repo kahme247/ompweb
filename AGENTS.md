@@ -1173,7 +1173,8 @@ during the wait.
   registered until the prompt reaches omp, so a retried send reuses the attach.
   Attachment preparation uses the wrapper's pending-command protection too, so
   disconnect and idle cleanup cannot dispose a submitted prompt's session while
-  a slow copy is still running. A later Stop stays behind its send fence.
+  a slow copy is still running. Later commands await the send fence before
+  selecting/replacing the wrapper, so Stop and an Advisor change cannot overtake it.
 - Bytes are forwarded, never re-encoded: the browser sends binary frames
   `[n][id][payload]` (≤ `pieceBytes`) as `LinkSender` blob units keyed
   `up:<id>`; `lib/browser-link.ts` accepts them only for uploads that link
@@ -1189,9 +1190,12 @@ during the wait.
   `upload_window_exceeded` (frames dropped until the next start; the socket
   stays open). Binary frames are not resent: after a browser-link drop or a
   web-server restart the worker re-sends `up_start {id, n, …}` (same id, `n` =
-  its per-open counter) and continues from the host's `received` in the answer
-  `up_ack {…, start: n}`; an answer whose `start` is not the latest `n` is
-  ignored. On main the latest concurrent start wins; earlier starts still answer their callers.
+  a worker-wide increasing sequence) and continues from the host's `received` in
+  the answer `up_ack {…, start: n}`. Each start has a fresh sink whose progress,
+  completion and errors retain `start: n`, including messages already queued
+  before a Retry. The worker ignores any mismatched generation before applying
+  an ack or error. On main the latest concurrent start wins; earlier starts
+  still answer their callers.
   Each host `uploadStart` also carries a fresh UUIDv4 `attempt`; the daemon
   echoes it on progress, completion and error `upload_ack`s. Main discards
   superseded-attempt acks even if they arrive after the newer start's reply.

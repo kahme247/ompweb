@@ -38,7 +38,7 @@ Uploads go to a staging directory on the target host's daemon, `<agent dir>/omp-
 2. The server strips the field and calls the host op `uploadAttach {id, sessionFile, sessionId}` for each id. The daemon hard-links the staged file into the session's `local/uploads/` (a copy when the link fails, e.g. on `EXDEV`), deletes the staged one, and returns `{path, url}`. The op's timeout is 10 minutes (a 2 GiB copy across file systems), not the 30 s of other ops.
 3. The server then appends the U1 block to `message` and sends the command to omp.
 
-Attachment preparation is part of the wrapper's pending command activity, not idle time. Both cleanup backstops keep the wrapper alive while uploads are attached and the prompt is dispatched, even if no tab is subscribed. The per-session send fence still prevents a later Stop from overtaking that prompt. Preparation failure releases both protections.
+Attachment preparation is part of the wrapper's pending command activity, not idle time. Both cleanup backstops keep the wrapper alive while uploads are attached and the prompt is dispatched, even if no tab is subscribed. A later command awaits the per-session send fence before selecting or replacing the wrapper, not just before dispatch: neither Stop nor an Advisor-triggered child replacement can overtake the attaching prompt. Preparation failure releases both protections.
 
 A failed attach fails the command: 404 `upload_missing`, or 409 `upload_incomplete`. Nothing goes to omp, and the composer keeps the draft. At start and on every `uploadStart` the daemon deletes staged files older than 24 h (`STAGED_MAX_AGE_MS`) and aborts open uploads idle (no start or write) for longer than that, deleting their files; a swept upload gets no `upload_ack`.
 
@@ -50,15 +50,16 @@ The upload id is a client-generated UUID. It doubles as the binary frame id on b
 
 | Message | Dir | Seq | Key | Meaning |
 |---|---|---|---|---|
-| `up_start {id, n, host, name, size, mime}` | ↑ | yes | `up:<id>` | open, or resume, an upload on `host`; `n` is the worker's per-open counter for that upload (1, 2, …), `mime` the file's type (`type` is the message's) |
+| `up_start {id, n, host, name, size, mime}` | ↑ | yes | `up:<id>` | open, or resume, an upload on `host`; `n` is allocated from a worker-wide increasing sequence and is never reused by a Retry, `mime` is the file's type (`type` is the message's) |
 | binary `[n][id][payload]` | ↑ | no | `up:<id>` | the next ≤ `pieceBytes` (256 KiB) of the file, in order |
 | `up_abort {id}` | ↑ | yes | `up:<id>` | cancel and delete the staged file |
-| `up_ack {id, received, done, start?}` | ↓ | yes | `up:<id>` | the host has written `received` bytes; `done` once all `size` bytes are written and synced. The answer to `up_start` `n` carries `start: n` |
-| `up_error {id, status, code, message}` | ↓ | yes | `up:<id>` | the upload failed (host offline, disk full, too large, old host) |
+| `up_ack {id, received, done, start}` | ↓ | yes | `up:<id>` | the host has written `received` bytes; `done` once all `size` bytes are written and synced. Start replies and asynchronous progress/completion carry the originating `start: n` |
+| `up_error {id, status, code, message, start?}` | ↓ | yes | `up:<id>` | the upload failed (host offline, disk full, too large, old host). Failures belonging to a start, including delayed sink errors, carry its `start: n`; malformed messages without a valid generation may receive an untagged error |
 
 - Binary frames are units of the worker's `LinkSender` (it already carries `{id, blob}` items) under key `up:<id>`. A session's commands and replies therefore take turns with upload chunks and never wait behind a whole file.
 - **Flow control is end to end.** The worker keeps at most `UPLOAD_WINDOW` = 2 MiB per upload sent beyond the last `up_ack.received`. The server holds no more than that per upload and writes nothing to its own disk: a frame that would put `sent − received` over `UPLOAD_WINDOW + pieceBytes` stops the upload with `up_error` 429 `upload_window_exceeded` (its frames are dropped until the next `up_start`; the socket stays open, and Retry resumes from the host's offset).
 - **Resume:** binary frames are not sequenced and are lost when the socket drops. After a resume or resync (a dropped browser link, a web-server restart) the worker sends `up_start` again with the same id and the next `n`; the host answers with its `received` offset, and the worker continues from there. The worker ignores a start answer whose `start` is not its latest `n`, so a replayed or stale answer cannot make it send from a wrong offset.
+- **Generation-bound delivery:** each accepted start has its own sink capturing `n`; a queued error or progress event keeps that generation even after a Retry installs a new sink. The worker rejects mismatched generations before changing progress, completing, or failing an upload. Host-attempt filtering alone cannot discard a browser message already queued for an old start.
 - **Stall watchdog:** an upload that no start answer or ack advances for `UPLOAD_STALL_MS` = 120 s fails to the tab with 504 `upload_stalled`. The worker forgets it without aborting it on the host, so the chip's Retry (same id) resumes from the host's offset.
 - **Host-link drop:** each in-flight upload on that host fails with `up_error` 503 `host_offline`; the chip's Retry resumes from the host's offset. Nothing retries by itself.
 - The tab hands the worker `Blob` slices (`File.slice`, read in the worker) rather than buffers, so the tab holds no file bytes.

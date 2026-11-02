@@ -66,8 +66,8 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
     const type = command.type;
     // Attached files go to the session's host first; nothing reaches omp when one fails (spec U3).
     const uploads = takeUploads(command, owner);
-    // A session's commands reach omp in arrival order: one with uploads holds a fence until its
-    // `session.send` is called, so a later Stop never overtakes a prompt still attaching.
+    // Hold later wrapper selection as well as dispatch behind attachment preparation, so an
+    // advisor toggle cannot replace the child and a Stop cannot overtake the preparing prompt.
     const prior = sendFences().get(id);
     if (uploads) {
       const gate = new Promise<void>((resolve) => (release = resolve));
@@ -77,13 +77,13 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
         if (sendFences().get(id) === fence) sendFences().delete(id);
       });
     }
+    if (prior) await prior;
     const send = async (session: AgentSessionWrapper) => {
-      if (!uploads && !prior) return session.send(command);
+      if (!uploads) return session.send(command);
       return session.withPendingCommand(async () => {
         let sending: Promise<unknown>;
         try {
-          await prior;
-          if (uploads) await attachUploads(uploads, owner, session, command);
+          await attachUploads(uploads, owner, session, command);
           sending = session.send(command);
         } finally {
           release();

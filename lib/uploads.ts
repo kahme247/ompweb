@@ -20,7 +20,7 @@ export interface UploadSink {
   error(status: number, code: string, message: string): void;
 }
 
-export interface UploadStartRequest { id: string; hostId: string; owner: string; name: string; size: number; type: string; sink: UploadSink }
+export interface UploadStartRequest { id: string; hostId: string; owner: string; name: string; size: number; type: string; sink: UploadSink; onRegistered?(): void }
 
 /** A failed upload step; `received`: the host's offset, on a 409 upload_offset. A HostOpError, so the agent command
  * routes answer it like a failed host op (`{error, code}` with its status, `hostOffline` on a 503 host_offline). */
@@ -123,7 +123,8 @@ function makeRoom(map: Map<string, Upload>, owner: string): void {
 }
 
 /** Register (or re-register, to resume) an upload and open it on its host; resolves the host's offset. Of starts that
- * overlap, the latest one's answer sets where the bytes go on from. Throws HostOpError. */
+ * overlap, the latest one's answer sets where the bytes go on from. `onRegistered` transfers sink ownership
+ * synchronously after preflight accepts this start, before asking the host. Throws HostOpError. */
 export async function startUpload(req: UploadStartRequest): Promise<{ received: number }> {
   const { id, hostId, owner, name, size, type, sink } = req;
   if (
@@ -154,6 +155,7 @@ export async function startUpload(req: UploadStartRequest): Promise<{ received: 
     map.set(id, upload);
   }
   upload.touched = Date.now();
+  req.onRegistered?.();
   let result: unknown;
   try {
     result = await hostUploadOp(hostId, "uploadStart", { id, name, size, type, attempt });
