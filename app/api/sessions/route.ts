@@ -80,7 +80,7 @@ export async function GET(req: Request) {
         const status = "status" in s ? s.status : "";
         const updatedAt = "updatedAt" in s ? s.updatedAt : "";
         const isCompacting = "isCompacting" in s ? s.isCompacting : "";
-        return `${s.id}:${status}:${updatedAt}:${isCompacting}:${s.cwd}`;
+        return `${s.id}:${status}:${updatedAt}:${isCompacting}:${s.cwd}:${s.hostId ?? ""}`;
       })
       .join(";");
     const ifNoneMatch = req.headers.get("if-none-match");
