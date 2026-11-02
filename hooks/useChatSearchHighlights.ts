@@ -70,8 +70,8 @@ export function useChatSearchHighlights({ container, query: rawQuery, target, re
   useEffect(() => {
     const element = container.current;
     const query = compileSearchQuery(rawQuery);
-    // A closed or cleared search ends the current hit, even if the same query is typed again.
-    if (!query) currentRef.current = null;
+    // Any query change ends the current hit, even when the same query is typed again later.
+    if (currentRef.current?.query !== rawQuery) currentRef.current = null;
     const registry = highlightRegistry();
     if (!ready || !element || !query || !registry) return;
     let timer: ReturnType<typeof setTimeout> | undefined;
