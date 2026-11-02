@@ -60,13 +60,16 @@ export function listSessionMatches(messages: AgentMessage[], entryIds: string[],
     let ordinal = 0;
     for (const text of messageTextBlocks(message)) {
       // GFM footnote references and definition labels render as generated text the chat skips;
-      // inside code (fenced blocks, inline backticks) they stay literal text the chat shows.
-      const code = [...text.matchAll(/```[\s\S]*?(?:```|$)|`[^`\n]+`/g)].map((m) => [m.index, m.index + m[0].length]);
-      const footnotes = [...text.matchAll(/\[\^[^\]\s]+\]:?/g)]
-        .map((m) => [m.index, m.index + m[0].length])
-        .filter(([from]) => !code.some(([codeFrom, codeTo]) => from >= codeFrom && from < codeTo));
+      // inside code (fenced blocks, inline backticks) they stay literal text the chat shows. One
+      // scan: a code match consumes its range, so only footnotes outside code are captured.
+      const footnotes = [...text.matchAll(/```[\s\S]*?(?:```|$)|`[^`\n]+`|(\[\^[^\]\s]+\]:?)/g)]
+        .filter((m) => m[1] !== undefined)
+        .map((m) => [m.index, m.index + m[0].length]);
+      // Both lists are in text order and disjoint: walk them together.
+      let next = 0;
       for (const { start, end, quality } of findSearchMatches(text, query)) {
-        if (footnotes.some(([from, to]) => start < to && end > from)) continue;
+        while (next < footnotes.length && footnotes[next][1] <= start) next++;
+        if (next < footnotes.length && footnotes[next][0] < end) continue;
         hits.push({ entryId, ordinal: ordinal++, quality, timestamp, text, start, end });
       }
     }
