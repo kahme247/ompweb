@@ -169,6 +169,8 @@ function hub(): HubState {
     frozen: false,
     linkSamples: { samples: [], file: "", timer: undefined },
   };
+  // A state kept from before a field existed (`bun --hot`) lacks it.
+  globalThis.__ompHostHub.linkSamples ??= { samples: [], file: "", timer: undefined };
   return globalThis.__ompHostHub;
 }
 
