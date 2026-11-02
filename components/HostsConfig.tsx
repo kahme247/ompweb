@@ -117,6 +117,7 @@ function HostCard({ host, onRename, onRevoke }: { host: HostRow; onRename: () =>
   const details = [
     host.ompVersion,
     host.platform,
+    host.hostVersion !== null && host.status !== "needs-upgrade" && t("hostsConfig.protocol", { version: host.hostVersion }),
     linked && (host.lastSeenAt ? t("hostsConfig.lastSeen", { time: new Date(host.lastSeenAt).toLocaleString() }) : t("hostsConfig.neverSeen")),
   ].filter(Boolean).join(" · ");
 
@@ -186,7 +187,10 @@ export function HostsConfig() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, width: "100%" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-        <p style={{ margin: 0, fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("hostsConfig.subtitle")}</p>
+        <p style={{ margin: 0, fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>
+          {t("hostsConfig.subtitle")}
+          {hosts?.[0] && <span style={{ display: "block" }}>{t("hostsConfig.serverProtocol", { version: hosts[0].serverVersion })}</span>}
+        </p>
         <button type="button" className="ui-focus-ring" style={{ ...primaryStyle, display: "inline-flex", alignItems: "center", gap: 5, flexShrink: 0 }} onClick={() => setDialog({ kind: "add" })}>
           <Plus size={14} aria-hidden="true" />{t("hostsConfig.add")}
         </button>

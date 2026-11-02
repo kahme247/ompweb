@@ -96,8 +96,13 @@ test("an offline this-machine row says to start the service, with the server's i
   send([row({ daemonManaged: false })]);
   await waitFor(() => assert.equal(screen.queryByText(/ompweb-host service/), null));
 
-  send([row({ status: "online", hostVersion: 3 })]);
+  send([row({ status: "online", hostVersion: 2, serverVersion: 3 })]);
   await waitFor(() => assert.equal(screen.queryByText(/ompweb-host service/), null));
+  // The daemon's protocol on its row, the web app's in the header; a needs-upgrade status already names both.
+  assert.match(screen.getByRole("button", { name: "Rename This machine" }).closest("li").textContent, /link protocol v2/);
+  screen.getByText("This web app expects link protocol v3.");
+  send([row({ status: "needs-upgrade", hostVersion: 2, serverVersion: 3 })]);
+  await waitFor(() => assert.doesNotMatch(screen.getByRole("button", { name: "Rename This machine" }).closest("li").textContent, /link protocol v2/));
 });
 
 test("the local name hint is the input's description, not part of its label", async (t) => {

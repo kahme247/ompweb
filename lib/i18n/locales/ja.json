@@ -1300,6 +1300,8 @@
   "agentSession.transportLostMaybeSent": "送信中に接続が切れました。メッセージは届いている可能性があります。もう一度送信する前に会話を確認してください。",
   "hostsConfig.lastSeen": "最終接続 {time}",
   "hostsConfig.neverSeen": "未接続",
+  "hostsConfig.protocol": "リンクプロトコル v{version}",
+  "hostsConfig.serverProtocol": "この Web アプリはリンクプロトコル v{version} を想定しています。",
   "hostsConfig.allowAgentStart": "エージェントが確認なしでここにセッションを開始できる",
   "hostsConfig.allowAgentStartAria": "エージェントが確認なしで {name} にセッションを開始できる",
   "hostsConfig.rename": "名前を変更",
