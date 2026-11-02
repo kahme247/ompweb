@@ -689,7 +689,9 @@ function fallBack(): void {
     applyMode();
   }, FALLBACK_MS);
   applyMode();
-  if (linkWanted()) scheduleDial(backoff());
+  // applyMode handed the unsent commands back to their tabs. A sent one has no reply deadline and no link to carry its
+  // reply, so it ends here: it may have run.
+  for (const command of [...pending.values()]) settle(command, failure(command, TRANSPORT_LOST));
 }
 
 function sendControl(message: Record<string, unknown>): void {
