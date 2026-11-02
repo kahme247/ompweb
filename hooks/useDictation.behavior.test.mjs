@@ -233,6 +233,35 @@ test("starting capture puts the hook in the recording state with a live analyser
   assert.ok(view.result.current.captureRef.current.startedAt > 0, "timer needs a start stamp");
 });
 
+test("the meter's audio context is resumed inside the click, before the microphone await", async () => {
+  // After the await the click's activation may be gone; a context the browser
+  // then keeps suspended feeds the waveform silence while recording works.
+  const events = [];
+  class TrackingAudioContext extends FakeAudioContext {
+    resume() {
+      events.push("resume");
+      return super.resume();
+    }
+  }
+  override(window, "AudioContext", TrackingAudioContext);
+  override(globalThis, "AudioContext", TrackingAudioContext);
+  override(navigator, "mediaDevices", {
+    getUserMedia: async () => {
+      events.push("getUserMedia");
+      return { getTracks: () => [new FakeTrack()] };
+    },
+  });
+  const { view } = mountDictation();
+
+  await act(async () => {
+    view.result.current.toggle();
+  });
+  await settle();
+
+  assert.equal(events[0], "resume", `context must resume before getUserMedia, got ${events.join(",")}`);
+  assert.notEqual(view.result.current.captureRef.current.analyser, null);
+});
+
 test("pause then resume keeps the timer base and analyser while accumulating paused time", async () => {
   const { view } = mountDictation();
 
