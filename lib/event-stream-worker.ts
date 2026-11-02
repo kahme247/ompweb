@@ -679,7 +679,8 @@ function refused(): void {
   if (!giveUp("close")) return;
   const offline = scope.navigator.onLine === false;
   link.diagnosing = true;
-  fetch(BROWSER_LINK_PATH, { cache: "no-store" }).then((response) => response.status, () => 0).then((status) => {
+  // Without a deadline a GET that never answers leaves `diagnosing` set and nothing redials; an abort counts as status 0.
+  withDeadline(METRICS_TIMEOUT_MS, (signal) => fetch(BROWSER_LINK_PATH, { cache: "no-store", signal })).then((response) => response.status, () => 0).then((status) => {
     link.diagnosing = false;
     if (offline || [0, 401, 502, 503, 504].includes(status) || ++link.refusals < FALLBACK_REFUSALS) scheduleDial(backoff());
     else fallBack();
