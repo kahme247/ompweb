@@ -279,7 +279,11 @@ export async function sharedHostInstallReason(installDir: string, ignoredPids: n
       if (!Number.isInteger(pid) || ignoredPids.includes(pid)) continue;
       try {
         const args = readFileSync(`/proc/${id}/cmdline`, "utf8").split("\0").filter(Boolean);
-        const cwd = readlinkSync(`/proc/${id}/cwd`);
+        // A non-dumpable process (e.g. started with capabilities) hides its cwd and exe, not its arguments: resolve
+        // relative ones from the install, where a process sharing it would start.
+        // shortcut: misses a sharer started from a subdirectory with relative arguments; read the cwd via ptrace if seen.
+        let cwd = installDir;
+        try { cwd = readlinkSync(`/proc/${id}/cwd`); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EACCES") throw error; }
         if (inside(`/proc/${id}/exe`) || args.slice(0, 4).some((arg) => !arg.startsWith("-") && inside(isAbsolute(arg) ? arg : resolve(cwd, arg)))) return "This installation is shared with another running process (possibly the web server); update it manually or use a dedicated host installation";
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT" && (error as NodeJS.ErrnoException).code !== "ESRCH") {
