@@ -8,12 +8,12 @@ const ALL_HITS = "omp-search";
 const CURRENT_HIT = "omp-search-current";
 // Typing settles before the transcript is walked again.
 const PAINT_DELAY_MS = 150;
-// Rendered text that is not in the message's markdown source, which the server counts hits in:
-// code-block headers (language label, Copy button), highlighted code's line-number gutter,
-// KaTeX's hidden MathML copy, Mermaid's loading/error notes (the same set MessageCopyActions
-// strips), the charts generated from tables (they repeat the table's labels and values) and
-// GFM footnotes' generated numbers, back-links and "Footnotes" heading (their bodies stay).
-const NOT_MESSAGE_TEXT = "button, .markdown-code-header, .linenumber, .katex-mathml, .mermaid-block-loading, .mermaid-block-error, [data-table-chart], [data-footnote-ref], [data-footnote-backref], [data-footnotes] > h2";
+// Rendered text the server's count (lib/session-match-listing.ts) does not see: code-block
+// headers (language label, Copy button), highlighted code's line-number gutter, KaTeX output
+// (math is not searched), Mermaid's loading/error notes, the charts generated from tables
+// (they repeat the table's labels and values) and GFM footnotes' generated numbers, back-links
+// and "Footnotes" heading (their bodies stay).
+const NOT_MESSAGE_TEXT = "button, .markdown-code-header, .linenumber, .katex, .mermaid-block-loading, .mermaid-block-error, [data-table-chart], [data-footnote-ref], [data-footnote-backref], [data-footnotes] > h2";
 
 // Absent before Chrome 105 / Safari 17.2 / Firefox 140: hits are then not
 // painted, but jumping to one still works.
@@ -22,8 +22,9 @@ function highlightRegistry(): HighlightRegistry | null {
 }
 
 /** Every hit inside one message text element, in text order (a hit's index is its server ordinal). */
-// shortcut: matches per text node, so a phrase split by inline formatting is missed; and the server counts
-// ordinals in the markdown source, so a hit hidden by rendering (a link URL) shifts later ones. Fine for jumps.
+// Matched per text node, like the server: a phrase split by inline formatting is found on neither side.
+// shortcut: a phrase across syntax-highlighting tokens or a linked `#123`/`agent://` ref is counted
+// only by the server, shifting later ordinals in that message; the jump then lands near it.
 export function elementHits(element: Element, query: CompiledSearchQuery): Range[] {
   const ranges: Range[] = [];
   const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, {

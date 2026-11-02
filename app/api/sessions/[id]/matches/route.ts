@@ -1,5 +1,6 @@
 import { apiErrorResponse, opErrorResponse, resolveSessionHostOr404 } from "@/lib/api-utils";
-import { listSessionMatches, MAX_SEARCH_MATCHES, SEARCH_MATCH_PAGE_SIZE } from "@/lib/session-search-matches";
+import { listSessionMatches } from "@/lib/session-match-listing";
+import { MAX_SEARCH_MATCHES, SEARCH_MATCH_PAGE_SIZE } from "@/lib/session-search-matches";
 import type { SessionContext } from "@/lib/types";
 
 const MAX_QUERY_LENGTH = 500;

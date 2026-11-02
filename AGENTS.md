@@ -177,7 +177,8 @@ lib/
   session-reader.ts    session .jsonl parsing + path cache + buildSessionContext
   session-search.ts    shared fuzzy/phrase query scorer for sidebar search (title weights ≫ transcript)
   session-content-search.ts  server: per-file transcript text cache (size+mtime) + searchSessions()
-  session-search-matches.ts  per-hit listing (snippet, per-message ordinal) for the sidebar's expandable search results
+  session-search-matches.ts  shared types/constants of the sidebar's per-session search hits
+  session-match-listing.ts   server: lists a session's search hits counted per rendered text node (remark parse)
   session-resume.ts    running-session list for auto-resume after a restart
   web-auth.ts          password-hash check + session cookie signing
   web-auth-secret.ts   per-installation session-signing key (~/.omp/agent/omp-web/web-auth-secret.json)
@@ -1046,13 +1047,19 @@ during the wait.
   asks for a longer prefix (`limit`), never an offset: a running session
   re-ranks between requests, so offsets would repeat or skip hits.
 - A hit is addressed as `(entryId, ordinal)`: its index among that message's
-  hits. The server counts in the markdown source (a user message's text blocks
-  joined with `\n`, each assistant text block separately); the chat counts in
-  the rendered `[data-message-text][data-entry-id]` text, skipping code-block
-  headers, buttons, line numbers, KaTeX MathML, Mermaid notes, table charts and generated footnote labels (`NOT_MESSAGE_TEXT`). New chrome inside
-  message text must be excluded there too, or later ordinals shift. Text that
-  rendering drops (a link URL) or splits into glyph nodes (KaTeX math) still
-  shifts them; the jump then lands on the message.
+  hits, counted per rendered text node in rendered order on both sides. The
+  server (`lib/session-match-listing.ts`) parses each body that has a hit in its
+  source (a user message's text blocks joined with `\n`, each assistant text
+  block separately) with the chat's remark parser and counts in text, inline
+  code and code nodes; link targets, image alt text, raw HTML and math render
+  no searchable text, and footnote definitions come last in reference order.
+  The chat counts in the rendered `[data-message-text][data-entry-id]` text,
+  skipping code-block headers, buttons, line numbers, KaTeX, Mermaid notes,
+  table charts and generated footnote labels (`NOT_MESSAGE_TEXT`). New chrome
+  inside message text must be excluded there too, and new markdown syntax
+  that renders text must be counted in `renderedTextNodes`, or later ordinals
+  shift. Known gaps: a phrase across syntax-highlighting tokens or a linked
+  `#123`/`agent://` ref, and block-level raw HTML; the jump then lands near it.
 - Painting uses the CSS Custom Highlight API (`omp-search`,
   `omp-search-current` in `globals.css`), repainted on DOM mutations; browsers
   without it still jump. A jump widens the lazy render window
