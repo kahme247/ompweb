@@ -106,7 +106,6 @@ omp-web **絕不會將明文密碼傳遞給伺服器**，因為每個 `omp` 對�
 
 ```bash
 ompweb hash-password                       # 詢問兩次密碼，輸入內容自動隱藏
-echo "a-long-random-password" | ompweb hash-password   # 或透過管線輸入
 
 OMP_WEB_PASSWORD_HASH='scrypt$15$8$1$…' ompweb
 ```
