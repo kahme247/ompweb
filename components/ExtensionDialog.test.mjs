@@ -2,11 +2,9 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import React from "react";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react/pure.js";
-import { createJiti } from "jiti";
+const { cleanup, fireEvent, render, screen } = await import("@testing-library/react/pure.js");
 
-const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
-const { ExtensionDialog } = await jiti.import("./ExtensionDialog.tsx");
+const { ExtensionDialog } = await import("./ExtensionDialog.tsx");
 afterEach(cleanup);
 
 test("Ask editor preserves an answer on request replay and initializes the next request", async () => {

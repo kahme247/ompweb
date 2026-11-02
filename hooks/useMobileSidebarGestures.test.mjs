@@ -2,11 +2,9 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import React from "react";
-import { act, cleanup, renderHook } from "@testing-library/react/pure.js";
-import { createJiti } from "jiti";
+const { act, cleanup, renderHook } = await import("@testing-library/react/pure.js");
 
-const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
-const { useMobileSidebarGestures } = await jiti.import("./useMobileSidebarGestures.ts");
+const { useMobileSidebarGestures } = await import("./useMobileSidebarGestures.ts");
 afterEach(() => { cleanup(); window.getSelection()?.removeAllRanges(); document.body.replaceChildren(); });
 
 function mount(initial = {}) {

@@ -31,7 +31,7 @@ function fileSize(file: string): number | undefined {
   return statSync(file, { throwIfNoEntry: false })?.size;
 }
 
-function writeAtomic(file: string, data: Buffer): void {
+function writeAtomic(file: string, data: Uint8Array): void {
   sweepMediaCache();
   mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${randomUUID()}.tmp`;
@@ -100,7 +100,7 @@ export function storeInlineImage(base64: string): string {
 
 /** Keep a copy of an image another host sent, so later requests are served locally. */
 export function storeMediaCopy(hash: string, bytes: Uint8Array): void {
-  if (HASH_RE.test(hash)) writeAtomic(path.join(mediaDir(), hash), Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+  if (HASH_RE.test(hash)) writeAtomic(path.join(mediaDir(), hash), bytes);
 }
 
 function imageBlockAsUrl(block: unknown): unknown {
@@ -205,19 +205,11 @@ export function existingThumbnail(hash: string): string | null {
   return HASH_RE.test(hash) && existsSync(thumb) ? thumb : null;
 }
 
-/** Generate and cache a small WebP preview; null when sharp is unavailable or fails. */
-export async function createThumbnail(hash: string, image: Buffer): Promise<Buffer | null> {
-  let thumb: Buffer;
+/** Generate and cache a small WebP preview (Bun.Image applies EXIF orientation); null when the bytes are not a decodable image. */
+export async function createThumbnail(hash: string, image: Buffer): Promise<Uint8Array | null> {
+  let thumb: Uint8Array;
   try {
-    // Dynamic on purpose: sharp's native binary is platform-specific and may be
-    // missing, and this module is also loaded by the session reader and RPC
-    // manager, which must not fail or load libvips just to rewrite URLs.
-    const { default: sharp } = await import("sharp");
-    thumb = await sharp(image)
-      .rotate() // apply EXIF orientation; WebP output drops the tag
-      .resize(THUMB_PX, THUMB_PX, { fit: "inside", withoutEnlargement: true })
-      .webp({ quality: 80 })
-      .toBuffer();
+    thumb = await new Bun.Image(image).resize(THUMB_PX, THUMB_PX, { fit: "inside", withoutEnlargement: true }).webp({ quality: 80 }).bytes();
   } catch {
     return null;
   }

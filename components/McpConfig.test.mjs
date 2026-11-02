@@ -2,10 +2,9 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import { createElement } from "react";
-import { cleanup, render, screen, waitFor } from "@testing-library/react/pure.js";
-import userEvent from "@testing-library/user-event";
-import { createJiti } from "jiti";
-const { McpConfig } = await createJiti(import.meta.url, { tsconfigPaths: true, fsCache: false, jsx: { runtime: "automatic" } }).import("./McpConfig.tsx");
+const { cleanup, render, screen, waitFor } = await import("@testing-library/react/pure.js");
+const { default: userEvent } = await import("@testing-library/user-event");
+const { McpConfig } = await import("./McpConfig.tsx");
 afterEach(cleanup);
 
 test("MCP switches persist the named action and reload without sending a model prompt", async (t) => {

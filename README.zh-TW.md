@@ -27,7 +27,7 @@
 ## 系統需求
 
 - 已安裝 [omp](https://github.com/can1357/oh-my-pi) 並設定於系統 `PATH` 中（或透過 `OMP_WEB_OMP_BIN` 指定路徑）
-- Node.js `>= 24`
+- Node.js `>= 24`。伺服器運作於 [Bun](https://bun.sh) 上，Bun 會作為 npm 套件的相依套件自動安裝（找不到隨套件安裝的 Bun 時會使用 `PATH` 中的 Bun）
 
 針對佇列中待傳送後續訊息執行的**引導（Steer）**操作，需搭配支援 `promote_queued_message` RPC 指令的 omp 執行階段（omp 18.1.16 尚未支援）。較舊版本會回報錯誤並保留訊息在佇列中作為普通後續訊息；ompweb 不會重複傳送引導訊息。
 
@@ -75,6 +75,8 @@ nix run github:kahme247/ompweb
 npm install -g @kahme247/ompweb
 ompweb
 ```
+**或下載單一二進位檔**（無需 Node 或 npm）：請參閱[單一二進位檔](#單一二進位檔)。
+
 
 在瀏覽器中開啟 [http://127.0.0.1:30177](http://127.0.0.1:30177)。
 
@@ -128,6 +130,69 @@ ompweb 透過一個輕量的守護行程 `ompweb host` 來執行這台機器的 
 - **升級後的首次啟動：** 若約 90 秒後仍未連結任何守護行程，ompweb 會顯示橫幅提示您平台的安裝指令。它絕不會自動自行安裝服務。在守護行程執行之前，「本機」會顯示為離線，且無法在上面啟動新的對話。
 - **它就像其他任何主機一樣。** 您可以在**設定 → 主機**中重新命名「本機」（清空名稱即可重設）；它無法被撤銷。網頁伺服器僅會在 loopback 繫結位址啟動時，寫入守護行程的連線設定（`~/.omp/agent/omp-web/host.json`，權限 `600`）。
 - **開發環境：** `npm run dev` 不會接管守護行程（請參閱[本機開發](#本機開發)）。
+
+### 單一二進位檔
+
+每個[發行版本](https://github.com/kahme247/ompweb/releases/latest)亦提供編譯完成的單一執行檔，隨附其所提供服務的相關檔案：
+`ompweb-linux-x64.tar.gz`、`ompweb-linux-arm64.tar.gz`、`ompweb-darwin-x64.tar.gz`、
+`ompweb-darwin-arm64.tar.gz` 以及 `ompweb-windows-x64.zip`。無需安裝 Node、npm
+或 Bun；僅需安裝 omp。x64 建置版本採用 Bun 的基準執行階段，因此亦可在不具備 AVX2 指令集的 CPU 上運作。每個封存檔皆於 `licenses/` 包含其打包內容的授權條款。`main` 分支上通過 CI 的每次提交亦會發布為以建置時間命名的[預先發行版（prerelease）](https://github.com/kahme247/ompweb/releases)（例如 `2026-11-01T10:30:00Z`），同樣包含上述五種封存檔。
+
+```bash
+tar -xzf ompweb-linux-x64.tar.gz -C ~/.local/share   # 解壓縮出 ompweb-linux-x64/
+~/.local/share/ompweb-linux-x64/ompweb               # 網頁伺服器：選項與環境變數同上
+~/.local/share/ompweb-linux-x64/ompweb host          # 本機守護行程，於第二個終端機執行
+```
+
+- **將 `ompweb` 保留在其資料夾內。** 它會從所在目錄提供 `dist/`、`public/` 與其他檔案（在系統 `PATH` 中建立指向它的符號連結可正常運作），若設定了 `OMP_WEB_PACKAGE_DIR` 則從該路徑提供。
+- **macOS** 會對下載檔案加上隔離屬性（quarantine）：首次啟動前請先執行一次 `xattr -dr com.apple.quarantine ompweb-darwin-arm64`。
+- **macOS 15 或更新版本** 在應用程式存取區域網路前會先詢問權限。若 Mac 上的 `ompweb host` 對區網上的伺服器回報 `ECONNREFUSED`，但 `curl` 卻能正常連線，請前往「系統設定 → 隱私權與安全性 → 區域網路」允許你的終端機（或 `ompweb`）。透過 Tailscale 等 VPN 連線的伺服器，或從 SSH 工作階段啟動的 host 則不受影響。
+- **不提供系統匣、服務安裝程式或應用程式內更新。** 若要更新，請停止 `ompweb` 與 `ompweb host`，以新發行版本替換該目錄，然後再次啟動兩者；當有新版本釋出時，**設定 → 系統** 會提供發行頁面連結。你的對話與設定皆儲存於 `~/.omp`，不在該目錄中。
+- **作為 systemd 使用者服務**，請自行編寫這兩個單元（請調整路徑；將 omp 所在目錄加入 `PATH`，或設定 `OMP_WEB_OMP_BIN`）：
+
+```ini
+# ~/.config/systemd/user/ompweb.service
+[Unit]
+Description=ompweb web service
+
+[Service]
+WorkingDirectory=%h
+ExecStart=%h/.local/share/ompweb-linux-x64/ompweb --no-open
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+# OMP_WEB_PASSWORD_HASH、PORT 與 OMP_WEB_HOSTNAME 放置於此，如同 ompweb-systemd。
+EnvironmentFile=-%h/.omp/agent/web-service.env
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+```
+
+```ini
+# ~/.config/systemd/user/ompweb-host.service
+[Unit]
+Description=ompweb host daemon
+# 在網頁伺服器寫入連線設定前它會結束：保持重新啟動。
+StartLimitIntervalSec=0
+
+[Service]
+WorkingDirectory=%h
+ExecStart=%h/.local/share/ompweb-linux-x64/ompweb host
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.omp/agent/web-service.env
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now ompweb ompweb-host
+```
+
+  在 macOS 上，編寫兩個 launchd agent（`ProgramArguments` 為 `…/ompweb --no-open` 與 `…/ompweb host`，搭配 `RunAtLoad` 與 `KeepAlive`）可達到相同效果；在 Windows 上，則可建立兩個在登入時執行 `ompweb.exe --no-open` 與 `ompweb.exe host` 的工作排程器工作。
 
 
 ### 作為 Windows 服務執行（系統匣）
@@ -261,7 +326,7 @@ npx @kahme247/ompweb@latest host --allow-http
 - **服務輔助程式：** `ompweb systemd install` 與 `ompweb launchd install` 會在網頁伺服器旁同時設定本機自己的守護行程（請參閱[兩項服務](#兩項服務網頁伺服器與本機守護行程)）。在另一台機器上您只需要守護行程，而這些輔助程式在那裡也會同時啟動網頁伺服器，因此請在您自選的行程監控程式（supervisor）下執行 `ompweb host`，讓它在失敗時自動重新啟動，以在登出或重新開機後保持連線。當伺服器撤銷其權杖，或其連線協定版本超出伺服器支援的範圍時（舊於伺服器支援的最舊版本，或新於伺服器：請在較舊的一方更新 ompweb），守護行程會以結束代碼 `1` 結束；若同一個主機有較新的連線取代它，則以 `0` 結束。SIGTERM 或 SIGINT 會停止守護行程及其 omp 程序。每個主機僅能有一個連線，切勿使用相同權杖執行兩個守護行程。
 - **伺服器的代理目錄保存主機清單**（`omp-web/hosts.json`）。若以不同的 `PI_CODING_AGENT_DIR` 啟動 ompweb 伺服器，或遺失該檔案，會導致所有主機權杖失效：每個常駐程式都會收到已遭撤銷的通知，停止其 omp 程序並結束。
 - **信任機制：** 已連結的主機會在該機器上為掌控 ompweb 伺服器或權杖的人員執行具備完整工具存取權限的 omp。請妥善保護權杖隱私，並在機器淘汰時將其撤銷。
-- **遠端主機尚不支援：** 檔案總管、Git 與工作樹（worktree）面板、目錄瀏覽，以及技能、外掛程式、代理與 MCP 設定目前僅在執行 ompweb 的本機上可用。聊天、對話歷史紀錄、通知與開始新對話則在所有主機上皆可正常運作。
+- **遠端主機尚不支援：** 檔案總管、Git 與工作樹（worktree）面板、目錄瀏覽、封存對話，以及技能、外掛程式、代理與 MCP 設定目前僅在執行 ompweb 的本機上可用。聊天、對話歷史紀錄、通知與開始新對話則在所有主機上皆可正常運作。
 - **由代理發起的對話：** 在啟用代理工具時，代理可傳遞 `host` 給 `new_session`（預設為該代理自身所在的主機）。遠端主機每次都會要求確認，除非在「設定 → 主機」中為其開啟了**代理可在此處直接開始對話，無需詢問**。在遠端主機上執行的代理在於本機開始對話或傳送訊息之前，一定會先詢問確認。
 
 ## 功能特色
@@ -297,7 +362,6 @@ npx @kahme247/ompweb@latest host --allow-http
 | `OMP_WEB_DISABLE_AUTOUPDATE` | 設為 `1` 可停用更新檢查與應用程式內更新；變更後需重新啟動 | `0` |
 | `OMP_WEB_NAME` | 顯示於瀏覽器分頁與已安裝應用程式的名稱。若設為 `url`、`host` 或 `domain`（不分大小寫），則採用瀏覽器連線的主機名稱（不含連接埠）；localhost 與 IP 位址仍會保持 `omp web`。其他任何值將原樣採用。變更後需重新啟動 | `omp web` |
 | `OMP_WEB_OMP_BIN` | 當 `omp` 二進位檔未在 `PATH` 中時指定的路徑 | _自動偵測_ |
-| `OMP_WEB_DEV_ORIGIN` | 開發伺服器允許的額外主機名稱（不包含通訊協定或連接埠）；在正式環境中會被忽略 | _無_ |
 | `PI_CODING_AGENT_DIR` | 自訂 omp 代理目錄 | `~/.omp/agent` |
 | `OMP_WEB_STT_ENDPOINT` | 相容於 OpenAI 的語音轉文字（STT）端點網址。若保留未設定，則會透過 omp 自身的憑證搭配 `OMP_WEB_STT_MODEL` 進行轉錄 | _無_ |
 | `OMP_WEB_STT_KEY` | STT 端點的選用 API 金鑰 | _無_ |
@@ -387,24 +451,15 @@ npm run dev
 開發伺服器將執行於 [http://127.0.0.1:30178](http://127.0.0.1:30178)。
 開發伺服器不會接管本機守護行程：只有正式環境的網頁伺服器會寫入守護行程的 `host.json`，因此「本機」在開發環境中會顯示為離線，而守護行程會保持與您已安裝的 ompweb 連結。
 
-
-開發伺服器允許 loopback 與 RFC1918 私有 IPv4 來源（`10.0.0.0/8`、`172.16.0.0/12` 與 `192.168.0.0/16`）。若搭配穿透通道（tunnel）或反向代理使用自訂主機名稱，無需修改 `next.config.ts` 即可直接指定：
-
-```bash
-OMP_WEB_DEV_ORIGIN=dev.example.com npm run dev
-```
-
-如需持久化設定，請在你的本機環境變數或服務組態中設定此變數，並重新啟動開發伺服器。此設定不會改變繫結位址或開啟身分驗證。Next.js 的主機名稱比對樣式無法表示 IPv6 CIDR；若需使用私有 IPv6 來源，必須明確指定（例如 `[fd00::1]`）。
+`npm run dev` 以 Bun 熱重載（hot reload）方式執行伺服器。`npm run build` 將瀏覽器端應用打包至 `dist/`，`npm start` 則在 30177 連接埠提供該產物（可用 `npm run smoke` 檢查結果）。`npm run dev:lan` 會將開發伺服器繫結至所有網路介面。`npm run build:binary` 會將適用於本機的[單一二進位檔](#單一二進位檔)建置到 `release/`（可使用 `-- --target bun-linux-arm64` 等參數為其他平台建置；`npm run smoke -- --binary release/ompweb-linux-x64/ompweb` 進行檢查）。
 
 ### 檢查與測試
 
 ```bash
 npm run typecheck   # 型別檢查（TypeScript）
 npm run lint        # ESLint 程式碼檢查
-npm test            # 執行測試套件
+npm test            # 執行測試套件（bun test）
 ```
-
-> **注意**：本機開發期間請勿執行 `npm run build`——它會產生 `.next/` 目錄並可能導致 `npm run dev` 運作異常。
 
 ## 授權條款與致謝
 

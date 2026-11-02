@@ -2,15 +2,13 @@ import "../../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach, before } from "node:test";
 import React from "react";
-import { act, cleanup, render, renderHook } from "@testing-library/react/pure.js";
-import { createJiti } from "jiti";
+const { act, cleanup, render, renderHook } = await import("@testing-library/react/pure.js");
 
-const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tryNative: false, tsconfigPaths: true });
 // Same specifiers as useNotifications' own imports: on Windows a relative path
 // can load a second toast module, whose manager the rendered provider never sees.
-const { ClampedDescription, ToastProvider, toast } = await jiti.import("@/components/ui/toast");
-const { useNotifications } = await jiti.import("@/hooks/useNotifications");
-const { notificationHistory } = await jiti.import("@/lib/notification-history");
+const { ClampedDescription, ToastProvider, toast } = await import("@/components/ui/toast");
+const { useNotifications } = await import("@/hooks/useNotifications");
+const { notificationHistory } = await import("@/lib/notification-history");
 
 /** The tab side of the shared event-stream worker (lib/event-stream.ts), so a
  * test can deliver frames on the notifications channel the hook opened. */

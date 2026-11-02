@@ -3,9 +3,8 @@ import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
 import React from "react";
 import { existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { createJiti } from "jiti";
-import { act, cleanup, fireEvent, render, renderHook, within } from "@testing-library/react/pure.js";
+import { mock } from "bun:test";
+const { act, cleanup, fireEvent, render, renderHook, within } = await import("@testing-library/react/pure.js");
 
 // useAgentSession is the chat state machine. These tests drive it through a
 // controllable fake shared-worker event stream + fetch router mounted via React
@@ -270,20 +269,12 @@ afterEach(async () => {
   }
 });
 
-// The hook chain includes components/ui/toast.tsx, whose JSX jiti cannot parse
-// in this environment and whose DOM toasts must never fire inside Node tests.
-const jiti = createJiti(import.meta.url, {
-  tryNative: false,
-  jsx: { runtime: "automatic" },
-  alias: {
-    "@/components/ui/toast": fileURLToPath(new URL("./__fixtures__/toast-stub.mjs", import.meta.url)),
-    "@/": fileURLToPath(new URL("../", import.meta.url)),
-  },
-});
-const { useAgentSession } = await jiti.import("../hooks/useAgentSession.ts");
-const { selectSessionHistory } = await jiti.import("@/lib/session-sync");
-const { publishSessionsChanged } = await jiti.import("@/lib/session-change-bus");
-const { AgentSessionWrapper } = await jiti.import("@/lib/rpc-manager");
+// The hook chain includes components/ui/toast.tsx, whose DOM toasts must never fire in tests.
+mock.module("@/components/ui/toast", () => import("./__fixtures__/toast-stub.mjs"));
+const { useAgentSession } = await import("../hooks/useAgentSession.ts");
+const { selectSessionHistory } = await import("@/lib/session-sync");
+const { publishSessionsChanged } = await import("@/lib/session-change-bus");
+const { AgentSessionWrapper } = await import("@/lib/rpc-manager");
 // Wrappers built directly need an online host: this machine's, as its daemon answers, minus spawning.
 const onlineHost = {
   id: "local",
@@ -296,12 +287,17 @@ const onlineHost = {
   invalidateSessionLists() {},
   autoApproveExtension: () => false,
 };
-const { isUnknownSlashCommand, slashCommandName, runHostTool } = await jiti.import("@/hooks/useAgentSession-stream");
-const { toastCalls } = await jiti.import("@/components/ui/toast");
-const { MessageView } = await jiti.import("@/components/MessageView");
-const { translate } = await jiti.import("@/lib/i18n");
-const { ChatWindow } = await jiti.import("@/components/ChatWindow");
-const { SESSION_EDIT_COMMAND, SESSION_EDIT_RESPONSE_PREFIX } = await jiti.import("@/lib/omp/session-edit-extension.mjs");
+const { isUnknownSlashCommand, slashCommandName, runHostTool } = await import("@/hooks/useAgentSession-stream");
+const { toastCalls } = await import("@/components/ui/toast");
+const { MessageView } = await import("@/components/MessageView");
+const { translate } = await import("@/lib/i18n");
+const { ChatWindow } = await import("@/components/ChatWindow");
+const { SESSION_EDIT_COMMAND, SESSION_EDIT_RESPONSE_PREFIX } = await import("@/lib/omp/session-edit-extension.mjs");
+// Edit only opens a confirm dialog; the edit starts from its confirm button.
+async function confirmEdit(view, button) {
+  await act(async () => { fireEvent.click(button); });
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: translate("messageView.editFromHere") })); });
+}
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -582,7 +578,7 @@ test("a promotion answered after navigation does not notify the new session", as
 // queued steer as soon as an abort lands (#130 saw follow-ups replay after the
 // next reply). Withdraw first, like the TUI's Esc, and hand the text back.
 test("Stop withdraws pending queued messages into the session draft before aborting", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   resetWorld();
   clearDraft("abort-withdraw");
   primeSession("abort-withdraw", [userMsg("u0", "loaded question")]);
@@ -607,7 +603,7 @@ test("Stop withdraws pending queued messages into the session draft before abort
 });
 
 test("a slow withdrawal does not hold Stop, and its late answer still recovers the text", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   resetWorld();
   clearDraft("abort-slow");
   primeSession("abort-slow", [userMsg("u0", "loaded question")]);
@@ -631,7 +627,7 @@ test("a slow withdrawal does not hold Stop, and its late answer still recovers t
 });
 
 test("Stop saves confirmed text early and still restores the queue in order", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   resetWorld();
   clearDraft("abort-mixed");
   primeSession("abort-mixed", [userMsg("u0", "loaded question")]);
@@ -659,7 +655,7 @@ test("Stop saves confirmed text early and still restores the queue in order", as
 });
 
 test("Stop withdraws a follow-up that a concurrent promotion already moved to steering", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   resetWorld();
   clearDraft("abort-promoted");
   primeSession("abort-promoted", [userMsg("u0", "loaded question")]);
@@ -2529,13 +2525,13 @@ test("forking carries the advisor choice to the child's next native command", as
   await act(async () => { await w.latest.handleFork("e0", false); });
   assert.deepEqual(forked, ["advisor-child"]);
   assert.equal(localStorage.getItem("omp-advisor-enabled:advisor-child"), "true");
-  const { sendAgentCommand } = await jiti.import("@/lib/agent-client");
+  const { sendAgentCommand } = await import("@/lib/agent-client");
   await sendAgentCommand("advisor-child", { type: "get_state" });
   assert.ok(world.calls.some((call) => call.url === "/api/agent/advisor-child?advisor=1"));
 });
 
 test("an edit-and-resend fork puts the branched prompt into the child's composer", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   for (const [editPrompt, child] of [[true, "edit-child"], [false, "keep-child"]]) {
     resetWorld();
     primeSession("fork-parent", [userMsg("u0", "q")]);
@@ -2829,7 +2825,7 @@ async function mountMovableChat(initialId) {
 }
 
 async function mountEditableSession(sid, options = {}) {
-  const { getDraft, setDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft } = await import("@/lib/draft-store");
   const session = sessionInfo(sid);
   const chatInputRef = options.chatInputRef ?? React.createRef();
   let latest;
@@ -2889,7 +2885,7 @@ async function mountObservedEditableSession(sid, options = {}) {
 for (const order of ["identity/history before HTTP", "HTTP before history delivery"]) {
   test(`native Edit relocation keeps the prefix, composer and resend (${order})`, async (t) => {
     resetWorld();
-    const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+    const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
     const sid = `edit-move-${order.startsWith("identity") ? "early" : "late"}`;
     const target = `${sid}-owned`;
     for (const id of [sid, target]) clearDraft(id);
@@ -2920,7 +2916,7 @@ for (const order of ["identity/history before HTTP", "HTTP before history delive
         },
       });
     }
-    await act(async () => { fireEvent.click(w.editButton()); });
+    await confirmEdit(w.view, w.editButton());
     await until(() => server.identityChanges.length === 1, "native identity machinery must confirm the copy-on-write move");
     assert.deepEqual(server.identityChanges, [{ oldId: sid, newId: target, keepOldId: true }]);
     assert.equal(world.wrappers.get(sid), world.wrappers.get(target), "the existing alias registry retains the originating observer");
@@ -2986,7 +2982,7 @@ for (const order of ["identity/history before HTTP", "HTTP before history delive
 
 test("relocation merges existing target attachments and preserves typing added while reload awaits", async (t) => {
   resetWorld();
-  const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
   const sid = "edit-move-new-typing", target = `${sid}-owned`;
   t.after(() => { clearDraft(sid); clearDraft(target); });
   const sourceImage = { data: "AAAA", mimeType: "image/png" };
@@ -3008,7 +3004,7 @@ test("relocation merges existing target attachments and preserves typing added w
       leafId: native.leafId, context: world.sessions.get(target),
     } }); }),
   });
-  await act(async () => { fireEvent.click(w.editButton()); });
+  await confirmEdit(w.view, w.editButton());
   await until(() => release, "confirmed target history must be awaiting its load");
   await act(async () => {
     fireEvent.change(w.view.getByRole("textbox"), { target: { value: "new source typing" } });
@@ -3017,9 +3013,12 @@ test("relocation merges existing target attachments and preserves typing added w
   await until(() => getDraft(sid)?.files.length === 2, "attachment reads completed during the reload must join the moved draft");
   await act(async () => { release(); });
   await until(() => w.selectedId === target, "the confirmed move must transition its composer");
+  // Bun appends ";charset=utf-8" to a text File's type, so the type is pinned by its prefix.
+  const mimeType = getDraft(target)?.files[1]?.mimeType ?? "";
+  assert.ok(mimeType.startsWith("text/plain"), mimeType);
   assert.deepEqual(getDraft(target), {
     value: "new source typing\n\nexisting target draft", images: [sourceImage, targetImage],
-    files: [sourceFile, { name: "new.txt", mimeType: "text/plain", content: "new file while waiting", size: 22 }, targetFile],
+    files: [sourceFile, { name: "new.txt", mimeType, content: "new file while waiting", size: 22 }, targetFile],
   });
   assert.equal(w.view.getByRole("textbox").value, "new source typing\n\nexisting target draft");
   assert.equal(getDraft(sid), null);
@@ -3027,7 +3026,7 @@ test("relocation merges existing target attachments and preserves typing added w
 
 test("relocation adopts existing target text without prefilling over it", async (t) => {
   resetWorld();
-  const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
   const sid = "edit-move-target-text", target = `${sid}-owned`;
   t.after(() => { clearDraft(sid); clearDraft(target); });
   const sourceImage = { data: "AAAA", mimeType: "image/png" };
@@ -3040,7 +3039,7 @@ test("relocation adopts existing target text without prefilling over it", async 
   const w = await mountMovableChat(sid);
   const composer = w.view.getByRole("textbox");
   assert.equal(composer.value, "");
-  await act(async () => { fireEvent.click(w.editButton()); });
+  await confirmEdit(w.view, w.editButton());
   await until(() => w.selectedId === target, "the confirmed target must become selected");
   await settle();
   assert.equal(w.view.getByRole("textbox"), composer, "the existing composer adopts its new draft identity");
@@ -3051,7 +3050,7 @@ test("relocation adopts existing target text without prefilling over it", async 
 
 test("relocation at draft capacity preserves every unrelated draft and its attachments", async (t) => {
   resetWorld();
-  const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
   const sid = "edit-move-full-drafts", target = `${sid}-owned`;
   const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
   const unrelated = Array.from({ length: 49 }, (_, index) => {
@@ -3078,7 +3077,7 @@ test("relocation at draft capacity preserves every unrelated draft and its attac
   await attachEditableWrapper(t, native);
   const w = await mountMovableChat(sid);
   const composer = w.view.getByRole("textbox");
-  await act(async () => { fireEvent.click(w.editButton()); });
+  await confirmEdit(w.view, w.editButton());
   await until(() => w.selectedId === target, "Edit must move the selected conversation at full draft capacity");
   await settle();
   assert.equal(w.view.getByRole("textbox"), composer);
@@ -3099,7 +3098,7 @@ test("relocation at draft capacity preserves every unrelated draft and its attac
 for (const phase of ["HTTP response", "target reload"]) {
 test(`navigation during a moved Edit's ${phase} is not hijacked or prefilled`, async (t) => {
   resetWorld();
-  const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
   const sid = `edit-move-leave-${phase.startsWith("HTTP") ? "http" : "reload"}`, target = `${sid}-owned`, other = `${sid}-other`;
   t.after(() => { for (const id of [sid, target, other]) clearDraft(id); });
   setDraft(sid, { value: "origin draft", images: [], files: [] });
@@ -3128,7 +3127,7 @@ test(`navigation during a moved Edit's ${phase} is not hijacked or prefilled`, a
       } }); }),
     });
   }
-  await act(async () => { fireEvent.click(w.editButton()); });
+  await confirmEdit(w.view, w.editButton());
   await until(() => release, "the old instance must await the moved Edit");
   await act(async () => { w.navigate(other); });
   await settle();
@@ -3146,7 +3145,7 @@ test(`navigation during a moved Edit's ${phase} is not hijacked or prefilled`, a
 
 test("a moved conversation whose reload fails preserves attachments without prefilling and reports failure", async (t) => {
   resetWorld();
-  const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
   const sid = "edit-move-load-failed", target = `${sid}-owned`;
   t.after(() => { clearDraft(sid); clearDraft(target); });
   const draft = { value: "", images: [{ data: "AAAA", mimeType: "image/png" }],
@@ -3160,7 +3159,7 @@ test("a moved conversation whose reload fails preserves attachments without pref
     match: (method, url) => method === "GET" && url.startsWith(`/api/sessions/${target}?`),
     produce: async () => ({ status: 503, value: {} }),
   });
-  await act(async () => { fireEvent.click(w.editButton()); });
+  await confirmEdit(w.view, w.editButton());
   await until(() => w.selectedId === target, "authoritative identity must survive a failed read of the moved history");
   await settle();
   assert.equal(new URL(window.location.href).searchParams.get("session"), target);
@@ -3171,7 +3170,7 @@ test("a moved conversation whose reload fails preserves attachments without pref
 
 test("observed edit-time persistence errors preserve the real composer and complete draft", async (t) => {
   resetWorld();
-  const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
   const sid = "edit-native-disk-error";
   t.after(() => clearDraft(sid));
   const draft = { value: "keep unsent text", images: [{ data: "AAAA", mimeType: "image/png" }],
@@ -3183,7 +3182,7 @@ test("observed edit-time persistence errors preserve the real composer and compl
   await attachEditableWrapper(t, native);
   const w = await mountMovableChat(sid);
   const composer = w.view.getByRole("textbox");
-  await act(async () => { fireEvent.click(w.editButton()); });
+  await confirmEdit(w.view, w.editButton());
   await until(() => w.view.queryAllByText(/Could not append session file: disk full/).length > 0, "native persistence failure must be displayed");
   await settle();
   assert.equal(w.selectedId, sid);
@@ -3196,7 +3195,7 @@ test("observed edit-time persistence errors preserve the real composer and compl
 
 test("Edit rewinds and resends in the same persisted session while retaining the old branch", async (t) => {
   resetWorld();
-  const { clearDraft } = await jiti.import("@/lib/draft-store");
+  const { clearDraft } = await import("@/lib/draft-store");
   const sid = "edit-same-session";
   clearDraft(sid);
   t.after(() => clearDraft(sid));
@@ -3210,7 +3209,7 @@ test("Edit rewinds and resends in the same persisted session while retaining the
   const release = native.holdEdit();
   t.after(release);
   const edit = w.editButton("entry-u2");
-  await act(async () => { fireEvent.click(edit); });
+  await confirmEdit(w.view, edit);
   await until(() => native.edits.length === 1, "the actual Edit button must reach native history navigation");
   assert.equal(w.latest.editingEntryId, "entry-u2");
   assert.equal(edit.disabled, true);
@@ -3283,7 +3282,7 @@ test("Edit rewinds and resends in the same persisted session while retaining the
 for (const order of ["HTTP first", "SSE first"]) {
   test(`a handled Edit echo preserves a later historical selection (${order})`, async (t) => {
     resetWorld();
-    const { clearDraft } = await jiti.import("@/lib/draft-store");
+    const { clearDraft } = await import("@/lib/draft-store");
     const sid = `edit-echo-branch-${order === "HTTP first" ? "http" : "sse"}`;
     clearDraft(sid);
     t.after(() => clearDraft(sid));
@@ -3292,7 +3291,7 @@ for (const order of ["HTTP first", "SSE first"]) {
     const { w, stream } = await mountObservedEditableSession(sid);
     const releaseReply = order === "SSE first" ? native.holdEditReply() : null;
     if (releaseReply) t.after(releaseReply);
-    await act(async () => { fireEvent.click(w.editButton("entry-u2")); });
+    await confirmEdit(w.view, w.editButton("entry-u2"));
     await until(() => native.leafId === "edit-marker-1", "the real native history must persist the Edit marker");
     const ownLeafId = native.leafId;
     if (releaseReply) {
@@ -3345,7 +3344,7 @@ for (const order of ["HTTP first", "SSE first"]) {
 }
 
 test("an HTTP-first Edit echo cannot reset the next replacement prompt", async (t) => {
-  const { clearDraft } = await jiti.import("@/lib/draft-store");
+  const { clearDraft } = await import("@/lib/draft-store");
   for (const phase of ["dispatch pending", "streaming"]) {
     await t.test(phase, async (t) => {
       resetWorld();
@@ -3355,7 +3354,7 @@ test("an HTTP-first Edit echo cannot reset the next replacement prompt", async (
       const native = primeEditableHistory(sid);
       const original = structuredClone(world.sessions.get(sid));
       const { w, stream: observer } = await mountObservedEditableSession(sid);
-      await act(async () => { fireEvent.click(w.editButton("entry-u2")); });
+      await confirmEdit(w.view, w.editButton("entry-u2"));
       await until(() => w.latest.editingEntryId === null && w.latest.activeLeafId === "edit-marker-1", "HTTP success and its reload must precede the next send");
       await settle();
       const ownLeafId = native.leafId;
@@ -3417,7 +3416,7 @@ test("an HTTP-first Edit echo cannot reset the next replacement prompt", async (
 });
 
 test("history notifications received during an unsuccessful Edit remain effective", async (t) => {
-  const { clearDraft } = await jiti.import("@/lib/draft-store");
+  const { clearDraft } = await import("@/lib/draft-store");
   for (const outcome of ["cancelled", "error", "wrong-session"]) {
     await t.test(outcome, async (t) => {
       resetWorld();
@@ -3454,7 +3453,7 @@ test("history notifications received during an unsuccessful Edit remain effectiv
           return { status: response.status, value };
         },
       });
-      await act(async () => { fireEvent.click(w.editButton("entry-u2")); });
+      await confirmEdit(w.view, w.editButton("entry-u2"));
       await until(() => replyReady, "the native Edit must settle before its HTTP reply is released");
       if (outcome !== "wrong-session") {
         // A separate client successfully navigates while this client's
@@ -3486,7 +3485,7 @@ test("history notifications received during an unsuccessful Edit remain effectiv
 });
 
 test("cancelled and failed Edits preserve history selection and draft, then release the guard", async (t) => {
-  const { getDraft, setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
   for (const outcome of ["cancelled", "error"]) {
     await t.test(outcome, async (t) => {
       resetWorld();
@@ -3502,7 +3501,7 @@ test("cancelled and failed Edits preserve history selection and draft, then rele
       await act(async () => { await w.changeLeaf("entry-a2"); });
       const selectedIds = [...w.latest.entryIds];
       const selectedMessages = structuredClone(w.latest.messages);
-      await act(async () => { fireEvent.click(w.editButton("entry-u2")); });
+      await confirmEdit(w.view, w.editButton("entry-u2"));
       await until(() => native.edits.length === 1 && w.latest.editingEntryId === null, "the unsuccessful Edit must settle");
       assert.equal(w.latest.sessionIdRef.current, sid);
       assert.equal(w.latest.activeLeafId, "entry-a2");
@@ -3515,7 +3514,7 @@ test("cancelled and failed Edits preserve history selection and draft, then rele
       assert.deepEqual(w.latest.notices.map((notice) => notice.type), outcome === "error" ? ["error"] : []);
 
       native.editOutcome = "success";
-      await act(async () => { fireEvent.click(w.editButton("entry-u2")); });
+      await confirmEdit(w.view, w.editButton("entry-u2"));
       await until(() => native.edits.length === 2 && w.latest.editingEntryId === null, "a settled refusal must allow another Edit");
       assert.deepEqual(world.sessions.get(sid).entryIds, ["entry-u1", "entry-a1"]);
       assert.deepEqual(w.latest.entryIds, ["entry-u1", "entry-a1"]);
@@ -3531,7 +3530,7 @@ test("cancelled and failed Edits preserve history selection and draft, then rele
 
 test("an Edit completed after unmount cannot fill the current composer or change its view", async (t) => {
   resetWorld();
-  const { clearDraft } = await jiti.import("@/lib/draft-store");
+  const { clearDraft } = await import("@/lib/draft-store");
   const sid = "edit-abandoned";
   const currentSid = "edit-current-view";
   for (const id of [sid, currentSid]) clearDraft(id);
@@ -3544,7 +3543,7 @@ test("an Edit completed after unmount cannot fill the current composer or change
   const old = await mountEditableSession(sid, options);
   const release = native.holdEdit();
   t.after(release);
-  await act(async () => { fireEvent.click(old.editButton("entry-u2")); });
+  await confirmEdit(old.view, old.editButton("entry-u2"));
   await until(() => native.edits.length === 1, "Edit must be waiting on native before leaving");
   old.unmount();
   const current = await mountEditableSession(currentSid, options);
@@ -4438,7 +4437,7 @@ test("REVIEW a 404 boundary on a live session (unreadable file / wrapper died) s
 // withdrew it and omp ran it as a new turn after the abort. omp's atomic Esc
 // takes back everything it holds, listed here or not.
 test("Stop takes queued input back through omp in one step, including a steer the snapshot missed", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   resetWorld();
   clearDraft("abort-atomic");
   primeSession("abort-atomic", [userMsg("u0", "loaded question")]);
@@ -4466,7 +4465,7 @@ test("Stop takes queued input back through omp in one step, including a steer th
 const isAtomicStop = (method, _url, body) => method === "POST" && body?.type === "abort_and_restore_queue";
 
 test("a failed atomic Stop is retried once and restores what omp still held", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   resetWorld();
   clearDraft("abort-atomic-retry");
   primeSession("abort-atomic-retry", [userMsg("u0", "loaded question")]);
@@ -4527,7 +4526,7 @@ test("a failed atomic Stop never retries into a run started after the click", as
 });
 
 test("overlapping Stops share one atomic withdrawal; an image-only entry does not come back as text", async () => {
-  const { getDraft, clearDraft } = await jiti.import("@/lib/draft-store");
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
   resetWorld();
   clearDraft("abort-atomic-twice");
   primeSession("abort-atomic-twice", [userMsg("u0", "loaded question")]);

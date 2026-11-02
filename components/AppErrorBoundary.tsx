@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect } from "react";
+import { Component, useEffect, type ReactNode } from "react";
 import { TriangleAlert } from "lucide-react";
 import { translate } from "@/lib/i18n";
 
-export default function ErrorBoundary({
+export function AppCrashScreen({
   error,
   reset,
 }: {
@@ -75,4 +75,17 @@ export default function ErrorBoundary({
       </button>
     </div>
   );
+}
+
+export class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  render() {
+    const { error } = this.state;
+    return error ? <AppCrashScreen error={error} reset={() => this.setState({ error: null })} /> : this.props.children;
+  }
 }

@@ -40,7 +40,7 @@ function settingsPath(): string {
 }
 
 declare global {
-  // Shared across module instances (instrumentation and route bundles).
+  // Survives `bun --hot` re-evaluation, which creates fresh module instances.
   var __ompWebSettingsCache: { path: string; settings: WebServerSettings } | undefined;
 }
 

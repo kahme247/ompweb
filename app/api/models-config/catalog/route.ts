@@ -1,12 +1,9 @@
-import { NextResponse } from "next/server";
 import {
   flattenModelsDevCatalog,
   recommendModelCatalogPreset,
   searchModelCatalog,
   type ModelCatalogEntry,
 } from "@/lib/model-catalog";
-
-export const dynamic = "force-dynamic";
 
 const MODELS_DEV_URL = "https://models.dev/api.json";
 const CATALOG_TTL_MS = 60 * 60 * 1000;
@@ -74,8 +71,8 @@ export async function GET(req: Request) {
     const entries = await loadCatalog();
     const models = searchModelCatalog(entries, query, provider, limit);
     const recommendation = recommendModelCatalogPreset(entries, query, provider, baseUrl);
-    return NextResponse.json({ models, recommendation, source: MODELS_DEV_URL });
+    return Response.json({ models, recommendation, source: MODELS_DEV_URL });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 502 });
+    return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 502 });
   }
 }

@@ -2,11 +2,9 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
 import React from "react";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react/pure.js";
-import { createJiti } from "jiti";
+const { cleanup, fireEvent, render, screen } = await import("@testing-library/react/pure.js");
 
-const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
-const { TabBar } = await jiti.import("./TabBar.tsx");
+const { TabBar } = await import("./TabBar.tsx");
 
 beforeEach(() => {
   globalThis.CSS ??= { escape: (value) => value };

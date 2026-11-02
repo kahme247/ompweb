@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import { apiErrorResponse, opErrorResponse, resolveHostOrError } from "@/lib/api-utils";
 import { allowFileRoot } from "@/lib/file-access";
 import { LOCAL_HOST_ID } from "@/lib/hosts/registry";
@@ -12,7 +11,7 @@ export async function POST(req: Request) {
     const cwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
 
     if (!cwd) {
-      return NextResponse.json({ error: "Path is required", code: "path_required" }, { status: 400 });
+      return Response.json({ error: "Path is required", code: "path_required" }, { status: 400 });
     }
 
     const target = resolveHostOrError(body.hostId);
@@ -21,7 +20,7 @@ export async function POST(req: Request) {
     if (!result.ok) return opErrorResponse(result);
     // Browsable only on this machine: another host's paths do not exist here.
     if (target.host.id === LOCAL_HOST_ID) allowFileRoot(result.value.cwd);
-    return NextResponse.json({
+    return Response.json({
       success: true,
       cwd: result.value.cwd,
       projectRoot: result.value.projectRoot,

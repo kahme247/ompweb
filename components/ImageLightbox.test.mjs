@@ -2,15 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createJiti } from "jiti";
 
-const jiti = createJiti(import.meta.url, {
-  jsx: { runtime: "automatic" },
-  tsconfigPaths: true,
-});
-const { MessageView } = await jiti.import("./MessageView.tsx");
-const { MarkdownBody } = await jiti.import("./MarkdownBody.tsx");
-const { ClickableImage, fitZoom, stepZoom } = await jiti.import("./ImageLightbox.tsx");
+const { MessageView } = await import("./MessageView.tsx");
+const { MarkdownBody } = await import("./MarkdownBody.tsx");
+const { ClickableImage, fitZoom, stepZoom } = await import("./ImageLightbox.tsx");
 
 test("user image blocks render as click-to-preview thumbnails", () => {
   const html = renderToStaticMarkup(React.createElement(MessageView, {

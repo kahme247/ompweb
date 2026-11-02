@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import { deriveSessionTitleFromFirstMessage, sanitizeSessionTitle } from "@/lib/session-title";
 import { getRpcSession, startRpcSession, WebRpcError } from "@/lib/rpc-manager";
 import { invalidateHostSessionList, sessionSpawnTarget } from "@/lib/hosts/session-index";
@@ -45,13 +44,13 @@ export async function POST(
         const generated = sanitizeSessionTitle((await rpc.generateTitle()) ?? undefined);
         if (generated) {
           invalidateSessionCaches(rpc.sessionFile);
-          return NextResponse.json({ title: generated, generated: true, usage: null });
+          return Response.json({ title: generated, generated: true, usage: null });
         }
       } catch (error) {
         // A busy/restarting session reports a typed error the UI can show; any
         // other failure degrades to the fallback below.
         if (error instanceof WebRpcError) {
-          return NextResponse.json({ error: error.message, code: error.code }, { status: 409 });
+          return Response.json({ error: error.message, code: error.code }, { status: 409 });
         }
       }
     }
@@ -63,12 +62,12 @@ export async function POST(
     const info = (await sessionOps.listSessions()).find((session) => session.id === id);
     const storedTitle = sanitizeSessionTitle(info?.name);
     if (storedTitle) {
-      return NextResponse.json({ title: storedTitle, generated: false, usage: null });
+      return Response.json({ title: storedTitle, generated: false, usage: null });
     }
 
     const derived = deriveSessionTitleFromFirstMessage(info?.firstMessage);
     if (!derived) {
-      return NextResponse.json(
+      return Response.json(
         { error: "The session has no user messages to name", code: "session_no_messages_to_name" },
         { status: 409 },
       );
@@ -76,7 +75,7 @@ export async function POST(
 
     // Title generation/path resolution yielded; Edit may now own this session.
     if (getRpcSession(id)?.isEditingHistory()) {
-      return NextResponse.json({ error: "Wait for the history edit to finish", code: "session_busy" }, { status: 409 });
+      return Response.json({ error: "Wait for the history edit to finish", code: "session_busy" }, { status: 409 });
     }
 
     // Save title both to disk and through the live process so it persists immediately.
@@ -90,10 +89,10 @@ export async function POST(
         // Saved on disk; ignore RPC sync failure.
       }
     }
-    return NextResponse.json({ title: derived, generated: false, usage: null });
+    return Response.json({ title: derived, generated: false, usage: null });
   } catch (error) {
     if (error instanceof HostOpError) return apiErrorResponse(error);
-    return NextResponse.json(
+    return Response.json(
       { error: error instanceof Error ? error.message : String(error) },
       { status: 500 },
     );

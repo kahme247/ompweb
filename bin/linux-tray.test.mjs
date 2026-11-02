@@ -321,7 +321,7 @@ test("tray --start fails gracefully with an install hint when dbus-next is absen
   const home = mkdtempSync(path.join(tmpdir(), "ompweb-tray-nodbus-"));
   try {
     const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "linux-tray.js");
-    const res = spawnSync(process.execPath, [script, "--start"], {
+    const res = spawnSync("node", [script, "--start"], {
       env: { ...process.env, HOME: home },
       encoding: "utf8",
       timeout: 15000,

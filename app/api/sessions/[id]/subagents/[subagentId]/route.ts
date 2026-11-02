@@ -1,9 +1,6 @@
-import { NextResponse } from "next/server";
 import { apiErrorResponse, opErrorResponse, resolveSessionHostOr404 } from "@/lib/api-utils";
 import { HostOpError } from "@/lib/hosts/link-protocol";
 import { isValidSubagentId } from "@/lib/hosts/session-ops";
-
-export const dynamic = "force-dynamic";
 
 /**
  * GET /api/sessions/[id]/subagents/[subagentId]?fromByte=N
@@ -23,7 +20,7 @@ export async function GET(
   const { id, subagentId } = await params;
   try {
     if (!isValidSubagentId(subagentId)) {
-      return NextResponse.json({ error: "Invalid subagent id", code: "invalid_subagent_id" }, { status: 400 });
+      return Response.json({ error: "Invalid subagent id", code: "invalid_subagent_id" }, { status: 400 });
     }
     const resolved = await resolveSessionHostOr404(id);
     if ("response" in resolved) return resolved.response;
@@ -35,10 +32,10 @@ export async function GET(
       searchParams.get("mode") === "completion" ? "completion" : "page",
       fromByteRaw !== null ? Number(fromByteRaw) : 0,
     );
-    return result.ok ? NextResponse.json(result.value) : opErrorResponse(result);
+    return result.ok ? Response.json(result.value) : opErrorResponse(result);
   } catch (error) {
     if (error instanceof HostOpError) return apiErrorResponse(error);
-    return NextResponse.json(
+    return Response.json(
       { error: error instanceof Error ? error.message : String(error) },
       { status: 500 },
     );

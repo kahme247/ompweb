@@ -37,9 +37,9 @@ declare global {
   var __ompResumeTracker: TrackerState | undefined;
 }
 
-// On globalThis so it survives Next.js hot-reload and is shared by every
-// bundle that imports this module. Created on first use, which claims the
-// previous runs' lists before anything in this run can overwrite them.
+// On globalThis so it survives a `bun --hot` re-evaluation. Created on first
+// use, which claims the previous runs' lists before anything in this run can
+// overwrite them.
 function tracker(): TrackerState {
   globalThis.__ompResumeTracker ??= { leftover: readLeftover(), sessions: new Map(), drops: new Map(), shuttingDown: false };
   return globalThis.__ompResumeTracker;

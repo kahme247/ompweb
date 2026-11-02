@@ -2,11 +2,10 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import { createElement } from "react";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react/pure.js";
-import userEvent from "@testing-library/user-event";
-import { createJiti } from "jiti";
+const { act, cleanup, render, screen, waitFor } = await import("@testing-library/react/pure.js");
+const { default: userEvent } = await import("@testing-library/user-event");
 
-const { HostsConfig } = await createJiti(import.meta.url, { tsconfigPaths: true, fsCache: false, jsx: { runtime: "automatic" } }).import("./HostsConfig.tsx");
+const { HostsConfig } = await import("./HostsConfig.tsx");
 
 const originalWorker = globalThis.Worker;
 // The event-stream transport keeps the first worker it was given for the whole file.

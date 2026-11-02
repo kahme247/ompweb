@@ -28,6 +28,16 @@ function getBrowserUrl(hostname, port) {
   return `http://${hostname}:${port}`;
 }
 
+/** Open `url` in the default browser; a failure only warns. */
+function openInBrowser(url) {
+  // getBuiltinModule: bin/ files add no new eslint-disable comments (see bin/bun-runtime.js).
+  const { spawn } = process.getBuiltinModule("node:child_process");
+  const command = process.platform === "win32" ? "explorer.exe" : process.platform === "darwin" ? "open" : "xdg-open";
+  const opener = spawn(command, [url], { stdio: "ignore", detached: true });
+  opener.on("error", (error) => console.warn(`Could not open browser automatically: ${error.message}`));
+  opener.unref();
+}
+
 function isTailscaleAddress(ifaceName, address) {
   if (typeof ifaceName === "string" && ifaceName.toLowerCase().includes("tailscale")) {
     return true;
@@ -147,6 +157,7 @@ function getAccessibleAddresses({ hostname, port, interfaces = os.networkInterfa
   return { entries };
 }
 
+/** @param {{ version?: string, entries?: { label: string, url: string }[], hint?: string, passwordEnabled?: boolean, isTTY?: boolean }} options */
 function formatAddressBanner({
   version = "0.0.0",
   entries = [],
@@ -199,4 +210,5 @@ module.exports = {
   isVirtualBridge,
   getAccessibleAddresses,
   formatAddressBanner,
+  openInBrowser,
 };

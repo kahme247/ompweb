@@ -2,18 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createJiti } from "jiti";
 
-const jiti = createJiti(import.meta.url, {
-  jsx: { runtime: "automatic" },
-  tsconfigPaths: true,
-});
 
 const {
   formatArchiveSize,
   formatArchiveRelativeTime,
   MetadataRow,
-} = await jiti.import("./ArchiveBrowser.tsx");
+} = await import("./ArchiveBrowser.tsx");
 
 test("formatArchiveSize formats bytes correctly", () => {
   assert.equal(formatArchiveSize(0), "0 B");

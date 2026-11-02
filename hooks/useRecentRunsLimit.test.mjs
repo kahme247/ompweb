@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createJiti } from "jiti";
 
-const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
 const {
   CUSTOM_STORAGE_KEY,
   DEFAULT_LIMIT,
@@ -15,7 +13,7 @@ const {
   resolvePresetLimit,
   saveRecentRunsLimitState,
   storedRecentRunsLimitState,
-} = await jiti.import("./useRecentRunsLimit.ts");
+} = await import("./useRecentRunsLimit.ts");
 
 test("has expected constants", () => {
   assert.equal(STORAGE_KEY, "omp-recent-runs-limit");

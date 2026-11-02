@@ -2,10 +2,9 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach, beforeEach } from "node:test";
 import { createElement } from "react";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react/pure.js";
-import { createJiti } from "jiti";
+const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react/pure.js");
 
-const { LocalDaemonBanner, LOCAL_DAEMON_BANNER_DISMISSED_KEY } = await createJiti(import.meta.url, { tsconfigPaths: true, fsCache: false, jsx: { runtime: "automatic" } }).import("./LocalDaemonBanner.tsx");
+const { LocalDaemonBanner, LOCAL_DAEMON_BANNER_DISMISSED_KEY } = await import("./LocalDaemonBanner.tsx");
 
 const originalWorker = globalThis.Worker;
 const workers = [];
