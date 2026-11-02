@@ -514,7 +514,9 @@ service keeps the link up across logouts and reboots; on macOS a script keeps it
 running in a terminal (see below for why). Unpack the release for the machine first,
 then save the link once with `ompweb host login --url …` as in step 2 (with the
 binary's path in place of `npx @kahme247/ompweb@latest`). Each setup starts
-`ompweb host` again 10 seconds after it exits. Add `--allow-http` after `host` if
+`ompweb host` again 10 seconds after it fails, but not after exit 0: that means a
+newer link with the same token replaced it, and restarting would take the link back
+every 10 seconds. Add `--allow-http` after `host` if
 the server URL is plain `http://`, and set `PI_CODING_AGENT_DIR` in the service too
 if you saved the link with it set. A machine links to one server: do not also run an
 ompweb web server on it, which writes the same link file for its own daemon. To
@@ -534,6 +536,8 @@ WorkingDirectory=%h
 ExecStart=%h/.local/share/ompweb-linux-x64/ompweb host
 Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
 Restart=always
+# Exit 0: a newer link for this host replaced it. Restarting would take the link back.
+RestartPreventExitStatus=0
 RestartSec=10
 
 [Install]
@@ -591,10 +595,12 @@ unpacked release:
 $dir = "$env:LOCALAPPDATA\ompweb-windows-x64"
 New-Item -ItemType Directory -Force "$env:USERPROFILE\.omp\agent\logs" | Out-Null
 Set-Content "$dir\ompweb-host.ps1" @'
-# Starts `ompweb host` again 10 s after it exits; output goes to ~\.omp\agent\logs\ompweb-host.log.
+# Starts `ompweb host` again 10 s after it fails, and stops on exit 0 (a newer link replaced it).
+# Output goes to ~\.omp\agent\logs\ompweb-host.log.
 $log = "$env:USERPROFILE\.omp\agent\logs\ompweb-host.log"
 while ($true) {
   & "$PSScriptRoot\ompweb.exe" host 2>&1 | ForEach-Object { "$_" } | Out-File -Append -Encoding utf8 $log
+  if ($LASTEXITCODE -eq 0) { break }
   Start-Sleep 10
 }
 '@
