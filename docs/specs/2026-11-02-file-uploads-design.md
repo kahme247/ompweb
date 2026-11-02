@@ -27,6 +27,7 @@ The composer refuses every file that is neither an image nor text (a `.zip` cann
 - **Everything else** (archives, PDFs, binaries) goes As file. The "files skipped" refusals are gone, except for the 2 GiB and 20-file limits.
 - Uploading starts on attach. A chip shows progress, then done, or an error with retry. Removing a chip aborts its upload. **Send** waits until every attached upload is done (the button shows the pending count).
 - A draft keeps finished uploads (id, name, size, host); an upload still in flight is lost on reload and must be attached again. Edit-move merges source and destination uploads by id, keeping the first occurrence (source first).
+- A page retained in the browser's back/forward cache must not retain an unresolved WebSocket-upload promise after the worker drops its client. Leaving the page fails those uploads visibly; restoring it offers Retry rather than an indefinitely blocked Send. This does not add automatic resume across page navigation.
 - The target host is the open session's host, or for a new chat the host selected on the new-session screen.
 
 ### U3. Staging on the host, attach on send
@@ -36,6 +37,8 @@ Uploads go to a staging directory on the target host's daemon, `<agent dir>/omp-
 1. On send, the prompt command (`prompt`, `steer`, `follow_up`; WebSocket `cmd` or HTTP route alike, so in `runAgentCommand`) carries `uploads: [id, …]`.
 2. The server strips the field and calls the host op `uploadAttach {id, sessionFile, sessionId}` for each id. The daemon hard-links the staged file into the session's `local/uploads/` (a copy when the link fails, e.g. on `EXDEV`), deletes the staged one, and returns `{path, url}`. The op's timeout is 10 minutes (a 2 GiB copy across file systems), not the 30 s of other ops.
 3. The server then appends the U1 block to `message` and sends the command to omp.
+
+Attachment preparation is part of the wrapper's pending command activity, not idle time. Both cleanup backstops keep the wrapper alive while uploads are attached and the prompt is dispatched, even if no tab is subscribed. The per-session send fence still prevents a later Stop from overtaking that prompt. Preparation failure releases both protections.
 
 A failed attach fails the command: 404 `upload_missing`, or 409 `upload_incomplete`. Nothing goes to omp, and the composer keeps the draft. At start and on every `uploadStart` the daemon deletes staged files older than 24 h (`STAGED_MAX_AGE_MS`) and aborts open uploads idle (no start or write) for longer than that, deleting their files; a swept upload gets no `upload_ack`.
 

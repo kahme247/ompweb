@@ -440,8 +440,8 @@ export class AgentSessionWrapper {
    *    vanish silently and the tab would only notice via a later 409;
    *  - isRunning() covers an in-flight turn that no listener is watching;
    *  - handshaking covers a spawn that has not finished its startup handshake;
-   *  - pendingCommands covers a route command (predict_word, mcp list, export)
-   *    whose response the child still owes us;
+   *  - pendingCommands covers command preparation and dispatch, including a
+   *    response the child still owes us;
    *  - the deadline check absorbs activity that landed while this fired.
    * Anything else keeps the session and re-arms for the remaining window.
    */
@@ -2036,6 +2036,17 @@ export class AgentSessionWrapper {
     notifyRunningChange();
   }
 
+  /** Protect submitted command work, including route preparation, from both idle reapers. */
+  async withPendingCommand<T>(callback: () => Promise<T>): Promise<T> {
+    this.resetIdleTimer();
+    this.pendingCommands += 1;
+    try {
+      return await callback();
+    } finally {
+      this.pendingCommands -= 1;
+    }
+  }
+
   async send(command: Record<string, unknown>): Promise<unknown> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     if (this.mcpListInFlight) throw new WebRpcError("MCP management is in progress. Try again when it finishes.", "session_busy");
@@ -2049,15 +2060,9 @@ export class AgentSessionWrapper {
       throw new WebRpcError("Wait for the history edit to finish", "session_busy");
     }
     if (mutatesHistory) this.historyMutationPendingCount += 1;
-    this.resetIdleTimer();
-    // Covers the whole command, including the awaits inside it: a route that
-    // has an unwatched session in mid-command (predict_word on a keystroke, an
-    // export, a follow-up) must never have its child reaped underneath it.
-    this.pendingCommands += 1;
     try {
-      return await this.dispatchCommand(command);
+      return await this.withPendingCommand(() => this.dispatchCommand(command));
     } finally {
-      this.pendingCommands = Math.max(0, this.pendingCommands - 1);
       if (mutatesHistory) this.historyMutationPendingCount -= 1;
     }
   }

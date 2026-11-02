@@ -78,17 +78,20 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
       });
     }
     const send = async (session: AgentSessionWrapper) => {
-      let sending: Promise<unknown>;
-      try {
-        await prior;
-        if (uploads) await attachUploads(uploads, owner, session, command);
-        sending = session.send(command);
-      } finally {
-        release();
-      }
-      const result = await sending;
-      if (uploads) forgetUploads(uploads);
-      return result;
+      if (!uploads && !prior) return session.send(command);
+      return session.withPendingCommand(async () => {
+        let sending: Promise<unknown>;
+        try {
+          await prior;
+          if (uploads) await attachUploads(uploads, owner, session, command);
+          sending = session.send(command);
+        } finally {
+          release();
+        }
+        const result = await sending;
+        if (uploads) forgetUploads(uploads);
+        return result;
+      });
     };
 
     // Fast path: already-running session. --advisor is a spawn-time flag with

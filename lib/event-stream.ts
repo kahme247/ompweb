@@ -103,7 +103,13 @@ class Transport {
       else this.streams.get(message.id)?.receive(message);
     };
     this.holdLifetimeLock();
-    window.addEventListener("pagehide", () => this.port.postMessage({ op: "bye" }));
+    window.addEventListener("pagehide", () => {
+      // The worker aborts these on bye, including when this page enters the bfcache.
+      for (const [id, listener] of [...this.uploads]) {
+        listener({ up: id, error: { status: 503, code: "upload_failed", message: "The upload failed. Retry it." } });
+      }
+      this.port.postMessage({ op: "bye" });
+    });
     window.addEventListener("pageshow", (event) => {
       // Back from the bfcache: pagehide already released our subscriptions.
       if (event.persisted) for (const stream of this.streams.values()) stream.resume();

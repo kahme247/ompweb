@@ -302,8 +302,8 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   `IDLE_DESTROY_MS` (10 min) and `DISCONNECT_DESTROY_MS`
   (`OMP_WEB_DISCONNECT_DESTROY_MS`, 2 min, `0` disables). The shorter one only
   fires once a session has been genuinely abandoned — no `onEvent` listener, no
-  run in flight, no startup handshake, no unanswered `send()`. The last
-  `onEvent` detach *starts* that window rather than exposing the last frame's,
+  run in flight, no startup handshake, no unanswered `send()` or command preparation.
+  The last `onEvent` detach *starts* that window rather than exposing the last frame's,
   so a reload reattaching seconds later does not 409. Both are fed by
   `resetIdleTimer()`, the single activity choke point for `send()` and every
   child frame: adding a new call path must route activity through it.
@@ -1171,6 +1171,9 @@ during the wait.
   `<session dir>/local/uploads/`, never overwriting; copy on EXDEV) and appends
   the "Attached files" block with `local://` URL and absolute path. Ids stay
   registered until the prompt reaches omp, so a retried send reuses the attach.
+  Attachment preparation uses the wrapper's pending-command protection too, so
+  disconnect and idle cleanup cannot dispose a submitted prompt's session while
+  a slow copy is still running. A later Stop stays behind its send fence.
 - Bytes are forwarded, never re-encoded: the browser sends binary frames
   `[n][id][payload]` (≤ `pieceBytes`) as `LinkSender` blob units keyed
   `up:<id>`; `lib/browser-link.ts` accepts them only for uploads that link
@@ -1198,8 +1201,11 @@ during the wait.
   is dropped from the registry (a later `up_start` re-registers it). The worker
   fails an upload no start answer or ack advances for `UPLOAD_STALL_MS` (120 s)
   with 504 `upload_stalled` and forgets it without aborting it on the host, so
-  Retry resumes. The daemon's `sweep` deletes staged files older than 24 h and
-  aborts open uploads idle (no start/write) over 24 h (`STAGED_MAX_AGE_MS`).
+  Retry resumes. Page navigation settles pending WebSocket-upload promises before
+  the worker's `bye`: a composer retained by bfcache shows Retry after restoration,
+  not a permanently uploading chip. This does not automatically resume navigation.
+  The daemon's `sweep` deletes staged files older than 24 h and aborts open uploads
+  idle (no start/write) over 24 h (`STAGED_MAX_AGE_MS`).
   `uploadAttach` has a 10-minute op timeout (a 2 GiB EXDEV copy), not
   `opTimeoutMs`.
 - Error codes: composer uploads use `upload_id_conflict` (another upload has
