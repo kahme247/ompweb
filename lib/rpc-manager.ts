@@ -2605,6 +2605,13 @@ export function getRpcSession(sessionId: string): AgentSessionWrapper | undefine
   return getRegistry().get(sessionId);
 }
 
+/** Every registry key of the wrapper under `sessionId` (its id and the aliases omp's moves left), else `[sessionId]`. */
+export function getRpcSessionKeys(sessionId: string): string[] {
+  const wrapper = getRegistry().get(sessionId);
+  if (!wrapper) return [sessionId];
+  return [...getRegistry()].flatMap(([key, live]) => (live === wrapper ? [key] : []));
+}
+
 export function getRunningRpcSessions(): RunningRpcSession[] {
   const map = new Map<string, RunningRpcSession>();
   for (const [sessionId, session] of getRegistry()) {

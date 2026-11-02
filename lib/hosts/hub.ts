@@ -1018,6 +1018,8 @@ export class RemoteRpcTransport implements RpcTransport {
       sendDown(linkFor(this.hostId), { type: "stdin", ch: this.ch, line }, this.ch);
       callback(null);
     } catch (error) {
+      // Nothing was queued: a command too large for the link is refused like an oversize request body.
+      if (error instanceof LinkLimitError) return callback(new HostOpError(413, "request_too_large", "Agent command is too large"));
       callback(error instanceof Error ? error : new Error(String(error)));
     }
   }

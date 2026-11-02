@@ -1,5 +1,5 @@
 import { apiErrorResponse, hostOfflineResponse, resolveSessionHostOr404 } from "@/lib/api-utils";
-import { startRpcSession, getRpcSession, WebRpcError, type AgentSessionWrapper } from "@/lib/rpc-manager";
+import { startRpcSession, getRpcSession, getRpcSessionKeys, WebRpcError, type AgentSessionWrapper } from "@/lib/rpc-manager";
 import { sessionSpawnTarget } from "@/lib/hosts/session-index";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { RequestBodyTooLargeError } from "@/lib/bounded-form-data";
@@ -68,7 +68,9 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
     const uploads = takeUploads(command, owner);
     // Hold later wrapper selection as well as dispatch behind attachment preparation, so an
     // advisor toggle cannot replace the child and a Stop cannot overtake the preparing prompt.
-    const prior = sendFences().get(id);
+    // A moved session answers to several ids: a command through any of them waits.
+    const held = getRpcSessionKeys(id).flatMap((key) => sendFences().get(key) ?? []);
+    const prior = held.length ? Promise.all(held).then(() => {}) : undefined;
     if (uploads) {
       const gate = new Promise<void>((resolve) => (release = resolve));
       const fence = prior ? prior.then(() => gate) : gate;

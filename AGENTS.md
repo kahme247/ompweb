@@ -1174,7 +1174,11 @@ during the wait.
   Attachment preparation uses the wrapper's pending-command protection too, so
   disconnect and idle cleanup cannot dispose a submitted prompt's session while
   a slow copy is still running. Later commands await the send fence before
-  selecting/replacing the wrapper, so Stop and an Advisor change cannot overtake it.
+  selecting/replacing the wrapper, so Stop and an Advisor change cannot overtake it;
+  a command through any registry alias of the same wrapper (`getRpcSessionKeys`)
+  waits too. The Attached files block can push a prompt past the host link's
+  line cap: the transport then refuses it before queueing with 413
+  `request_too_large`, and the uploads stay registered for a shorter resend.
 - Bytes are forwarded, never re-encoded: the browser sends binary frames
   `[n][id][payload]` (≤ `pieceBytes`) as `LinkSender` blob units keyed
   `up:<id>`; `lib/browser-link.ts` accepts them only for uploads that link
