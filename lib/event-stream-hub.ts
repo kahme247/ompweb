@@ -9,9 +9,11 @@ import { subscribeSessionFileChanges } from "./session-watcher";
 import {
   MUX_CONTROL_EVENT,
   UNKNOWN_CONNECTION_CODE,
+  type BrowserTransportState,
   type EventStreamChannel,
   type MuxControlFrame,
 } from "./event-stream-protocol";
+import { browserTransportState } from "./web-settings";
 
 // Server half of the multiplexed live-event stream (see event-stream-protocol).
 // One EventStreamConnection = one `/api/events` SSE response = one browser
@@ -36,6 +38,8 @@ class Subscription {
   // the FULL accumulated message each time, so latest-wins is safe. Every
   // other frame flushes this first so per-subscription order is preserved.
   pendingUpdate: unknown | null = null;
+  /** Emit time of `pendingUpdate`, the latest coalesced frame's, so the stamp keeps measuring server-to-peer delay. */
+  pendingAt: number | null = null;
 
   constructor(readonly id: string, readonly coalescesMessageUpdates: boolean) {}
 }
@@ -54,6 +58,71 @@ interface SubscriptionHandle {
 
 declare global {
   var __ompEventStreamConnections: Map<string, EventStreamConnection> | undefined;
+  var __ompServerId: string | undefined;
+}
+
+/** Random per process: a reconnecting client compares it to learn whether the server restarted. */
+export function serverId(): string {
+  return (globalThis.__ompServerId ??= randomUUID());
+}
+
+/** Tell every open connection the browser transport setting changed. */
+export function broadcastBrowserTransport(state: BrowserTransportState): void {
+  for (const connection of connections().values()) connection.control({ type: "transport", ...state });
+}
+
+/** Where a connection's frames go: an SSE response body or a WebSocket. */
+export interface FrameSink {
+  /** Send one frame; false means the peer is gone and the connection closes. */
+  write(name: string, at: number, data: string): boolean;
+  /** The peer is behind: replaceable updates coalesce until the owner calls `resume()`. */
+  backpressured(): boolean;
+  /** Keep-alive; false means the peer is gone. */
+  heartbeat(): boolean;
+  readonly heartbeatMs: number;
+  close(): void;
+}
+
+class SseSink implements FrameSink {
+  readonly heartbeatMs = HEARTBEAT_MS;
+  readonly stream: ReadableStream<Uint8Array>;
+  private controller!: ReadableStreamDefaultController<Uint8Array>;
+
+  constructor(onPull: () => void, onCancel: () => void) {
+    this.stream = new ReadableStream<Uint8Array>({
+      start: (controller) => { this.controller = controller; },
+      // A slow consumer resumed reading: deliver coalesced updates now rather
+      // than waiting for the next event or heartbeat.
+      pull: onPull,
+      // Half-open disconnects may never fire the abort signal.
+      cancel: onCancel,
+    });
+  }
+
+  write(name: string, at: number, data: string): boolean {
+    return this.enqueue(`event: ${name}\nid: ${at}\ndata: ${data}\n\n`);
+  }
+
+  heartbeat(): boolean {
+    return this.enqueue(":\n\n");
+  }
+
+  backpressured(): boolean {
+    return (this.controller.desiredSize ?? 0) < 0;
+  }
+
+  close(): void {
+    try { this.controller.close(); } catch { /* already closed */ }
+  }
+
+  private enqueue(text: string): boolean {
+    try {
+      this.controller.enqueue(encoder.encode(text));
+      return true;
+    } catch {
+      return false;
+    }
+  }
 }
 
 function connections(): Map<string, EventStreamConnection> {
@@ -71,30 +140,31 @@ function runDetach(detach: (() => void) | null): void {
 
 export class EventStreamConnection {
   readonly id = randomUUID();
-  readonly stream: ReadableStream<Uint8Array>;
+  /** The SSE response body; null when the caller supplied its own sink. */
+  readonly stream: ReadableStream<Uint8Array> | null;
   private heartbeat: NodeJS.Timeout | undefined;
-  private controller: ReadableStreamDefaultController<Uint8Array> | null = null;
+  private readonly sink: FrameSink;
   private closed = false;
   private readonly subscriptions = new Map<string, Subscription>();
   private readonly signal: AbortSignal | undefined;
 
-  constructor(signal?: AbortSignal) {
+  constructor(signal?: AbortSignal, sink?: FrameSink) {
     this.signal = signal;
-    this.stream = new ReadableStream<Uint8Array>({
-      start: (controller) => {
-        this.controller = controller;
-        connections().set(this.id, this);
-        this.control({ type: "hello", connectionId: this.id });
-        this.heartbeat = setInterval(() => {
-          if (this.flushAll()) this.write(":\n\n");
-        }, HEARTBEAT_MS);
-      },
-      // A slow consumer resumed reading: deliver coalesced updates now rather
-      // than waiting for the next event or heartbeat.
-      pull: () => { this.flushAll(); },
-      // Half-open disconnects may never fire the abort signal.
-      cancel: () => this.close(),
-    });
+    if (sink) {
+      this.sink = sink;
+      this.stream = null;
+    } else {
+      const sse = new SseSink(() => this.resume(), () => this.close());
+      this.sink = sse;
+      this.stream = sse.stream;
+    }
+    connections().set(this.id, this);
+    this.control({ type: "hello", connectionId: this.id, serverId: serverId(), ...browserTransportState() });
+    if (!this.closed) {
+      this.heartbeat = setInterval(() => {
+        if (this.flushAll() && !this.sink.heartbeat()) this.close();
+      }, this.sink.heartbeatMs);
+    }
     signal?.addEventListener("abort", this.close);
     if (signal?.aborted) this.close();
   }
@@ -108,7 +178,7 @@ export class EventStreamConnection {
     this.subscriptions.clear();
     connections().delete(this.id);
     this.signal?.removeEventListener("abort", this.close);
-    try { this.controller?.close(); } catch { /* already closed */ }
+    this.sink.close();
   };
 
   get isClosed(): boolean {
@@ -169,22 +239,18 @@ export class EventStreamConnection {
     this.control({ type: "end", sub: subscription.id });
   }
 
-  private write(text: string): boolean {
-    if (this.closed || !this.controller) return false;
-    try {
-      this.controller.enqueue(encoder.encode(text));
-      return true;
-    } catch {
-      this.close();
-      return false;
-    }
+  private write(name: string, data: string, at = Date.now()): boolean {
+    if (this.closed) return false;
+    if (this.sink.write(name, at, data)) return true;
+    this.close();
+    return false;
   }
 
-  private control(frame: MuxControlFrame): void {
-    this.write(`event: ${MUX_CONTROL_EVENT}\ndata: ${JSON.stringify(frame)}\n\n`);
+  control(frame: MuxControlFrame): void {
+    this.write(MUX_CONTROL_EVENT, JSON.stringify(frame));
   }
 
-  private writeFrame(subscription: Subscription, data: unknown): boolean {
+  private writeFrame(subscription: Subscription, data: unknown, at?: number): boolean {
     let text: string;
     try {
       text = JSON.stringify(data);
@@ -194,13 +260,20 @@ export class EventStreamConnection {
       this.end(subscription);
       return false;
     }
-    return this.write(`event: ${subscription.id}\ndata: ${text}\n\n`);
+    return this.write(subscription.id, text, at);
   }
 
   private flush(subscription: Subscription): boolean {
     const data = subscription.pendingUpdate;
+    const at = subscription.pendingAt ?? undefined;
     subscription.pendingUpdate = null;
-    return data === null || this.writeFrame(subscription, data);
+    subscription.pendingAt = null;
+    return data === null || this.writeFrame(subscription, data, at);
+  }
+
+  /** The peer drained: deliver coalesced updates now rather than waiting for the next event or heartbeat. */
+  resume(): void {
+    this.flushAll();
   }
 
   private flushAll(): boolean {
@@ -210,15 +283,14 @@ export class EventStreamConnection {
 
   private deliver(subscription: Subscription, data: unknown): void {
     if (!subscription.active || this.closed) return;
-    const desiredSize = this.controller?.desiredSize ?? null;
     if (
       subscription.coalescesMessageUpdates
       && (data as { type?: unknown } | null)?.type === "message_update"
-      && desiredSize !== null
-      && desiredSize < 0
+      && this.sink.backpressured()
     ) {
       // Coalesce while backpressured; never buffer unboundedly.
       subscription.pendingUpdate = data;
+      subscription.pendingAt = Date.now();
       return;
     }
     if (this.flush(subscription)) this.writeFrame(subscription, data);

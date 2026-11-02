@@ -58,6 +58,9 @@ class FakeStream {
   }
 }
 
+/** The port of the worker the tab's transport started; tests flip its transport. */
+let workerPort = null;
+
 /** Speaks the tab<->worker protocol of public/event-stream-worker.js. */
 class FakeSharedWorker {
   constructor() {
@@ -73,10 +76,23 @@ class FakeSharedWorker {
           if (!stream) return;
           stream.closedByCaller = true;
           stream.readyState = FakeStream.CLOSED;
+        } else if (message.op === "cmd") {
+          void answerCommand(this.port, message);
         }
       },
     };
+    workerPort = this.port;
   }
+}
+
+/** A command over the session socket: `world.socketAnswer` may answer it as the worker would (e.g. transport_lost), else the agent route does. */
+async function answerCommand(port, { n, sessionId, advisor, body }) {
+  let answer = world.socketAnswer?.(JSON.parse(body));
+  if (!answer) {
+    const res = await fetchStub(`/api/agent/${encodeURIComponent(sessionId)}${advisor ? "?advisor=1" : ""}`, { method: "POST", body });
+    answer = { status: res.status, body: await res.json() };
+  }
+  port.onmessage?.({ data: { cmd: n, recvAt: null, repliedAt: null, attempts: 1, deduped: false, behindBytes: 0, ...answer } });
 }
 
 function safeParse(text) {
@@ -5052,6 +5068,55 @@ test("a streaming-behavior prompt the dropped link may have delivered is reporte
   await act(async () => { accepted = await w.latest.handlePromptWithStreamingBehavior("queued text", "followUp"); await sleep(30); });
   assert.equal(accepted, true);
   assert.deepEqual(toastCalls, [["info", translate("agentSession.hostOfflineMaybeSent", { detail: "Build box is offline" })]]);
+});
+
+// What the worker answers when the session socket dropped after sending a command (spec D5).
+const SOCKET_LOST = { error: "The connection to omp-web dropped before the answer arrived; the command may have run.", code: "transport_lost" };
+
+/** Runs a test with the worker in WebSocket mode, so agent commands go to it instead of fetch. */
+async function inWebSocketMode(run) {
+  const { openEventStream } = await import("@/lib/event-stream");
+  openEventStream({ kind: "running" }).close(); // the tab's transport exists before the hook mounts
+  workerPort.onmessage({ data: { transport: "ws-session" } });
+  try {
+    await run();
+  } finally {
+    workerPort.onmessage({ data: { transport: "sse" } });
+    world.socketAnswer = null;
+  }
+}
+
+test("a prompt whose session socket dropped before the answer toasts that it may have run and leaves no draft to restore", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    world.socketAnswer = (command) => command.type === "prompt" ? { status: 503, body: SOCKET_LOST } : null;
+    const w = await mountSession("socket-lost");
+    let receipt;
+    await act(async () => { receipt = w.latest.handleSend("maybe sent"); await sleep(30); });
+    await act(async () => { lastEs()?.open(); receipt = await receipt; });
+    w.unmount();
+    assert.notEqual(receipt.status, "rejected", "the composer must not bring the text back: it may run twice");
+    assert.equal(w.latest.agentRunning, false);
+    assert.deepEqual(toastCalls, [["info", translate("agentSession.transportLostMaybeSent")]]);
+    assert.equal(w.latest.notices.length, 0);
+    assert.equal(callsTo("POST", "/api/agent/socket-lost").some((call) => call.body?.type === "prompt"), false, "the prompt went over the socket");
+  });
+});
+
+test("a steer whose session socket dropped before the answer is reported as taken", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession("socket-lost-steer", [userMsg("u0", "q")]);
+    const w = await mountSession("socket-lost-steer");
+    world.socketAnswer = (command) => command.type === "steer" ? { status: 503, body: SOCKET_LOST } : null;
+    let accepted;
+    await act(async () => { accepted = await w.latest.handleSteer("steer text"); await sleep(30); });
+    assert.equal(accepted, true, "the composer drops the text: it may run");
+    assert.deepEqual(toastCalls, [["info", translate("agentSession.transportLostMaybeSent")]]);
+    assert.equal(w.latest.notices.length, 0);
+  });
 });
 
 test("the hosts channel decides the offline banner; a frame only speaks before its first snapshot", async () => {

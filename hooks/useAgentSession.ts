@@ -15,7 +15,7 @@ import type {
 import { normalizeToolCalls } from "@/lib/normalize";
 import { hasVisibleAssistantContent } from "@/lib/assistant-response";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
-import { HostOfflineError, sendAgentCommand, setSessionAdvisorSpawn } from "@/lib/agent-client";
+import { HostOfflineError, TransportLostError, sendAgentCommand, setSessionAdvisorSpawn } from "@/lib/agent-client";
 import type { HostStatus } from "@/lib/hosts/host";
 import { newChatDraftKey, remoteHostId } from "@/lib/project-ordering";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "@/lib/skill-diagnostics";
@@ -202,9 +202,16 @@ export interface UseAgentSessionOptions {
   onOpenUrl?: (url: string) => string;
 }
 
-/** Toast a send its host's link stopped. True when the link dropped after the
- *  send left, so it may still run there: the composer must not offer it again. */
-function toastHostOffline(error: HostOfflineError): boolean {
+/** Toast a send its connection stopped: the host's link (HostOfflineError) or
+ *  this browser's session socket (TransportLostError). True when it may have
+ *  left and still run, so the composer must not offer it again; null for any
+ *  other error, which the caller reports itself. */
+function toastStoppedSend(error: unknown): boolean | null {
+  if (error instanceof TransportLostError) {
+    toast.info(translate("agentSession.transportLostMaybeSent"));
+    return true;
+  }
+  if (!(error instanceof HostOfflineError)) return null;
   if (error.mayHaveRun) toast.info(translate("agentSession.hostOfflineMaybeSent", { detail: error.message }));
   else toast.error(translate("agentSession.hostOfflineSend", { detail: error.message }));
   return error.mayHaveRun;
@@ -2879,8 +2886,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Every failure here (stream connect, startup, set_model, or the prompt
       // POST itself) leaves no run to show, so roll back the optimistic bubble.
       setOptimisticUserMessage(null);
-      const mayHaveRun = e instanceof HostOfflineError && toastHostOffline(e);
-      if (!(e instanceof HostOfflineError)) {
+      const mayHaveRun = toastStoppedSend(e);
+      if (mayHaveRun === null) {
         addNotice({
           type: "error",
           message: e instanceof EventStreamConnectionError
@@ -3735,10 +3742,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // optimistic chat bubble here would duplicate the queue panel and turn into
   // a ghost message if the queue is recalled.
   const toPiImages = (images?: AttachedImage[]) => images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
-  /** A refused steer/follow-up: an unreachable host toasts (the composer keeps the text), anything else is a chat notice.
-   *  True when the link dropped after the send left: it may still run, so the composer drops the text. */
+  /** A refused steer/follow-up: a stopped connection toasts (the composer keeps the text), anything else is a chat notice.
+   *  True when the send may have left before the connection stopped: it may still run, so the composer drops the text. */
   const reportQueueFailure = useCallback((e: unknown): boolean => {
-    if (e instanceof HostOfflineError) return toastHostOffline(e);
+    const mayHaveRun = toastStoppedSend(e);
+    if (mayHaveRun !== null) return mayHaveRun;
     addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
     return false;
   }, [addNotice]);
