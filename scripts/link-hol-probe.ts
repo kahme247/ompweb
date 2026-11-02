@@ -64,18 +64,27 @@ const model = { provider: values.model.slice(0, slash), modelId: values.model.sl
 
 const secret = process.env.OMP_WEB_TRUSTED_HEADER_SECRET;
 const stop = new AbortController();
-// Ctrl-C, a kill or a dropped ssh session end the load and the waits; the sessions are still deleted.
-for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, () => stop.abort());
+let signalled = false;
+// Ctrl-C, a kill or a dropped ssh session end the load, the waits and any call in flight; the sessions are still
+// deleted. A second signal exits at once, leaving them.
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+  process.on(signal, () => {
+    if (signalled) process.exit(1);
+    signalled = true;
+    stop.abort();
+  });
+}
 const sleep = (ms: number) => delay(ms, undefined, { signal: stop.signal }).catch(() => {});
 
-/** One API call; throws on a status outside 2xx unless `allow` lists it. */
-async function api(path: string, init: { method?: string; body?: unknown; allow?: number[] } = {}): Promise<{ bytes: number; json: Record<string, unknown> }> {
+/** One API call; throws on a status outside 2xx unless `allow` lists it. `cleanup`: the call goes on after a stop
+ * signal (it deletes what the run made). */
+async function api(path: string, init: { method?: string; body?: unknown; allow?: number[]; cleanup?: boolean } = {}): Promise<{ bytes: number; json: Record<string, unknown> }> {
   const method = init.method ?? (init.body === undefined ? "GET" : "POST");
   const response = await fetch(`${server}${path}`, {
     method,
     headers: { ...(secret ? { "x-omp-web-auth": secret } : {}), ...(init.body === undefined ? {} : { "content-type": "application/json" }) },
     body: init.body === undefined ? undefined : JSON.stringify(init.body),
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    signal: init.cleanup ? AbortSignal.timeout(FETCH_TIMEOUT_MS) : AbortSignal.any([stop.signal, AbortSignal.timeout(FETCH_TIMEOUT_MS)]),
   });
   const text = await response.text();
   if (!response.ok && !init.allow?.includes(response.status)) throw new Error(`${method} ${path}: ${response.status} ${text.slice(0, 300)}`);
@@ -225,7 +234,7 @@ try {
   // Only what this run made. A session never written (C) answers 404 once its omp is stopped.
   for (const id of created) {
     try {
-      await api(`/api/sessions/${id}`, { method: "DELETE", allow: [404] });
+      await api(`/api/sessions/${id}`, { method: "DELETE", allow: [404], cleanup: true });
     } catch (error) {
       console.error(`could not delete session ${id}: ${error instanceof Error ? error.message : error}`);
       process.exitCode = 1;
