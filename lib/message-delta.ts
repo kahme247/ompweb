@@ -153,7 +153,8 @@ const ESCAPES: Record<string, string> = { '"': '"', "\\": "\\", "/": "/", b: "\b
  * left out. Anything unreadable is `{}`.
  */
 export function parsePartialJson(text: string): unknown {
-  const source = text.trim();
+  // Only the start is trimmed: spaces at the end belong to an unfinished string.
+  const source = text.trimStart();
   if (!source) return {};
   try {
     return JSON.parse(source);
@@ -228,7 +229,8 @@ export function parsePartialJson(text: string): unknown {
         i += 1;
         const item = value();
         if (item === INCOMPLETE) return out;
-        out[key.value] = item;
+        // JSON.parse keeps a "__proto__" key as an own property; plain assignment would call the prototype setter.
+        Object.defineProperty(out, key.value, { value: item, enumerable: true, writable: true, configurable: true });
       }
     }
     if (char === "[") {
