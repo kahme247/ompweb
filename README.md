@@ -468,7 +468,7 @@ everything else on it: they resume when it wakes, and the link returns then. A
 docked or no-sleep setup keeps running with the lid closed. Revoking a host in
 Settings closes its link and the daemon stops its omp processes.
 
-Behind a reverse proxy, forward WebSocket upgrades on `/api/hosts/link` (nginx: `proxy_http_version 1.1;`, `proxy_set_header Upgrade $http_upgrade;`, `proxy_set_header Connection "upgrade";`, and a `proxy_read_timeout` well above 30 s).
+Behind a reverse proxy, forward WebSocket upgrades on `/api/hosts/link` (host links) and `/api/events/link` (browsers; a browser whose proxy refuses the upgrade falls back to server-sent events) (nginx: `proxy_http_version 1.1;`, `proxy_set_header Upgrade $http_upgrade;`, `proxy_set_header Connection "upgrade";`, and a `proxy_read_timeout` well above 30 s).
 
 Update ompweb on the server before its hosts: a host from before this version shows **needs upgrade** until it is updated.
 

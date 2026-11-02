@@ -755,10 +755,10 @@ during the wait.
   and `host-tools` are subscribed from `AppShell`, so they outlive the sidebar
   (which unmounts while Settings is open).
 - **Browser link** (`browserTransport: "ws"`; `docs/specs/2026-11-01-browser-link-design.md`). The server's
-  setting (`omp-web-settings.json`, `lib/web-settings.ts`; `"sse"` default, any other stored value, the old
-  `ws-*` experiment modes included, reads as `"sse"`) picks the worker's connection. With `sse` everything
+  setting (`omp-web-settings.json`, `lib/web-settings.ts`; `"ws"` default, any other stored value except `"sse"`, the
+  old `ws-*` experiment modes included, reads as `"ws"`) picks the worker's connection. With `sse` everything
   above holds and the worker opens no WebSocket. Switch it in Settings → Interface & Behavior → "Browser
-  connection (experiment)" or with `PUT /api/web-settings {"browserTransport":"ws"|"sse"}`; a change
+  connection" or with `PUT /api/web-settings {"browserTransport":"ws"|"sse"}`; a change
   broadcasts a `transport` control frame on every connection and every `hello` carries it. From a shell
   (production on 127.0.0.1:30185, the trusted header from the pr-watcher env file; no `Origin`, so no
   origin check):

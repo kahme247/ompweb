@@ -173,7 +173,7 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { id: "touch-targets", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.touchTargets", descKey: "settingsConfig.touchTargetsDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Touch Targets", fallbackDesc: "Adjust interactive target sizes for buttons and toolbar controls.", scope: "UI" },
   { id: "message-during-active-run", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.messageDuringActiveRun", descKey: "settingsConfig.messageDuringActiveRunDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Message during active run", fallbackDesc: "What composer does on submit while agent runs. Steer interrupts; Queue follow-up delivers after finish.", scope: "UI" },
   { id: "word-completion", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.wordCompletion", descKey: "settingsConfig.wordCompletionDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Word completion", fallbackDesc: "Ghost text from omp's word prediction; Tab or → accepts. Auto enables it only with a mouse or trackpad (not on touch keyboards).", scope: "UI" },
-  { id: "browser-transport", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.browserTransport", descKey: "settingsConfig.browserTransportDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Browser connection (experiment)", fallbackDesc: "How browsers receive live updates and send chat commands: server-sent events + HTTP (the default), or one WebSocket that picks up where it left off after a dropped connection. Every open browser switches within a few seconds.", scope: "UI" },
+  { id: "browser-transport", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.browserTransport", descKey: "settingsConfig.browserTransportDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Browser connection", fallbackDesc: "How browsers receive live updates and send chat commands: one WebSocket that picks up where it left off after a dropped connection (the default), or server-sent events + HTTP. A browser whose proxy blocks WebSockets falls back to server-sent events on its own. Every open browser switches within a few seconds.", scope: "UI" },
   // Tool Safety & Approvals
   { id: "approval-mode", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.approvalMode", descKey: "settingsConfig.approvalModeDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Approval Mode", fallbackDesc: "Choose when OMP asks before tool calls.", scope: "Native OMP" },
   { id: "bash-override", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.bashOverride", descKey: "settingsConfig.bashOverrideDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Bash Override", fallbackDesc: "Override default approval policy specifically for terminal commands.", scope: "Native OMP" },
@@ -368,9 +368,9 @@ function BrowserTransportSetting() {
     fetch("/api/web-settings")
       .then((res) => (res.ok ? res.json() : null))
       .then((data: { browserTransport?: BrowserTransport } | null) => {
-        if (alive) setTransport(data?.browserTransport ?? "sse");
+        if (alive) setTransport(data?.browserTransport ?? "ws");
       })
-      .catch(() => { if (alive) setTransport("sse"); });
+      .catch(() => { if (alive) setTransport("ws"); });
     return () => { alive = false; };
   }, []);
   const change = async (next: BrowserTransport) => {
@@ -396,7 +396,7 @@ function BrowserTransportSetting() {
     <NativeSetting searchId="browser-transport" label={t("settingsConfig.browserTransport")} description={t("settingsConfig.browserTransportDesc")} scope="UI">
       <select
         style={nativeSelectStyle}
-        value={transport ?? "sse"}
+        value={transport ?? "ws"}
         disabled={transport === null || saving}
         onChange={(event) => {
           const next = BROWSER_TRANSPORTS.find((mode) => mode === event.target.value);

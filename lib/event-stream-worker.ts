@@ -4,8 +4,9 @@
 // carries every tab's stream (lib/event-stream.ts) as a subscription on its one connection, so opening more tabs no
 // longer consumes more of the browser's six HTTP/1.1 connections per host. The server's `browserTransport` setting
 // (every hello and `transport` control frame carry it) picks the connection:
-//   "sse" (default): the ONLY `/api/events` EventSource; POST /api/events subscribes; tabs POST their commands.
-//   "ws": the browser link, one WebSocket at /api/events/link carrying every subscription and command with the host
+//   "sse": the ONLY `/api/events` EventSource; POST /api/events subscribes; tabs POST their commands. Also the fallback
+//   when the proxy refuses the WebSocket upgrade.
+//   "ws" (default): the browser link, one WebSocket at /api/events/link carrying every subscription and command with the host
 //   link's delivery (docs/specs/2026-11-01-browser-link-design.md; lib/browser-link.ts is the server end).
 //
 // Bundled by server/client-env.ts (buildEventStreamWorker) into a classic script; lib/event-stream-worker.test.mjs runs

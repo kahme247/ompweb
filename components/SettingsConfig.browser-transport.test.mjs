@@ -41,8 +41,8 @@ test("the browser transport control offers SSE and the WebSocket link, saves a c
   const { container } = render(createElement(SettingsConfig, settingsProps));
   await settle();
   const page = within(container);
-  const select = page.getByRole("combobox", { name: "Browser connection (experiment)" });
-  assert.deepEqual([...select.options].map((option) => [option.value, option.textContent]), [["sse", "Server-sent events + HTTP (default)"], ["ws", "WebSocket link"]]);
+  const select = page.getByRole("combobox", { name: "Browser connection" });
+  assert.deepEqual([...select.options].map((option) => [option.value, option.textContent]), [["sse", "Server-sent events + HTTP"], ["ws", "WebSocket link (default)"]]);
   assert.equal(select.value, "sse");
   assert.equal(select.disabled, false);
 
@@ -75,11 +75,26 @@ test("the browser transport control is disabled while its save is in flight, so 
   });
   const { container } = render(createElement(SettingsConfig, settingsProps));
   await settle();
-  const select = within(container).getByRole("combobox", { name: "Browser connection (experiment)" });
+  const select = within(container).getByRole("combobox", { name: "Browser connection" });
   fireEvent.change(select, { target: { value: "ws" } });
   await settle();
   assert.equal(select.disabled, true, "a second change cannot start while the first save is in flight");
   await act(async () => { releasePut(); });
   await settle();
   assert.equal(select.disabled, false);
+});
+
+test("the browser transport control shows the WebSocket link when the server sends no value or the read fails", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    cleanup();
+    globalThis.fetch = originalFetch;
+  });
+  for (const answer of [() => Response.json({}), () => Response.json({}, { status: 500 }), () => Promise.reject(new Error("offline"))]) {
+    globalThis.fetch = async (url) => (String(url) === "/api/web-settings" ? answer() : Response.json({}));
+    const { container, unmount } = render(createElement(SettingsConfig, settingsProps));
+    await settle();
+    assert.equal(within(container).getByRole("combobox", { name: "Browser connection" }).value, "ws");
+    unmount();
+  }
 });

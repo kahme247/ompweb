@@ -22,7 +22,7 @@ export interface WebServerSettings {
    * re-checks every name before handing it to a spawn.
    */
   agentEnv: Record<string, string>;
-  /** Live-event transport the browser uses; "sse" unless the file says "ws" (the experiment's ws-* values read as "sse"). */
+  /** Live-event transport the browser uses; "ws" unless the file says "sse" (a missing or unknown value, the experiment's ws-* values included, reads as "ws"). */
   browserTransport: BrowserTransport;
 }
 
@@ -30,7 +30,7 @@ const DEFAULTS: WebServerSettings = {
   autoResumeSessions: false,
   agentToolsEnabled: false,
   agentEnv: {},
-  browserTransport: "sse",
+  browserTransport: "ws",
 };
 
 /** What every hello and `transport` frame tells the browser. */
@@ -70,7 +70,7 @@ export function loadWebServerSettings(): WebServerSettings {
           autoResumeSessions: raw.autoResumeSessions === true,
           agentToolsEnabled: raw.agentToolsEnabled === true,
           agentEnv: readAgentEnvRecord(raw.agentEnv),
-          browserTransport: BROWSER_TRANSPORTS.find((transport) => transport === raw.browserTransport) ?? "sse",
+          browserTransport: BROWSER_TRANSPORTS.find((transport) => transport === raw.browserTransport) ?? "ws",
         };
       }
     }

@@ -12,9 +12,9 @@ Measured with the experiment's modes: a command's `ack` queued behind event fram
 
 ### B1. One socket, one setting
 
-- `browserTransport: "sse" | "ws"` in `omp-web-settings.json`, default `"sse"`. Any other stored value (the experiment's `ws-client`, `ws-client-split`, `ws-session`, `ws-pool`, `websocket`, …) reads as `"sse"`; `browserTransportPerSocket`/`browserTransportMaxSockets` are gone (dropped on the next save). `PUT /api/web-settings` accepts only the two values. The live switch is unchanged: a changed setting broadcasts `{type:"transport", transport}` on every connection, and every hello carries it.
+- `browserTransport: "sse" | "ws"` in `omp-web-settings.json`, default `"ws"`. A missing value or any other stored value (the experiment's `ws-client`, `ws-client-split`, `ws-session`, `ws-pool`, `websocket`, …) reads as `"ws"`; only a stored `"sse"` keeps SSE. `browserTransportPerSocket`/`browserTransportMaxSockets` are gone (dropped on the next save). `PUT /api/web-settings` accepts only the two values. The live switch is unchanged: a changed setting broadcasts `{type:"transport", transport}` on every connection, and every hello carries it.
 - In `"ws"` the SharedWorker (dedicated Worker where SharedWorker is missing) holds **one** WebSocket, `GET /api/events/link`, for everything: every tab's subscriptions (session, running, notifications, host-tools, hosts, file) and every agent command and reply. No second socket: pieces and fair per-key queues keep a small message from waiting behind a large one.
-- SSE stays the default and the fallback (B7). Reconcile polls, `POST /api/agent/new`, files, settings and the metrics POST stay HTTP in both modes.
+- SSE stays the fallback (B7) and an explicit choice in Settings. Reconcile polls, `POST /api/agent/new`, files, settings and the metrics POST stay HTTP in both modes.
 
 ### B2. Reuse boundary
 
@@ -107,5 +107,5 @@ A dial whose socket closes before `open` is diagnosed with a plain `GET /api/eve
 ## Acceptance
 
 1. `npm run typecheck && npm run lint && npm test` and `npm run build` pass; no `ws-client|ws-session|ws-pool|events/ws|browser-socket` outside `docs/` and `CHANGELOG.md`.
-2. Tests (each written failing first): a command reply passes a large event backlog on a slow peer; a late ack does not reconnect; resume resends exactly the missed frames (no duplicates, no re-subscribe); resync with fresh subscriptions after TTL, overflow and server restart; a token from another web session is refused; a resent duplicate command runs once; old stored setting values read as `sse`; the worker bundle has no forbidden APIs; a failed upgrade falls back to SSE.
+2. Tests (each written failing first): a command reply passes a large event backlog on a slow peer; a late ack does not reconnect; resume resends exactly the missed frames (no duplicates, no re-subscribe); resync with fresh subscriptions after TTL, overflow and server restart; a token from another web session is refused; a resent duplicate command runs once; a missing or old stored setting value reads as `ws` and only `sse` reads as `sse`; the worker bundle has no forbidden APIs; a failed upgrade falls back to SSE.
 3. Real smoke: headless Chromium, two tabs, `ws` mode, real omp: a socket killed mid-stream resumes and the reply completes once and matches the stored session; commands sent during the drop are answered once; SSE mode still works.
