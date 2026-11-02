@@ -14,6 +14,8 @@ export interface SessionLiveFields {
 
 export interface SessionCatchUp {
   request(): Promise<SessionContext | null>;
+  /** A live delta found no message to apply to: reads at most once per MISSING_BASE_RETRY_MS, however many such deltas arrive. */
+  requestMissingBase(): void;
   seed(context: SessionContext, position?: SessionHistoryCursor | null): SessionContext;
   invalidate(): void;
   view(): SessionView;
@@ -23,6 +25,9 @@ export interface SessionCatchUp {
   disconnect(): void;
   observe(event: AgentEvent): "epoch" | "stale" | null;
 }
+
+/** While reads fail fast, every base-less delta would send its own context request; one per window instead, then the next delta retries. */
+export const MISSING_BASE_RETRY_MS = 2000;
 
 /** One durable cursor per selected view. Live ordering is independent of disk pagination. */
 export function createSessionCatchUp(options: {
@@ -49,6 +54,7 @@ export function createSessionCatchUp(options: {
     toolSequences.clear();
   };
   let requested = false;
+  let missingBaseAt = -Infinity;
   let pending: Promise<SessionContext | null> | null = null;
 
   const invalidate = () => {
@@ -182,8 +188,16 @@ export function createSessionCatchUp(options: {
     return pending;
   };
 
+  const requestMissingBase = () => {
+    const now = Date.now();
+    if (now - missingBaseAt < MISSING_BASE_RETRY_MS) return;
+    missingBaseAt = now;
+    void request();
+  };
+
   return {
     request,
+    requestMissingBase,
     seed,
     invalidate,
     view: () => view,
