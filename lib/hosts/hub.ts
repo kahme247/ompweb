@@ -361,8 +361,15 @@ function ackDown(link: Link, ack: number): void {
  * per window): a daemon cannot flood the shared metrics file. */
 const STATS_BUDGET_FACTOR = 8;
 
+/** Write the samples dropped past the link's budget as one `{dropped}` sample. */
+function recordDropped(link: Link): void {
+  const window = link.statsWindow;
+  if (window.dropped > 0) recordLinkSamples([{ metric: "link", dir: "up", host: link.id, dropped: window.dropped, at: Date.now() }]);
+  window.dropped = 0;
+}
+
 /** A daemon's `stats`: valid samples within the link's budget become `up` samples; the excess is dropped and written as
- * one `{dropped}` sample when the next window starts. Malformed samples (already dropped by decodeUp) are logged once. */
+ * one `{dropped}` sample when the next window starts, or when the link ends or the hub freezes. Malformed samples (already dropped by decodeUp) are logged once. */
 function applyStats(link: Link, message: Extract<UpMessage, { type: "stats" }>): void {
   if (message.invalid && !link.statsWarned) {
     link.statsWarned = true;
@@ -371,8 +378,8 @@ function applyStats(link: Link, message: Extract<UpMessage, { type: "stats" }>):
   const window = link.statsWindow;
   const now = performance.now();
   if (now - window.start >= LINK_LIMITS.statsFlushMs) {
-    if (window.dropped > 0) recordLinkSamples([{ metric: "link", dir: "up", host: link.id, dropped: window.dropped, at: Date.now() }]);
-    Object.assign(window, { start: now, used: 0, dropped: 0 });
+    recordDropped(link);
+    Object.assign(window, { start: now, used: 0 });
   }
   const taken = message.samples.slice(0, Math.max(0, STATS_BUDGET_FACTOR * LINK_LIMITS.statsSamples - window.used));
   window.used += taken.length;
@@ -400,6 +407,7 @@ function failAllOps(link: Link, error: () => Error): void {
 /** The socket is gone: ops in flight fail now rather than at their timeout. */
 function endSocket(link: Link): void {
   link.socket = null;
+  recordDropped(link);
   failAllOps(link, () => new HostOpError(503, "host_offline", `${labelOf(link.id)} is offline`));
 }
 
@@ -463,7 +471,10 @@ const stopping = () => json({ error: "omp-web is shutting down" }, 503);
  */
 export function freezeHostLinks(): void {
   hub().frozen = true;
-  for (const link of hub().links.values()) link.socket?.close(LINK_CLOSE.goingAway, "omp-web is restarting");
+  for (const link of hub().links.values()) {
+    recordDropped(link);
+    link.socket?.close(LINK_CLOSE.goingAway, "omp-web is restarting");
+  }
   // The process exits next: keep what was measured.
   flushLinkSamples();
 }
@@ -600,6 +611,8 @@ function openLink(link: Link, ws: LinkSocket, hello: Hello): void {
   // has applied none (ack 0) has sent none: it is a fresh process whose
   // uplink numbering starts again at 1.
   if (hello.ack <= 0) link.up = new SeqWindow();
+  // An op the replaced socket was answering is answered again from byte 0 by a fresh daemon: its old pieces would prefix them.
+  for (const pending of link.pending.values()) Object.assign(pending, { blob: [], blobBytes: 0 });
   // After a restart of this server the daemon is ahead: number above its ack.
   link.downSeq = Math.max(link.downSeq, hello.ack);
   released(link, link.outbox.ack(hello.ack));

@@ -389,7 +389,7 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   `LINK_LIMITS.statsSamples`, queued under their own sender key (fair and inside the unacked window like any
   message). The samples are advisory: the hub keeps the valid ones, drops a malformed one (logged once per host) without
   failing the frame, and writes at most 8 × `statsSamples` `up` samples per host per `statsFlushMs` (the excess is
-  written as one `{dropped}` record when the next window starts). `ackMs` is monotonic (`performance.now()`) on both
+  written as one `{dropped}` record when the next window starts, or when the link ends or the hub freezes). `ackMs` is monotonic (`performance.now()`) on both
   sides, `at` the wall clock. Both sides batch (`statsSamples` or `statsFlushMs`, 30 s): the hub's batch lives in its
   `globalThis` state, resolves its file when it starts and is written in `freezeHostLinks`; the daemon queues what it
   holds when it stops (best effort). Tests that drive the hub call
