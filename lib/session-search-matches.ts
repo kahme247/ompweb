@@ -4,6 +4,8 @@ import type { AgentMessage } from "./types";
 import { compileSearchQuery, findSearchMatches } from "./session-search";
 
 export const SEARCH_MATCH_PAGE_SIZE = 10;
+/** Longest prefix one request may ask for (100 "Load more" clicks). */
+export const MAX_SEARCH_MATCHES = 1000;
 // Short lead-in: the sidebar row is narrow and the hit must stay visible.
 const SNIPPET_BEFORE = 16;
 const SNIPPET_AFTER = 90;
@@ -45,11 +47,11 @@ function messageTextBlocks(message: AgentMessage): string[] {
   return message.role === "assistant" ? textBlocks(message.content) : [];
 }
 
-/** One page of hits: best match first, then newest message first; ties keep text order. */
-export function listSessionMatches(messages: AgentMessage[], entryIds: string[], rawQuery: string, offset = 0): SessionSearchMatchPage {
+/** The best `limit` hits: best match first, then newest message first; ties keep text order. */
+export function listSessionMatches(messages: AgentMessage[], entryIds: string[], rawQuery: string, limit = SEARCH_MATCH_PAGE_SIZE): SessionSearchMatchPage {
   const query = compileSearchQuery(rawQuery);
   if (!query) return { matches: [], total: 0 };
-  // Snippets are cut for the returned page only: a short query can hit a large session 100k+ times.
+  // Snippets are cut for the returned hits only: a short query can hit a large session 100k+ times.
   const hits: { entryId: string; ordinal: number; quality: number; timestamp: number | null; text: string; start: number; end: number }[] = [];
   messages.forEach((message, index) => {
     const entryId = entryIds[index];
@@ -61,7 +63,7 @@ export function listSessionMatches(messages: AgentMessage[], entryIds: string[],
     }
   });
   hits.sort((a, b) => b.quality - a.quality || (b.timestamp ?? 0) - (a.timestamp ?? 0));
-  const matches = hits.slice(offset, offset + SEARCH_MATCH_PAGE_SIZE).map(({ entryId, ordinal, quality, timestamp, text, start, end }) => {
+  const matches = hits.slice(0, limit).map(({ entryId, ordinal, quality, timestamp, text, start, end }) => {
     const from = Math.max(0, start - SNIPPET_BEFORE);
     const to = Math.min(text.length, end + SNIPPET_AFTER);
     return {

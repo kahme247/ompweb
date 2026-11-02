@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useI18n } from "@/lib/i18n";
-import type { SessionSearchMatch } from "@/lib/session-search-matches";
+import { MAX_SEARCH_MATCHES, SEARCH_MATCH_PAGE_SIZE, type SessionSearchMatch } from "@/lib/session-search-matches";
 
 /** The hit the chat should scroll to and mark as current; a new object per click. */
 export interface SearchMatchTarget {
@@ -41,17 +41,17 @@ export function SessionSearchMatches({ sessionId, query, depth, onOpen }: {
   const [failed, setFailed] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
-  const load = useCallback(async (offset: number) => {
+  const load = useCallback(async (limit: number) => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
     setLoading(true);
     setFailed(false);
     try {
-      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/matches?q=${encodeURIComponent(query)}&offset=${offset}`, { signal: controller.signal });
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/matches?q=${encodeURIComponent(query)}&limit=${limit}`, { signal: controller.signal });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const page = await res.json() as { matches: SessionSearchMatch[]; total: number };
-      setMatches((prev) => [...prev.slice(0, offset), ...page.matches]);
+      setMatches(page.matches);
       setTotal(page.total);
     } catch {
       if (controller.signal.aborted) return;
@@ -62,7 +62,7 @@ export function SessionSearchMatches({ sessionId, query, depth, onOpen }: {
 
   useEffect(() => {
     // Same settle time as the sidebar's transcript search: typing must not read the session per keystroke.
-    const timer = setTimeout(() => void load(0), 250);
+    const timer = setTimeout(() => void load(SEARCH_MATCH_PAGE_SIZE), 250);
     return () => {
       clearTimeout(timer);
       abortRef.current?.abort();
@@ -72,14 +72,14 @@ export function SessionSearchMatches({ sessionId, query, depth, onOpen }: {
   const status = total === null && !failed
     ? t("sessionSidebar.loadingMatches")
     : total === 0 ? t("sessionSidebar.noMatchesInSession") : null;
-  // A failed page (the first one too) is retried from the same row that loads the next one.
-  const canLoadMore = failed || (total !== null && matches.length < total);
+  // "Load more" re-reads a longer ranked prefix (a running session re-ranks between requests);
+  // a failed request, the first one too, is retried from the same row.
+  const canLoadMore = failed || (total !== null && matches.length < total && matches.length < MAX_SEARCH_MATCHES);
 
   return (
     <div role="list" aria-label={t("sessionSidebar.matches")} style={{ margin: "0 0 2px" }}>
-      {matches.map((match, index) => (
-        // Pages of a session still being written can repeat a hit, so its id is not a unique key.
-        <div role="listitem" key={index}>
+      {matches.map((match) => (
+        <div role="listitem" key={`${match.entryId}:${match.ordinal}`}>
           <button
             type="button"
             className="session-search-match"
@@ -99,7 +99,7 @@ export function SessionSearchMatches({ sessionId, query, depth, onOpen }: {
             type="button"
             className="session-search-match"
             disabled={loading}
-            onClick={() => void load(matches.length)}
+            onClick={() => void load(Math.min(matches.length + SEARCH_MATCH_PAGE_SIZE, MAX_SEARCH_MATCHES))}
             style={{ ...rowStyle(depth), color: failed ? "var(--status-error)" : "var(--accent)", fontWeight: 600, cursor: loading ? "default" : "pointer" }}
           >
             {t(failed ? "sessionSidebar.matchesFailed" : "sessionSidebar.loadMoreMatches")}

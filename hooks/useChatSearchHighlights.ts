@@ -70,6 +70,8 @@ export function useChatSearchHighlights({ container, query: rawQuery, target, re
   useEffect(() => {
     const element = container.current;
     const query = compileSearchQuery(rawQuery);
+    // A closed or cleared search ends the current hit, even if the same query is typed again.
+    if (!query) currentRef.current = null;
     const registry = highlightRegistry();
     if (!ready || !element || !query || !registry) return;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -102,9 +104,15 @@ export function useChatSearchHighlights({ container, query: rawQuery, target, re
     const element = container.current;
     const query = compileSearchQuery(rawQuery);
     if (!target || handledRef.current === target || !ready || !element || !query) return;
-    // Not loaded yet: the effect re-runs when the transcript arrives.
     const messageIndex = entryIds.indexOf(target.entryId);
-    if (messageIndex < 0 || !revealMessage(messageIndex)) return;
+    // Loaded without the entry (another branch is shown): drop the target rather than jump later.
+    if (messageIndex < 0) {
+      handledRef.current = target;
+      onTargetHandled?.();
+      return;
+    }
+    // Not rendered yet: the effect re-runs once the render window includes it.
+    if (!revealMessage(messageIndex)) return;
     handledRef.current = target;
     currentRef.current = { query: rawQuery, target };
     onTargetHandled?.();
@@ -112,6 +120,7 @@ export function useChatSearchHighlights({ container, query: rawQuery, target, re
     const { range, element: message } = findTarget(element, query, target);
     const registry = highlightRegistry();
     if (registry && range) registry.set(CURRENT_HIT, new Highlight(range));
+    else registry?.delete(CURRENT_HIT);
     // Instant: a smooth scroll would race the lazy-load sentinel the reveal just put on screen.
     (range?.startContainer.parentElement ?? message)?.scrollIntoView({ block: "center", behavior: "instant" });
   }, [container, rawQuery, target, ready, entryIds, revealMessage, holdScrollPosition, onTargetHandled]);

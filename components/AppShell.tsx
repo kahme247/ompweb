@@ -1831,10 +1831,15 @@ export function AppShell({ appName }: { appName: string }) {
   // One jump per click: dropped once the chat used it, so reopening that session later starts at the bottom.
   const [searchMatchTarget, setSearchMatchTarget] = useState<SearchMatchTarget | null>(null);
   const clearSearchMatchTarget = useCallback(() => setSearchMatchTarget(null), []);
+  // The sidebar reports only changes: a pending target belongs to the query it was picked under.
   const handleSearchQueryChange = useCallback((query: string) => {
     setChatSearchQuery(query);
-    if (!query) setSearchMatchTarget(null);
+    setSearchMatchTarget(null);
   }, []);
+  // A target still pending when another session opens must not jump when its own session reopens.
+  useEffect(() => {
+    setSearchMatchTarget((target) => (target && target.sessionId !== selectedSession?.id ? null : target));
+  }, [selectedSession?.id]);
 
   const sidebarContent = (
     <SessionSidebar

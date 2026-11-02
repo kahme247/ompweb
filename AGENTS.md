@@ -92,7 +92,7 @@ app/api/
   sessions/search/route.ts        GET ?q= — NDJSON { scores } batches (titles + transcripts); closing the request stops the scan
   sessions/[id]/route.ts          GET/PATCH/DELETE session
   sessions/[id]/context/route.ts  GET ?leafId= — context for a specific leaf
-  sessions/[id]/matches/route.ts  GET ?q=&offset= — 10 search hits per page in the active conversation (best match, then newest)
+  sessions/[id]/matches/route.ts  GET ?q=&limit= — best `limit` search hits in the active conversation (best match, then newest); Load more asks for a longer prefix
   sessions/[id]/export/route.ts   GET exported HTML for a session
   agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? }
   agent/[id]/route.ts             GET state | POST any RPC command
@@ -199,7 +199,7 @@ components/
   ChatInput.tsx       input bar + model/thinking/tools/compact controls
   ComposerPanels.tsx  composer-attached /btw + todo + subagent panels (collapsible, live states)
   BtwPanel.tsx        /btw side-question panel (stream, cancel, copy, follow-up) + history dialog
-  SessionSearchMatches.tsx  a search result's hits under its sidebar row (10 per page + "Load more…")
+  SessionSearchMatches.tsx  a search result's hits under its sidebar row (10 at a time + "Load more…")
   TodoList.tsx        todo phase grid with preview/show-all (used by ComposerPanels)
   SubagentTranscriptDialog.tsx  task + final output summary dialog (wide, screen-adaptive)
   MessageView.tsx     renders one message (user/assistant/toolCall/toolResult)
@@ -1040,23 +1040,27 @@ during the wait.
 
 ### Search hits in the chat (`/api/sessions/[id]/matches`, `hooks/useChatSearchHighlights.ts`)
 - While the sidebar search has a query, each session row's chevron lists its
-  hits (`SessionSearchMatches`, 10 per page). The server ranks hits of the
+  hits (`SessionSearchMatches`, 10 at a time). The server ranks hits of the
   active conversation's user text and assistant text blocks (quality, then
-  newest message) and builds snippets for the returned page only.
+  newest message) and builds snippets for the returned hits only. "Load more"
+  asks for a longer prefix (`limit`), never an offset: a running session
+  re-ranks between requests, so offsets would repeat or skip hits.
 - A hit is addressed as `(entryId, ordinal)`: its index among that message's
   hits. The server counts in the markdown source (a user message's text blocks
   joined with `\n`, each assistant text block separately); the chat counts in
   the rendered `[data-message-text][data-entry-id]` text, skipping code-block
   headers, buttons and KaTeX MathML (`NOT_MESSAGE_TEXT`). New chrome inside
   message text must be excluded there too, or later ordinals shift. Text that
-  rendering drops (a link URL) still shifts them; the jump then lands on the
-  message.
+  rendering drops (a link URL) or splits into glyph nodes (KaTeX math) still
+  shifts them; the jump then lands on the message.
 - Painting uses the CSS Custom Highlight API (`omp-search`,
   `omp-search-current` in `globals.css`), repainted on DOM mutations; browsers
   without it still jump. A jump widens the lazy render window
   (`revealMessage`) first. Each click is a new target object used once:
   `onSearchTargetHandled` drops it in AppShell, so reopening the session later
-  does not jump again. An empty query clears the highlights and the target.
+  does not jump again. AppShell also drops a pending target when the query
+  changes or another session opens, and the hook drops one whose entry the
+  loaded branch lacks. An empty query clears the highlights and the target.
 
 ### MCP configuration (`lib/omp/mcp-config.ts`, `/api/mcp`, `components/McpConfig.tsx`)
 - Project MCP config resolution order: `.omp/mcp.json`, `.omp/.mcp.json`,

@@ -1297,8 +1297,9 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   }, [onSelectSession, expandProject, hostUnavailableReason]);
   const handleOpenSearchMatch = useCallback((s: SessionInfo, target: SearchMatchTarget) => {
     handleSelectSessionFromList(s);
-    onOpenSearchMatch?.(target);
-  }, [handleSelectSessionFromList, onOpenSearchMatch]);
+    // An unreachable host refused the selection (with a toast): leave no pending jump behind.
+    if (!hostUnavailableReason(hostOf(s))) onOpenSearchMatch?.(target);
+  }, [handleSelectSessionFromList, onOpenSearchMatch, hostUnavailableReason]);
 
   const handleNewSession = useCallback(() => {
     if (!selectedCwd || hostUnavailableReason(selectedHostId)) return;
