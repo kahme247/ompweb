@@ -596,9 +596,11 @@ $dir = "$env:LOCALAPPDATA\ompweb-windows-x64"
 New-Item -ItemType Directory -Force "$env:USERPROFILE\.omp\agent\logs" | Out-Null
 Set-Content "$dir\ompweb-host.ps1" @'
 # Starts `ompweb host` again 10 s after it fails, and stops on exit 0 (a newer link replaced it).
-# Output goes to ~\.omp\agent\logs\ompweb-host.log.
+# Output goes to ~\.omp\agent\logs\ompweb-host.log, moved to .log.1 past 10 MB (checked between restarts).
+# For a plain http:// server URL, put --allow-http after `host` below.
 $log = "$env:USERPROFILE\.omp\agent\logs\ompweb-host.log"
 while ($true) {
+  if ((Test-Path $log) -and (Get-Item $log).Length -gt 10MB) { Move-Item $log "$log.1" -Force }
   & "$PSScriptRoot\ompweb.exe" host 2>&1 | ForEach-Object { "$_" } | Out-File -Append -Encoding utf8 $log
   if ($LASTEXITCODE -eq 0) { break }
   Start-Sleep 10
@@ -611,8 +613,10 @@ Register-ScheduledTask -TaskName ompweb-host -Force `
 Start-ScheduledTask ompweb-host
 ```
 
-Stop it with `Stop-ScheduledTask ompweb-host; Stop-Process -Name ompweb`, and remove
-it with `Unregister-ScheduledTask ompweb-host`. The log is not rotated.
+Stop it with `Stop-ScheduledTask ompweb-host`, then end the running host with
+`Get-Process ompweb | Where-Object Path -eq "$env:LOCALAPPDATA\ompweb-windows-x64\ompweb.exe" | Stop-Process`
+(only this release's `ompweb.exe`; adjust the path as for `$dir`). Remove it with
+`Unregister-ScheduledTask ompweb-host`.
 
 ## Features
 
