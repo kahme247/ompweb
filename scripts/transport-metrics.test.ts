@@ -298,13 +298,15 @@ test("the CLI prints the table for a file, reading .1 before the file, and the a
   const dir = mkdtempSync(path.join(tmpdir(), "omp-web-transport-summary-"));
   try {
     const file = path.join(dir, "m.jsonl");
-    const sample = (req: string, serverAt: number) => JSON.stringify({ metric: "action", transport: "sse", type: "prompt", clientId: "c", req, outcome: "ok", sentAt: 0, gotAt: 10, serverAt });
-    writeFileSync(`${file}.1`, `${sample("a", 1_000)}\n`);
-    writeFileSync(file, `${sample("b", 2_000)}\nnot json\n`);
+    const sample = (req: string, serverAt: number, ua: string) => JSON.stringify({ metric: "action", transport: "sse", type: "prompt", clientId: "c", req, outcome: "ok", sentAt: 0, gotAt: 10, serverAt, ua });
+    writeFileSync(`${file}.1`, `${sample("a", 1_000, "old-agent")}\n`);
+    writeFileSync(file, `${sample("b", 2_000, "new-agent")}\nnot json\n`);
     const summary = () => Bun.spawnSync([process.execPath, path.join(import.meta.dir, "transport-metrics.ts"), "--file", file, "--since", "1970-01-01T00:00:00Z"]);
     const run = summary();
     assert.equal(run.exitCode, 0, run.stderr.toString());
     assert.match(run.stdout.toString(), /sse +action totalMs +all +n=2 +p50=10/);
+    // The client row keeps the last user agent it read: the file's, only if .1 was read first.
+    assert.match(run.stdout.toString(), /all +client +c null new-agent +n=2/);
     assert.doesNotMatch(run.stdout.toString(), /round trip/);
     writeFileSync(file, `${JSON.stringify({ metric: "link", dir: "down", host: "mac", session: null, bytes: 200, bytesAhead: 0, ackMs: 10, at: 0, serverAt: 3_000 })}\n`, { flag: "a" });
     const withLink = summary().stdout.toString();
