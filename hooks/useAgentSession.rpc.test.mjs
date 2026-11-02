@@ -5119,6 +5119,21 @@ test("a `!` command whose session socket dropped before the answer toasts that i
   });
 });
 
+test("a `!` command the route refused is offered back to the composer with an error notice", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    toastCalls.length = 0;
+    primeSession("socket-refused-bash", [userMsg("u0", "q")]);
+    const offered = [];
+    const w = await mountSession("socket-refused-bash", undefined, { chatInputRef: { current: { insertIfEmpty: (text) => offered.push(text) } } });
+    world.socketAnswer = (command) => command.type === "bash" ? { status: 400, body: { error: "Shell is busy" } } : null;
+    await act(async () => { await w.latest.handleSend("!touch /tmp/once"); await sleep(30); });
+    assert.deepEqual(offered, ["!touch /tmp/once"], "it never ran, so the composer gets it back");
+    assert.deepEqual(toastCalls, []);
+    assert.deepEqual(w.latest.notices.map((notice) => notice.type), ["error"]);
+  });
+});
+
 test("a steer whose session socket dropped before the answer is reported as taken", async () => {
   await inWebSocketMode(async () => {
     resetWorld();

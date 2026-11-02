@@ -25,6 +25,8 @@ export const browserLinkTimings = { pingMs: LINK_LIMITS.pingMs, offlineMs: LINK_
  * past `totalBacklogBytes` across every link, the links whose sockets have been gone longest are dropped first. Either
  * way their browsers resync. */
 export const browserLinkLimits = { backlogBytes: 32 * 1024 * 1024, totalBacklogBytes: 256 * 1024 * 1024 };
+/** Remembered commands kept for a resend. Settled ones are evicted past it; the map can exceed it only by the commands in
+ * flight, each of which the rpc command timeout bounds. */
 export const DEDUPE_MAX = 500;
 /** The longest joined command line: the route's body cap plus room for the envelope. */
 const MAX_COMMAND_CHARS = MAX_AGENT_COMMAND_REQUEST_BYTES + 64 * 1024;
