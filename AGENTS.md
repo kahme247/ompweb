@@ -1164,6 +1164,9 @@ during the wait.
   (`lib/image-attachments.ts`, `lib/chat-attachments.ts`); every other file,
   an image switched to **As file**, and anything over a budget is uploaded
   (2 GiB per file, 20 per message, `lib/upload-limits.ts`, browser-safe).
+  The composer re-checks the inline budget per chip on every render, so an
+  image's decoded size comes from `attachedImageBytes` (scanned once per
+  image object), never a fresh base64 scan.
 - Uploads land in a staging dir on the **session's host** (the daemon), not on
   main: a new chat has no session yet. The prompt command carries
   `uploads: [id]`; `runAgentCommand` (`lib/agent-command.ts`) attaches each

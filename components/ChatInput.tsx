@@ -66,7 +66,7 @@ import {
   selectTextAttachments,
 } from "@/lib/chat-attachments";
 import {
-  getBase64DecodedByteLength,
+  attachedImageBytes,
   MAX_ATTACHED_IMAGES,
   MAX_TOTAL_ATTACHED_IMAGE_BYTES,
   validateOutgoingPrompt,
@@ -664,7 +664,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   /** Whether `bytes` more of images (`extra` more of them) still fit the inline budget the send checks. */
   const fitsInline = useCallback((bytes: number, extra = 0): boolean => {
     const images = attachedImagesRef.current;
-    const used = images.reduce((total, image) => total + (getBase64DecodedByteLength(image.data) ?? 0), 0) + pendingImageBytesRef.current;
+    const used = images.reduce((total, image) => total + attachedImageBytes(image), 0) + pendingImageBytesRef.current;
     return images.length + pendingImageCountRef.current + extra < MAX_ATTACHED_IMAGES && used + bytes <= MAX_TOTAL_ATTACHED_IMAGE_BYTES;
   }, []);
 
