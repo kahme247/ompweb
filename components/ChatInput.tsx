@@ -636,8 +636,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
    *  many were attached. */
   const attachAsFiles = useCallback((files: File[], previewUrls: string[] = []): number => {
     const room = Math.max(0, MAX_UPLOADS_PER_MESSAGE - attachedUploadsRef.current.length);
-    const fitting = files.filter((file) => file.size <= MAX_UPLOAD_BYTES);
-    const added = fitting.slice(0, room).map((file): AttachedUpload => ({
+    const fitting = files.flatMap((file, i) => (file.size <= MAX_UPLOAD_BYTES ? [{ file, previewUrl: previewUrls[i] }] : []));
+    const added = fitting.slice(0, room).map(({ file, previewUrl }): AttachedUpload => ({
       id: newUploadId(),
       name: file.name,
       size: file.size,
@@ -646,7 +646,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       received: 0,
       status: "uploading",
       error: null,
-      previewUrl: previewUrls[files.indexOf(file)] ?? (file.type.startsWith("image/") ? URL.createObjectURL(file) : null),
+      previewUrl: previewUrl ?? (file.type.startsWith("image/") ? URL.createObjectURL(file) : null),
     }));
     if (fitting.length < files.length) {
       setAttachError(t("chatInput.attachmentUploadTooLarge", { count: files.length - fitting.length, size: `${MAX_UPLOAD_BYTES / 1024 ** 3} GB` }));
@@ -2324,7 +2324,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             {imageUploads.map((upload) => (
               <ImageChip
                 key={upload.id}
-                previewUrl={upload.previewUrl ?? ""}
+                previewUrl={upload.previewUrl}
                 upload={upload}
                 canSwitch={upload.file !== null && fitsInline(upload.size)}
                 onSwitch={() => void switchUploadToInline(upload)}

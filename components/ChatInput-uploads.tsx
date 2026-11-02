@@ -145,7 +145,7 @@ export function UploadChip({ upload, onRemove, onRetry }: { upload: AttachedUplo
  * or no file to upload).
  */
 export function ImageChip({ previewUrl, upload, canSwitch, onSwitch, onRemove, onRetry }: {
-  previewUrl: string;
+  previewUrl: string | null;
   upload: AttachedUpload | null;
   canSwitch: boolean;
   onSwitch: () => void;
@@ -157,7 +157,7 @@ export function ImageChip({ previewUrl, upload, canSwitch, onSwitch, onRemove, o
   return (
     <div style={{ position: "relative", flexShrink: 0 }} title={failed ? upload?.error ?? undefined : undefined}>
       <div style={{ position: "relative", width: 56, height: 56, overflow: "hidden", borderRadius: 6, border: `1px solid ${failed ? "var(--status-error)" : "var(--border)"}` }}>
-        <img src={previewUrl} alt="" style={{ width: 56, height: 56, objectFit: "cover", display: "block" }} />
+        {previewUrl && <img src={previewUrl} alt="" style={{ width: 56, height: 56, objectFit: "cover", display: "block" }} />}
         <button
           type="button"
           onClick={onSwitch}

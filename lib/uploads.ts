@@ -88,7 +88,9 @@ function onHostEvent(hostId: string, ack: UploadAck | null): void {
   if (ack.error) {
     map.delete(ack.id);
     dropUploadFrames(hostId, ack.id);
-    upload.sink?.error(ack.error.status, ack.error.code, ack.error.message);
+    // A daemon's status is untrusted: Response.json throws on one outside 200-599.
+    const status = ack.error.status >= 400 && ack.error.status <= 599 ? ack.error.status : 502;
+    upload.sink?.error(status, ack.error.code, ack.error.message);
     return;
   }
   upload.received = Math.min(upload.size, Math.max(upload.received, ack.received));

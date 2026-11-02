@@ -486,8 +486,9 @@ function onUploadFrame(ws: BrowserSocket, data: Uint8Array): void {
   if (frame.bytes.byteLength > LINK_LIMITS.pieceBytes) return ws.close(CLOSE.tooBig, "Frame too large");
   if (!link.uploads.has(frame.id)) return ws.close(CLOSE.invalidData, "Not an upload of this link");
   sawBrowser(link);
-  // False once the upload ended on this server (failed): its up_error is on the way, and the chunk is dropped.
-  forwardUploadFrame(link.owner, frame.id, frame.bytes);
+  // False once the upload ended on this server (failed, aborted or evicted idle): say so instead of letting it stall.
+  // A failed start already sent its up_error; the worker ignores errors for an upload it dropped.
+  if (!forwardUploadFrame(link.owner, frame.id, frame.bytes)) link.uploads.get(frame.id)?.error(404, "upload_missing", "The upload is no longer open");
 }
 
 function onHello(ws: BrowserSocket, hello: Record<string, unknown>): void {

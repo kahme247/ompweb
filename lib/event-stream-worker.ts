@@ -1109,6 +1109,9 @@ function addUpload(client: Client, message: Record<string, unknown>): void {
     epoch: 0,
     stallTimer: undefined,
   };
+  // A retry reuses the id: the earlier attempt's stall timer must not fire on this one.
+  const earlier = uploads.get(id);
+  if (earlier) dropUpload(earlier);
   uploads.set(id, upload);
   watchUpload(upload);
   if (link.welcomed) openUpload(upload);
@@ -1142,6 +1145,7 @@ function dropUpload(upload: Upload): void {
 function watchUpload(upload: Upload): void {
   clearTimeout(upload.stallTimer);
   upload.stallTimer = setTimeout(() => {
+    if (uploads.get(upload.id) !== upload) return;
     dropUpload(upload);
     post(upload.client, { up: upload.id, error: { status: 504, code: "upload_stalled", message: "The upload stopped making progress" } });
     linkIdle();
