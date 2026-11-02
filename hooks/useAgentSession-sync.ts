@@ -54,12 +54,17 @@ export function createSessionCatchUp(options: {
     toolSequences.clear();
   };
   let requested = false;
+  // performance.now() of the last missing-base request, and the one trailing request waiting for its window to end.
   let missingBaseAt = -Infinity;
+  let missingBaseTimer: ReturnType<typeof setTimeout> | undefined;
   let pending: Promise<SessionContext | null> | null = null;
 
   const invalidate = () => {
     revision += 1;
     if (pending) requested = true;
+    clearTimeout(missingBaseTimer);
+    missingBaseTimer = undefined;
+    missingBaseAt = -Infinity;
   };
   const seed = (next: SessionContext, position: SessionHistoryCursor | null = cursor) => {
     // A newer completed sync may reflect truncation, not just an append.
@@ -189,9 +194,16 @@ export function createSessionCatchUp(options: {
   };
 
   const requestMissingBase = () => {
-    const now = Date.now();
-    if (now - missingBaseAt < MISSING_BASE_RETRY_MS) return;
-    missingBaseAt = now;
+    const wait = missingBaseAt + MISSING_BASE_RETRY_MS - performance.now();
+    if (wait > 0) {
+      // The last episode still gets its request, once the window ends: a quiet stream sends no further delta to retry.
+      missingBaseTimer ??= setTimeout(() => {
+        missingBaseTimer = undefined;
+        requestMissingBase();
+      }, wait);
+      return;
+    }
+    missingBaseAt = performance.now();
     void request();
   };
 
