@@ -815,7 +815,7 @@ during the wait.
   - **Metrics** (both transports). Tabs and the worker record `action`, `event`, `reconnect` (with
     `resumed` on the link), `hang` (HTTP only) and `dropped` samples tagged `transport` (`sse`/`ws`),
     `socket`/`conn` (`sse`, `link`, `http`, `worker`) and `sockets`; the worker POSTs them to
-    `/api/transport-metrics` every 30 s or 200 samples (a probe or POST not answered within 10 s is abandoned: a failed POST keeps its samples). The route appends JSONL to `<agent
+    `/api/transport-metrics` every 30 s or 200 samples (a probe not answered within 10 s is abandoned, a POST within 10 s plus its body at 2 KB/s; a failed POST keeps its samples, so a timeout after the server processed it can duplicate them). The route appends JSONL to `<agent
     dir>/omp-web/transport-metrics.jsonl` (`.jsonl.1` above 20 MiB). One worker-wide clock (the
     lowest-RTT of the last 20 link pings and SSE probes, at most 5 min old) times every sample.
     `bun scripts/transport-metrics.ts --since 2h` prints the per-transport summary (also `--until`,

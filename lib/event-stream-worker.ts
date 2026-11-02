@@ -73,6 +73,8 @@ const METRICS_FLUSH_MS = 30000;
 /** A metrics request (clock probe or sample POST) not answered in full by then is abandoned, so one hung request never
  * stops the probe chain or keeps `flushing` set. */
 const METRICS_TIMEOUT_MS = 10000;
+/** The slowest link a sample POST is given time for: 2 KB/s. The deadline is METRICS_TIMEOUT_MS plus the body over this. */
+const METRICS_POST_BYTES_PER_MS = 2;
 const METRICS_FLUSH_COUNT = 200;
 const METRICS_BUFFER_MAX = 2000;
 const EVENT_SAMPLE_MS = 1000;
@@ -1245,10 +1247,13 @@ function flushSamples(): void {
   const droppedCount = droppedSamples;
   droppedSamples = 0;
   flushing = true;
-  withDeadline(METRICS_TIMEOUT_MS, async (signal) => (await fetch(METRICS_PATH, {
+  const body = JSON.stringify({ samples: droppedCount > 0 ? batch.concat(stamp({ metric: "dropped", count: droppedCount })) : batch });
+  // The deadline grows with the batch so a slow link (about 2 KB/s and up) can finish it. A timeout after the server has
+  // processed the batch sends it again and duplicates its samples (metrics only).
+  withDeadline(METRICS_TIMEOUT_MS + body.length / METRICS_POST_BYTES_PER_MS, async (signal) => (await fetch(METRICS_PATH, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ samples: droppedCount > 0 ? batch.concat(stamp({ metric: "dropped", count: droppedCount })) : batch }),
+    body,
     signal,
   })).ok)
     .catch(() => false)
@@ -1276,13 +1281,14 @@ function attach(port: Port): void {
     const message = event.data;
     if (!message || typeof message !== "object") return;
     const data = message as Record<string, unknown>;
+    // A tab back from the bfcache sends whatever comes first (a `wake`, often, or the reopened streams) after its `bye`
+    // removed it: it missed any mode change since.
+    if (data.op !== "bye" && !clients.has(client)) {
+      clients.add(client);
+      post(client, { transport: mode });
+    }
     switch (data.op) {
       case "open":
-        // A tab back from the bfcache resumes its streams after its `bye` removed it: it missed any mode change since.
-        if (!clients.has(client)) {
-          clients.add(client);
-          post(client, { transport: mode });
-        }
         open(client, Number(data.id), data.channel as EventStreamChannel);
         break;
       case "close":
