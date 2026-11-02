@@ -691,16 +691,29 @@ function fallBack(): void {
   link.ws?.close(DONE_CODE);
   link.ws = null;
   clearTimeout(fallbackTimer);
-  fallbackTimer = setTimeout(() => {
-    fallbackTimer = undefined;
-    applyMode();
-  }, FALLBACK_MS);
+  fallbackTimer = setTimeout(probeLink, FALLBACK_MS);
   applyMode();
   // applyMode handed the unsent commands back to their tabs. A sent idempotent one goes back too (the tab POSTs it,
   // running it again is harmless); any other has no link to carry its reply and may have run.
   for (const command of [...pending.values()]) {
     settle(command, isIdempotentCommand(command.type) ? { cmd: command.n, http: true } : failure(command, TRANSPORT_LOST));
   }
+}
+
+/** After FALLBACK_MS: dial in the background and leave SSE only once the upgrade works, so the tabs never see a failed try. */
+function probeLink(): void {
+  const probe = new WebSocket(new URL(BROWSER_LINK_PATH, scope.location.href).href.replace(/^http/, "ws"));
+  let opened = false;
+  probe.onopen = () => {
+    opened = true;
+    probe.close(DONE_CODE);
+    fallbackTimer = undefined;
+    applyMode();
+  };
+  // A probe that closed without opening stays on SSE another FALLBACK_MS.
+  probe.onclose = () => {
+    if (!opened) fallbackTimer = setTimeout(probeLink, FALLBACK_MS);
+  };
 }
 
 function sendControl(message: Record<string, unknown>): void {

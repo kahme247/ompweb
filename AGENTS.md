@@ -729,8 +729,8 @@ during the wait.
   tools + chat + file watch per tab) froze everything after ~2 tabs, so
   **never add a new `EventSource`** for live data: add a channel instead.
 - `lib/event-stream-worker.ts` (SharedWorker; dedicated Worker where
-  SharedWorker is missing) holds the only `/api/events` EventSource (or, in
-  `ws` mode, the browser link below) and multiplexes every tab's subscriptions:
+  SharedWorker is missing) holds the browser's one connection: by default the browser link below, one WebSocket;
+  the only `/api/events` EventSource is the fallback (a stored `sse` setting, or a proxy that refuses the upgrade). It multiplexes every tab's subscriptions:
   frames arrive as `event: <subId>`, control frames as `event: mux`
   (`hello`/`open`/`end`). Subscriptions are attached with `POST /api/events`.
   `buildEventStreamWorker` (`server/client-env.ts`) bundles it into one classic

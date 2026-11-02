@@ -174,6 +174,10 @@ your user or system environment (for example `setx OMP_WEB_PASSWORD_HASH
 started with. Changing or removing the hash takes effect at the next server
 restart, without signing out of Windows.
 
+### Behind a reverse proxy
+
+Forward WebSocket upgrades on `/api/events/link` (browsers) and `/api/hosts/link` (hosts); without the upgrade, a browser falls back to server-sent events after a few seconds. In nginx that means `proxy_http_version 1.1;`, `proxy_set_header Upgrade $http_upgrade;`, `proxy_set_header Connection "upgrade";`, and a `proxy_read_timeout` well above 30 s.
+
 ### Two services: the web server and the local daemon
 
 ompweb runs this machine's `omp` sessions through a small daemon, `ompweb host`,
@@ -468,7 +472,7 @@ everything else on it: they resume when it wakes, and the link returns then. A
 docked or no-sleep setup keeps running with the lid closed. Revoking a host in
 Settings closes its link and the daemon stops its omp processes.
 
-Behind a reverse proxy, forward WebSocket upgrades on `/api/hosts/link` (host links) and `/api/events/link` (browsers; a browser whose proxy refuses the upgrade falls back to server-sent events) (nginx: `proxy_http_version 1.1;`, `proxy_set_header Upgrade $http_upgrade;`, `proxy_set_header Connection "upgrade";`, and a `proxy_read_timeout` well above 30 s).
+A reverse proxy must forward the upgrade on `/api/hosts/link`; see [Behind a reverse proxy](#behind-a-reverse-proxy).
 
 Update ompweb on the server before its hosts: a host from before this version shows **needs upgrade** until it is updated.
 
