@@ -1,10 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createJiti } from "jiti";
 
-const jiti = createJiti(import.meta.url, { tryNative: false, tsconfigPaths: true });
-const { livePlace } = await jiti.import("./SessionSidebar-helpers.ts");
-const { groupProjectsByHost } = await jiti.import("../lib/project-ordering.ts");
+const { livePlace } = await import("./SessionSidebar-helpers.ts");
+const { groupProjectsByHost } = await import("../lib/project-ordering.ts");
 
 const hosts = [{ id: "local", label: "This machine" }, { id: "h1", label: "Build box" }];
 const selected = { cwd: "/here", hostId: "local" };
@@ -30,7 +28,7 @@ test("a live session's place comes from the freshest source, with that source's 
 });
 
 test("hostsCameOnline: a link-up transition, or a remote host already linked at the first snapshot", async () => {
-  const { hostsCameOnline } = await jiti.import("./SessionSidebar-helpers.ts");
+  const { hostsCameOnline } = await import("./SessionSidebar-helpers.ts");
   const row = (id, status) => ({ id, status });
   const local = row("local", "online");
   assert.equal(hostsCameOnline(null, [local]), false, "first snapshot, this machine only: the load has its sessions");

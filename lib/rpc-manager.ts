@@ -510,7 +510,7 @@ export class AgentSessionWrapper {
   }
 
   /** A remote link that dropped this child's buffered output asks for a reconcile.
-   * Duck-typed: route bundles and instrumentation load separate hub modules. */
+   * Duck-typed: a `bun --hot` re-evaluation can leave live transports on an older class. */
   private watchResync(proc: RpcProcess): void {
     proc.transport?.onResync?.(() => {
       if (this.proc === proc) void this.reconcileAfterGap();
@@ -2546,7 +2546,7 @@ export async function restartAllRpcSessions(): Promise<number> {
 // Pushes the current set of running session ids to subscribers whenever any
 // session's running state may have changed. This lets the sidebar receive live
 // updates over SSE instead of polling. Listeners live on globalThis so they
-// survive Next.js hot-reload.
+// survive a `bun --hot` re-evaluation.
 // ----------------------------------------------------------------------------
 
 function getRunningListeners(): Set<(update: RunningSessionUpdate) => void> {

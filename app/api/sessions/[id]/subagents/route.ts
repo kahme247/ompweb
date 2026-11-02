@@ -1,9 +1,6 @@
-import { NextResponse } from "next/server";
 import { apiErrorResponse, opErrorResponse, resolveSessionHostOr404 } from "@/lib/api-utils";
 import { HostOpError } from "@/lib/hosts/link-protocol";
 import { getRpcSession } from "@/lib/rpc-manager";
-
-export const dynamic = "force-dynamic";
 
 /**
  * GET /api/sessions/[id]/subagents
@@ -24,15 +21,15 @@ export async function GET(
       // history yet", not "unknown session". The client treats an empty
       // roster the same as a 404, so answer 200 to keep the console clean.
       if (getRpcSession(id)?.isAlive()) {
-        return NextResponse.json({ subagents: [] });
+        return Response.json({ subagents: [] });
       }
       return resolved.response;
     }
     const result = await resolved.host.sessionOps.readSubagentHistory(id);
-    return result.ok ? NextResponse.json(result.value) : opErrorResponse(result);
+    return result.ok ? Response.json(result.value) : opErrorResponse(result);
   } catch (error) {
     if (error instanceof HostOpError) return apiErrorResponse(error);
-    return NextResponse.json(
+    return Response.json(
       { error: error instanceof Error ? error.message : String(error) },
       { status: 500 },
     );

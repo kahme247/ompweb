@@ -27,7 +27,7 @@ A clean, modern web UI for the [oh-my-pi (omp)](https://github.com/can1357/oh-my
 ## Requirements
 
 - [omp](https://github.com/can1357/oh-my-pi) installed and available on your `PATH` (or specified via `OMP_WEB_OMP_BIN`)
-- Node.js `>= 24`
+- Node.js `>= 24`. The server runs on [Bun](https://bun.sh), which installs automatically as a dependency of the npm package (a Bun on your `PATH` is used if the bundled one is missing)
 
 The **Steer** action on a queued follow-up requires an omp runtime with the `promote_queued_message` RPC command (not available in omp 18.1.16). Older runtimes report an error and leave the message queued as a follow-up; ompweb does not send a duplicate steering message.
 
@@ -109,6 +109,8 @@ nix run github:kahme247/ompweb
 npm install -g @kahme247/ompweb
 ompweb
 ```
+
+**Or download the single binary** (no Node or npm): see [Single binary](#single-binary).
 
 Open [http://127.0.0.1:30177](http://127.0.0.1:30177) in your browser.
 
@@ -202,6 +204,87 @@ the daemon's link when it starts, so start the web server first.
   for a loopback bind address.
 - **Development:** `npm run dev` does not take the daemon (see
   [Development](#development)).
+
+### Single binary
+
+Each [release](https://github.com/kahme247/ompweb/releases/latest) also ships
+ompweb as one compiled program with the files it serves beside it:
+`ompweb-linux-x64.tar.gz`, `ompweb-linux-arm64.tar.gz`, `ompweb-darwin-x64.tar.gz`,
+`ompweb-darwin-arm64.tar.gz` and `ompweb-windows-x64.zip`. It needs no Node, npm
+or Bun; only omp must be installed. The x64 builds use Bun's baseline runtime, so
+they also run on CPUs without AVX2. Each archive carries the licenses of what it
+bundles in `licenses/`. Every commit on `main` that passes CI is also published as a
+[prerelease](https://github.com/kahme247/ompweb/releases) named after the time it was
+built (for example `2026-11-01T10:30:00Z`), with the same five archives.
+
+```bash
+tar -xzf ompweb-linux-x64.tar.gz -C ~/.local/share   # unpacks ompweb-linux-x64/
+~/.local/share/ompweb-linux-x64/ompweb               # the web server: same options and environment variables as above
+~/.local/share/ompweb-linux-x64/ompweb host          # the local daemon, in a second terminal
+```
+
+- **Keep `ompweb` in its directory.** It serves `dist/`, `public/` and the other
+  files from the directory it is in (a symlink to it on your `PATH` works), or
+  from `OMP_WEB_PACKAGE_DIR` when that is set.
+- **macOS** quarantines downloads: run `xattr -dr com.apple.quarantine ompweb-darwin-arm64`
+  once before the first start.
+- **macOS 15 and later** ask before an app may reach your local network. If
+  `ompweb host` on a Mac reports `ECONNREFUSED` for a server on your LAN while
+  `curl` reaches it, allow your terminal (or `ompweb`) under System Settings →
+  Privacy & Security → Local Network. A server reached over a VPN such as
+  Tailscale, or a host started from an SSH session, is not affected.
+- **No tray, service installers or in-app update.** To update, stop `ompweb` and
+  `ompweb host`, replace the directory with the new release, and start both again;
+  **Settings → System** links the release page when a new version is out.
+  Your sessions and settings live in `~/.omp`, not in that directory.
+- **As systemd user services**, write the two units yourself (adjust the paths;
+  add omp's directory to `PATH`, or set `OMP_WEB_OMP_BIN`):
+
+```ini
+# ~/.config/systemd/user/ompweb.service
+[Unit]
+Description=ompweb web service
+
+[Service]
+WorkingDirectory=%h
+ExecStart=%h/.local/share/ompweb-linux-x64/ompweb --no-open
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+# OMP_WEB_PASSWORD_HASH, PORT and OMP_WEB_HOSTNAME go here, as for ompweb-systemd.
+EnvironmentFile=-%h/.omp/agent/web-service.env
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
+```
+
+```ini
+# ~/.config/systemd/user/ompweb-host.service
+[Unit]
+Description=ompweb host daemon
+# It exits until the web server has written its link: keep restarting.
+StartLimitIntervalSec=0
+
+[Service]
+WorkingDirectory=%h
+ExecStart=%h/.local/share/ompweb-linux-x64/ompweb host
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-%h/.omp/agent/web-service.env
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now ompweb ompweb-host
+```
+
+  On macOS, two launchd agents (`ProgramArguments` `…/ompweb --no-open` and
+  `…/ompweb host`, with `RunAtLoad` and `KeepAlive`) do the same; on Windows, two
+  Task Scheduler tasks that run `ompweb.exe --no-open` and `ompweb.exe host` at logon.
 
 ### Run as a Windows Service (System Tray)
 
@@ -407,9 +490,9 @@ Notes:
   whoever controls the ompweb server or the token. Keep the token private and
   revoke it when a machine is retired.
 - **Not available on remote hosts yet:** the file explorer, Git and worktree
-  panels, directory browsing, and the Skills, Plugins, Agents and MCP settings only
-  work on the machine ompweb runs on. Chat, session history, notifications and
-  starting sessions work on every host.
+  panels, directory browsing, archiving sessions, and the Skills, Plugins, Agents
+  and MCP settings only work on the machine ompweb runs on. Chat, session history,
+  notifications and starting sessions work on every host.
 - **Agent-started sessions:** with agent tools enabled, an agent can pass a `host`
   to `new_session` (it defaults to the agent's own host). A remote host asks for
   confirmation each time unless **Agents can start sessions here without asking**
@@ -449,7 +532,6 @@ Notes:
 | `OMP_WEB_DISABLE_AUTOUPDATE` | Set to `1` to disable update checks and in-app updates; restart after changing | `0` |
 | `OMP_WEB_NAME` | Name shown in browser tabs and installed-app names. `url`, `host` or `domain` (any case) uses the hostname the browser connected to, without port; localhost and IP addresses keep `omp web`. Any other value is used as-is. Restart after changing | `omp web` |
 | `OMP_WEB_OMP_BIN` | Path to `omp` binary if not on `PATH` | _auto-detected_ |
-| `OMP_WEB_DEV_ORIGIN` | Additional allowed hostname for the development server (no scheme or port); ignored in production | _None_ |
 | `PI_CODING_AGENT_DIR` | Custom omp agent directory | `~/.omp/agent` |
 | `OMP_WEB_STT_ENDPOINT` | OpenAI-compatible transcription endpoint URL. Leave unset to transcribe with `OMP_WEB_STT_MODEL` through omp's own credentials | _None_ |
 | `OMP_WEB_STT_KEY` | Optional API key for the STT endpoint | _None_ |
@@ -581,28 +663,15 @@ A dev server does not take over the local daemon: only the production web
 server writes the daemon's `host.json`, so "This machine" shows offline in dev
 and the daemon stays linked to your installed ompweb.
 
-The development server allows loopback and RFC1918 private IPv4 origins
-(`10.0.0.0/8`, `172.16.0.0/12`, and `192.168.0.0/16`). When using a tunnel
-or reverse proxy with a custom hostname, set it without editing `next.config.ts`:
-
-```bash
-OMP_WEB_DEV_ORIGIN=dev.example.com npm run dev
-```
-
-For a persistent setup, set the variable in your local environment or service
-configuration and restart the dev server. This does not change the bind address
-or enable authentication. Next.js hostname patterns cannot express IPv6 CIDRs;
-a private IPv6 origin must be supplied explicitly (for example, `[fd00::1]`).
+`npm run dev` runs the server with Bun hot reload. `npm run build` bundles the browser app into `dist/`, and `npm start` serves it on port 30177 (`npm run smoke` checks the result). `npm run dev:lan` binds the dev server to all interfaces. `npm run build:binary` builds the [single binary](#single-binary) for this machine into `release/` (`-- --target bun-linux-arm64` and the like for another platform; `npm run smoke -- --binary release/ompweb-linux-x64/ompweb` checks it).
 
 ### Checks
 
 ```bash
 npm run typecheck   # Type check (TypeScript)
 npm run lint        # ESLint
-npm test            # Run test suite
+npm test            # Run test suite (bun test)
 ```
-
-> **Note**: Do not run `npm run build` during local dev — it populates `.next/` and can break `npm run dev`.
 
 ## License & Credits
 

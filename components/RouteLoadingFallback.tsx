@@ -1,18 +1,9 @@
-import { Suspense } from "react";
-import { headers } from "next/headers";
-import { AppShell } from "@/components/AppShell";
-import { getInstallName } from "@/lib/install-name";
-
-export default async function Home() {
-  const appName = getInstallName(await headers());
-  return (
-    <Suspense fallback={<RouteLoadingFallback />}>
-      <AppShell appName={appName} />
-    </Suspense>
-  );
-}
-
-function RouteLoadingFallback() {
+/**
+ * The shell silhouette shown until AppShell renders. app/index.html carries the same markup as static HTML, so the
+ * browser paints it as soon as the page and its stylesheet arrive (Next server-rendered it); RouteLoadingFallback.test
+ * keeps the two copies identical.
+ */
+export function RouteLoadingFallback() {
   return (
     <div className="route-fallback" role="status" aria-busy="true" aria-label="Loading omp web">
       <aside className="route-fallback-sidebar" aria-hidden="true">

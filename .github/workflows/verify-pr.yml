@@ -58,6 +58,46 @@ jobs:
       - name: Verify production build
         run: npm run build
 
+      - name: Smoke test
+        run: npm run smoke
+
+      # The release binary for this runner (the -baseline x64 build releases ship), from the client built above, with its
+      # own `ompweb host` daemon (scripts/build-binary.ts).
+      - name: Binary smoke test
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            npx bun scripts/build-binary.ts --target bun-windows-x64-baseline
+            npm run smoke -- --binary release/ompweb-windows-x64/ompweb.exe
+          else
+            npx bun scripts/build-binary.ts --target bun-linux-x64-baseline
+            npm run smoke -- --binary release/ompweb-linux-x64/ompweb
+          fi
+
+      - name: Packed install smoke test
+        shell: bash
+        run: |
+          npm pack --ignore-scripts
+          npm install -g --prefix "$RUNNER_TEMP/ompweb-prefix" ./kahme247-ompweb-*.tgz
+          npm run smoke -- --package "$(npm root -g --prefix "$RUNNER_TEMP/ompweb-prefix")/@kahme247/ompweb"
+
+      # Bun's postinstall does not run here: the launcher must fall back to @oven/bun-<os>-<arch> (spec R1).
+      - name: Packed install smoke test (install scripts disabled)
+        shell: bash
+        run: |
+          npm install -g --ignore-scripts --prefix "$RUNNER_TEMP/ompweb-prefix-no-scripts" ./kahme247-ompweb-*.tgz
+          npm run smoke -- --package "$(npm root -g --prefix "$RUNNER_TEMP/ompweb-prefix-no-scripts")/@kahme247/ompweb"
+
+      - name: Parse Windows PowerShell scripts (Windows only)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($f in 'scripts/windows/omp-web-service.ps1', 'scripts/windows/omp-web-tray.ps1') {
+            $e = $null
+            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f).Path, [ref]$null, [ref]$e) | Out-Null
+            if ($e) { $e; exit 1 }
+          }
+
       - name: Verify Windows System Tray & Shortcuts (Windows only)
         if: runner.os == 'Windows'
         run: |

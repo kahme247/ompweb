@@ -1,4 +1,3 @@
-import { NextResponse } from "next/server";
 import { createHash } from "crypto";
 import { listSessionsAllHosts } from "@/lib/hosts/session-index";
 import { getRunningRpcSessions } from "@/lib/rpc-manager";
@@ -71,7 +70,7 @@ export async function GET(req: Request) {
       const matched = sessions.filter((s) => s.id === filterId);
       const body = { sessions: matched, runningSessionIds, runningSessions };
       const bodyJson = JSON.stringify(body);
-      return new NextResponse(bodyJson, {
+      return new Response(bodyJson, {
         headers: { "Content-Type": "application/json", ...SESSION_LIST_HEADERS },
       });
     }
@@ -95,9 +94,9 @@ export async function GET(req: Request) {
     ) {
       cache.sessionsRef = sessions;
       if (ifNoneMatch === cache.etag) {
-        return new NextResponse(null, { status: 304, headers: { ETag: cache.etag, ...SESSION_LIST_HEADERS } });
+        return new Response(null, { status: 304, headers: { ETag: cache.etag, ...SESSION_LIST_HEADERS } });
       }
-      return new NextResponse(cache.bodyJson, {
+      return new Response(cache.bodyJson, {
         headers: { ETag: cache.etag, "Content-Type": "application/json", ...SESSION_LIST_HEADERS },
       });
     }
@@ -113,11 +112,11 @@ export async function GET(req: Request) {
     cache.etag = etag;
 
     if (ifNoneMatch === etag) {
-      return new NextResponse(null, { status: 304, headers: { ETag: etag, ...SESSION_LIST_HEADERS } });
+      return new Response(null, { status: 304, headers: { ETag: etag, ...SESSION_LIST_HEADERS } });
     }
-    return new NextResponse(bodyJson, { headers: { ETag: etag, "Content-Type": "application/json", ...SESSION_LIST_HEADERS } });
+    return new Response(bodyJson, { headers: { ETag: etag, "Content-Type": "application/json", ...SESSION_LIST_HEADERS } });
   } catch (error) {
-    return NextResponse.json(
+    return Response.json(
       { error: error instanceof Error ? error.message : String(error), code: "internal_error" },
       { status: 500, headers: { "Cache-Control": "no-store" } },
     );

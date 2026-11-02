@@ -2,11 +2,9 @@ import assert from "node:assert/strict";
 import "../tests/setup-dom.mjs";
 import test, { afterEach } from "node:test";
 import React from "react";
-import { cleanup, render, waitFor } from "@testing-library/react/pure.js";
-import { createJiti } from "jiti";
+const { cleanup, render, waitFor } = await import("@testing-library/react/pure.js");
 
-const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
-const { IosFocusZoomGuard } = await jiti.import("./IosFocusZoomGuard.tsx");
+const { IosFocusZoomGuard } = await import("./IosFocusZoomGuard.tsx");
 
 const BASE = "width=device-width, initial-scale=1";
 const IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15";
@@ -20,7 +18,7 @@ function device(t, userAgent, platform, maxTouchPoints) {
   }
 }
 
-// React can mount a fresh viewport meta after hydration; model that as a replacement.
+// A viewport meta that replaces the original one later.
 function replaceViewportMeta() {
   document.head.querySelector('meta[name="viewport"]')?.remove();
   const meta = document.createElement("meta");
@@ -40,7 +38,7 @@ for (const [name, userAgent, platform, touchPoints] of [
   ["iPhone", IPHONE, "iPhone", 5],
   ["iPadOS with a desktop user agent", MAC, "MacIntel", 5],
 ]) {
-  test(`${name} caps viewport scale, including on a viewport meta React mounts later`, async (t) => {
+  test(`${name} caps viewport scale, including on a viewport meta that replaces it later`, async (t) => {
     device(t, userAgent, platform, touchPoints);
     replaceViewportMeta();
     render(React.createElement(IosFocusZoomGuard));

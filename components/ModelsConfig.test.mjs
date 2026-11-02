@@ -1,12 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createJiti } from "jiti";
 
-const jiti = createJiti(import.meta.url, {
-  jsx: { runtime: "automatic" },
-  tsconfigPaths: true,
-});
-const { providerInitials } = await jiti.import("./ModelsConfig.tsx");
+const { providerInitials } = await import("./ModelsConfig.tsx");
 
 test("provider glyphs derive from arbitrary runtime provider ids", () => {
   assert.equal(providerInitials("acme-provider"), "AP");

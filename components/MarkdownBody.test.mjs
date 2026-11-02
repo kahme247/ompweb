@@ -2,15 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createJiti } from "jiti";
 
-const jiti = createJiti(import.meta.url, {
-  jsx: { runtime: "automatic" },
-  tsconfigPaths: true,
-});
-const { MarkdownBody } = await jiti.import("./MarkdownBody.tsx");
-const { normalizeDisplayMath, loadMathMarkdownPlugins } = await jiti.import("../lib/markdown.ts");
-const { GithubRepoContext } = await jiti.import("../lib/github-refs.ts");
+const { MarkdownBody } = await import("./MarkdownBody.tsx");
+const { normalizeDisplayMath, loadMathMarkdownPlugins } = await import("../lib/markdown.ts");
+const { GithubRepoContext } = await import("../lib/github-refs.ts");
 
 function renderMarkdown(markdown) {
   return renderToStaticMarkup(
@@ -135,7 +130,7 @@ test("does not leak react-markdown node metadata onto inline code", () => {
   assert.doesNotMatch(html, /\snode=/);
 });
 
-const agentLinkModule = await jiti.import("../lib/agent-links.ts");
+const agentLinkModule = await import("../lib/agent-links.ts");
 const { AgentLinkContext, agentLinkIds } = agentLinkModule;
 
 function renderWithAgentLinks(markdown) {
