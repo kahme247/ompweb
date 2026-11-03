@@ -1275,7 +1275,9 @@ during the wait.
   with 504 `upload_stalled` and forgets it without aborting it on the host, so
   the tab's automatic resume continues it. Page navigation settles pending
   WebSocket-upload promises before the worker's `bye`: a composer retained by
-  bfcache shows Retry after restoration, not a permanently uploading chip.
+  bfcache shows Retry after restoration, not a permanently uploading chip. That
+  failure (410) gives the chip a new upload id, so its Retry starts over and the
+  old id's pending cancel (worker, HTTP DELETE or host) can never delete it.
   The daemon's `sweep` deletes staged files older than 24 h and aborts open uploads
   idle (no start/write) over 24 h (`STAGED_MAX_AGE_MS`): at start, on every
   `uploadStart`, and every hour (`UPLOAD_SWEEP_INTERVAL_MS`).
