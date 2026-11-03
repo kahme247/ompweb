@@ -26,7 +26,8 @@ class FakeStream {
     this.channel = channel;
     this.readyState = FakeStream.CONNECTING;
     this.closedByCaller = false;
-    world.esInstances.push(this);
+    // The hook's `running` subscription is not a session observer: tests count those.
+    (channel.kind === "running" ? world.runningStreams : world.esInstances).push(this);
   }
   deliver(message) {
     this.port.onmessage?.({ data: { id: this.id, ...message } });
@@ -110,6 +111,7 @@ function jsonResponse(status, value) {
 // Backend snapshot the router serves. Tests mutate these between phases.
 const world = {
   esInstances: [],
+  runningStreams: [],
   calls: [],
   holds: [], // { match(method, url, body), produce: () => Promise<{ status, value }> }
   sessions: new Map(), // sid -> { leafId, messages, entryIds }
@@ -371,6 +373,7 @@ function callsTo(method, urlPart) {
 
 function resetWorld() {
   world.esInstances.length = 0;
+  world.runningStreams.length = 0;
   world.calls.length = 0;
   world.holds.length = 0;
   world.sessions.clear();
@@ -1808,6 +1811,44 @@ test("fatal SSE error mid-run reconnects after 1s and the new stream delivers ev
   });
   await settle();
   assert.equal(w.latest.agentRunning, false, "events must flow through the replacement stream");
+});
+
+test("a chat with no stream attaches when the running channel reports its session", async () => {
+  resetWorld();
+  primeSession("started-elsewhere", [userMsg("u0", "q")]);
+  const w = await mountSession("started-elsewhere");
+  assert.equal(world.esInstances.length, 0, "an idle chat has no observer");
+  const running = world.runningStreams.at(-1);
+  assert.ok(running, "the chat watches the running channel");
+  // Another chat instance (the user switched away and back) started the run after this one loaded.
+  world.agents.set("started-elsewhere", { running: true, state: { isStreaming: true, isPromptRunning: true } });
+  await act(async () => {
+    running.deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["other"] }) });
+    await settle();
+  });
+  assert.equal(world.esInstances.length, 0, "another session's run is not this chat's");
+  await act(async () => {
+    running.deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["started-elsewhere"] }) });
+    await settle();
+  });
+  assert.equal(world.esInstances.length, 1, "the chat attaches its observer");
+  assert.equal(lastEs().channel.sessionId, "started-elsewhere");
+  assert.equal(w.latest.agentRunning, true);
+});
+
+test("a running frame never touches a chat that already has its stream", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  const { w } = await startRun("s1", "q1");
+  const streams = world.esInstances.length;
+  const gets = world.calls.filter((call) => call.method === "GET" && call.url === "/api/agent/s1").length;
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["s1"] }) });
+    await settle();
+  });
+  assert.equal(world.esInstances.length, streams);
+  assert.equal(world.calls.filter((call) => call.method === "GET" && call.url === "/api/agent/s1").length, gets);
+  assert.equal(w.latest.agentRunning, true);
 });
 
 test("unmount mid-run closes the stream and late frames cannot resurrect state", async () => {

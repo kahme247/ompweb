@@ -3984,6 +3984,79 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     completionScrollAllowedRef.current = end.getBoundingClientRect().bottom - container.getBoundingClientRect().bottom <= 24;
   }, []);
 
+  // Attach to a run omp has going for `sid` when this chat has no stream yet: on
+  // load, and when the running channel reports a run that started after the load
+  // (another tab or device, or a send from a chat instance the user left).
+  const attachLiveRun = useCallback((sid: string, agentState: { running?: boolean; state?: AgentStateResponse }) => {
+    if (!agentState.running || eventSourceRef.current) return;
+    void connectEvents(sid);
+    if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
+      agentRunningRef.current = true;
+      setAgentRunning(true);
+      setAgentPhase(agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
+      dispatch({ type: "start" });
+      // Register the host-tool + URI bridges so the agent can call
+      // open_url/notify/open_file and resolve pi-web://clipboard.
+      void registerHostTools(sid);
+      void registerHostUriSchemes(sid);
+      // Rehydrate the live roster (missed lifecycle/progress frames).
+      // Tracked + session-guarded: a session switch during the delay must
+      // not issue a stale get_subagents against the old session.
+      if (rosterRefreshTimerRef.current) {
+        clearTimeout(rosterRefreshTimerRef.current);
+        rosterRefreshTimerRef.current = null;
+      }
+      rosterRefreshTimerRef.current = setTimeout(() => {
+        rosterRefreshTimerRef.current = null;
+        if (sessionIdRef.current !== sid) return;
+        void refreshSubagentRoster(sid);
+      }, 600);
+      if (!agentState.state.isStreaming && agentState.state.isPromptRunning) {
+        void waitForPromptSettlement(sid);
+      }
+    }
+    if (agentState.state?.isBashRunning) {
+      bashRunningRef.current = true;
+      setBashRunning(true);
+      void waitForBashSettlement(sid);
+    }
+  }, [connectEvents, refreshSubagentRoster, registerHostTools, registerHostUriSchemes, waitForBashSettlement, waitForPromptSettlement]);
+  const attachLiveRunRef = useRef(attachLiveRun);
+  attachLiveRunRef.current = attachLiveRun;
+
+  // The sidebar's running badge comes from this channel; a chat showing that
+  // session without a stream rechecks omp and attaches, so it never needs a reload.
+  useEffect(() => {
+    if (!session?.id) return;
+    const source = openEventStream({ kind: "running" });
+    let checking = false;
+    source.onmessage = (e) => {
+      const sid = sessionIdRef.current;
+      // A run this chat already shows, or a stream its backoff timer is reconnecting, is not news.
+      if (checking || !sid || !hookAliveRef.current || eventSourceRef.current || agentRunningRef.current || reconnectTimerRef.current) return;
+      let ids: unknown;
+      try {
+        const frame = JSON.parse(e.data) as { type?: string; runningSessionIds?: unknown };
+        if (frame.type !== "running") return;
+        ids = frame.runningSessionIds;
+      } catch {
+        return;
+      }
+      if (!Array.isArray(ids) || !ids.includes(sid)) return;
+      checking = true;
+      void fetch(`/api/agent/${encodeURIComponent(sid)}`)
+        .then((res) => (res.ok ? res.json() as Promise<{ running?: boolean; state?: AgentStateResponse }> : null))
+        .then((data) => {
+          if (data && hookAliveRef.current && sessionIdRef.current === sid) attachLiveRunRef.current(sid, data);
+        })
+        .catch(() => {
+          // The next running frame retries.
+        })
+        .finally(() => { checking = false; });
+    };
+    return () => source.close();
+  }, [session?.id]);
+
   // Load session on mount
   // React StrictMode re-invokes this effect for the freshly mounted keyed
   // <ChatWindow> (setup → cleanup → setup), which made every session switch
@@ -4017,40 +4090,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             });
           }
         }
-        if (agentState?.running && !eventSourceRef.current) {
-          void connectEvents(session.id);
-          if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
-            agentRunningRef.current = true;
-            setAgentRunning(true);
-            setAgentPhase(agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
-            dispatch({ type: "start" });
-            // Register the host-tool + URI bridges so the agent can call
-            // open_url/notify/open_file and resolve pi-web://clipboard.
-            void registerHostTools(session.id);
-            void registerHostUriSchemes(session.id);
-            // Rehydrate the live roster (missed lifecycle/progress frames).
-            // Tracked + session-guarded: a session switch during the delay must
-            // not issue a stale get_subagents against the old session.
-            if (rosterRefreshTimerRef.current) {
-              clearTimeout(rosterRefreshTimerRef.current);
-              rosterRefreshTimerRef.current = null;
-            }
-            const rosterTimerSid = session.id;
-            rosterRefreshTimerRef.current = setTimeout(() => {
-              rosterRefreshTimerRef.current = null;
-              if (sessionIdRef.current !== rosterTimerSid) return;
-              void refreshSubagentRoster(rosterTimerSid);
-            }, 600);
-            if (!agentState.state.isStreaming && agentState.state.isPromptRunning) {
-              void waitForPromptSettlement(session.id);
-            }
-          }
-          if (agentState.state?.isBashRunning) {
-            bashRunningRef.current = true;
-            setBashRunning(true);
-            void waitForBashSettlement(session.id);
-          }
-        }
+        if (agentState) attachLiveRun(session.id, agentState);
         if (agentState?.state) {
           // Model + thinking level are owned by loadSession (token-guarded);
           // re-applying this same snapshot here would mint a fresh token and
@@ -4065,7 +4105,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshSubagentRoster, registerHostTools, registerHostUriSchemes]);
+  }, [attachLiveRun]);
 
   useEffect(() => {
     onSystemPromptChange?.(systemPrompt);
