@@ -4028,8 +4028,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       void waitForBashSettlement(sid);
     }
   }, [connectEvents, refreshSubagentRoster, registerHostTools, registerHostUriSchemes, waitForBashSettlement, waitForPromptSettlement]);
-  const attachLiveRunRef = useRef(attachLiveRun);
-  attachLiveRunRef.current = attachLiveRun;
+  // The running-frame attach has no loadSession behind it: the run (maybe from another
+  // device) can use another model or thinking level, so sync them as a command does.
+  const attachStartedRunRef = useRef<(sid: string, agentState: { running?: boolean; state?: AgentStateResponse }) => void>(() => {});
+  attachStartedRunRef.current = (sid, agentState) => {
+    attachLiveRun(sid, agentState);
+    if (agentState.running) void refreshLiveModelState(sid);
+  };
 
   // The sidebar's running badge comes from this channel; a chat showing that
   // session without a stream rechecks omp and attaches, so it never needs a reload.
@@ -4054,7 +4059,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       void fetch(`/api/agent/${encodeURIComponent(sid)}`)
         .then((res) => (res.ok ? res.json() as Promise<{ running?: boolean; state?: AgentStateResponse }> : null))
         .then((data) => {
-          if (data && hookAliveRef.current && sessionIdRef.current === sid) attachLiveRunRef.current(sid, data);
+          if (data && hookAliveRef.current && sessionIdRef.current === sid) attachStartedRunRef.current(sid, data);
         })
         .catch(() => {
           // The next running frame retries.
