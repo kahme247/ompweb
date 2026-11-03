@@ -44,32 +44,42 @@ async function isRealDir(path: string): Promise<boolean> {
   }
 }
 
-/** Delete the regular files in `dir` last modified before `cutoff`. A symlink, directory or anything else is left alone;
- * an entry that fails (gone, not ours to delete) is skipped and tried at the next sweep. */
-async function sweepDir(dir: string, cutoff: number): Promise<void> {
+/** Delete the regular files in `dir` last modified before the cutoff `cutoff()` returns at that moment (null: stop). A
+ * symlink, directory or anything else is left alone; an entry that fails (gone, not ours to delete) is skipped and tried
+ * at the next sweep. Returns false once the policy says stop. */
+async function sweepDir(dir: string, cutoff: () => number | null): Promise<boolean> {
   let names: string[];
   try {
     names = await readdir(dir);
   } catch {
-    return;
+    return true;
   }
   for (const name of names) {
     const file = join(dir, name);
     try {
       const info = await lstat(file);
-      if (info.isFile() && info.mtimeMs < cutoff) await unlink(file);
+      if (!info.isFile()) continue;
+      // Read per file: a setting made longer (or Never) while this sweep runs must not lose a file to the old one.
+      const current = cutoff();
+      if (current === null) return false;
+      if (info.mtimeMs < current) await unlink(file);
     } catch {
       // Skipped.
     }
   }
+  return true;
 }
 
 /** Delete every sent upload older than `days` days at `now`. Fixed depth: only the uploads folders, never a tree below
  * them, and a `local` or `uploads` that is a symlink is not followed. The folders stay. Staged files keep U3's 24 h rule.
  * The symlink checks see each directory as it is when checked: a directory swapped for a link during the sweep is not
- * caught (Node has no `unlinkat`), which only a process already running as this user can do. */
-export async function sweepSentUploads(days: number, now = Date.now(), roots: RetentionRoots = defaultRoots()): Promise<void> {
-  const cutoff = now - days * DAY_MS;
+ * caught (Node has no `unlinkat`), which only a process already running as this user can do. `days` may be a function,
+ * read before each delete, so a sweep follows a setting changed while it runs (null: stop). */
+export async function sweepSentUploads(days: number | (() => number | null), now = Date.now(), roots: RetentionRoots = defaultRoots()): Promise<void> {
+  const cutoff = () => {
+    const current = typeof days === "function" ? days() : days;
+    return current === null ? null : now - current * DAY_MS;
+  };
   const folders: string[] = [];
   for (const root of [roots.sessions, roots.archive]) {
     for (const project of await subdirs(root)) {
@@ -84,7 +94,7 @@ export async function sweepSentUploads(days: number, now = Date.now(), roots: Re
     for (const session of await subdirs(roots.tmp)) folders.push(join(session, UPLOADS_LOCAL_DIR));
   }
   for (const folder of folders) {
-    if (await isRealDir(folder)) await sweepDir(folder, cutoff);
+    if (await isRealDir(folder) && !(await sweepDir(folder, cutoff))) return;
   }
 }
 
@@ -123,9 +133,10 @@ export class UploadRetention {
     this.timer = undefined;
   }
 
-  /** A sweep is idempotent and skips entries that vanish under it, so two at once are harmless. */
+  /** A sweep is idempotent and skips entries that vanish under it, so two at once are harmless. It reads the setting
+   * before each delete, so one still running after a change follows the new value. */
   sweep(now = Date.now()): Promise<void> {
-    return typeof this.days === "number" ? sweepSentUploads(this.days, now, this.roots) : Promise.resolve();
+    return typeof this.days === "number" ? sweepSentUploads(() => (typeof this.days === "number" ? this.days : null), now, this.roots) : Promise.resolve();
   }
 
   /** Op setUploadRetention: keep `days` (null: for ever), then sweep without holding up the answer. The same value as
