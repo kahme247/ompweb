@@ -899,6 +899,7 @@ during the wait.
 
 ### Running state + reconciliation
 - The sidebar subscribes to the `running` channel, backed by `subscribeRunningSessions()` in `lib/rpc-manager.ts`, so running badges update without polling.
+- An open chat subscribes to `running` too: when its session shows up there while the chat has no `session` stream (the run started after the chat loaded: another tab or device, or a send from a chat instance the user switched away from), it reads `GET /api/agent/[id]` and attaches exactly as on load (`attachLiveRun`). Without it the chat stayed idle beside a running badge until a reload.
 - `useAgentSession` still treats its `session` channel as primary for chat events, but while a run is active it periodically calls `GET /api/agent/[id]` and also reconciles on `visibilitychange`/`online`. This fixes missed `agent_end` events from background tabs or half-open connections.
 - Prompt runs use a monotonic run id; late SSE or slow reconciliation responses from an old run must be ignored so they cannot resurrect stale streaming bubbles.
 
