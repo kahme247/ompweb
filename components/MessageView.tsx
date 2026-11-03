@@ -1868,28 +1868,9 @@ function BashExecutionView({ message, sessionId }: { message: BashExecutionMessa
     setFullOutput(null);
   }, [message.command, message.fullOutputPath, message.output, message.timestamp]);
   const isPending = !message.output && message.exitCode === undefined && !message.cancelled;
-  const isError = message.cancelled || (message.exitCode !== undefined && message.exitCode !== 0);
-
-  // Reuse the existing ToolCallBlock so user-run bash looks identical to an
-  // agent-run bash tool call: same header, collapse behavior, result pane.
-  // Synthesize an equivalent ToolCallContent + ToolResultMessage pair.
-  const toolName = message.excludeFromContext ? "bash (local)" : "bash";
-  const block: ToolCallContent = {
-    type: "toolCall",
-    toolCallId: `bash-${message.timestamp ?? ""}`,
-    toolName,
-    input: { command: message.command },
-  };
-  const result: ToolResultMessage | undefined = isPending
-    ? undefined
-    : {
-        role: "toolResult",
-        toolCallId: block.toolCallId,
-        toolName,
-        content: message.output ? [{ type: "text", text: message.output }] : [],
-        isError,
-        timestamp: message.timestamp,
-      };
+  const failed = message.cancelled || (message.exitCode !== undefined && message.exitCode !== 0);
+  // Starts collapsed, as user-run bash always has; the header toggles it.
+  const [expanded, setExpanded] = useState(false);
 
   // Large executions record their full output to a temp file (fullOutputPath);
   // fetch it through the guarded bash-output route instead of re-reading the
@@ -1915,8 +1896,32 @@ function BashExecutionView({ message, sessionId }: { message: BashExecutionMessa
     : null;
 
   return (
-    <div data-selection-scope="message" tabIndex={-1} style={{ margin: "6px 0" }}>
-      <ToolCallBlock block={block} result={result} />
+    <div data-selection-scope="message" tabIndex={-1} className={`shell-run${failed ? " shell-run-failed" : ""}${expanded ? " shell-run-open" : ""}`}>
+      <Collapsible open={expanded} onOpenChange={setExpanded}>
+        <CollapsibleTrigger className="shell-run-header" disabled={isPending}>
+          <span className="shell-run-prompt" aria-hidden>$</span>
+          <code className="shell-run-command">{message.command}</code>
+          {message.excludeFromContext && (
+            <span className="shell-run-tag" title={t("messageView.shellLocalTitle")}>{t("messageView.shellLocal")}</span>
+          )}
+          <span className="shell-run-status">
+            {isPending ? (
+              <LoaderCircle size={13} strokeWidth={1.8} className="activity-row-spinner" aria-hidden />
+            ) : failed ? (
+              <>
+                <CircleAlert size={13} strokeWidth={1.8} aria-hidden />
+                {message.cancelled ? t("messageView.shellCancelled") : t("messageView.shellExit", { code: String(message.exitCode) })}
+              </>
+            ) : (
+              <Check size={13} strokeWidth={2} aria-hidden />
+            )}
+          </span>
+          <ChevronDown size={13} strokeWidth={1.8} aria-hidden className="shell-run-chevron" style={{ transform: expanded ? "rotate(180deg)" : undefined }} />
+        </CollapsibleTrigger>
+        {expanded && !isPending && (
+          <pre className="shell-run-output">{message.output || t("messageView.noOutput")}</pre>
+        )}
+      </Collapsible>
       {downloadUrl && (
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 6 }}>
           {fullOutput?.phase !== "ready" && (

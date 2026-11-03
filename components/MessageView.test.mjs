@@ -1040,3 +1040,41 @@ test("an open confirmation closes when the row starts showing another message", 
   assert.deepEqual(calls, []);
   view.unmount();
 });
+
+test("a `!` run renders as a shell card with its command, status and output", () => {
+  const shell = (message) => {
+    const view = render(React.createElement(MessageView, { message: { role: "bashExecution", ...message } }));
+    return { view, header: view.container.querySelector(".shell-run-header") };
+  };
+
+  const ok = shell({ command: "git status", output: "clean\n", exitCode: 0 });
+  assert.equal(ok.header.querySelector(".shell-run-command").textContent, "git status");
+  assert.equal(ok.view.container.querySelector(".shell-run-output"), null, "collapsed until opened");
+  fireEvent.click(ok.header);
+  assert.equal(ok.view.container.querySelector(".shell-run-output").textContent, "clean\n");
+  assert.equal(ok.view.container.querySelector(".shell-run-failed"), null);
+  assert.equal(ok.header.querySelector(".shell-run-tag"), null, "only `!!` runs are tagged local");
+  fireEvent.click(ok.header);
+  assert.equal(ok.view.container.querySelector(".shell-run-output"), null, "the header closes it again");
+  cleanup();
+
+  const failed = shell({ command: "false", output: "", exitCode: 1 });
+  assert.match(failed.header.querySelector(".shell-run-status").textContent, /exit 1/);
+  assert.ok(failed.view.container.querySelector(".shell-run-failed"));
+  fireEvent.click(failed.header);
+  assert.equal(failed.view.container.querySelector(".shell-run-output").textContent, "(no output)");
+  cleanup();
+
+  const cancelled = shell({ command: "sleep 9", output: "", cancelled: true });
+  assert.match(cancelled.header.querySelector(".shell-run-status").textContent, /cancelled/);
+  cleanup();
+
+  const local = shell({ command: "env", output: "A=1", exitCode: 0, excludeFromContext: true });
+  assert.equal(local.header.querySelector(".shell-run-tag").textContent, "local");
+  cleanup();
+
+  const pending = shell({ command: "make", output: "" });
+  assert.ok(pending.header.querySelector(".activity-row-spinner"), "a running command shows a spinner");
+  fireEvent.click(pending.header);
+  assert.equal(pending.view.container.querySelector(".shell-run-output"), null, "no empty output while it runs");
+});
