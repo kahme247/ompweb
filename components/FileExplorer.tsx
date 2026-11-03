@@ -552,6 +552,15 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const loadingPathsRef = useRef<Set<string>>(new Set());
+  // Listing generation: advanced whenever every cached listing is dropped
+  // (cwd change, hidden-items flip). An in-flight fetch carries the
+  // generation it started on; a response of an older one is discarded, so it
+  // cannot repopulate the cleared map, resurrect the hidden-item mode it
+  // listed, or clear the new request's loading state.
+  const listingGenerationRef = useRef(0);
+  // Last hidden-items mode the listing cache was built for (see the flip
+  // effect below); initialised to the mount value so mounting never counts.
+  const prevShowHiddenRef = useRef(showHidden);
   const rootRequestRef = useRef(0);
   const expandedPathsRef = useRef<Set<string>>(new Set());
   expandedPathsRef.current = expandedPaths;
@@ -710,10 +719,16 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   // against duplicate in-flight requests; the state copy drives spinners.
   const fetchDir = useCallback((dirPath: string) => {
     if (loadingPathsRef.current.has(dirPath)) return Promise.resolve();
+    const generation = listingGenerationRef.current;
+    // The shared loading bookkeeping belongs to the current generation only:
+    // a superseded response must neither clear the current request's spinner
+    // nor touch the ref the new dedupe guard reads.
+    const isCurrent = () => listingGenerationRef.current === generation;
     loadingPathsRef.current.add(dirPath);
     setLoadingPaths((prev) => new Set(prev).add(dirPath));
     return fetchEntries(dirPath, showHidden)
       .then((entries) => {
+        if (!isCurrent()) return;
         setChildrenByPath((prev) => {
           const next = new Map(prev);
           next.set(dirPath, entries);
@@ -722,9 +737,10 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         if (dirPath === cwd) setError(null);
       })
       .catch((e) => {
-        if (dirPath === cwd) setError(e instanceof Error ? e.message : String(e));
+        if (isCurrent() && dirPath === cwd) setError(e instanceof Error ? e.message : String(e));
       })
       .finally(() => {
+        if (!isCurrent()) return;
         loadingPathsRef.current.delete(dirPath);
         setLoadingPaths((prev) => {
           const next = new Set(prev);
@@ -974,6 +990,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
 
     // Reset expanded state only when cwd changes, not on refreshKey bumps
     if (cwdChanged) {
+      // Supersede in-flight listings of the previous directory too.
+      listingGenerationRef.current += 1;
       setExpandedPaths(new Set());
       setHighlightedPaths(new Set());
       setUploadSummary(null);
@@ -1010,11 +1028,13 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   // cached directory listing may survive it: drop the map (the root and every
   // expanded directory are then re-fetched by the effects above — the cached
   // listings of collapsed directories would otherwise be served stale when
-  // they expand). Expansion state is deliberately kept.
-  const prevShowHiddenRef = useRef(showHidden);
+  // they expand) and supersede the generation, so listings still in flight
+  // from the previous mode are discarded instead of repopulating the map.
+  // Expansion state is deliberately kept.
   useEffect(() => {
     if (prevShowHiddenRef.current === showHidden) return;
     prevShowHiddenRef.current = showHidden;
+    listingGenerationRef.current += 1;
     setChildrenByPath(new Map());
     loadingPathsRef.current = new Set();
     setLoadingPaths(new Set());
