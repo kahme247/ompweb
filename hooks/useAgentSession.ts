@@ -223,11 +223,18 @@ function toastStoppedSend(error: unknown, promptIssued = true): boolean | null {
   return error.mayHaveRun && promptIssued;
 }
 
-/** Whether omp recorded this held `!` run: a run of its command stamped after
- * every message that existed when it was sent. Both stamps are omp's clock, and
- * older runs predate `after` in every view (compacted or not). */
-function isHeldBashRecorded(messages: AgentMessage[], held: { command: string; after: number }): boolean {
-  return messages.some((message) => message.role === "bashExecution" && message.command === held.command && (message.timestamp ?? 0) > held.after);
+/** The held `!` runs omp has not recorded yet. A recorded run is a run of the
+ * command stamped after `after`, the newest omp stamp this tab had seen when it
+ * was sent (both omp's clock, so older runs never match in any view); each
+ * recorded run settles one held entry, oldest first, and `settled` holds the
+ * runs (`stamp:command`) that already settled one. Adds the runs it matches. */
+function unrecordedHeldBash<T extends { command: string; after: number }>(messages: AgentMessage[], held: T[], settled: Set<string>): T[] {
+  return held.filter((entry) => {
+    const run = messages.find((message) => message.role === "bashExecution" && message.command === entry.command
+      && (message.timestamp ?? 0) > entry.after && !settled.has(`${message.timestamp}:${message.command}`));
+    if (run) settled.add(`${run.timestamp}:${entry.command}`);
+    return !run;
+  });
 }
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
@@ -261,20 +268,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [pendingBash, setPendingBash] = useState<{ command: string; excludeFromContext: boolean } | null>(null);
   // `!` results from a running turn: omp holds them back until a later prompt
   // starts, so until the transcript has them they show from here, like the
-  // terminal's pending block. `after` is the newest omp timestamp the
-  // transcript had when it was sent.
+  // terminal's pending block. `after` is the newest omp stamp this tab had
+  // seen when it was sent; it only grows, so a history view cannot lower it.
   const [heldBash, setHeldBash] = useState<{ message: BashExecutionMessage; command: string; after: number }[]>([]);
+  const newestStampRef = useRef(0);
+  const newestStamp = useMemo(() => confirmedMessages.reduce((newest, message) => Math.max(newest, message.timestamp ?? 0), 0), [confirmedMessages]);
+  newestStampRef.current = Math.max(newestStampRef.current, newestStamp);
+  // Recorded runs that already settled a held entry, so one run settles one.
+  const settledRunsRef = useRef(new Set<string>());
   const deferredBash = useMemo(
-    () => heldBash.filter((held) => !isHeldBashRecorded(confirmedMessages, held)).map((held) => held.message),
+    () => unrecordedHeldBash(confirmedMessages, heldBash, new Set(settledRunsRef.current)).map((held) => held.message),
     [heldBash, confirmedMessages],
   );
   // Once the transcript has one, it is done for good: compaction or a branch
   // view without it must not bring the local copy back.
   useEffect(() => {
-    setHeldBash((prev) => {
-      const left = prev.filter((held) => !isHeldBashRecorded(confirmedMessages, held));
-      return left.length === prev.length ? prev : left;
-    });
+    const left = unrecordedHeldBash(confirmedMessages, heldBash, settledRunsRef.current);
+    if (left.length === heldBash.length) return;
+    // Keep entries added since this render.
+    setHeldBash((prev) => prev.filter((held) => left.includes(held) || !heldBash.includes(held)));
   }, [confirmedMessages, heldBash]);
   // False once this hook instance unmounts: background loops (prompt/bash
   // settlement polling) must not keep firing on a dead instance.
@@ -3032,8 +3044,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     bashRunningRef.current = true;
     setPendingBash({ command, excludeFromContext });
     setBashRunning(true);
-    // omp stamps the recorded run after every message it has written by now.
-    const after = confirmedMessages.reduce((latest, message) => Math.max(latest, message.timestamp ?? 0), 0);
+    const after = newestStampRef.current;
     try {
       const sid = sessionIdRef.current ?? session?.id ?? await ensureNewSession();
       if (!sid) throw new Error(translate("agentSession.shellSessionFailed"));
@@ -3074,7 +3085,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setPendingBash(null);
       setBashRunning(false);
     }
-  }, [addNotice, confirmedMessages, ensureNewSession, loadSession, opts.chatInputRef, promoteNewSession, session]);
+  }, [addNotice, ensureNewSession, loadSession, opts.chatInputRef, promoteNewSession, session]);
   executeBashRef.current = executeBash;
 
   const withdrawAndAbort = useCallback(async (sid: string, onAbortSent: () => void) => {

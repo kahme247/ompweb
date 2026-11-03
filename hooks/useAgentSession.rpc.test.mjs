@@ -5249,6 +5249,31 @@ test("a `!` command during a run runs at once and its held-back output shows unt
   });
 });
 
+test("two held runs of the same `!` command each wait for their own recorded run", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    const run = (timestamp) => ({ role: "bashExecution", command: "git status", output: "clean\n", exitCode: 0, timestamp });
+    primeSession("midrun-twice", [userMsg("u0", "q")]);
+    const { w, es } = await startRun("midrun-twice", "q1");
+    await act(async () => { es.emit({ type: "agent_start" }); await Promise.resolve(); });
+    const result = { output: "clean\n", exitCode: 0, cancelled: false, truncated: false, deferred: true };
+    world.socketAnswer = (command) => command.type === "bash" ? { status: 200, body: { success: true, data: result } } : null;
+    for (let i = 0; i < 2; i++) await act(async () => { await w.latest.handleSend("!git status"); await sleep(30); });
+    assert.equal(w.latest.deferredBash.length, 2);
+
+    const before = world.sessions.get("midrun-twice").messages;
+    saveSession("midrun-twice", [...before, run(5)]);
+    await act(async () => { publishSessionsChanged(["midrun-twice"]); });
+    await settle();
+    assert.equal(w.latest.deferredBash.length, 1, "one recorded run settles one held run");
+
+    saveSession("midrun-twice", [...before, run(5), run(6)]);
+    await act(async () => { publishSessionsChanged(["midrun-twice"]); });
+    await settle();
+    assert.deepEqual(w.latest.deferredBash, []);
+  });
+});
+
 test("Stop during a run with a `!` command beside it stops the turn, not the command", async () => {
   await inWebSocketMode(async () => {
     resetWorld();
