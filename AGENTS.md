@@ -754,6 +754,17 @@ during the wait.
   and the reply reports it (`{queued:true, queue:"followUp",
   reason:"shellRunning"}`), which the hook surfaces as a notice while rolling
   the phantom optimistic turn back. The chip still comes from omp's snapshot.
+  This applies only with no turn streaming: during a turn, prompts and steers
+  reach omp unchanged.
+- A `!cmd` submitted during a run is never queued as text: `sendQueued` hands
+  it to `handleSend`, which runs it at once beside the turn, as omp's terminal
+  does. omp holds such a result back until a later prompt starts (with omp
+  18.15 it was seen landing one prompt later than the next); the wrapper marks the reply
+  `deferred` (its `streaming` when the reply arrived, which is omp's own
+  `isStreaming`), and the hook shows it from `heldBash` (after the transcript)
+  until the transcript has one more run of that command than when it was
+  sent. Never clear it on a client event such as sending a prompt: the result
+  may reach the transcript one prompt later. Other tabs see it only from then on.
 
 ### Live event stream: one socket per browser (`/api/events`)
 - Browsers cap HTTP/1.1 at **6 connections per host across all tabs**, and an

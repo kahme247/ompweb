@@ -5204,6 +5204,38 @@ test("a `!` command the route refused is offered back to the composer with an er
   });
 });
 
+test("a `!` command during a run runs at once and its held-back output shows until the transcript has it", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    // An earlier run of the same command is already in the history.
+    const earlier = { role: "bashExecution", command: "echo hi", output: "hi\n", exitCode: 0 };
+    primeSession("midrun-bash", [userMsg("u0", "q"), earlier]);
+    const { w, es } = await startRun("midrun-bash", "q1");
+    await act(async () => { es.emit({ type: "agent_start" }); await Promise.resolve(); });
+    const result = { output: "hi\n", exitCode: 0, cancelled: false, truncated: false, deferred: true };
+    world.socketAnswer = (command) => command.type === "bash" ? { status: 200, body: { success: true, data: result } } : null;
+    let receipt;
+    await act(async () => { receipt = await w.latest.handleSend("!echo hi"); await sleep(30); });
+    assert.deepEqual(receipt, { status: "accepted" });
+    assert.equal(w.latest.agentRunning, true, "the turn keeps running");
+    assert.deepEqual(
+      w.latest.deferredBash.map(({ command, output, exitCode }) => ({ command, output, exitCode })),
+      [{ command: "echo hi", output: "hi\n", exitCode: 0 }],
+    );
+
+    await act(async () => { es.emit({ type: "agent_end", isTerminal: true, messages: [] }); await sleep(30); });
+    await settle();
+    assert.equal(w.latest.deferredBash.length, 1, "omp still holds it after the turn");
+
+    // omp writes it when a later prompt starts; from then on the transcript shows it.
+    saveSession("midrun-bash", [...world.sessions.get("midrun-bash").messages, { ...earlier, timestamp: 2 }]);
+    await act(async () => { publishSessionsChanged(["midrun-bash"]); });
+    await settle();
+    assert.equal(w.latest.messages.filter((message) => message.role === "bashExecution").length, 2);
+    assert.deepEqual(w.latest.deferredBash, []);
+  });
+});
+
 test("a steer whose session socket dropped before the answer is reported as taken", async () => {
   await inWebSocketMode(async () => {
     resetWorld();
