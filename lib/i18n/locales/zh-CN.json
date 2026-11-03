@@ -781,6 +781,7 @@
   "fileExplorer.searchPlaceholder": "搜索文件...",
   "fileExplorer.searchTruncated": "已显示 {count} 个匹配项。结果可能不完整；缩小查询范围可查看更多。",
   "fileExplorer.searching": "搜索中...",
+  "fileExplorer.showHiddenItems": "显示隐藏项目",
   "fileExplorer.skipExisting": "跳过已存在",
   "fileExplorer.skippedCount": "{count} 个已跳过",
   "fileExplorer.uploadCancelled": "已取消上传",

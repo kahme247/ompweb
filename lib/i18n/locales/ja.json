@@ -781,6 +781,7 @@
   "fileExplorer.searchPlaceholder": "ファイルを検索...",
   "fileExplorer.searchTruncated": "{count} 件を表示しています。結果は不完全な可能性があります。絞り込むとさらに表示されます。",
   "fileExplorer.searching": "検索中...",
+  "fileExplorer.showHiddenItems": "隠し項目を表示",
   "fileExplorer.skipExisting": "既存をスキップ",
   "fileExplorer.skippedCount": "{count} 件スキップ",
   "fileExplorer.uploadCancelled": "アップロードをキャンセルしました",

@@ -26,7 +26,7 @@ import { parseFormDataWithinLimit, parseJsonWithinLimit, RequestBodyTooLargeErro
 const IGNORED_NAMES = new Set([
   "node_modules", ".git", ".next", "dist", "build", "__pycache__",
   ".turbo", ".cache", "coverage", ".pytest_cache", ".mypy_cache",
-  "target", "vendor", ".DS_Store", ".git",
+  "target", "vendor", ".DS_Store",
 ]);
 
 const IGNORED_SUFFIXES = [".pyc"];
@@ -412,6 +412,10 @@ export async function GET(
       return Response.json({ error: "Invalid file request type", code: "invalid_request_type" }, { status: 400 });
     }
     const sessionId = searchParams.get("sessionId");
+    // The explorer's "Show hidden items" toggle: for `type=list` only, skip the
+    // IGNORED_NAMES/IGNORED_SUFFIXES skip-list so build/ and friends can be
+    // browsed. Everything else (reads, downloads) never applied it anyway.
+    const showHidden = searchParams.get("hidden") === "1";
 
     const access = await authorizeFileAccess(segments, sessionId, type !== "list");
     if (!access.ok) {
@@ -516,7 +520,7 @@ export async function GET(
     const readDirectorySync = Reflect.get(fs, "readdirSync") as typeof fs.readdirSync;
     const dirents = readDirectorySync(filePath, { withFileTypes: true });
     const entries = dirents
-      .filter((d) => !IGNORED_NAMES.has(d.name) && !IGNORED_SUFFIXES.some((s) => d.name.endsWith(s)))
+      .filter((d) => showHidden || (!IGNORED_NAMES.has(d.name) && !IGNORED_SUFFIXES.some((s) => d.name.endsWith(s))))
       .flatMap((d) => {
         const isDir = resolveDirentIsDirectory(d, path.join(filePath, d.name));
         return isDir === null
