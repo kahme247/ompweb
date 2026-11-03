@@ -4037,8 +4037,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     let checking = false;
     source.onmessage = (e) => {
       const sid = sessionIdRef.current;
-      // A run this chat already shows, or a stream its backoff timer is reconnecting, is not news.
-      if (checking || !sid || !hookAliveRef.current || eventSourceRef.current || agentRunningRef.current || reconnectTimerRef.current) return;
+      // A run or shell this chat already shows (executeBash owns its own settlement), or a stream its backoff
+      // timer is reconnecting, is not news.
+      if (checking || !sid || !hookAliveRef.current || eventSourceRef.current || agentRunningRef.current || bashRunningRef.current || reconnectTimerRef.current) return;
       let ids: unknown;
       try {
         const frame = JSON.parse(e.data) as { type?: string; runningSessionIds?: unknown };

@@ -1859,6 +1859,33 @@ test("a running frame never touches a chat that already has its stream", async (
   assert.equal(w.latest.agentRunning, true);
 });
 
+test("a running frame leaves a shell command this idle chat runs to the chat", async () => {
+  resetWorld();
+  primeSession("own-shell", [userMsg("u0", "q")]);
+  const w = await mountSession("own-shell");
+  assert.equal(world.esInstances.length, 0, "an idle chat has no observer");
+  let release;
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url === "/api/agent/own-shell" && body?.type === "bash",
+    produce: () => new Promise((resolve) => { release = () => resolve({ value: { success: true, data: { output: "", exitCode: 0 } } }); }),
+  });
+  let bash;
+  await act(async () => { bash = w.latest.handleSend("!sleep 5"); await sleep(30); });
+  assert.equal(w.latest.bashRunning, true);
+  // omp reports the session running while its shell runs; executeBash owns that command's settlement.
+  world.agents.set("own-shell", { running: true, state: { isBashRunning: true } });
+  const gets = world.calls.filter((call) => call.method === "GET" && call.url === "/api/agent/own-shell").length;
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["own-shell"] }) });
+    await settle();
+  });
+  assert.equal(world.calls.filter((call) => call.method === "GET" && call.url === "/api/agent/own-shell").length, gets);
+  assert.equal(world.esInstances.length, 0);
+  world.agents.set("own-shell", { running: false, state: {} });
+  await act(async () => { release(); await bash; await settle(); });
+  assert.equal(w.latest.bashRunning, false);
+});
+
 test("unmount mid-run closes the stream and late frames cannot resurrect state", async () => {
   resetWorld();
   primeSession("s1", [userMsg("u0", "q")]);
