@@ -14,7 +14,7 @@ export interface WorkspaceFileInfo {
   language: string; mime: string; previewKind: "pdf" | "docx" | null;
 }
 export interface WorkspaceDirectoryListing {
-  path: string; entries: Array<{ name: string; isDir: boolean; size: number; modified: string }>;
+  path: string; entries: Array<{ name: string; isDir: boolean; size: number; modified: string; linkTarget?: string; outsideRoot?: boolean }>;
 }
 export interface WorkspaceRead { id: string; info: WorkspaceFileInfo }
 export type WorkspaceIndex = { files: string[]; truncated: boolean } | { matches: FileIndexEntry[]; truncated?: boolean };
@@ -31,7 +31,7 @@ export type WorkspaceDirectoryBrowse =
 
 export interface WorkspaceOps {
   home(): Promise<OpResult<{ home: string }>>;
-  listFiles(input: WorkspaceFileRequest, showHidden: boolean): Promise<OpResult<WorkspaceDirectoryListing>>;
+  listFiles(input: WorkspaceFileRequest, root: string | null): Promise<OpResult<WorkspaceDirectoryListing>>;
   fileInfo(input: WorkspaceFileRequest): Promise<OpResult<WorkspaceFileInfo>>;
   readTextFile(input: WorkspaceFileRequest): Promise<OpResult<{ content: string; language: string; size: number }>>;
   openFile(input: WorkspaceFileRequest): Promise<OpResult<WorkspaceRead>>;
@@ -58,7 +58,7 @@ export interface WorkspaceOps {
 }
 
 export const WORKSPACE_OP_PARAMS: { readonly [K in keyof WorkspaceOps]: readonly string[] } = {
-  home: [], listFiles: ["input", "showHidden"], fileInfo: ["input"], readTextFile: ["input"],
+  home: [], listFiles: ["input", "root"], fileInfo: ["input"], readTextFile: ["input"],
   openFile: ["input"], readFileChunk: ["id", "offset", "length"], closeFile: ["id"],
   fileIndex: ["cwd", "query", "limit", "kind", "refresh"],
   readBashOutput: ["sessionId", "path"], openBashOutput: ["sessionId", "path"],

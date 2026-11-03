@@ -15,12 +15,3 @@ export function resolveDirentIsDirectory(
     return null;
   }
 }
-const ignored: Readonly<Record<string, true>> = {
-  node_modules: true, ".git": true, ".next": true, dist: true, build: true, __pycache__: true,
-  ".turbo": true, ".cache": true, coverage: true, ".pytest_cache": true, ".mypy_cache": true,
-  target: true, vendor: true, ".DS_Store": true,
-};
-
-export function isIgnoredFileEntry(name: string): boolean {
-  return Object.hasOwn(ignored, name) || name.endsWith(".pyc");
-}

@@ -4,7 +4,6 @@ import fs from "fs";
 import path from "path";
 import { buildEntriesFromFiles, filterFileEntries, type FileIndexEntry } from "./file-fuzzy";
 import { createChildProcessEnvironment } from "./project-command-env";
-import { isIgnoredFileEntry } from "./file-dirent";
 import type { WorkspaceIndex } from "./workspace-types";
 const execFileAsync = promisify(execFile);
 
@@ -106,7 +105,7 @@ function listWithWalk(cwd: string): FileListing {
       continue;
     }
     for (const d of dirents) {
-      if (isIgnoredFileEntry(d.name)) continue;
+      // Never follow symlinked directories out of cwd or into a loop.
       const childRel = rel ? `${rel}/${d.name}` : d.name;
       if (d.isDirectory()) {
         if (depth + 1 <= MAX_WALK_DEPTH) {

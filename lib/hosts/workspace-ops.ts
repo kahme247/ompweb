@@ -2,8 +2,8 @@ import fs from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { authorizeFileAccess } from "../file-authorization";
-import { isExistingFilePathAllowed, isFilePathAllowed } from "../file-access";
-import { isIgnoredFileEntry, resolveDirentIsDirectory } from "../file-dirent";
+import { existingPathWithinRootsChecker, isAbsoluteFileRequestPath, isExistingFilePathAllowed, isFilePathAllowed, normalizeSlashes } from "../file-access";
+import { resolveDirentIsDirectory } from "../file-dirent";
 import { indexWorkspaceFiles } from "../file-index";
 import { inspectUploadTargets, validateUploadFileNames } from "../file-upload";
 import type { StagedUploads } from "./uploads";
@@ -155,15 +155,34 @@ export function createWorkspaceService(uploads: StagedUploads, emit: (id: string
       return inspectUploadTargets(await authorizeWorkspaceDirectory(directory), names);
     }),
     publishUpload: (id, directory, name, conflict) => result(() => uploads.publish(id, directory, name, conflict)),
-    listFiles: (input, showHidden) => result(async () => {
-      if (typeof showHidden !== "boolean") throw invalid();
+    listFiles: (input, root) => result(async () => {
+      if (root !== null && typeof root !== "string") throw invalid();
       const checked = await access(input, false);
       if (!checked.stat.isDirectory()) throw new HostOpError(400, "not_a_directory", "Not a directory");
-      const entries = fs.readdirSync(checked.filePath, { withFileTypes: true })
-        .filter((entry) => showHidden || !isIgnoredFileEntry(entry.name))
+      let insideRoot: ((target: string) => boolean) | null = null;
+      if (root !== null) {
+        const roots = await getWorkspaceRoots();
+        if (!isAbsoluteFileRequestPath(root) || !isFilePathAllowed(root, roots) || !isExistingFilePathAllowed(root, roots)) {
+          throw new HostOpError(403, "access_denied", "Access denied");
+        }
+        insideRoot = existingPathWithinRootsChecker(new Set([normalizeSlashes(root)]));
+        if (!insideRoot(checked.filePath)) throw new HostOpError(403, "outside_root", "Outside the explorer root");
+      }
+      const readDirectorySync = Reflect.get(fs, "readdirSync") as typeof fs.readdirSync;
+      const entries = readDirectorySync(checked.filePath, { withFileTypes: true })
         .flatMap((entry) => {
-          const isDir = resolveDirentIsDirectory(entry, path.join(checked.filePath, entry.name));
-          return isDir === null ? [] : [{ name: entry.name, isDir, size: 0, modified: "" }];
+          const entryPath = path.join(checked.filePath, entry.name);
+          const isDir = resolveDirentIsDirectory(entry, entryPath);
+          const isLink = entry.isSymbolicLink();
+          if (isDir === null && !isLink) return [];
+          let linkTarget: string | undefined;
+          if (isLink) {
+            try { linkTarget = fs.readlinkSync(entryPath); }
+            catch { /* Replaced since readdir: list it without a target. */ }
+          }
+          const outsideRoot = insideRoot !== null && isLink && !insideRoot(entryPath);
+          return [{ name: entry.name, isDir: isDir ?? false, size: 0, modified: "",
+            ...(linkTarget !== undefined && { linkTarget }), ...(outsideRoot && { outsideRoot }) }];
         }).sort((a, b) => a.isDir !== b.isDir ? (a.isDir ? -1 : 1) : a.name.localeCompare(b.name));
       return { path: checked.filePath, entries };
     }),
