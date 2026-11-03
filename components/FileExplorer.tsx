@@ -205,7 +205,8 @@ function flattenVisibleRows(
 ): FlatRow[] {
   for (const node of nodes) {
     out.push({ kind: "node", node, depth });
-    if (node.isDir && expandedPaths.has(node.fullPath)) {
+    // A dir flagged after it was expanded keeps its stale listing out of the tree.
+    if (node.isDir && !node.outsideRoot && expandedPaths.has(node.fullPath)) {
       const children = childrenByPath.get(node.fullPath);
       if (children) {
         if (children.length === 0) {
