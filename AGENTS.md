@@ -835,10 +835,14 @@ during the wait.
     worker's the daemon's (`bufferedAmount` under 2 pieces); a fix to either original must be carried over
     (`lib/browser-link.integration.test.mjs` runs the real worker against the real server end). A socket
     that has not said hello within 10 s is closed 1008.
-  - **Liveness is ping/pong only**: the server pings every 15 s, each side drops a socket after 30 s
-    without any frame. A command waiting for its reply never redials. Wakes: `online` and a network
-    change redial at once and reset the dial backoff to 1 s (the first dial as a network returns often
-    fails), `visible` pings and redials a socket silent for 3 s.
+  - **Liveness:** the server pings every 15 s; each side drops a socket after 30 s without any frame.
+    Command delivery additionally watches sequence-ack progress, including multipart uploads: initially
+    5–6 s without progress redials with trigger `command`, even while updates arrive. Each such redial
+    doubles the deadline up to 30 s; an advancing ack on the current socket covering all watched
+    command pieces resets it to 5 s (a resume welcome does not). Acknowledged commands waiting for
+    their results never cause this redial. Replay and resync retain the rules below.
+    Wakes: `online` and a network change redial at once and reset dial backoff to 1 s; `visible`
+    pings and redials a socket silent for 3 s.
   - **Resume.** The link outlives its socket for 2 min (`LINK_RESUME_MS`): the worker's `hello` carries
     its token and `ack`, the server (same web session only: SHA-256 of the session cookie, else
     `trusted`/`open`) reattaches and both sides resend what the other missed. Subscriptions stay open on

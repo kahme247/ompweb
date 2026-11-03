@@ -86,7 +86,8 @@ function hangKind(s: Sample, transportByReq: Map<string, number | undefined>): s
 
 /**
  * A reconnect's trigger family, so the rows line up across transports: the link's `close` is what an EventSource
- * reports as `error`; the link's own `silence` detector (30 s without a frame) keeps its row (SSE has none); a network
+ * reports as `error`; the link's `silence` detector (30 s without a frame) and `command` detector (initially 5–6 s
+ * without delivery-ack progress) keep their rows (SSE has neither); a network
  * wake is split by whether the effective type changed (`navigator.connection` `change` also fires on RTT or downlink
  * drift, when the link redials a healthy socket).
  */

@@ -56,6 +56,9 @@ const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 const SILENCE_CHECK_MS = 1000;
 const VISIBLE_PROBE_MS = 3000;
+/** Redial after 5-6 s without command ack progress. Double up to offlineMs on each timeout so slow links can finish
+ * a downlink piece blocking the ack; an acked command resets it, a wake or new link does not. */
+const COMMAND_ACK_MS = 5000;
 // Every tab forwards the same network or visibility event: a dial younger than
 // this without a welcome is the one an earlier tab's wake just started.
 const WAKE_REDIAL_GAP_MS = 1000;
@@ -208,7 +211,7 @@ interface Clock {
 
 /** A line the link's sender queues (`rid` marks an agent command's), or an upload's chunk (a binary unit). */
 type UpItem = { line: string; size: number; rid?: string } | { id: string; blob: Uint8Array };
-type Sent = { seq: number; line: string; bytes: number };
+type Sent = { seq: number; line: string; bytes: number; rid?: string };
 
 /** A server line's header: everything but `data`, which `decode` hands on as the raw text it is. */
 interface DownHead {
@@ -286,6 +289,10 @@ const link = {
   appliedBytes: 0,
   ackTimer: undefined as Timer | undefined,
   flushTimer: undefined as Timer | undefined,
+  /** Command pieces on this socket: last ack progress, highest seq, and adaptive deadline. */
+  commandWaitSince: undefined as number | undefined,
+  commandSeq: 0,
+  commandAckMs: COMMAND_ACK_MS,
   lastFrameAt: 0,
   dialedAt: 0,
   reconnectDelayMs: RECONNECT_MIN_MS,
@@ -615,6 +622,8 @@ function resetLink(): void {
   link.down = new SeqWindow();
   link.parts = new PartJoiner(Infinity);
   link.appliedBytes = 0;
+  link.commandWaitSince = undefined;
+  link.commandSeq = 0;
   clearTimeout(link.ackTimer);
   link.ackTimer = undefined;
   clearTimeout(link.flushTimer);
@@ -633,6 +642,7 @@ function dial(): void {
   link.opened = false;
   link.welcomed = false;
   link.dialedAt = link.lastFrameAt = Date.now();
+  link.commandWaitSince = undefined;
   silenceTimer ??= setInterval(checkSilence, SILENCE_CHECK_MS);
   // Events of a socket the link gave up (late frames, its close) are ignored.
   ws.onopen = () => {
@@ -779,10 +789,15 @@ function flushLink(): void {
   const ws = link.ws;
   if (!ws || !link.welcomed) return;
   const room = () => ws.bufferedAmount < SEND_BUFFER_BYTES && link.unacked < LINK_LIMITS.unackedBytes;
+  const now = Date.now();
   const write = (item: Sent) => {
     ws.send(item.line);
     link.sentSeq = item.seq;
     link.unacked += item.bytes;
+    if (item.rid !== undefined) {
+      link.commandSeq = item.seq;
+      link.commandWaitSince ??= now;
+    }
   };
   // An up_abort still queued keeps the link wanted: closing it first would lose the abort and leave the host's copy staged.
   const hadUp = link.sender.hasKeyWith("up:");
@@ -803,10 +818,10 @@ function flushLink(): void {
       ws.send(unit.frame);
       continue;
     }
-    const item = { seq: unit.seq, line: unit.line, bytes: encoder.encode(unit.line).byteLength };
+    const rid = "rid" in unit.item ? unit.item.rid : undefined;
+    const item = { seq: unit.seq, line: unit.line, bytes: encoder.encode(unit.line).byteLength, rid };
     link.outbox.push(item);
     write(item);
-    const rid = "rid" in unit.item ? unit.item.rid : undefined;
     if (unit.done && rid?.startsWith(ABORT_RID)) {
       const abort = aborts.get(rid.slice(ABORT_RID.length));
       if (abort) abort.seq = unit.seq;
@@ -816,7 +831,7 @@ function flushLink(): void {
       command.sent = true;
       command.seq = unit.seq;
       // The first send's time: the server's dedupe forgets a command COMMAND_DEDUPE_MS after its first run.
-      if (command.attempts++ === 0) command.sentAt = Date.now();
+      if (command.attempts++ === 0) command.sentAt = now;
     }
   }
   if (ws.bufferedAmount >= SEND_BUFFER_BYTES) link.flushTimer = setTimeout(flushLink, LINK_LIMITS.flushMs);
@@ -906,6 +921,13 @@ function sendAck(): void {
 
 function onAck(ack: number): void {
   if (!Number.isSafeInteger(ack)) return;
+  if (link.commandWaitSince !== undefined && ack > link.ackedUp) {
+    // Progress proves the way up works: all commands acked ends the wait, a partial ack restarts it.
+    if (ack >= link.commandSeq) {
+      link.commandWaitSince = undefined;
+      link.commandAckMs = COMMAND_ACK_MS;
+    } else link.commandWaitSince = Date.now();
+  }
   link.ackedUp = Math.max(link.ackedUp, ack);
   for (const item of link.outbox.ack(ack)) if (item.seq <= link.sentSeq) link.unacked -= item.bytes;
   settleAborts(ack);
@@ -965,7 +987,14 @@ function onWelcome(welcome: DownHead): void {
 }
 
 function checkSilence(): void {
-  if (link.ws && Date.now() - link.lastFrameAt >= LINK_LIMITS.offlineMs) redial(backoff(), "silence");
+  if (!link.ws) return;
+  const now = Date.now();
+  if (now - link.lastFrameAt >= LINK_LIMITS.offlineMs) redial(backoff(), "silence");
+  else if (link.commandWaitSince !== undefined && now - link.commandWaitSince >= link.commandAckMs) {
+    // Frames still arriving prove only the way down: a command that is not acked means the way up is gone.
+    link.commandAckMs = Math.min(link.commandAckMs * 2, LINK_LIMITS.offlineMs);
+    redial(0, "command");
+  }
 }
 
 /**
