@@ -606,7 +606,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     setAttachedUploads((prev) => prev.map((upload) => (upload.id === id ? { ...upload, ...patch } : upload)));
   }, []);
 
-  /** Uploads the chip's file to its host; a retry resumes at the host's offset (same id). */
+  /** Uploads the chip's file to its host; a retry resumes at the host's offset (same id). While a transient failure
+   *  waits to resume by itself, the chip keeps `uploading` and shows the failure in `error`. */
   const runUpload = useCallback((upload: AttachedUpload) => {
     if (!upload.file) return;
     const { id, size } = upload;
@@ -617,7 +618,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (percent === shownPercent) return;
       shownPercent = percent;
       patchUpload(id, { received });
-    }, id);
+    }, id, (error) => patchUpload(id, { error: error === null ? null : uploadErrorMessage(error) }));
     uploadHandlesRef.current.set(id, handle);
     const settle = (patch: Partial<AttachedUpload>) => {
       // Removed or switched meanwhile: its abort ended it.

@@ -19,6 +19,7 @@
 //                 { op: "cmd", n, req, sessionId, advisor, body, type }  (an agent command; body: its JSON text, type: its type)
 //                 { op: "metric", sample }  (a transport sample of the tab's: tagged, buffered and POSTed here)
 //                 { op: "upload", id, host, name, type, blob }  (a file to upload over the link; blob: the File)
+//                 { op: "up_pause", id }  (stop this tab's upload; keep the host's staged bytes for Retry)
 //                 { op: "up_abort", id }
 // Worker -> tab:  { id, type: "open" }
 //                 { id, type: "message", data }   (raw JSON string)
@@ -1147,7 +1148,7 @@ function dropUpload(upload: Upload): void {
 }
 
 /** (Re)arms its stall deadline: whatever keeps it from moving (a link that stays down, a host that stopped acking)
- * fails it there. Nothing is aborted, so a Retry resumes it from the host's offset. */
+ * fails it there. Nothing is aborted, so the tab's automatic resume (`uploadFile`) continues it from the host's offset. */
 function watchUpload(upload: Upload): void {
   clearTimeout(upload.stallTimer);
   upload.stallTimer = setTimeout(() => {
@@ -1517,6 +1518,14 @@ function attach(port: Port): void {
       case "upload":
         addUpload(client, data);
         break;
+      case "up_pause": {
+        const upload = uploads.get(String(data.id));
+        if (upload?.client === client) {
+          dropUpload(upload);
+          linkIdle();
+        }
+        break;
+      }
       case "up_abort":
         abortUpload(String(data.id));
         break;

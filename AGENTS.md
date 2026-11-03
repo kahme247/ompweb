@@ -1251,16 +1251,27 @@ during the wait.
   per-id queue so an abort cannot be undone by an earlier attach's receipt.
   A start that finds the upload aborted sends
   `uploadAbort` to the host and answers 404 `upload_missing`. A host-link drop
-  fails each in-flight upload with 503 `host_offline`; the chip's Retry (same
-  id) resumes. No auto-retry.
+  fails each in-flight upload with 503 `host_offline`. `uploadFile`
+  (`lib/event-stream.ts`) resumes 502/503/504 and HTTP network failures by
+  itself (same id, back-off restarting after new bytes, chip shows
+  "Reconnecting…") until an outage reaches 5 min, timed from its first
+  failure; other failures, and a bfcache pagehide (410), show Retry.
+  Back-off and in-flight retries share the remaining outage budget; their
+  watchdog resets only when acknowledged bytes advance. Expiry aborts the
+  HTTP request or sends tab-scoped `up_pause` to stop the worker without
+  deleting staged bytes, then settles with `upload_stalled` so Retry is usable.
+  Checks after waking and before applying an ack prevent expired work reviving.
+  HTTP body-read network errors propagate to the retry classifier (only JSON
+  syntax errors use the fallback body). Network `TypeError`s use the existing
+  localized network-error explanation in upload chip tooltips.
 - Limits on main: at most 32 unfinished uploads per owner (429
   `too_many_uploads`); an unfinished entry idle 10 min (no start, frame or ack)
   is dropped from the registry (a later `up_start` re-registers it). The worker
   fails an upload no start answer or ack advances for `UPLOAD_STALL_MS` (120 s)
   with 504 `upload_stalled` and forgets it without aborting it on the host, so
-  Retry resumes. Page navigation settles pending WebSocket-upload promises before
-  the worker's `bye`: a composer retained by bfcache shows Retry after restoration,
-  not a permanently uploading chip. This does not automatically resume navigation.
+  the tab's automatic resume continues it. Page navigation settles pending
+  WebSocket-upload promises before the worker's `bye`: a composer retained by
+  bfcache shows Retry after restoration, not a permanently uploading chip.
   The daemon's `sweep` deletes staged files older than 24 h and aborts open uploads
   idle (no start/write) over 24 h (`STAGED_MAX_AGE_MS`).
   `uploadAttach` has a 10-minute op timeout (a 2 GiB EXDEV copy), not

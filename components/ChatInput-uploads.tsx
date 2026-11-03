@@ -1,7 +1,7 @@
 "use client";
 
 import React from "react";
-import { AlertCircle, File as FileIcon, Loader2, RotateCw, X } from "lucide-react";
+import { AlertCircle, File as FileIcon, Loader2, RotateCw, WifiOff, X } from "lucide-react";
 import type { ChatDraftUpload } from "@/lib/draft-store";
 import { UploadFailedError } from "@/lib/event-stream";
 import { formatUploadSize } from "@/lib/upload-limits";
@@ -21,6 +21,7 @@ export interface AttachedUpload {
   /** Bytes the host has. */
   received: number;
   status: "uploading" | "done" | "error";
+  /** Why it failed; while `uploading`, the transient failure it waits to resume from. */
   error: string | null;
   /** An image sent As file: its thumbnail (an object URL). */
   previewUrl: string | null;
@@ -46,7 +47,7 @@ export function uploadRecovery(uploads: AttachedUpload[]): { uploads?: ChatDraft
 }
 
 export function uploadErrorMessage(error: unknown): string {
-  return error instanceof UploadFailedError ? formatApiError({ error: error.message, code: error.code }) : translate("chatInput.uploadFailed");
+  return error instanceof UploadFailedError ? formatApiError({ error: error.message, code: error.code }) : error instanceof TypeError ? translate("fileExplorer.uploadNetworkError") : translate("chatInput.uploadFailed");
 }
 
 const percentOf = (upload: AttachedUpload) => (upload.size > 0 ? Math.floor((upload.received * 100) / upload.size) : 100);
@@ -98,9 +99,10 @@ function ProgressBar({ upload }: { upload: AttachedUpload }) {
 export function UploadChip({ upload, onRemove, onRetry }: { upload: AttachedUpload; onRemove: () => void; onRetry: () => void }) {
   const { t } = useI18n();
   const failed = upload.status === "error";
+  const reconnecting = upload.status === "uploading" && upload.error !== null;
   return (
     <div
-      title={failed ? `${upload.name}: ${upload.error ?? ""}` : upload.name}
+      title={failed || reconnecting ? `${upload.name}: ${upload.error ?? ""}` : upload.name}
       style={{
         position: "relative", overflow: "hidden",
         display: "flex", alignItems: "center", gap: 7,
@@ -124,7 +126,7 @@ export function UploadChip({ upload, onRemove, onRetry }: { upload: AttachedUplo
         {upload.name}
       </span>
       <span style={{ flexShrink: 0, fontSize: 10, color: failed ? "var(--status-error)" : "var(--text-dim)" }}>
-        {failed ? t("chatInput.uploadFailed") : upload.status === "uploading" ? `${percentOf(upload)}%` : formatUploadSize(upload.size)}
+        {failed ? t("chatInput.uploadFailed") : reconnecting ? t("chatInput.uploadReconnecting") : upload.status === "uploading" ? `${percentOf(upload)}%` : formatUploadSize(upload.size)}
       </span>
       {failed && upload.file && (
         <ChipButton label={t("chatInput.uploadRetry")} onClick={onRetry}>
@@ -154,8 +156,10 @@ export function ImageChip({ previewUrl, upload, canSwitch, onSwitch, onRemove, o
 }) {
   const { t } = useI18n();
   const failed = upload?.status === "error";
+  const reconnecting = upload?.status === "uploading" && upload.error !== null;
+  // Failed, or waiting to resume by itself: the tooltip says why.
   return (
-    <div style={{ position: "relative", flexShrink: 0 }} title={failed ? upload?.error ?? undefined : undefined}>
+    <div style={{ position: "relative", flexShrink: 0 }} title={upload?.error ?? undefined}>
       <div style={{ position: "relative", width: 56, height: 56, overflow: "hidden", borderRadius: 6, border: `1px solid ${failed ? "var(--status-error)" : "var(--border)"}` }}>
         {previewUrl && <img src={previewUrl} alt="" style={{ width: 56, height: 56, objectFit: "cover", display: "block" }} />}
         <button
@@ -187,6 +191,16 @@ export function ImageChip({ previewUrl, upload, canSwitch, onSwitch, onRemove, o
         >
           <RotateCw size={11} strokeWidth={2} aria-hidden="true" />
         </ChipButton>
+      )}
+      {reconnecting && (
+        <span
+          role="img"
+          aria-label={t("chatInput.uploadReconnecting")}
+          title={t("chatInput.uploadReconnecting")}
+          style={{ position: "absolute", top: -5, left: -5, width: 24, height: 24, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 6, background: "var(--bg-panel)", border: "1px solid var(--border)", color: "var(--text-muted)" }}
+        >
+          <WifiOff size={11} strokeWidth={2} aria-hidden="true" />
+        </span>
       )}
       <ChipButton
         label={t("chatInput.removeImage")}

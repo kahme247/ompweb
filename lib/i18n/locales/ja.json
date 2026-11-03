@@ -361,6 +361,7 @@
   "chatInput.imageInlineTooLarge": "インラインで送るには大きすぎます",
   "chatInput.uploadFailed": "アップロード失敗",
   "chatInput.uploadRetry": "アップロードを再試行",
+  "chatInput.uploadReconnecting": "再接続中…",
   "chatInput.uploadProgress": "{name} をアップロード中",
   "chatInput.uploadsPending": "{count} 件アップロード中",
   "chatInput.uploadsWaiting": "{count} 件のアップロードの完了を待っています。",
