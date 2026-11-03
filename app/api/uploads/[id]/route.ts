@@ -22,8 +22,10 @@ export async function PUT(req: Request, { params }: Params) {
   }
 }
 
-/** DELETE /api/uploads/<id>: cancel the upload and delete its staged file. */
+/** DELETE /api/uploads/<id>?host=<hostId>: cancel the upload and delete its staged file, now or on the host's next hello.
+ * `host` reaches an upload this server no longer registers. */
 export async function DELETE(req: Request, { params }: Params) {
-  await abortUpload((await params).id, requestOwner(req));
+  const host = new URL(req.url).searchParams.get("host");
+  await abortUpload((await params).id, requestOwner(req), host && host.length <= 128 ? host : undefined);
   return new Response(null, { status: 204 });
 }

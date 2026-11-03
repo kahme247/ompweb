@@ -20,7 +20,7 @@
 //                 { op: "metric", sample }  (a transport sample of the tab's: tagged, buffered and POSTed here)
 //                 { op: "upload", id, host, name, type, blob }  (a file to upload over the link; blob: the File)
 //                 { op: "up_pause", id }  (stop this tab's upload; keep the host's staged bytes for Retry)
-//                 { op: "up_abort", id }
+//                 { op: "up_abort", id, host }  (the tab removed it: the host deletes what it staged; kept until delivered)
 // Worker -> tab:  { id, type: "open" }
 //                 { id, type: "message", data }   (raw JSON string)
 //                 { id, type: "error", readyState: 0 | 2 }  (EventSource semantics)
@@ -72,6 +72,12 @@ const SEND_DEADLINE_MS = 15000;
 const FALLBACK_MS = 300000;
 /** Refused dials in a row (each GET reaching the server, no open between, the browser online) before that fallback. */
 const FALLBACK_REFUSALS = 3;
+/** The most up_aborts kept until delivered: past it the oldest goes (the host daemon's sweep of old staged files covers it). */
+const ABORTS_MAX = 256;
+/** An abort's DELETE that failed goes again after these (the last repeats), and at once on a wake. */
+const ABORT_RETRY_MS = [5_000, 15_000, 60_000];
+/** Marks an up_abort's line in the sender (a command's `rid` is the tab's request id). */
+const ABORT_RID = "abort:";
 const TRANSPORT_UNAVAILABLE = { error: "Not sent: no connection to omp-web.", code: "transport_unavailable" };
 const TRANSPORT_LOST = { error: "The connection to omp-web dropped before the answer arrived; the command may have run.", code: "transport_lost" };
 // Transport samples (spec D6 of the experiment): POSTed in batches to the metrics route, whose GET is the SSE clock probe.
@@ -450,6 +456,8 @@ function applyMode(): void {
     closeSource();
     sseConn.reconnect = null;
     for (const subscription of subscriptions.values()) subscribe(subscription);
+    // An abort still on HTTP goes on the link instead (a DELETE already in flight may still settle it).
+    for (const [id, abort] of aborts) if (abort.http) sendAbort(id);
     ensureLink();
     return;
   }
@@ -463,6 +471,11 @@ function applyMode(): void {
   for (const upload of [...uploads.values()]) {
     dropUpload(upload);
     post(upload.client, { up: upload.id, http: true });
+  }
+  // Aborts go back too: the link no longer carries them, so each is a DELETE the worker repeats until the server answers.
+  for (const id of aborts.keys()) {
+    link.sender.drop(`up:${id}`);
+    sendAbort(id);
   }
   for (const command of [...pending.values()]) {
     if (command.sent) continue;
@@ -561,7 +574,7 @@ function dropClient(client: Client): void {
 // ---- The browser link (spec B3-B5) ----
 
 function linkWanted(): boolean {
-  if (mode === "ws") return subscriptions.size > 0 || pending.size > 0 || uploads.size > 0 || link.sender.hasKeyWith("up:");
+  if (mode === "ws") return subscriptions.size > 0 || pending.size > 0 || uploads.size > 0 || aborts.size > 0 || link.sender.hasKeyWith("up:");
   // On SSE the link stays only until the commands sent on it are answered.
   for (const command of pending.values()) if (command.sent) return true;
   return false;
@@ -794,6 +807,10 @@ function flushLink(): void {
     link.outbox.push(item);
     write(item);
     const rid = "rid" in unit.item ? unit.item.rid : undefined;
+    if (unit.done && rid?.startsWith(ABORT_RID)) {
+      const abort = aborts.get(rid.slice(ABORT_RID.length));
+      if (abort) abort.seq = unit.seq;
+    }
     const command = unit.done && rid !== undefined ? pending.get(rid) : undefined;
     if (command) {
       command.sent = true;
@@ -891,7 +908,9 @@ function onAck(ack: number): void {
   if (!Number.isSafeInteger(ack)) return;
   link.ackedUp = Math.max(link.ackedUp, ack);
   for (const item of link.outbox.ack(ack)) if (item.seq <= link.sentSeq) link.unacked -= item.bytes;
+  settleAborts(ack);
   flushLink();
+  linkIdle();
 }
 
 /**
@@ -909,6 +928,7 @@ function onWelcome(welcome: DownHead): void {
   if (resumed) {
     link.ackedUp = Math.max(link.ackedUp, ack);
     link.outbox.ack(ack);
+    settleAborts(ack);
   } else {
     resetLink();
   }
@@ -920,6 +940,8 @@ function onWelcome(welcome: DownHead): void {
   if (!resumed && mode === "ws") {
     markConnecting(subscriptions.values());
     for (const subscription of subscriptions.values()) subscribe(subscription);
+    // The resync dropped what the sender held and what the server never acked: every pending abort goes again.
+    for (const id of aborts.keys()) sendAbort(id);
   }
   for (const command of [...pending.values()]) {
     clearTimeout(command.deadline);
@@ -951,6 +973,7 @@ function checkSilence(): void {
  * Every wake but `hidden` and `init` may start a reconnect sample's outage (spec D6 `startAt`).
  */
 function wake(reason: string): void {
+  if (reason === "online" || reason === "network" || reason === "visible") retryAborts();
   const now = Date.now();
   const type = effectiveType();
   // Every tab forwards the same event: the first of a burst keeps the type from before it.
@@ -1159,12 +1182,69 @@ function watchUpload(upload: Upload): void {
   }, UPLOAD_STALL_MS);
 }
 
+/** An abort not yet delivered: its up_abort line on the link (`seq`: where the sender numbered it, until the server acks it),
+ * or, off the link, its DELETE (`http`). */
+interface Abort {
+  host: string | undefined;
+  seq?: number;
+  http: boolean;
+  fetching: boolean;
+}
+
+/** By upload id: kept until the server has it, so a link that drops or a request that fails never leaves the host's copy staged. */
+const aborts = new Map<string, Abort>();
+let abortFailures = 0;
+let abortTimer: Timer | undefined;
+
 /** The tab removed it (or went away): the server deletes what the host staged. */
-function abortUpload(id: string): void {
+function abortUpload(id: string, host?: string): void {
   const upload = uploads.get(id);
   if (upload) dropUpload(upload);
-  if (link.token !== null) queueUp(`up:${id}`, JSON.stringify({ type: "up_abort", id }));
+  if (!aborts.has(id)) {
+    if (aborts.size >= ABORTS_MAX) aborts.delete(aborts.keys().next().value as string);
+    aborts.set(id, { host: host ?? upload?.host, http: false, fetching: false });
+    sendAbort(id);
+  }
   linkIdle();
+}
+
+/** On the link in `ws` mode (queued once the link has a token; until then it dials and the welcome sends it), else a DELETE. */
+function sendAbort(id: string): void {
+  const abort = aborts.get(id);
+  if (!abort) return;
+  abort.seq = undefined;
+  abort.http = mode !== "ws";
+  if (abort.http) return deleteUpload(id, abort);
+  if (link.token !== null) queueUp(`up:${id}`, JSON.stringify({ type: "up_abort", id, host: abort.host }), `${ABORT_RID}${id}`);
+  else ensureLink();
+}
+
+/** The server applied the up lines through `ack`: those aborts are delivered. */
+function settleAborts(ack: number): void {
+  for (const [id, abort] of aborts) if (!abort.http && abort.seq !== undefined && abort.seq <= ack) aborts.delete(id);
+}
+
+/** A 2xx or 4xx answer settles it (the server owns delivery from there); a network error or 5xx keeps it for a retry. */
+function deleteUpload(id: string, abort: Abort): void {
+  if (abort.fetching) return;
+  abort.fetching = true;
+  const query = abort.host === undefined ? "" : `?host=${encodeURIComponent(abort.host)}`;
+  fetch(`/api/uploads/${encodeURIComponent(id)}${query}`, { method: "DELETE" }).then((response) => response.status < 500, () => false).then((settled) => {
+    abort.fetching = false;
+    if (aborts.get(id) !== abort) return;
+    if (settled) {
+      aborts.delete(id);
+      abortFailures = 0;
+    } else if (abort.http && abortTimer === undefined) {
+      abortTimer = setTimeout(retryAborts, ABORT_RETRY_MS[Math.min(abortFailures++, ABORT_RETRY_MS.length - 1)]);
+    }
+  });
+}
+
+function retryAborts(): void {
+  clearTimeout(abortTimer);
+  abortTimer = undefined;
+  for (const [id, abort] of aborts) if (abort.http) deleteUpload(id, abort);
 }
 
 /**
@@ -1527,7 +1607,7 @@ function attach(port: Port): void {
         break;
       }
       case "up_abort":
-        abortUpload(String(data.id));
+        abortUpload(String(data.id), typeof data.host === "string" ? data.host : undefined);
         break;
       case "lock":
         // MessagePort has no close event. The tab holds this lock for its

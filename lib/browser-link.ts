@@ -544,11 +544,11 @@ function apply(link: BrowserLink, ws: BrowserSocket, message: Record<string, unk
     case "up_start":
       return onUploadStart(link, ws, message);
     case "up_abort": {
-      const { id } = message;
+      const { id, host } = message;
       if (typeof id !== "string" || !UPLOAD_ID_RE.test(id)) return ws.close(CLOSE.invalidData, "Invalid upload id");
       // The worker sends nothing of it after this line, so no chunk of it can follow.
       link.uploads.delete(id);
-      abortUpload(id, link.owner).catch((error: unknown) => console.error(`[omp-web] upload abort failed: ${error instanceof Error ? error.message : String(error)}`));
+      abortUpload(id, link.owner, typeof host === "string" && host.length <= 128 ? host : undefined).catch((error: unknown) => console.error(`[omp-web] upload abort failed: ${error instanceof Error ? error.message : String(error)}`));
       return;
     }
     case "cmd":

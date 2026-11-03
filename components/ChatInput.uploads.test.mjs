@@ -136,7 +136,7 @@ function putOf(id) {
   });
 }
 
-const deleted = (id) => requests.some((each) => each.method === "DELETE" && each.url === `/api/uploads/${id}`);
+const deleted = (id) => requests.some((each) => each.method === "DELETE" && each.url === `/api/uploads/${id}?host=local`);
 const chipOf = (name) => screen.getByText(name).parentElement;
 const pressEnter = () => act(async () => { fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" }); });
 

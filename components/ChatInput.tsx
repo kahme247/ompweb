@@ -844,8 +844,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const removeUpload = useCallback((id: string) => {
     const handle = uploadHandlesRef.current.get(id);
     uploadHandlesRef.current.delete(id);
+    const hostId = attachedUploadsRef.current.find((upload) => upload.id === id)?.hostId;
     if (handle) handle.abort();
-    else discardUpload(id);
+    else if (hostId !== undefined) discardUpload(id, hostId);
     setAttachedUploads((prev) => {
       const removed = prev.find((upload) => upload.id === id);
       if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
@@ -886,7 +887,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       const handle = uploadHandlesRef.current.get(id);
       uploadHandlesRef.current.delete(id);
       if (handle) handle.abort();
-      else discardUpload(id);
+      else discardUpload(id, upload.hostId);
       setAttachedUploads((prev) => prev.filter((each) => each.id !== id));
       setAttachedImages((prev) => [...prev, { data, mimeType: file.type, previewUrl, file }]);
     } catch {
