@@ -1280,7 +1280,10 @@ during the wait.
   old id's pending cancel (worker, HTTP DELETE or host) can never delete it.
   The daemon's `sweep` deletes staged files older than 24 h and aborts open uploads
   idle (no start/write) over 24 h (`STAGED_MAX_AGE_MS`): at start, on every
-  `uploadStart`, and every hour (`UPLOAD_SWEEP_INTERVAL_MS`).
+  `uploadStart`, and every hour (`UPLOAD_SWEEP_INTERVAL_MS`). It never rejects
+  (a file it cannot delete is logged and tried again next sweep): a rejection
+  from its timer would stop the daemon, and one before `uploadStart` would fail
+  every new upload.
   `uploadAttach` has a 10-minute op timeout (a 2 GiB EXDEV copy), not
   `opTimeoutMs`.
 - Cancels are durable (spec U4 "Durable cancel"): the tab always hands

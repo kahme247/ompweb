@@ -145,10 +145,17 @@ export class StagedUploads {
   }
 
   /** Abort open uploads idle (no start, no write) longer than STAGED_MAX_AGE_MS, then delete staged files older than
-   * that which no write is going to. */
+   * that which no write is going to. Never rejects: it runs from a timer, and before every uploadStart. */
   async sweep(now = Date.now()): Promise<void> {
     for (const [id, upload] of this.open) {
-      if (!this.controls.has(id) && now - upload.active > STAGED_MAX_AGE_MS) await this.abort(id);
+      if (this.controls.has(id) || now - upload.active <= STAGED_MAX_AGE_MS) continue;
+      try {
+        await this.abort(id);
+      } catch (error) {
+        // Its files could not be removed (a .part replaced by a directory, EPERM): the upload is closed already, and
+        // the file scan below tries them again on every sweep.
+        console.error(`[ompweb host] could not delete staged upload ${id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
     let names: string[];
     try {
