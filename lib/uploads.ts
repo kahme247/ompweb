@@ -93,6 +93,9 @@ function pendingAborts(): Map<string, Set<string>> {
 function deliverAbort(hostId: string, id: string): Promise<void> {
   return hostUploadOp(hostId, "uploadAbort", { id }).then(() => {}, (error: unknown) => {
     if (!(error instanceof HostOpError) || (error.code !== "host_offline" && error.code !== "host_timeout")) return;
+    // A start of the same id since (a Retry) registered it again: replayed later, this abort would delete that upload.
+    // The host runs an id's ops in arrival order, so if this abort does land late, the Retry's start comes after it.
+    if (uploads().has(id)) return;
     const ids = pendingAborts().get(hostId) ?? new Set<string>();
     ids.add(id);
     if (ids.size > MAX_PENDING_ABORTS_PER_HOST) ids.delete(ids.values().next().value as string);

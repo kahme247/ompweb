@@ -1123,6 +1123,9 @@ let upStartSeq = 0;
 
 function addUpload(client: Client, message: Record<string, unknown>): void {
   const id = String(message.id);
+  // A Retry under this id supersedes a cancel still pending for it (in any mode: on SSE the tab uploads over HTTP): it
+  // must not be resent or deleted again over the new upload. A line already on the wire is ordered before the up_start.
+  aborts.delete(id);
   if (mode !== "ws") return post(client, { up: id, http: true });
   const upload: Upload = {
     id,

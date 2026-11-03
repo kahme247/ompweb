@@ -1286,9 +1286,11 @@ during the wait.
   has it (link line until acked and resent on a resync; in `sse` mode a
   `DELETE …?host=` with a 40 s deadline, retried until a 2xx or a 4xx other
   than 408/429). Main keeps an `uploadAbort` its host could not take (503/504)
-  per host and resends it on that host's next hello (`onHostHello`); a new
-  `uploadStart` of the id drops it, so a Retry is never deleted by its own
-  failure's abort. An id main does not register goes to the browser's `host`
+  per host and resends it on that host's next hello (`onHostHello`). A Retry of
+  the same id supersedes it on every layer: a new `uploadStart` drops a kept
+  abort, an in-flight one that fails after the id is registered again is not
+  kept, and the worker drops its own pending cancel on a new upload of the id.
+  An id main does not register goes to the browser's `host`
   if known. All of it is in memory: the hourly sweep is the backstop.
 - Error codes: composer uploads use `upload_id_conflict` (another upload has
   this id); `upload_conflict` stays the file manager's.
