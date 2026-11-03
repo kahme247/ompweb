@@ -10,12 +10,13 @@ import type { AgentMessage, AssistantContentBlock, AssistantMessage, CustomMessa
  *
  * Rows are appended in transcript order; a row is either:
  * - { kind: "message", index } — one message rendered standalone (messages
- *   before the first anchor, or a turn with nothing to fold)
+ *   before the first anchor)
  * - { kind: "group", userIndex, endIndex, segments } — one anchored turn. Like
- *   the omp TUI, agent text is never hidden: the turn renders as its anchor
+ *   the omp TUI, agent text is retained: the turn renders as its anchor
  *   followed by `segments` in order, where each run of activity (thinking,
  *   tool calls, notices) between two pieces of text folds into one collapsed
- *   row. A turn stays one row so the render-window math is unchanged.
+ *   row. Completed turns can fold progress before their final reply. A turn
+ *   stays one row so the render-window math is unchanged.
  */
 
 /** A folded activity entry: the listed blocks of an assistant message, or a whole non-assistant message. */
@@ -51,6 +52,21 @@ export interface PlanOptions {
 export function isGroupAnchor(message: AgentMessage): boolean {
   if (message.role === "user") return true;
   return message.role === "custom" && (message as CustomMessage).customType === "compaction";
+}
+
+/** A normal stop with a real reply is required before folding progress. In
+ * particular, a tool preamble, truncated response or failed/aborted message
+ * is not a final reply. Unknown legacy stop reasons stay expanded. */
+export function completedTurnReplyIndex(messages: AgentMessage[], start: number, end: number): number | null {
+  for (let index = end - 1; index > start; index -= 1) {
+    const message = messages[index];
+    if (isPassiveToolContext(message) || (message.role === "custom" && message.customType === "xdev-mount-notice")) continue;
+    if (message.role !== "assistant" || message.stopReason !== "stop" || message.errorMessage?.trim()) return null;
+    const blocks = getDisplayableAssistantBlocks(message);
+    if (blocks.some(block => block.type === "toolCall")) return null;
+    return blocks.some(block => block.type === "image" || (block.type === "text" && block.text.trim())) ? index : null;
+  }
+  return null;
 }
 
 /** Split one anchored turn into text and folded-activity segments. */
@@ -115,7 +131,7 @@ export function planTurnSegments(
     flushOther();
     // A provider error must stay visible: when the message ended in activity,
     // it gets its own (empty) text segment to carry the error.
-    if (assistant.errorMessage?.trim() && segments.at(-1) !== lastText) {
+    if ((assistant.errorMessage?.trim() || assistant.stopReason === "error" || assistant.stopReason === "aborted") && segments.at(-1) !== lastText) {
       lastText = { kind: "text", index: idx, blocks: [], last: false };
       segments.push(lastText);
       activity = null;
@@ -255,16 +271,14 @@ export function planTranscriptRows(messages: AgentMessage[], options: PlanOption
     const userIdx = idx;
     let endIdx = userIdx + 1;
     while (endIdx < messages.length && !isGroupAnchor(messages[endIdx])) endIdx += 1;
-    // "Never fold" plans standalone rows, so the render window counts every message.
-    const segments = options.neverFold ? [] : planTurnSegments(messages, userIdx, endIdx, options);
-    if (segments.some((segment) => segment.kind === "activity")) {
-      rows.push({ kind: "group", userIndex: userIdx, endIndex: endIdx, segments });
-    } else {
-      // Nothing to fold: render the anchor and the rest as standalone messages.
-      // Tool results render under their tool call, as in the fold, so they get no row.
+    if (options.neverFold) {
+      // Keep standalone rows pageable when activity is never folded.
       for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
         if (messages[renderIdx].role !== "toolResult") rows.push({ kind: "message", index: renderIdx });
       }
+    } else {
+      const segments = planTurnSegments(messages, userIdx, endIdx, options);
+      rows.push({ kind: "group", userIndex: userIdx, endIndex: endIdx, segments });
     }
     idx = endIdx;
   }

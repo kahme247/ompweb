@@ -184,6 +184,9 @@ interface Props {
   sourceBlockIndices?: number[];
   /** omp-reported output throughput (get_state.tokensPerSecond), live while streaming. */
   liveTokensPerSecond?: number | null;
+  /** ChatWindow owns the per-turn model header and output rail. */
+  hideModelLabel?: boolean;
+  compactActions?: boolean;
 }
 
 function formatTime(ts: number | undefined, locale: Locale): string | null {
@@ -213,12 +216,12 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, forkEntryId, forkEditsPrompt, onFork, forking, forkDisabled, onEdit, editing, editDisabled, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, expandThinkingByDefault = false, hideThinking = false, sourceBlockIndices, liveTokensPerSecond }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, forkEntryId, forkEditsPrompt, onFork, forking, forkDisabled, onEdit, editing, editDisabled, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, expandThinkingByDefault = false, hideThinking = false, sourceBlockIndices, liveTokensPerSecond, hideModelLabel = false, compactActions = false }: Props) {
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} forkDisabled={forkDisabled} onEdit={onEdit} editing={editing} editDisabled={editDisabled} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} forkEntryId={forkEntryId} forkEditsPrompt={forkEditsPrompt} onFork={onFork} forking={forking} forkDisabled={forkDisabled} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} expandThinkingByDefault={expandThinkingByDefault} hideThinking={hideThinking} sourceBlockIndices={sourceBlockIndices} liveTokensPerSecond={liveTokensPerSecond} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} forkEntryId={forkEntryId} forkEditsPrompt={forkEditsPrompt} onFork={onFork} forking={forking} forkDisabled={forkDisabled} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} expandThinkingByDefault={expandThinkingByDefault} hideThinking={hideThinking} sourceBlockIndices={sourceBlockIndices} liveTokensPerSecond={liveTokensPerSecond} hideModelLabel={hideModelLabel} compactActions={compactActions} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -263,6 +266,8 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.toolCallsDefaultCollapsed === next.toolCallsDefaultCollapsed
     && prev.expandThinkingByDefault === next.expandThinkingByDefault
     && prev.hideThinking === next.hideThinking
+    && prev.hideModelLabel === next.hideModelLabel
+    && prev.compactActions === next.compactActions
     && prev.sourceBlockIndices?.join() === next.sourceBlockIndices?.join()
     && (!prev.isStreaming || prev.liveTokensPerSecond === next.liveTokensPerSecond);
 });
@@ -632,6 +637,8 @@ function AssistantMessageView({
   hideThinking,
   sourceBlockIndices,
   liveTokensPerSecond,
+  hideModelLabel,
+  compactActions,
 }: {
   message: AssistantMessage;
   isStreaming?: boolean;
@@ -654,6 +661,8 @@ function AssistantMessageView({
   hideThinking: boolean;
   sourceBlockIndices?: number[];
   liveTokensPerSecond?: number | null;
+  hideModelLabel: boolean;
+  compactActions: boolean;
 }) {
   const { t, locale } = useI18n();
   const { isSupported: ttsSupported, isSpeaking: ttsSpeaking, speakingId: ttsSpeakingId, toggle: ttsToggle } = useSpeechContext();
@@ -673,9 +682,8 @@ function AssistantMessageView({
     .map((block, index) => ({ block, originalIndex: sourceBlockIndices?.[index] ?? index }))
     .filter(({ block }) => !(hideThinking && block.type === "thinking") && !isEmptyThinkingBlock(block, { isStreaming }));
   const blocks = blockItems.map(({ block }) => block);
-  // Activity rows stay compact; a row that also carries reply text keeps its model label.
   const hideHeader = blocks.some((block) => block.type === "thinking" || block.type === "toolCall") && !blocks.some(isReplyBlock);
-  const errorMessage = message.errorMessage?.trim() || null;
+  const errorMessage = message.errorMessage?.trim() || (message.stopReason === "aborted" ? t("messageView.interruptedByUser") : message.stopReason === "error" ? t("agentSession.responseFailed") : null);
   const isInterrupted = isInterruptedMessage(errorMessage, message.stopReason);
   const blockItemsRef = useRef(blockItems);
   blockItemsRef.current = blockItems;
@@ -759,9 +767,9 @@ function AssistantMessageView({
 
   return (
     <div
-      className="chat-message"
+      className={`chat-message${compactActions ? " assistant-output-message" : ""}`}
       data-live={isStreaming ? "true" : undefined}
-      style={{ marginBottom: 6 }}
+      style={{ marginBottom: compactActions ? 0 : 6 }}
     >
       {/* Model label */}
       <div
@@ -770,12 +778,12 @@ function AssistantMessageView({
           fontSize: 11,
           color: "var(--text-dim)",
           marginBottom: 4,
-          display: hideHeader ? "none" : "flex",
+          display: (hideHeader || hideModelLabel) && !isStreaming ? "none" : "flex",
           alignItems: "center",
           gap: 6,
         }}
       >
-        {message.provider && (
+        {message.provider && !hideModelLabel && (
           <span>{modelNames?.[`${message.provider}:${message.model}`] ?? modelNames?.[message.model] ?? message.model}</span>
         )}
         {isStreaming && (() => {
@@ -879,8 +887,10 @@ function AssistantMessageView({
       </div>
 
       {!isStreaming && (texts.some((text) => text.trim()) || time || canFork || (ttsSupported && speakableText.trim().length > 0)) && (
-        <div className="message-assistant-footer" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 6, marginTop: 3 }}>
-          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 3 }}>
+        <>
+        <div className={compactActions ? "message-assistant-footer assistant-output-footer" : "message-assistant-footer"} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 6, marginTop: 3 }}>
+          {compactActions && time && <span className="assistant-output-time">{time}</span>}
+          <div className={compactActions ? "assistant-output-actions" : undefined} style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 3 }}>
             <MessageCopyActions texts={texts} bodyRef={bodyRef} />
             {ttsSupported && speakableText.trim().length > 0 && (
               <Tooltip content={isThisSpeaking ? t("messageView.stopSpeech") : t("messageView.readAloud")}>
@@ -898,8 +908,9 @@ function AssistantMessageView({
             )}
             {canFork && <ForkSessionButton entryId={forkEntryId!} editPrompt={forkEditsPrompt} onFork={onFork!} forking={forking} forkDisabled={forkDisabled} />}
           </div>
-          {time && <span style={{ fontSize: 10, color: "var(--text-dim)", marginLeft: "auto" }}>{time}</span>}
+          {!compactActions && time && <span style={{ fontSize: 10, color: "var(--text-dim)", marginLeft: "auto" }}>{time}</span>}
         </div>
+        </>
       )}
     </div>
   );
