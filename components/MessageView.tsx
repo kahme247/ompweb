@@ -236,7 +236,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     return <CustomMessageView message={custom} cwd={cwd} onOpenFile={onOpenFile} />;
   }
   if (message.role === "bashExecution") {
-    return <BashExecutionView message={message as BashExecutionMessage} sessionId={sessionId} />;
+    return <BashExecutionView message={message as BashExecutionMessage} sessionId={sessionId} entryId={entryId} />;
   }
   return null;
 }, (prev, next) => {
@@ -1854,7 +1854,7 @@ function previewText(text: string): string {
   return normalized.length > 140 ? `${normalized.slice(0, 140)}...` : normalized;
 }
 
-function BashExecutionView({ message, sessionId }: { message: BashExecutionMessage; sessionId?: string }) {
+function BashExecutionView({ message, sessionId, entryId }: { message: BashExecutionMessage; sessionId?: string; entryId?: string }) {
   const { t } = useI18n();
   const [fullOutput, setFullOutput] = useState<{ phase: "loading" } | { phase: "error"; message: string } | { phase: "ready"; output: string } | null>(null);
   // Bumped on every message change; an in-flight fetch from the previous
@@ -1873,7 +1873,7 @@ function BashExecutionView({ message, sessionId }: { message: BashExecutionMessa
   const [expanded, setExpanded] = useState(false);
   useEffect(() => {
     setExpanded(false);
-  }, [message.command, message.timestamp]);
+  }, [message.command, message.timestamp, entryId]);
 
   // Large executions record their full output to a temp file (fullOutputPath);
   // fetch it through the guarded bash-output route instead of re-reading the

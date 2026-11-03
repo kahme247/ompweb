@@ -1093,6 +1093,17 @@ test("shell card expansion resets for a different run but survives output update
   assert.equal(header().getAttribute("aria-expanded"), "false", "a different run of the same command starts collapsed");
 });
 
+test("a branch switch that reuses the card for another untimed run of the same command starts it collapsed", () => {
+  const message = { role: "bashExecution", command: "ls", output: "a", exitCode: 0 };
+  const view = render(React.createElement(MessageView, { message, entryId: "e1" }));
+  const header = () => view.container.querySelector(".shell-run-header");
+  fireEvent.click(header());
+  view.rerender(React.createElement(MessageView, { message: { ...message }, entryId: "e1" }));
+  assert.equal(header().getAttribute("aria-expanded"), "true", "a reload of the same entry keeps it open");
+  view.rerender(React.createElement(MessageView, { message: { ...message, output: "b" }, entryId: "e2" }));
+  assert.equal(header().getAttribute("aria-expanded"), "false");
+});
+
 test("a successful shell card exposes its outcome in its accessible name", () => {
   const view = render(React.createElement(MessageView, {
     message: { role: "bashExecution", command: "true", output: "", exitCode: 0 },
