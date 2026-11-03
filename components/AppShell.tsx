@@ -109,6 +109,9 @@ const EXPAND_THINKING_STORAGE_KEY = "omp-web:expand-thinking";
 const PROVIDER_USAGE_VISIBLE_STORAGE_KEY = "omp-web:provider-usage-visible";
 const NATIVE_SELECT_ALL_STORAGE_KEY = "omp-web:scope-native-select-all";
 const OPEN_URL_AUTOMATICALLY_STORAGE_KEY = "omp-web:open-url-automatically";
+// Off by default, so the Explorer keeps hiding build/, node_modules/ and the
+// other IGNORED_NAMES directories until the toolbar switch is flipped.
+const SHOW_HIDDEN_FILES_STORAGE_KEY = "omp-web:show-hidden-files";
 
 
 type AutoNameStatus =
@@ -180,6 +183,7 @@ export function AppShell({ appName }: { appName: string }) {
   const [providerUsageVisible, setProviderUsageVisible] = useState(true);
   const [scopeNativeSelectAll, setScopeNativeSelectAll] = useState(false);
   const [openUrlAutomatically, setOpenUrlAutomatically] = useState(false);
+  const [showHiddenFiles, setShowHiddenFiles] = useState(false);
   const [sidebarResizing, setSidebarResizing] = useState(false);
   // Active drag handlers so an unmount mid-drag can detach them.
   const sidebarResizeHandlersRef = useRef<{ onMove: (ev: MouseEvent) => void; onUp: () => void } | null>(null);
@@ -200,6 +204,7 @@ export function AppShell({ appName }: { appName: string }) {
       setProviderUsageVisible(window.localStorage.getItem(PROVIDER_USAGE_VISIBLE_STORAGE_KEY) !== "false");
       setScopeNativeSelectAll(window.localStorage.getItem(NATIVE_SELECT_ALL_STORAGE_KEY) === "true");
       setOpenUrlAutomatically(window.localStorage.getItem(OPEN_URL_AUTOMATICALLY_STORAGE_KEY) === "true");
+      setShowHiddenFiles(window.localStorage.getItem(SHOW_HIDDEN_FILES_STORAGE_KEY) === "true");
     } catch {
       // Keep the compact default when storage is unavailable.
     }
@@ -267,6 +272,17 @@ export function AppShell({ appName }: { appName: string }) {
     } catch {
       // The preference still applies for this page load.
     }
+  }, []);
+  const handleToggleShowHiddenFiles = useCallback(() => {
+    setShowHiddenFiles((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(SHOW_HIDDEN_FILES_STORAGE_KEY, String(next));
+      } catch {
+        // The preference still applies for this page load.
+      }
+      return next;
+    });
   }, []);
   // Persist the committed width (after each change; skipped mid-drag, then
   // written once the drag ends). The first run is skipped so the mount-time
@@ -2660,6 +2676,8 @@ export function AppShell({ appName }: { appName: string }) {
         fileSearchOpen={fileSearchOpen}
         onToggleFileSearch={handleToggleFileSearch}
         onFileSearchOpenChange={setFileSearchOpen}
+        showHiddenFiles={showHiddenFiles}
+        onToggleShowHiddenFiles={handleToggleShowHiddenFiles}
         explorerUploadBusy={explorerUploadBusy}
         onUploadBusyChange={setExplorerUploadBusy}
         explorerGitCount={explorerGitCount}

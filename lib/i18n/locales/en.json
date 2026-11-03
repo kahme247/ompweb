@@ -798,6 +798,7 @@
   "fileExplorer.searchFiles": "Search files",
   "fileExplorer.searchPlaceholder": "Search files...",
   "fileExplorer.searchTruncated": "{count} matches shown. The list may be incomplete — narrow the query to see more.",
+  "fileExplorer.showHiddenItems": "Show hidden items",
   "tabBar.git": "Git",
   "tabBar.worktrees": "Worktrees",
   "gitChanges.filterFiles": "Filter files…",

@@ -1051,6 +1051,10 @@ during the wait.
 - `/api/cwd/validate`, `/api/default-cwd`, and `/api/worktrees` call `allowFileRoot()` when they make a new location browsable.
 - The session-id → file path cache (`cacheSessionPath`, `lib/session-reader.ts`) on main is filled by main's own scans and by wrappers on the local host; it only serves the readers listed under "Session list caching".
 
+### Explorer hidden items
+- The tree skip-list (`IGNORED_NAMES`/`IGNORED_SUFFIXES`) is **duplicated** in `app/api/files/[...path]/route.ts` and `app/api/file-index/route.ts` — edit both or extract a shared module.
+- The Explorer's "Show hidden items" toggle sends `?hidden=1`, which bypasses the skip-list for `type=list` only. It deliberately does NOT touch `/api/file-index` — @-mentions and file search keep ignoring those paths. State is AppShell-owned (localStorage `omp-web:show-hidden-files`, off by default); flipping it makes `FileExplorer` drop its cached listings and re-read the visible directories, keeping expansion.
+
 ### Session list caching — new sessions must appear immediately
 - The sidebar and command palette list sessions per host: `listSessionsAllHosts()` (`lib/hosts/session-index.ts`) calls each host's `listSessions` op and caches it 30 s per host (`LIST_TTL_MS`, the daemon's own TTL). **This machine's list is its daemon's**; a host that fails or is offline keeps its last list. Nothing on main parses session files to build it.
 - The daemon's `listSessions` is `listAllSessions()` (`lib/session-reader.ts`): a 30 s TTL list cache plus an mtime-keyed directory walk in `lib/omp/session-files.ts` (`listSessionFiles`), both in the daemon process.
