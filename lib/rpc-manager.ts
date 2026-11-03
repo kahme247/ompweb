@@ -2374,10 +2374,13 @@ export class AgentSessionWrapper {
         this.bashRunning = true;
         notifyRunningChange();
         try {
-          const result = await this.proc.sendCommand<BashResultInfo>({ type: "bash", command: command.command as string });
-          // Frames and the reply share stdout, so `streaming` is omp's own
-          // `isStreaming` when it recorded the result.
-          return { ...result, deferred: this.streaming };
+          // omp holds the result back while it streams; frames and the reply
+          // share stdout, so `streaming` when the reply is read is omp's own
+          // `isStreaming`. Read it then: an agent_end in the same batch is
+          // applied before this await resumes.
+          let deferred = this.streaming;
+          const result = await this.proc.sendCommand<BashResultInfo>({ type: "bash", command: command.command as string }, undefined, () => { deferred = this.streaming; });
+          return { ...result, deferred };
         } finally {
           this.bashRunning = false;
           this.invalidateSessionLists();

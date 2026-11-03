@@ -265,6 +265,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     () => heldBash.filter((held) => countBashRuns(confirmedMessages, held.message.command) <= held.seen).map((held) => held.message),
     [heldBash, confirmedMessages],
   );
+  // Once the transcript has one, it is done for good: compaction or a branch
+  // view without it must not bring the local copy back.
+  useEffect(() => {
+    setHeldBash((prev) => {
+      const left = prev.filter((held) => countBashRuns(confirmedMessages, held.message.command) <= held.seen);
+      return left.length === prev.length ? prev : left;
+    });
+  }, [confirmedMessages]);
   // False once this hook instance unmounts: background loops (prompt/bash
   // settlement polling) must not keep firing on a dead instance.
   const hookAliveRef = useRef(true);

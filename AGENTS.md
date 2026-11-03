@@ -760,11 +760,14 @@ during the wait.
   it to `handleSend`, which runs it at once beside the turn, as omp's terminal
   does. omp holds such a result back until a later prompt starts (with omp
   18.15 it was seen landing one prompt later than the next); the wrapper marks the reply
-  `deferred` (its `streaming` when the reply arrived, which is omp's own
-  `isStreaming`), and the hook shows it from `heldBash` (after the transcript)
-  until the transcript has one more run of that command than when it was
-  sent. Never clear it on a client event such as sending a prompt: the result
-  may reach the transcript one prompt later. Other tabs see it only from then on.
+  `deferred`: its `streaming` read by `sendCommand`'s `onReply` as the reply
+  is read (omp's own `isStreaming`; after the await, an `agent_end` from the
+  same link batch would already have cleared it). The hook shows it from
+  `heldBash` (after the transcript) until the transcript has one more run of
+  that command than when it was sent, then retires it for good (compaction or
+  a branch view without it must not bring it back). Never clear it on a client
+  event such as sending a prompt: the result may reach the transcript one
+  prompt later. Other tabs see it only from then on.
 
 ### Live event stream: one socket per browser (`/api/events`)
 - Browsers cap HTTP/1.1 at **6 connections per host across all tabs**, and an

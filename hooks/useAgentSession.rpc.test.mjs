@@ -5233,6 +5233,13 @@ test("a `!` command during a run runs at once and its held-back output shows unt
     await settle();
     assert.equal(w.latest.messages.filter((message) => message.role === "bashExecution").length, 2);
     assert.deepEqual(w.latest.deferredBash, []);
+
+    // Compaction drops it from the context: the shown output must not come back.
+    saveSession("midrun-bash", [userMsg("u0", "q")]);
+    await act(async () => { publishSessionsChanged(["midrun-bash"]); });
+    await settle();
+    assert.equal(w.latest.messages.some((message) => message.role === "bashExecution"), false);
+    assert.deepEqual(w.latest.deferredBash, []);
   });
 });
 
