@@ -3,7 +3,7 @@
 // and attaching finished ones to a prompt. The server keeps no upload bytes on its own disk.
 import { randomUUID } from "node:crypto";
 import { RequestBodyTooLargeError } from "./bounded-form-data";
-import { dropUploadFrames, getHost, hostUploadOp, onUploadEvent, sendUploadFrame, type UploadAck } from "./hosts/hub";
+import { dropUploadFrames, getHost, hostUploadOp, onHostHello, onUploadEvent, sendUploadFrame, type UploadAck } from "./hosts/hub";
 import { HostOpError, LINK_LIMITS } from "./hosts/link-protocol";
 import { isRecord } from "./type-guards";
 import { formatUploadSize, MAX_UPLOAD_BYTES, MAX_UPLOADS_PER_MESSAGE, UPLOAD_ID_RE, UPLOAD_WINDOW_BYTES } from "./upload-limits";
@@ -13,6 +13,8 @@ const MAX_OPEN_UPLOADS_PER_OWNER = 32;
 /** An unfinished upload nothing touched this long (no start, chunk or ack) gives its place up: an up_start re-registers
  * it and resumes from the host's offset. */
 const UPLOAD_IDLE_MS = 10 * 60_000;
+/** Aborts kept per host while it cannot take them; past this the oldest go (the daemon's sweep deletes those files). */
+const MAX_PENDING_ABORTS_PER_HOST = 1000;
 
 /** Who hears back about one upload: a browser link, or an HTTP request waiting for its chunk's ack. */
 export interface UploadSink {
@@ -65,6 +67,7 @@ interface Upload {
 
 declare global {
   var __ompUploads: Map<string, Upload> | undefined;
+  var __ompPendingAborts: Map<string, Set<string>> | undefined;
 }
 
 // globalThis, like the rpc-manager registry: survives a `bun --hot` re-evaluation.
@@ -72,8 +75,32 @@ function uploads(): Map<string, Upload> {
   if (!globalThis.__ompUploads) {
     globalThis.__ompUploads = new Map();
     onUploadEvent(onHostEvent);
+    onHostHello((hostId) => {
+      const ids = pendingAborts().get(hostId);
+      if (!ids) return;
+      pendingAborts().delete(hostId);
+      for (const id of ids) deliverAbort(hostId, id);
+    });
   }
   return globalThis.__ompUploads;
+}
+
+/** Aborts a host could not take (offline, timed out): sent again on its next hello. In memory only. */
+function pendingAborts(): Map<string, Set<string>> {
+  return (globalThis.__ompPendingAborts ??= new Map());
+}
+
+function deliverAbort(hostId: string, id: string): Promise<void> {
+  return hostUploadOp(hostId, "uploadAbort", { id }).then(() => {}, (error: unknown) => {
+    if (!(error instanceof HostOpError) || (error.code !== "host_offline" && error.code !== "host_timeout")) return;
+    // A start of the same id since (a Retry) registered it again: replayed later, this abort would delete that upload.
+    // The host runs an id's ops in arrival order, so if this abort does land late, the Retry's start comes after it.
+    if (uploads().has(id)) return;
+    const ids = pendingAborts().get(hostId) ?? new Set<string>();
+    ids.add(id);
+    if (ids.size > MAX_PENDING_ABORTS_PER_HOST) ids.delete(ids.values().next().value as string);
+    pendingAborts().set(hostId, ids);
+  });
 }
 
 function onHostEvent(hostId: string, ack: UploadAck | null): void {
@@ -155,6 +182,9 @@ export async function startUpload(req: UploadStartRequest): Promise<{ received: 
     map.set(id, upload);
   }
   upload.touched = Date.now();
+  // A Retry reuses the id of an upload whose failure parked an abort for its host: replayed on the next hello, that abort
+  // would delete the upload this start is resuming.
+  pendingAborts().get(hostId)?.delete(id);
   req.onRegistered?.();
   let result: unknown;
   try {
@@ -184,7 +214,7 @@ function failUpload(id: string, upload: Upload, status: number, code: string, me
   uploads().delete(id);
   dropUploadFrames(upload.hostId, id);
   upload.sink?.error(status, code, message);
-  hostUploadOp(upload.hostId, "uploadAbort", { id }).catch(() => {});
+  void deliverAbort(upload.hostId, id);
 }
 
 function forward(id: string, upload: Upload, bytes: Uint8Array): void {
@@ -255,14 +285,19 @@ export function putUploadChunk(id: string, owner: string, offset: number, body: 
   return promise;
 }
 
-/** Cancel an upload of `owner` and delete its staged file (best effort while its host is offline). */
-export async function abortUpload(id: string, owner: string): Promise<void> {
+/** Cancel an upload of `owner` and delete its staged file, now or on its host's next hello. One this server does not
+ * register (it restarted, or forgot an idle or failed one) goes to `hostId`, the host its browser names: upload ids are
+ * random UUIDs only their owner's browser holds. */
+export async function abortUpload(id: string, owner: string, hostId?: string): Promise<void> {
   const map = uploads();
   const upload = map.get(id);
-  if (!upload || upload.owner !== owner) return;
-  map.delete(id);
-  dropUploadFrames(upload.hostId, id);
-  await hostUploadOp(upload.hostId, "uploadAbort", { id }).catch(() => {});
+  if (upload) {
+    if (upload.owner !== owner) return;
+    map.delete(id);
+    dropUploadFrames(upload.hostId, id);
+    return deliverAbort(upload.hostId, id);
+  }
+  if (hostId && UPLOAD_ID_RE.test(id) && getHost(hostId)) return deliverAbort(hostId, id);
 }
 
 /** Detach a sink (its browser link is gone) without aborting the upload; a later startUpload resumes it. */

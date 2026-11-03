@@ -1275,11 +1275,28 @@ during the wait.
   with 504 `upload_stalled` and forgets it without aborting it on the host, so
   the tab's automatic resume continues it. Page navigation settles pending
   WebSocket-upload promises before the worker's `bye`: a composer retained by
-  bfcache shows Retry after restoration, not a permanently uploading chip.
+  bfcache shows Retry after restoration, not a permanently uploading chip. That
+  failure (410) gives the chip a new upload id, so its Retry starts over and the
+  old id's pending cancel (worker, HTTP DELETE or host) can never delete it.
   The daemon's `sweep` deletes staged files older than 24 h and aborts open uploads
-  idle (no start/write) over 24 h (`STAGED_MAX_AGE_MS`).
+  idle (no start/write) over 24 h (`STAGED_MAX_AGE_MS`): at start, on every
+  `uploadStart`, and every hour (`UPLOAD_SWEEP_INTERVAL_MS`). It never rejects
+  (a file it cannot delete is logged and tried again next sweep): a rejection
+  from its timer would stop the daemon, and one before `uploadStart` would fail
+  every new upload.
   `uploadAttach` has a 10-minute op timeout (a 2 GiB EXDEV copy), not
   `opTimeoutMs`.
+- Cancels are durable (spec U4 "Durable cancel"): the tab always hands
+  `{op: "up_abort", id, host}` to the worker, which keeps it until the server
+  has it (link line until acked and resent on a resync; in `sse` mode a
+  `DELETE …?host=` with a 40 s deadline, retried until a 2xx or a 4xx other
+  than 408/429). Main keeps an `uploadAbort` its host could not take (503/504)
+  per host and resends it on that host's next hello (`onHostHello`). A Retry of
+  the same id supersedes it on every layer: a new `uploadStart` drops a kept
+  abort, an in-flight one that fails after the id is registered again is not
+  kept, and the worker drops its own pending cancel on a new upload of the id.
+  An id main does not register goes to the browser's `host`
+  if known. All of it is in memory: the hourly sweep is the backstop.
 - Error codes: composer uploads use `upload_id_conflict` (another upload has
   this id); `upload_conflict` stays the file manager's.
 - SSE mode uses the same registry over HTTP (`/api/uploads`). Upload owner =

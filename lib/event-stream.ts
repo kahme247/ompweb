@@ -165,9 +165,10 @@ class Transport {
     this.port.postMessage({ op: "upload", id, host: hostId, name: file.name, type: file.type, blob: file });
   }
 
-  abortUpload(id: string): void {
+  /** The worker keeps it until the server has it (a link or request that fails is retried), whatever its mode. */
+  abortUpload(id: string, host: string): void {
     this.uploads.delete(id);
-    this.port.postMessage({ op: "up_abort", id });
+    this.port.postMessage({ op: "up_abort", id, host });
   }
 
   /** Stop the sender but retain the host's staged bytes for a later Retry. */
@@ -458,17 +459,17 @@ export function uploadFile(
     abort() {
       if (controller.signal.aborted) return;
       controller.abort();
-      // The transport may have changed since the last attempt (it waits to resume): the worker drops an up_abort once
-      // it has left `ws`, so only a link that is still the live transport takes it.
-      if (viaLink && link && transport === link && link.mode === "ws") link.abortUpload(id);
-      else discardUpload(id);
+      // The worker keeps the abort until the server has it; only a tab without a worker deletes it itself.
+      discardUpload(id, hostId);
     },
   };
 }
 
-/** Deletes a finished (or failed) upload the composer no longer attaches: the host drops what it staged. */
-export function discardUpload(id: string): void {
-  fetch(`/api/uploads/${id}`, { method: "DELETE" }).catch(() => {});
+/** Deletes a finished (or failed) upload the composer no longer attaches: the host drops what it staged. `hostId`: the
+ * upload's host, so the server can tell it even when it no longer knows the upload. */
+export function discardUpload(id: string, hostId: string): void {
+  if (transport) transport.abortUpload(id, hostId);
+  else fetch(`/api/uploads/${id}?host=${encodeURIComponent(hostId)}`, { method: "DELETE" }).catch(() => {});
 }
 
 /** POST opens or resumes it at the host's offset; each PUT carries up to HTTP_UPLOAD_BYTES from the offset the server

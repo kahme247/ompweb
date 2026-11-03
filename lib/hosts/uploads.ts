@@ -20,8 +20,10 @@ const MAX_NAME_BYTES = 200;
 const MAX_EXT_BYTES = 20;
 // omp's own rule (internal-urls/local-protocol.ts): long artifact paths move to the temp dir on Windows.
 const WINDOWS_LOCAL_ROOT_MAX_CHARS = 180;
-/** Staged files untouched this long, and open uploads idle this long, are deleted (at start and on every uploadStart). */
+/** Staged files untouched this long, and open uploads idle this long, are deleted (at start, on every uploadStart and
+ * every UPLOAD_SWEEP_INTERVAL_MS). */
 export const STAGED_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+export const UPLOAD_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 
 /** The longest prefix of `text` within `bytes` UTF-8 bytes, cut between code points. */
 function clipUtf8(text: string, bytes: number): string {
@@ -143,10 +145,17 @@ export class StagedUploads {
   }
 
   /** Abort open uploads idle (no start, no write) longer than STAGED_MAX_AGE_MS, then delete staged files older than
-   * that which no write is going to. */
+   * that which no write is going to. Never rejects: it runs from a timer, and before every uploadStart. */
   async sweep(now = Date.now()): Promise<void> {
     for (const [id, upload] of this.open) {
-      if (!this.controls.has(id) && now - upload.active > STAGED_MAX_AGE_MS) await this.abort(id);
+      if (this.controls.has(id) || now - upload.active <= STAGED_MAX_AGE_MS) continue;
+      try {
+        await this.abort(id);
+      } catch (error) {
+        // Its files could not be removed (a .part replaced by a directory, EPERM): the upload is closed already, and
+        // the file scan below tries them again on every sweep.
+        console.error(`[ompweb host] could not delete staged upload ${id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
     let names: string[];
     try {
