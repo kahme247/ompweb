@@ -175,6 +175,8 @@ export interface BashResultInfo {
   outputBytes?: number;
   artifactId?: string;
   workingDir?: string;
+  /** omp-web: omp held the result back for the next prompt (a turn was running). */
+  deferred?: boolean;
 }
 
 export interface GenerationSpeedInfo {
