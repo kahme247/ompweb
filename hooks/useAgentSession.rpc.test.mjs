@@ -1821,9 +1821,13 @@ test("a chat with no stream attaches when the running channel reports its sessio
   const running = world.runningStreams.at(-1);
   assert.ok(running, "the chat watches the running channel");
   // Another chat instance (the user switched away and back) or device started the run after this one loaded,
-  // at a thinking level the chat has not seen.
+  // with a model and thinking level the chat has not seen.
   assert.notEqual(w.latest.thinkingLevel, "high");
-  world.agents.set("started-elsewhere", { running: true, state: { isStreaming: true, isPromptRunning: true, thinkingLevel: "high" } });
+  assert.notEqual(w.latest.displayModel?.modelId, "live-model");
+  world.agents.set("started-elsewhere", {
+    running: true,
+    state: { isStreaming: true, isPromptRunning: true, model: { provider: "test", id: "live-model" }, thinkingLevel: "high" },
+  });
   await act(async () => {
     running.deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["other"] }) });
     await settle();
@@ -1837,6 +1841,7 @@ test("a chat with no stream attaches when the running channel reports its sessio
   assert.equal(lastEs().channel.sessionId, "started-elsewhere");
   assert.equal(w.latest.agentRunning, true);
   assert.equal(w.latest.thinkingLevel, "high", "the composer shows the run's thinking level");
+  assert.equal(w.latest.displayModel.modelId, "live-model", "the composer shows the run's model");
 });
 
 test("a running frame never touches a chat that already has its stream", async () => {
