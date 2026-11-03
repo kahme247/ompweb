@@ -2,8 +2,7 @@
 // `uploadRetentionDays` setting (op `setUploadRetention`), the daemon keeps it in `<agent dir>/omp-web/upload-retention.json`
 // and deletes files older than that from every session's `local://uploads/`, at start and every 24 h.
 // Loaded by the daemon through jiti: no `@/` imports and no Bun APIs.
-import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { lstat, readdir, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -101,8 +100,6 @@ function readStored(file: string): number | null | undefined {
 export class UploadRetention {
   /** undefined: main has not said yet. null: keep for ever. */
   private days: number | null | undefined;
-  /** Sweeps run one after the other. */
-  private queue: Promise<void> = Promise.resolve();
   private timer: NodeJS.Timeout | undefined;
 
   constructor(
@@ -124,25 +121,19 @@ export class UploadRetention {
     this.timer = undefined;
   }
 
+  /** A sweep is idempotent and skips entries that vanish under it, so two at once are harmless. */
   sweep(now = Date.now()): Promise<void> {
-    const run = this.queue.then(() => (typeof this.days === "number" ? sweepSentUploads(this.days, now, this.roots) : undefined));
-    this.queue = run.catch(() => {});
-    return run;
+    return typeof this.days === "number" ? sweepSentUploads(this.days, now, this.roots) : Promise.resolve();
   }
 
   /** Op setUploadRetention: keep `days` (null: for ever), then sweep without holding up the answer. The same value as
-   * the last one does nothing, so a daemon that links over and over does not walk every session each time. */
+   * the last one does nothing, so a daemon that links over and over does not walk every session each time. The file is
+   * not secret, and one that is corrupt reads as none (main sends the value again at every hello): a plain write. */
   set(days: unknown): null {
     if (!isUploadRetentionDays(days)) throw new HostOpError(400, "invalid_request", "days must be a whole number from 1 to 3650, or null");
     if (days === this.days) return null;
     mkdirSync(dirname(this.file), { recursive: true });
-    const temporary = `${this.file}.${randomUUID()}.tmp`;
-    try {
-      writeFileSync(temporary, `${JSON.stringify({ days })}\n`, { mode: 0o600, flag: "wx" });
-      renameSync(temporary, this.file);
-    } finally {
-      rmSync(temporary, { force: true });
-    }
+    writeFileSync(this.file, `${JSON.stringify({ days })}\n`);
     this.days = days;
     void this.sweep();
     return null;

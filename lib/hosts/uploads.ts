@@ -4,7 +4,7 @@
 // Loaded by the daemon through jiti: no `@/` imports and no Bun APIs.
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { appendFile, copyFile, link, lstat, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, link, lstat, mkdir, open, readdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
@@ -469,6 +469,10 @@ export class StagedUploads {
       // A hard link never replaces a file; another device (or a file system without links) gets a copy instead.
       try {
         await link(part, target);
+        // The link shares the staged file's inode, whose mtime is its last write (up to 24 h ago); retention (U6) counts
+        // from the send, as it does for a copy. Best effort: without it the file simply expires a little sooner.
+        const sent = new Date();
+        await utimes(target, sent, sent).catch(() => {});
       } catch (error) {
         if (errno(error) === "EEXIST" && n < 1000) continue;
         if (!["EXDEV", "EPERM", "ENOTSUP", "ENOSYS"].includes(errno(error) ?? "")) throw error;
