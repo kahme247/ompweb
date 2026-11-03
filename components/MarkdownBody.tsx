@@ -1,7 +1,7 @@
 "use client";
 
 import { Children, cloneElement, isValidElement, useContext, useMemo, type ComponentProps, type MouseEvent, type ReactElement, type ReactNode } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
+import ReactMarkdown, { type Components, type UrlTransform } from "react-markdown";
 import { remarkInlineCodeFileLinks, resolveLocalFileHref } from "@/lib/file-links";
 import { encodeFilePathForApi } from "@/lib/file-paths";
 import { AgentLinkContext, agentAwareUrlTransform, agentLinkIds, remarkAgentLinks } from "../lib/agent-links";
@@ -10,6 +10,9 @@ import { normalizeDisplayMath, useMarkdownPlugins, type MarkdownPlugins } from "
 import { markdownCodeRenderer } from "./MarkdownCode";
 import { ClickableImage } from "./ImageLightbox";
 import { TableChart } from "./TableChart";
+
+// The default sanitizer reads `C:` as a scheme; a drive path (`\` arrives as `%5C`) is a local file the `a` renderer opens.
+const urlTransform: UrlTransform = (url, key, node) => (/^[A-Za-z]:(?:\/|%5C)/i.test(url) ? url : agentAwareUrlTransform(url, key, node));
 
 interface MarkdownBodyProps {
   children: string;
@@ -162,7 +165,7 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
         remarkPlugins={remarkPlugins}
         rehypePlugins={rehypePlugins}
         components={components}
-        urlTransform={agentAwareUrlTransform}
+        urlTransform={urlTransform}
       >
         {normalizedMarkdown}
       </ReactMarkdown>
