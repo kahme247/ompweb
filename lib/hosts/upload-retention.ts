@@ -65,7 +65,9 @@ async function sweepDir(dir: string, cutoff: number): Promise<void> {
 }
 
 /** Delete every sent upload older than `days` days at `now`. Fixed depth: only the uploads folders, never a tree below
- * them, and a `local` or `uploads` that is a symlink is not followed. The folders stay. Staged files keep U3's 24 h rule. */
+ * them, and a `local` or `uploads` that is a symlink is not followed. The folders stay. Staged files keep U3's 24 h rule.
+ * The symlink checks see each directory as it is when checked: a directory swapped for a link during the sweep is not
+ * caught (Node has no `unlinkat`), which only a process already running as this user can do. */
 export async function sweepSentUploads(days: number, now = Date.now(), roots: RetentionRoots = defaultRoots()): Promise<void> {
   const cutoff = now - days * DAY_MS;
   const folders: string[] = [];
