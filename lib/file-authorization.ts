@@ -3,11 +3,9 @@ import { homedir } from "os";
 import path from "path";
 import {
   getAllowedFileRoots,
-  getConfigAgentRoots,
-  isConfigRootDeniedFile,
   isExistingFilePathAllowed,
   isFilePathAllowed,
-  isUnderConfigRoot,
+  isOmpSecretFile,
   isWindowsAbsolutePath,
   normalizeSlashes,
   resolveRequestedFilePath,
@@ -62,12 +60,11 @@ export async function authorizeFileAccess(
   const filePath = resolveReadFilePath(segments, allowedRoots);
   // Making the omp config root readable (so `~/.agents/AGENTS.md` and
   // `~/.omp/AGENTS.md` open in the viewer, #135) also puts omp's credential
-  // store inside an allowed root. Deny those by name before anything can
-  // stat, read or download them. Only paths outside the config roots are
-  // exempt, so a workspace that happens to hold an `agent.db` still opens.
-  if (isUnderConfigRoot(filePath, getConfigAgentRoots()) && isConfigRootDeniedFile(filePath)) {
-    return ACCESS_DENIED;
-  }
+  // store inside an allowed root. Deny it before anything can stat, read or
+  // download it, also through a symlink that resolves to it.
+  let realPath = filePath;
+  try { realPath = fs.realpathSync(filePath); } catch { /* missing: the stat below answers 404 */ }
+  if (isOmpSecretFile(filePath) || isOmpSecretFile(realPath)) return ACCESS_DENIED;
   const allowedByRoot = isFilePathAllowed(filePath, allowedRoots);
   const allowedBySessionReference =
     !allowedByRoot &&
