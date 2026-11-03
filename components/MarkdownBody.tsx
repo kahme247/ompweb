@@ -128,8 +128,8 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
       const openFile = onOpenFile;
       if (filePath && openFile) {
         const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
+          // No modifier escape hatch: the href is a filesystem path, which the browser cannot open in a new tab.
           if (event.defaultPrevented || event.button !== 0) return;
-          if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
           const target = event.currentTarget.getAttribute("target");
           if (target && target !== "_self") return;
           event.preventDefault();
