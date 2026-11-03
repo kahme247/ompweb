@@ -87,7 +87,7 @@ class FakeSharedWorker {
 
 /** A command over the session socket: `world.socketAnswer` may answer it as the worker would (e.g. transport_lost), else the agent route does. */
 async function answerCommand(port, { n, sessionId, advisor, body }) {
-  let answer = world.socketAnswer?.(JSON.parse(body));
+  let answer = await world.socketAnswer?.(JSON.parse(body));
   if (!answer) {
     const res = await fetchStub(`/api/agent/${encodeURIComponent(sessionId)}${advisor ? "?advisor=1" : ""}`, { method: "POST", body });
     answer = { status: res.status, body: await res.json() };
@@ -5201,6 +5201,99 @@ test("a `!` command the route refused is offered back to the composer with an er
     assert.deepEqual(offered, ["!touch /tmp/once"], "it never ran, so the composer gets it back");
     assert.deepEqual(toastCalls, []);
     assert.deepEqual(w.latest.notices.map((notice) => notice.type), ["error"]);
+  });
+});
+
+test("a `!` command during a run runs at once and its held-back output shows until the transcript has it", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    const run = (timestamp) => ({ role: "bashExecution", command: "echo hi", output: "hi\n", exitCode: 0, timestamp });
+    primeSession("midrun-bash", [userMsg("u0", "q")]);
+    const { w, es } = await startRun("midrun-bash", "q1");
+    await act(async () => { es.emit({ type: "agent_start" }); await Promise.resolve(); });
+    const result = { output: "hi\n", exitCode: 0, cancelled: false, truncated: false, deferred: true };
+    world.socketAnswer = (command) => command.type === "bash" ? { status: 200, body: { success: true, data: result } } : null;
+    let receipt;
+    await act(async () => { receipt = await w.latest.handleSend("!echo hi"); await sleep(30); });
+    assert.deepEqual(receipt, { status: "accepted" });
+    assert.equal(w.latest.agentRunning, true, "the turn keeps running");
+    assert.deepEqual(
+      w.latest.deferredBash.map(({ command, output, exitCode }) => ({ command, output, exitCode })),
+      [{ command: "echo hi", output: "hi\n", exitCode: 0 }],
+    );
+
+    await act(async () => { es.emit({ type: "agent_end", isTerminal: true, messages: [] }); await sleep(30); });
+    await settle();
+    assert.equal(w.latest.deferredBash.length, 1, "omp still holds it after the turn");
+
+    // An older run of the same command comes into view (e.g. pre-compaction history): it is not this one.
+    const before = world.sessions.get("midrun-bash").messages;
+    saveSession("midrun-bash", [...before, run(1)]);
+    await act(async () => { publishSessionsChanged(["midrun-bash"]); });
+    await settle();
+    assert.equal(w.latest.messages.filter((message) => message.role === "bashExecution").length, 1);
+    assert.equal(w.latest.deferredBash.length, 1, "an older run does not count as this one");
+
+    // omp writes it when a later prompt starts, stamped after everything before it.
+    saveSession("midrun-bash", [...before, run(1), run(5)]);
+    await act(async () => { publishSessionsChanged(["midrun-bash"]); });
+    await settle();
+    assert.deepEqual(w.latest.deferredBash, []);
+
+    // Compaction drops it from the context: the shown output must not come back.
+    saveSession("midrun-bash", [userMsg("u0", "q")]);
+    await act(async () => { publishSessionsChanged(["midrun-bash"]); });
+    await settle();
+    assert.equal(w.latest.messages.some((message) => message.role === "bashExecution"), false);
+    assert.deepEqual(w.latest.deferredBash, []);
+  });
+});
+
+test("two held runs of the same `!` command each wait for their own recorded run", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    const run = (timestamp) => ({ role: "bashExecution", command: "git status", output: "clean\n", exitCode: 0, timestamp });
+    primeSession("midrun-twice", [userMsg("u0", "q")]);
+    const { w, es } = await startRun("midrun-twice", "q1");
+    await act(async () => { es.emit({ type: "agent_start" }); await Promise.resolve(); });
+    const result = { output: "clean\n", exitCode: 0, cancelled: false, truncated: false, deferred: true };
+    world.socketAnswer = (command) => command.type === "bash" ? { status: 200, body: { success: true, data: result } } : null;
+    for (let i = 0; i < 2; i++) await act(async () => { await w.latest.handleSend("!git status"); await sleep(30); });
+    assert.equal(w.latest.deferredBash.length, 2);
+
+    const before = world.sessions.get("midrun-twice").messages;
+    saveSession("midrun-twice", [...before, run(5)]);
+    await act(async () => { publishSessionsChanged(["midrun-twice"]); });
+    await settle();
+    assert.equal(w.latest.deferredBash.length, 1, "one recorded run settles one held run");
+
+    saveSession("midrun-twice", [...before, run(5), run(6)]);
+    await act(async () => { publishSessionsChanged(["midrun-twice"]); });
+    await settle();
+    assert.deepEqual(w.latest.deferredBash, []);
+  });
+});
+
+test("Stop during a run with a `!` command beside it stops the turn, not the command", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    primeSession("midrun-stop", [userMsg("u0", "q")]);
+    const { w, es } = await startRun("midrun-stop", "q1");
+    await act(async () => { es.emit({ type: "agent_start" }); await Promise.resolve(); });
+    const sent = [];
+    let finishBash;
+    world.socketAnswer = (command) => {
+      sent.push(command.type);
+      if (command.type !== "bash") return null;
+      return new Promise((resolve) => { finishBash = () => resolve({ status: 200, body: { success: true, data: { output: "", exitCode: 0, cancelled: false, truncated: false, deferred: true } } }); });
+    };
+    let bash;
+    await act(async () => { bash = w.latest.handleSend("!sleep 5"); await sleep(30); });
+    assert.equal(w.latest.bashRunning, true);
+    await act(async () => { void w.latest.handleAbort(); await sleep(30); });
+    assert.equal(sent.includes("abort_bash"), false, "the shell command keeps running");
+    assert.ok(sent.some((type) => type === "abort_and_restore_queue" || type === "abort"), "the turn is stopped");
+    await act(async () => { finishBash(); await bash; });
   });
 });
 

@@ -7,7 +7,7 @@ export const MAX_UPLOAD_BYTES = 2 * 1024 ** 3;
 export const MAX_UPLOADS_PER_MESSAGE = 20;
 /** Bytes of one upload a sender keeps in flight beyond the host's last ack (spec U4). */
 export const UPLOAD_WINDOW_BYTES = 2 * 1024 * 1024;
-/** An upload the host's acks do not advance for this long has stalled: the worker fails it (Retry resumes it). */
+/** An upload the host's acks do not advance for this long has stalled: the worker fails it, and the tab resumes it. */
 export const UPLOAD_STALL_MS = 120_000;
 /** An upload id: a client-made UUID v4, lowercase. */
 export const UPLOAD_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;

@@ -606,7 +606,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     setAttachedUploads((prev) => prev.map((upload) => (upload.id === id ? { ...upload, ...patch } : upload)));
   }, []);
 
-  /** Uploads the chip's file to its host; a retry resumes at the host's offset (same id). */
+  /** Uploads the chip's file to its host; a retry resumes at the host's offset (same id). While a transient failure
+   *  waits to resume by itself, the chip keeps `uploading` and shows the failure in `error`. */
   const runUpload = useCallback((upload: AttachedUpload) => {
     if (!upload.file) return;
     const { id, size } = upload;
@@ -617,7 +618,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (percent === shownPercent) return;
       shownPercent = percent;
       patchUpload(id, { received });
-    }, id);
+    }, id, (error) => patchUpload(id, { error: error === null ? null : uploadErrorMessage(error) }));
     uploadHandlesRef.current.set(id, handle);
     const settle = (patch: Partial<AttachedUpload>) => {
       // Removed or switched meanwhile: its abort ended it.
@@ -1133,7 +1134,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const raw = overrideText ?? value;
     const msg = raw.trim();
     if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length) return;
-    if (submissionBlockedRef.current || isStreaming) return;
+    // `!cmd` runs right away during a run too, as in omp's terminal; it is never queued as text.
+    const shellCommand = msg.startsWith("!") && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length;
+    if (submissionBlockedRef.current || (isStreaming && !shellCommand)) return;
     onAudioUnlock?.();
     if (sendSideQuestion(msg, overrideText)) return;
     if (rejectsPendingUploads()) return;
@@ -1603,6 +1606,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length) return;
     if (sendSideQuestion(msg, overrideText)) return;
     if (rejectsPendingUploads()) return;
+    if (msg.startsWith("!") && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length) {
+      void handleSend(overrideText);
+      return;
+    }
     const images = attachedImagesRef.current.length ? attachedImagesRef.current : undefined;
     const uploads = uploadArgs(attachedUploadsRef.current);
     // The queue callbacks resolve false when omp refused the message: it goes
@@ -1659,7 +1666,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       recoverOnFailure(onFollowUp(composedMessage, images, ...uploads), composedMessage);
     }
     clearInput();
-  }, [value, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, t, advisorEnabled, rejectsOversizedPrompt, rejectsPendingUploads, sendSideQuestion]);
+  }, [value, handleSend, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, t, advisorEnabled, rejectsOversizedPrompt, rejectsPendingUploads, sendSideQuestion]);
   // A typed message or attachment during a run is a queued follow-up — and so
   // is a dictation in progress: the primary button must take the same state it
   // would have if the composer already held text. Keep Stop as the action

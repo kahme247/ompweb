@@ -2085,7 +2085,7 @@ export class AgentSessionWrapper {
         // optimistic turn and lost the message). Degrade into omp's own
         // follow-up queue instead: omp keeps owning the chips and delivers the
         // message once the shell command releases the session.
-        if (this.bashRunning) return await this.queueWhileShellRunning(command);
+        if (this.bashRunning && !this.streaming) return await this.queueWhileShellRunning(command);
         const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
         if (!streamingBehavior) {
           this.responseObserved = false;
@@ -2151,7 +2151,7 @@ export class AgentSessionWrapper {
         // `steer` has the same collision while a `!!` shell command runs — and
         // there is no live turn to steer anyway, so it joins the follow-up
         // queue like a prompt would.
-        if (type === "steer" && this.bashRunning) return await this.queueWhileShellRunning(command);
+        if (type === "steer" && this.bashRunning && !this.streaming) return await this.queueWhileShellRunning(command);
         await this.proc.sendCommand({
           type,
           message: command.message as string,
@@ -2366,13 +2366,21 @@ export class AgentSessionWrapper {
         if (command.excludeFromContext === true) {
           throw new WebRpcError(BASH_EXCLUDE_MESSAGE, "bash_exclude_unsupported");
         }
-        if (this.isRunning()) {
-          throw new Error("Cannot run a shell command while the session is busy");
+        // A turn may be running: omp runs the command beside it and, as its
+        // terminal does, records the result only when the next prompt starts.
+        if (this.bashRunning) {
+          throw new Error("A shell command is already running");
         }
         this.bashRunning = true;
         notifyRunningChange();
         try {
-          return await this.proc.sendCommand<BashResultInfo>({ type: "bash", command: command.command as string });
+          // omp holds the result back while it streams; frames and the reply
+          // share stdout, so `streaming` when the reply is read is omp's own
+          // `isStreaming`. Read it then: an agent_end in the same batch is
+          // applied before this await resumes.
+          let deferred = this.streaming;
+          const result = await this.proc.sendCommand<BashResultInfo>({ type: "bash", command: command.command as string }, undefined, () => { deferred = this.streaming; });
+          return { ...result, deferred };
         } finally {
           this.bashRunning = false;
           this.invalidateSessionLists();

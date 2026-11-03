@@ -754,6 +754,26 @@ during the wait.
   and the reply reports it (`{queued:true, queue:"followUp",
   reason:"shellRunning"}`), which the hook surfaces as a notice while rolling
   the phantom optimistic turn back. The chip still comes from omp's snapshot.
+  This applies only with no turn streaming: during a turn, prompts and steers
+  reach omp unchanged.
+- A `!cmd` submitted during a run is never queued as text: `sendQueued` hands
+  it to `handleSend`, which runs it at once beside the turn, as omp's terminal
+  does. omp holds such a result back until a later prompt starts (with omp
+  18.15 it was seen landing one prompt later than the next); the wrapper marks the reply
+  `deferred`: its `streaming` read by `sendCommand`'s `onReply` as the reply
+  is read (omp's own `isStreaming`; after the await, an `agent_end` from the
+  same link batch would already have cleared it). The hook shows it from
+  `heldBash` (after the transcript) until the transcript has a run of that
+  command stamped after the newest omp stamp the tab had seen when the command
+  was sent (`newestStampRef`, which only grows, so a history view cannot lower
+  it; both omp's clock, so an older run revealed by the pre-compaction view
+  never matches; never compare counts, they change with the view). Each
+  recorded run settles one held entry (`settledRunsRef`). It then retires it
+  for good (compaction or a branch view without it must not bring it back). Never clear it on a client
+  event such as sending a prompt: the result may reach the transcript one
+  prompt later. Other tabs see it only from then on. Stop (`handleAbort`)
+  stops a running turn first, as omp's Esc does; `abort_bash` only when no
+  turn runs.
 
 ### Live event stream: one socket per browser (`/api/events`)
 - Browsers cap HTTP/1.1 at **6 connections per host across all tabs**, and an
@@ -1031,6 +1051,10 @@ during the wait.
 - `/api/cwd/validate`, `/api/default-cwd`, and `/api/worktrees` call `allowFileRoot()` when they make a new location browsable.
 - The session-id → file path cache (`cacheSessionPath`, `lib/session-reader.ts`) on main is filled by main's own scans and by wrappers on the local host; it only serves the readers listed under "Session list caching".
 
+### Explorer hidden items
+- The tree skip-list (`IGNORED_NAMES`/`IGNORED_SUFFIXES`) is **duplicated** in `app/api/files/[...path]/route.ts` and `app/api/file-index/route.ts` — edit both or extract a shared module.
+- The Explorer's "Show hidden items" toggle sends `?hidden=1`, which bypasses the skip-list for `type=list` only. It deliberately does NOT touch `/api/file-index` — @-mentions and file search keep ignoring those paths. State is AppShell-owned (localStorage `omp-web:show-hidden-files`, off by default); flipping it makes `FileExplorer` drop its cached listings and re-read the visible directories, keeping expansion.
+
 ### Session list caching — new sessions must appear immediately
 - The sidebar and command palette list sessions per host: `listSessionsAllHosts()` (`lib/hosts/session-index.ts`) calls each host's `listSessions` op and caches it 30 s per host (`LIST_TTL_MS`, the daemon's own TTL). **This machine's list is its daemon's**; a host that fails or is offline keeps its last list. Nothing on main parses session files to build it.
 - The daemon's `listSessions` is `listAllSessions()` (`lib/session-reader.ts`): a 30 s TTL list cache plus an mtime-keyed directory walk in `lib/omp/session-files.ts` (`listSessionFiles`), both in the daemon process.
@@ -1231,16 +1255,27 @@ during the wait.
   per-id queue so an abort cannot be undone by an earlier attach's receipt.
   A start that finds the upload aborted sends
   `uploadAbort` to the host and answers 404 `upload_missing`. A host-link drop
-  fails each in-flight upload with 503 `host_offline`; the chip's Retry (same
-  id) resumes. No auto-retry.
+  fails each in-flight upload with 503 `host_offline`. `uploadFile`
+  (`lib/event-stream.ts`) resumes 502/503/504 and HTTP network failures by
+  itself (same id, back-off restarting after new bytes, chip shows
+  "Reconnecting…") until an outage reaches 5 min, timed from its first
+  failure; other failures, and a bfcache pagehide (410), show Retry.
+  Back-off and in-flight retries share the remaining outage budget; their
+  watchdog resets only when acknowledged bytes advance. Expiry aborts the
+  HTTP request or sends tab-scoped `up_pause` to stop the worker without
+  deleting staged bytes, then settles with `upload_stalled` so Retry is usable.
+  Checks after waking and before applying an ack prevent expired work reviving.
+  HTTP body-read network errors propagate to the retry classifier (only JSON
+  syntax errors use the fallback body). Network `TypeError`s use the existing
+  localized network-error explanation in upload chip tooltips.
 - Limits on main: at most 32 unfinished uploads per owner (429
   `too_many_uploads`); an unfinished entry idle 10 min (no start, frame or ack)
   is dropped from the registry (a later `up_start` re-registers it). The worker
   fails an upload no start answer or ack advances for `UPLOAD_STALL_MS` (120 s)
   with 504 `upload_stalled` and forgets it without aborting it on the host, so
-  Retry resumes. Page navigation settles pending WebSocket-upload promises before
-  the worker's `bye`: a composer retained by bfcache shows Retry after restoration,
-  not a permanently uploading chip. This does not automatically resume navigation.
+  the tab's automatic resume continues it. Page navigation settles pending
+  WebSocket-upload promises before the worker's `bye`: a composer retained by
+  bfcache shows Retry after restoration, not a permanently uploading chip.
   The daemon's `sweep` deletes staged files older than 24 h and aborts open uploads
   idle (no start/write) over 24 h (`STAGED_MAX_AGE_MS`).
   `uploadAttach` has a 10-minute op timeout (a 2 GiB EXDEV copy), not

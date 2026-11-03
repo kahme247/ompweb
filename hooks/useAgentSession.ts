@@ -3,6 +3,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo, useReducer } from "react";
 import type {
   AgentMessage,
+  BashExecutionMessage,
   ExitedRpcSession,
   CustomMessage,
   ExtensionStatusItem,
@@ -28,6 +29,7 @@ import { createMessageUpdateCoalescer, type MessageUpdateCoalescer } from "@/lib
 import { displayMessage } from "@/lib/message-delta";
 import { looksLikeRunningTurn } from "@/lib/chat-transcript-plan";
 import { createReconcileGuard, type ReconcileGuard } from "@/lib/reconcile-guard";
+import type { BashResultInfo } from "@/lib/pi-types";
 import { getToolNamesForPreset, type ToolPreset } from "@/lib/tool-presets";
 import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-preset-preference";
 import { toast } from "@/components/ui/toast";
@@ -221,6 +223,20 @@ function toastStoppedSend(error: unknown, promptIssued = true): boolean | null {
   return error.mayHaveRun && promptIssued;
 }
 
+/** The held `!` runs omp has not recorded yet. A recorded run is a run of the
+ * command stamped after `after`, the newest omp stamp this tab had seen when it
+ * was sent (both omp's clock, so older runs never match in any view); each
+ * recorded run settles one held entry, oldest first, and `settled` holds the
+ * runs (`stamp:command`) that already settled one. Adds the runs it matches. */
+function unrecordedHeldBash<T extends { command: string; after: number }>(messages: AgentMessage[], held: T[], settled: Set<string>): T[] {
+  return held.filter((entry) => {
+    const run = messages.find((message) => message.role === "bashExecution" && message.command === entry.command
+      && (message.timestamp ?? 0) > entry.after && !settled.has(`${message.timestamp}:${message.command}`));
+    if (run) settled.add(`${run.timestamp}:${entry.command}`);
+    return !run;
+  });
+}
+
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
     session, newSessionCwd, newSessionHostId, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved,
@@ -250,6 +266,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [hostFrame, setHostFrame] = useState<{ sessionId: string | null; status: HostStatus } | null>(null);
   const [bashRunning, setBashRunning] = useState(false);
   const [pendingBash, setPendingBash] = useState<{ command: string; excludeFromContext: boolean } | null>(null);
+  // `!` results from a running turn: omp holds them back until a later prompt
+  // starts, so until the transcript has them they show from here, like the
+  // terminal's pending block. `after` is the newest omp stamp this tab had
+  // seen when it was sent; it only grows, so a history view cannot lower it.
+  const [heldBash, setHeldBash] = useState<{ message: BashExecutionMessage; command: string; after: number }[]>([]);
+  const newestStampRef = useRef(0);
+  const newestStamp = useMemo(() => confirmedMessages.reduce((newest, message) => Math.max(newest, message.timestamp ?? 0), 0), [confirmedMessages]);
+  newestStampRef.current = Math.max(newestStampRef.current, newestStamp);
+  // Recorded runs that already settled a held entry, so one run settles one.
+  const settledRunsRef = useRef(new Set<string>());
+  const deferredBash = useMemo(
+    () => unrecordedHeldBash(confirmedMessages, heldBash, new Set(settledRunsRef.current)).map((held) => held.message),
+    [heldBash, confirmedMessages],
+  );
+  // Once the transcript has one, it is done for good: compaction or a branch
+  // view without it must not bring the local copy back.
+  useEffect(() => {
+    const left = unrecordedHeldBash(confirmedMessages, heldBash, settledRunsRef.current);
+    if (left.length === heldBash.length) return;
+    // Keep entries added since this render.
+    setHeldBash((prev) => prev.filter((held) => left.includes(held) || !heldBash.includes(held)));
+  }, [confirmedMessages, heldBash]);
   // False once this hook instance unmounts: background loops (prompt/bash
   // settlement polling) must not keep firing on a dead instance.
   const hookAliveRef = useRef(true);
@@ -2734,8 +2772,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleSend = useCallback(async (message: string, images?: AttachedImage[], uploads?: string[]): Promise<PromptSubmissionResult> => {
     const trimmedMessage = message.trim();
     if (!trimmedMessage && !images?.length && !uploads?.length) return { status: "rejected" };
-    if (agentRunningRef.current || bashRunningRef.current || editInFlightRef.current) return { status: "rejected" };
+    if (bashRunningRef.current || editInFlightRef.current) return { status: "rejected" };
     if (initialHydrationPendingRef.current) return { status: "rejected" };
+    // Shell commands run during a turn too, as in omp's terminal: omp holds the
+    // result back until a later prompt starts.
+    const isBashCommand = !images?.length && !uploads?.length && trimmedMessage.startsWith("!");
+    if (isBashCommand) {
+      const isExcluded = trimmedMessage.startsWith("!!");
+      const bashCmd = (isExcluded ? trimmedMessage.slice(2) : trimmedMessage.slice(1)).trim();
+      if (!bashCmd) return { status: "rejected" };
+      await executeBashRef.current?.(bashCmd, isExcluded);
+      return { status: "accepted" };
+    }
+    if (agentRunningRef.current) return { status: "rejected" };
     const isSlashCommandPrompt = !images?.length && !uploads?.length && trimmedMessage.startsWith("/");
     // omp runs TUI-only commands such as `/guided-goal` nowhere but its own
     // terminal, so over RPC the text is sent as an ordinary prompt and the turn
@@ -2748,15 +2797,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         warnedSlashCommandsRef.current.add(name);
         addNotice({ type: "warning", message: translate("agentSession.unknownSlashCommand", { name }) });
       }
-    }
-
-    const isBashCommand = !images?.length && !uploads?.length && trimmedMessage.startsWith("!");
-    if (isBashCommand) {
-      const isExcluded = trimmedMessage.startsWith("!!");
-      const bashCmd = (isExcluded ? trimmedMessage.slice(2) : trimmedMessage.slice(1)).trim();
-      if (!bashCmd) return { status: "rejected" };
-      await executeBashRef.current?.(bashCmd, isExcluded);
-      return { status: "accepted" };
     }
 
     // This is the final dispatch boundary, after web slash commands have been
@@ -2999,22 +3039,38 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [addNotice, catchUp, eventCoalescer, ensureEventsConnected, refreshSubagentRoster, clearTerminalReconcileTimer, opts.chatInputRef, snapshotRunEntries]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
-    if (agentRunningRef.current || bashRunningRef.current || editInFlightRef.current) return;
+    if (bashRunningRef.current || editInFlightRef.current) return;
     const inputText = `${excludeFromContext ? "!!" : "!"}${command}`;
     bashRunningRef.current = true;
     setPendingBash({ command, excludeFromContext });
     setBashRunning(true);
+    const after = newestStampRef.current;
     try {
       const sid = sessionIdRef.current ?? session?.id ?? await ensureNewSession();
       if (!sid) throw new Error(translate("agentSession.shellSessionFailed"));
-      await sendAgentCommand(sid, {
+      const result = await sendAgentCommand<BashResultInfo>(sid, {
         type: "bash",
         command,
         excludeFromContext,
       });
-      // Same abandonment rule as handleSend: navigating away mid-spawn must
-      // not pull the fresh chat into this session's history.
-      if (hookAliveRef.current) {
+      if (result?.deferred) {
+        setHeldBash((prev) => [...prev, {
+          command,
+          after,
+          message: {
+            role: "bashExecution",
+            command,
+            output: result.output,
+            exitCode: result.exitCode,
+            cancelled: result.cancelled,
+            truncated: result.truncated,
+            timestamp: Date.now(),
+          },
+        }]);
+      } else if (hookAliveRef.current && !agentRunningRef.current) {
+        // Same abandonment rule as handleSend: navigating away mid-spawn must
+        // not pull the fresh chat into this session's history. A run this tab
+        // still shows as live reloads at its agent_end instead.
         await loadSession(sid);
         promoteNewSession(1, inputText);
       }
@@ -3162,7 +3218,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleAbort = useCallback(async () => {
     const sid = sessionIdRef.current;
     if (!sid) return;
-    if (bashRunningRef.current) {
+    // As omp's Esc: a running turn is stopped first; a `!` command beside it keeps running.
+    if (bashRunningRef.current && !agentRunningRef.current) {
       try {
         await sendAgentCommand(sid, { type: "abort_bash" });
       } catch (e) {
@@ -4190,7 +4247,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands, removeQueuedMessage, promoteQueuedToSteer, setActiveLeafId, setData, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,
     btw, askBtw,
-    bashRunning, pendingBash,
+    bashRunning, pendingBash, deferredBash,
     // True while a run this UI does not own looks active from the transcript
     // tail; drives the live-tail rendering and the bounded sync poll.
     externalRunActive,
