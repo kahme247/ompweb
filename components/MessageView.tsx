@@ -1918,7 +1918,7 @@ function BashExecutionView({ message, sessionId }: { message: BashExecutionMessa
           </span>
           <ChevronDown size={13} strokeWidth={1.8} aria-hidden className="shell-run-chevron" style={{ transform: expanded ? "rotate(180deg)" : undefined }} />
         </CollapsibleTrigger>
-        {expanded && !isPending && (
+        {expanded && (
           <pre className="shell-run-output">{message.output || t("messageView.noOutput")}</pre>
         )}
       </Collapsible>

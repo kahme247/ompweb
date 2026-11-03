@@ -3991,7 +3991,7 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
 .shell-run-header:hover { background: var(--bg-subtle); }
 /* The card clips overflow, so the focus ring sits inside the header. */
 .shell-run-header:focus-visible { outline-offset: -2px; }
-.shell-run-header:disabled { cursor: default; }
+.shell-run-header[aria-disabled="true"] { cursor: default; }
 .shell-run-prompt { color: var(--accent); font-weight: 600; flex-shrink: 0; }
 .shell-run-command {
   flex: 1;

@@ -1075,6 +1075,8 @@ test("a `!` run renders as a shell card with its command, status and output", ()
 
   const pending = shell({ command: "make", output: "" });
   assert.ok(pending.header.querySelector(".activity-row-spinner"), "a running command shows a spinner");
+  assert.equal(pending.header.getAttribute("aria-disabled"), "true", "the header cannot be toggled while it runs");
   fireEvent.click(pending.header);
+  assert.equal(pending.header.getAttribute("aria-expanded"), "false");
   assert.equal(pending.view.container.querySelector(".shell-run-output"), null, "no empty output while it runs");
 });
