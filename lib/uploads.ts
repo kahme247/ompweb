@@ -361,11 +361,20 @@ export async function attachUploads(
       upload.attached = await upload.attaching!.result;
     }
     const { url, path } = upload.attached!;
-    lines.push(`- ${url} (${path}, ${formatUploadSize(upload.size)}, ${upload.type || "application/octet-stream"})`);
+    // The agent reads the exact path in the parentheses; the link target is percent-encoded so no name breaks it.
+    const href = encodeURI(path.toWellFormed()).replace(/[()#?&]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+    lines.push(`- [${markdownCode(url)}](${href}) (${path}, ${formatUploadSize(upload.size)}, ${upload.type || "application/octet-stream"})`);
   }
   const block = `Attached files (this session's local:// directory):\n${lines.join("\n")}`;
   const message = typeof command.message === "string" ? command.message : "";
   command.message = message ? `${message}\n\n${block}` : block;
+}
+
+/** A CommonMark code span holding `text` verbatim: the fence outruns any backtick run inside it. */
+function markdownCode(text: string): string {
+  const fence = "`".repeat(Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length)) + 1);
+  const pad = /^`|`$/.test(text) ? " " : "";
+  return `${fence}${pad}${text}${pad}${fence}`;
 }
 
 /** The prompt carrying these uploads reached omp: their registry entries go. */
