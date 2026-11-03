@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from "fs";
+import { existsSync, readdirSync, realpathSync } from "fs";
 import { homedir } from "os";
 import path from "path";
 import { getAgentDir, getConfigRoot } from "./omp/paths";
@@ -79,17 +79,33 @@ export function getConfigAgentRoots(): string[] {
  * Only the files omp itself keeps are denied: those directly in an agent dir
  * (`PI_CODING_AGENT_DIR`, `<config root>/agent`, `<config root>/profiles/<name>/agent`).
  * A file of the same name deeper down, such as an upload in a session's
- * `local/uploads/`, is not omp's and opens like any other.
+ * `local/uploads/`, is not omp's and opens like any other. Agent dirs are
+ * compared both as named and as resolved, so a symlinked agent dir (or a path
+ * reaching it under another name) is still covered.
  */
 export function isOmpSecretFile(filePath: string): boolean {
-  const target = comparablePath(path.resolve(filePath));
-  const name = path.posix.basename(target);
-  if (!/^(?:agent\.db(?:-wal|-shm|-journal|\..+)?|models\.(?:yml|yaml|json))$/.test(name)) return false;
-  const parent = path.posix.dirname(target);
-  const configRoot = comparablePath(getConfigRoot());
-  return parent === comparablePath(getAgentDir())
-    || parent === `${configRoot}/agent`
-    || (path.posix.basename(parent) === "agent" && path.posix.dirname(path.posix.dirname(parent)) === `${configRoot}/profiles`);
+  const name = path.basename(filePath);
+  if (!/^(?:agent\.db(?:-wal|-shm|-journal|\..+)?|models\.(?:yml|yaml|json))$/i.test(name)) return false;
+  const parents = new Set([path.dirname(path.resolve(filePath)), resolvedOrSelf(path.dirname(path.resolve(filePath)))].map(comparablePath));
+  const profiles = comparablePath(path.join(getConfigRoot(), "profiles"));
+  for (const parent of parents) {
+    if (path.posix.basename(parent) === "agent" && path.posix.dirname(path.posix.dirname(parent)) === profiles) return true;
+  }
+  return ompAgentDirs().some((dir) => parents.has(comparablePath(dir)) || parents.has(comparablePath(resolvedOrSelf(dir))));
+}
+
+/** Every agent dir omp may keep its secrets in: the active one, the default one and each profile's. */
+function ompAgentDirs(): string[] {
+  const configRoot = getConfigRoot();
+  const dirs = [getAgentDir(), path.join(configRoot, "agent")];
+  try {
+    for (const profile of readdirSync(path.join(configRoot, "profiles"))) dirs.push(path.join(configRoot, "profiles", profile, "agent"));
+  } catch { /* no profiles */ }
+  return dirs;
+}
+
+function resolvedOrSelf(dir: string): string {
+  try { return realpathSync(dir); } catch { return dir; }
 }
 
 /** `filePath` with `/` separators, lowercased on Windows, where paths compare case-insensitively. */
