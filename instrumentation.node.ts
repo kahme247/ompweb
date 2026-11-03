@@ -72,6 +72,14 @@ export async function register(): Promise<void> {
     }
   }
 
+  // Each host daemon deletes sent uploads after the configured number of days: tell it the setting whenever it links.
+  try {
+    const { startUploadRetentionSync } = await import("@/lib/hosts/upload-retention-sync");
+    startUploadRetentionSync();
+  } catch (error) {
+    console.warn(`[omp-web] upload retention sync not started: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   // Resume sessions that were mid-run when omp-web last stopped (opt-in
   // setting). Fire-and-forget: resuming must not block boot.
   void (async () => {

@@ -102,6 +102,15 @@ The upload id is a client-generated UUID. It doubles as the binary frame id on b
   - A main restart forgets the registry. A finished staged upload then cannot be attached ("attach the file again"); an unfinished one resumes through `up_start`, which re-registers it.
   - Another owner, host, name, MIME type or size for a registered id is 409 `upload_id_conflict`, checked before changing its live state, queued frames, sink or attempt identity. A rejected start leaves the original upload usable.
 
+### U6. Retention of sent uploads
+
+Staged files expire after 24 h (U3), but a sent upload lives in its session's `local/uploads/` for as long as the session does. A web setting, `uploadRetentionDays` in `omp-web-settings.json`, deletes them after a while.
+
+- **Setting:** `number | null`. `null` never deletes. Otherwise a whole number of days, 1 to 3650. The default is 30, matching the media cache's 30-day sweep (`lib/media-cache.ts`); a stored value that is neither reads as 30, and `PUT /api/web-settings` answers 400 `invalid_settings` for one. Settings → System offers Never, 7, 30 and 90 days (a value set through the API shows as an extra choice).
+- **Op `setUploadRetention {days}`** (`days`: the setting's value). It is a compatible addition: `LINK_PROTOCOL_VERSION` stays 6, and a daemon that predates it answers 501 `unknown_op`, which main ignores (that host keeps its uploads). Main sends it to a host on every `hello` (`onHostHello`) and, when the setting changes, to this machine's daemon and every linked host; an offline host gets it at its next hello. The daemon validates `days` as the setting is validated (400 `invalid_request`).
+- **Daemon:** it stores `days` in `<agent dir>/omp-web/upload-retention.json` (`{"days": …}`, mode 0600, temporary file plus rename) and answers at once; a value equal to the stored one does nothing, so a daemon that links over and over does not sweep each time. A sweep runs after a change, when the daemon starts (with the stored value; an absent or unreadable file means none yet), and every 24 h from an unref'd timer. Sweeps never overlap: they queue.
+- **Sweep:** for each directory `<sessions>/<project>/<session>/local/uploads/`, the same under the archive (`<archive sessions>/<project>/<session>.jsonl/local/uploads/`: archiving moves the artifacts directory whole), and, on Windows only, `<tmp>/omp-local/<session id>/uploads/` (the long-path fallback of U1), it deletes each regular file whose mtime is more than `days` days old. Whatever else is in that folder goes too: it is the uploads folder. The walk has a fixed depth, `lstat`s every entry, and never follows a symlink: a symlinked `local` or `uploads` is skipped, and a symlink, directory or other non-file entry inside `uploads` stays. A per-entry error is skipped for the next sweep. The `uploads` folders stay. Staged files are not touched (U3).
+
 ## Limitations
 
 - The upload rate is bounded by `UPLOAD_WINDOW / RTT`: about 40 MB/s at 50 ms and 10 MB/s at 200 ms.

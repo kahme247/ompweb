@@ -220,6 +220,7 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   // Windows Background Service & System Tray
   { id: "auto-resume-sessions", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.autoResumeSessions", descKey: "settingsConfig.autoResumeSessionsDesc", fallbackSection: "System", fallbackLabel: "Resume running sessions after a restart", fallbackDesc: "When omp-web restarts while agents are working, restart those sessions and tell each agent: \"Session interrupted and resumed. Continue as you would have done without the interruption.\" Work in progress at the moment of the restart, such as a running command, is lost." },
   { id: "agent-tools-cross-session", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.agentTools", descKey: "settingsConfig.agentToolsDesc", fallbackSection: "System", fallbackLabel: "Agent tools (cross-session)", fallbackDesc: "Allow agents to call list_sessions, new_session and send_to_session to reach other omp-web sessions, even with no browser tab open. Delivered messages are prefixed with the sending session's ID." },
+  { id: "upload-retention", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.uploadRetention", descKey: "settingsConfig.uploadRetentionDesc", fallbackSection: "System", fallbackLabel: "Delete sent uploads after", fallbackDesc: "Files attached As file are deleted from each session's local://uploads folder on every host, archived sessions included, once they are this old. Never keeps them for ever." },
   { id: "agent-env", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.agentEnv", descKey: "settingsConfig.agentEnvDesc", fallbackSection: "System", fallbackLabel: "Agent environment variables", fallbackDesc: "Extra environment variables passed to the omp process, one KEY=VALUE per line. Applied to sessions started after saving.", scope: "UI" },
   { id: "windows-service-autostart", tab: "system", sectionKey: "settingsConfig.windowsServiceTitle", labelKey: "settingsConfig.windowsServiceAutostart", descKey: "settingsConfig.windowsServiceAutostartDesc", fallbackSection: "Windows Background Service & System Tray", fallbackLabel: "Start with Windows", fallbackDesc: "Launch background service quietly in system tray when logging into Windows.", scope: "UI" },
   { id: "windows-service-shortcuts", tab: "system", sectionKey: "settingsConfig.windowsServiceTitle", labelKey: "settingsConfig.windowsServiceInstallBtn", descKey: "settingsConfig.windowsServiceDesc", fallbackSection: "Windows Background Service & System Tray", fallbackLabel: "Install Service & Shortcuts", fallbackDesc: "Manage background service execution, system tray monitor, Windows logon autostart, and Desktop shortcuts.", scope: "UI" },
@@ -351,6 +352,61 @@ function AgentToolsSetting() {
   return (
     <NativeSetting searchId="agent-tools-cross-session" label={t("settingsConfig.agentTools")} description={t("settingsConfig.agentToolsDesc")}>
       <ToggleSwitch checked={enabled === true} disabled={enabled === null} onChange={(next) => void change(next)} />
+    </NativeSetting>
+  );
+}
+
+const UPLOAD_RETENTION_CHOICES: readonly (number | null)[] = [null, 7, 30, 90];
+
+/** Server-side omp-web setting (lib/web-settings.ts): every host's daemon applies it to its own sessions' uploads. */
+function UploadRetentionSetting() {
+  const { t, tn } = useI18n();
+  // undefined until loaded; null is "Never".
+  const [days, setDays] = useState<number | null | undefined>(undefined);
+  // Blocks a second change until the save lands: two PUTs in flight could finish out of order and leave the older one saved.
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/web-settings")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { uploadRetentionDays?: number | null } | null) => { if (alive && data && data.uploadRetentionDays !== undefined) setDays(data.uploadRetentionDays); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
+  const change = async (next: number | null) => {
+    const previous = days;
+    setDays(next);
+    setSaving(true);
+    try {
+      const res = await fetch("/api/web-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uploadRetentionDays: next }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch (error) {
+      setDays(previous);
+      toast.error(t("settingsConfig.uploadRetentionSaveFailed"), error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+  // A value set through the API (14 days) stays visible as its own choice.
+  const choices = days === undefined || UPLOAD_RETENTION_CHOICES.includes(days) ? UPLOAD_RETENTION_CHOICES : [...UPLOAD_RETENTION_CHOICES, days];
+  return (
+    <NativeSetting searchId="upload-retention" label={t("settingsConfig.uploadRetention")} description={t("settingsConfig.uploadRetentionDesc")}>
+      <select
+        style={nativeSelectStyle}
+        value={days === undefined ? "30" : String(days)}
+        disabled={days === undefined || saving}
+        onChange={(event) => void change(event.target.value === "null" ? null : Number(event.target.value))}
+      >
+        {choices.map((choice) => (
+          <option key={String(choice)} value={String(choice)} style={nativeOptionStyle}>
+            {choice === null ? t("settingsConfig.uploadRetentionNever") : tn("settingsConfig.uploadRetentionDays", choice, { count: choice })}
+          </option>
+        ))}
+      </select>
     </NativeSetting>
   );
 }
@@ -1782,6 +1838,8 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                 <AutoResumeSessionsSetting />
 
                 <AgentToolsSetting />
+
+                <UploadRetentionSetting />
 
                 <AgentEnvSetting />
 

@@ -142,6 +142,7 @@ lib/
     host-login.ts      `host.json` (`loginHost`, `readHostLogin`) and `isLoopbackHost`, shared by the daemon and local-bootstrap
     session-ops.ts     file-reading half of the session/project routes, run on the owning host's daemon (this machine's too)
     uploads.ts         daemon side of composer uploads: `StagedUploads` (staging dir `<agent dir>/omp-web/uploads/`, offset writes, 24 h sweep, attach into the session's `local/uploads/`), `sanitizeUploadName`, `sessionLocalRoot`
+    upload-retention.ts  daemon side of sent-upload retention: `UploadRetention` (op `setUploadRetention`, `<agent dir>/omp-web/upload-retention.json`, sweep at start and every 24 h), `sweepSentUploads`; `upload-retention-sync.ts` is main's side (`startUploadRetentionSync` on every hello, `pushUploadRetention` when the setting changes)
     link-protocol.ts   link messages, codec, binary blob frames, close codes, size limits, `HOST_OP_NAMES`, `SeqWindow`/`Outbox`, `LinkSender`/`PartJoiner` (pieces, fair sending)
     hub.ts             main side: the link's upgrade and `websocket` handler (`handleLinkUpgrade`, `hostLinkSocket`), `RemoteHost`, `getHost`, `listHosts`, adoption of live children (`reattach`/`adopt`), orphans, `freezeHostLinks`, `hosts` change events
     daemon.ts          daemon side: `runHostDaemon` (reconnect, buffering, op dispatch, hello with each child's `{sessionId, cwd, pending}`; follows a `host.json` url or token change when a dial fails; loopback redials at most 3 s apart)
@@ -1318,6 +1319,7 @@ during the wait.
   (a file it cannot delete is logged and tried again next sweep): a rejection
   from its timer would stop the daemon, and one before `uploadStart` would fail
   every new upload.
+  Sent uploads expire by the `uploadRetentionDays` web setting (default 30, `null` = never; `lib/web-settings.ts`, spec U6): main sends it to each daemon with the op `setUploadRetention` on every hello and when the setting changes (an older daemon's 501 is ignored, no protocol bump), and the daemon deletes regular files older than that by mtime from `local/uploads/` of every active and archived session (and Windows' `<tmp>/omp-local/<id>/uploads/`), never following a symlink and never entering a subdirectory. Staged files keep the 24 h rule.
   `uploadAttach` has a 10-minute op timeout (a 2 GiB EXDEV copy), not
   `opTimeoutMs`.
 - Cancels are durable (spec U4 "Durable cancel"): the tab always hands

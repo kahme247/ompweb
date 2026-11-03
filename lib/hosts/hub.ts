@@ -1449,6 +1449,11 @@ export function hostUploadOp(hostId: string, op: "uploadStart" | "uploadAbort" |
   return request(hostId, op, args, op === "uploadAttach" ? UPLOAD_ATTACH_TIMEOUT_MS : linkTimings.opTimeoutMs);
 }
 
+/** Tell `hostId`'s daemon how many days to keep sent uploads (null: for ever). A daemon from before the op answers 501. */
+export function setHostUploadRetention(hostId: string, days: number | null): Promise<unknown> {
+  return request(hostId, "setUploadRetention", { days });
+}
+
 /** Queue upload bytes (at most pieceBytes) for `hostId`'s daemon, fair with its other traffic; false when it has no socket. */
 export function sendUploadFrame(hostId: string, id: string, bytes: Uint8Array): boolean {
   const link = hub().links.get(hostId);

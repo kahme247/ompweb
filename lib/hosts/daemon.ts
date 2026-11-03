@@ -44,6 +44,7 @@ import { sessionOps } from "./session-ops";
 import packageJson from "../../package.json";
 import { acknowledgeHostUpdateHealth, checkHostUpdates, configureHostUpdateSafety, getHostUpdateOperation, HostUpdateError, startHostUpdate } from "./updates";
 import type { HostUpdateCompatibility, HostUpdateOperation } from "./update-types";
+import { UploadRetention } from "./upload-retention";
 import { StagedUploads, UPLOAD_SWEEP_INTERVAL_MS } from "./uploads";
 import { isWorkspaceOp, WORKSPACE_OP_PARAMS } from "../workspace-types";
 import { createWorkspaceService } from "./workspace-ops";
@@ -181,6 +182,8 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   // deletes it once it expires, not only at start or on the next upload.
   const sweepTimer = setInterval(() => void uploads.sweep(), UPLOAD_SWEEP_INTERVAL_MS);
   sweepTimer.unref?.();
+  const uploadRetention = new UploadRetention();
+  void uploadRetention.start();
   // Uplink messages wait in `sender` until they go out, then here until main acks them; a dropped socket resends
   // them after the next welcome.
   const sender = new LinkSender<Pending>(true);
@@ -569,6 +572,8 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         return uploads.abort(args.id);
       case "uploadAttach":
         return uploads.attach(args.id, sessionsPath(args.sessionFile), args.sessionId);
+      case "setUploadRetention":
+        return uploadRetention.set(args.days);
       default: {
         const run = sessionOps[op] as (...params: unknown[]) => Promise<unknown>;
         const result = await run.apply(sessionOps, SESSION_OP_PARAMS[op].map((name) => args[name]));
@@ -778,6 +783,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       stopSignal.abort();
       socket?.close();
       clearTimeout(flushTimer);
+      uploadRetention.stop();
       clearTimeout(statsTimer);
       clearInterval(sweepTimer);
       await workspace.stop();
