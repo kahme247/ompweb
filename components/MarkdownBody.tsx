@@ -124,9 +124,11 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
         const anchor = <a href={href} {...props} onClick={handleClick} onAuxClick={(event) => event.preventDefault()}>{textParts}</a>;
         return imageParts.length > 0 ? <>{anchor}{imageParts}</> : anchor;
       }
-      const filePath = onOpenFile ? resolveLocalFileHref(href, cwd) : null;
-      const openFile = onOpenFile;
-      if (filePath && openFile) {
+      const filePath = resolveLocalFileHref(href, cwd);
+      if (filePath) {
+        // Without a file panel (a remote host's session, a dialog) a path link has nowhere to go: show its text.
+        if (!onOpenFile) return <>{textParts}{imageParts}</>;
+        const openFile = onOpenFile;
         const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
           // No modifier escape hatch: the href is a filesystem path, which the browser cannot open in a new tab.
           if (event.defaultPrevented || event.button !== 0) return;
