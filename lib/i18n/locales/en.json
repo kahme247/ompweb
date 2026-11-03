@@ -951,6 +951,7 @@
   "messageView.fullOutputLoading": "Loading full output…",
   "messageView.shellExit": "exit {code}",
   "messageView.shellCancelled": "cancelled",
+  "messageView.shellSucceeded": "succeeded",
   "messageView.shellLocal": "local",
   "messageView.shellLocalTitle": "Output stays local: it is not sent to the model",
   "modelsConfig.addFromCatalog": "from catalog",

@@ -1080,3 +1080,22 @@ test("a `!` run renders as a shell card with its command, status and output", ()
   assert.equal(pending.header.getAttribute("aria-expanded"), "false");
   assert.equal(pending.view.container.querySelector(".shell-run-output"), null, "no empty output while it runs");
 });
+
+test("shell card expansion resets for a different run but survives output updates", () => {
+  const message = { role: "bashExecution", command: "printf hello", output: "hello", exitCode: 0, timestamp: 10 };
+  const view = render(React.createElement(MessageView, { message }));
+  const header = () => view.container.querySelector(".shell-run-header");
+  fireEvent.click(header());
+  assert.equal(header().getAttribute("aria-expanded"), "true");
+  view.rerender(React.createElement(MessageView, { message: { ...message, output: "hello\n" } }));
+  assert.equal(header().getAttribute("aria-expanded"), "true", "refreshing the same run keeps the reader's expansion");
+  view.rerender(React.createElement(MessageView, { message: { ...message, timestamp: 20 } }));
+  assert.equal(header().getAttribute("aria-expanded"), "false", "a different run of the same command starts collapsed");
+});
+
+test("a successful shell card exposes its outcome in its accessible name", () => {
+  const view = render(React.createElement(MessageView, {
+    message: { role: "bashExecution", command: "true", output: "", exitCode: 0 },
+  }));
+  assert.ok(view.getByRole("button", { name: /true.*succeeded/i }));
+});

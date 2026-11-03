@@ -912,6 +912,7 @@
   "messageView.fullOutputLoading": "完全な出力を読み込み中…",
   "messageView.shellExit": "終了コード {code}",
   "messageView.shellCancelled": "キャンセル済み",
+  "messageView.shellSucceeded": "成功",
   "messageView.shellLocal": "ローカル",
   "messageView.shellLocalTitle": "出力はローカルのみで、モデルには送信されません",
   "modelsConfig.addFromCatalog": "カタログから",

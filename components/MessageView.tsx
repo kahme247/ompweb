@@ -1871,6 +1871,9 @@ function BashExecutionView({ message, sessionId }: { message: BashExecutionMessa
   const failed = message.cancelled || (message.exitCode !== undefined && message.exitCode !== 0);
   // Starts collapsed, as user-run bash always has; the header toggles it.
   const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    setExpanded(false);
+  }, [message.command, message.timestamp]);
 
   // Large executions record their full output to a temp file (fullOutputPath);
   // fetch it through the guarded bash-output route instead of re-reading the
@@ -1913,7 +1916,10 @@ function BashExecutionView({ message, sessionId }: { message: BashExecutionMessa
                 {message.cancelled ? t("messageView.shellCancelled") : t("messageView.shellExit", { code: String(message.exitCode) })}
               </>
             ) : (
-              <Check size={13} strokeWidth={2} aria-hidden />
+              <>
+                <Check size={13} strokeWidth={2} aria-hidden />
+                <span className="sr-only">{t("messageView.shellSucceeded")}</span>
+              </>
             )}
           </span>
           <ChevronDown size={13} strokeWidth={1.8} aria-hidden className="shell-run-chevron" style={{ transform: expanded ? "rotate(180deg)" : undefined }} />

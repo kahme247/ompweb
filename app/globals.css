@@ -4001,7 +4001,8 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
   white-space: nowrap;
   font-family: inherit;
 }
-.shell-run-open .shell-run-command { white-space: pre-wrap; overflow-wrap: anywhere; }
+.shell-run-open .shell-run-command,
+.shell-run-header[aria-disabled="true"] .shell-run-command { white-space: pre-wrap; overflow-wrap: anywhere; }
 .shell-run-tag {
   flex-shrink: 0;
   padding: 0 6px;
