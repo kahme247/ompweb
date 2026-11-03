@@ -2897,13 +2897,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // The event route is observer-only. Start or resume the web-owned RPC
         // wrapper with a supported command before opening the SSE connection.
         await sendAgentCommand(sid, { type: "get_state" });
-        await ensureEventsConnected(sid);
-        void refreshSubagentRoster(sid);
-        void registerHostTools(sid);
-        void registerHostUriSchemes(sid);
-        const previousEntryIds = await snapshotRunEntries(sid);
-        if (promptRunIdRef.current === promptRunId && sessionIdRef.current === sid) {
-          runPreviousEntryIdsRef.current = previousEntryIds;
+        // As for a new chat above: the user may have switched chats during startup
+        // (this instance unmounted, its stream wait settled "closed"). Their prompt
+        // still goes out, with no stream or UI state left to set up.
+        try {
+          await ensureEventsConnected(sid);
+        } catch (e) {
+          if (hookAliveRef.current || !(e instanceof EventStreamConnectionError)) throw e;
+        }
+        if (hookAliveRef.current) {
+          void refreshSubagentRoster(sid);
+          void registerHostTools(sid);
+          void registerHostUriSchemes(sid);
+          const previousEntryIds = await snapshotRunEntries(sid);
+          if (promptRunIdRef.current === promptRunId && sessionIdRef.current === sid) {
+            runPreviousEntryIdsRef.current = previousEntryIds;
+          }
         }
         promptIssued = true;
         queuedBehindShell = isQueuedWhileShellRunning(await sendAgentCommand(sid, {

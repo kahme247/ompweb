@@ -579,6 +579,7 @@ executor-style promises instead. Server code may use them freely.
   - The confirmed-move callback synchronously calls `ChatInputHandle.retargetPendingRecovery(from, to)` before state updates or parent callbacks. This advances only captured queue-recovery ownership, closing the acknowledgement-to-commit gap; layout hydration still owns the live composer key/state. Do not turn this pre-commit ownership handoff into eager draft hydration.
   - Pending transcription keeps its original server scope/job/claim ownership. Confirmed moves record a tab-local recovery association so the target can rediscover that job after navigation/remount; other clients' drafts and server scopes are not migrated. A hard reload before an upload acknowledgement can leave multiple possible source jobs; retain recovery and report ambiguity rather than guess or reupload.
   - Event connections own their readiness waits: replacement and unmount settle the old wait as closed, clear its timers/coalesced work and close its observer. Late continuations must not attach streams to an unmounted hook or let a stale connection authorize a new operation. Keep lifetime cleanup separate from the mount-load latch so StrictMode setup/cleanup replay still cleans up observers attached afterward.
+  A user's prompt is the exception to "abandoned readiness": when its chat unmounts during startup (the user switched chats while omp spawned), `handleSend` still sends the prompt, opens no observer, skips host-tool/roster setup and returns `accepted`, as the new-chat path does.
   Ordinary `ChatInput.onSend` returns `Promise<PromptSubmissionResult>` (`accepted` / `rejected` / `superseded`). Only rejection restores composed text/file contents and images through `recoverDraft`; its receipt supplies the promoted real-session draft key when a new chat became a session, otherwise the composer uses the originating key captured before submission. Superseded failures must not reinsert a processed turn or reset a newer run. The composer owns recovery; `useAgentSession.handleSend` must not separately insert failed-send text and duplicate it.
 - **In-session branch** (Continue button / BranchNavigator): reads a historical view of the entry tree within the same file; it does not change the live agent's context. Multiple entries share the same `parentId`. Switching between them calls `/api/sessions/[id]/context?leafId=` through `handleLeafChange`; never use that read-only path to implement Edit.
 
@@ -834,10 +835,14 @@ during the wait.
     worker's the daemon's (`bufferedAmount` under 2 pieces); a fix to either original must be carried over
     (`lib/browser-link.integration.test.mjs` runs the real worker against the real server end). A socket
     that has not said hello within 10 s is closed 1008.
-  - **Liveness is ping/pong only**: the server pings every 15 s, each side drops a socket after 30 s
-    without any frame. A command waiting for its reply never redials. Wakes: `online` and a network
-    change redial at once and reset the dial backoff to 1 s (the first dial as a network returns often
-    fails), `visible` pings and redials a socket silent for 3 s.
+  - **Liveness:** the server pings every 15 s; each side drops a socket after 30 s without any frame.
+    Command delivery additionally watches sequence-ack progress, including multipart uploads: initially
+    5–6 s without progress redials with trigger `command`, even while updates arrive. Each such redial
+    doubles the deadline up to 30 s; an advancing ack on the current socket covering all watched
+    command pieces resets it to 5 s (a resume welcome does not). Acknowledged commands waiting for
+    their results never cause this redial. Replay and resync retain the rules below.
+    Wakes: `online` and a network change redial at once and reset dial backoff to 1 s; `visible`
+    pings and redials a socket silent for 3 s.
   - **Resume.** The link outlives its socket for 2 min (`LINK_RESUME_MS`): the worker's `hello` carries
     its token and `ack`, the server (same web session only: SHA-256 of the session cookie, else
     `trusted`/`open`) reattaches and both sides resend what the other missed. Subscriptions stay open on
@@ -1275,11 +1280,28 @@ during the wait.
   with 504 `upload_stalled` and forgets it without aborting it on the host, so
   the tab's automatic resume continues it. Page navigation settles pending
   WebSocket-upload promises before the worker's `bye`: a composer retained by
-  bfcache shows Retry after restoration, not a permanently uploading chip.
+  bfcache shows Retry after restoration, not a permanently uploading chip. That
+  failure (410) gives the chip a new upload id, so its Retry starts over and the
+  old id's pending cancel (worker, HTTP DELETE or host) can never delete it.
   The daemon's `sweep` deletes staged files older than 24 h and aborts open uploads
-  idle (no start/write) over 24 h (`STAGED_MAX_AGE_MS`).
+  idle (no start/write) over 24 h (`STAGED_MAX_AGE_MS`): at start, on every
+  `uploadStart`, and every hour (`UPLOAD_SWEEP_INTERVAL_MS`). It never rejects
+  (a file it cannot delete is logged and tried again next sweep): a rejection
+  from its timer would stop the daemon, and one before `uploadStart` would fail
+  every new upload.
   `uploadAttach` has a 10-minute op timeout (a 2 GiB EXDEV copy), not
   `opTimeoutMs`.
+- Cancels are durable (spec U4 "Durable cancel"): the tab always hands
+  `{op: "up_abort", id, host}` to the worker, which keeps it until the server
+  has it (link line until acked and resent on a resync; in `sse` mode a
+  `DELETE …?host=` with a 40 s deadline, retried until a 2xx or a 4xx other
+  than 408/429). Main keeps an `uploadAbort` its host could not take (503/504)
+  per host and resends it on that host's next hello (`onHostHello`). A Retry of
+  the same id supersedes it on every layer: a new `uploadStart` drops a kept
+  abort, an in-flight one that fails after the id is registered again is not
+  kept, and the worker drops its own pending cancel on a new upload of the id.
+  An id main does not register goes to the browser's `host`
+  if known. All of it is in memory: the hourly sweep is the backstop.
 - Error codes: composer uploads use `upload_id_conflict` (another upload has
   this id); `upload_conflict` stays the file manager's.
 - SSE mode uses the same registry over HTTP (`/api/uploads`). Upload owner =

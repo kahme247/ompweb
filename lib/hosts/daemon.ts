@@ -44,7 +44,7 @@ import { sessionOps } from "./session-ops";
 import packageJson from "../../package.json";
 import { acknowledgeHostUpdateHealth, checkHostUpdates, configureHostUpdateSafety, getHostUpdateOperation, HostUpdateError, startHostUpdate } from "./updates";
 import type { HostUpdateCompatibility, HostUpdateOperation } from "./update-types";
-import { StagedUploads } from "./uploads";
+import { StagedUploads, UPLOAD_SWEEP_INTERVAL_MS } from "./uploads";
 
 const FIRST_RETRY_MS = 1_000;
 const MAX_RETRY_MS = 60_000;
@@ -173,6 +173,10 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   // Upload acks go under the upload's own key, fair with the channels.
   const uploads = new StagedUploads((ack) => void queue({ type: "upload_ack", ...ack }, `up:${ack.id}`));
   void uploads.sweep();
+  // A cancel that never reached this host (the browser closed while offline) leaves its staged file: an idle host still
+  // deletes it once it expires, not only at start or on the next upload.
+  const sweepTimer = setInterval(() => void uploads.sweep(), UPLOAD_SWEEP_INTERVAL_MS);
+  sweepTimer.unref?.();
   // Uplink messages wait in `sender` until they go out, then here until main acks them; a dropped socket resends
   // them after the next welcome.
   const sender = new LinkSender<Pending>(true);
@@ -756,6 +760,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       socket?.close();
       clearTimeout(flushTimer);
       clearTimeout(statsTimer);
+      clearInterval(sweepTimer);
       const live = [...channels.values()].map(({ transport }) => transport);
       const exits = live.map((transport) => {
         const { promise, resolve } = Promise.withResolvers<void>();

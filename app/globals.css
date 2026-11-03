@@ -3966,6 +3966,74 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
 @media (prefers-reduced-motion: reduce) {
   .activity-row-spinner { animation: none; }
 }
+/* A `!` command the user ran: a terminal-style card, unlike the agent's tool rows. */
+.shell-run {
+  margin: 6px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--tool-bg);
+  overflow: hidden;
+}
+.shell-run-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  background: none;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.shell-run-header:hover { background: var(--bg-subtle); }
+/* The card clips overflow, so the focus ring sits inside the header. */
+.shell-run-header:focus-visible { outline-offset: -2px; }
+.shell-run-header[aria-disabled="true"] { cursor: default; }
+.shell-run-prompt { color: var(--accent); font-weight: 600; flex-shrink: 0; }
+.shell-run-command {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: inherit;
+}
+.shell-run-open .shell-run-command,
+.shell-run-header[aria-disabled="true"] .shell-run-command { white-space: pre-wrap; overflow-wrap: anywhere; }
+.shell-run-tag {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.shell-run-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  color: var(--status-success);
+  font-size: 11.5px;
+}
+.shell-run-failed .shell-run-status { color: var(--status-error); }
+.shell-run-chevron { flex-shrink: 0; color: var(--text-dim); transition: transform var(--dur-fast) var(--ease-out-warm); }
+.shell-run-output {
+  margin: 0;
+  max-height: 420px;
+  overflow: auto;
+  padding: 8px 10px 10px 26px;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 .tool-call-details {
   width: min(calc(100% - 21px), 760px);
   max-width: 760px;
@@ -4558,6 +4626,7 @@ html[data-touch-targets="accessible"] :is(
   .sidebar-new-session,
   .process-details-toggle,
   .activity-row-trigger,
+  .shell-run-header,
   .session-item-icon-button,
   .tool-call-input-toggle
 ) {

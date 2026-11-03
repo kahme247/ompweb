@@ -136,7 +136,7 @@ function putOf(id) {
   });
 }
 
-const deleted = (id) => requests.some((each) => each.method === "DELETE" && each.url === `/api/uploads/${id}`);
+const deleted = (id) => requests.some((each) => each.method === "DELETE" && each.url === `/api/uploads/${id}?host=local`);
 const chipOf = (name) => screen.getByText(name).parentElement;
 const pressEnter = () => act(async () => { fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" }); });
 
@@ -366,17 +366,25 @@ test("a draft keeps finished uploads only, and restores them as done chips", asy
   assert.deepEqual(sent[0][2], [done.id]);
 });
 
+/** The tab's one shared-worker transport (a module singleton), faked once and switched to `ws` by each test. */
+let fakePort;
+function wsPort() {
+  if (!fakePort) {
+    globalThis.SharedWorker = class {
+      constructor() {
+        fakePort = this.port = { posted: [], postMessage(message) { this.posted.push(message); }, onmessage: null, start() {} };
+      }
+    };
+    openEventStream({ kind: "running" });
+    delete globalThis.SharedWorker;
+  }
+  fakePort.onmessage({ data: { transport: "ws" } });
+  return fakePort;
+}
+
 test("a stall the worker reports shows Reconnecting… and resumes by itself under the same id", async () => {
-  // The browser-link path: a fake shared worker, switched to `ws`, answers the upload with the worker's stall error.
-  let port;
-  globalThis.SharedWorker = class {
-    constructor() {
-      port = this.port = { posted: [], postMessage(message) { this.posted.push(message); }, onmessage: null, start() {} };
-    }
-  };
-  openEventStream({ kind: "running" });
-  delete globalThis.SharedWorker;
-  port.onmessage({ data: { transport: "ws" } });
+  // The browser-link path: the fake shared worker answers the upload with the worker's stall error.
+  const port = wsPort();
   try {
     const ref = renderComposer("uploads-stall", []);
     await act(async () => { ref.current.addFiles([binaryFile("data.zip")]); });
@@ -398,5 +406,32 @@ test("a stall the worker reports shows Reconnecting… and resumes by itself und
     assert.doesNotMatch(chipOf("data.zip").textContent, RECONNECTING);
   } finally {
     port.onmessage({ data: { transport: "sse" } });
+  }
+});
+
+test("Retry after the page left the back/forward cache starts a new upload id: the old one's cancel can never delete it", async () => {
+  const port = wsPort();
+  try {
+    const ref = renderComposer("uploads-bfcache-retry", []);
+    await act(async () => { ref.current.addFiles([binaryFile("cached.zip")]); });
+    const first = await waitFor(() => {
+      const message = port.posted.find((each) => each.op === "upload" && each.name === "cached.zip");
+      assert.ok(message);
+      return message;
+    });
+    // pagehide: the worker cancelled it on the host (410, not resumable).
+    await act(async () => { port.onmessage({ data: { up: first.id, error: { status: 410, code: "upload_failed", message: "The upload failed. Retry it." } } }); });
+    const retry = await waitFor(() => within(chipOf("cached.zip")).getByRole("button", { name: RETRY }));
+    await act(async () => { retry.click(); });
+    const second = await waitFor(() => {
+      const starts = port.posted.filter((each) => each.op === "upload" && each.name === "cached.zip");
+      assert.equal(starts.length, 2);
+      return starts[1];
+    });
+    assert.notEqual(second.id, first.id, "a new id: the cancel still pending for the old one cannot reach it");
+    await act(async () => { port.onmessage({ data: { up: second.id, received: 8, done: true } }); });
+    await waitFor(() => assert.equal(screen.getByRole("button", { name: SEND }).disabled, false));
+  } finally {
+    fakePort.onmessage({ data: { transport: "sse" } });
   }
 });
