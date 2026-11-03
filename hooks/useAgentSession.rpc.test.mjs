@@ -1829,13 +1829,13 @@ test("unmount mid-run closes the stream and late frames cannot resurrect state",
   assert.equal(w.latest.agentRunning, true, "unmounted state must stay frozen");
 });
 
-test("unmount settles an unopened send connection without dispatching the prompt", async () => {
+test("unmount during the send connection still delivers the prompt", async () => {
   resetWorld();
   primeSession("connecting-unmount", [userMsg("u0", "q")]);
   const w = await mountSession("connecting-unmount");
   let sending;
   await act(async () => {
-    sending = w.latest.handleSend("must not reach native");
+    sending = w.latest.handleSend("switched chats mid-send");
     await sleep(30);
   });
   const source = lastEs();
@@ -1847,6 +1847,28 @@ test("unmount settles an unopened send connection without dispatching the prompt
     result = await sending;
   });
   assert.equal(source.closedByCaller, true);
+  assert.equal(result.status, "accepted");
+  assert.equal(world.calls.filter((call) => call.body?.type === "prompt").length, 1);
+  assert.equal(world.esInstances.length, 1, "no observer is opened for the unmounted chat");
+  for (const type of ["set_host_tools", "set_host_uri_schemes", "get_subagents"]) {
+    assert.equal(world.calls.some((call) => call.body?.type === type), false, `no ${type} for the unmounted chat`);
+  }
+});
+
+test("a send connection that fails while the chat is mounted rejects without dispatching the prompt", async () => {
+  resetWorld();
+  primeSession("connecting-fails", [userMsg("u0", "q")]);
+  const w = await mountSession("connecting-fails");
+  let sending;
+  await act(async () => {
+    sending = w.latest.handleSend("stays in the composer");
+    await sleep(30);
+  });
+  let result;
+  await act(async () => {
+    lastEs().failFatal();
+    result = await sending;
+  });
   assert.equal(result.status, "rejected");
   assert.equal(world.calls.some((call) => call.body?.type === "prompt"), false);
 });
@@ -1878,8 +1900,9 @@ for (const operation of ["prompt", "btw"]) {
     });
     assert.equal(mountedRoots.size, 0, "the real React root must already have completed its cleanup");
     assert.equal(world.esInstances.length, 0, "a late RPC response cannot create an observer its owner cannot close");
-    assert.equal(operation === "prompt" ? result.status : result, operation === "prompt" ? "rejected" : false);
-    assert.equal(world.calls.some((call) => call.body?.type === operation), false, "no follow-on operation may use the abandoned readiness");
+    assert.equal(operation === "prompt" ? result.status : result, operation === "prompt" ? "accepted" : false);
+    // The user's prompt still goes out (they switched chats); a side question has no UI left to answer into.
+    assert.equal(world.calls.some((call) => call.body?.type === operation), operation === "prompt");
   });
 }
 
