@@ -1279,15 +1279,17 @@ during the wait.
   The daemon's `sweep` deletes staged files older than 24 h and aborts open uploads
   idle (no start/write) over 24 h (`STAGED_MAX_AGE_MS`): at start, on every
   `uploadStart`, and every hour (`UPLOAD_SWEEP_INTERVAL_MS`).
+  `uploadAttach` has a 10-minute op timeout (a 2 GiB EXDEV copy), not
+  `opTimeoutMs`.
 - Cancels are durable (spec U4 "Durable cancel"): the tab always hands
   `{op: "up_abort", id, host}` to the worker, which keeps it until the server
   has it (link line until acked and resent on a resync; in `sse` mode a
-  `DELETE …?host=` retried until a 2xx/4xx). Main keeps an `uploadAbort` its
-  host could not take (503/504) per host and resends it on that host's next
-  hello (`onHostHello`); an id it does not register goes to the browser's
-  `host` if known. All of it is in memory: the hourly sweep is the backstop.
-  `uploadAttach` has a 10-minute op timeout (a 2 GiB EXDEV copy), not
-  `opTimeoutMs`.
+  `DELETE …?host=` with a 40 s deadline, retried until a 2xx or a 4xx other
+  than 408/429). Main keeps an `uploadAbort` its host could not take (503/504)
+  per host and resends it on that host's next hello (`onHostHello`); a new
+  `uploadStart` of the id drops it, so a Retry is never deleted by its own
+  failure's abort. An id main does not register goes to the browser's `host`
+  if known. All of it is in memory: the hourly sweep is the backstop.
 - Error codes: composer uploads use `upload_id_conflict` (another upload has
   this id); `upload_conflict` stays the file manager's.
 - SSE mode uses the same registry over HTTP (`/api/uploads`). Upload owner =

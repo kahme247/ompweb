@@ -179,6 +179,9 @@ export async function startUpload(req: UploadStartRequest): Promise<{ received: 
     map.set(id, upload);
   }
   upload.touched = Date.now();
+  // A Retry reuses the id of an upload whose failure parked an abort for its host: replayed on the next hello, that abort
+  // would delete the upload this start is resuming.
+  pendingAborts().get(hostId)?.delete(id);
   req.onRegistered?.();
   let result: unknown;
   try {

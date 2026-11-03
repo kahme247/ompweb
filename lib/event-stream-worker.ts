@@ -76,6 +76,8 @@ const FALLBACK_REFUSALS = 3;
 const ABORTS_MAX = 256;
 /** An abort's DELETE that failed goes again after these (the last repeats), and at once on a wake. */
 const ABORT_RETRY_MS = [5_000, 15_000, 60_000];
+/** An abort's DELETE not answered in this long is abandoned and retried. */
+const ABORT_DELETE_TIMEOUT_MS = 40_000;
 /** Marks an up_abort's line in the sender (a command's `rid` is the tab's request id). */
 const ABORT_RID = "abort:";
 const TRANSPORT_UNAVAILABLE = { error: "Not sent: no connection to omp-web.", code: "transport_unavailable" };
@@ -456,8 +458,6 @@ function applyMode(): void {
     closeSource();
     sseConn.reconnect = null;
     for (const subscription of subscriptions.values()) subscribe(subscription);
-    // An abort still on HTTP goes on the link instead (a DELETE already in flight may still settle it).
-    for (const [id, abort] of aborts) if (abort.http) sendAbort(id);
     ensureLink();
     return;
   }
@@ -1224,12 +1224,14 @@ function settleAborts(ack: number): void {
   for (const [id, abort] of aborts) if (!abort.http && abort.seq !== undefined && abort.seq <= ack) aborts.delete(id);
 }
 
-/** A 2xx or 4xx answer settles it (the server owns delivery from there); a network error or 5xx keeps it for a retry. */
+/** A 2xx or 4xx answer settles it (the server owns delivery from there), except 408 and 429; a network error, a timeout or a 5xx keeps it for a retry. */
 function deleteUpload(id: string, abort: Abort): void {
   if (abort.fetching) return;
   abort.fetching = true;
   const query = abort.host === undefined ? "" : `?host=${encodeURIComponent(abort.host)}`;
-  fetch(`/api/uploads/${encodeURIComponent(id)}${query}`, { method: "DELETE" }).then((response) => response.status < 500, () => false).then((settled) => {
+  // The deadline is above the server's 30 s host-op timeout: a request that hangs (half-open socket) would otherwise
+  // keep `fetching` set and block every retry. A timeout counts as not settled.
+  withDeadline(ABORT_DELETE_TIMEOUT_MS, (signal) => fetch(`/api/uploads/${encodeURIComponent(id)}${query}`, { method: "DELETE", signal })).then((response) => response.status < 500 && response.status !== 408 && response.status !== 429, () => false).then((settled) => {
     abort.fetching = false;
     if (aborts.get(id) !== abort) return;
     if (settled) {
