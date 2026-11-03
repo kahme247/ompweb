@@ -20,27 +20,67 @@
  * resolve to that have no fork target, nor do rows with no usable user entry.
  */
 
-export interface ForkTarget {
+export interface ForkBranchTarget {
+  type: "branch";
   entryId: string;
   /** Put the branched prompt's text back into the composer. */
   editPrompt: boolean;
 }
 
+export interface ForkLeafTarget {
+  type: "fork";
+  entryId?: undefined;
+  /** Leaf fork clones session in-place with full history; composer remains untouched. */
+  editPrompt: false;
+}
+
+export type ForkTarget = ForkBranchTarget | ForkLeafTarget;
+
+export interface ResolveForkTargetsOptions {
+  /** Active branch leaf id in the UI, if navigated away from HEAD. */
+  activeLeafId?: string | null;
+  /** Authoritative leaf id of the running session process. */
+  headLeafId?: string | null;
+}
+
 export function resolveForkTargets(
   messages: readonly { role: string; branchSummary?: boolean }[],
   entryIds: readonly (string | undefined)[],
+  options?: ResolveForkTargetsOptions,
 ): (ForkTarget | undefined)[] {
   // Branch summaries render as user rows but are not entries omp can branch at.
   const roles = messages.map((message) => (message.branchSummary ? "branchSummary" : message.role));
   const targets: (ForkTarget | undefined)[] = roles.map(() => undefined);
-  let nextUserEntryId: string | undefined;
+
+  // If there are no user entries in the session, there is no usable conversation to fork or branch.
+  const hasUserEntry = roles.some((role, index) => role === "user" && !!entryIds[index]);
+  if (!hasUserEntry) return targets;
+  // 1. Identify the active branch leaf (the last assistant or user message with a valid entryId)
+  let leafIndex = -1;
   for (let index = roles.length - 1; index >= 0; index--) {
-    if (roles[index] === "user") nextUserEntryId = entryIds[index];
-    else if (roles[index] === "assistant" && nextUserEntryId) {
-      targets[index] = { entryId: nextUserEntryId, editPrompt: false };
+    if ((roles[index] === "assistant" || roles[index] === "user") && entryIds[index]) {
+      leafIndex = index;
+      break;
     }
   }
-  // The row-0 prompt has nothing before it (a compaction summary would be row 0).
+
+  // 2. When synchronized with HEAD, the active leaf triggers an in-place session clone (CLI /fork parity)
+  const isHeadSynchronized = options?.activeLeafId == null || options.activeLeafId === options.headLeafId;
+  if (leafIndex !== -1 && isHeadSynchronized) {
+    targets[leafIndex] = { type: "fork", editPrompt: false };
+  }
+
+  // 3. Historical assistant replies fork at the NEXT user prompt, keeping the reply in history
+  let nextUserEntryId: string | undefined;
+  for (let index = roles.length - 1; index >= 0; index--) {
+    if (roles[index] === "user") {
+      nextUserEntryId = entryIds[index];
+    } else if (roles[index] === "assistant" && nextUserEntryId && !targets[index]) {
+      targets[index] = { type: "branch", entryId: nextUserEntryId, editPrompt: false };
+    }
+  }
+
+  // 4. Historical user prompts rewind to their own entry, returning the prompt for edit-and-resend
   let ownUserEntryId: string | undefined;
   let ownIsFirstPrompt = false;
   for (let index = 0; index < roles.length; index++) {
@@ -50,7 +90,7 @@ export function resolveForkTargets(
     }
     if (targets[index] || !ownUserEntryId || ownIsFirstPrompt) continue;
     if (roles[index] === "user" || roles[index] === "assistant") {
-      targets[index] = { entryId: ownUserEntryId, editPrompt: true };
+      targets[index] = { type: "branch", entryId: ownUserEntryId, editPrompt: true };
     }
   }
   return targets;

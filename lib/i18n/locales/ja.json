@@ -916,6 +916,8 @@
   "messageView.modifiedFiles": "変更されたファイル",
   "messageView.newSession": "新しいセッション",
   "messageView.newSessionTitle": "この時点から新しいセッションをフォークします",
+  "messageView.forkSession": "セッションをフォーク (会話全体を複製)",
+  "messageView.branchFromHere": "ここから分岐 (プロンプトを再編集)",
   "messageView.noMessage": "（メッセージなし）",
   "messageView.noOutput": "（出力なし）",
   "messageView.noSummary": "（要約なし）",

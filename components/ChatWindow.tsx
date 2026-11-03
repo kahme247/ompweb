@@ -293,7 +293,9 @@ interface CommittedTranscriptProps {
   isNew: boolean;
   forkingEntryId: string | null;
   editingEntryId: string | null;
-  handleFork: (entryId: string, editPrompt: boolean) => void;
+  handleFork: (entryId?: string, editPrompt?: boolean) => void;
+  activeLeafId?: string | null;
+  headLeafId?: string | null;
   handleEdit: (entryId: string, content: string) => Promise<boolean>;
   modelNames: Record<string, string>;
   messageCwd: string | undefined;
@@ -324,13 +326,13 @@ interface CommittedTranscriptProps {
  */
 const CommittedTranscript = memo(function CommittedTranscript({
   messages, entryIds, conversationMeta, messageRefs, isStreaming, sessionBusy, isCompacting, externalRunActive, isNew, forkingEntryId, editingEntryId,
-  handleFork, handleEdit, modelNames, messageCwd, onOpenFile, sessionId,
+  handleFork, handleEdit, modelNames, messageCwd, onOpenFile, sessionId, activeLeafId, headLeafId,
   toolCallsDefaultCollapsed, hideToolActivity, neverFoldActivity, showToolCallsUnfolded, expandThinkingByDefault, hideThinkingBlock, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
 }: CommittedTranscriptProps) {
   const { t } = useI18n();
   const { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage } = conversationMeta;
   // omp's `branch` command accepts a user entry only; see lib/chat-fork.ts.
-  const forkTargets = useMemo(() => resolveForkTargets(messages, entryIds), [messages, entryIds]);
+  const forkTargets = useMemo(() => resolveForkTargets(messages, entryIds, { activeLeafId, headLeafId }), [messages, entryIds, activeLeafId, headLeafId]);
 
   const attachVisibleRef = (idx: number, refIndex: number) => (el: HTMLDivElement | null) => {
     messageRefs.current[refIndex] = el;
@@ -373,8 +375,9 @@ const CommittedTranscript = memo(function CommittedTranscript({
         entryId={entryIds[idx]}
         forkEntryId={forkTarget?.entryId}
         forkEditsPrompt={forkTarget?.editPrompt}
+        forkIsLeaf={forkTarget?.type === "fork"}
         onFork={canOfferFork ? handleFork : undefined}
-        forking={forkingEntryId === forkTarget?.entryId}
+        forking={forkingEntryId !== null && (forkTarget?.type === "fork" ? forkingEntryId === "__LEAF__" : forkingEntryId === forkTarget?.entryId)}
         forkDisabled={historyMutationPending}
         onEdit={canOfferEdit ? handleEdit : undefined}
         editing={editingEntryId === entryIds[idx]}
@@ -555,7 +558,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
   }, [onAgentEnd]);
 
   const {
-    loading, error, messages, entryIds, showPreCompactionHistory, streamState,
+    loading, error, data, activeLeafId, messages, entryIds, showPreCompactionHistory, streamState,
     agentRunning, bashRunning, pendingBash, deferredBash, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, fastModeEnabled, fastModeActive, slowModeSupported, slowModeEnabled, slowModeScope, usageLimit,
     externalRunActive,
     toolPreset,
@@ -1409,6 +1412,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
               isNew={isNew}
               forkingEntryId={forkingEntryId}
               editingEntryId={editingEntryId}
+              activeLeafId={activeLeafId}
+              headLeafId={data?.leafId}
               handleFork={handleFork}
               handleEdit={handleEdit}
               modelNames={modelNames}
