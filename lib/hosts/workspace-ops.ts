@@ -2,7 +2,7 @@ import fs from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { authorizeFileAccess } from "../file-authorization";
-import { existingPathWithinRootsChecker, isExistingFilePathAllowed, isFilePathAllowed, normalizeSlashes } from "../file-access";
+import { existingPathWithinRootsChecker, isAbsoluteFileRequestPath, isExistingFilePathAllowed, isFilePathAllowed, normalizeSlashes } from "../file-access";
 import { resolveDirentIsDirectory } from "../file-dirent";
 import { indexWorkspaceFiles } from "../file-index";
 import { inspectUploadTargets, validateUploadFileNames } from "../file-upload";
@@ -161,6 +161,8 @@ export function createWorkspaceService(uploads: StagedUploads, emit: (id: string
       if (!checked.stat.isDirectory()) throw new HostOpError(400, "not_a_directory", "Not a directory");
       let insideRoot: ((target: string) => boolean) | null = null;
       if (root !== null) {
+        // The listed path is authorized already; the root can only narrow it.
+        if (!isAbsoluteFileRequestPath(root)) throw new HostOpError(403, "outside_root", "Outside the explorer root");
         insideRoot = existingPathWithinRootsChecker(new Set([normalizeSlashes(root)]));
         if (!insideRoot(checked.filePath)) throw new HostOpError(403, "outside_root", "Outside the explorer root");
       }
