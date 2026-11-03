@@ -113,6 +113,52 @@ Settings → Hosts lists hosts with status, omp version and last seen; adds a
 host (shows the token once, with the `ompweb host login` command to run);
 renames; revokes; toggles `allowAgentStart`.
 
+#### Per-host software updates
+
+Every row, including **This machine**, shows the daemon's ompweb version and
+the OMP runtime version, checks for available updates and exposes update actions.
+**System & Updates** is renamed **System** and keeps the web server's controls.
+Host checks and installations use `checkUpdates` and `updateSoftware` host ops;
+`GET /api/hosts/[id]/updates?force=1` refreshes the check, and a POST with
+`{target: "ompweb" | "omp", version}` requests installation of that exact candidate.
+No browser-supplied command, installation path, URL or protocol range is accepted.
+
+The hub supplies its supported link-protocol range. Both the hub and daemon
+block an ompweb candidate outside that range, or whose protocol cannot be
+verified, before installation. Availability and the blocking reason remain
+visible; the user updates the web server first. OMP does not change the link
+protocol and is never blocked for this reason.
+
+Daemon updates require no session processes on that host, including subagents.
+New spawns are refused while an update is running. The host-only helper stages
+the installation and restarts only that daemon, retaining a backup for rollback.
+The UI follows durable operation state after reconnect rather than treating an
+accepted POST as success. Runtime updates use `omp update` on that host and do
+not force-restart existing sessions. Older daemons answer `unknown_op` and show
+an explicit update-support error instead of running anything on the web server.
+
+The helper keeps the newest rollback backup and its identifying metadata, pruning
+older backups, failed/staging releases and copied runtimes after completion or at
+the next claim. Only owned paths proven by that installation's update descriptor
+are eligible. Windows-locked files are retried at the next update.
+
+If the host and web server share an installation, the host cannot replace it
+under the running web app. Update the web server first; once the exact candidate
+is already on disk, the host can perform a restart-only update. That operation
+does not reinstall the package or promise rollback to the old loaded runtime.
+Source checkouts, unsafe/linked layouts and unknown service identities show a
+manual-update reason. Script-supervised macOS and Windows hosts are blocked
+instead of attempting a competing daemon. External restart loops must be stopped
+before a foreground update; an inline shell loop cannot reliably be distinguished
+from an interactive shell.
+
+Only the detached helper restarts the daemon after stopping it. A helper killed
+between the stop and a healthy acknowledgement leaves the host offline and the
+installation either the old release or the candidate (with `.ompweb-backup-<id>`
+beside it); recovery is manual, as the README describes. Automatic recovery
+would need a supervisor that outlives the helper on every platform; there is
+none on unmanaged macOS and Windows hosts, so none was added.
+
 ### Routing
 
 Every `SessionInfo` carries `hostId`. API routes resolve `id → host` once

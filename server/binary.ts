@@ -9,6 +9,7 @@ import { formatAddressBanner, getAccessibleAddresses, getBrowserUrl, openInBrows
 import { runHashPasswordCommand } from "../bin/omp-web-hash-password";
 import { checkLaunchSecurity, parseLaunchOptions } from "../bin/omp-web-options";
 import { runHostCli } from "@/lib/hosts/host-cli";
+import { runHostUpdateWorker } from "../lib/hosts/update-worker";
 
 // Before any server module loads: app/api/manifest reads public/ from it when it loads, and the daemon names
 // lib/omp/session-edit-extension.mjs in it to omp.
@@ -17,6 +18,9 @@ const root = process.env.OMP_WEB_PACKAGE_DIR;
 const SEE_README = "https://github.com/kahme247/ompweb#single-binary shows how to run `ompweb` and `ompweb host` as services instead.";
 
 const command = process.argv[2];
+if (command === "host-update-worker") {
+  process.exit(await runHostUpdateWorker(process.argv[3] || ""));
+}
 if (command === "host") process.exit(await runHostCli(process.argv.slice(3)));
 if (command === "hash-password" || command === "hash_password") {
   process.exit(await runHashPasswordCommand().catch((error: unknown) => {

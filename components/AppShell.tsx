@@ -53,7 +53,6 @@ import {
   AppUpdateTransportError,
   COMPLETED_APP_UPDATE_KEY,
   DISMISSED_APP_UPDATE_KEY,
-  DISMISSED_OMP_UPDATE_KEY,
   fetchAppUpdateJson,
   isExactLegacyTargetCompletion,
   readDismissedVersion,
@@ -339,10 +338,6 @@ export function AppShell({ appName }: { appName: string }) {
       advanceAppUpdateVisibleStage(next);
     }
   }, [advanceAppUpdateVisibleStage]);
-  const [ompUpdateAvailable, setOmpUpdateAvailable] = useState(false);
-  const [ompUpdatesDisabled, setOmpUpdatesDisabled] = useState(false);
-  // Bumped on visibilitychange so the mount-time update checks re-run.
-  const [updateCheckKey, setUpdateCheckKey] = useState(0);
   // On mobile the sidebar is an overlay drawer; hide it by default so the chat
   // is visible on load. Runs once the breakpoint resolves after hydration.
   useEffect(() => {
@@ -364,57 +359,6 @@ export function AppShell({ appName }: { appName: string }) {
       active.blur();
     }
   }, [sidebarOpen, mobileSidebarReady]);
-  useEffect(() => {
-    const controller = new AbortController();
-    void fetch("/api/omp-update", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "check" }),
-      signal: controller.signal,
-    })
-      .then((response) => response.ok ? response.json() : null)
-      .then((data: { currentVersion?: string | null; availableVersion?: string | null; updateAvailable?: boolean; updateCommand?: string; updatesDisabled?: boolean; selfUpdateSupported?: boolean } | null) => {
-        setOmpUpdateAvailable(Boolean(data?.updateAvailable));
-        setOmpUpdatesDisabled(Boolean(data?.updatesDisabled));
-        if (!data?.updateAvailable || !data.availableVersion) return;
-        // This check re-runs on every visibilitychange back to the tab, so a
-        // version the user already dismissed must not be re-announced.
-        if (readDismissedVersion(DISMISSED_OMP_UPDATE_KEY) === data.availableVersion) return;
-        const version = data.availableVersion;
-        toast.info(
-          translate("appShell.ompUpdateAvailable"),
-          <UpdateToastBody
-            currentVersion={data.currentVersion}
-            availableVersion={version}
-            target={data.updateCommand || "omp update"}
-            link={false}
-            // Update now runs from Settings → System, and only where this server can run it (not in the binary).
-            action={data.selfUpdateSupported === true ? {
-              label: translate("settingsConfig.ompUpdateAction"),
-              onClick: () => {
-                setSettingsTab("system");
-                toast.close(`omp-update-available:${version}`);
-              },
-            } : undefined}
-          />,
-          // Version in the id: re-announcing the same version keeps its
-          // notification-center read state; a newer version is a new notice.
-          { id: `omp-update-available:${version}`, timeout: 0, onClose: () => rememberDismissedVersion(DISMISSED_OMP_UPDATE_KEY, version) }
-        );
-      })
-      .catch(() => {});
-    return () => controller.abort();
-  }, [updateCheckKey]);
-  useEffect(() => {
-    const recheck = () => {
-      if (document.visibilityState !== "visible") return;
-      // A transient failure on mount reads as "no update" forever otherwise;
-      // re-running the checks below on re-focus gives them another chance.
-      setUpdateCheckKey((key) => key + 1);
-    };
-    document.addEventListener("visibilitychange", recheck);
-    return () => document.removeEventListener("visibilitychange", recheck);
-  }, []);
   const refreshAppUpdate = useCallback(async (force = false, autoOpen = false): Promise<AppUpdateInfo | null> => {
     const data = await fetchAppUpdateJson<AppUpdateInfo>(
       force ? "/api/app-update?force=1" : "/api/app-update",
@@ -1887,7 +1831,7 @@ export function AppShell({ appName }: { appName: string }) {
       onOpenSettings={() => setSettingsTab((prev) => prev ? null : "general")}
       onOpenArchive={() => setArchiveBrowserOpen(true)}
       navigation={sidebarNavigation}
-      updateAvailable={Boolean(appUpdate?.updateAvailable) || ompUpdateAvailable}
+      updateAvailable={Boolean(appUpdate?.updateAvailable)}
       onClose={isMobile ? handleSidebarToggle : undefined}
       onSearchQueryChange={handleSearchQueryChange}
       onOpenSearchMatch={setSearchMatchTarget}
@@ -2092,10 +2036,7 @@ export function AppShell({ appName }: { appName: string }) {
             onModelsSaved={() => setModelsRefreshKey((k) => k + 1)}
             onPluginsReloaded={() => setSessionKey((k) => k + 1)}
             appUpdate={appUpdate}
-            ompUpdateAvailable={ompUpdateAvailable}
-            ompUpdatesDisabled={ompUpdatesDisabled}
             onRefreshAppUpdate={refreshAppUpdate}
-            onOmpUpdateAvailabilityChange={setOmpUpdateAvailable}
             onRequestAppUpdate={requestAppUpdateFromSettings}
             onSelectTab={setSettingsTab}
             onClose={() => setSettingsTab(null)}

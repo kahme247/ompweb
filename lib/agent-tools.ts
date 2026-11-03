@@ -329,7 +329,7 @@ export async function executeAgentTool(
   ctx: AgentToolContext,
 ): Promise<unknown> {
   if (!ctx.enabled) {
-    throw new Error("Agent tools are disabled. Enable \"Agent tools\" in omp-web Settings (System & Updates) first.");
+    throw new Error("Agent tools are disabled. Enable \"Agent tools\" in omp-web Settings (System) first.");
   }
   if (!AGENT_TOOL_NAMES.has(toolName)) throw new Error(`Unknown agent tool: ${toolName}.`);
   const record = asRecord(args);

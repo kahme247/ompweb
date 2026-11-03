@@ -37,9 +37,9 @@ export const SETTINGS_CATEGORIES: TabItem[] = [
   { id: "intelligence", label: "Agent & Intelligence", description: "Advisor, memory, autolearn, compaction and retry", Icon: Sparkles },
   { id: "agents", label: "Agents", description: "Task agents, model settings, and tool policy", Icon: Bot },
   { id: "mcp", label: "Extensions & Tools", description: "MCP servers, managed skills, and OMP plugins", Icon: Cable },
-  { id: "hosts", label: "Hosts", description: "Link other machines to run sessions there", Icon: Network },
+  { id: "hosts", label: "Hosts", description: "Linked machines, host software versions, and updates", Icon: Network },
   { id: "notifications", label: "Notifications", description: "Desktop and mobile notifications for your sessions", Icon: Bell },
-  { id: "system", label: "System & Updates", description: "App updates, runtime version, and active session restart", Icon: RefreshCw },
+  { id: "system", label: "System", description: "Web server updates, agent settings, and service controls", Icon: RefreshCw },
 ];
 
 export const getNormalizedActive = (tab: SettingsTab): SettingsTab => {
