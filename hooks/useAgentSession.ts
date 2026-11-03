@@ -275,7 +275,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const left = prev.filter((held) => !isHeldBashRecorded(confirmedMessages, held));
       return left.length === prev.length ? prev : left;
     });
-  }, [confirmedMessages]);
+  }, [confirmedMessages, heldBash]);
   // False once this hook instance unmounts: background loops (prompt/bash
   // settlement polling) must not keep firing on a dead instance.
   const hookAliveRef = useRef(true);
@@ -3207,7 +3207,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleAbort = useCallback(async () => {
     const sid = sessionIdRef.current;
     if (!sid) return;
-    if (bashRunningRef.current) {
+    // As omp's Esc: a running turn is stopped first; a `!` command beside it keeps running.
+    if (bashRunningRef.current && !agentRunningRef.current) {
       try {
         await sendAgentCommand(sid, { type: "abort_bash" });
       } catch (e) {

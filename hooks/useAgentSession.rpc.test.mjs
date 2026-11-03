@@ -87,7 +87,7 @@ class FakeSharedWorker {
 
 /** A command over the session socket: `world.socketAnswer` may answer it as the worker would (e.g. transport_lost), else the agent route does. */
 async function answerCommand(port, { n, sessionId, advisor, body }) {
-  let answer = world.socketAnswer?.(JSON.parse(body));
+  let answer = await world.socketAnswer?.(JSON.parse(body));
   if (!answer) {
     const res = await fetchStub(`/api/agent/${encodeURIComponent(sessionId)}${advisor ? "?advisor=1" : ""}`, { method: "POST", body });
     answer = { status: res.status, body: await res.json() };
@@ -5246,6 +5246,29 @@ test("a `!` command during a run runs at once and its held-back output shows unt
     await settle();
     assert.equal(w.latest.messages.some((message) => message.role === "bashExecution"), false);
     assert.deepEqual(w.latest.deferredBash, []);
+  });
+});
+
+test("Stop during a run with a `!` command beside it stops the turn, not the command", async () => {
+  await inWebSocketMode(async () => {
+    resetWorld();
+    primeSession("midrun-stop", [userMsg("u0", "q")]);
+    const { w, es } = await startRun("midrun-stop", "q1");
+    await act(async () => { es.emit({ type: "agent_start" }); await Promise.resolve(); });
+    const sent = [];
+    let finishBash;
+    world.socketAnswer = (command) => {
+      sent.push(command.type);
+      if (command.type !== "bash") return null;
+      return new Promise((resolve) => { finishBash = () => resolve({ status: 200, body: { success: true, data: { output: "", exitCode: 0, cancelled: false, truncated: false, deferred: true } } }); });
+    };
+    let bash;
+    await act(async () => { bash = w.latest.handleSend("!sleep 5"); await sleep(30); });
+    assert.equal(w.latest.bashRunning, true);
+    await act(async () => { void w.latest.handleAbort(); await sleep(30); });
+    assert.equal(sent.includes("abort_bash"), false, "the shell command keeps running");
+    assert.ok(sent.some((type) => type === "abort_and_restore_queue" || type === "abort"), "the turn is stopped");
+    await act(async () => { finishBash(); await bash; });
   });
 });
 

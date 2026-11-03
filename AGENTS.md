@@ -769,7 +769,9 @@ during the wait.
   matches; never compare counts, they change with the view), then retires it
   for good (compaction or a branch view without it must not bring it back). Never clear it on a client
   event such as sending a prompt: the result may reach the transcript one
-  prompt later. Other tabs see it only from then on.
+  prompt later. Other tabs see it only from then on. Stop (`handleAbort`)
+  stops a running turn first, as omp's Esc does; `abort_bash` only when no
+  turn runs.
 
 ### Live event stream: one socket per browser (`/api/events`)
 - Browsers cap HTTP/1.1 at **6 connections per host across all tabs**, and an

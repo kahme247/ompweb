@@ -44,8 +44,9 @@ test("a `!` command typed during a run is sent as a shell command, never queued 
 
 test("a `!` command refused during a run goes back to the draft", async () => {
   const user = userEvent.setup();
-  renderComposer("rejected");
+  const calls = renderComposer("rejected");
   await user.type(screen.getByRole("textbox"), "!git status");
   await user.keyboard("{Enter}");
   await waitFor(() => assert.equal(screen.getByRole("textbox").value, "!git status"));
+  assert.deepEqual(calls, [["onSend", "!git status"]]);
 });
