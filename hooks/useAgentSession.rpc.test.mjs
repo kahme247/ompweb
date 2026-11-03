@@ -5207,9 +5207,8 @@ test("a `!` command the route refused is offered back to the composer with an er
 test("a `!` command during a run runs at once and its held-back output shows until the transcript has it", async () => {
   await inWebSocketMode(async () => {
     resetWorld();
-    // An earlier run of the same command is already in the history.
-    const earlier = { role: "bashExecution", command: "echo hi", output: "hi\n", exitCode: 0 };
-    primeSession("midrun-bash", [userMsg("u0", "q"), earlier]);
+    const run = (timestamp) => ({ role: "bashExecution", command: "echo hi", output: "hi\n", exitCode: 0, timestamp });
+    primeSession("midrun-bash", [userMsg("u0", "q")]);
     const { w, es } = await startRun("midrun-bash", "q1");
     await act(async () => { es.emit({ type: "agent_start" }); await Promise.resolve(); });
     const result = { output: "hi\n", exitCode: 0, cancelled: false, truncated: false, deferred: true };
@@ -5227,11 +5226,18 @@ test("a `!` command during a run runs at once and its held-back output shows unt
     await settle();
     assert.equal(w.latest.deferredBash.length, 1, "omp still holds it after the turn");
 
-    // omp writes it when a later prompt starts; from then on the transcript shows it.
-    saveSession("midrun-bash", [...world.sessions.get("midrun-bash").messages, { ...earlier, timestamp: 2 }]);
+    // An older run of the same command comes into view (e.g. pre-compaction history): it is not this one.
+    const before = world.sessions.get("midrun-bash").messages;
+    saveSession("midrun-bash", [...before, run(1)]);
     await act(async () => { publishSessionsChanged(["midrun-bash"]); });
     await settle();
-    assert.equal(w.latest.messages.filter((message) => message.role === "bashExecution").length, 2);
+    assert.equal(w.latest.messages.filter((message) => message.role === "bashExecution").length, 1);
+    assert.equal(w.latest.deferredBash.length, 1, "an older run does not count as this one");
+
+    // omp writes it when a later prompt starts, stamped after everything before it.
+    saveSession("midrun-bash", [...before, run(1), run(5)]);
+    await act(async () => { publishSessionsChanged(["midrun-bash"]); });
+    await settle();
     assert.deepEqual(w.latest.deferredBash, []);
 
     // Compaction drops it from the context: the shown output must not come back.

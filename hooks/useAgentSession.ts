@@ -223,8 +223,11 @@ function toastStoppedSend(error: unknown, promptIssued = true): boolean | null {
   return error.mayHaveRun && promptIssued;
 }
 
-function countBashRuns(messages: AgentMessage[], command: string): number {
-  return messages.filter((message) => message.role === "bashExecution" && message.command === command).length;
+/** Whether omp recorded this held `!` run: a run of its command stamped after
+ * every message that existed when it was sent. Both stamps are omp's clock, and
+ * older runs predate `after` in every view (compacted or not). */
+function isHeldBashRecorded(messages: AgentMessage[], held: { command: string; after: number }): boolean {
+  return messages.some((message) => message.role === "bashExecution" && message.command === held.command && (message.timestamp ?? 0) > held.after);
 }
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
@@ -258,18 +261,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [pendingBash, setPendingBash] = useState<{ command: string; excludeFromContext: boolean } | null>(null);
   // `!` results from a running turn: omp holds them back until a later prompt
   // starts, so until the transcript has them they show from here, like the
-  // terminal's pending block. `seen` is how many runs of that command the
-  // transcript already had when it was sent.
-  const [heldBash, setHeldBash] = useState<{ message: BashExecutionMessage; seen: number }[]>([]);
+  // terminal's pending block. `after` is the newest omp timestamp the
+  // transcript had when it was sent.
+  const [heldBash, setHeldBash] = useState<{ message: BashExecutionMessage; command: string; after: number }[]>([]);
   const deferredBash = useMemo(
-    () => heldBash.filter((held) => countBashRuns(confirmedMessages, held.message.command) <= held.seen).map((held) => held.message),
+    () => heldBash.filter((held) => !isHeldBashRecorded(confirmedMessages, held)).map((held) => held.message),
     [heldBash, confirmedMessages],
   );
   // Once the transcript has one, it is done for good: compaction or a branch
   // view without it must not bring the local copy back.
   useEffect(() => {
     setHeldBash((prev) => {
-      const left = prev.filter((held) => countBashRuns(confirmedMessages, held.message.command) <= held.seen);
+      const left = prev.filter((held) => !isHeldBashRecorded(confirmedMessages, held));
       return left.length === prev.length ? prev : left;
     });
   }, [confirmedMessages]);
@@ -3029,8 +3032,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     bashRunningRef.current = true;
     setPendingBash({ command, excludeFromContext });
     setBashRunning(true);
-    // omp only ever adds this run after the runs the transcript shows now.
-    const seen = countBashRuns(confirmedMessages, command);
+    // omp stamps the recorded run after every message it has written by now.
+    const after = confirmedMessages.reduce((latest, message) => Math.max(latest, message.timestamp ?? 0), 0);
     try {
       const sid = sessionIdRef.current ?? session?.id ?? await ensureNewSession();
       if (!sid) throw new Error(translate("agentSession.shellSessionFailed"));
@@ -3041,7 +3044,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       });
       if (result?.deferred) {
         setHeldBash((prev) => [...prev, {
-          seen,
+          command,
+          after,
           message: {
             role: "bashExecution",
             command,

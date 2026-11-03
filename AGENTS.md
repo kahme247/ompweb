@@ -763,9 +763,11 @@ during the wait.
   `deferred`: its `streaming` read by `sendCommand`'s `onReply` as the reply
   is read (omp's own `isStreaming`; after the await, an `agent_end` from the
   same link batch would already have cleared it). The hook shows it from
-  `heldBash` (after the transcript) until the transcript has one more run of
-  that command than when it was sent, then retires it for good (compaction or
-  a branch view without it must not bring it back). Never clear it on a client
+  `heldBash` (after the transcript) until the transcript has a run of that
+  command stamped after the newest message it held when the command was sent
+  (both omp's clock, so an older run revealed by the pre-compaction view never
+  matches; never compare counts, they change with the view), then retires it
+  for good (compaction or a branch view without it must not bring it back). Never clear it on a client
   event such as sending a prompt: the result may reach the transcript one
   prompt later. Other tabs see it only from then on.
 
