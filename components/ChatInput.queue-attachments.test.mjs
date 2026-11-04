@@ -174,11 +174,28 @@ test("a refused follow-up goes back whole to its draft, ahead of what was typed 
   const calls = await renderRunningWithAttachments({ queued: new Promise((resolve) => { refuse = () => resolve(false); }) });
   fireEvent.click(screen.getByRole("button", { name: /queue/i }));
   await waitFor(() => assert.equal(calls.length, 1));
+  assert.equal(screen.getByRole("status").textContent, "Sending…", "the in-flight message shows until omp answers");
   fireEvent.change(screen.getByRole("textbox"), { target: { value: "typed meanwhile" } });
   await act(async () => { refuse(); });
+  await waitFor(() => assert.equal(screen.queryByRole("status"), null, "the sending row goes once omp answered"));
   await waitFor(() => assert.deepEqual(getDraft(KEY)?.images, [{ data: PNG, mimeType: "image/png" }]));
   assert.equal(getDraft(KEY)?.value, `${calls[0].message}\n\ntyped meanwhile`, "the text, file contents included, comes back too");
   assert.equal(screen.getByRole("textbox").value, `${calls[0].message}\n\ntyped meanwhile`);
+});
+
+test("a queued message shows Sending… only in its own chat, until omp takes it", async () => {
+  let accept;
+  const { calls, rerender } = await renderWithAttachments({ queued: new Promise((resolve) => { accept = () => resolve(true); }) });
+  fireEvent.click(screen.getByRole("button", { name: /queue/i }));
+  await waitFor(() => assert.equal(calls.length, 1));
+  assert.equal(screen.getByRole("status").textContent, "Sending…");
+  rerender({ draftKey: "another-chat" });
+  assert.equal(screen.queryByRole("status"), null, "another chat's composer does not show it");
+  rerender({ draftKey: KEY });
+  assert.equal(screen.getByRole("status").textContent, "Sending…", "back in its chat while still in flight");
+  await act(async () => { accept(); });
+  await waitFor(() => assert.equal(screen.queryByRole("status"), null, "omp's queue chip takes over"));
+  assert.equal(getDraft(KEY), null, "nothing goes back into the composer");
 });
 
 for (const { label, fill, oversized } of [

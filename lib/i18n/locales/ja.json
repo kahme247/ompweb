@@ -411,6 +411,7 @@
   "chatInput.queuedEdit": "編集",
   "chatInput.queuedEditTitle": "このキューされたメッセージを編集",
   "chatInput.queuedFollowUp": "キューされたフォローアップ",
+  "chatInput.queuedSending": "送信中…",
   "chatInput.queuedSteer": "キューされたステア",
   "chatInput.queuedSteerAction": "ステア",
   "chatInput.queuedSteerTitle": "このメッセージをステアとして送信",

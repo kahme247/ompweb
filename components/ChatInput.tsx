@@ -1601,6 +1601,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
     });
   }, [slashMatch, value]);
+  const [sendingQueued, setSendingQueued] = useState<{ id: number; key: string | undefined; text: string }[]>([]);
+  const sendingIdRef = useRef(0);
 
   const sendQueued = useCallback((mode: "steer" | "followup", overrideText?: string) => {
     if (submissionBlockedRef.current) return;
@@ -1620,10 +1622,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     // if the user has typed or switched sessions since.
     const key = draftKeyRef.current;
     const kept = { images: images?.map(imageToDraftImage), ...uploadRecovery(attachedUploadsRef.current) };
-    const recoverOnFailure = (queued: Promise<boolean>, text: string) => {
+    // Until omp answers, the message shows as "Sending…" above the composer:
+    // it is neither in the composer nor in omp's queue yet.
+    const trackSend = (queued: Promise<boolean>, text: string) => {
+      const id = ++sendingIdRef.current;
+      setSendingQueued((list) => [...list, { id, key, text }]);
       void Promise.resolve(queued).then((ok) => {
         if (ok === false && key) recoverDraft(key, { text, ...kept });
-      });
+      }).finally(() => setSendingQueued((list) => list.filter((entry) => entry.id !== id)));
     };
     const files = attachedTextFilesRef.current;
     onAudioUnlock?.();
@@ -1644,7 +1650,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (expansion.kind === "expand") {
         const prompt = composeMessageWithTextAttachments(expansion.prompt, files);
         if (rejectsOversizedPrompt(prompt, attachedImagesRef.current)) return;
-        recoverOnFailure(onPromptWithStreamingBehavior(prompt, streamingBehavior, images, ...uploads), prompt);
+        trackSend(onPromptWithStreamingBehavior(prompt, streamingBehavior, images, ...uploads), prompt);
         clearInput();
         return;
       }
@@ -1657,16 +1663,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       }
       const prompt = composeMessageWithTextAttachments(msg, files);
       if (rejectsOversizedPrompt(prompt, attachedImagesRef.current)) return;
-      recoverOnFailure(onPromptWithStreamingBehavior(prompt, streamingBehavior, images, ...uploads), prompt);
+      trackSend(onPromptWithStreamingBehavior(prompt, streamingBehavior, images, ...uploads), prompt);
       clearInput();
       return;
     }
     const composedMessage = composeMessageWithTextAttachments(msg, files);
     if (rejectsOversizedPrompt(composedMessage, attachedImagesRef.current)) return;
     if (mode === "steer" && onSteer) {
-      recoverOnFailure(onSteer(composedMessage, images, ...uploads), composedMessage);
+      trackSend(onSteer(composedMessage, images, ...uploads), composedMessage);
     } else if (mode === "followup" && onFollowUp) {
-      recoverOnFailure(onFollowUp(composedMessage, images, ...uploads), composedMessage);
+      trackSend(onFollowUp(composedMessage, images, ...uploads), composedMessage);
     }
     clearInput();
   }, [value, handleSend, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, t, advisorEnabled, rejectsOversizedPrompt, rejectsPendingUploads, sendSideQuestion]);
@@ -1697,6 +1703,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   ];
   const firstQueued = queuedEntries[0] ?? null;
   const queuedCount = queuedEntries.length;
+  const sendingEntries = sendingQueued.filter((entry) => entry.key === draftKey);
+  const queueBarShown = queuedCount > 0 || sendingEntries.length > 0;
 
   const [queueExpanded, setQueueExpanded] = useState(false);
   const [queueActionPending, setQueueActionPending] = useState(false);
@@ -2773,7 +2781,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           })()}
         {/* Queued prompts panel / bar — attached to composer's top edge.
             When 1 item: compact single row. When multiple items: compact row with expand toggle, or full list when expanded. */}
-        {queuedCount > 0 && (
+        {queueBarShown && (
           <div
             aria-label={t("chatInput.queuedPrompts")}
             style={{
@@ -2784,7 +2792,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               overflow: "hidden",
             }}
           >
-            {queuedCount === 1 ? (
+            {sendingEntries.map((entry) => (
+              <div key={entry.id} style={{ padding: "5px 8px 5px 12px", display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                <Loader2 size={12} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0, color: "var(--text-muted)", animation: "spin 0.8s linear infinite" }} />
+                <span role="status" style={{ flexShrink: 0, fontSize: 10, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--text-muted)" }}>
+                  {t("chatInput.queuedSending")}
+                </span>
+                <span title={entry.text} style={{ flex: 1, minWidth: 0, fontSize: 12, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {entry.text}
+                </span>
+              </div>
+            ))}
+            {queuedCount === 0 ? null : queuedCount === 1 ? (
               <div style={{
                 padding: "5px 8px 5px 12px",
                 display: "flex",
@@ -2985,7 +3004,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             style={{
               border: `1px solid ${bashMode ? "var(--tool-bg)" : "color-mix(in srgb, var(--border) 70%, transparent)"}`,
               borderBottom: "none",
-              borderRadius: queuedCount > 0 ? 0 : "var(--radius-card) var(--radius-card) 0 0",
+              borderRadius: queueBarShown ? 0 : "var(--radius-card) var(--radius-card) 0 0",
               background: "var(--bg-panel)",
               padding: "6px 14px",
               display: "flex",
@@ -3009,7 +3028,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               flexDirection: "column",
               background: "var(--bg)",
               border: `1px solid ${bashMode ? "var(--tool-bg)" : "color-mix(in srgb, var(--border) 70%, transparent)"}`,
-              borderRadius: (queuedCount > 0 || Boolean(statusText)) ? "0 0 var(--radius-card) var(--radius-card)" : "var(--radius-card)",
+              borderRadius: (queueBarShown || Boolean(statusText)) ? "0 0 var(--radius-card) var(--radius-card)" : "var(--radius-card)",
               padding: "12px 12px 10px",
               boxShadow: "var(--shadow-card)",
             } as React.CSSProperties}

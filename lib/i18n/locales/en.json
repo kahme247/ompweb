@@ -428,6 +428,7 @@
   "chatInput.queuedEdit": "Edit",
   "chatInput.queuedEditTitle": "Edit this queued message",
   "chatInput.queuedFollowUp": "Queued follow-up",
+  "chatInput.queuedSending": "Sending…",
   "chatInput.queuedSteer": "Queued steer",
   "chatInput.queuedSteerAction": "Steer",
   "chatInput.queuedSteerTitle": "Deliver this message as a steer",
