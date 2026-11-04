@@ -1,6 +1,7 @@
 // `local://` URLs as omp's own local-protocol.ts reads them (`extractRelativePath` + `validateRelativePath`, omp
 // 18.3.1+ and the installed 18.15): the file an agent wrote with `local://x` is the one ompweb opens, and nothing omp
-// refuses is accepted here. Stricter in one way: a leading backslash is absolute on every platform.
+// refuses is accepted here. Stricter in one way: a backslash is always a separator, so a leading one is absolute and
+// `a\..b` is refused off Windows too (omp reads it there as one file name).
 // Pure (no I/O, no `@/` imports): the open_file host tool in the browser and the server share it.
 
 // Scheme and authority (omp's LOCAL_AUTHORITY_RE), then the raw path; a query or fragment is not part of the path.
@@ -37,6 +38,7 @@ export function parseLocalUri(input: string, platform: NodeJS.Platform = process
   if (/^[\\/]/.test(decoded) || (platform === "win32" && /^[a-zA-Z]:/.test(decoded))) {
     return fail("Absolute paths are not allowed in local:// URLs");
   }
-  if (decoded.split(/[\\/]/).includes("..")) return fail("Path traversal (..) is not allowed in local:// URLs");
+  // omp's rule: no `..` segment, and none that starts with `..` (`normalized.startsWith("..")` / `includes("/..")`).
+  if (decoded.split(/[\\/]/).some((segment) => segment.startsWith(".."))) return fail("Path traversal (..) is not allowed in local:// URLs");
   return { ok: true, relative: decoded };
 }
