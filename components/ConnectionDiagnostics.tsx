@@ -22,12 +22,14 @@ const STATUS_COLOR: Record<ConnectionDiagnostics["status"], string> = {
   connected: "var(--status-success)",
   connecting: "var(--status-warning)",
   down: "var(--status-error)",
+  idle: "var(--text-dim)",
 };
 
 const STATUS_KEY: Record<ConnectionDiagnostics["status"], string> = {
   connected: "connectionDiagnostics.statusConnected",
   connecting: "connectionDiagnostics.statusConnecting",
   down: "connectionDiagnostics.statusDown",
+  idle: "connectionDiagnostics.statusIdle",
 };
 
 const numberCell: CSSProperties = {
@@ -138,8 +140,6 @@ function DiagnosticsBody({ diagnostics: d, now }: { diagnostics: ConnectionDiagn
         </Row>
         <Row label={t("connectionDiagnostics.rowClockRtt")}>{d.clockRttMs === null ? "—" : t("connectionDiagnostics.msValue", { ms: Math.round(d.clockRttMs) })}</Row>
         <Row label={t("connectionDiagnostics.rowNetwork")}>{d.effectiveType ?? "—"}</Row>
-        <Row label={t("connectionDiagnostics.rowPending")}>{d.pendingCommands}</Row>
-        <Row label={t("connectionDiagnostics.rowUploads")}>{d.uploads}</Row>
       </dl>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -183,8 +183,10 @@ function DiagnosticsBody({ diagnostics: d, now }: { diagnostics: ConnectionDiagn
             </div>
           </div>
         ))}
-        <div style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.5 }}>
-          {t("connectionDiagnostics.statsNote", { minutes })}
+        <div style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.5, display: "flex", flexDirection: "column", gap: 6 }}>
+          <div>{t("connectionDiagnostics.statsNote", { minutes })}</div>
+          <div>{t("connectionDiagnostics.timingNote")}</div>
+          <div>{t("connectionDiagnostics.commandNote")}</div>
         </div>
       </div>
     </>

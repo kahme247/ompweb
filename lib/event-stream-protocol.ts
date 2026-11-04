@@ -57,9 +57,9 @@ export interface ConnectionDiagnostics {
   /** In effect in this browser now: `sse` with `fallback` when refused WebSocket upgrades put this worker on SSE. */
   mode: BrowserTransport;
   fallback: boolean;
-  /** `down`: no connection for long enough that commands fail. */
-  status: "connected" | "connecting" | "down";
-  /** When the current outage began; null while connected. */
+  /** `idle`: no connection intended; `down`: no connection for long enough that commands fail. */
+  status: "idle" | "connected" | "connecting" | "down";
+  /** When the current connection attempt or outage began; null while idle or connected. */
   since: number | null;
   lastReconnect: { at: number; trigger: string; outageMs: number; resumed: boolean | null } | null;
   /** Within `windowMs`; resumes and resyncs are the browser link's. */
@@ -68,8 +68,6 @@ export interface ConnectionDiagnostics {
   resyncs: number;
   clockRttMs: number | null;
   effectiveType: string | null;
-  pendingCommands: number;
-  uploads: number;
   windowMs: number;
   stats: DiagnosticStat[];
 }

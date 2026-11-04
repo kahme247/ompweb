@@ -881,10 +881,11 @@ during the wait.
     `--client`, `--file`).
   - **Connection tab** (right panel, both layouts, shown while Settings → Interface & Behavior → "Show connection
     diagnostics" is on, `omp-web:connection-diagnostics`, per browser). It polls the worker (`diag` op,
-    `requestConnectionDiagnostics`) once a second while visible: the mode in effect, fallback, status (`down` after
-    `SEND_DEADLINE_MS` without a connection), the last reconnect, and per-transport stats (mean, p50, p95, p99.9 from
-    1000 values, max) of the worker's last 15 min of samples (at most 20 000, kept beside the POST buffer). The
-    durations come from `lib/transport-stats.ts`, which `scripts/transport-metrics.ts` uses too, so both agree.
+    `requestConnectionDiagnostics`) once a second while visible: the mode in effect, fallback, status (`idle` when
+    no connection is needed, `down` after `SEND_DEADLINE_MS` without a connection), the last reconnect, and
+    per-transport stats (mean, p50, p95, p99.9 from 1000 values, max) of the worker's last 30 min of samples (at most
+    20 000, kept beside the POST buffer). Command rows include confirmed successful replies only. Shared durations
+    come from `lib/transport-stats.ts`; one-way estimates use clock correction and assume symmetric latency.
     Without a SharedWorker (Chrome for Android) each tab has its own worker, so the numbers are that tab's.
   - **Worker rules.** Browser code: no `AbortSignal.timeout`/`any` or `Promise.withResolvers` (a test checks
     the bundle). Every global the worker uses must be injectable into the `vm` context of

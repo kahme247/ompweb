@@ -95,6 +95,8 @@ export function diagnosticStats(samples: Sample[]): DiagnosticStat[] {
   for (const s of samples) {
     const transport = typeof s.transport === "string" ? s.transport : "unknown";
     if (s.metric === "action") {
+      // A local timeout/proxy refusal never confirms an omp round trip; this panel measures successful commands only.
+      if (s.outcome !== "ok" || serverMsOf(s) === undefined) continue;
       add(transport, "upMs", upMsOf(s));
       add(transport, "transportMs", transportMsOf(s));
       if (s.type === "get_state") add(transport, "ompMs", serverMsOf(s));

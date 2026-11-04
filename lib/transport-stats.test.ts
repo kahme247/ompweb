@@ -12,6 +12,8 @@ test("p99.9 is reported only from 1000 values, where it is no longer just the ma
   const few = summarizeDurations(Array.from({ length: 999 }, (_, i) => i));
   assert.equal(few.p999, null);
   assert.equal(few.max, 998);
+  const boundary = summarizeDurations(Array.from({ length: 1000 }, (_, i) => i + 1));
+  assert.equal(boundary.p999, 999);
   // 2000 values: rank ceil(0.999 * 2000) = 1998, the 1998th smallest.
   const many = summarizeDurations(Array.from({ length: 2000 }, (_, i) => 2000 - i));
   assert.equal(many.p999, 1998);
@@ -22,7 +24,7 @@ test("p99.9 is reported only from 1000 values, where it is no longer just the ma
 
 test("diagnostic rows split by transport; omp delivery counts get_state only", () => {
   // Server clock = tab clock + 1000. Sent 0, received (server) 1010, replied 1030, got 50.
-  const action = { metric: "action", sentAt: 0, gotAt: 50, recvAt: 1010, repliedAt: 1030, offset: 1000 };
+  const action = { metric: "action", outcome: "ok", status: 200, sentAt: 0, gotAt: 50, recvAt: 1010, repliedAt: 1030, offset: 1000 };
   const rows = diagnosticStats([
     { ...action, transport: "ws", type: "get_state" },
     { ...action, transport: "ws", type: "prompt", repliedAt: 1040, gotAt: 60 },
@@ -39,4 +41,21 @@ test("diagnostic rows split by transport; omp delivery counts get_state only", (
   assert.equal(value("ws", "ompMs")?.max, 20);
   assert.equal(value("ws", "serverMs")?.max, 30);
   assert.equal(value("sse", "eventMs")?.p50, 5);
+});
+
+test("diagnostics exclude unconfirmed deliveries and failed commands from successful-command latencies", () => {
+  const base = { metric: "action", transport: "ws", type: "get_state", sentAt: 0, gotAt: 15_000, recvAt: null, repliedAt: null };
+  const failed = [
+    { ...base, outcome: "unavailable", status: 503 },
+    { ...base, outcome: "lost", status: 503 },
+    { ...base, transport: "sse", outcome: "error", status: 0 },
+    { ...base, transport: "sse", outcome: "error", status: 502 },
+    { ...base, outcome: "error", status: 503, recvAt: 1, repliedAt: 2 },
+    { ...base, outcome: "ok", status: 200 },
+  ];
+  assert.deepEqual(diagnosticStats(failed), []);
+  const rows = diagnosticStats([...failed, { ...base, outcome: "ok", status: 200, gotAt: 10, recvAt: 2, repliedAt: 5 }]);
+  assert.deepEqual(rows.map((row) => [row.metric, row.count, row.mean]), [
+    ["transportMs", 1, 7], ["ompMs", 1, 3], ["serverMs", 1, 3], ["totalMs", 1, 10],
+  ]);
 });

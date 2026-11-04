@@ -112,7 +112,7 @@ const CLOCK_WINDOW_SAMPLES = 20;
 const LARGE_FRAME_BYTES = 64 * 1024;
 const LARGE_FRAME_LOG_MS = 30000;
 /** The diagnostics panel's stats cover this browser's samples of this long, at most DIAGNOSTICS_MAX of them. */
-const DIAGNOSTICS_WINDOW_MS = 15 * 60_000;
+const DIAGNOSTICS_WINDOW_MS = 30 * 60_000;
 const DIAGNOSTICS_MAX = 20_000;
 
 /** A tab's end of the worker: a SharedWorker's MessagePort, or the dedicated worker's own scope. */
@@ -207,6 +207,8 @@ interface Conn {
   lastEventSampleAt: number;
   heldEvent: HeldEvent | null;
   reconnect: Reconnect | null;
+  /** First unanswered attempt or drop, until hello/welcome or the connection is no longer wanted. */
+  connectingSince: number | null;
   largeFrames: LoggedFrame[];
 }
 
@@ -266,8 +268,8 @@ let mode: BrowserTransport = "sse";
 let fallbackTimer: Timer | undefined;
 /** Every attached tab, told the mode when it changes. */
 const clients = new Set<Client>();
-const sseConn: Conn = { key: "sse", lastEventSampleAt: -Infinity, heldEvent: null, reconnect: null, largeFrames: [] };
-const linkConn: Conn = { key: "link", lastEventSampleAt: -Infinity, heldEvent: null, reconnect: null, largeFrames: [] };
+const sseConn: Conn = { key: "sse", lastEventSampleAt: -Infinity, heldEvent: null, reconnect: null, connectingSince: null, largeFrames: [] };
+const linkConn: Conn = { key: "link", lastEventSampleAt: -Infinity, heldEvent: null, reconnect: null, connectingSince: null, largeFrames: [] };
 /** The browser link: its socket, the identity it resumes with, and both directions' delivery state. */
 const link = {
   ws: null as WebSocket | null,
@@ -376,6 +378,7 @@ function ensureSource(): void {
   if (mode !== "sse" || source || reconnectTimer !== undefined || subscriptions.size === 0) return;
   const current = new EventSource(EVENT_STREAM_PATH);
   source = current;
+  sseConn.connectingSince ??= Date.now();
   current.addEventListener(MUX_CONTROL_EVENT, (event: MessageEvent<string>) => {
     if (source !== current) return;
     let frame: ControlFrame;
@@ -423,6 +426,7 @@ function handleControl(frame: ControlFrame, conn: Conn): void {
     // Switched to the link: the switch moved every subscription off this EventSource.
     if (mode !== "sse" || typeof frame.connectionId !== "string") return;
     connectionId = frame.connectionId;
+    sseConn.connectingSince = null;
     if (sseConn.reconnect) {
       sseConn.reconnect.hello = true;
       // No stream, no frame to end its outage (and nothing was being delivered).
@@ -474,6 +478,7 @@ function applyMode(): void {
     reconnectTimer = undefined;
     closeSource();
     sseConn.reconnect = null;
+    sseConn.connectingSince = null;
     for (const subscription of subscriptions.values()) subscribe(subscription);
     ensureLink();
     return;
@@ -543,6 +548,7 @@ function release(subscription: Subscription): void {
     reconnectTimer = undefined;
     closeSource();
     sseConn.reconnect = null;
+    sseConn.connectingSince = null;
   }
   linkIdle();
 }
@@ -617,6 +623,7 @@ function shutLink(): void {
   link.welcomed = false;
   resetLink();
   linkConn.reconnect = null;
+  linkConn.connectingSince = null;
   linkConn.heldEvent = null;
   stopSilenceCheck();
 }
@@ -652,6 +659,7 @@ function dial(): void {
   link.opened = false;
   link.welcomed = false;
   link.dialedAt = link.lastFrameAt = Date.now();
+  linkConn.connectingSince ??= link.dialedAt;
   link.commandWaitSince = undefined;
   silenceTimer ??= setInterval(checkSilence, SILENCE_CHECK_MS);
   // Events of a socket the link gave up (late frames, its close) are ignored.
@@ -969,6 +977,7 @@ function onWelcome(welcome: DownHead): void {
   link.token = typeof welcome.token === "string" ? welcome.token : null;
   link.serverId = typeof welcome.serverId === "string" ? welcome.serverId : null;
   link.welcomed = true;
+  linkConn.connectingSince = null;
   if (!resumed && mode === "ws") {
     markConnecting(subscriptions.values());
     for (const subscription of subscriptions.values()) subscribe(subscription);
@@ -1489,6 +1498,7 @@ function recordTabSample(sample: Sample): void {
 
 /** A connection dropped (`reconnect`): its outage runs from the first drop until a stream gets a frame after the next hello or welcome. */
 function dropped(conn: Conn, trigger: string): void {
+  conn.connectingSince ??= Date.now();
   if (conn.reconnect) return;
   const dropAt = Date.now();
   const woke = lastWake !== null && dropAt - lastWake.at <= WAKE_WINDOW_MS;
@@ -1613,8 +1623,9 @@ function diagnostics(): ConnectionDiagnostics {
   const from = diagnosticSamples.findIndex((entry) => now - entry.t <= DIAGNOSTICS_WINDOW_MS);
   diagnosticSamples = from === -1 ? [] : diagnosticSamples.slice(from);
   const conn = mode === "ws" ? linkConn : sseConn;
+  const wanted = mode === "ws" ? linkWanted() : subscriptions.size > 0;
   const connected = mode === "ws" ? link.ws?.readyState === OPEN && link.welcomed : source !== null && connectionId !== null;
-  const since = connected ? null : conn.reconnect?.dropAt ?? null;
+  const since = !wanted || connected ? null : conn.connectingSince;
   let reconnects = 0;
   let resumes = 0;
   let resyncs = 0;
@@ -1628,9 +1639,9 @@ function diagnostics(): ConnectionDiagnostics {
   return {
     setting,
     mode,
-    fallback: fallbackTimer !== undefined,
+    fallback: setting === "ws" && mode === "sse",
     // Down once commands would fail for want of a connection (SEND_DEADLINE_MS).
-    status: connected ? "connected" : since !== null && now - since >= SEND_DEADLINE_MS ? "down" : "connecting",
+    status: !wanted ? "idle" : connected ? "connected" : since !== null && now - since >= SEND_DEADLINE_MS ? "down" : "connecting",
     since,
     lastReconnect,
     reconnects,
@@ -1638,8 +1649,6 @@ function diagnostics(): ConnectionDiagnostics {
     resyncs,
     clockRttMs: clock ? clock.rtt : null,
     effectiveType: effectiveType(),
-    pendingCommands: pending.size,
-    uploads: uploads.size,
     windowMs: DIAGNOSTICS_WINDOW_MS,
     stats: diagnosticStats(diagnosticSamples.map((entry) => entry.sample)),
   };
