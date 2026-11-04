@@ -296,12 +296,19 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
     return () => ro.disconnect();
   }, [scrollContainer]);
 
-  // Keep active row visible within the rail when the rail overflows
+  // Keep the active row visible after navigation and composer-panel resizes.
   useEffect(() => {
-    if (railRef.current && railOverflows(railRef.current.scrollHeight, railRef.current.clientHeight)) {
-      const activeRow = railRef.current.querySelector(`[data-index="${activeIndex}"]`) as HTMLElement | null;
+    const rail = railRef.current;
+    if (!rail) return;
+    const revealActiveRow = () => {
+      if (!railOverflows(rail.scrollHeight, rail.clientHeight)) return;
+      const activeRow = rail.querySelector(`[data-index="${activeIndex}"]`) as HTMLElement | null;
       activeRow?.scrollIntoView({ block: "nearest", behavior: reducedMotion ? "auto" : "smooth" });
-    }
+    };
+    revealActiveRow();
+    const resize = new ResizeObserver(revealActiveRow);
+    resize.observe(rail);
+    return () => resize.disconnect();
   }, [activeIndex, nodes.length, reducedMotion]);
 
   // Drag scrubber interaction along the vertical rail
@@ -361,6 +368,10 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
       style={{
         position: "relative",
         display: "flex",
+        // A column capped by the chat area: the rail shrinks and scrolls instead of
+        // spilling out, which let its scrollIntoView scroll the clipped chat area.
+        flexDirection: "column",
+        maxHeight: "100%",
         alignItems: "center",
         pointerEvents: "auto",
         userSelect: "none",
