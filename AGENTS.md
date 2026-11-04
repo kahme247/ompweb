@@ -789,24 +789,28 @@ during the wait.
   turn runs.
 
 ### Message outbox (`lib/message-outbox.ts`, `lib/event-stream-worker.ts`, `docs/specs/2026-11-04-message-outbox-design.md`)
-- **Every message to an existing session is held until omp has it**: an idle
-  prompt, a follow-up and a steer (slash commands too; `!cmd` and `/btw` keep
-  their own paths). Send ends once the browser has stored it; omp-web then
-  delivers it exactly once, across reconnects, a web restart and a host
-  outage. A new chat's first prompt still goes the old way (`ensureNewSession`
-  + prompt, phase 1).
+- **Every message to an existing session is held until acceptance is confirmed**:
+  an idle prompt, follow-up or steer (slash commands too; `!cmd` and `/btw`
+  retain their own paths). Send ends once browser storage commits. Retain
+  unconfirmed outcomes visibly across reconnects, restarts and host outages;
+  uncertain host delivery is not independently retried. Native process crashes
+  preclude an unconditional exactly-once guarantee. New chats keep their first
+  `ensureNewSession` + prompt path (phase 1).
 - **Browser leg.** `addToOutbox` (`lib/event-stream.ts`) hands the entry to the
   event-stream worker, which commits it to IndexedDB (`omp-web-outbox`/`entries`)
   and only then answers, so the composer clears only then. Missing IndexedDB
   or a failed transaction rejects the add and preserves the draft. The worker sends `outbox_add` over its current transport
   (a link `cmd`, or POST `/api/agent/[id]` in SSE mode), one entry per session at
   a time, oldest first; 401/408/429/5xx/network retry with backoff (1 s → 30 s,
-  at once on a wake), other 4xx mark it failed. It deletes the entry on the 200
-  and resends whatever IndexedDB holds when it starts. An entry still unsent
-  7 days after `createdAt` fails instead (the server keeps ids 8 days). A
-  closing tab sends its oldest unconfirmed entry per session as a `keepalive`
-  POST (64 KiB in total), and every add registers Background Sync `omp-outbox`
-  on `public/sw.js`, which posts what IndexedDB still holds (Chromium only).
+  at once on a wake), other 4xx mark it failed. Delete its browser copy only
+  after a matching successful outbox receipt, not an arbitrary HTTP 200, and
+  wait for the IndexedDB transaction to complete. Allocate logical enqueue
+  order and insert a unique ID atomically; clock ties and worker restarts must
+  not reorder entries or overwrite a held intent. An entry still unsent seven
+  days after `createdAt` fails instead (server IDs live eight days). Pagehide
+  sends each session's head only (64 KiB total, no incomplete ordering view).
+  Background Sync registers `omp-outbox` only after the active service worker
+  proves outbox capability; an old push-only worker is not sufficient.
 - **Idempotent by id.** `outbox_add`/`outbox_remove` are agent
   commands in `runAgentCommand`, before any wrapper spawn; a repeat of a known
   id answers the stored entry. These and `outbox_scope` are in
@@ -820,19 +824,28 @@ during the wait.
   `outbox_scope_changed`; normal same-owner re-login keeps it. With no cached
   scope, a first-ever offline send must retain its draft until the server can
   identify itself.
-- **Server leg.** A SQLite store in omp-web's data dir and a per-session FIFO
-  dispatcher (one entry in flight) through the wrapper; host offline →
-  `waiting_host`; a lost reply or a child exit while delivering → `failed` with
-  `mayHaveBeenSent` (never resent by itself). The `session` channel carries
+- **Server leg.** SQLite and a per-conversation FIFO dispatcher (aliases share
+  the same claim) send through the wrapper. Acceptance is bounded by the
+  per-alias 16 MiB limit and the global 256 MiB/1,000-active-row pool; overflow
+  is retryable 429 while the browser keeps its copy. Never trim accepted rows.
+  Storage startup failure remains retryable without a new send or hello;
+  successful initialization installs hooks once and shutdown cancels retries.
+  Host offline → `waiting_host`; uncertain replies/child exits while delivering
+  → `failed` with `mayHaveBeenSent`, never independently resent. The session carries
   `outbox_update {entries,settledIds}` (every non-delivered entry plus the latest
   256 delivered/removed ids, retained 8 days) on subscribe and on every
-  change, and opens without a wrapper while the session has entries (no
-  `connected` then; the wrapper attaches in place later and sends it).
+  change, and opens without a wrapper while held entries exist. Observe the
+  session-registry lifecycle too: an explicit command can create the ready
+  wrapper without another outbox mutation; attach/rebind then announce `connected`.
   `GET /api/sessions/[id]/state` carries `outbox`, `outboxSettledIds` and
   `outboxScope` on every answer, an offline host's error included, so a reload
   subscribes to follow them. Upload completion receipts persist privately
   before the completion ACK, so upload ids survive a restart even before
   outbox_add reaches the server.
+  Consecutive unsent outbox snapshots replace each other in the session
+  backpressure queue. Resume and heartbeat do not serialize them while the sink
+  is still behind; native events remain ordering fences, with genuine overflow
+  handled by the existing resync limits. Never rewrite numbered or partial lines.
 - **Held bubbles** (`HeldMessageView`, after the live turn, submission order):
   the hook merges the worker's entries (`subscribeOutbox`) with the server's
   snapshot by id; a server confirmation (`{stored}`) bridges until the server
@@ -843,15 +856,31 @@ during the wait.
   Not sent (Delete). The delivery mode is a read-only label. Delete
   (`deleteHeldMessage`) awaits the IndexedDB delete commit for a browser-held
   entry; a server entry sends `outbox_remove`, refused with 409
-  `outbox_dispatched` once delivering. A late add commit consumes only its
-  unchanged originating draft (`consumeDraft`), including an unchanged
-  remounted composer, never newer text or attachments.
+  `outbox_dispatched` once delivering. A late commit consumes only the original
+  draft's unchanged content and edit generation, including after remount.
+  Equal text after newer typing is not unchanged; hydration is not a user edit.
+  Active submission ownership lives in the shared draft store, not a composer
+  mount. Confirmed identity moves transfer it synchronously before React commits;
+  live draft hydration and source-snapshot merging still belong to layout.
+  Mark accepted attachment reads as edits before asynchronous completion, not
+  only when their chips appear. During pre-commit identity handoff, do not
+  recreate the obsolete draft key or consume capacity belonging to other drafts.
 - **Run state comes from omp's frames**, never from Send: `agent_start` starts
   the run. The server captures `previousEntryIds` before dispatch and publishes
   it only on the active delivering entry, before omp frames; recovery must use
   this authoritative boundary, not cached/late-fetched history that could
   mistake the previous saved answer for a new response. The boundary is
   cleared after handoff/failure, never kept in tombstones.
+  Active replacement inference also requires unambiguous message admission:
+  an intervening message command from another origin cannot supply this
+  attempt's identical echo. Retain uncertainty instead of guessing ownership.
+  A later new idle message may renew an ambiguous child through the existing
+  awaited restart lifecycle: require authoritative native settlement, a saved
+  session, no active/queued/background work, dialogs, history mutation or unrelated
+  pending command, and stable child/admission identity across preparation awaits.
+  Recheck before teardown; never infer old acceptance from time or settlement,
+  and never replay old uncertain entries. Preserve accepted host-tool and URI
+  registrations under current policy before submitting to the replacement child.
   A prompt's bubble leaves when the server sees omp's reply and echo;
   the hook shows omp's echoed user message (`echoedUserMessage`) until the
   transcript catch-up has its saved copy (same timestamp and text), so there is
