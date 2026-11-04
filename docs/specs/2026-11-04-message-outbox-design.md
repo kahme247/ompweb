@@ -12,7 +12,7 @@ When a message cannot reach omp, the user finds out late and in the wrong place.
 - The composer is the only place a refused message survives, so the user has to wait for the answer before typing the next thing.
 - An outcome of `delivery: "unknown"` (the link dropped after the command left) drops the draft so it is never sent twice, and the message may be lost.
 
-The outbox moves ownership: once the user presses Send, omp-web is responsible for delivering the message exactly once, across a browser reconnect, a web-server restart and a host outage. The composer clears at once, in every state.
+The outbox moves ownership: after the browser commits a submitted message, omp-web retains it across tab closure, reconnects, web-server restarts and host outages until acceptance is confirmed or an explicit failure remains visible. The composer clears only after that local commit. Retries reuse the message ID and do not independently resend uncertain host commands; the native protocol's limits on proving acceptance are explicit in O5.
 
 ## Decisions
 
