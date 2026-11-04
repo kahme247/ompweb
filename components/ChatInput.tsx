@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
+import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, useSyncExternalStore, forwardRef, memo, KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { ChevronDown, ClipboardPaste, CornerDownRight, ListChecks, Loader2, Mic, Paperclip, Plus, RotateCw, Shrink, Snail, Sparkles, Wrench, X, Zap } from "lucide-react";
 import { getSubmitDuringRunBehavior, isWordCompletionEnabled } from "@/lib/composer-prefs";
@@ -16,6 +16,7 @@ import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { ContextDetailPanel } from "./ComposerPanels";
 import { RecordingDeck } from "./RecordingDeck";
 import { clearDraft, getDraft, mergeRecoveredText, recoverDraft, setDraft, subscribeDraftRecovery, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
+import { getPendingSends, subscribePendingSends, trackPendingSend } from "@/lib/pending-sends";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import type { AttachedImage, AttachedTextFile } from "./ChatInput-draft-attachments";
 import {
@@ -1601,8 +1602,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
     });
   }, [slashMatch, value]);
-  const [sendingQueued, setSendingQueued] = useState<{ id: number; key: string | undefined; text: string }[]>([]);
-  const sendingIdRef = useRef(0);
+  const sendingQueued = useSyncExternalStore(subscribePendingSends, getPendingSends, getPendingSends);
 
   const sendQueued = useCallback((mode: "steer" | "followup", overrideText?: string) => {
     if (submissionBlockedRef.current) return;
@@ -1625,11 +1625,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     // Until omp answers, the message shows as "Sending…" above the composer:
     // it is neither in the composer nor in omp's queue yet.
     const trackSend = (queued: Promise<boolean>, text: string) => {
-      const id = ++sendingIdRef.current;
-      setSendingQueued((list) => [...list, { id, key, text }]);
-      void Promise.resolve(queued).then((ok) => {
+      const reply = Promise.resolve(queued).then((ok) => {
         if (ok === false && key) recoverDraft(key, { text, ...kept });
-      }).finally(() => setSendingQueued((list) => list.filter((entry) => entry.id !== id)));
+      });
+      trackPendingSend(key, text, reply);
     };
     const files = attachedTextFilesRef.current;
     onAudioUnlock?.();

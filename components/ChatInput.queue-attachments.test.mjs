@@ -183,7 +183,7 @@ test("a refused follow-up goes back whole to its draft, ahead of what was typed 
   assert.equal(screen.getByRole("textbox").value, `${calls[0].message}\n\ntyped meanwhile`);
 });
 
-test("a queued message shows Sending… only in its own chat, until omp takes it", async () => {
+test("a queued message shows Sending… only in its own chat, across the remount a chat switch causes, until omp takes it", async () => {
   let accept;
   const { calls, rerender } = await renderWithAttachments({ queued: new Promise((resolve) => { accept = () => resolve(true); }) });
   fireEvent.click(screen.getByRole("button", { name: /queue/i }));
@@ -191,7 +191,9 @@ test("a queued message shows Sending… only in its own chat, until omp takes it
   assert.equal(screen.getByRole("status").textContent, "Sending…");
   rerender({ draftKey: "another-chat" });
   assert.equal(screen.queryByRole("status"), null, "another chat's composer does not show it");
-  rerender({ draftKey: KEY });
+  // AppShell remounts ChatWindow on every chat switch: a fresh composer must still see the send.
+  cleanup();
+  render(React.createElement(ChatInput, { draftKey: KEY, isStreaming: true, onSend: async () => ({ status: "accepted" }), onAbort() {}, onFollowUp: async () => true }));
   assert.equal(screen.getByRole("status").textContent, "Sending…", "back in its chat while still in flight");
   await act(async () => { accept(); });
   await waitFor(() => assert.equal(screen.queryByRole("status"), null, "omp's queue chip takes over"));

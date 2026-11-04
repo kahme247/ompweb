@@ -1,0 +1,27 @@
+/** Queued sends still waiting for omp's answer, per draft key. Module state, so
+ *  the "Sending…" row survives the composer remount a chat switch causes. */
+export type PendingSend = { id: number; key: string | undefined; text: string };
+
+let pending: readonly PendingSend[] = [];
+let nextId = 0;
+const listeners = new Set<() => void>();
+
+function set(next: readonly PendingSend[]) {
+  pending = next;
+  for (const listener of listeners) listener();
+}
+
+export function trackPendingSend(key: string | undefined, text: string, reply: Promise<unknown>): void {
+  const id = ++nextId;
+  set([...pending, { id, key, text }]);
+  void reply.finally(() => set(pending.filter((entry) => entry.id !== id))).catch(() => {});
+}
+
+export function subscribePendingSends(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
+}
+
+export function getPendingSends(): readonly PendingSend[] {
+  return pending;
+}
