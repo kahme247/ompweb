@@ -884,7 +884,7 @@
   "imagePreview.zoomIn": "Zoom in",
   "imagePreview.zoomOut": "Zoom out",
   "tableChart.title": "Table chart",
-  "tableChart.measure": "Measure to plot",
+  "tableChart.legend": "Legend",
   "tableChart.saveSvg": "Save SVG",
   "tableChart.note": "Visualized from the recorded table. ~ marks estimates; hatching marks ranges; arrows mark upper/lower limits.",
   "tableChart.skipped": "{count} nonnumeric rows excluded",
