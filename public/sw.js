@@ -75,42 +75,62 @@ const done = (request) =>
     request.onerror = () => reject(request.error);
   });
 
+function markOutboxFailed(db, id, error) {
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction("entries", "readwrite");
+    transaction.oncomplete = () => resolve();
+    transaction.onabort = transaction.onerror = () => reject(transaction.error || new Error("Could not save the outbox failure"));
+    const store = transaction.objectStore("entries");
+    const request = store.get(id);
+    request.onsuccess = () => {
+      const entry = request.result;
+      // Another sender may have accepted and deleted it while this request was in flight.
+      if (entry?.state === "sending") store.put({ ...entry, state: "failed", error });
+    };
+  });
+}
+
 async function flushOutbox() {
   const open = indexedDB.open("omp-web-outbox", 1);
   open.onupgradeneeded = () => open.result.createObjectStore("entries", { keyPath: "id" });
   const db = await done(open);
-  const entries = await done(db.transaction("entries").objectStore("entries").getAll());
-  // Oldest first, and a session's later entries wait while an earlier one fails: the server queues by arrival.
-  entries.sort((a, b) => a.createdAt - b.createdAt);
-  const waiting = new Set();
-  for (const { id, sessionId, scope, advisor, mode, message, images, uploads, state, createdAt } of entries) {
-    // Expired or unscoped rows must never be rebound: the page's worker marks them not sent.
-    if (state !== "sending" || typeof scope !== "string" || !scope || Date.now() - createdAt > 7 * 24 * 60 * 60 * 1000 || waiting.has(sessionId)) continue;
-    // A running worker may have added or accepted an entry since our snapshot: only the shared session head can go.
-    const current = await done(db.transaction("entries").objectStore("entries").getAll());
-    const head = current.filter((entry) => entry.sessionId === sessionId && entry.state === "sending").sort((a, b) => a.createdAt - b.createdAt)[0];
-    if (!head || head.id !== id) continue;
-    let status = 0;
-    let timer;
-    try {
-      const body = JSON.stringify({ type: "outbox_add", id, scope, mode, message, images, uploads });
-      // Include the body read: a half-open POST must not keep every later sync entry waiting forever.
-      const controller = new AbortController();
-      timer = setTimeout(() => controller.abort(), 40_000 + Math.ceil(body.length / 2));
-      const response = await fetch(`/api/agent/${encodeURIComponent(sessionId)}${advisor === true ? "?advisor=1" : ""}`, { method: "POST", headers: { "Content-Type": "application/json" }, body, signal: controller.signal });
-      await response.json().catch((error) => {
-        if (controller.signal.aborted) throw error;
-      });
-      status = response.status;
-    } catch {
-      // Offline or timed out: retried below.
-    } finally {
-      clearTimeout(timer);
+  try {
+    const entries = await done(db.transaction("entries").objectStore("entries").getAll());
+    // Oldest first, and a session's later entries wait while an earlier one fails: the server queues by arrival.
+    entries.sort((a, b) => a.createdAt - b.createdAt);
+    const waiting = new Set();
+    for (const { id, sessionId, scope, advisor, mode, message, images, uploads, state, createdAt } of entries) {
+      // Expired or unscoped rows must never be rebound: the page's worker marks them not sent.
+      if (state !== "sending" || typeof scope !== "string" || !scope || Date.now() - createdAt > 7 * 24 * 60 * 60 * 1000 || waiting.has(sessionId)) continue;
+      // A running worker may have added or accepted an entry since our snapshot: only the shared session head can go.
+      const current = await done(db.transaction("entries").objectStore("entries").getAll());
+      const head = current.filter((entry) => entry.sessionId === sessionId && entry.state === "sending").sort((a, b) => a.createdAt - b.createdAt)[0];
+      if (!head || head.id !== id) continue;
+      let status = 0;
+      let error;
+      let timer;
+      try {
+        const body = JSON.stringify({ type: "outbox_add", id, scope, mode, message, images, uploads });
+        // Include the body read: a half-open POST must not keep every later sync entry waiting forever.
+        const controller = new AbortController();
+        timer = setTimeout(() => controller.abort(), 40_000 + Math.ceil(body.length / 2));
+        const response = await fetch(`/api/agent/${encodeURIComponent(sessionId)}${advisor === true ? "?advisor=1" : ""}`, { method: "POST", headers: { "Content-Type": "application/json" }, body, signal: controller.signal });
+        const reply = await response.json().catch((error) => {
+          if (controller.signal.aborted) throw error;
+        });
+        if (typeof reply?.error === "string") error = reply.error;
+        status = response.status;
+      } catch {
+        // Offline or timed out: retried below.
+      } finally {
+        clearTimeout(timer);
+      }
+      if (status >= 200 && status < 300) await done(db.transaction("entries", "readwrite").objectStore("entries").delete(id));
+      else if (status === 0 || status === 401 || status === 408 || status === 429 || status >= 500) waiting.add(sessionId);
+      else await markOutboxFailed(db, id, error || `HTTP ${status}`);
     }
-    if (status >= 200 && status < 300) await done(db.transaction("entries", "readwrite").objectStore("entries").delete(id));
-    else if (status === 0 || status === 401 || status === 408 || status === 429 || status >= 500) waiting.add(sessionId);
+    if (waiting.size > 0) throw new Error("omp-outbox: entries left to send");
+  } finally {
+    db.close();
   }
-  db.close();
-  // A transient failure: the browser fires the sync again later. A final refusal stays for the next page to show.
-  if (waiting.size > 0) throw new Error("omp-outbox: entries left to send");
 }
