@@ -1464,6 +1464,7 @@
   "connectionDiagnostics.transportWs": "WebSocket",
   "connectionDiagnostics.transportSse": "サーバー送信イベント + HTTP",
   "connectionDiagnostics.fallbackRefused": "（フォールバック: WebSocket は拒否されました）",
+  "connectionDiagnostics.fallbackVersion": "（フォールバック: サーバーのリンクバージョンが異なります）",
   "connectionDiagnostics.rowTransport": "使用中のトランスポート",
   "connectionDiagnostics.rowSetting": "サーバー設定",
   "connectionDiagnostics.rowStatus": "状態",

@@ -123,7 +123,7 @@ function DiagnosticsBody({ diagnostics: d, now }: { diagnostics: ConnectionDiagn
       <dl style={{ margin: 0, display: "flex", flexDirection: "column" }}>
         <Row label={t("connectionDiagnostics.rowTransport")}>
           {transportName(d.mode)}
-          {d.fallback && ` ${t("connectionDiagnostics.fallbackRefused")}`}
+          {d.fallback && ` ${t(d.fallback === "version" ? "connectionDiagnostics.fallbackVersion" : "connectionDiagnostics.fallbackRefused")}`}
         </Row>
         <Row label={t("connectionDiagnostics.rowSetting")}>{transportName(d.setting)}</Row>
         <Row label={t("connectionDiagnostics.rowStatus")}>

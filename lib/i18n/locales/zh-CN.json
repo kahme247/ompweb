@@ -1464,6 +1464,7 @@
   "connectionDiagnostics.transportWs": "WebSocket",
   "connectionDiagnostics.transportSse": "服务器发送事件 + HTTP",
   "connectionDiagnostics.fallbackRefused": "（已回退：WebSocket 被拒绝）",
+  "connectionDiagnostics.fallbackVersion": "（已回退：服务器的连接协议版本不同）",
   "connectionDiagnostics.rowTransport": "当前使用的传输方式",
   "connectionDiagnostics.rowSetting": "服务器设置",
   "connectionDiagnostics.rowStatus": "状态",

@@ -59,3 +59,14 @@ test("diagnostics exclude unconfirmed deliveries and failed commands from succes
     ["transportMs", 1, 7], ["ompMs", 1, 3], ["serverMs", 1, 3], ["totalMs", 1, 10],
   ]);
 });
+
+test("commands the web app may answer without omp count as transport only, never as omp time", () => {
+  const ok = { metric: "action", transport: "ws", outcome: "ok", sentAt: 0, gotAt: 10, recvAt: 2, repliedAt: 3 };
+  const rows = diagnosticStats([{ ...ok, type: "predict_word" }, { ...ok, type: "get_btw_history" }]);
+  assert.deepEqual(rows.map((row) => [row.metric, row.count]), [["transportMs", 2]]);
+});
+
+test("a backward clock step drops the command's round trip and transport share", () => {
+  const rows = diagnosticStats([{ metric: "action", transport: "ws", type: "prompt", outcome: "ok", sentAt: 100, gotAt: 40, recvAt: 2, repliedAt: 5 }]);
+  assert.deepEqual(rows.map((row) => row.metric), ["serverMs"]);
+});

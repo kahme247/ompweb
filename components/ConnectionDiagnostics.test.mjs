@@ -30,7 +30,7 @@ afterEach(() => {
 const wsDiagnostics = {
   setting: "ws",
   mode: "ws",
-  fallback: false,
+  fallback: null,
   status: "connected",
   since: null,
   lastReconnect: null,
@@ -249,4 +249,29 @@ test("a response from an unmounted panel cannot replace the new panel's snapshot
   assert.equal(valueOf("Clock RTT").textContent, "11 ms");
   await flushResponse(late, { ...wsDiagnostics, clockRttMs: 99 });
   assert.equal(valueOf("Clock RTT").textContent, "11 ms");
+});
+
+test("turning the setting on in another tab adds the Connection tab here", async () => {
+  render(createElement(Harness));
+  assert.equal(screen.queryByRole("tab", { name: "Connection" }), null);
+  act(() => {
+    localStorage.setItem("omp-web:connection-diagnostics", "on");
+    window.dispatchEvent(Object.assign(new Event("storage"), { key: "omp-web:connection-diagnostics" }));
+  });
+  assert.ok(await screen.findByRole("tab", { name: "Connection" }));
+});
+
+test("with storage refusing writes, the choice still holds for this page load", async () => {
+  // On the prototype: assigning localStorage.setItem would just store an item named "setItem".
+  const proto = Object.getPrototypeOf(localStorage);
+  const setItem = proto.setItem;
+  proto.setItem = () => { throw new Error("quota exceeded"); };
+  try {
+    render(createElement(Harness));
+    act(() => setConnectionDiagnosticsEnabled(true));
+    assert.ok(await screen.findByRole("tab", { name: "Connection" }));
+  } finally {
+    proto.setItem = setItem;
+    setConnectionDiagnosticsEnabled(false);
+  }
 });

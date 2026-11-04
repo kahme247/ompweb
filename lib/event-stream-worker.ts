@@ -43,6 +43,7 @@ import {
   isIdempotentCommand,
   type BrowserTransport,
   type ConnectionDiagnostics,
+  type FallbackReason,
   type EventStreamChannel,
 } from "./event-stream-protocol";
 import { LINK_LIMITS, LinkSender, Outbox, PartJoiner, queuedLine, SeqWindow, type Part } from "./hosts/link-protocol";
@@ -266,6 +267,8 @@ let setting: BrowserTransport = "sse";
 /** The mode in effect: the setting, unless a refused upgrade put this worker on SSE for a while (fallbackTimer). */
 let mode: BrowserTransport = "sse";
 let fallbackTimer: Timer | undefined;
+/** Why the last fallback put this worker on SSE (shown while it lasts). */
+let fallbackReason: FallbackReason = "refused";
 /** Every attached tab, told the mode when it changes. */
 const clients = new Set<Client>();
 const sseConn: Conn = { key: "sse", lastEventSampleAt: -Infinity, heldEvent: null, reconnect: null, connectingSince: null, largeFrames: [] };
@@ -677,7 +680,7 @@ function dial(): void {
   // `error` is always followed by `close`.
   ws.onclose = (event: CloseEvent) => {
     if (link.ws !== ws) return;
-    if (event.code === VERSION_MISMATCH_CODE) return fallBack();
+    if (event.code === VERSION_MISMATCH_CODE) return fallBack("version");
     if (!link.opened) return refused();
     redial(backoff(), "close");
   };
@@ -747,11 +750,12 @@ function refused(): void {
   withDeadline(METRICS_TIMEOUT_MS, (signal) => fetch(BROWSER_LINK_PATH, { cache: "no-store", signal })).then((response) => response.status, () => 0).then((status) => {
     link.diagnosing = false;
     if (offline || [0, 401, 502, 503, 504].includes(status) || ++link.refusals < FALLBACK_REFUSALS) scheduleDial(backoff());
-    else fallBack();
+    else fallBack("refused");
   });
 }
 
-function fallBack(): void {
+function fallBack(reason: FallbackReason): void {
+  fallbackReason = reason;
   link.refusals = 0;
   link.ws?.close(DONE_CODE);
   link.ws = null;
@@ -1639,7 +1643,7 @@ function diagnostics(): ConnectionDiagnostics {
   return {
     setting,
     mode,
-    fallback: setting === "ws" && mode === "sse",
+    fallback: setting === "ws" && mode === "sse" ? fallbackReason : null,
     // Down once commands would fail for want of a connection (SEND_DEADLINE_MS).
     status: !wanted ? "idle" : connected ? "connected" : since !== null && now - since >= SEND_DEADLINE_MS ? "down" : "connecting",
     since,

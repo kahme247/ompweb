@@ -876,7 +876,7 @@ during the wait.
     `socket`/`conn` (`sse`, `link`, `http`, `worker`) and `sockets`; the worker POSTs them to
     `/api/transport-metrics` every 30 s or 200 samples (a probe not answered within 10 s is abandoned, a POST within 10 s plus its body at 2 KB/s; a failed POST keeps its samples, so a timeout after the server processed it can duplicate them). The route appends JSONL to `<agent
     dir>/omp-web/transport-metrics.jsonl` (`.jsonl.1` above 20 MiB). One worker-wide clock (the
-    lowest-RTT of the last 20 link pings and SSE probes, at most 5 min old) times every sample.
+    lowest-RTT of the last 20 link pings and SSE probes, at most 5 min old unless it is the newest sample) times every sample.
     `bun scripts/transport-metrics.ts --since 2h` prints the per-transport summary (also `--until`,
     `--client`, `--file`).
   - **Connection tab** (right panel, both layouts, shown while Settings → Interface & Behavior → "Show connection
@@ -884,7 +884,7 @@ during the wait.
     `requestConnectionDiagnostics`) once a second while visible: the mode in effect, fallback, status (`idle` when
     no connection is needed, `down` after `SEND_DEADLINE_MS` without a connection), the last reconnect, and
     per-transport stats (mean, p50, p95, p99.9 from 1000 values, max) of the worker's last 30 min of samples (at most
-    20 000, kept beside the POST buffer). Command rows include confirmed successful replies only. Shared durations
+    20 000, kept beside the POST buffer). Command rows include confirmed successful replies only; app ↔ omp rows skip commands the web app may answer itself (`SERVER_ANSWERABLE_COMMANDS`, kept equal to `NO_SPAWN_REPLIES` by a test). Shared durations
     come from `lib/transport-stats.ts`; one-way estimates use clock correction and assume symmetric latency.
     Without a SharedWorker (Chrome for Android) each tab has its own worker, so the numbers are that tab's.
   - **Worker rules.** Browser code: no `AbortSignal.timeout`/`any` or `Promise.withResolvers` (a test checks

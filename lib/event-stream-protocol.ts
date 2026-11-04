@@ -51,12 +51,15 @@ export interface BrowserTransportState {
 }
 
 /** The worker's answer to a `diag` poll (the right panel's Connection tab). Times are the browser's epoch ms. */
+/** Why the worker fell back to SSE: proxies refused the upgrade, or the server speaks another link version. */
+export type FallbackReason = "refused" | "version";
+
 export interface ConnectionDiagnostics {
   /** The server's setting. */
   setting: BrowserTransport;
-  /** In effect in this browser now: `sse` with `fallback` when refused WebSocket upgrades put this worker on SSE. */
+  /** In effect in this browser now: `sse` with `fallback` set while the WebSocket link is unusable. */
   mode: BrowserTransport;
-  fallback: boolean;
+  fallback: FallbackReason | null;
   /** `idle`: no connection intended; `down`: no connection for long enough that commands fail. */
   status: "idle" | "connected" | "connecting" | "down";
   /** When the current connection attempt or outage began; null while idle or connected. */
@@ -79,6 +82,10 @@ export const LINK_RESUME_MS = 120_000;
 /** How long the server remembers a command's reply by (session, rid): a resend within it is answered, not run again.
  * Longer than LINK_RESUME_MS, so a command resent after a resync to the same server still finds it. */
 export const COMMAND_DEDUPE_MS = 600_000;
+
+/** Commands the web app answers itself (lib/agent-command.ts NO_SPAWN_REPLIES) when no omp child is alive, so their
+ * reply times say nothing about omp. */
+export const SERVER_ANSWERABLE_COMMANDS: ReadonlySet<string> = new Set(["predict_word", "predict_word_feedback", "get_btw_history", "btw_cancel"]);
 
 const REPEATABLE_COMMANDS = ["predict_word", "predict_word_feedback", "set_host_tools", "set_host_uri_schemes"];
 
