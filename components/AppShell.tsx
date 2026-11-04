@@ -1581,7 +1581,7 @@ export function AppShell({ appName }: { appName: string }) {
         setPendingOpens((queue) => [...queue, { kind: "file", target: path, name, sessionId: call.sessionId, source: call, crossSession: true }]);
         return `Asked the user to confirm opening ${path}; they are viewing another omp-web session.`;
       },
-    });
+    }, call.sessionId);
     try {
       await sendAgentCommand(call.sessionId, {
         type: "host_tool_result",
