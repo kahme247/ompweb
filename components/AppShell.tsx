@@ -20,6 +20,7 @@ import { ChatWindow } from "./ChatWindow";
 import { type Tab } from "./TabBar";
 import { type FileExplorerHandle } from "./FileExplorer";
 import type { RightPanelView } from "./RightPanel";
+import { useConnectionDiagnosticsEnabled } from "@/lib/connection-diagnostics-prefs";
 import { NotificationBell } from "./NotificationBell";
 import { BranchNavigator } from "./BranchNavigator";
 import { LanguageSwitcher } from "./LanguageSwitcher";
@@ -978,6 +979,11 @@ export function AppShell({ appName }: { appName: string }) {
   }, [isCompactOverlay]);
   const [rightPanelHasOpened, setRightPanelHasOpened] = useState(false);
   const [rightView, setRightView] = useState<RightPanelView>("explorer");
+  const connectionDiagnosticsOn = useConnectionDiagnosticsEnabled();
+  // The Connection tab exists only while its setting is on; a selected one falls back to Explorer.
+  useEffect(() => {
+    if (!connectionDiagnosticsOn) setRightView((view) => view === "connection" ? "explorer" : view);
+  }, [connectionDiagnosticsOn]);
   const unreadNotifications = useUnreadNotificationCount();
   // Desktop shows the history in the top-bar bell's popover; mobile in the right panel's tab.
   const [notificationsOpen, setNotificationsOpen] = useState(false);
@@ -2672,6 +2678,7 @@ export function AppShell({ appName }: { appName: string }) {
         explorerCwd={explorerCwd}
         remoteHost={remoteHost}
         worktrees={worktreeCtx}
+        connectionDiagnosticsOn={connectionDiagnosticsOn}
         explorerRefreshKey={explorerRefreshKey}
         fileSearchOpen={fileSearchOpen}
         onToggleFileSearch={handleToggleFileSearch}
