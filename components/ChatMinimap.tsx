@@ -361,6 +361,10 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
       style={{
         position: "relative",
         display: "flex",
+        // A column capped by the chat area: the rail shrinks and scrolls instead of
+        // spilling out, which let its scrollIntoView scroll the clipped chat area.
+        flexDirection: "column",
+        maxHeight: "100%",
         alignItems: "center",
         pointerEvents: "auto",
         userSelect: "none",
