@@ -23,9 +23,9 @@ The outbox moves ownership: once the user presses Send, omp-web is responsible f
   - **Waiting for <host>** (clock icon): the web server has it; the host is offline. It goes when the host links again.
   - **Delivering**: dispatched to the host, waiting for omp's answer.
   - **Not sent** (alert icon, no spinner): it cannot go by itself (O6). Actions: **Edit** (moves it back into the composer and out of the outbox) and **Delete**. Transient failures are never "Not sent": they retry on their own, without a button.
-- Held bubbles are ordered by submission. Each has a mode chip (Prompt / Follow-up / Steer), changeable while it is held.
+- Held bubbles are ordered by submission. Each has a mode chip (Prompt / Follow-up / Steer), changeable only while the server confirms it has not dispatched that entry.
 - A held bubble leaves when omp has it: a prompt becomes the real user message when omp echoes it; a follow-up or steer becomes omp's queue chip (`queue_update`). There is no gap and no duplicate: the bubble stays until the replacing frame has been applied (O4).
-- While held, a bubble offers **Edit** and **Delete**. Once dispatched to the host (O3) it cannot be withdrawn: it shows **Delivering** without actions until omp answers.
+- A confirmed server-held or failed bubble offers **Edit** and **Delete**; a permanently refused browser-local entry does too. **Sending** and **Delivering** have no withdrawal actions: an unconfirmed browser add may already be executing on the server, and deleting its local record cannot cancel it safely. Once the server confirms an entry is still held, its controls become available.
 - Every tab and device viewing the session sees the held bubbles the web server has (O2); a message still on its first leg shows only in the browser that sent it, as in any chat app. This is the one exception to "Never track chips client-side" in `AGENTS.md`: the outbox holds only what omp does not have yet, and omp's queue stays omp's.
 
 ### O2. Where the outbox lives
