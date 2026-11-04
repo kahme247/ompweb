@@ -335,16 +335,28 @@ export interface HostToolHandlers {
   openFile?: (path: string, name: string) => string | void;
 }
 
+/** How long a `local://` lookup may take before the agent is told the server did not answer: the host ops behind it give
+ * up after 30 s themselves. */
+export const LOCAL_FILE_LOOKUP_TIMEOUT_MS = 30_000;
+
 /** A session's `local://` file as the absolute path the file viewer opens, found by the server that holds the session. */
 async function resolveLocalFile(sessionId: string | undefined, uri: string): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
   if (!sessionId) return { ok: false, error: "A local:// file belongs to a session, and no session asked for it" };
+  const unanswered = { ok: false as const, error: `Could not open ${uri}: the server did not answer` };
+  // An AbortController and a timer, not AbortSignal.timeout (older browsers lack it): a stalled request must not leave
+  // the agent's tool call pending until the tab goes away.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), LOCAL_FILE_LOOKUP_TIMEOUT_MS);
   try {
-    const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/local-file?uri=${encodeURIComponent(uri)}`);
+    const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/local-file?uri=${encodeURIComponent(uri)}`, { signal: controller.signal });
     const body = (await response.json().catch(() => ({}))) as { path?: unknown; error?: unknown };
+    if (controller.signal.aborted) return unanswered;
     if (response.ok && typeof body.path === "string") return { ok: true, path: body.path };
     return { ok: false, error: typeof body.error === "string" ? body.error : `Could not open ${uri} (HTTP ${response.status})` };
   } catch {
-    return { ok: false, error: `Could not open ${uri}: the server did not answer` };
+    return unanswered;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

@@ -2,7 +2,7 @@
 // and whether a path lies in it. The root is always the session's own (never the cwd, never the session on screen):
 // the id names the session, its owning host's metadata names the file, and `sessionLocalRoot` (omp's rule, shared with
 // composer uploads) names the directory.
-import { realpathSync, statSync } from "node:fs";
+import { realpathSync, statSync, type Stats } from "node:fs";
 import path from "node:path";
 import { isPathWithinRoots, normalizeSlashes } from "./file-access";
 import { LOCAL_HOST_ID } from "./hosts/registry";
@@ -11,7 +11,7 @@ import { sessionLocalRoot } from "./hosts/uploads";
 import { getRpcSession } from "./rpc-manager";
 import { isValidSessionId } from "./session-file-references-core";
 
-type SessionLocalFailure = { ok: false; status: 403 | 404 | 501; code: string; error: string };
+type SessionLocalFailure = { ok: false; status: 400 | 403 | 404 | 501; code: string; error: string };
 type SessionLocalRoot = { ok: true; root: string } | SessionLocalFailure;
 
 const SESSION_NOT_FOUND: SessionLocalFailure = { ok: false, status: 404, code: "session_not_found", error: "Session not found" };
@@ -61,8 +61,9 @@ function resolvesOutside(root: string, target: string): boolean {
 }
 
 /** Where `relative` (from `parseLocalUri`, which already refused `..` and absolute names) lies in the session's local
- * root, for a file that is there: a missing one is 404 `file_not_found`, a path that resolves outside the root through
- * a symlink (or cannot be shown not to) is refused. Never reads the file. */
+ * root, for a file that is there: a path that resolves outside the root through a symlink (or cannot be shown not to)
+ * is refused first, then a missing one is 404 `file_not_found` and a directory or other non-file 400 `not_a_file`, as
+ * the viewer's own read would answer. Never reads the file. */
 export async function resolveSessionLocalFile(
   sessionId: string,
   relative: string,
@@ -71,8 +72,9 @@ export async function resolveSessionLocalFile(
   if (!located.ok) return located;
   const target = path.resolve(located.root, relative);
   if (resolvesOutside(located.root, target)) return { ok: false, status: 403, code: "access_denied", error: "Access denied" };
+  let stat: Stats;
   try {
-    statSync(target);
+    stat = statSync(target);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT" || code === "ENOTDIR") {
@@ -80,6 +82,7 @@ export async function resolveSessionLocalFile(
     }
     return { ok: false, status: 403, code: "access_denied", error: "Access denied" };
   }
+  if (!stat.isFile()) return { ok: false, status: 400, code: "not_a_file", error: "Not a file: the file viewer opens files, not directories" };
   return { ok: true, path: target };
 }
 
