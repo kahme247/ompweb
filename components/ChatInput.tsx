@@ -15,7 +15,7 @@ import type { SttAfter } from "@/lib/stt";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { ContextDetailPanel } from "./ComposerPanels";
 import { RecordingDeck } from "./RecordingDeck";
-import { clearDraft, consumeDraft, getDraft, mergeRecoveredText, recoverDraft, setDraft, subscribeDraftConsumption, subscribeDraftRecovery, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
+import { beginDraftSubmission, clearDraft, consumeDraft, endDraftSubmission, getDraft, getDraftRevision, markDraftEdited, mergeRecoveredText, moveDraftSubmissions, recoverDraft, setDraft, subscribeDraftConsumption, subscribeDraftRecovery, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import type { AttachedImage, AttachedTextFile } from "./ChatInput-draft-attachments";
 import {
@@ -428,7 +428,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     () => new Intl.Collator(locale, { numeric: true, sensitivity: "base" }),
     [locale],
   );
-  const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
+  const [value, setRawValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
   const [queuedDeleteTarget, setQueuedDeleteTarget] = useState<{
     text: string;
     kind: "follow-up" | "steer";
@@ -500,6 +500,19 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const fileIndexMetaRef = useRef<{ cwd: string; fetchedAt: number } | null>(null);
   const fileIndexFetchingRef = useRef<string | null>(null);
   const draftKeyRef = useRef(draftKey);
+  /** Every user/programmatic text input goes through here; only draft hydration and identity transfer use `setRawValue`.
+   *  The edit is recorded at admission, before React batches state or flushes the persist effect, so an equal final
+   *  value (clear then retype in one batch) still invalidates an older outbox commit. */
+  const markInputEdited = useCallback(() => {
+    // A confirmed move can hand off the identity before React commits the draftKey prop. Edits in that window belong
+    // to the new owner, just like pending queue recovery; marking the old display key would miss its pending commit.
+    const key = draftRecoveryIdentityRef.current.key;
+    if (key) markDraftEdited(key);
+  }, []);
+  const setValue: React.Dispatch<React.SetStateAction<string>> = useCallback((next) => {
+    markInputEdited();
+    setRawValue(next);
+  }, [markInputEdited]);
   const consumedIdentityMoveRef = useRef<typeof draftIdentityMove>(undefined);
   // Pending queue edits retain this identity across confirmed moves only.
   // Navigation starts a new identity, even when a draft key is later reused.
@@ -559,7 +572,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       ta.style.height = "auto";
       ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
     });
-  }, []);
+  }, [setValue]);
 
 
   useImperativeHandle(ref, () => ({
@@ -607,7 +620,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     },
     retargetPendingRecovery(from, to) {
       const identity = draftRecoveryIdentityRef.current;
-      if (identity.key === from) identity.key = to;
+      if (identity.key === from) {
+        // The hook has transferred the stored draft, but React may not have committed the new key yet. Retarget active
+        // submissions here too: an ACK in that gap must find its draft, including one sent by an earlier mount.
+        moveDraftSubmissions(from, to);
+        identity.key = to;
+      }
     },
   }));
 
@@ -666,12 +684,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       setAttachError(t("chatInput.attachmentUploadLimit", { count: MAX_UPLOADS_PER_MESSAGE }));
     }
     if (added.length === 0) return 0;
+    markInputEdited();
     // Counted at once: another batch in the same tick sees these.
     attachedUploadsRef.current = [...attachedUploadsRef.current, ...added];
     setAttachedUploads((prev) => [...prev, ...added]);
     added.forEach(runUpload);
     return added.length;
-  }, [runUpload, t]);
+  }, [markInputEdited, runUpload, t]);
 
   /** Whether `bytes` more of images (`extra` more of them) still fit the inline budget the send checks. */
   const fitsInline = useCallback((bytes: number, extra = 0): boolean => {
@@ -696,6 +715,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const switched = attachAsFiles(asFiles);
     if (switched > 0) setAttachNotice(t("chatInput.imagesAsFile", { count: switched }));
     if (!imageFiles.length) return;
+    // Admission is a new composer edit now, not only when FileReader finishes: an older ACK must not invalidate it.
+    markInputEdited();
     const revision = attachmentRevisionRef.current;
     const identityRevision = attachmentIdentityRevisionRef.current;
     pendingImageCountRef.current += imageFiles.length;
@@ -733,7 +754,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       pendingImageCountRef.current -= imageFiles.length;
       pendingImageBytesRef.current -= inlineBytes;
     }
-  }, [attachAsFiles, fitsInline, t]);
+  }, [attachAsFiles, fitsInline, markInputEdited, t]);
 
   /** Text is inlined while it fits the text budget; past it, when it turns out binary, and always for a PDF (omp reads
    *  it as a document; its decoded bytes are not text), it goes As file. */
@@ -746,6 +767,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     });
     attachAsFiles(files.filter((file) => !textFiles.includes(file)));
     if (!textFiles.length) return;
+    markInputEdited();
     const revision = attachmentRevisionRef.current;
     const identityRevision = attachmentIdentityRevisionRef.current;
     pendingTextFileCountRef.current += textFiles.length;
@@ -780,7 +802,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       pendingTextFileCountRef.current -= textFiles.length;
       pendingTextFileBytesRef.current -= textFiles.reduce((total, file) => total + file.size, 0);
     }
-  }, [attachAsFiles, t]);
+  }, [attachAsFiles, markInputEdited, t]);
 
   const processFiles = useCallback((files: File[]) => {
     const imageFiles = files.filter((file) => file.type.startsWith("image/"));
@@ -792,6 +814,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const processFilesRef = useRef(processFiles);
   processFilesRef.current = processFiles;
   const pasteClipboardImage = useCallback(async () => {
+    markInputEdited();
     setPlusMenuOpen(false);
     const revision = attachmentRevisionRef.current;
     try {
@@ -815,7 +838,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     } catch {
       if (revision === attachmentRevisionRef.current) setAttachError(t("chatInput.clipboardImageFailed"));
     }
-  }, [t]);
+  }, [markInputEdited, t]);
 
   // The clipboard read API exists only in a secure context, so a plain-http LAN
   // session (`npm run dev:lan` on http://192.168.x.x) cannot use this at all.
@@ -825,6 +848,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     typeof navigator !== "undefined" && typeof navigator.clipboard?.read === "function";
 
   const removeImage = useCallback((index: number) => {
+    markInputEdited();
     setAttachedImages((prev) => {
       const next = [...prev];
       const [removed] = next.splice(index, 1);
@@ -833,12 +857,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     });
     setAttachError(null);
     setAttachNotice(null);
-  }, []);
+  }, [markInputEdited]);
 
   const removeTextFile = useCallback((index: number) => {
+    markInputEdited();
     setAttachedTextFiles((prev) => prev.filter((_, fileIndex) => fileIndex !== index));
     setAttachError(null);
-  }, []);
+  }, [markInputEdited]);
 
   const clearImages = useCallback(() => {
     setAttachedImages((prev) => {
@@ -853,6 +878,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   /** Removing a chip aborts its upload, or has the host delete what it staged. */
   const removeUpload = useCallback((id: string) => {
+    markInputEdited();
     const handle = uploadHandlesRef.current.get(id);
     uploadHandlesRef.current.delete(id);
     const hostId = attachedUploadsRef.current.find((upload) => upload.id === id)?.hostId;
@@ -865,14 +891,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     });
     setAttachError(null);
     setAttachNotice(null);
-  }, []);
+  }, [markInputEdited]);
 
   const retryUpload = useCallback((id: string) => {
     const upload = attachedUploadsRef.current.find((each) => each.id === id);
     if (!upload?.file || upload.status !== "error") return;
+    markInputEdited();
     patchUpload(id, { status: "uploading", error: null });
     runUpload(upload);
-  }, [patchUpload, runUpload]);
+  }, [markInputEdited, patchUpload, runUpload]);
 
   /** Inline -> As file: the image's file (rebuilt from its bytes for one restored from a draft) is uploaded instead. */
   const switchImageToFile = useCallback((image: AttachedImage) => {
@@ -889,6 +916,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const switchUploadToInline = useCallback(async (upload: AttachedUpload) => {
     const { id, file, previewUrl } = upload;
     if (!file || !previewUrl || !fitsInline(file.size)) return;
+    markInputEdited();
     const revision = attachmentRevisionRef.current;
     pendingImageCountRef.current += 1;
     pendingImageBytesRef.current += file.size;
@@ -907,7 +935,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       pendingImageCountRef.current -= 1;
       pendingImageBytesRef.current -= file.size;
     }
-  }, [fitsInline, t]);
+  }, [fitsInline, markInputEdited, t]);
 
   /** After a send the uploads belong to the prompt: the chips go, what the host staged stays. Any still in flight
    *  (a cleared composer) is aborted. */
@@ -936,22 +964,30 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
-  }, [clearImages, clearTextFiles, clearUploads, draftKey]);
+  }, [clearImages, clearTextFiles, clearUploads, draftKey, setValue]);
 
-  /** A stored submission may finish after navigation/remount: clear only its unchanged draft, never a new composer's
-   * text or attachments. Capture before the asynchronous IndexedDB commit. */
+  /** A stored submission may finish after navigation/remount: clear only the draft revision it was sent from, never a
+   * new composer's text or attachments, nor an equal-text retype made while the commit was pending. Capture before the
+   * asynchronous IndexedDB commit. */
   const clearOnceStored = useCallback((raw: string) => {
-    const key = draftKeyRef.current;
-    const snapshot = key ? getDraft(key) : null;
     const images = attachedImagesRef.current;
     const files = attachedTextFilesRef.current;
     const uploads = attachedUploadsRef.current;
-    return () => {
-      if (composerAliveRef.current && draftKeyRef.current === key
+    const pending = beginDraftSubmission(draftKeyRef.current);
+    const commit = () => {
+      endDraftSubmission(pending);
+      // `pending.key` follows a confirmed identity move of an unchanged draft and is cleared if the move merged or the
+      // draft was edited first, so only the sent draft itself is ever consumed.
+      if (pending.edited) return;
+      if (composerAliveRef.current && draftKeyRef.current === pending.key
+        && (!pending.key || getDraftRevision(pending.key) === pending.revision)
         && valueRef.current === raw
         && attachedImagesRef.current === images && attachedTextFilesRef.current === files && attachedUploadsRef.current === uploads) clearInput();
-      else if (key && snapshot) consumeDraft(key, snapshot);
+      else if (pending.key && pending.snapshot) consumeDraft(pending.key, pending.snapshot, pending.revision);
     };
+    /** The submission settled without a commit (refused or failed): stop tracking it. */
+    commit.release = () => endDraftSubmission(pending);
+    return commit;
   }, [clearInput]);
 
   useLayoutEffect(() => subscribeDraftConsumption((key, snapshot) => {
@@ -967,7 +1003,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   }), [clearInput]);
 
   useLayoutEffect(() => {
-    if (!draftKey || draftKeyRef.current !== draftKey) return;
+    // The synchronous ref handoff can precede the prop commit. Keep live deltas in React for the existing move merge,
+    // rather than recreating the obsolete key (which could evict an unrelated draft at capacity).
+    if (!draftKey || draftKeyRef.current !== draftKey || draftRecoveryIdentityRef.current.key !== draftKey) return;
     const draft = {
       value,
       images: attachedImages.map(imageToDraftImage),
@@ -992,7 +1030,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       const source = draftIdentityMove.sourceDraft ?? persistedDraftRef.current;
       const draft = getDraft(draftKey);
       draftKeyRef.current = draftKey;
-      setValue((current) => {
+      // A pending outbox commit (possibly from an earlier mount) follows only its own unchanged draft to the new key.
+      moveDraftSubmissions(previousDraftKey, draftKey);
+      setRawValue((current) => {
         const transferred = draft?.value ?? "";
         if (!source || current === source.value) return transferred;
         const destination = source.value && transferred.startsWith(source.value)
@@ -1053,7 +1093,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
     const draft = draftKey ? getDraft(draftKey) : null;
     draftKeyRef.current = draftKey;
-    setValue(draft?.value ?? "");
+    setRawValue(draft?.value ?? "");
     setAtQuery(null);
     setSlashMatch(null);
     setHistoryMenuOpen(false);
@@ -1097,7 +1137,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       ta.style.height = "auto";
       ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
     });
-  }), []);
+  }), [setValue]);
 
   useLayoutEffect(() => {
     const ta = textareaRef.current;
@@ -1158,6 +1198,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (!submissionBlockedRef.current && !result.error && !result.retainInput) stored();
       return true;
     } finally {
+      stored.release();
       holdingRef.current = false;
     }
   }, [onBuiltinCommand, clearOnceStored]);
@@ -1196,15 +1237,22 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const key = draftKeyRef.current;
     const images = attachedImagesRef.current.length ? attachedImagesRef.current : undefined;
     const recovery = { text: composedMessage, images: images?.map(imageToDraftImage), ...uploadRecovery(attachedUploadsRef.current) };
-    const stored = clearOnceStored(raw);
-    const pending = onSend(composedMessage, images, ...uploadArgs(attachedUploadsRef.current));
-    if (outbox && !shellCommand) {
+    const stored = outbox && !shellCommand ? clearOnceStored(raw) : undefined;
+    let pending: Promise<PromptSubmissionResult>;
+    try {
+      pending = onSend(composedMessage, images, ...uploadArgs(attachedUploadsRef.current));
+    } catch (error) {
+      stored?.release();
+      throw error;
+    }
+    if (stored) {
       // Stored in this browser once accepted: clear only then (a reload in between keeps the draft), and only if the
       // composer still holds what was sent. A refused one stays where it is.
       holdingRef.current = true;
       try {
         if ((await pending).status === "accepted") stored();
       } finally {
+        stored.release();
         holdingRef.current = false;
       }
       return;
@@ -1567,7 +1615,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       el.style.height = "auto";
       el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
     });
-  }, [atQuery, value]);
+  }, [atQuery, value, setValue]);
 
   useEffect(() => {
     if (atActiveIndex >= atMatches.length) {
@@ -1612,7 +1660,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       ta.style.height = "auto";
       ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
     });
-  }, []);
+  }, [setValue]);
 
   const applySlashCommand = useCallback((command: SlashCommandPaletteItem) => {
     const ta = textareaRef.current;
@@ -1654,7 +1702,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       el.style.height = "auto";
       el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
     });
-  }, [slashMatch, value]);
+  }, [slashMatch, value, setValue]);
 
   const sendQueued = useCallback((mode: "steer" | "followup", overrideText?: string) => {
     if (submissionBlockedRef.current || holdingRef.current) return;
@@ -1676,11 +1724,20 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const hold = (text: string) => {
       const stored = clearOnceStored(raw);
       holdingRef.current = true;
-      void Promise.resolve(queue(text, images, ...uploads))
+      let queued: boolean | Promise<boolean>;
+      try {
+        queued = queue(text, images, ...uploads);
+      } catch (error) {
+        stored.release();
+        holdingRef.current = false;
+        throw error;
+      }
+      void Promise.resolve(queued)
         .then((ok) => {
           if (ok) stored();
         })
         .finally(() => {
+          stored.release();
           holdingRef.current = false;
         });
     };
@@ -2007,7 +2064,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }
       }
     },
-    [isMobile, isStreaming, onSteer, onFollowUp, onAbort, onMinimize, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, toggleDictation, wordPrediction]
+    [isMobile, isStreaming, onSteer, onFollowUp, onAbort, onMinimize, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, toggleDictation, wordPrediction, setValue]
   );
 
 

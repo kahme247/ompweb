@@ -583,7 +583,7 @@ export function HeldMessageView({ held, hostLabel, onDelete }: {
               open={confirmingDelete}
               onOpenChange={setConfirmingDelete}
               title={t("heldMessage.deleteTitle")}
-              description={t("heldMessage.deleteConfirmBody")}
+              description={t(failed && held.mayHaveBeenSent ? "heldMessage.deleteConfirmMayHaveBeenSent" : "heldMessage.deleteConfirmBody")}
               confirmLabel={t("heldMessage.delete")}
               cancelLabel={t("chatInput.cancel")}
               onConfirm={() => { setConfirmingDelete(false); onDelete!(held.id); }}
