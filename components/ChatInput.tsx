@@ -2982,7 +2982,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 )}
               </div>
             )}
-            {sendingEntries.map((entry) => (
+            {sendingEntries.length > 0 && <div style={{ maxHeight: 120, overflowY: "auto" }}>{sendingEntries.map((entry) => (
               <div key={entry.id} style={{ padding: "5px 8px 5px 12px", display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
                 <Loader2 size={12} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0, color: "var(--text-muted)", animation: "spin 0.8s linear infinite" }} />
                 <span role="status" style={{ flexShrink: 0, fontSize: 10, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--text-muted)" }}>
@@ -2992,7 +2992,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   {entry.text}
                 </span>
               </div>
-            ))}
+            ))}</div>}
           </div>
         )}
         {/* Live agent status bar — attached to composer's top edge */}
