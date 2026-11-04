@@ -1,7 +1,7 @@
 // Durations derived from transport samples (lib/event-stream-worker.ts, lib/agent-client.ts), shared by
 // scripts/transport-metrics.ts and the worker's live diagnostics so both compute the same numbers. Browser-safe.
 
-import { SERVER_ANSWERABLE_COMMANDS } from "./event-stream-protocol";
+import { NO_OMP_REPLY_COMMANDS } from "./event-stream-protocol";
 import { asNumber } from "./type-guards";
 
 type Sample = Record<string, unknown>;
@@ -102,7 +102,7 @@ export function diagnosticStats(samples: Sample[]): DiagnosticStat[] {
       const totalMs = totalMsOf(s);
       // A backward clock step during the command makes its round trip (and so its transport share) meaningless.
       if (totalMs !== undefined && totalMs >= 0) add(transport, "transportMs", transportMsOf(s));
-      if (typeof s.type === "string" && SERVER_ANSWERABLE_COMMANDS.has(s.type)) continue;
+      if (typeof s.type === "string" && NO_OMP_REPLY_COMMANDS.has(s.type)) continue;
       if (s.type === "get_state") add(transport, "ompMs", serverMsOf(s));
       add(transport, "serverMs", serverMsOf(s));
       if (totalMs !== undefined && totalMs >= 0) add(transport, "totalMs", totalMs);

@@ -70,3 +70,9 @@ test("a backward clock step drops the command's round trip and transport share",
   const rows = diagnosticStats([{ metric: "action", transport: "ws", type: "prompt", outcome: "ok", sentAt: 100, gotAt: 40, recvAt: 2, repliedAt: 5 }]);
   assert.deepEqual(rows.map((row) => row.metric), ["serverMs"]);
 });
+
+test("commands forwarded to omp without awaiting its reply count as transport only", () => {
+  const ok = { metric: "action", transport: "sse", outcome: "ok", sentAt: 0, gotAt: 10, recvAt: 2, repliedAt: 3 };
+  const rows = diagnosticStats(["host_tool_result", "host_uri_result", "extension_ui_response"].map((type) => ({ ...ok, type })));
+  assert.deepEqual(rows.map((row) => [row.metric, row.count]), [["transportMs", 3]]);
+});
