@@ -805,6 +805,10 @@ during the wait.
   sends each session's head only (64 KiB total, no incomplete ordering view).
   Background Sync registers `omp-outbox` only after the active service worker
   proves outbox capability; an old push-only worker is not sufficient.
+  A transient initial IndexedDB read failure must not latch the SharedWorker
+  unusable: later list/add/delete operations retry the existing shared load,
+  with one retry attempt shared by concurrent tabs. Persistent failures still
+  preserve drafts and stored rows rather than claiming successful storage.
 - **Idempotent by id.** `outbox_add`/`outbox_remove` are agent
   commands in `runAgentCommand`, before any wrapper spawn; a repeat of a known
   id answers the stored entry. These and `outbox_scope` are in

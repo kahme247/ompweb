@@ -1704,7 +1704,15 @@ const outboxReadRetry = new Map<string, { timer: Timer | undefined; ms: number }
 let outboxPartial = false;
 const outboxDb = openOutboxDb();
 /** The stored entries are loaded (and sent): every tab's outbox op waits for it, so none races them. */
-const outboxReady = outboxDb.then(loadOutbox);
+let outboxReady = outboxDb.then(loadOutbox);
+
+/** Retry a failed load on the next operation; concurrent tabs share that attempt too. */
+async function ensureOutboxReady(): Promise<boolean> {
+  const pending = outboxReady;
+  if (await pending) return true;
+  if (outboxReady === pending) outboxReady = outboxDb.then(loadOutbox);
+  return outboxReady;
+}
 
 /** null where IndexedDB is missing or refuses: adds must fail without a durable store. */
 function openOutboxDb(): Promise<IDBDatabase | null> {
@@ -1779,13 +1787,13 @@ function broadcastOutbox(): void {
 
 /** A tab's list once loaded. An empty one only when `always`: a tab back from the bfcache may still show gone entries. */
 function tellOutbox(client: Client, always: boolean): void {
-  void outboxReady.then((loaded) => {
+  void ensureOutboxReady().then((loaded) => {
     if (loaded && (always || outboxItems.size > 0)) post(client, outboxPartial ? { outbox: outboxList(), partial: true } : { outbox: outboxList() });
   });
 }
 
 function addOutbox(client: Client, n: number, entry: LocalOutboxEntry): void {
-  void outboxReady.then(async (loaded) => {
+  void ensureOutboxReady().then(async (loaded) => {
     const item: OutboxItem = { entry: { ...entry, state: "sending" }, inFlight: false, retryTimer: undefined, retryMs: RECONNECT_MIN_MS };
     const committed = loaded && await writeOutbox((store) => {
       const request = store.getAll();
@@ -1811,7 +1819,7 @@ function addOutbox(client: Client, n: number, entry: LocalOutboxEntry): void {
 }
 
 function dropOutbox(client: Client, n: number, id: string): void {
-  void outboxReady.then(async (loaded) => {
+  void ensureOutboxReady().then(async (loaded) => {
     const item = outboxItems.get(id);
     outboxDropping.add(id);
     const removed = loaded && await writeOutbox((store) => store.delete(id));
