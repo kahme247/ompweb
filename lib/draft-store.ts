@@ -61,6 +61,8 @@ declare global {
   var __ompChatDraftListeners: Set<() => void> | undefined;
   var __ompChatDraftRecoveryListeners: Set<(key: string, recovery: DraftRecovery) => void> | undefined;
   var __ompChatDraftConsumptionListeners: Set<(key: string, snapshot: ChatDraft) => void> | undefined;
+  var __ompChatDraftRevisions: { byKey: Map<string, number>; last: number } | undefined;
+  var __ompChatDraftSubmissions: Set<DraftSubmission> | undefined;
 }
 
 const MAX_DRAFTS = 50;
@@ -120,6 +122,8 @@ function readStoredDrafts(): Map<string, ChatDraft> {
 const listeners = (globalThis.__ompChatDraftListeners ??= new Set<() => void>());
 const recoveryListeners = (globalThis.__ompChatDraftRecoveryListeners ??= new Set<(key: string, recovery: DraftRecovery) => void>());
 const consumptionListeners = (globalThis.__ompChatDraftConsumptionListeners ??= new Set<(key: string, snapshot: ChatDraft) => void>());
+const revisions = (globalThis.__ompChatDraftRevisions ??= { byKey: new Map<string, number>(), last: 0 });
+const submissions = (globalThis.__ompChatDraftSubmissions ??= new Set<DraftSubmission>());
 
 export function hasUnsentDrafts(): boolean {
   return drafts.size > 0;
@@ -140,9 +144,70 @@ export function subscribeDraftRecovery(listener: (key: string, recovery: DraftRe
   return () => { recoveryListeners.delete(listener); };
 }
 
-/** A durable outbox commit consumes only its original draft, including a composer remounted while it waited. */
-export function consumeDraft(key: string, snapshot: ChatDraft): void {
-  if (JSON.stringify(getDraft(key)) !== JSON.stringify(snapshot)) return;
+/** Records an edit at input admission, before it reaches `setDraft`: batched React updates can end with the same
+ *  content and never write the store, which would otherwise hide a clear-and-retype from `consumeDraft`. */
+export function markDraftEdited(key: string): void {
+  markSubmissionsEdited(key);
+  if (drafts.has(key)) revisions.byKey.set(key, ++revisions.last);
+}
+
+/** A submission waiting for its durable commit, owned by this store (not by the composer mount that sent it, which may
+ *  be gone by the time the commit lands). `key` follows a confirmed identity move of the unchanged draft and is
+ *  cleared when the draft merged into another or was edited first; `edited` records any edit since it was sent. */
+export interface DraftSubmission { key: string | undefined; snapshot: ChatDraft | null; revision: number; edited: boolean }
+
+/** Starts tracking the draft at `key`. Every submission MUST be ended (`endDraftSubmission`) once its commit settles,
+ *  whether it was stored, refused or failed. */
+export function beginDraftSubmission(key: string | undefined): DraftSubmission {
+  const submission: DraftSubmission = { key, snapshot: key ? getDraft(key) : null, revision: key ? getDraftRevision(key) : -1, edited: false };
+  submissions.add(submission);
+  return submission;
+}
+
+export function endDraftSubmission(submission: DraftSubmission): void {
+  submissions.delete(submission);
+}
+
+function markSubmissionsEdited(key: string): void {
+  for (const submission of submissions) if (submission.key === key) submission.edited = true;
+}
+
+/** The hook moved `from`'s draft to `to` for a confirmed identity change (not navigation). Pending submissions follow
+ *  it only while its content is still exactly what they sent and nothing edited it; otherwise they let go of it. */
+export function moveDraftSubmissions(from: string, to: string): void {
+  const moved = drafts.get(to);
+  for (const submission of submissions) {
+    if (submission.key !== from) continue;
+    if (submission.edited || !submission.snapshot || !moved || !isSameDraft(moved, submission.snapshot)) submission.key = undefined;
+    else {
+      submission.key = to;
+      submission.revision = getDraftRevision(to);
+    }
+  }
+}
+
+/** Edit generation of a key's draft: bumps on every content change (not on a same-content rewrite such as hydration or
+ *  a navigation save), so a clear-and-retype of equal text is a different revision. -1 when there is no draft; a draft
+ *  restored from sessionStorage and never edited since is 0. */
+export function getDraftRevision(key: string): number {
+  return drafts.has(key) ? revisions.byKey.get(key) ?? 0 : -1;
+}
+
+/** Content equality by field, without re-encoding attachment payloads; absent and empty `uploads` are equal. */
+export function isSameDraft(a: ChatDraft | undefined, b: ChatDraft): boolean {
+  if (!a || a.value !== b.value || a.images.length !== b.images.length || a.files.length !== b.files.length) return false;
+  const uploadsA = a.uploads ?? [];
+  const uploadsB = b.uploads ?? [];
+  return uploadsA.length === uploadsB.length
+    && a.images.every((image, i) => image.data === b.images[i].data && image.mimeType === b.images[i].mimeType)
+    && a.files.every((file, i) => file.name === b.files[i].name && file.mimeType === b.files[i].mimeType && file.content === b.files[i].content && file.size === b.files[i].size)
+    && uploadsA.every((upload, i) => upload.id === uploadsB[i].id && upload.name === uploadsB[i].name && upload.size === uploadsB[i].size && upload.hostId === uploadsB[i].hostId);
+}
+
+/** A durable outbox commit consumes only the draft it was sent from: the same edit revision AND unchanged content
+ *  (also after a composer remount). Any later edit, even one that restores the same text, keeps the draft. */
+export function consumeDraft(key: string, snapshot: ChatDraft, revision: number): void {
+  if (getDraftRevision(key) !== revision || !isSameDraft(drafts.get(key), snapshot)) return;
   clearDraft(key);
   for (const listener of consumptionListeners) listener(key, snapshot);
 }
@@ -203,7 +268,12 @@ export function setDraft(key: string, draft: ChatDraft): void {
     const oldestKey = drafts.keys().next().value;
     if (oldestKey !== undefined) clearDraft(oldestKey);
   }
-  drafts.set(key, cloneDraft(draft));
+  const next = cloneDraft(draft);
+  if (!isSameDraft(drafts.get(key), next)) {
+    revisions.byKey.set(key, ++revisions.last);
+    markSubmissionsEdited(key);
+  }
+  drafts.set(key, next);
   try {
     // Persist only text: attachment payloads can exhaust the tab's storage quota.
     if (draft.value) sessionStorage.setItem(STORAGE_PREFIX + key, draft.value);
@@ -218,6 +288,7 @@ export function setDraft(key: string, draft: ChatDraft): void {
 
 export function clearDraft(key: string): void {
   const deleted = drafts.delete(key);
+  revisions.byKey.delete(key);
   try {
     sessionStorage.removeItem(STORAGE_PREFIX + key);
     sessionStorage.removeItem(UPLOADS_STORAGE_PREFIX + key);

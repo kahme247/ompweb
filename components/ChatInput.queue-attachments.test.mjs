@@ -206,6 +206,260 @@ test("an outbox commit after unmount cannot clear a remounted composer's new tex
   assert.equal(getDraft(KEY)?.files.length, 1);
 });
 
+// A text-only outbox Send whose IndexedDB commit is still pending; `store()` completes it.
+async function sendTextPendingStore(text) {
+  let store;
+  const onSend = () => new Promise((resolve) => { store = () => resolve({ status: "accepted" }); });
+  const ref = React.createRef();
+  const props = { ref, draftKey: KEY, outbox: true, isStreaming: false, onAbort() {}, onSend };
+  const view = render(React.createElement(ChatInput, props));
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: text } });
+  fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+  await waitFor(() => assert.ok(store, "the send reached the outbox"));
+  return { props, ref, view, store: () => act(async () => { store(); }) };
+}
+
+test("an equal-text clear-and-retype while the outbox commit is pending is newer input and survives", async () => {
+  const { store } = await sendTextPendingStore("same text");
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "" } });
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "same text" } });
+  await store();
+  assert.equal(screen.getByRole("textbox").value, "same text");
+  assert.equal(getDraft(KEY)?.value, "same text");
+});
+
+test("an equal-text clear-and-retype in a remounted composer survives the original commit", async () => {
+  const { props, store } = await sendTextPendingStore("same text");
+  cleanup();
+  render(React.createElement(ChatInput, props));
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "" } });
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "same text" } });
+  await store();
+  assert.equal(screen.getByRole("textbox").value, "same text");
+  assert.equal(getDraft(KEY)?.value, "same text");
+});
+// A controlled textarea's DOM events flush synchronously (React restores controlled state at event end), so a DOM
+// clear-and-retype always reaches the persist effect; only programmatic inputs (dictation, history, completions, the
+// imperative handle) can be batched into an unflushed edit whose final value equals the sent one, and React then
+// bails so the persist effect never writes the store. The edit recorded at input admission is what tells the pending
+// commit its composer was touched. The sent message here is attachment-only, so its text is "".
+async function sendAttachmentOnlyPendingStore() {
+  let store;
+  const ref = React.createRef();
+  const props = {
+    ref, draftKey: KEY, outbox: true, isStreaming: false, onAbort() {},
+    onSend: () => new Promise((resolve) => { store = () => resolve({ status: "accepted" }); }),
+  };
+  render(React.createElement(ChatInput, props));
+  await act(async () => { ref.current.addFiles([new File([Buffer.from(PNG, "base64")], "dot.png", { type: "image/png" })]); });
+  await waitFor(() => assert.equal(getDraft(KEY)?.images.length, 1));
+  fireEvent.click(screen.getByRole("button", { name: /send/i }));
+  await waitFor(() => assert.ok(store, "the send reached the outbox"));
+  return { props, ref, store: () => act(async () => { store(); }) };
+}
+const programmaticEditEndingEqual = (ref) => act(async () => {
+  ref.current.insertIfEmpty("tmp");
+  ref.current.insertIfEmpty("");
+});
+
+test("a programmatic edit batched back to the sent text keeps the composer through the original commit", async () => {
+  const { ref, store } = await sendAttachmentOnlyPendingStore();
+  await programmaticEditEndingEqual(ref);
+  await store();
+  assert.equal(getDraft(KEY)?.images.length, 1, "touched composer is not consumed");
+});
+
+test("the same batched programmatic edit in a remounted composer keeps it through the original commit", async () => {
+  const { props, store } = await sendAttachmentOnlyPendingStore();
+  cleanup();
+  const ref = React.createRef();
+  render(React.createElement(ChatInput, { ...props, ref }));
+  await programmaticEditEndingEqual(ref);
+  await store();
+  assert.equal(getDraft(KEY)?.images.length, 1, "touched composer is not consumed");
+});
+
+
+// What useAgentSession does for a confirmed native id change (Edit): free the source slot, write the (merged) target
+// draft, then the live composer adopts the new key through `draftIdentityMove` without remounting.
+async function moveIdentity(view, props, targetKey, destination) {
+  const sourceDraft = getDraft(KEY);
+  clearDraft(KEY);
+  setDraft(targetKey, destination ? { ...sourceDraft, value: `${destination.value}\n\n${sourceDraft.value}` } : sourceDraft);
+  await act(async () => {
+    view.rerender(React.createElement(ChatInput, { ...props, draftKey: targetKey, draftIdentityMove: { from: KEY, to: targetKey, sourceDraft } }));
+  });
+}
+
+test("a commit that lands after a confirmed identity move consumes the unchanged moved draft", async (t) => {
+  const targetKey = `${KEY}:moved`;
+  t.after(() => clearDraft(targetKey));
+  const { props, view, store } = await sendTextPendingStore("same text");
+  await moveIdentity(view, props, targetKey);
+  assert.equal(screen.getByRole("textbox").value, "same text");
+  await store();
+  assert.equal(screen.getByRole("textbox").value, "");
+  assert.equal(getDraft(targetKey), null);
+});
+
+test("a commit after an identity move that merged an existing target draft leaves the merged draft", async (t) => {
+  const targetKey = `${KEY}:merged`;
+  t.after(() => clearDraft(targetKey));
+  setDraft(targetKey, { value: "older target text", images: [], files: [] });
+  const { props, view, store } = await sendTextPendingStore("same text");
+  await moveIdentity(view, props, targetKey, getDraft(targetKey));
+  const merged = screen.getByRole("textbox").value;
+  assert.match(merged, /older target text/);
+  await store();
+  assert.equal(screen.getByRole("textbox").value, merged);
+  assert.equal(getDraft(targetKey)?.value, merged);
+});
+
+test("precommit typing after an identity handoff never recreates the old key or evicts an unrelated draft at capacity", async (t) => {
+  const targetKey = `${KEY}:capacity-target`;
+  const otherKeys = Array.from({ length: 49 }, (_, index) => `${KEY}:capacity-other-${index}`);
+  t.after(() => { for (const key of [targetKey, ...otherKeys]) clearDraft(key); });
+  setDraft(otherKeys[0], { value: "oldest unrelated draft", images: [], files: [] });
+  const { props, ref, view, store } = await sendTextPendingStore("same text");
+  for (const key of otherKeys.slice(1)) setDraft(key, { value: key, images: [], files: [] });
+  const sourceDraft = getDraft(KEY);
+  act(() => {
+    clearDraft(KEY);
+    setDraft(targetKey, sourceDraft);
+    ref.current.retargetPendingRecovery(KEY, targetKey);
+  });
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "newer input" } });
+  assert.equal(getDraft(KEY), null, "the obsolete display key is not reinserted");
+  assert.equal(getDraft(otherKeys[0])?.value, "oldest unrelated draft", "the capacity-neutral move stays capacity-neutral");
+  await store();
+  view.rerender(React.createElement(ChatInput, {
+    ...props, draftKey: targetKey, draftIdentityMove: { from: KEY, to: targetKey, sourceDraft },
+  }));
+  assert.equal(screen.getByRole("textbox").value, "newer input");
+  assert.equal(getDraft(targetKey)?.value, "newer input");
+  for (const key of otherKeys) assert.ok(getDraft(key), `unrelated draft ${key} remains`);
+});
+
+for (const image of [false, true]) {
+  test(`a newly admitted ${image ? "image" : "text file"} read survives the older send's ACK before the read completes`, async (t) => {
+    const { ref, store } = await sendTextPendingStore("same text");
+    let release;
+    const content = image ? Uint8Array.from(Buffer.from(PNG, "base64")).buffer : "new file";
+    const file = new File([image ? Buffer.from(PNG, "base64") : content], image ? "new.png" : "new.txt", {
+      type: image ? "image/png" : "text/plain",
+    });
+    override(file, image ? "arrayBuffer" : "text", () => new Promise((resolve) => { release = resolve; }));
+    t.after(() => release?.(content));
+    act(() => { ref.current.addFiles([file]); });
+    assert.equal(typeof release, "function", "the file was accepted and its read started");
+    await store();
+    await act(async () => { release(content); });
+    await waitFor(() => assert.equal(image ? getDraft(KEY)?.images.length : getDraft(KEY)?.files.length, 1));
+    assert.equal(screen.getByRole("textbox").value, "same text", "the newer attachment intent keeps the composer");
+  });
+}
+
+for (const variant of ["unchanged", "newer", "handoff-newer", "merged"]) {
+  test(`an earlier mount's commit after synchronous move handoff but before React retarget ${variant === "unchanged" ? "consumes the moved draft" : `preserves the ${variant} draft`}`, async (t) => {
+    const targetKey = `${KEY}:handoff-${variant}`;
+    t.after(() => clearDraft(targetKey));
+    const { props, store } = await sendTextPendingStore("same text");
+    cleanup();
+    const ref = React.createRef();
+    const view = render(React.createElement(ChatInput, { ...props, ref }));
+    if (variant === "newer") {
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "" } });
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "same text" } });
+    }
+    const sourceDraft = getDraft(KEY);
+    const transferred = variant === "merged" ? { ...sourceDraft, value: "older target\n\nsame text" } : sourceDraft;
+    // The hook completes the store transfer, then ChatWindow synchronously hands off the live ref. The prop commit
+    // comes later: the ACK belongs to the original mount and can settle in this gap.
+    act(() => {
+      clearDraft(KEY);
+      setDraft(targetKey, transferred);
+      ref.current.retargetPendingRecovery(KEY, targetKey);
+    });
+    if (variant === "handoff-newer") {
+      // The ref already names the moved identity, but the textarea and draftKey prop still name the old key.
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "" } });
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "same text" } });
+    }
+    await store();
+    assert.equal(getDraft(targetKey)?.value ?? "", variant === "unchanged" ? "" : transferred.value);
+    view.rerender(React.createElement(ChatInput, {
+      ...props, ref, draftKey: targetKey, draftIdentityMove: { from: KEY, to: targetKey, sourceDraft },
+    }));
+    assert.equal(screen.getByRole("textbox").value, variant === "unchanged" ? "" : transferred.value);
+    assert.equal(getDraft(targetKey)?.value ?? "", variant === "unchanged" ? "" : transferred.value);
+  });
+}
+
+// The commit callback belongs to the first mount; the move is handed to the composer remounted on the same session.
+test("a commit owned by an earlier mount consumes the unchanged draft moved under the remounted composer", async (t) => {
+  const targetKey = `${KEY}:remount-moved`;
+  t.after(() => clearDraft(targetKey));
+  const { props, store } = await sendTextPendingStore("same text");
+  cleanup();
+  const view = render(React.createElement(ChatInput, props));
+  await moveIdentity(view, props, targetKey);
+  assert.equal(screen.getByRole("textbox").value, "same text");
+  await store();
+  assert.equal(screen.getByRole("textbox").value, "");
+  assert.equal(getDraft(targetKey), null);
+});
+
+test("input typed after the remount and move survives a commit owned by the earlier mount", async (t) => {
+  const targetKey = `${KEY}:remount-moved-edited`;
+  t.after(() => clearDraft(targetKey));
+  const { props, store } = await sendTextPendingStore("same text");
+  cleanup();
+  const view = render(React.createElement(ChatInput, props));
+  await moveIdentity(view, props, targetKey);
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "" } });
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "same text" } });
+  await store();
+  assert.equal(screen.getByRole("textbox").value, "same text");
+  assert.equal(getDraft(targetKey)?.value, "same text");
+});
+
+test("input after an identity move, even equal text, survives the old key's commit", async (t) => {
+  const targetKey = `${KEY}:moved-edited`;
+  t.after(() => clearDraft(targetKey));
+  const { props, view, store } = await sendTextPendingStore("same text");
+  await moveIdentity(view, props, targetKey);
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "" } });
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "same text" } });
+  await store();
+  assert.equal(screen.getByRole("textbox").value, "same text");
+  assert.equal(getDraft(targetKey)?.value, "same text");
+});
+
+test("input admitted before an identity move, even equal text, survives the old key's commit", async (t) => {
+  const targetKey = `${KEY}:edited-moved`;
+  t.after(() => clearDraft(targetKey));
+  const { props, view, store } = await sendTextPendingStore("same text");
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "" } });
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "same text" } });
+  await moveIdentity(view, props, targetKey);
+  await store();
+  assert.equal(screen.getByRole("textbox").value, "same text");
+  assert.equal(getDraft(targetKey)?.value, "same text");
+});
+
+test("an untouched remounted draft, and one only navigated away and back, is consumed by its commit", async () => {
+  const { props, store } = await sendTextPendingStore("same text");
+  cleanup();
+  const view = render(React.createElement(ChatInput, props));
+  assert.equal(screen.getByRole("textbox").value, "same text", "hydrated, not typed");
+  view.rerender(React.createElement(ChatInput, { ...props, draftKey: `${KEY}:elsewhere` }));
+  view.rerender(React.createElement(ChatInput, props));
+  assert.equal(screen.getByRole("textbox").value, "same text");
+  await store();
+  assert.equal(screen.getByRole("textbox").value, "");
+  assert.equal(getDraft(KEY), null);
+});
+
 for (const stored of [true, false]) {
   test(`an idle Send through the outbox clears only once ${stored ? "stored" : "refused: never"}`, async () => {
     let answer;

@@ -21,9 +21,29 @@ test("held messages name every delivery leg and only offer Delete before dispatc
   ]) {
     const html = renderToStaticMarkup(React.createElement(HeldMessageView, { held: { ...base, state }, hostLabel: "Build box", onDelete() {} }));
     assert.ok(html.includes(label), state);
-    assert.equal(html.includes("Delete this unsent message"), actions, state);
+    assert.equal(html.includes("Delete this held message"), actions, state);
     assert.equal(html.includes("<select"), false, state);
     assert.equal(html.includes("activity-row-spinner"), spinner, state);
+  }
+});
+
+test("Delete confirmation never claims omp has not seen a message that may have been sent, nor cancellation", async () => {
+  const base = { id: "held", mode: "prompt", message: "Keep this safe.", createdAt: Date.now(), local: false, state: "failed" };
+  const dialogText = async (held) => {
+    const view = render(React.createElement(HeldMessageView, { held, onDelete() {} }));
+    await act(async () => { fireEvent.click(view.getByRole("button", { name: "Delete this held message" })); });
+    const text = (await waitFor(() => view.getByRole("dialog"))).textContent;
+    view.unmount();
+    return text;
+  };
+  const uncertain = await dialogText({ ...base, mayHaveBeenSent: true });
+  assert.match(uncertain, /may already have reached omp/);
+  assert.match(uncertain, /cannot cancel or undo/);
+  assert.doesNotMatch(uncertain, /has not reached|will not be sent/);
+  for (const state of ["held", "failed"]) {
+    const ordinary = await dialogText({ ...base, state });
+    assert.match(ordinary, /Remove this held message from the outbox list\?/, state);
+    assert.doesNotMatch(ordinary, /has not reached|never reached|will not send|will not be sent|cancel/, state);
   }
 });
 
