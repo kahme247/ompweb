@@ -1762,9 +1762,14 @@ async function writeOutbox(change: (store: IDBObjectStore) => void): Promise<boo
   });
 }
 
+/** Unsequenced legacy rows precede new adds; their already-lost timestamp ties use a deterministic id fallback. */
+function compareOutbox(a: LocalOutboxEntry, b: LocalOutboxEntry): number {
+  return (a.enqueueOrder ?? 0) - (b.enqueueOrder ?? 0) || a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+
 /** Every entry, in submission order. */
 function outboxList(): LocalOutboxEntry[] {
-  return [...outboxItems.values()].map((item) => item.entry).sort((a, b) => a.createdAt - b.createdAt);
+  return [...outboxItems.values()].map((item) => item.entry).sort(compareOutbox);
 }
 
 function broadcastOutbox(): void {
@@ -1782,7 +1787,15 @@ function tellOutbox(client: Client, always: boolean): void {
 function addOutbox(client: Client, n: number, entry: LocalOutboxEntry): void {
   void outboxReady.then(async (loaded) => {
     const item: OutboxItem = { entry: { ...entry, state: "sending" }, inFlight: false, retryTimer: undefined, retryMs: RECONNECT_MIN_MS };
-    if (!loaded || !(await writeOutbox((store) => store.put(item.entry)))) {
+    const committed = loaded && await writeOutbox((store) => {
+      const request = store.getAll();
+      request.onsuccess = () => {
+        // The store's readwrite lock serializes allocation with every other worker's acceptance.
+        item.entry.enqueueOrder = (request.result as LocalOutboxEntry[]).reduce((max, row) => Math.max(max, row.enqueueOrder ?? 0), 0) + 1;
+        store.add(item.entry);
+      };
+    });
+    if (!committed) {
       post(client, { outboxAdded: n, error: "The message could not be saved to this browser. Send it again." });
       return;
     }
@@ -1898,18 +1911,36 @@ async function sendOutbox(sessionId: string): Promise<void> {
   queueCommand({ port, streams: new Map(), visible: false }, { n: 0, req, sessionId, advisor: advisor === true, body, type: "outbox_add" });
 }
 
+/** A transport success is not a storage receipt (a sign-in page can also answer 200). */
+function acceptedOutboxEntry(body: unknown, id: string): unknown {
+  const reply = body as { success?: unknown; data?: { entry?: Record<string, unknown> } } | null;
+  const entry = reply?.data?.entry;
+  return reply?.success === true && entry?.id === id &&
+    typeof entry.sessionId === "string" && entry.sessionId.length > 0 &&
+    ["prompt", "followUp", "steer"].includes(entry.mode as string) &&
+    ["held", "waiting_host", "delivering", "failed", "delivered"].includes(entry.state as string) &&
+    (entry.images === undefined || Array.isArray(entry.images) && entry.images.every((image) => image?.type === "image" && typeof image.data === "string" && typeof image.mimeType === "string")) &&
+    (entry.uploads === undefined || Array.isArray(entry.uploads) && entry.uploads.every((upload) => typeof upload === "string")) &&
+    (entry.error === undefined || typeof entry.error === "string") &&
+    (entry.mayHaveBeenSent === undefined || typeof entry.mayHaveBeenSent === "boolean") &&
+    typeof entry.message === "string" && typeof entry.createdAt === "number" && Number.isFinite(entry.createdAt) && entry.createdAt >= 0
+    ? entry : null;
+}
+
 /**
- * 2xx: stored, gone from here. No answer, 401, 408, 429 or a 5xx (the worker's own 503s too): again after the entry's
+ * Valid 2xx acceptance: stored, gone from here. Unconfirmed success, no answer, 401, 408, 429 or a 5xx: again after the entry's
  * delay. Any other refusal is final (O6): "failed" until a tab drops it, and the session's next entry goes.
  */
 async function outboxAnswer(item: OutboxItem, status: number, body: unknown): Promise<void> {
   const { id, sessionId } = item.entry;
   if (outboxItems.get(id) !== item) return;
-  const reply = (body ?? {}) as { data?: { entry?: unknown }; error?: unknown };
+  const reply = (body ?? {}) as { error?: unknown };
+  const accepted = acceptedOutboxEntry(body, id);
+  if (status >= 200 && status < 300 && !accepted) status = 0;
   if (status >= 200 && status < 300) {
     if (!(await writeOutbox((store) => store.delete(id)))) return outboxAnswer(item, 0, null);
     outboxItems.delete(id);
-    if (reply.data?.entry) for (const client of clients) post(client, { outboxStored: reply.data.entry });
+    for (const client of clients) post(client, { outboxStored: accepted });
   } else if (status === 0 || status === 401 || status === 408 || status === 429 || status >= 500) {
     item.inFlight = false;
     item.retryTimer = setTimeout(() => {

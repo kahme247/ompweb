@@ -78,6 +78,8 @@ export interface LocalOutboxEntry {
   images?: { type: "image"; data: string; mimeType: string }[];
   uploads?: string[];
   createdAt: number;
+  /** Allocated atomically by IndexedDB acceptance; absent only on preexisting rows. */
+  enqueueOrder?: number;
   /** failed: the server refused outbox_add for good (spec O6). */
   state: "sending" | "failed";
   /** The server's error text for "failed". */
@@ -432,14 +434,74 @@ export async function addToOutbox(entry: Omit<LocalOutboxEntry, "state" | "error
   void registerOutboxSync();
 }
 
+function supportsOutboxSync(worker: ServiceWorker | null): Promise<boolean> {
+  if (!worker) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const channel = new MessageChannel();
+    const finish = (supported: boolean) => {
+      clearTimeout(timer);
+      channel.port1.close();
+      channel.port2.close();
+      resolve(supported);
+    };
+    const timer = setTimeout(() => finish(false), 1_000);
+    channel.port1.onmessage = ({ data }) => finish(data?.type === "omp-outbox-capability" && data.version === 1);
+    try {
+      worker.postMessage({ type: "omp-outbox-capability" }, [channel.port2]);
+    } catch {
+      finish(false);
+    }
+  });
+}
+
+/** ready may still mean the old push-only worker while its replacement installs. */
+function waitForOutboxWorker(registration: ServiceWorkerRegistration): Promise<boolean> {
+  return new Promise((resolve) => {
+    const checked = new Set<ServiceWorker>();
+    const observed = new Set<ServiceWorker>();
+    const finish = (supported: boolean) => {
+      clearTimeout(timer);
+      registration.removeEventListener("updatefound", check);
+      navigator.serviceWorker.removeEventListener("controllerchange", check);
+      for (const worker of observed) worker.removeEventListener("statechange", check);
+      resolve(supported);
+    };
+    const check = () => {
+      for (const worker of [registration.installing, registration.waiting]) {
+        if (!worker || observed.has(worker)) continue;
+        observed.add(worker);
+        worker.addEventListener("statechange", check);
+      }
+      const worker = registration.active;
+      if (!worker || checked.has(worker)) return;
+      checked.add(worker);
+      void supportsOutboxSync(worker).then((supported) => {
+        if (supported && registration.active === worker) finish(true);
+      });
+    };
+    const timer = setTimeout(() => finish(false), 5_000);
+    registration.addEventListener("updatefound", check);
+    navigator.serviceWorker.addEventListener("controllerchange", check);
+    check();
+  });
+}
+
 /** Background Sync (Chromium only): the service worker sends what IndexedDB still holds once online, with no tab open. */
 async function registerOutboxSync(): Promise<void> {
   if (!("serviceWorker" in navigator) || !window.isSecureContext) return;
   try {
-    // An already active worker can register sync offline; fetching /sw.js again would strand a last-tab send.
+    // A proven active worker works offline; a pre-outbox registration must go through the normal update flow.
     const existing = await navigator.serviceWorker.getRegistration();
-    const registration = (existing?.active ? existing : await registerNotificationWorker()) as (ServiceWorkerRegistration & { sync?: { register(tag: string): Promise<void> } }) | null;
-    await registration?.sync?.register("omp-outbox");
+    if (existing?.active && await supportsOutboxSync(existing.active)) {
+      await (existing as ServiceWorkerRegistration & { sync?: { register(tag: string): Promise<void> } }).sync?.register("omp-outbox");
+      return;
+    }
+    const registration = await registerNotificationWorker() as (ServiceWorkerRegistration & { sync?: { register(tag: string): Promise<void> } }) | null;
+    // Re-registering a recently checked URL can return the old worker without fetching changed script bytes.
+    if (registration?.sync && registration.active === existing?.active) await registration.update();
+    if (registration?.sync && await waitForOutboxWorker(registration)) {
+      await registration.sync.register("omp-outbox");
+    }
   } catch {
     // Refused (no permission, private window): the next page that opens sends it.
   }
