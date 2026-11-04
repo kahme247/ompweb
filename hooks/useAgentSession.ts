@@ -1386,7 +1386,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       description: "Open a file in the workspace file viewer.",
       parameters: {
         type: "object",
-        properties: { path: { type: "string", description: "Absolute or workspace-relative file path." } },
+        properties: { path: { type: "string", description: "Absolute or workspace-relative file path, or a local:// URL for a file in this session's local:// directory." } },
         required: ["path"],
       },
     },
@@ -1451,7 +1451,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         return `Opened ${url}`;
       }),
       openFile: onOpenFile ? (path, name) => onOpenFile(path, name, sid) : undefined,
-    });
+    }, sid);
     await respondHostTool(sid, id, text, isError);
   }, [onOpenFile, onOpenUrl, respondHostTool]);
 

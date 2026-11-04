@@ -6,6 +6,7 @@ import {
   getConfigAgentRoots,
   isConfigRootDeniedFile,
   isExistingFilePathAllowed,
+  isExistingPathWithinRoots,
   isFilePathAllowed,
   isUnderConfigRoot,
   isWindowsAbsolutePath,
@@ -13,6 +14,7 @@ import {
   resolveRequestedFilePath,
 } from "./file-access";
 import { isFilePathReferencedBySession } from "./session-file-references";
+import { sessionLocalRootContaining } from "./session-local-files";
 
 /** Rebuild an absolute path from `/api/files/[...path]` catch-all segments. */
 export function filePathFromSegments(segments: string[]): string {
@@ -51,7 +53,8 @@ const ACCESS_DENIED: FileAccessDecision = { ok: false, status: 403, error: "Acce
  * The single allow-list gate for reading workspace files (`/api/files` and the
  * live file-watch channel): resolves the requested catch-all segments, then
  * admits the path when it is inside an allowed root, or — when
- * `allowSessionReference` — referenced by the given session's transcript.
+ * `allowSessionReference` — inside the given session's own `local://`
+ * directory, or referenced by that session's transcript.
  */
 export async function authorizeFileAccess(
   segments: string[],
@@ -69,11 +72,17 @@ export async function authorizeFileAccess(
     return ACCESS_DENIED;
   }
   const allowedByRoot = isFilePathAllowed(filePath, allowedRoots);
+  // A session's own local:// directory is its artifact store wherever its host
+  // keeps it (a custom session dir, Windows's temp fallback). Reads inside it
+  // are confined to it, symlinks included, even when the transcript names the
+  // path too.
+  const localRoot = !allowedByRoot && allowSessionReference ? await sessionLocalRootContaining(filePath, sessionId) : null;
   const allowedBySessionReference =
     !allowedByRoot &&
+    !localRoot &&
     allowSessionReference &&
     await isFilePathReferencedBySession(filePath, sessionId);
-  if (!allowedByRoot && !allowedBySessionReference) return ACCESS_DENIED;
+  if (!allowedByRoot && !localRoot && !allowedBySessionReference) return ACCESS_DENIED;
 
   let stat: fs.Stats;
   try {
@@ -82,7 +91,9 @@ export async function authorizeFileAccess(
     return { ok: false, status: 404, error: "Not found", code: "file_not_found" };
   }
 
-  if (!allowedBySessionReference && !isExistingFilePathAllowed(filePath, allowedRoots)) {
+  if (localRoot) {
+    if (!isExistingPathWithinRoots(filePath, new Set([localRoot]))) return ACCESS_DENIED;
+  } else if (!allowedBySessionReference && !isExistingFilePathAllowed(filePath, allowedRoots)) {
     return ACCESS_DENIED;
   }
   return { ok: true, filePath, stat };

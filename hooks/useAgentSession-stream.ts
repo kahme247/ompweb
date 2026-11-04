@@ -19,6 +19,7 @@ import type {
   SubagentProgress,
 } from "@/lib/subagent-types";
 import { translate } from "@/lib/i18n";
+import { isLocalUri } from "@/lib/local-uri";
 import type { SessionStreamCursor } from "@/lib/session-sync";
 
 export interface SessionData {
@@ -334,15 +335,30 @@ export interface HostToolHandlers {
   openFile?: (path: string, name: string) => string | void;
 }
 
+/** A session's `local://` file as the absolute path the file viewer opens, found by the server that holds the session. */
+async function resolveLocalFile(sessionId: string | undefined, uri: string): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
+  if (!sessionId) return { ok: false, error: "A local:// file belongs to a session, and no session asked for it" };
+  try {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/local-file?uri=${encodeURIComponent(uri)}`);
+    const body = (await response.json().catch(() => ({}))) as { path?: unknown; error?: unknown };
+    if (response.ok && typeof body.path === "string") return { ok: true, path: body.path };
+    return { ok: false, error: typeof body.error === "string" ? body.error : `Could not open ${uri} (HTTP ${response.status})` };
+  } catch {
+    return { ok: false, error: `Could not open ${uri}: the server did not answer` };
+  }
+}
+
 /**
  * Execute an omp-web host tool (open_url / notify / open_file) and return the
  * toolResult text. Shared by the session's own stream and by tabs answering
- * calls for a session they are not viewing.
+ * calls for a session they are not viewing. `sessionId` is the session the
+ * call came from, which owns a `local://` file.
  */
 export async function runHostTool(
   toolName: string,
   args: Record<string, unknown>,
   handlers: HostToolHandlers,
+  sessionId?: string,
 ): Promise<{ text: string; isError: boolean }> {
   const str = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
   switch (toolName) {
@@ -371,8 +387,14 @@ export async function runHostTool(
       return { text: "Notification shown", isError: false };
     }
     case "open_file": {
-      const path = str(args.path) ?? "";
-      if (!path) return { text: "No path provided", isError: true };
+      const requested = str(args.path) ?? "";
+      if (!requested) return { text: "No path provided", isError: true };
+      let path = requested;
+      if (isLocalUri(requested)) {
+        const resolved = await resolveLocalFile(sessionId, requested);
+        if (!resolved.ok) return { text: resolved.error, isError: true };
+        path = resolved.path;
+      }
       let text: string | void = undefined;
       if (handlers.openFile) {
         try {
@@ -381,7 +403,7 @@ export async function runHostTool(
           // ignore navigation failures
         }
       }
-      return { text: text || `Opened ${path}`, isError: false };
+      return { text: text || `Opened ${requested}`, isError: false };
     }
     default:
       return { text: `Host tool "${toolName}" is not available in omp-web`, isError: true };

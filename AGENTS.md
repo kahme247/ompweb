@@ -94,6 +94,7 @@ app/api/
   sessions/[id]/context/route.ts  GET ?leafId= — context for a specific leaf
   sessions/[id]/matches/route.ts  GET ?q=&limit= — best `limit` search hits in the active conversation (best match, then newest); Load more asks for a longer prefix
   sessions/[id]/export/route.ts   GET exported HTML for a session
+  sessions/[id]/local-file/route.ts GET ?uri=local://<file> — the absolute path of a file in the session's own local:// directory (the open_file host tool, then the viewer reads it through /api/files with `sessionId`); 400 `invalid_local_uri`, 404 `session_not_found`, 403 on a symlink out, 501 `remote_host_unsupported` for a session on a remote host
   agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? }
   agent/[id]/route.ts             GET state | POST any RPC command
   events/route.ts                 GET multiplexed SSE | POST subscribe/unsubscribe channels
@@ -162,9 +163,11 @@ lib/
   event-stream-hub.ts  server connections + running/session/file channels for /api/events (SSE) and the browser link (`FrameSink`); `broadcastBrowserTransport`
   event-stream-protocol.ts  wire contract shared by hub, route, and facade
   file-access.ts       allowed file roots for /api/files and worktrees
-  file-authorization.ts  single allow-list gate for /api/files and the file channel
+  file-authorization.ts  single allow-list gate for /api/files and the file channel: allowed roots, the session's own `local://` directory (confined, symlinks included) or the session transcript's references
   media-cache.ts       tool-result images → /api/media URLs; media copies + thumbnails
   file-paths.ts        client/server path encoding helpers
+  local-uri.ts         `local://` parsing exactly as omp's local-protocol.ts reads it (pure; browser and server)
+  session-local-files.ts  a session's `local://` root on this machine (`sessionLocalRootFor`: owning host, then `sessionLocalRoot`), a path resolved inside it, and the file gate's check
   github-refs.ts       remark plugin linking #N / owner/repo#N + GithubRepoContext
   git-clone.ts         pure clone helpers: URL→directory name (https/ssh only), \r-aware progress log
   github-repo.ts       server: pick the gh-default GitHub remote from git config
@@ -1310,6 +1313,12 @@ during the wait.
 - The registry is in memory: a main restart loses finished-but-unsent uploads
   ("attach the file again"); unfinished ones resume. Switching chats aborts
   in-flight uploads; drafts keep only finished ones (`sessionStorage`).
+
+### open_file and `local://`
+- The `open_file` host tool takes an absolute path, a workspace-relative path or a `local://` URL. `runHostTool` (`hooks/useAgentSession-stream.ts`) resolves a `local://` URL **before** a tab exists, with the id of the session that called (`useAgentSession` for the viewed session, `AppShell` for a call from another one), through `GET /api/sessions/[id]/local-file`: the tab, its de-duplication and the cross-session confirmation all see the absolute path and `sourceSessionId`, so two sessions' `local://note.md` are two files.
+- The server side is `lib/session-local-files.ts`: `sessionLocalRootFor` finds the owning host (a live wrapper first, then `hostForSessionId` and the host's own list entry) and takes `sessionLocalRoot(sessionFile, sessionId)` (`lib/hosts/uploads.ts`, omp's `resolveLocalRoot` including the Windows temp fallback). Never derive the root from the cwd or the viewed session. A session on a remote host is refused (501): `/api/files` reads this machine's disk only.
+- `lib/local-uri.ts` reads the URL as omp's `extractRelativePath`/`validateRelativePath` do (host decoded twice, query and fragment dropped, `..` or an absolute suffix refused), plus Windows absolute suffixes on every platform. A missing file is not checked at resolve time: the viewer's own read answers `file_not_found`; a path that leaves the root through a symlink is refused (403).
+- `authorizeFileAccess` admits a path inside the given session's local root only for reads, downloads and the file channel (never `type=list`), and confines it with a realpath check even when the transcript names the path. The credential-file deny runs before it, so a session directory under the agent dir still hides `agent.db` and `models.yml`.
 
 ### Voice transcription jobs (`lib/stt-jobs.ts`, `/api/stt`, `hooks/useDictation.ts`)
 - The browser never waits on the STT endpoint: `POST /api/stt` keeps the
