@@ -16,7 +16,7 @@ import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { ContextDetailPanel } from "./ComposerPanels";
 import { RecordingDeck } from "./RecordingDeck";
 import { clearDraft, getDraft, mergeRecoveredText, recoverDraft, setDraft, subscribeDraftRecovery, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
-import { getPendingSends, subscribePendingSends, trackPendingSend } from "@/lib/pending-sends";
+import { getPendingSends, retargetPendingSends, subscribePendingSends, trackPendingSend } from "@/lib/pending-sends";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import type { AttachedImage, AttachedTextFile } from "./ChatInput-draft-attachments";
 import {
@@ -276,7 +276,7 @@ export interface ChatInputHandle {
   prependText: (text: string) => void;
   addFiles: (files: File[]) => void;
   openContextPanel: () => void;
-  /** Retarget captured queue recoveries before a confirmed move can render. */
+  /** Retarget pending sends and captured queue recoveries before a confirmed move can render. */
   retargetPendingRecovery: (from: string, to: string) => void;
 }
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
@@ -500,7 +500,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const fileIndexFetchingRef = useRef<string | null>(null);
   const draftKeyRef = useRef(draftKey);
   const consumedIdentityMoveRef = useRef<typeof draftIdentityMove>(undefined);
-  // Pending queue edits retain this identity across confirmed moves only.
+  // Pending queue recoveries retain this identity across confirmed moves only.
   // Navigation starts a new identity, even when a draft key is later reused.
   const draftRecoveryIdentityRef = useRef({ key: draftKey });
   const persistedDraftRef = useRef<ChatDraft | null>(null);
@@ -600,6 +600,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     retargetPendingRecovery(from, to) {
       const identity = draftRecoveryIdentityRef.current;
       if (identity.key === from) identity.key = to;
+      retargetPendingSends(from, to);
     },
   }));
 
@@ -1620,15 +1621,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     // The queue callbacks resolve false when omp refused the message: it goes
     // back, text and attachments together, to the draft it was sent from, even
     // if the user has typed or switched sessions since.
-    const key = draftKeyRef.current;
+    const recoveryIdentity = draftRecoveryIdentityRef.current;
     const kept = { images: images?.map(imageToDraftImage), ...uploadRecovery(attachedUploadsRef.current) };
     // Until omp answers, the message shows as "Sending…" above the composer:
     // it is neither in the composer nor in omp's queue yet.
     const trackSend = (queued: Promise<boolean>, text: string) => {
       const reply = Promise.resolve(queued).then((ok) => {
-        if (ok === false && key) recoverDraft(key, { text, ...kept });
+        if (ok === false && recoveryIdentity.key) recoverDraft(recoveryIdentity.key, { text, ...kept });
       });
-      trackPendingSend(key, text, reply);
+      trackPendingSend(recoveryIdentity.key, text, reply);
     };
     const files = attachedTextFilesRef.current;
     onAudioUnlock?.();

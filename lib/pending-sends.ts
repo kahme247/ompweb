@@ -17,6 +17,12 @@ export function trackPendingSend(key: string | undefined, text: string, reply: P
   void reply.finally(() => set(pending.filter((entry) => entry.id !== id))).catch(() => {});
 }
 
+/** A confirmed identity move keeps these sends in the same conversation. */
+export function retargetPendingSends(from: string, to: string): void {
+  if (from === to || !pending.some((entry) => entry.key === from)) return;
+  set(pending.map((entry) => entry.key === from ? { ...entry, key: to } : entry));
+}
+
 export function subscribePendingSends(listener: () => void): () => void {
   listeners.add(listener);
   return () => { listeners.delete(listener); };

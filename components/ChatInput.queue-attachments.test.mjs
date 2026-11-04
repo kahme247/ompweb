@@ -200,6 +200,32 @@ test("a queued message shows Sending… only in its own chat, across the remount
   assert.equal(getDraft(KEY), null, "nothing goes back into the composer");
 });
 
+test("pending queued sends follow a confirmed session move and recover a refusal into its new draft", async (t) => {
+  let refuse;
+  const targetKey = `${KEY}-moved`;
+  t.after(() => clearDraft(targetKey));
+  const { calls, ref, rerender } = await renderWithAttachments({
+    queued: new Promise((resolve) => { refuse = () => resolve(false); }),
+  });
+  fireEvent.click(screen.getByRole("button", { name: /queue/i }));
+  await waitFor(() => assert.equal(calls.length, 1));
+  assert.equal(screen.getByRole("status").textContent, "Sending…");
+  try {
+    await act(async () => {
+      ref.current.retargetPendingRecovery(KEY, targetKey);
+      rerender({ draftKey: targetKey, draftIdentityMove: { from: KEY, to: targetKey } });
+    });
+    assert.equal(screen.getByRole("status").textContent, "Sending…", "the pending row belongs to the confirmed conversation");
+  } finally {
+    await act(async () => { refuse(); });
+  }
+  await waitFor(() => assert.equal(screen.queryByRole("status"), null, "the original reply still clears the moved row"));
+  assert.equal(getDraft(targetKey)?.value, calls[0].message, "a refusal follows the confirmed conversation too");
+  assert.deepEqual(getDraft(targetKey)?.images, [{ data: PNG, mimeType: "image/png" }]);
+  assert.equal(screen.getByRole("textbox").value, calls[0].message);
+  assert.equal(getDraft(KEY), null, "the old draft is not recreated");
+});
+
 for (const { label, fill, oversized } of [
   { label: "sendable composed request", fill: "x", oversized: false },
   { label: "oversized composed request", fill: '"', oversized: true },
