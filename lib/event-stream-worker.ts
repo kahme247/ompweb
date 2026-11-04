@@ -12,6 +12,9 @@
 // Bundled by server/client-env.ts (buildEventStreamWorker) into a classic script; lib/event-stream-worker.test.mjs runs
 // it in node:vm with fake browser globals.
 //
+// It also owns the browser's message outbox (docs/specs/2026-11-04-message-outbox-design.md O2): IndexedDB
+// `omp-web-outbox`, sent as `outbox_add` agent commands until the server has stored each (public/sw.js reads it too).
+//
 // Tab -> worker:  { op: "open", id, channel } | { op: "close", id }
 //                 { op: "lock", name }  (tab holds this Web Lock while alive)
 //                 { op: "bye" }         (pagehide: drop this tab's streams)
@@ -22,6 +25,8 @@
 //                 { op: "up_pause", id }  (stop this tab's upload; keep the host's staged bytes for Retry)
 //                 { op: "up_abort", id, host }  (the tab removed it: the host deletes what it staged; kept until delivered)
 //                 { op: "diag", n }  (the connection diagnostics panel's poll)
+//                 { op: "outbox_add", n, entry }  (a message for the outbox: a LocalOutboxEntry without state/error)
+//                 { op: "outbox_drop", n, id }  (remove a "failed" entry; the tab waits for its committed deletion)
 // Worker -> tab:  { id, type: "open" }
 //                 { id, type: "message", data }   (raw JSON string)
 //                 { id, type: "error", readyState: 0 | 2 }  (EventSource semantics)
@@ -32,6 +37,12 @@
 //                 { up: id, received, done } | { up: id, error: { status, code, message } }  (an upload's progress, failure)
 //                 { up: id, http: true }  (SSE mode: the tab uploads it over HTTP itself)
 //                 { diag: n, data }  (ConnectionDiagnostics, lib/event-stream.ts)
+//                 { outboxAdded: n, error?: string }  (committed to IndexedDB, or refused with error: keep the draft)
+//                 { outboxDropped: n, error?: string }  (deletion committed, or refused: keep the bubble and draft)
+//                 { outbox: LocalOutboxEntry[], partial?: true }  (every entry, in submission order: on attach once loaded
+//                   if any, back from the bfcache, and on every change; partial: the last shared read failed, so earlier
+//                   entries of other workers may be missing and the tab must not keepalive from it)
+//                 { outboxStored: OutboxEntry }  (the server stored one; the list without it follows)
 import {
   BROWSER_LINK_PATH,
   BROWSER_LINK_VERSION,
@@ -46,6 +57,7 @@ import {
   type FallbackReason,
   type EventStreamChannel,
 } from "./event-stream-protocol";
+import type { LocalOutboxEntry } from "./event-stream";
 import { LINK_LIMITS, LinkSender, Outbox, PartJoiner, queuedLine, SeqWindow, type Part } from "./hosts/link-protocol";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "./image-attachments";
 import { diagnosticStats } from "./transport-stats";
@@ -131,6 +143,8 @@ interface WorkerScope extends Port {
     onLine?: boolean;
   };
   location: { href: string };
+  /** Missing or refusing IndexedDB means an outbox add fails: the composer must keep the draft. */
+  indexedDB?: IDBFactory;
 }
 const scope = self as unknown as WorkerScope;
 
@@ -1025,7 +1039,10 @@ function checkSilence(): void {
  * Every wake but `hidden` and `init` may start a reconnect sample's outage (spec D6 `startAt`).
  */
 function wake(reason: string): void {
-  if (reason === "online" || reason === "network" || reason === "visible") retryAborts();
+  if (reason === "online" || reason === "network" || reason === "visible") {
+    retryAborts();
+    retryOutbox();
+  }
   const now = Date.now();
   const type = effectiveType();
   // Every tab forwards the same event: the first of a burst keeps the type from before it.
@@ -1658,11 +1675,297 @@ function diagnostics(): ConnectionDiagnostics {
   };
 }
 
+// ---- The message outbox's first leg (docs/specs/2026-11-04-message-outbox-design.md O2): a message is committed to
+// IndexedDB before the tab's composer clears, then goes as `outbox_add` over the current transport until the server
+// has stored it. Each session's entries go one at a time, oldest first: the server queues them in arrival order. ----
+
+const OUTBOX_DB = "omp-web-outbox";
+const OUTBOX_STORE = "entries";
+/** The server keeps delivered ids 8 days: an older entry is never sent again, or a resend could deliver it twice. */
+const OUTBOX_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+interface OutboxItem {
+  entry: LocalOutboxEntry;
+  /** An attempt is out: its answer decides what comes next. */
+  inFlight: boolean;
+  retryTimer: Timer | undefined;
+  /** The next transient failure's delay: RECONNECT_MIN_MS doubling to RECONNECT_MAX_MS, reset by a wake. */
+  retryMs: number;
+}
+
+/** Every entry this browser holds, by id. */
+const outboxItems = new Map<string, OutboxItem>();
+/** One shared-store head read per session at a time, including while several local entries commit. */
+const outboxReading = new Set<string>();
+const outboxDropping = new Set<string>();
+/** A session whose shared-list read failed reads again after this delay (1 s doubling to 30 s): no send goes before it. */
+const outboxReadRetry = new Map<string, { timer: Timer | undefined; ms: number }>();
+/** The last read of the shared list failed: this worker's list may miss other workers' earlier entries. */
+let outboxPartial = false;
+const outboxDb = openOutboxDb();
+/** The stored entries are loaded (and sent): every tab's outbox op waits for it, so none races them. */
+const outboxReady = outboxDb.then(loadOutbox);
+
+/** null where IndexedDB is missing or refuses: adds must fail without a durable store. */
+function openOutboxDb(): Promise<IDBDatabase | null> {
+  return new Promise((resolve) => {
+    const factory = scope.indexedDB;
+    if (!factory) return resolve(null);
+    try {
+      const request = factory.open(OUTBOX_DB, 1);
+      request.onupgradeneeded = () => request.result.createObjectStore(OUTBOX_STORE, { keyPath: "id" });
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/** A failed read must not let a private worker's incomplete snapshot choose which message goes first. */
+function readOutbox(db: IDBDatabase | null): Promise<LocalOutboxEntry[] | null> {
+  return new Promise((resolve) => {
+    if (!db) return resolve(null);
+    try {
+      const transaction = db.transaction(OUTBOX_STORE);
+      const request = transaction.objectStore(OUTBOX_STORE).getAll();
+      transaction.oncomplete = () => resolve(request.result);
+      transaction.onerror = transaction.onabort = request.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/** What an earlier worker (or tab) left: every unsent entry goes again. */
+async function loadOutbox(db: IDBDatabase | null): Promise<boolean> {
+  const stored = await readOutbox(db);
+  if (!stored) return false;
+  for (const entry of stored) outboxItems.set(entry.id, { entry, inFlight: false, retryTimer: undefined, retryMs: RECONNECT_MIN_MS });
+  await Promise.all([...new Set(stored.map((entry) => entry.sessionId))].map((sessionId) => sendOutbox(sessionId)));
+  return true;
+}
+
+/** True only once a write commits: a quota error or abort must not clear the composer's draft. */
+async function writeOutbox(change: (store: IDBObjectStore) => void): Promise<boolean> {
+  const db = await outboxDb;
+  if (!db) return false;
+  return await new Promise<boolean>((resolve) => {
+    try {
+      const transaction = db.transaction(OUTBOX_STORE, "readwrite");
+      transaction.oncomplete = () => resolve(true);
+      transaction.onerror = transaction.onabort = () => resolve(false);
+      change(transaction.objectStore(OUTBOX_STORE));
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+/** Every entry, in submission order. */
+function outboxList(): LocalOutboxEntry[] {
+  return [...outboxItems.values()].map((item) => item.entry).sort((a, b) => a.createdAt - b.createdAt);
+}
+
+function broadcastOutbox(): void {
+  const list = outboxList();
+  for (const client of clients) post(client, outboxPartial ? { outbox: list, partial: true } : { outbox: list });
+}
+
+/** A tab's list once loaded. An empty one only when `always`: a tab back from the bfcache may still show gone entries. */
+function tellOutbox(client: Client, always: boolean): void {
+  void outboxReady.then((loaded) => {
+    if (loaded && (always || outboxItems.size > 0)) post(client, outboxPartial ? { outbox: outboxList(), partial: true } : { outbox: outboxList() });
+  });
+}
+
+function addOutbox(client: Client, n: number, entry: LocalOutboxEntry): void {
+  void outboxReady.then(async (loaded) => {
+    const item: OutboxItem = { entry: { ...entry, state: "sending" }, inFlight: false, retryTimer: undefined, retryMs: RECONNECT_MIN_MS };
+    if (!loaded || !(await writeOutbox((store) => store.put(item.entry)))) {
+      post(client, { outboxAdded: n, error: "The message could not be saved to this browser. Send it again." });
+      return;
+    }
+    // Committed: the entry is accepted whatever follows, or a resend from the composer would duplicate it under a new id.
+    outboxItems.set(item.entry.id, item);
+    // Include earlier entries from every worker before the tab can clear its composer or run pagehide keepalives; a failed
+    // read only delays the send (sendOutbox reads again before any network attempt).
+    await refreshOutbox();
+    broadcastOutbox();
+    post(client, { outboxAdded: n });
+    sendOutbox(item.entry.sessionId);
+  });
+}
+
+function dropOutbox(client: Client, n: number, id: string): void {
+  void outboxReady.then(async (loaded) => {
+    const item = outboxItems.get(id);
+    outboxDropping.add(id);
+    const removed = loaded && await writeOutbox((store) => store.delete(id));
+    outboxDropping.delete(id);
+    if (!removed) {
+      post(client, { outboxDropped: n, error: "The message could not be removed from this browser. Try again." });
+      return;
+    }
+    clearTimeout(item?.retryTimer);
+    outboxItems.delete(id);
+    post(client, { outboxDropped: n });
+    broadcastOutbox();
+    if (item) sendOutbox(item.entry.sessionId);
+  });
+}
+
+/** Refresh the whole shared list before exposing an add or choosing a session head; null means the read failed. */
+async function refreshOutbox(): Promise<boolean | null> {
+  const entries = await readOutbox(await outboxDb);
+  if (!entries) {
+    outboxPartial = true;
+    return null;
+  }
+  const ids = new Set(entries.map((entry) => entry.id));
+  // Back to a complete view: the tabs hear it even when no entry changed.
+  let changed = outboxPartial;
+  outboxPartial = false;
+  for (const [id, item] of outboxItems) {
+    if (ids.has(id)) continue;
+    clearTimeout(item.retryTimer);
+    outboxItems.delete(id);
+    changed = true;
+  }
+  for (const entry of entries) {
+    const item = outboxItems.get(entry.id);
+    if (!item) {
+      outboxItems.set(entry.id, { entry, inFlight: false, retryTimer: undefined, retryMs: RECONNECT_MIN_MS });
+      changed = true;
+    } else if (item.entry.state !== entry.state || item.entry.error !== entry.error) {
+      item.entry = entry;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/** Every attempt reads the shared store: dedicated workers and old/new SharedWorkers must agree on the session head. */
+async function sendOutbox(sessionId: string): Promise<void> {
+  if (outboxReading.has(sessionId)) return;
+  outboxReading.add(sessionId);
+  const changed = await refreshOutbox();
+  outboxReading.delete(sessionId);
+  if (changed === null) {
+    const retry = outboxReadRetry.get(sessionId) ?? { timer: undefined, ms: RECONNECT_MIN_MS };
+    outboxReadRetry.set(sessionId, retry);
+    if (retry.timer !== undefined) return;
+    retry.timer = setTimeout(() => {
+      retry.timer = undefined;
+      sendOutbox(sessionId);
+    }, retry.ms);
+    retry.ms = Math.min(retry.ms * 2, RECONNECT_MAX_MS);
+    return;
+  }
+  clearTimeout(outboxReadRetry.get(sessionId)?.timer);
+  outboxReadRetry.delete(sessionId);
+  if (changed) broadcastOutbox();
+  const head = outboxList().find((entry) => entry.sessionId === sessionId && entry.state === "sending");
+  const item = head && outboxItems.get(head.id);
+  if (!item || item.inFlight || item.retryTimer !== undefined || outboxDropping.has(item.entry.id)) return;
+  if (Date.now() - item.entry.createdAt > OUTBOX_MAX_AGE_MS) return failOutbox(item, "Not sent within 7 days.");
+  if (typeof item.entry.scope !== "string" || !item.entry.scope) return failOutbox(item, "This message has no saved installation or sign-in scope and cannot be sent.");
+  item.inFlight = true;
+  const { id, scope, advisor, mode, message, images, uploads } = item.entry;
+  const body = JSON.stringify({ type: "outbox_add", id, scope, mode, message, images, uploads });
+  // A tab of the worker's own (not in `clients`): the command takes the current transport as a tab's would.
+  const port: Port = {
+    onmessage: null,
+    postMessage(answer) {
+      const { http, status, body: reply } = answer as { http?: true; status: number; body: unknown };
+      if (!http) return outboxAnswer(item, status, reply);
+      // A half-open POST must not block this session forever; include the body read and allow 2 KB/s for its uplink.
+      withDeadline(40_000 + Math.ceil(body.length / 2), async (signal) => {
+        const response = await fetch(`/api/agent/${encodeURIComponent(sessionId)}${advisor === true ? "?advisor=1" : ""}`, { method: "POST", headers: { "Content-Type": "application/json" }, body, signal });
+        const reply = await response.json().catch((error) => {
+          if (signal.aborted) throw error;
+          return null;
+        });
+        return { status: response.status, body: reply };
+      }).then(
+        ({ status, body }) => outboxAnswer(item, status, body),
+        () => outboxAnswer(item, 0, null),
+      );
+    },
+  };
+  // A fresh request id per attempt; the server dedupes outbox_add by the entry's id.
+  const req = Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
+  queueCommand({ port, streams: new Map(), visible: false }, { n: 0, req, sessionId, advisor: advisor === true, body, type: "outbox_add" });
+}
+
+/**
+ * 2xx: stored, gone from here. No answer, 401, 408, 429 or a 5xx (the worker's own 503s too): again after the entry's
+ * delay. Any other refusal is final (O6): "failed" until a tab drops it, and the session's next entry goes.
+ */
+async function outboxAnswer(item: OutboxItem, status: number, body: unknown): Promise<void> {
+  const { id, sessionId } = item.entry;
+  if (outboxItems.get(id) !== item) return;
+  const reply = (body ?? {}) as { data?: { entry?: unknown }; error?: unknown };
+  if (status >= 200 && status < 300) {
+    if (!(await writeOutbox((store) => store.delete(id)))) return outboxAnswer(item, 0, null);
+    outboxItems.delete(id);
+    if (reply.data?.entry) for (const client of clients) post(client, { outboxStored: reply.data.entry });
+  } else if (status === 0 || status === 401 || status === 408 || status === 429 || status >= 500) {
+    item.inFlight = false;
+    item.retryTimer = setTimeout(() => {
+      item.retryTimer = undefined;
+      sendOutbox(sessionId);
+    }, item.retryMs);
+    item.retryMs = Math.min(item.retryMs * 2, RECONNECT_MAX_MS);
+    return;
+  } else {
+    return failOutbox(item, typeof reply.error === "string" ? reply.error : `HTTP ${status}`);
+  }
+  broadcastOutbox();
+  sendOutbox(sessionId);
+}
+
+/** Final: "failed" until a tab drops it, and the session's next entry goes. Written only over a row still "sending" in
+ * the same transaction: another worker (or the service worker) may have had a 200 and deleted it meanwhile. */
+async function failOutbox(item: OutboxItem, error: string): Promise<void> {
+  item.inFlight = true;
+  const { id, sessionId } = item.entry;
+  const failed: LocalOutboxEntry = { ...item.entry, state: "failed", error };
+  const read: { stored?: LocalOutboxEntry } = {};
+  const committed = await writeOutbox((store) => {
+    const request = store.get(id);
+    request.onsuccess = () => {
+      read.stored = request.result as LocalOutboxEntry | undefined;
+      if (read.stored?.state === "sending") store.put(failed);
+    };
+  });
+  if (!committed) return outboxAnswer(item, 0, null);
+  item.inFlight = false;
+  if (outboxItems.get(id) !== item) return;
+  if (!read.stored) {
+    clearTimeout(item.retryTimer);
+    outboxItems.delete(id);
+  } else item.entry = read.stored.state === "sending" ? failed : read.stored;
+  broadcastOutbox();
+  sendOutbox(sessionId);
+}
+
+/** The network or the page is back: every waiting entry goes again now, from the shortest delay. */
+function retryOutbox(): void {
+  for (const item of outboxItems.values()) {
+    clearTimeout(item.retryTimer);
+    item.retryTimer = undefined;
+    item.retryMs = RECONNECT_MIN_MS;
+  }
+  for (const item of [...outboxItems.values()]) sendOutbox(item.entry.sessionId);
+}
+
 function attach(port: Port): void {
   const client: Client = { port, streams: new Map(), visible: false };
   clients.add(client);
   // Tabs assume SSE until told otherwise.
   if (mode !== "sse") post(client, { transport: mode });
+  tellOutbox(client, false);
   port.onmessage = (event) => {
     const message = event.data;
     if (!message || typeof message !== "object") return;
@@ -1672,6 +1975,7 @@ function attach(port: Port): void {
     if (data.op !== "bye" && !clients.has(client)) {
       clients.add(client);
       post(client, { transport: mode });
+      tellOutbox(client, true);
     }
     switch (data.op) {
       case "open":
@@ -1710,6 +2014,12 @@ function attach(port: Port): void {
       }
       case "up_abort":
         abortUpload(String(data.id), typeof data.host === "string" ? data.host : undefined);
+        break;
+      case "outbox_add":
+        addOutbox(client, Number(data.n), data.entry as LocalOutboxEntry);
+        break;
+      case "outbox_drop":
+        dropOutbox(client, Number(data.n), String(data.id));
         break;
       case "lock":
         // MessagePort has no close event. The tab holds this lock for its

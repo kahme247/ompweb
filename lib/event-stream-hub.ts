@@ -4,7 +4,8 @@ import { authorizeFileAccess } from "./file-authorization";
 import { filePathApiSegments } from "./file-paths";
 import { hostsSnapshot, onHostsChange } from "./hosts/hub";
 import { attachNotificationClient } from "./notification-hub";
-import { getExitedRpcSessions, getRpcSession, getRunningRpcSessions, subscribeHostToolCalls, subscribeRunningSessions } from "./rpc-manager";
+import { getExitedRpcSessions, getRpcSession, getRunningRpcSessions, subscribeHostToolCalls, subscribeRunningSessions, type AgentSessionWrapper } from "./rpc-manager";
+import { onOutboxChange, outboxEntries, outboxSettledIds } from "./message-outbox";
 import { subscribeSessionFileChanges } from "./session-watcher";
 import {
   MUX_CONTROL_EVENT,
@@ -405,20 +406,43 @@ function openHostsChannel(handle: SubscriptionHandle): SubscribeResult {
   return SUBSCRIBED;
 }
 
-// Agent events of one live omp wrapper.
+// Agent events of one live omp wrapper, and the session's held messages (`outbox_update`, lib/message-outbox.ts).
 function openSessionChannel(sessionId: string, handle: SubscriptionHandle): SubscribeResult {
   // Observer-only: opening a saved session must not create another omp
   // process for a terminal-owned session. Explicit commands use
   // POST /api/agent/[id], which starts the wrapper before this attaches.
   const existing = getRpcSession(sessionId);
-  const session = existing?.isAlive() ? existing : undefined;
-  if (!session) return { ok: false, status: 409, error: "Session is not managed by omp-web", code: "session_not_managed" };
+  let session = existing?.isAlive() ? existing : undefined;
+  // Held messages show before omp runs (a host offline): the channel attaches to the wrapper the dispatcher starts.
+  if (!session && outboxEntries(sessionId).length === 0) {
+    return { ok: false, status: 409, error: "Session is not managed by omp-web", code: "session_not_managed" };
+  }
 
   handle.open();
-  // onEvent can synchronously replay pending UI requests. Subscribe before
-  // sampling the cursor/announcing readiness so catch-up has no event gap.
-  handle.setDetach(session.onEvent((event) => handle.send(event)));
-  handle.send({ type: "connected", sessionId, web: session.getStreamSnapshot().cursor });
+  let detachSession = () => {};
+  const attach = (live: AgentSessionWrapper) => {
+    // onEvent can synchronously replay pending UI requests. Subscribe before
+    // sampling the cursor/announcing readiness so catch-up has no event gap.
+    detachSession = live.onEvent((event) => handle.send(event));
+    handle.send({ type: "connected", sessionId, web: live.getStreamSnapshot().cursor });
+  };
+  if (session) attach(session);
+  const detachOutbox = onOutboxChange(sessionId, (entries) => {
+    const existing = getRpcSession(sessionId);
+    const live = existing?.isAlive() ? existing : undefined;
+    if (live !== session) {
+      detachSession();
+      detachSession = () => {};
+      session = live;
+      if (live) attach(live);
+    }
+    handle.send({ type: "outbox_update", entries, settledIds: outboxSettledIds(sessionId) });
+  });
+  handle.setDetach(() => {
+    detachOutbox();
+    detachSession();
+  });
+  if (handle.active) handle.send({ type: "outbox_update", entries: outboxEntries(sessionId), settledIds: outboxSettledIds(sessionId) });
   return SUBSCRIBED;
 }
 

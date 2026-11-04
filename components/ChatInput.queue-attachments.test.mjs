@@ -78,7 +78,6 @@ async function renderWithAttachments({ queued = true, queueCallbacks = true, ...
     onAbort: record("onAbort"),
     onSteer: queueCallbacks ? record("onSteer") : undefined,
     onFollowUp: queueCallbacks ? record("onFollowUp") : undefined,
-    onPromptWithStreamingBehavior: queueCallbacks ? record("onPromptWithStreamingBehavior") : undefined,
     ...props,
   };
   const view = render(React.createElement(ChatInput, inputProps));
@@ -165,21 +164,66 @@ test("a queued web slash command is expanded and keeps the attachments", async (
   await user.keyboard("{Enter}");
   await waitFor(() => assert.equal(calls.length, 1));
   delete window.HTMLElement.prototype.scrollIntoView;
-  assert.equal(calls[0].name, "onPromptWithStreamingBehavior");
+  assert.equal(calls[0].name, "onFollowUp", "a slash command is held like any follow-up; the server sends it as a prompt");
   assertQueuedWithAttachments(calls[0], expandWebSlashCommand("/goal ship it").prompt);
 });
 
-test("a refused follow-up goes back whole to its draft, ahead of what was typed meanwhile", async () => {
+test("a queued message stays in the composer until the outbox has it, and stays whole when refused", async () => {
   let refuse;
   const calls = await renderRunningWithAttachments({ queued: new Promise((resolve) => { refuse = () => resolve(false); }) });
   fireEvent.click(screen.getByRole("button", { name: /queue/i }));
   await waitFor(() => assert.equal(calls.length, 1));
-  fireEvent.change(screen.getByRole("textbox"), { target: { value: "typed meanwhile" } });
+  assert.deepEqual(getDraft(KEY)?.images, [{ data: PNG, mimeType: "image/png" }], "not cleared before it is stored");
+  fireEvent.click(screen.getByRole("button", { name: /queue/i }));
+  assert.equal(calls.length, 1, "a second click while it is being stored sends nothing");
   await act(async () => { refuse(); });
-  await waitFor(() => assert.deepEqual(getDraft(KEY)?.images, [{ data: PNG, mimeType: "image/png" }]));
-  assert.equal(getDraft(KEY)?.value, `${calls[0].message}\n\ntyped meanwhile`, "the text, file contents included, comes back too");
-  assert.equal(screen.getByRole("textbox").value, `${calls[0].message}\n\ntyped meanwhile`);
+  assert.deepEqual(getDraft(KEY)?.images, [{ data: PNG, mimeType: "image/png" }], "a refusal leaves text and attachments in place");
+  assert.equal(getDraft(KEY)?.files.length, 1);
 });
+
+test("a queued message is not cleared once stored if the composer changed meanwhile", async () => {
+  let store;
+  const calls = await renderRunningWithAttachments({ queued: new Promise((resolve) => { store = () => resolve(true); }) });
+  fireEvent.click(screen.getByRole("button", { name: /queue/i }));
+  await waitFor(() => assert.equal(calls.length, 1));
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "typed meanwhile" } });
+  await act(async () => { store(); });
+  assert.equal(screen.getByRole("textbox").value, "typed meanwhile");
+});
+
+test("an outbox commit after unmount cannot clear a remounted composer's new text or attachments", async () => {
+  let store;
+  const calls = await renderRunningWithAttachments({ queued: new Promise((resolve) => { store = () => resolve(true); }) });
+  fireEvent.click(screen.getByRole("button", { name: /queue/i }));
+  await waitFor(() => assert.equal(calls.length, 1));
+  cleanup();
+  render(React.createElement(ChatInput, { draftKey: KEY, outbox: true, isStreaming: false, onAbort() {}, onSend: async () => ({ status: "accepted" }) }));
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "new draft after remount" } });
+  await act(async () => { store(); });
+  assert.equal(screen.getByRole("textbox").value, "new draft after remount");
+  assert.equal(getDraft(KEY)?.value, "new draft after remount");
+  assert.equal(getDraft(KEY)?.images.length, 1);
+  assert.equal(getDraft(KEY)?.files.length, 1);
+});
+
+for (const stored of [true, false]) {
+  test(`an idle Send through the outbox clears only once ${stored ? "stored" : "refused: never"}`, async () => {
+    let answer;
+    const user = userEvent.setup();
+    const calls = await renderRunningWithAttachments({ isStreaming: false, outbox: true, queued: new Promise((resolve) => { answer = resolve; }) });
+    await user.type(screen.getByRole("textbox"), "look at this");
+    await user.keyboard("{Enter}");
+    await waitFor(() => assert.equal(calls.length, 1));
+    assert.equal(calls[0].name, "onSend");
+    assert.equal(getDraft(KEY)?.images.length, 1, "kept until the outbox has it");
+    await act(async () => { answer(stored); });
+    if (stored) await waitFor(() => assert.equal(getDraft(KEY), null));
+    else {
+      assert.equal(screen.getByRole("textbox").value, "look at this");
+      assert.equal(getDraft(KEY)?.images.length, 1);
+    }
+  });
+}
 
 for (const { label, fill, oversized } of [
   { label: "sendable composed request", fill: "x", oversized: false },
@@ -1035,3 +1079,68 @@ for (const holdUpload of [false, true]) {
     await waitFor(() => assert.equal(getDraft(targetKey), null));
   });
 }
+
+test("a second Enter must not invoke a pending slash builtin twice; success clears unchanged text", async (t) => {
+  override(window.HTMLElement.prototype, "scrollIntoView", () => {});
+  let finish;
+  const pending = new Promise((resolve) => { finish = resolve; });
+  t.after(async () => { await act(async () => { finish({ handled: true }); }); });
+  const builtinCalls = [];
+  const user = userEvent.setup();
+  render(React.createElement(ChatInput, {
+    draftKey: KEY,
+    isStreaming: false,
+    onAbort() {},
+    onSend: async () => ({ status: "accepted" }),
+    onBuiltinCommand: (message) => {
+      builtinCalls.push(message);
+      return pending;
+    },
+  }));
+  const textbox = screen.getByRole("textbox");
+  await user.type(textbox, "/goal ship it");
+  await user.keyboard("{Enter}");
+  await waitFor(() => assert.equal(builtinCalls.length, 1));
+  assert.equal(textbox.value, "/goal ship it", "the builtin has not completed");
+  await user.keyboard("{Enter}");
+  assert.deepEqual(builtinCalls, ["/goal ship it"], "repeated Enter must not execute the pending builtin again");
+  await act(async () => { finish({ handled: true }); });
+  await waitFor(() => assert.equal(textbox.value, ""));
+  assert.equal(getDraft(KEY), null, "success clears the unchanged builtin draft");
+});
+
+test("a completed slash builtin must not erase an attachment added while its callback was pending", async (t) => {
+  override(window.HTMLElement.prototype, "scrollIntoView", () => {});
+  let finish;
+  const pending = new Promise((resolve) => { finish = resolve; });
+  t.after(async () => { await act(async () => { finish({ handled: true }); }); });
+  const builtinCalls = [];
+  const ref = React.createRef();
+  const user = userEvent.setup();
+  render(React.createElement(ChatInput, {
+    ref,
+    draftKey: KEY,
+    isStreaming: false,
+    onAbort() {},
+    onSend: async () => ({ status: "accepted" }),
+    onBuiltinCommand: (message) => {
+      builtinCalls.push(message);
+      return pending;
+    },
+  }));
+  const textbox = screen.getByRole("textbox");
+  await user.type(textbox, "/goal keep this draft");
+  await user.keyboard("{Enter}");
+  await waitFor(() => assert.deepEqual(builtinCalls, ["/goal keep this draft"]));
+  await act(async () => {
+    ref.current.addFiles([
+      new File(["added while pending"], "pending.txt", { type: "text/plain" }),
+    ]);
+  });
+  await waitFor(() => assert.equal(getDraft(KEY)?.files[0]?.name, "pending.txt"));
+  const changedDraft = getDraft(KEY);
+  assert.equal(changedDraft.files[0].content, "added while pending");
+  await act(async () => { finish({ handled: true }); });
+  assert.equal(textbox.value, "/goal keep this draft", "an attachment change preserves the composer text too");
+  assert.deepEqual(getDraft(KEY), changedDraft, "builtin completion must not erase the newly attached file");
+});

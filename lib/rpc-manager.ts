@@ -1433,6 +1433,13 @@ export class AgentSessionWrapper {
         // notifyRunningChange apply to their listener sets.
       }
     }
+    for (const tap of globalThis.__ompFrameTaps ?? []) {
+      try {
+        tap(this, event as AgentEvent);
+      } catch {
+        // Same isolation as the listeners above.
+      }
+    }
   }
 
   private sessionFileSignalTimer: NodeJS.Timeout | null = null;
@@ -2139,6 +2146,7 @@ export class AgentSessionWrapper {
             this.awaitingAgentStart = true;
             this.awaitingAgentStartDeadline = Date.now() + AWAITING_AGENT_START_TIMEOUT_MS;
           }
+          if (ack?.agentInvoked === false) return ack;
         } catch (error) {
           this.promptRunning = false;
           this.awaitingAgentStart = false;
@@ -2504,6 +2512,7 @@ export class AgentSessionWrapper {
     if (!this._alive) return;
     console.info("[omp-web] session-dispose", JSON.stringify({ sessionId: this._sessionId, reason, running: this.isRunning(), pendingDialogs: this.pendingUiRequests.size, at: new Date().toISOString(), caller: new Error().stack?.split("\n").slice(2, 5).map((line) => line.trim()) }));
     this._alive = false;
+    this.emit({ type: "process_exit", reason });
     this.streaming = false;
     this.promptRunning = false;
     this.compacting = false;
@@ -2582,6 +2591,7 @@ declare global {
   var __ompRunningListeners: Set<(update: RunningSessionUpdate) => void> | undefined;
   var __ompHostToolListeners: Set<(call: CrossSessionHostToolCall) => void> | undefined;
   var __ompExitedSessions: Map<string, ExitedRpcSession> | undefined;
+  var __ompFrameTaps: Set<(wrapper: AgentSessionWrapper, event: AgentEvent) => void> | undefined;
 }
 
 function getExitedMap(): Map<string, ExitedRpcSession> {
@@ -2685,6 +2695,14 @@ export function subscribeRunningSessions(listener: (update: RunningSessionUpdate
   const listeners = getRunningListeners();
   listeners.add(listener);
   return () => { listeners.delete(listener); };
+}
+
+/** See every wrapper's frames after its listeners, without counting as a subscriber (the reapers ignore it):
+ * server bookkeeping such as the message outbox's late hand-off. */
+export function tapSessionFrames(tap: (wrapper: AgentSessionWrapper, event: AgentEvent) => void): () => void {
+  const taps = (globalThis.__ompFrameTaps ??= new Set());
+  taps.add(tap);
+  return () => { taps.delete(tap); };
 }
 
 // ----------------------------------------------------------------------------

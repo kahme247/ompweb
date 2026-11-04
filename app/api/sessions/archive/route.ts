@@ -1,6 +1,7 @@
 import { apiErrorResponse } from "@/lib/api-utils";
 import { listArchivedSessions, restoreArchivedSession } from "@/lib/omp/archive";
 import { invalidateLocalSessionLists } from "@/lib/hosts/session-index";
+import { pumpOutbox } from "@/lib/message-outbox";
 import { invalidateSessionListCache } from "@/lib/session-reader";
 import type { ArchivedSessionInfo } from "@/lib/types";
 
@@ -34,6 +35,8 @@ export async function POST(req: Request) {
     const sessionId = restoreArchivedSession(body.key);
     invalidateSessionListCache();
     invalidateLocalSessionLists();
+    // Messages held while it was archived go now (spec O6).
+    pumpOutbox(sessionId);
     return Response.json({ ok: true, sessionId });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

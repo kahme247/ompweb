@@ -5,11 +5,27 @@ import React from "react";
 const { act, cleanup, fireEvent, render, waitFor } = await import("@testing-library/react/pure.js");
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { MessageView, SafeMarkdownBody, TaskResultPanel, isInterruptedMessage } = await import("./MessageView.tsx");
+const { HeldMessageView, MessageView, SafeMarkdownBody, TaskResultPanel, isInterruptedMessage } = await import("./MessageView.tsx");
 const { CodeBlock } = await import("./MermaidBlock.tsx");
 const { buildSessionContext } = await import("../lib/session-reader.ts");
 const { collectToolResults, planTranscriptRows } = await import("../lib/chat-transcript-plan.ts");
 afterEach(cleanup);
+
+test("held messages name every delivery leg and only offer Delete before dispatch", () => {
+  const base = { id: "held", mode: "prompt", message: "Keep this safe.", createdAt: Date.now(), local: false };
+  for (const [state, label, actions, spinner] of [
+    ["sending", "Sending…", false, true],
+    ["waiting_host", "Waiting for Build box", true, false],
+    ["delivering", "Delivering…", false, true],
+    ["failed", "Not sent", true, false],
+  ]) {
+    const html = renderToStaticMarkup(React.createElement(HeldMessageView, { held: { ...base, state }, hostLabel: "Build box", onDelete() {} }));
+    assert.ok(html.includes(label), state);
+    assert.equal(html.includes("Delete this unsent message"), actions, state);
+    assert.equal(html.includes("<select"), false, state);
+    assert.equal(html.includes("activity-row-spinner"), spinner, state);
+  }
+});
 
 test("sent messages without timestamps or branch metadata still offer copy", () => {
   const html = renderToStaticMarkup(React.createElement(MessageView, {
