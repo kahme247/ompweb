@@ -1407,17 +1407,17 @@ export class AgentSessionWrapper {
       case "tool_execution_start":
       case "tool_execution_update":
         if (typeof event.toolCallId !== "string") break;
-        // A start is always a new execution, even of a reused id; only a returned call's updates are stale.
-        // shortcut: a wrapper adopted after a server restart never saw the ends and still keeps those updates; filter against committed results if adopted chats show them.
+        // A start is always a new execution, even of a reused id. A returned call's updates are stale: its row
+        // shows the committed result, so tabs and the snapshot both drop them (a tab would show it running again).
+        // shortcut: a wrapper adopted after a server restart never saw the ends and still passes those updates; filter against committed results if adopted chats show them.
         if (event.type === "tool_execution_start") this.endedToolCalls.delete(event.toolCallId);
-        if (!this.endedToolCalls.has(event.toolCallId)) {
-          this.liveToolEvents.set(event.toolCallId, {
-            ...this.liveToolEvents.get(event.toolCallId),
-            ...event,
-            type: event.type,
-            toolCallId: event.toolCallId,
-          });
-        }
+        else if (this.endedToolCalls.has(event.toolCallId)) return;
+        this.liveToolEvents.set(event.toolCallId, {
+          ...this.liveToolEvents.get(event.toolCallId),
+          ...event,
+          type: event.type,
+          toolCallId: event.toolCallId,
+        });
         break;
       case "tool_execution_end":
         if (typeof event.toolCallId === "string") this.endTool(event.toolCallId);
