@@ -27,7 +27,7 @@ import { randomBytes } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import { crc32, deflateSync } from "node:zlib";
-import { percentile } from "./transport-metrics";
+import { percentile } from "../lib/transport-stats";
 
 const SMALL_EVERY_MS = 200;
 const SETTLE_MS = 70_000;

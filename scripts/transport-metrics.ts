@@ -4,6 +4,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { transportMetricsPath } from "../lib/transport-metrics";
+import { diff, eventMsOf, percentile, totalMsOf, transportMsOf, upMsOf } from "../lib/transport-stats";
 import { asNumber, asString } from "../lib/type-guards";
 
 export type SummaryRow = {
@@ -32,27 +33,7 @@ const LARGE_FRAME_BYTES = 64 * 1024;
 /** Printed under a report with link rows: what a `down` ackMs can include. */
 export const LINK_ACK_NOTE = "note: link down ackMs is a round trip; a v5 host acks within about 16 ms, a v4 host only with its next uplink frame (output, a result, or its pong within 15 s), so there a line that makes no output can wait up to 15 s.";
 
-/** Nearest-rank percentile. */
-export function percentile(values: number[], p: number): number | null {
-  if (values.length === 0) return null;
-  const sorted = [...values].sort((a, b) => a - b);
-  return sorted[Math.min(sorted.length, Math.max(1, Math.ceil((p / 100) * sorted.length))) - 1];
-}
-
 type Group = { section: string; transport: string; key: string; count: number; values: number[]; batches: number[] };
-
-const diff = (a: unknown, b: unknown) => {
-  const x = asNumber(a);
-  const y = asNumber(b);
-  return x === undefined || y === undefined ? undefined : x - y;
-};
-
-/** totalMs − serverMs: clock-free, and what the transport added to an action. */
-function transportMsOf(s: Sample): number | undefined {
-  const totalMs = diff(s.gotAt, s.sentAt);
-  const serverMs = diff(s.repliedAt, s.recvAt);
-  return totalMs !== undefined && serverMs !== undefined ? totalMs - serverMs : undefined;
-}
 
 /**
  * Spec D6 cross-session blocking, the same in every transport: behind at least LARGE_FRAME_BYTES of another session
@@ -167,10 +148,8 @@ export function summarize(samples: Sample[], options: SummaryOptions): SummaryRo
 
     if (s.metric === "action") {
       const type = asString(s.type);
-      const totalMs = diff(s.gotAt, s.sentAt);
-      const sentAt = asNumber(s.sentAt);
-      const offset = asNumber(s.offset);
-      const upMs = sentAt === undefined || offset === undefined ? undefined : diff(s.recvAt, sentAt + offset);
+      const totalMs = totalMsOf(s);
+      const upMs = upMsOf(s);
       const transportMs = transportMsOf(s);
       for (const [section, value] of [["action totalMs", totalMs], ["action transportMs", transportMs], ["action upMs", upMs]] as const) {
         addValue(section, transport, "all", value);
@@ -186,9 +165,7 @@ export function summarize(samples: Sample[], options: SummaryOptions): SummaryRo
       if ((asNumber(s.attempts) ?? 1) > 1) add("resend", transport, "attempts>1");
       if (s.deduped === true) add("deduped", transport, "deduped");
     } else if (s.metric === "event") {
-      const ms = diff(s.gotAt, s.at);
-      const offset = asNumber(s.offset);
-      const eventMs = ms === undefined || offset === undefined ? undefined : ms + offset;
+      const eventMs = eventMsOf(s);
       addValue("event ms", transport, `${asString(s.conn)} ${asString(s.channel)}`, eventMs);
       if (isolated) addValue("isolation event ms", transport, isolated, eventMs);
     } else if (s.metric === "reconnect") {

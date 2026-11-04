@@ -10,7 +10,7 @@ import { attachUploads, forgetUploads, takeUploads } from "@/lib/uploads";
 // the background (SSE connect, reconcile). Without a live process there is no
 // ghost text, no running side question and nothing to cancel, so the reply is
 // known without omp. Asking (`btw`) and opening the history start omp first.
-const NO_SPAWN_REPLIES: Record<string, unknown> = {
+export const NO_SPAWN_REPLIES: Record<string, unknown> = {
   predict_word: { suffix: null },
   predict_word_feedback: null,
   get_btw_history: { records: [] },
