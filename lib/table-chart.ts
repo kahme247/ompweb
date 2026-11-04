@@ -76,7 +76,7 @@ function textOf(node: Node): string {
 const INDEX_HEADER = /^(?:#|id|no\.?|index)$/i;
 const IDENTIFIER_HEADER = /^(?:#|id|no\.?|index|编号|번호|버전|version)$/i;
 
-/** One group per unit, in column order. The label is the first non-index column (column 0 if every column is one). */
+/** Groups share a unit and fit the palette. The label is the first non-index column (column 0 if every column is one). */
 export function chartGroupsFromRows(headers: string[], rows: string[][]): ChartGroup[] {
   if (headers.length < 2 || headers.length > 12 || rows.length < 2 || rows.length > 40) return [];
   const isIndex = (column: number) => INDEX_HEADER.test(headers[column].trim()) || rows.every((row) => !row[column]?.trim() || /^#?\d+$/.test(row[column].trim()));
@@ -92,10 +92,16 @@ export function chartGroupsFromRows(headers: string[], rows: string[][]): ChartG
     const [unit] = units;
     byUnit.set(unit, [...(byUnit.get(unit) || []), { column, values }]);
   }
-  return [...byUnit].map(([unit, members]) => {
-    const kept = rows.flatMap((row, r) => members.some((member) => member.values[r]) ? [{ label: row[label], values: members.map((member) => member.values[r]) }] : []);
-    const series = members.map(({ column }, i) => ({ column, header: headers[column] || String(column + 1), slot: i % SERIES_COLORS.length }));
-    return { unit, series, rows: kept, skipped: rows.length - kept.length };
+  return [...byUnit].flatMap(([unit, members]) => {
+    const groups: ChartGroup[] = [];
+    // Separate charts keep every legend unambiguous without repeating colours.
+    for (let start = 0; start < members.length; start += SERIES_COLORS.length) {
+      const batch = members.slice(start, start + SERIES_COLORS.length);
+      const kept = rows.flatMap((row, r) => batch.some((member) => member.values[r]) ? [{ label: row[label], values: batch.map((member) => member.values[r]) }] : []);
+      const series = batch.map(({ column }, slot) => ({ column, header: headers[column] || String(column + 1), slot }));
+      groups.push({ unit, series, rows: kept, skipped: rows.length - kept.length });
+    }
+    return groups;
   });
 }
 

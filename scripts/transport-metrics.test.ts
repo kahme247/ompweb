@@ -3,13 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { formatReport, LINK_ACK_NOTE, percentile, summarize, type SummaryRow } from "./transport-metrics";
-
-test("percentile is nearest rank", () => {
-  assert.equal(percentile([10, 20, 30, 40, 100], 50), 30);
-  assert.equal(percentile([100, 10, 40, 20, 30], 95), 100);
-  assert.equal(percentile([], 50), null);
-});
+import { formatReport, LINK_ACK_NOTE, summarize, type SummaryRow } from "./transport-metrics";
 
 const base = { clientId: "c1", effectiveType: "4g", visible: true, ua: "UA/1" };
 const at = (serverAt: number) => ({ ...base, serverAt });

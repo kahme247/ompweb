@@ -1,6 +1,6 @@
 "use client";
 
-import type { BrowserTransport, EventStreamChannel } from "./event-stream-protocol";
+import type { BrowserTransport, ConnectionDiagnostics, EventStreamChannel } from "./event-stream-protocol";
 
 export type { EventStreamChannel } from "./event-stream-protocol";
 
@@ -59,6 +59,11 @@ type CommandMessage = { cmd: number; http: true } | ({ cmd: number } & Omit<Comm
 /** The worker about an upload: progress (the bytes the host has), its failure, or `http` (SSE mode: the tab uploads it). */
 type UploadMessage = { up: string; received: number; done: boolean } | { up: string; error: { status: number; code: string; message: string } } | { up: string; http: true };
 
+type DiagnosticsMessage = { diag: number; data: ConnectionDiagnostics };
+
+/** A diagnostics poll the worker has not answered by then resolves null. */
+const DIAGNOSTICS_TIMEOUT_MS = 2000;
+
 type WakeReason = "init" | "visible" | "hidden" | "online" | "network";
 
 interface WorkerPort {
@@ -92,14 +97,16 @@ class Transport {
   private readonly streams = new Map<number, MultiplexedEventStream>();
   private readonly commands = new Map<number, (reply: CommandReply | null) => void>();
   private readonly uploads = new Map<string, (message: UploadMessage) => void>();
+  private readonly diagnostics = new Map<number, (data: ConnectionDiagnostics | null) => void>();
   mode: BrowserTransport = "sse";
 
   constructor(private readonly port: WorkerPort) {
     port.onmessage = (event) => {
-      const message = event.data as WorkerMessage | TransportMessage | CommandMessage | UploadMessage;
+      const message = event.data as WorkerMessage | TransportMessage | CommandMessage | UploadMessage | DiagnosticsMessage;
       if ("transport" in message) this.mode = message.transport;
       else if ("cmd" in message) this.answer(message);
       else if ("up" in message) this.uploads.get(message.up)?.(message);
+      else if ("diag" in message) this.diagnostics.get(message.diag)?.(message.data);
       else this.streams.get(message.id)?.receive(message);
     };
     this.holdLifetimeLock();
@@ -153,6 +160,20 @@ class Transport {
     const resolve = this.commands.get(cmd);
     this.commands.delete(cmd);
     resolve?.("http" in reply ? null : { ...reply, via: "ws" });
+  }
+
+  requestDiagnostics(): Promise<ConnectionDiagnostics | null> {
+    return new Promise((resolve) => {
+      const n = this.nextId++;
+      const done = (data: ConnectionDiagnostics | null) => {
+        clearTimeout(timer);
+        this.diagnostics.delete(n);
+        resolve(data);
+      };
+      const timer = setTimeout(() => done(null), DIAGNOSTICS_TIMEOUT_MS);
+      this.diagnostics.set(n, done);
+      this.port.postMessage({ op: "diag", n });
+    });
   }
 
   /** Hands the worker the File itself: it reads the bytes, so the tab holds none. `listener` hears until done, a
@@ -293,6 +314,11 @@ export function openEventStream(channel: EventStreamChannel): EventStream {
 /** Hands a transport sample (spec D6) to the worker, which tags and stores it; without a transport it is dropped. */
 export function recordTransportSample(sample: Record<string, unknown>): void {
   transport?.post({ op: "metric", sample });
+}
+
+/** The Connection tab's snapshot from the worker; null without a transport or when the worker does not answer. */
+export function requestConnectionDiagnostics(): Promise<ConnectionDiagnostics | null> {
+  return transport ? transport.requestDiagnostics() : Promise.resolve(null);
 }
 
 /** Sends an agent command over the worker's browser link (transport `ws`): null (or a promise of null, when the worker

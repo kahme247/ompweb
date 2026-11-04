@@ -42,6 +42,14 @@
   .table-auto-chart-label, .table-auto-chart-bars { grid-column: 1 / -1; }
   .table-auto-chart-axis > div { grid-column: 1; }
 }
+/* Chrome 111–116 supports container queries, but not subgrid. Fixed value columns keep the fallback axes aligned. */
+@supports not (grid-template-columns: subgrid) {
+  .table-auto-chart-rows, .table-auto-chart-rows > li { grid-template-columns: minmax(0, 1fr) minmax(60px, 1.5fr) 8rem; column-gap: 10px; }
+  .table-auto-chart-bars { grid-template-columns: minmax(60px, 1fr) 8rem; column-gap: 10px; }
+  @container tablechart (max-width: 520px) {
+    .table-auto-chart-rows, .table-auto-chart-rows > li, .table-auto-chart-bars { grid-template-columns: minmax(0, 1fr) 8rem; }
+  }
+}
 @source inline("data-font-size");
 @source inline("data-ui-scale");
 @source inline("data-touch-targets");
