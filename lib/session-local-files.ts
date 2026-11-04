@@ -2,7 +2,7 @@
 // and whether a path lies in it. The root is always the session's own (never the cwd, never the session on screen):
 // the id names the session, its owning host's metadata names the file, and `sessionLocalRoot` (omp's rule, shared with
 // composer uploads) names the directory.
-import { realpathSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { isPathWithinRoots, normalizeSlashes } from "./file-access";
 import { LOCAL_HOST_ID } from "./hosts/registry";
@@ -11,8 +11,8 @@ import { sessionLocalRoot } from "./hosts/uploads";
 import { getRpcSession } from "./rpc-manager";
 import { isValidSessionId } from "./session-file-references-core";
 
-export type SessionLocalFailure = { ok: false; status: 400 | 403 | 404 | 501; code: string; error: string };
-export type SessionLocalRoot = { ok: true; root: string } | SessionLocalFailure;
+type SessionLocalFailure = { ok: false; status: 403 | 404 | 501; code: string; error: string };
+type SessionLocalRoot = { ok: true; root: string } | SessionLocalFailure;
 
 const SESSION_NOT_FOUND: SessionLocalFailure = { ok: false, status: 404, code: "session_not_found", error: "Session not found" };
 
@@ -20,7 +20,7 @@ const SESSION_NOT_FOUND: SessionLocalFailure = { ok: false, status: 404, code: "
  * server reads only its own machine's files, and a path on the other machine must never be answered from here. A
  * live session's own file wins over the host's list, which lags a new session; 503 (thrown) while this machine's
  * daemon has never listed its sessions. */
-export async function sessionLocalRootFor(sessionId: string | null): Promise<SessionLocalRoot> {
+async function sessionLocalRootFor(sessionId: string | null): Promise<SessionLocalRoot> {
   if (!isValidSessionId(sessionId)) return SESSION_NOT_FOUND;
   const live = getRpcSession(sessionId);
   const running = live?.isAlive() ? live : undefined;
@@ -60,8 +60,9 @@ function resolvesOutside(root: string, target: string): boolean {
   }
 }
 
-/** Where `relative` (from `parseLocalUri`) lies in the session's local root. The file need not exist: a missing one
- * is the viewer's own not-found; a path that leaves the root, through `..` or a symlink, is refused. */
+/** Where `relative` (from `parseLocalUri`, which already refused `..` and absolute names) lies in the session's local
+ * root, for a file that is there: a missing one is 404 `file_not_found`, a path that resolves outside the root through
+ * a symlink (or cannot be shown not to) is refused. Never reads the file. */
 export async function resolveSessionLocalFile(
   sessionId: string,
   relative: string,
@@ -69,10 +70,16 @@ export async function resolveSessionLocalFile(
   const located = await sessionLocalRootFor(sessionId);
   if (!located.ok) return located;
   const target = path.resolve(located.root, relative);
-  if (!isPathWithinRoots(target, new Set([located.root]))) {
-    return { ok: false, status: 400, code: "invalid_local_uri", error: "local:// URL escapes the session's local directory" };
-  }
   if (resolvesOutside(located.root, target)) return { ok: false, status: 403, code: "access_denied", error: "Access denied" };
+  try {
+    statSync(target);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      return { ok: false, status: 404, code: "file_not_found", error: "File not found in this session's local:// directory" };
+    }
+    return { ok: false, status: 403, code: "access_denied", error: "Access denied" };
+  }
   return { ok: true, path: target };
 }
 

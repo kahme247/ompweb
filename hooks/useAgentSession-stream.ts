@@ -352,13 +352,14 @@ async function resolveLocalFile(sessionId: string | undefined, uri: string): Pro
  * Execute an omp-web host tool (open_url / notify / open_file) and return the
  * toolResult text. Shared by the session's own stream and by tabs answering
  * calls for a session they are not viewing. `sessionId` is the session the
- * call came from, which owns a `local://` file.
+ * call came from, which owns a `local://` file; required (undefined only when
+ * there is none), so a caller that forgets it fails the typecheck.
  */
 export async function runHostTool(
   toolName: string,
   args: Record<string, unknown>,
   handlers: HostToolHandlers,
-  sessionId?: string,
+  sessionId: string | undefined,
 ): Promise<{ text: string; isError: boolean }> {
   const str = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
   switch (toolName) {

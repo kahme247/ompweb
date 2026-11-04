@@ -49,6 +49,27 @@ export type FileAccessDecision =
 const ACCESS_DENIED: FileAccessDecision = { ok: false, status: 403, error: "Access denied", code: "access_denied" };
 
 /**
+ * The credential deny again, by what the path really is: a link named `notes.txt`
+ * (or a `local://` directory that is a link to the agent dir) that leads to
+ * `agent.db` is still the credential store. The config roots are compared by
+ * their own realpath too: `~/.omp/agent` is often a link itself.
+ */
+function resolvesToDeniedConfigFile(filePath: string): boolean {
+  const real = (candidate: string): string | null => {
+    try {
+      return normalizeSlashes(fs.realpathSync(candidate));
+    } catch {
+      return null;
+    }
+  };
+  const target = real(filePath);
+  if (target === null) return false;
+  const roots = getConfigAgentRoots();
+  const realRoots = roots.flatMap((root) => real(root) ?? []);
+  return isUnderConfigRoot(target, [...roots, ...realRoots]) && isConfigRootDeniedFile(target);
+}
+
+/**
  * The single allow-list gate for reading workspace files (`/api/files` and the
  * live file-watch channel): resolves the requested catch-all segments, then
  * admits the path when it is inside an allowed root, or — when
@@ -97,6 +118,7 @@ export async function authorizeFileAccess(
     return { ok: false, status: 404, error: "Not found", code: "file_not_found" };
   }
 
+  if (resolvesToDeniedConfigFile(filePath)) return ACCESS_DENIED;
   if (localRoot) {
     if (!isExistingPathWithinRoots(filePath, new Set([localRoot]))) return ACCESS_DENIED;
   } else if (!allowedBySessionReference && !isExistingFilePathAllowed(filePath, allowedRoots)) {
