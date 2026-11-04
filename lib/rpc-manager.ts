@@ -239,6 +239,141 @@ interface IdentityChangeOptions {
   keepOldId?: boolean;
 }
 
+/** No replacing frame after a successful prompt reply: expose uncertainty rather than leave it delivering. */
+export const HANDOFF_FALLBACK_MS = 2 * 60_000;
+type HandOff = { error?: string; mayHaveBeenSent?: boolean };
+export interface MessageReplacementWatch {
+  handOff(): Promise<HandOff>;
+  stop(): void;
+}
+const CHILD_EXITED: HandOff = { error: "omp exited before it showed the message", mayHaveBeenSent: true };
+
+function queueTexts(value: unknown): string[] {
+  if (!isRecord(value)) return [];
+  return [value.steering, value.followUp].flatMap((list) => Array.isArray(list) ? list.filter((text): text is string => typeof text === "string") : []);
+}
+
+function messageText(message: Record<string, unknown>): string {
+  if (typeof message.content === "string") return message.content;
+  return Array.isArray(message.content) ? message.content.flatMap((part) => isRecord(part) && part.type === "text" && typeof part.text === "string" ? [part.text] : []).join("") : "";
+}
+
+/** Current native skill echoes carry the original draft in details.prompt; older echoes retain native skill name and
+ * argument metadata. Only used by the active command watcher, never to settle an uncertain stored row. */
+function matchesNativeSkill(message: Record<string, unknown>, submitted: string): boolean {
+  if (message.role !== "custom" || message.customType !== "skill-prompt" || message.attribution !== "user") return false;
+  const details = isRecord(message.details) ? message.details : {};
+  if (typeof details.prompt === "string") return details.prompt.trim() === submitted.trim();
+  const invocation = /^\/skill:([^\s]+)(?:\s+([\s\S]*))?$/.exec(submitted.trim());
+  if (!invocation) return false;
+  const content = messageText(message);
+  const name = typeof details.name === "string" ? details.name : /User invoked the "([^"]+)" skill/.exec(content)?.[1];
+  const parts = content.split(/\nUser:\s*/);
+  const args = typeof details.args === "string" ? details.args : parts.length > 1 ? parts[parts.length - 1] : "";
+  return name === invocation[1] && args.trim() === (invocation[2] ?? "").trim();
+}
+
+/** Every mode requires both its command reply and a replacing frame. Baseline occurrence counts distinguish a new
+ * identical queue chip from a stale one; pre-existing identical messages must echo before this one can claim an echo.
+ * The command is shared with attachment preparation, so comparison uses the final text, never an empty prefix. */
+function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, unknown>, baseline: unknown, generation: number, competingPending: boolean, previousEntryIds?: string[]): MessageReplacementWatch {
+  const { promise, resolve } = Promise.withResolvers<HandOff>();
+  const ambiguous: HandOff = { error: "Another message was dispatched while this message's native replacement was being confirmed", mayHaveBeenSent: true };
+  const ownsWindow = () => !competingPending && wrapper.getMessageCommandGeneration() === generation + 1;
+  const initialQueue = queueTexts(baseline);
+  let priorQueue = initialQueue;
+  let echoDebt: number | undefined;
+  let seen = false;
+  let stopped = false;
+  let checkingExpansion = false;
+  const boundary = previousEntryIds ? new Set(previousEntryIds) : null;
+  const openedUserMessages = new Set<string>();
+  let timer: NodeJS.Timeout | undefined;
+  let expansionRetry: NodeJS.Timeout | undefined;
+  const expectedText = () => typeof command.message === "string" && command.message ? command.message : Array.isArray(command.images) && command.images.length ? "[Image]" : "";
+  const finish = (outcome: HandOff) => {
+    if (seen || stopped) return;
+    seen = true;
+    clearTimeout(expansionRetry);
+    // Every channel receives the replacement before the removal, even if this listener was registered first.
+    queueMicrotask(() => resolve(!outcome.error && !ownsWindow() ? ambiguous : outcome));
+  };
+  // Ordinary native templates don't echo their original slash token. While this idle claim is active, correlate its
+  // new native user lifecycle to the sole new persisted user entry beyond the pre-dispatch boundary; the caller still
+  // waits for THIS command's successful reply. Ambiguous/missing persisted context proves nothing.
+  const checkExpandedUser = async (message: Record<string, unknown>) => {
+    if (checkingExpansion || stopped || seen || !boundary || initialQueue.length || command.type !== "prompt"
+      || command.streamingBehavior || !expectedText().trimStart().startsWith("/")) return;
+    checkingExpansion = true;
+    clearTimeout(expansionRetry);
+    let retry = false;
+    try {
+      const context = await wrapper.withPendingCommand(() => wrapper.host.sessionOps.readContext(wrapper.sessionId, undefined, {
+        boundary: false, deferThinking: true, deferMedia: true, includePreCompaction: false, sync: null,
+      }));
+      if (!context.ok || !isRecord(context.value)) { retry = !context.ok && context.status >= 500; return; }
+      const { entryIds, messages } = context.value;
+      if (!Array.isArray(entryIds) || !Array.isArray(messages)) return;
+      const added = messages.filter((item, index) => typeof entryIds[index] === "string" && !boundary.has(entryIds[index])
+        && isRecord(item) && item.role === "user");
+      if (added.length === 1 && isRecord(added[0]) && messageText(added[0]) === messageText(message)) finish({});
+      // Native echo can precede the file flush. Re-read only this active candidate, never infer a missing entry.
+      retry = added.length === 0;
+    } catch {
+      // No post-dispatch state is guessed from a failed read; keep waiting for a proven replacement.
+      retry = true;
+    } finally {
+      checkingExpansion = false;
+      if (retry && !stopped && !seen) {
+        expansionRetry = setTimeout(() => { void checkExpandedUser(message); }, 100);
+        expansionRetry.unref?.();
+      }
+    }
+  };
+  const detach = wrapper.onEvent((event) => {
+    if (seen) return;
+    if (competingPending || wrapper.getMessageCommandGeneration() > generation + 1) { finish(ambiguous); return; }
+    if (!ownsWindow() && event.type !== "process_exit") return;
+    const text = expectedText();
+    if (echoDebt === undefined) echoDebt = initialQueue.filter((item) => item === text).length;
+    if (event.type === "message_start" && typeof event.messageId === "string" && isRecord(event.message) && event.message.role === "user") {
+      openedUserMessages.add(event.messageId);
+    } else if (event.type === "queue_update") {
+      const next = queueTexts(event);
+      const counts = new Map<string, number>();
+      for (const item of priorQueue) counts.set(item, (counts.get(item) ?? 0) + 1);
+      const added: string[] = [];
+      for (const item of next) {
+        const remaining = counts.get(item) ?? 0;
+        if (remaining) counts.set(item, remaining - 1);
+        else added.push(item);
+      }
+      if (text && (added.includes(text) || (command.type === "prompt" && text.trimStart().startsWith("/") && added.length === 1))) finish({});
+      priorQueue = next;
+    } else if (event.type === "message_end" && isRecord(event.message)
+      && (event.message.role === "user" || (event.message.role === "custom" && event.message.attribution === "user"))) {
+      if (text && (messageText(event.message) === text || matchesNativeSkill(event.message, text))) {
+        if (echoDebt > 0) echoDebt -= 1;
+        else finish({});
+      } else if (event.message.role === "user" && (typeof event.messageId !== "string" || openedUserMessages.has(event.messageId))) {
+        void checkExpandedUser(event.message);
+      }
+    } else if (event.type === "process_exit") finish(CHILD_EXITED);
+    else if (event.type === "prompt_error") finish({ error: typeof event.errorMessage === "string" ? event.errorMessage : "omp refused the message" });
+    else if (event.type === "prompt_result" && event.status === "error") finish({ error: isRecord(event.error) && typeof event.error.message === "string" ? event.error.message : "omp refused the message" });
+    else if (event.type === "agent_end" && event.isTerminal !== false && !wrapper.isAlive()) finish(CHILD_EXITED);
+  }, { internal: true });
+  return {
+    async handOff() {
+      if (!ownsWindow()) return ambiguous;
+      timer = setTimeout(() => finish({ error: "omp acknowledged this message but has not shown it yet", mayHaveBeenSent: true }), HANDOFF_FALLBACK_MS);
+      timer.unref?.();
+      const outcome = await promise;
+      return ownsWindow() ? outcome : ambiguous;
+    },
+    stop() { stopped = true; clearTimeout(timer); clearTimeout(expansionRetry); detach(); },
+  };
+}
 export class AgentSessionWrapper {
   private listeners: EventListener[] = [];
   private pendingUiRequests = new Map<string, UnsequencedAgentEvent>();
@@ -250,6 +385,12 @@ export class AgentSessionWrapper {
   private promptRunning = false;
   private promptDispatchPendingCount = 0;
   private historyMutationPendingCount = 0;
+  private messageCommandGeneration = 0;
+  private confirmedMessageCommandGeneration = 0;
+  private pendingMessageCommands = 0;
+  private nativeQueuedMessages: unknown = { steering: [], followUp: [] };
+  private readonly startedEmpty: boolean;
+  private messageReplacement: MessageReplacementWatch | null = null;
   private historyEditInFlight = false;
   private awaitingAgentStart = false;
   private awaitingAgentStartDeadline = 0;
@@ -306,6 +447,8 @@ export class AgentSessionWrapper {
   private _alive = true;
   /** Host tools the web UI registered via set_host_tools (agent-callable). */
   private hostToolNames: Set<string> = new Set();
+  /** Accepted browser definitions only: server tools follow the current enablement policy when a child is renewed. */
+  private registeredHostTools: Array<{ name?: unknown; [key: string]: unknown }> | null = null;
   /** Feeding an adopted child's open requests (see adopt): server agent tools there may already have run. */
   private replaying = false;
   /** Adopted, and no tab has registered host tools since: omp may call tools the
@@ -320,6 +463,7 @@ export class AgentSessionWrapper {
   private readonly internalListeners = new WeakSet<EventListener>();
   /** URI schemes the web UI registered via set_host_uri_schemes. */
   private hostUriSchemes: Map<string, { writable?: boolean }> = new Map();
+  private registeredHostUriSchemes: Array<{ scheme?: unknown; writable?: unknown; [key: string]: unknown }> | null = null;
   /** host_uri_request ids awaiting a host_uri_result from the browser. */
   private pendingHostUris: Map<string, UnsequencedAgentEvent> = new Map();
   /** Resolves once an in-flight destroyAndWait finishes; null when idle. Read
@@ -371,6 +515,7 @@ export class AgentSessionWrapper {
     this.recordedCwd = recordedCwd ?? null;
     this.advisorSpawned = advisorSpawned;
     this._sessionId = expectedSessionId;
+    this.startedEmpty = expectedSessionId === "";
     this.disconnectDestroyMs = disconnectDestroyMs;
     this.host = host;
     this.launchAdvisor = launchAdvisor;
@@ -693,6 +838,7 @@ export class AgentSessionWrapper {
   }
 
   private applyIdentity(state: RpcSessionState): void {
+    if (state.queuedMessages !== undefined) this.nativeQueuedMessages = state.queuedMessages;
     const oldId = this._sessionId;
     const identityChanged = Boolean(oldId) && (state.sessionId !== oldId || (state.sessionFile && state.sessionFile !== this._sessionFile));
     // omp >= 18.5 moves a session it does not own onto a new file on its first
@@ -780,7 +926,7 @@ export class AgentSessionWrapper {
       // omp saves the title before it prints the result, so the poll below can
       // finish first: the window closes on that output or on expiry instead.
       this.quietRenameUntil = Date.now() + GENERATE_TITLE_TIMEOUT_MS;
-      await this.proc.sendCommand({ type: "prompt", message: "/rename" }, PROMPT_ACK_TIMEOUT_MS);
+      await this.sendNativeMessageCommand({ type: "prompt", message: "/rename" }, PROMPT_ACK_TIMEOUT_MS);
     } else {
       await this.send({ type: "prompt", message: "/rename" });
     }
@@ -958,6 +1104,9 @@ export class AgentSessionWrapper {
         } else {
           this.continuationGraceUntil = Date.now() + NON_TERMINAL_CONTINUATION_GRACE_MS;
         }
+        break;
+      case "queue_update":
+        this.nativeQueuedMessages = event;
         break;
       case "session_settled":
         this.unsettled = false;
@@ -1711,7 +1860,7 @@ export class AgentSessionWrapper {
       // would never run and the wrapper would keep reporting itself as busy
       // (later calls fail with session_busy) until unrelated traffic cleared
       // the wedge. The 15s output wait above stays a separate concern.
-      await this.proc.sendCommand({ type: "prompt", message: action === "list" ? "/mcp list" : `/mcp ${action}${name ? ` ${name}` : ""}` }, PROMPT_ACK_TIMEOUT_MS);
+      await this.sendNativeMessageCommand({ type: "prompt", message: action === "list" ? "/mcp list" : `/mcp ${action}${name ? ` ${name}` : ""}` }, PROMPT_ACK_TIMEOUT_MS);
       const result = await output;
       if (action !== "list" && /^(?:Failed|Usage:|Server .* not found|Unknown)/m.test(result)) {
         throw new WebRpcError("OMP could not update this MCP server. Check its source configuration.", "mcp_change_failed");
@@ -1950,18 +2099,27 @@ export class AgentSessionWrapper {
   /** Full restart of the child process against the same session file. This is
    * omp-web's `reload`: extensions, skills, prompts, and tools are rediscovered
    * on boot, matching a fresh CLI launch. */
-  private async restart(): Promise<void> {
+  private async restart(requireIdle = false): Promise<void> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     const sessionFile = this._sessionFile;
     const old = this.proc;
+    const generation = this.messageCommandGeneration;
     // Stays true for the whole restart so send() rejects commands that would
     // otherwise hit the disposed or half-built child.
     this.restarting = true;
     let resumable: boolean;
     try {
+      if (requireIdle && this.hostDown()) throw this.hostOfflineError("refused");
       // Asked before touching the live child: a remote host can be offline,
       // and the child must then keep running with its frames still read.
       resumable = !!sessionFile && await this.host.sessionFileExists(sessionFile);
+      if (requireIdle) {
+        if (this.hostDown()) throw this.hostOfflineError("refused");
+        if (!resumable) throw new WebRpcError("The saved session is not available for an idle restart", "session_busy");
+        if (!this.isAlive() || this.proc !== old || this.messageCommandGeneration !== generation || this.messageBoundaryBusy(1)) {
+          throw new WebRpcError("Wait for the current operation to finish", "session_busy");
+        }
+      }
     } catch (error) {
       this.restarting = false;
       throw error;
@@ -2024,6 +2182,8 @@ export class AgentSessionWrapper {
         return;
       }
       this.proc = proc;
+      this.messageCommandGeneration += 1;
+      this.confirmedMessageCommandGeneration = this.messageCommandGeneration;
       this.unsubscribeFrames = proc.onFrame((frame) => this.handleFrame(frame));
       this.watchResync(proc);
       try {
@@ -2043,6 +2203,17 @@ export class AgentSessionWrapper {
         if (!resumable && this._sessionFile && await this.host.sessionFileExists(this._sessionFile)) {
           await proc.sendCommand({ type: "new_session" });
           this.applyIdentity(await proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS));
+        }
+        if (requireIdle) {
+          if (this.registeredHostTools !== null) {
+            await this.dispatchCommand({ type: "set_host_tools", tools: this.registeredHostTools });
+          } else if (loadWebServerSettings().agentToolsEnabled) {
+            // Like initial startup, a runtime that never accepted host tools may reject this optional registration.
+            await this.dispatchCommand({ type: "set_host_tools", tools: [] }).catch(() => {});
+          }
+          if (this.registeredHostUriSchemes !== null) {
+            await this.dispatchCommand({ type: "set_host_uri_schemes", schemes: this.registeredHostUriSchemes });
+          }
         }
       } catch (error) {
         // Never leave the replacement running with nobody reading its frames.
@@ -2070,6 +2241,89 @@ export class AgentSessionWrapper {
       this.pendingCommands -= 1;
     }
   }
+  /** Process-local admission only, not a native message id: overlapping writes make echo inference uncertain. */
+  getMessageCommandGeneration(): number { return this.messageCommandGeneration; }
+  /** ACKs/settlement aren't command-specific echo receipts: earlier writes need an uncontended replacement proof. */
+  hasPendingMessageCommands(): boolean {
+    return this.pendingMessageCommands > 0 || this.confirmedMessageCommandGeneration !== this.messageCommandGeneration;
+  }
+
+  /** Only advance a contiguous, uncontended admission after its replacing frame (or a no-agent builtin receipt). */
+  confirmMessageCommandGeneration(generation: number): void {
+    if (generation === this.messageCommandGeneration && generation === this.confirmedMessageCommandGeneration + 1) {
+      this.confirmedMessageCommandGeneration = generation;
+    }
+  }
+
+  private messageBoundaryBusy(ownedPendingCommands = 0): boolean {
+    return this.isRunning() || this.historyEditInFlight || this.historyMutationPendingCount > 0
+      || this.pendingCommands > ownedPendingCommands
+      || this.pendingMessageCommands > 0 || this.pendingUiRequests.size > 0
+      || this.pendingHostTools.size > 0 || this.pendingHostUris.size > 0;
+  }
+
+  /** A settled idle child may be replaced to stop OLD uncertain effects; this never confirms or replays them. */
+  async renewMessageProofBoundaryIfIdle(): Promise<boolean> {
+    if (!this.hasPendingMessageCommands() || this.restarting || this.hostDown() || this.messageBoundaryBusy()) return false;
+    return this.withPendingCommand(async () => {
+      const proc = this.proc;
+      const generation = this.messageCommandGeneration;
+      const before = await this.getStateWithTimeout();
+      if (before.isSettled !== true || before.hasPendingAsyncWork === true
+        || before.isStreaming !== false || before.isCompacting !== false
+        || before.queuedMessageCount > 0 || queueTexts(before.queuedMessages).length > 0
+        || before.sessionId !== this._sessionId || before.sessionFile !== this._sessionFile
+        || this.proc !== proc || this.messageCommandGeneration !== generation
+        || this.restarting || this.messageBoundaryBusy(1) || !this.hasPendingMessageCommands()) return false;
+      await this.restart(true);
+      return this.proc !== proc;
+    });
+  }
+
+  /** The outbox supplies its persisted pre-dispatch boundary; direct writes reuse this same proof below. */
+  watchMessageReplacement(command: Record<string, unknown>, baseline: unknown, generation: number, competingPending: boolean, previousEntryIds?: string[]): MessageReplacementWatch {
+    const proof = watchReplacement(this, command, baseline, generation, competingPending, previousEntryIds);
+    this.messageReplacement = proof;
+    return {
+      handOff: proof.handOff,
+      stop: () => {
+        proof.stop();
+        if (this.messageReplacement === proof) this.messageReplacement = null;
+      },
+    };
+  }
+
+  private async sendNativeMessageCommand<T = unknown>(command: { type: string; [key: string]: unknown }, timeoutMs?: number): Promise<T> {
+    const message = IMAGE_BEARING_COMMANDS.has(command.type);
+    const proof = message && !this.messageReplacement && !this.hasPendingMessageCommands()
+      ? watchReplacement(this, command, this.nativeQueuedMessages, this.messageCommandGeneration, false,
+        this.startedEmpty && !this.adopted && this.messageCommandGeneration === 0 ? [] : undefined)
+      : null;
+    if (message) {
+      this.messageCommandGeneration += 1;
+      this.pendingMessageCommands += 1;
+    }
+    const generation = this.messageCommandGeneration;
+    try {
+      const result = await this.proc.sendCommand<T>(command, timeoutMs);
+      if (message && isRecord(result) && result.agentInvoked === false) {
+        this.confirmMessageCommandGeneration(generation);
+        proof?.stop();
+      } else if (proof) {
+        void proof.handOff().then((outcome) => {
+          if (!outcome.error) this.confirmMessageCommandGeneration(generation);
+        }).finally(proof.stop);
+      }
+      return result;
+    } catch (error) {
+      proof?.stop();
+      if (message && error instanceof RpcCommandError) this.confirmMessageCommandGeneration(generation);
+      throw error;
+    } finally {
+      if (message) this.pendingMessageCommands -= 1;
+    }
+  }
+
 
   async send(command: Record<string, unknown>): Promise<unknown> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
@@ -2126,7 +2380,7 @@ export class AgentSessionWrapper {
         try {
           // omp acks immediately; agent output streams as events, completion is
           // agent_end (agent runs) or prompt_result (local-only slash commands).
-          const ack = await this.proc.sendCommand<{ agentInvoked?: boolean } | undefined>({
+          const ack = await this.sendNativeMessageCommand<{ agentInvoked?: boolean } | undefined>({
             type: "prompt",
             message: command.message as string,
             ...(toImageContents(command.images) ? { images: toImageContents(command.images) } : {}),
@@ -2177,7 +2431,7 @@ export class AgentSessionWrapper {
         // there is no live turn to steer anyway, so it joins the follow-up
         // queue like a prompt would.
         if (type === "steer" && this.bashRunning && !this.streaming) return await this.queueWhileShellRunning(command);
-        await this.proc.sendCommand({
+        await this.sendNativeMessageCommand({
           type,
           message: command.message as string,
           ...(toImageContents(command.images) ? { images: toImageContents(command.images) } : {}),
@@ -2424,8 +2678,9 @@ export class AgentSessionWrapper {
         const merged = loadWebServerSettings().agentToolsEnabled
           ? [...valid, ...AGENT_TOOL_DEFINITIONS.filter((t) => !valid.some((v) => v.name === t.name))]
           : valid;
-        this.hostToolNames = new Set(merged.map((t) => t.name as string));
         await this.proc.sendCommand({ type: "set_host_tools", tools: merged });
+        this.hostToolNames = new Set(merged.map((t) => t.name as string));
+        this.registeredHostTools = valid.filter((tool) => !AGENT_TOOL_NAMES.has(tool.name as string));
         // omp now knows exactly these: an adopted child's lost registration is replaced.
         this.hostToolsUnknown = false;
         return null;
@@ -2442,13 +2697,14 @@ export class AgentSessionWrapper {
 
       case "set_host_uri_schemes": {
         const schemes = Array.isArray(command.schemes) ? command.schemes as Array<{ scheme?: unknown; writable?: unknown; [key: string]: unknown }> : [];
+        await this.proc.sendCommand({ type: "set_host_uri_schemes", schemes });
+        this.registeredHostUriSchemes = schemes;
         this.hostUriSchemes = new Map();
         for (const entry of schemes) {
           if (typeof entry.scheme === "string" && entry.scheme) {
             this.hostUriSchemes.set(entry.scheme, { writable: entry.writable === true });
           }
         }
-        await this.proc.sendCommand({ type: "set_host_uri_schemes", schemes });
         return null;
       }
 
@@ -2465,7 +2721,7 @@ export class AgentSessionWrapper {
             this.responseRunActive = false;
             this.streamSequence += 1;
           }
-          const result: unknown = await this.proc.sendCommand(
+          const result: unknown = await this.sendNativeMessageCommand(
             command as { type: string },
             type === "predict_word" ? PREDICT_WORD_TIMEOUT_MS : undefined,
           );
@@ -2490,7 +2746,7 @@ export class AgentSessionWrapper {
    */
   private async queueWhileShellRunning(command: Record<string, unknown>): Promise<unknown> {
     const images = toImageContents(command.images);
-    await this.proc.sendCommand({
+    await this.sendNativeMessageCommand({
       type: "follow_up",
       message: command.message as string,
       ...(images ? { images } : {}),
@@ -2548,8 +2804,10 @@ export class AgentSessionWrapper {
     for (const timer of this.parkedHostTools.values()) clearTimeout(timer);
     this.parkedHostTools.clear();
     this.hostToolNames.clear();
+    this.registeredHostTools = null;
     this.pendingHostUris.clear();
     this.hostUriSchemes.clear();
+    this.registeredHostUriSchemes = null;
     notifyRunningChange();
     await untilHostDown(this.host, disposed);
   }
@@ -2984,6 +3242,7 @@ export async function startRpcSession(
     for (const candidate of new Set(registry.values())) {
       if (candidate.isAlive() && candidate.sessionFile && samePath(candidate.sessionFile, sessionFile)) {
         registry.set(sessionId, candidate);
+        notifyRunningChange({ refreshSessionList: true });
         return { session: candidate, realSessionId: candidate.sessionId };
       }
     }
@@ -3080,13 +3339,16 @@ function registerSession(created: AgentSessionWrapper): void {
   created.onDestroy(() => {
     // Drop every key (current id, original id, moved-from aliases).
     for (const [key, wrapper] of registry) if (wrapper === created) registry.delete(key);
+    notifyRunningChange({ refreshSessionList: true });
   });
   created.onIdentityChange((_oldId, newId, options) => {
     // A move keeps the old ids routable; a branch/new/switch serves another conversation, so every old key goes.
     if (!options?.keepOldId) for (const [key, wrapper] of registry) if (wrapper === created) registry.delete(key);
     registry.set(newId, created);
+    notifyRunningChange({ refreshSessionList: true });
   });
   registry.set(created.sessionId, created);
+  notifyRunningChange({ refreshSessionList: true });
 }
 
 /**

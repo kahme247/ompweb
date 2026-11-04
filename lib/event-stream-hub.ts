@@ -36,10 +36,8 @@ const SUBSCRIBED: SubscribeResult = { ok: true };
 class Subscription {
   active = true;
   detach: (() => void) | null = null;
-  // Backpressure queue (session channels): while the socket is behind,
-  // `message_update` frames wait here and merge (see queueUpdate) instead of
-  // being written. Every other frame flushes it first, so per-subscription
-  // order is preserved.
+  // Session backpressure queue: message updates merge and consecutive outbox
+  // snapshots replace each other. Other frames flush it first to preserve order.
   pendingUpdates: QueuedUpdate[] = [];
 
   constructor(readonly id: string, readonly coalescesMessageUpdates: boolean) {}
@@ -264,10 +262,18 @@ export class EventStreamConnection {
     return this.write(subscription.id, text, at);
   }
 
-  private flush(subscription: Subscription): boolean {
+  private flush(subscription: Subscription, force = false): boolean {
+    if (!force && this.sink.backpressured()) return true;
     const queued = subscription.pendingUpdates;
     subscription.pendingUpdates = [];
-    for (const { data, at } of queued) if (!this.writeFrame(subscription, data, at)) return false;
+    for (let i = 0; i < queued.length; i++) {
+      if (!force && this.sink.backpressured()) {
+        subscription.pendingUpdates = queued.slice(i);
+        return true;
+      }
+      const { data, at } = queued[i];
+      if (!this.writeFrame(subscription, data, at)) return false;
+    }
     return true;
   }
 
@@ -286,13 +292,13 @@ export class EventStreamConnection {
     if (
       subscription.coalescesMessageUpdates
       && isRecord(data)
-      && data.type === "message_update"
-      && this.sink.backpressured()
+      && (data.type === "outbox_update" || (data.type === "message_update" && this.sink.backpressured()))
     ) {
       queueUpdate(subscription.pendingUpdates, data, Date.now());
+      if (data.type === "outbox_update") this.flush(subscription);
       return;
     }
-    if (this.flush(subscription)) this.writeFrame(subscription, data);
+    if (this.flush(subscription, true)) this.writeFrame(subscription, data);
   }
 }
 
@@ -309,8 +315,21 @@ type QueuedUpdate = { data: Record<string, unknown>; at: number };
  * and break the sequence fence the browser relies on.
  */
 function queueUpdate(queue: QueuedUpdate[], data: Record<string, unknown>, at: number): void {
+  if (data.type === "outbox_update") {
+    const last = queue.at(-1);
+    if (last?.data.type === "outbox_update") {
+      last.data = data;
+      last.at = at;
+    } else {
+      queue.push({ data, at });
+    }
+    return;
+  }
   if (!isDeltaUpdate(data)) {
-    for (let i = queue.length - 1; i >= 0; i--) if (queue[i].data.messageId === data.messageId) queue.splice(i, 1);
+    for (let i = queue.length - 1; i >= 0; i--) {
+      if (queue[i].data.type === "outbox_update") break;
+      if (queue[i].data.messageId === data.messageId) queue.splice(i, 1);
+    }
     queue.push({ data, at });
     return;
   }
@@ -427,7 +446,7 @@ function openSessionChannel(sessionId: string, handle: SubscriptionHandle): Subs
     handle.send({ type: "connected", sessionId, web: live.getStreamSnapshot().cursor });
   };
   if (session) attach(session);
-  const detachOutbox = onOutboxChange(sessionId, (entries) => {
+  const rebind = () => {
     const existing = getRpcSession(sessionId);
     const live = existing?.isAlive() ? existing : undefined;
     if (live !== session) {
@@ -436,10 +455,16 @@ function openSessionChannel(sessionId: string, handle: SubscriptionHandle): Subs
       session = live;
       if (live) attach(live);
     }
+  };
+  const detachRunning = subscribeRunningSessions(rebind);
+  const detachOutbox = onOutboxChange(sessionId, (entries) => {
+    rebind();
     handle.send({ type: "outbox_update", entries, settledIds: outboxSettledIds(sessionId) });
   });
+  rebind();
   handle.setDetach(() => {
     detachOutbox();
+    detachRunning();
     detachSession();
   });
   if (handle.active) handle.send({ type: "outbox_update", entries: outboxEntries(sessionId), settledIds: outboxSettledIds(sessionId) });

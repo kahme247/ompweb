@@ -5,7 +5,7 @@ import { chmodSync, closeSync, mkdirSync, openSync } from "fs";
 import { createHmac } from "node:crypto";
 import { join } from "path";
 import { Database } from "bun:sqlite";
-import { runAgentCommand } from "./agent-command";
+import { commandErrorResponse, runAgentCommand } from "./agent-command";
 import { apiErrorResponse, resolveSessionHostOr404 } from "./api-utils";
 import { onHostHello } from "./hosts/hub";
 import { STAGED_MAX_AGE_MS } from "./hosts/uploads";
@@ -22,12 +22,12 @@ import { resolveWebAuthSecret } from "./web-auth-secret";
 /** Delivered (and removed) ids answer a repeated `outbox_add` this long (spec O2: idempotent by id); the browser gives
  * up resending after 7 days, so a resend always finds its id. */
 export const KEEP_DELIVERED_MS = 8 * 24 * 60 * 60 * 1000;
-/** No replacing frame after a successful prompt reply: expose uncertainty rather than leave it delivering. */
-export const HANDOFF_FALLBACK_MS = 2 * 60_000;
 /** A session that was busy (restarting, an MCP or history edit) or a host op that timed out: tried again after this. */
 export const RETRY_MS = 5_000;
 /** Fixed snapshot budget below the browser link's 32 MiB backlog; per-entry error margin and frame envelope included. */
 export const MAX_OUTBOX_BYTES = 16 * 1024 * 1024;
+const MAX_GLOBAL_OUTBOX_BYTES = 256 * 1024 * 1024;
+const MAX_GLOBAL_OUTBOX_ENTRIES = 1000;
 
 const ENTRY_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const MODES: Record<OutboxMode, true> = { prompt: true, followUp: true, steer: true };
@@ -80,7 +80,7 @@ interface Row {
 
 declare global {
   var __ompOutboxStore: { path: string; db: Database } | undefined;
-  var __ompOutbox: { busy: Set<string>; listeners: Map<string, Set<(entries: OutboxEntry[]) => void>>; started: boolean; maintenance?: NodeJS.Timeout } | undefined;
+  var __ompOutbox: { busy: Set<string>; listeners: Map<string, Set<(entries: OutboxEntry[]) => void>>; started: boolean; maintenance?: NodeJS.Timeout; startupRetry?: NodeJS.Timeout; retries?: Set<NodeJS.Timeout>; detach?: () => void } | undefined;
 }
 
 // globalThis, like the rpc-manager registry: survives a `bun --hot` re-evaluation.
@@ -125,15 +125,25 @@ function db(): Database {
     database.close(true);
     throw error;
   }
-  closeOutboxStore();
+  cached?.db.close(true);
   globalThis.__ompOutboxStore = { path, db: database };
   return database;
 }
 
 /** Closes the cached store. `close(true)` finalizes the statements still alive: without it the file stays open until GC, and Windows keeps it locked. */
 export function closeOutboxStore(): void {
-  clearInterval(globalThis.__ompOutbox?.maintenance);
-  if (globalThis.__ompOutbox) globalThis.__ompOutbox.maintenance = undefined;
+  const state = globalThis.__ompOutbox;
+  if (state) {
+    clearInterval(state.maintenance);
+    clearTimeout(state.startupRetry);
+    for (const timer of state.retries ?? []) clearTimeout(timer);
+    state.retries?.clear();
+    state.detach?.();
+    state.detach = undefined;
+    state.maintenance = undefined;
+    state.startupRetry = undefined;
+    state.started = false;
+  }
   globalThis.__ompOutboxStore?.db.close(true);
   globalThis.__ompOutboxStore = undefined;
 }
@@ -296,6 +306,8 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
     if (row(id)) return true; // a concurrent repeat takes no capacity
     const total = database.prepare(`SELECT COALESCE(SUM(payload_bytes), 0) AS bytes FROM entries WHERE session_id IN (${slots(keys)}) AND state != 'delivered'`).get(...keys) as { bytes: number };
     if (total.bytes + payloadBytes > MAX_OUTBOX_BYTES - 64 * 1024) return false;
+    const global = database.prepare("SELECT COALESCE(SUM(payload_bytes), 0) AS bytes, COUNT(*) AS count FROM entries WHERE state != 'delivered'").get() as { bytes: number; count: number };
+    if (global.bytes + payloadBytes > MAX_GLOBAL_OUTBOX_BYTES || global.count >= MAX_GLOBAL_OUTBOX_ENTRIES) return false;
     database.prepare(`INSERT INTO entries (${COLUMNS}, payload_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'held', NULL, 0, ?, ?, NULL, ?, ?)`).run(
       id, sessionId, mode, message,
       Array.isArray(images) && images.length ? JSON.stringify(images) : null,
@@ -306,7 +318,7 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
     );
     return true;
   }).immediate();
-  if (!accepted) return Response.json({ error: "This session outbox is full. It will accept more messages after held entries drain.", code: "outbox_full" }, { status: 429 });
+  if (!accepted) return Response.json({ error: "The message outbox is full. It will accept more messages after held entries drain or are deleted.", code: "outbox_full" }, { status: 429 });
   if (!entryBelongsToSession(row(id)!, sessionId)) return Response.json({ error: "This message id belongs to another session", code: "outbox_id_conflict" }, { status: 409 });
   publish(sessionId);
   pumpOutbox(sessionId);
@@ -386,14 +398,32 @@ function pumpAll(): void {
 export function startOutbox(): void {
   const state = outbox();
   if (state.started) return;
-  db(); // a failed open may be retried by the next startup/add, not latched as started
-  state.started = true;
-  recoverDelivering(undefined, true);
-  db().prepare("DELETE FROM entries WHERE state = 'delivered' AND done_at < ?").run(Date.now() - KEEP_DELIVERED_MS);
-  db().prepare("DELETE FROM completed_uploads WHERE at < ?").run(Date.now() - STAGED_MAX_AGE_MS);
+  clearTimeout(state.startupRetry);
+  state.startupRetry = undefined;
+  try {
+    db();
+    recoverDelivering(undefined, true);
+    db().prepare("DELETE FROM entries WHERE state = 'delivered' AND done_at < ?").run(Date.now() - KEEP_DELIVERED_MS);
+    db().prepare("DELETE FROM completed_uploads WHERE at < ?").run(Date.now() - STAGED_MAX_AGE_MS);
+  } catch (error) {
+    console.warn(`[omp-web] outbox startup failed: ${error instanceof Error ? error.message : String(error)}`);
+    state.startupRetry = setTimeout(() => {
+      state.startupRetry = undefined;
+      if (globalThis.__ompOutbox === state) startOutbox();
+    }, RETRY_MS);
+    state.startupRetry.unref?.();
+    return;
+  }
   process.once("exit", closeOutboxStore);
-  onHostHello(() => pumpAll());
-  tapSessionFrames(onChildExit);
+  const detachHello = onHostHello(() => { if (globalThis.__ompOutbox === state && state.started) pumpAll(); });
+  const detachFrames = tapSessionFrames((wrapper, event) => {
+    if (globalThis.__ompOutbox === state && state.started) onChildExit(wrapper, event);
+  });
+  state.detach = () => {
+    process.removeListener("exit", closeOutboxStore);
+    detachHello();
+    detachFrames();
+  };
   // A live owner at boot can die later without another add or hello. Recover its claim, never resend it.
   const maintenance = setInterval(() => {
     if (globalThis.__ompOutbox !== state) { clearInterval(maintenance); return; }
@@ -406,6 +436,7 @@ export function startOutbox(): void {
   }, RETRY_MS);
   state.maintenance = maintenance;
   maintenance.unref?.();
+  state.started = true;
   pumpAll();
 }
 
@@ -448,12 +479,24 @@ async function deliver(entry: Row): Promise<Outcome> {
     return fail(entry, "The attached files are gone: attach them again", false);
   }
   // Start (or join) the session's omp first, as any command would, so the echo watch is on the wrapper that gets it.
+  const priorWrapper = getRpcSession(sessionId);
+  const generation = priorWrapper?.getMessageCommandGeneration() ?? 0;
+  const competingPending = priorWrapper?.hasPendingMessageCommands() ?? false;
   const started = await runAgentCommand(sessionId, { type: "get_state" }, entry.advisor === 1, entry.owner);
   if (!started.ok) return refused(entry, started, false);
   const wrapper = getRpcSession(sessionId);
   const current = row(entry.id);
   if (!current || (current.state !== "held" && current.state !== "waiting_host")) return "next";
   if (!wrapper?.isAlive()) return retry(current);
+  if (wrapper.getMessageCommandGeneration() !== (priorWrapper === wrapper ? generation : 0)
+    || (competingPending && !wrapper.hasPendingMessageCommands())) return "next";
+  if (competingPending && !wrapper.isRunning()) {
+    try {
+      if (await wrapper.renewMessageProofBoundaryIfIdle()) return "next";
+    } catch (error) {
+      return refused(current, commandErrorResponse(error), false);
+    }
+  }
   const idle = !wrapper.isRunning();
   const keys = sessionKeys(sessionId);
   // A cold start can discover native aliases. Re-select across them before claiming, so an older alias wins.
@@ -494,7 +537,14 @@ async function deliver(entry: Row): Promise<Outcome> {
   }
   if (!wrapper.isAlive()) return fail(current, "omp exited before this message was dispatched", true);
   if (row(current.id)?.state !== "delivering") return "next";
-  const replacement = watchReplacement(wrapper, command, baseline.data?.queuedMessages, previousEntryIds);
+  if (wrapper.getMessageCommandGeneration() !== (priorWrapper === wrapper ? generation : 0)
+    || (competingPending && !wrapper.hasPendingMessageCommands())) {
+    // Another command finished during preparation, before THIS native write: discard stale mode/queue/history data.
+    setState(current.id, "held");
+    publish(sessionId);
+    return "next";
+  }
+  const replacement = wrapper.watchMessageReplacement(command, baseline.data?.queuedMessages, priorWrapper === wrapper ? generation : 0, competingPending, previousEntryIds);
   publish(sessionId);
   try {
     // attachUploads mutates this same command before writing it: the watcher matches the final attachment block too.
@@ -504,6 +554,7 @@ async function deliver(entry: Row): Promise<Outcome> {
     if (row(current.id)?.state === "failed") return "next";
     const handOff = body.data?.agentInvoked === false ? {} : await replacement.handOff();
     if (handOff.error) return fail(current, handOff.error, handOff.mayHaveBeenSent === true);
+    wrapper.confirmMessageCommandGeneration((priorWrapper === wrapper ? generation : 0) + 1);
     retire(current.id);
     publish(sessionId);
     return "next";
@@ -522,129 +573,6 @@ function commandOf(entry: Row, running: boolean): { type: string; streamingBehav
   return { type: entry.mode === "steer" ? "steer" : "follow_up" };
 }
 
-type HandOff = { error?: string; mayHaveBeenSent?: boolean };
-const CHILD_EXITED: HandOff = { error: "omp exited before it showed the message", mayHaveBeenSent: true };
-
-function queueTexts(value: unknown): string[] {
-  if (!isRecord(value)) return [];
-  return [value.steering, value.followUp].flatMap((list) => Array.isArray(list) ? list.filter((text): text is string => typeof text === "string") : []);
-}
-
-function messageText(message: Record<string, unknown>): string {
-  if (typeof message.content === "string") return message.content;
-  return Array.isArray(message.content) ? message.content.flatMap((part) => isRecord(part) && part.type === "text" && typeof part.text === "string" ? [part.text] : []).join("") : "";
-}
-
-/** Current native skill echoes carry the original draft in details.prompt; older echoes retain native skill name and
- * argument metadata. Only used by the active command watcher, never to settle an uncertain stored row. */
-function matchesNativeSkill(message: Record<string, unknown>, submitted: string): boolean {
-  if (message.role !== "custom" || message.customType !== "skill-prompt" || message.attribution !== "user") return false;
-  const details = isRecord(message.details) ? message.details : {};
-  if (typeof details.prompt === "string") return details.prompt.trim() === submitted.trim();
-  const invocation = /^\/skill:([^\s]+)(?:\s+([\s\S]*))?$/.exec(submitted.trim());
-  if (!invocation) return false;
-  const content = messageText(message);
-  const name = typeof details.name === "string" ? details.name : /User invoked the "([^"]+)" skill/.exec(content)?.[1];
-  const parts = content.split(/\nUser:\s*/);
-  const args = typeof details.args === "string" ? details.args : parts.length > 1 ? parts[parts.length - 1] : "";
-  return name === invocation[1] && args.trim() === (invocation[2] ?? "").trim();
-}
-
-/** Every mode requires both its command reply and a replacing frame. Baseline occurrence counts distinguish a new
- * identical queue chip from a stale one; pre-existing identical messages must echo before this one can claim an echo.
- * The command is shared with attachment preparation, so comparison uses the final text, never an empty prefix. */
-function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, unknown>, baseline: unknown, previousEntryIds?: string[]): { handOff(): Promise<HandOff>; stop(): void } {
-  const { promise, resolve } = Promise.withResolvers<HandOff>();
-  const initialQueue = queueTexts(baseline);
-  let priorQueue = initialQueue;
-  let echoDebt: number | undefined;
-  let seen = false;
-  let stopped = false;
-  let checkingExpansion = false;
-  const boundary = previousEntryIds ? new Set(previousEntryIds) : null;
-  const openedUserMessages = new Set<string>();
-  let timer: NodeJS.Timeout | undefined;
-  let expansionRetry: NodeJS.Timeout | undefined;
-  const expectedText = () => typeof command.message === "string" && command.message ? command.message : Array.isArray(command.images) && command.images.length ? "[Image]" : "";
-  const finish = (outcome: HandOff) => {
-    if (seen || stopped) return;
-    seen = true;
-    clearTimeout(expansionRetry);
-    // Every channel receives the replacement before the removal, even if this listener was registered first.
-    queueMicrotask(() => resolve(outcome));
-  };
-  // Ordinary native templates don't echo their original slash token. While this idle claim is active, correlate its
-  // new native user lifecycle to the sole new persisted user entry beyond the pre-dispatch boundary; the caller still
-  // waits for THIS command's successful reply. Ambiguous/missing persisted context proves nothing.
-  const checkExpandedUser = async (message: Record<string, unknown>) => {
-    if (checkingExpansion || stopped || seen || !boundary || initialQueue.length || command.type !== "prompt"
-      || command.streamingBehavior || !expectedText().trimStart().startsWith("/")) return;
-    checkingExpansion = true;
-    clearTimeout(expansionRetry);
-    let retry = false;
-    try {
-      const context = await wrapper.withPendingCommand(() => wrapper.host.sessionOps.readContext(wrapper.sessionId, undefined, {
-        boundary: false, deferThinking: true, deferMedia: true, includePreCompaction: false, sync: null,
-      }));
-      if (!context.ok || !isRecord(context.value)) { retry = !context.ok && context.status >= 500; return; }
-      const { entryIds, messages } = context.value;
-      if (!Array.isArray(entryIds) || !Array.isArray(messages)) return;
-      const added = messages.filter((item, index) => typeof entryIds[index] === "string" && !boundary.has(entryIds[index])
-        && isRecord(item) && item.role === "user");
-      if (added.length === 1 && isRecord(added[0]) && messageText(added[0]) === messageText(message)) finish({});
-      // Native echo can precede the file flush. Re-read only this active candidate, never infer a missing entry.
-      retry = added.length === 0;
-    } catch {
-      // No post-dispatch state is guessed from a failed read; keep waiting for a proven replacement.
-      retry = true;
-    } finally {
-      checkingExpansion = false;
-      if (retry && !stopped && !seen) {
-        expansionRetry = setTimeout(() => { void checkExpandedUser(message); }, 100);
-        expansionRetry.unref?.();
-      }
-    }
-  };
-  const detach = wrapper.onEvent((event) => {
-    if (seen) return;
-    const text = expectedText();
-    if (echoDebt === undefined) echoDebt = initialQueue.filter((item) => item === text).length;
-    if (event.type === "message_start" && typeof event.messageId === "string" && isRecord(event.message) && event.message.role === "user") {
-      openedUserMessages.add(event.messageId);
-    } else if (event.type === "queue_update") {
-      const next = queueTexts(event);
-      const counts = new Map<string, number>();
-      for (const item of priorQueue) counts.set(item, (counts.get(item) ?? 0) + 1);
-      const added: string[] = [];
-      for (const item of next) {
-        const remaining = counts.get(item) ?? 0;
-        if (remaining) counts.set(item, remaining - 1);
-        else added.push(item);
-      }
-      if (text && (added.includes(text) || (command.type === "prompt" && text.trimStart().startsWith("/") && added.length === 1))) finish({});
-      priorQueue = next;
-    } else if (event.type === "message_end" && isRecord(event.message)
-      && (event.message.role === "user" || (event.message.role === "custom" && event.message.attribution === "user"))) {
-      if (text && (messageText(event.message) === text || matchesNativeSkill(event.message, text))) {
-        if (echoDebt > 0) echoDebt -= 1;
-        else finish({});
-      } else if (event.message.role === "user" && (typeof event.messageId !== "string" || openedUserMessages.has(event.messageId))) {
-        void checkExpandedUser(event.message);
-      }
-    } else if (event.type === "process_exit") finish(CHILD_EXITED);
-    else if (event.type === "prompt_error") finish({ error: typeof event.errorMessage === "string" ? event.errorMessage : "omp refused the message" });
-    else if (event.type === "prompt_result" && event.status === "error") finish({ error: isRecord(event.error) && typeof event.error.message === "string" ? event.error.message : "omp refused the message" });
-    else if (event.type === "agent_end" && event.isTerminal !== false && !wrapper.isAlive()) finish(CHILD_EXITED);
-  }, { internal: true });
-  return {
-    handOff() {
-      timer = setTimeout(() => finish({ error: "omp acknowledged this message but has not shown it yet", mayHaveBeenSent: true }), HANDOFF_FALLBACK_MS);
-      timer.unref?.();
-      return promise;
-    },
-    stop() { stopped = true; clearTimeout(timer); clearTimeout(expansionRetry); detach(); },
-  };
-}
 
 function fail(entry: Row, error: string, mayHaveBeenSent: boolean): Outcome {
   setState(entry.id, "failed", error, mayHaveBeenSent);
@@ -656,7 +584,14 @@ function fail(entry: Row, error: string, mayHaveBeenSent: boolean): Outcome {
 function retry(entry: Row): Outcome {
   setState(entry.id, "held");
   publish(entry.session_id);
-  setTimeout(() => pumpOutbox(entry.session_id), RETRY_MS).unref?.();
+  const state = outbox();
+  const retries = (state.retries ??= new Set());
+  const timer = setTimeout(() => {
+    retries.delete(timer);
+    if (globalThis.__ompOutbox === state) pumpOutbox(entry.session_id);
+  }, RETRY_MS);
+  retries.add(timer);
+  timer.unref?.();
   return "wait";
 }
 
