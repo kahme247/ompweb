@@ -191,6 +191,7 @@ lib/
   web-password-hash.ts typed view of bin/omp-web-password-hash.js (the scrypt hash format)
   web-settings.ts      omp-web server settings (~/.omp/agent/omp-web-settings.json)
   transport-metrics.ts transport samples → `<agent dir>/omp-web/transport-metrics.jsonl` (renamed to `.jsonl.1` above 20 MiB)
+  transport-stats.ts   durations of transport samples (percentiles, per-metric derivation) shared by the worker's Connection tab stats and scripts/transport-metrics.ts
   skills-service.ts    skill listing via `omp skill list --json`; pure-Node replica scan as fallback
   tool-presets.ts      PRESET_NONE/DEFAULT/FULL + getToolNamesForPreset()
   types.ts             shared TypeScript types
@@ -215,6 +216,7 @@ components/
   BranchNavigator.tsx in-session branch switcher
   NotificationList.tsx notification history list + Mark all read/Clear actions (mobile right-panel tab, desktop bell popover)
   NotificationBell.tsx desktop top-bar bell: unread badge + floating NotificationList popover
+  ConnectionDiagnostics.tsx right-panel Connection tab: transport in use, status, latency stats (opt-in, Settings → Interface & Behavior)
   ChatMinimap.tsx     scroll minimap alongside the message list
   MarkdownBody.tsx    markdown renderer
   ModelsConfig.tsx    modal for models/auth configuration
@@ -877,6 +879,13 @@ during the wait.
     lowest-RTT of the last 20 link pings and SSE probes, at most 5 min old) times every sample.
     `bun scripts/transport-metrics.ts --since 2h` prints the per-transport summary (also `--until`,
     `--client`, `--file`).
+  - **Connection tab** (right panel, both layouts, shown while Settings → Interface & Behavior → "Show connection
+    diagnostics" is on, `omp-web:connection-diagnostics`, per browser). It polls the worker (`diag` op,
+    `requestConnectionDiagnostics`) once a second while visible: the mode in effect, fallback, status (`down` after
+    `SEND_DEADLINE_MS` without a connection), the last reconnect, and per-transport stats (mean, p50, p95, p99.9 from
+    1000 values, max) of the worker's last 15 min of samples (at most 20 000, kept beside the POST buffer). The
+    durations come from `lib/transport-stats.ts`, which `scripts/transport-metrics.ts` uses too, so both agree.
+    Without a SharedWorker (Chrome for Android) each tab has its own worker, so the numbers are that tab's.
   - **Worker rules.** Browser code: no `AbortSignal.timeout`/`any` or `Promise.withResolvers` (a test checks
     the bundle). Every global the worker uses must be injectable into the `vm` context of
     `lib/event-stream-worker.test.mjs`. The link URL is absolute (`new URL(path, self.location.href)`,

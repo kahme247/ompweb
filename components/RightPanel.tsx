@@ -24,11 +24,12 @@ import { FileViewer } from "./FileViewer";
 import { NotificationActions, NotificationList } from "./NotificationList";
 import { useUnreadNotificationCount } from "@/lib/notification-history";
 import { WorktreesPanel } from "./WorktreesPanel";
+import { ConnectionDiagnosticsPanel } from "./ConnectionDiagnostics";
 import type { WorktreeContext } from "./SessionSidebar-helpers";
 import { useI18n } from "@/lib/i18n";
 import { getFileName } from "@/lib/file-paths";
 
-export type RightPanelView = "explorer" | "git" | "notifications" | "worktrees" | "file";
+export type RightPanelView = "explorer" | "git" | "notifications" | "worktrees" | "connection" | "file";
 
 interface Props {
   fileTabs: Tab[];
@@ -48,6 +49,8 @@ interface Props {
   remoteHost: boolean;
   /** Active Git workspace's worktrees (null when it is not a Git top-level repo). */
   worktrees: WorktreeContext | null;
+  /** Connection diagnostics are on in this browser: the Connection tab is shown. */
+  connectionDiagnosticsOn: boolean;
   explorerRefreshKey: number;
   fileSearchOpen: boolean;
   onToggleFileSearch: () => void;
@@ -103,6 +106,7 @@ export const RightPanel = memo(function RightPanel({
   explorerCwd,
   remoteHost,
   worktrees,
+  connectionDiagnosticsOn,
   explorerRefreshKey,
   fileSearchOpen,
   onToggleFileSearch,
@@ -218,6 +222,8 @@ export const RightPanel = memo(function RightPanel({
               notificationsBadge={unreadNotifications}
               worktreesSelected={rightView === "worktrees"}
               onSelectWorktrees={() => onSelectView("worktrees")}
+              connectionSelected={rightView === "connection"}
+              onSelectConnection={connectionDiagnosticsOn ? () => onSelectView("connection") : undefined}
             />
           </div>
           {rightView === "explorer" ? (
@@ -468,6 +474,11 @@ export const RightPanel = memo(function RightPanel({
           {/* Keyed by repository so a draft branch or pending confirmation never carries over to another repo. */}
           {visitedViews.has("worktrees") && <WorktreesPanel key={worktrees?.projectRoot ?? ""} ctx={worktrees} remoteHost={remoteHost} />}
         </div>
+        {connectionDiagnosticsOn && (
+          <div id="workspace-file-panel-connection" role="tabpanel" aria-label={t("tabBar.connection")} style={{ display: rightView === "connection" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>
+            <ConnectionDiagnosticsPanel active={rightView === "connection" && rightPanelOpen} />
+          </div>
+        )}
         {/* Keep open viewers mounted so switching tabs preserves scroll and preview state. */}
         <div id="workspace-file-panel-file" role="tabpanel" aria-label={activeFileTab?.filePath ?? t("appShell.filePanel")} style={{ display: rightView === "file" ? "block" : "none", flex: 1, minHeight: 0, overflow: "hidden" }}>
           {fileTabs.length > 0 ? fileTabs.map((tab) => (

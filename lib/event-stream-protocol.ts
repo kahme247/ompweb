@@ -21,6 +21,7 @@
 // lib/event-stream-worker.ts imports this module (bundled by server/client-env.ts).
 
 import { isValidNotificationId } from "./notification-events";
+import type { DiagnosticStat } from "./transport-stats";
 
 export const EVENT_STREAM_PATH = "/api/events";
 export const MUX_CONTROL_EVENT = "mux";
@@ -47,6 +48,30 @@ export const BROWSER_TRANSPORTS: readonly BrowserTransport[] = ["sse", "ws"];
 /** The setting every hello and `transport` frame carries. */
 export interface BrowserTransportState {
   transport: BrowserTransport;
+}
+
+/** The worker's answer to a `diag` poll (the right panel's Connection tab). Times are the browser's epoch ms. */
+export interface ConnectionDiagnostics {
+  /** The server's setting. */
+  setting: BrowserTransport;
+  /** In effect in this browser now: `sse` with `fallback` when refused WebSocket upgrades put this worker on SSE. */
+  mode: BrowserTransport;
+  fallback: boolean;
+  /** `down`: no connection for long enough that commands fail. */
+  status: "connected" | "connecting" | "down";
+  /** When the current outage began; null while connected. */
+  since: number | null;
+  lastReconnect: { at: number; trigger: string; outageMs: number; resumed: boolean | null } | null;
+  /** Within `windowMs`; resumes and resyncs are the browser link's. */
+  reconnects: number;
+  resumes: number;
+  resyncs: number;
+  clockRttMs: number | null;
+  effectiveType: string | null;
+  pendingCommands: number;
+  uploads: number;
+  windowMs: number;
+  stats: DiagnosticStat[];
 }
 
 export const BROWSER_LINK_PATH = "/api/events/link";

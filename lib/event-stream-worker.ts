@@ -21,6 +21,7 @@
 //                 { op: "upload", id, host, name, type, blob }  (a file to upload over the link; blob: the File)
 //                 { op: "up_pause", id }  (stop this tab's upload; keep the host's staged bytes for Retry)
 //                 { op: "up_abort", id, host }  (the tab removed it: the host deletes what it staged; kept until delivered)
+//                 { op: "diag", n }  (the connection diagnostics panel's poll)
 // Worker -> tab:  { id, type: "open" }
 //                 { id, type: "message", data }   (raw JSON string)
 //                 { id, type: "error", readyState: 0 | 2 }  (EventSource semantics)
@@ -30,6 +31,7 @@
 //                   socket, behindSameBytes, behindOtherBytes, replyBehindOtherBytes }
 //                 { up: id, received, done } | { up: id, error: { status, code, message } }  (an upload's progress, failure)
 //                 { up: id, http: true }  (SSE mode: the tab uploads it over HTTP itself)
+//                 { diag: n, data }  (ConnectionDiagnostics, lib/event-stream.ts)
 import {
   BROWSER_LINK_PATH,
   BROWSER_LINK_VERSION,
@@ -40,10 +42,12 @@ import {
   UNKNOWN_CONNECTION_CODE,
   isIdempotentCommand,
   type BrowserTransport,
+  type ConnectionDiagnostics,
   type EventStreamChannel,
 } from "./event-stream-protocol";
 import { LINK_LIMITS, LinkSender, Outbox, PartJoiner, queuedLine, SeqWindow, type Part } from "./hosts/link-protocol";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "./image-attachments";
+import { diagnosticStats } from "./transport-stats";
 import { UPLOAD_STALL_MS, UPLOAD_WINDOW_BYTES } from "./upload-limits";
 
 const CONNECTING = 0;
@@ -107,6 +111,9 @@ const CLOCK_WINDOW_MS = 300000;
 const CLOCK_WINDOW_SAMPLES = 20;
 const LARGE_FRAME_BYTES = 64 * 1024;
 const LARGE_FRAME_LOG_MS = 30000;
+/** The diagnostics panel's stats cover this browser's samples of this long, at most DIAGNOSTICS_MAX of them. */
+const DIAGNOSTICS_WINDOW_MS = 15 * 60_000;
+const DIAGNOSTICS_MAX = 20_000;
 
 /** A tab's end of the worker: a SharedWorker's MessagePort, or the dedicated worker's own scope. */
 interface Port {
@@ -317,6 +324,9 @@ let knownEffectiveType: string | null = null;
 let lastWake: { at: number; effectiveType: string | null } | null = null;
 /** dropAt of the reconnects that a running one may still count in its `batch`. */
 let recentDrops: number[] = [];
+/** Every sample of the last DIAGNOSTICS_WINDOW_MS (stamped, as POSTed), with the worker's clock when recorded. */
+let diagnosticSamples: { t: number; sample: Sample }[] = [];
+let lastReconnect: ConnectionDiagnostics["lastReconnect"] = null;
 
 function post(client: Client, message: unknown): void {
   try {
@@ -1495,6 +1505,7 @@ function endReconnect(conn: Conn, now: number): void {
   const reconnect = conn.reconnect;
   if (!reconnect?.hello) return;
   conn.reconnect = null;
+  lastReconnect = { at: now, trigger: reconnect.trigger, outageMs: now - reconnect.dropAt, resumed: reconnect.resumed };
   let batch = 0;
   for (const at of recentDrops) if (Math.abs(at - reconnect.dropAt) <= BATCH_WINDOW_MS) batch += 1;
   record({
@@ -1536,7 +1547,10 @@ function stamp(sample: Sample): Sample {
 }
 
 function record(sample: Sample): void {
-  samples.push(stamp(sample));
+  const stamped = stamp(sample);
+  samples.push(stamped);
+  diagnosticSamples.push({ t: Date.now(), sample: stamped });
+  if (diagnosticSamples.length > DIAGNOSTICS_MAX) diagnosticSamples.splice(0, diagnosticSamples.length - DIAGNOSTICS_MAX);
   trimSamples();
   // Reaching the count flushes right after this task, off the path that recorded it (a frame's delivery); a failed POST
   // leaves more than that, which then waits for the timer instead of retrying per sample.
@@ -1593,6 +1607,44 @@ function flushSamples(): void {
     });
 }
 
+/** The connection diagnostics panel's snapshot: the connection in use now and the last DIAGNOSTICS_WINDOW_MS of samples. */
+function diagnostics(): ConnectionDiagnostics {
+  const now = Date.now();
+  const from = diagnosticSamples.findIndex((entry) => now - entry.t <= DIAGNOSTICS_WINDOW_MS);
+  diagnosticSamples = from === -1 ? [] : diagnosticSamples.slice(from);
+  const conn = mode === "ws" ? linkConn : sseConn;
+  const connected = mode === "ws" ? link.ws?.readyState === OPEN && link.welcomed : source !== null && connectionId !== null;
+  const since = connected ? null : conn.reconnect?.dropAt ?? null;
+  let reconnects = 0;
+  let resumes = 0;
+  let resyncs = 0;
+  for (const { sample } of diagnosticSamples) {
+    if (sample.metric !== "reconnect") continue;
+    reconnects++;
+    if (sample.resumed === true) resumes++;
+    else if (sample.resumed === false) resyncs++;
+  }
+  const clock = currentClock(now);
+  return {
+    setting,
+    mode,
+    fallback: fallbackTimer !== undefined,
+    // Down once commands would fail for want of a connection (SEND_DEADLINE_MS).
+    status: connected ? "connected" : since !== null && now - since >= SEND_DEADLINE_MS ? "down" : "connecting",
+    since,
+    lastReconnect,
+    reconnects,
+    resumes,
+    resyncs,
+    clockRttMs: clock ? clock.rtt : null,
+    effectiveType: effectiveType(),
+    pendingCommands: pending.size,
+    uploads: uploads.size,
+    windowMs: DIAGNOSTICS_WINDOW_MS,
+    stats: diagnosticStats(diagnosticSamples.map((entry) => entry.sample)),
+  };
+}
+
 function attach(port: Port): void {
   const client: Client = { port, streams: new Map(), visible: false };
   clients.add(client);
@@ -1622,6 +1674,9 @@ function attach(port: Port): void {
         client.visible = data.visible === true;
         if (typeof data.clientId === "string") clientId = data.clientId;
         wake(String(data.reason));
+        break;
+      case "diag":
+        post(client, { diag: data.n, data: diagnostics() });
         break;
       case "metric":
         if (data.sample && typeof data.sample === "object") recordTabSample(data.sample as Sample);
