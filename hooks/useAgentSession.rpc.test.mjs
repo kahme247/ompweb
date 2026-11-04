@@ -2127,6 +2127,28 @@ test("the notify host tool stays out of the Notifications tab, which lists only 
   assert.deepEqual(toastCalls, []);
 });
 
+test("an open_file local:// call asks the server for the calling session's file and opens the absolute path it names", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  world.holds.push({
+    match: (method, url) => method === "GET" && url.includes("/api/sessions/s1/local-file"),
+    produce: async () => ({ value: { path: "/sessions/s1/local/note.md" } }),
+  });
+  const opened = [];
+  const { es } = await startRun("s1", "q1", false, { onOpenFile: (path, name, sessionId) => { opened.push([path, name, sessionId]); } });
+  await act(async () => {
+    es.emit({ type: "host_tool_call", id: "h1", toolCallId: "c1", toolName: "open_file", arguments: { path: "local://note.md" } });
+    await sleep(60);
+  });
+
+  const lookups = callsTo("GET", "/api/sessions/s1/local-file");
+  assert.equal(lookups.length, 1, "one lookup, for the session that asked");
+  assert.equal(new URL(lookups[0].url, "http://localhost").searchParams.get("uri"), "local://note.md");
+  assert.deepEqual(opened, [["/sessions/s1/local/note.md", "note.md", "s1"]]);
+  const answer = callsTo("POST", "/api/agent/s1").find((call) => call.body?.type === "host_tool_result");
+  assert.deepEqual([answer?.body.id, answer?.body.isError, answer?.body.result.content[0].text], ["h1", false, "Opened local://note.md"]);
+});
+
 test("SSE open merges the btw history; a no-op cancel re-reads it and settles a record omp lost", async () => {
   resetWorld();
   primeSession("s1", [userMsg("u0", "q")]);

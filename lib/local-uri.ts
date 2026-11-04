@@ -1,9 +1,9 @@
-// `local://` URLs as omp's own local-protocol.ts reads them (`extractRelativePath` + `validateRelativePath`): the file
-// an agent wrote with `local://x` is the one ompweb opens, and nothing omp refuses is accepted here. Stricter in one
-// way: a Windows absolute suffix is refused on every platform, not only where it would resolve.
+// `local://` URLs as omp's own local-protocol.ts reads them (`extractRelativePath` + `validateRelativePath`, omp
+// 18.3.1+ and the installed 18.15): the file an agent wrote with `local://x` is the one ompweb opens, and nothing omp
+// refuses is accepted here. Stricter in one way: a leading backslash is absolute on every platform.
 // Pure (no I/O, no `@/` imports): the open_file host tool in the browser and the server share it.
 
-// Scheme and host, then the raw path; a query or fragment is not part of the path.
+// Scheme and authority (omp's LOCAL_AUTHORITY_RE), then the raw path; a query or fragment is not part of the path.
 const LOCAL_URI_RE = /^local:\/\/([^/?#]*)(\/[^?#]*)?/i;
 
 export type LocalUriParse = { ok: true; relative: string } | { ok: false; error: string };
@@ -16,17 +16,12 @@ export function isLocalUri(input: string): boolean {
 const fail = (error: string): LocalUriParse => ({ ok: false, error });
 
 /** The path under the session's local root that `input` names, or why it names none. Resolving it against a root and
- * confining it there (symlinks included) is the caller's job. */
-export function parseLocalUri(input: string): LocalUriParse {
+ * confining it there (symlinks included) is the caller's job. `platform` decides whether a drive letter is absolute. */
+export function parseLocalUri(input: string, platform: NodeJS.Platform = process.platform): LocalUriParse {
   const match = LOCAL_URI_RE.exec(input);
   if (!match) return fail("Not a local:// URL");
-  // omp decodes the host segment twice (`rawHost`, then the joined path) and the rest once: kept, so both read one file.
-  let host = match[1];
-  try {
-    host = decodeURIComponent(host);
-  } catch {
-    // omp keeps an undecodable host raw; the joined path below then fails to decode.
-  }
+  // The authority is the first path segment, decoded once with the rest, as written (a second decode corrupts `%`).
+  const host = match[1];
   const pathname = match[2] ?? "";
   const hasPath = pathname !== "" && pathname !== "/";
   const combined = host ? (hasPath ? `${host}${pathname}` : host) : hasPath ? pathname.slice(1) : "";
@@ -38,8 +33,10 @@ export function parseLocalUri(input: string): LocalUriParse {
     return fail(`Invalid URL encoding in local:// path: ${input}`);
   }
   if (decoded.includes("\0")) return fail("A NUL byte is not allowed in a local:// path");
-  // A POSIX root, a Windows root (`\x`, `C:\x`, `C:x`): none is relative to the local root.
-  if (/^[\\/]|^[a-zA-Z]:/.test(decoded)) return fail("Absolute paths are not allowed in local:// URLs");
+  // A POSIX or Windows root (`/x`, `\x`); on Windows also `C:\x` and `C:x`. Elsewhere `a:1.md` is a file name.
+  if (/^[\\/]/.test(decoded) || (platform === "win32" && /^[a-zA-Z]:/.test(decoded))) {
+    return fail("Absolute paths are not allowed in local:// URLs");
+  }
   if (decoded.split(/[\\/]/).includes("..")) return fail("Path traversal (..) is not allowed in local:// URLs");
   return { ok: true, relative: decoded };
 }
