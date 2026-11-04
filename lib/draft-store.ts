@@ -60,6 +60,7 @@ declare global {
   var __ompChatDrafts: Map<string, ChatDraft> | undefined;
   var __ompChatDraftListeners: Set<() => void> | undefined;
   var __ompChatDraftRecoveryListeners: Set<(key: string, recovery: DraftRecovery) => void> | undefined;
+  var __ompChatDraftConsumptionListeners: Set<(key: string, snapshot: ChatDraft) => void> | undefined;
 }
 
 const MAX_DRAFTS = 50;
@@ -118,6 +119,7 @@ function readStoredDrafts(): Map<string, ChatDraft> {
 
 const listeners = (globalThis.__ompChatDraftListeners ??= new Set<() => void>());
 const recoveryListeners = (globalThis.__ompChatDraftRecoveryListeners ??= new Set<(key: string, recovery: DraftRecovery) => void>());
+const consumptionListeners = (globalThis.__ompChatDraftConsumptionListeners ??= new Set<(key: string, snapshot: ChatDraft) => void>());
 
 export function hasUnsentDrafts(): boolean {
   return drafts.size > 0;
@@ -136,6 +138,18 @@ export function subscribeDrafts(listener: () => void): () => void {
 export function subscribeDraftRecovery(listener: (key: string, recovery: DraftRecovery) => void): () => void {
   recoveryListeners.add(listener);
   return () => { recoveryListeners.delete(listener); };
+}
+
+/** A durable outbox commit consumes only its original draft, including a composer remounted while it waited. */
+export function consumeDraft(key: string, snapshot: ChatDraft): void {
+  if (JSON.stringify(getDraft(key)) !== JSON.stringify(snapshot)) return;
+  clearDraft(key);
+  for (const listener of consumptionListeners) listener(key, snapshot);
+}
+
+export function subscribeDraftConsumption(listener: (key: string, snapshot: ChatDraft) => void): () => void {
+  consumptionListeners.add(listener);
+  return () => { consumptionListeners.delete(listener); };
 }
 
 function cloneDraft(draft: ChatDraft): ChatDraft {

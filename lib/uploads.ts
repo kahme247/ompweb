@@ -9,6 +9,7 @@ import { isRecord } from "./type-guards";
 import { formatUploadSize, MAX_UPLOAD_BYTES, MAX_UPLOADS_PER_MESSAGE, UPLOAD_ID_RE, UPLOAD_WINDOW_BYTES } from "./upload-limits";
 import type { UploadConflictStrategy } from "./file-upload";
 import type { WorkspaceUploadResult } from "./workspace-types";
+import { completedUpload, forgetCompletedUpload, saveCompletedUpload } from "./message-outbox";
 
 /** Unfinished uploads one owner may have registered: each may hold a window of bytes in its host link's queue. */
 const MAX_OPEN_UPLOADS_PER_OWNER = 32;
@@ -66,6 +67,50 @@ interface Upload {
   attempt: string;
   touched: number;
   workspace?: { directory: string; name: string; conflict: UploadConflictStrategy; pending?: Promise<WorkspaceUploadResult>; result?: WorkspaceUploadResult; timer?: NodeJS.Timeout };
+}
+
+/** Private receipt saved with a server-held outbox entry: no bytes or browser sink, only the finished staging
+ * registration needed to call uploadAttach after a web restart. Never accepted from a browser command. */
+export interface OutboxUploadReceipt {
+  id: string;
+  hostId: string;
+  name: string;
+  size: number;
+  type: string;
+  attached: Upload["attached"];
+}
+
+/** Snapshot only this owner's finished uploads. Missing, incomplete or someone else's ids are left out: the normal
+ * takeUploads/attachUploads checks fail them at dispatch, never send a message without its files. */
+export function snapshotOutboxUploads(ids: string[], owner: string): OutboxUploadReceipt[] {
+  return ids.flatMap((id) => {
+    const upload = uploads().get(id);
+    if (!upload) {
+      const stored = completedUpload(id);
+      return stored?.owner === owner ? [stored.receipt] : [];
+    }
+    if (upload.owner !== owner || !upload.done) return [];
+    const { hostId, name, size, type, attached } = upload;
+    return [{ id, hostId, name, size, type, attached }];
+  });
+}
+
+/** Restore trusted SQLite receipts only when the live registry has none; never replace another owner's registration.
+ * Host/session/owner checks still run through takeUploads and attachUploads before any message goes to omp. */
+export function restoreOutboxUploads(receipts: OutboxUploadReceipt[], owner: string): void {
+  const registry = uploads();
+  for (const { id, hostId, name, size, type, attached } of receipts) {
+    if (registry.has(id)) continue;
+    registry.set(id, {
+      hostId, owner, name, size, type, attached,
+      received: size, sent: size, done: true, live: false, sink: null, attempt: "", touched: Date.now(),
+    });
+  }
+}
+
+function persistCompletedUpload(id: string, upload: Upload): void {
+  const { hostId, name, size, type, attached, owner } = upload;
+  saveCompletedUpload(owner, { id, hostId, name, size, type, attached });
 }
 
 declare global {
@@ -130,6 +175,16 @@ function onHostEvent(hostId: string, ack: UploadAck | null): void {
   upload.received = Math.min(upload.size, Math.max(upload.received, ack.received));
   upload.done = ack.done && upload.received === upload.size;
   upload.touched = Date.now();
+  if (upload.done) {
+    try {
+      // Before its done ACK: an outbox_add may never reach main until after a restart.
+      persistCompletedUpload(ack.id, upload);
+    } catch {
+      upload.done = upload.live = false;
+      upload.sink?.error(500, "upload_receipt_failed", "Could not save the completed upload; retry the upload");
+      return;
+    }
+  }
   if (upload.live) upload.sink?.ack(upload.received, upload.done);
 }
 
@@ -167,6 +222,11 @@ export async function startUpload(req: UploadStartRequest): Promise<{ received: 
   if (size > MAX_UPLOAD_BYTES) throw new UploadError(413, "upload_too_large", "The file is larger than 2 GiB");
   if (!getHost(hostId)) throw new UploadError(404, "host_not_found", "Unknown host");
   const map = uploads();
+  const stored = completedUpload(id);
+  if (stored) {
+    if (stored.owner !== owner) throw new UploadError(409, "upload_id_conflict", "Another upload has this id");
+    restoreOutboxUploads([stored.receipt], owner);
+  }
   let upload = map.get(id);
   const known = upload !== undefined;
   if (upload && (upload.owner !== owner || upload.hostId !== hostId || upload.name !== name || upload.type !== type || upload.size !== size)) {
@@ -208,6 +268,7 @@ export async function startUpload(req: UploadStartRequest): Promise<{ received: 
     upload.received = upload.sent = result.received;
     upload.done = result.done && result.received === size;
     upload.live = !upload.done;
+    if (upload.done) persistCompletedUpload(id, upload);
   }
   return { received: result.received };
 }
@@ -293,10 +354,16 @@ export function putUploadChunk(id: string, owner: string, offset: number, body: 
  * random UUIDs only their owner's browser holds. */
 export async function abortUpload(id: string, owner: string, hostId?: string): Promise<void> {
   const map = uploads();
+  const stored = completedUpload(id);
+  if (stored) {
+    if (stored.owner !== owner) return;
+    restoreOutboxUploads([stored.receipt], owner);
+  }
   const upload = map.get(id);
   if (upload) {
     if (upload.owner !== owner) return;
     map.delete(id);
+    forgetCompletedUpload(id);
     dropUploadFrames(upload.hostId, id);
     return deliverAbort(upload.hostId, id);
   }
@@ -325,6 +392,7 @@ export function takeUploads(command: Record<string, unknown>, owner: string): st
   }
   if (ids.length === 0) return null;
   if (typeof command.type !== "string" || !Object.hasOwn(PROMPT_TYPES, command.type)) throw new UploadError(400, "invalid_uploads", "Only a prompt, steer or follow_up attaches files");
+  restoreOutboxUploads(snapshotOutboxUploads(ids as string[], owner), owner);
   for (const id of ids as string[]) {
     const upload = uploads().get(id);
     if (!upload || upload.owner !== owner) throw missing();
@@ -384,7 +452,10 @@ function markdownCode(text: string): string {
 
 /** The prompt carrying these uploads reached omp: their registry entries go. */
 export function forgetUploads(ids: string[]): void {
-  for (const id of ids) uploads().delete(id);
+  for (const id of ids) {
+    uploads().delete(id);
+    forgetCompletedUpload(id);
+  }
 }
 
 /** Bind one completed upload to one authorized workspace destination, including lost-reply retries. */

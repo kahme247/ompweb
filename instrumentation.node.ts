@@ -91,6 +91,14 @@ export async function register(): Promise<void> {
     }
   })();
 
+  // Messages the outbox held when omp-web last stopped go once their hosts link (lib/message-outbox.ts).
+  try {
+    const { startOutbox } = await import("@/lib/message-outbox");
+    startOutbox();
+  } catch (error) {
+    console.warn(`[omp-web] message outbox not started: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   // Crash/stall journal: a long-running server that dies or wedges while the
   // user is away leaves no trace in a terminal that no longer exists (CLI runs
   // are killed with their terminal; pages then show endless loading until the

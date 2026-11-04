@@ -214,7 +214,6 @@ test("a queued steer or follow-up during a run waits for uploads too", async () 
     isStreaming: true,
     onSteer: record("onSteer"),
     onFollowUp: record("onFollowUp"),
-    onPromptWithStreamingBehavior: record("onPromptWithStreamingBehavior"),
   });
   await act(async () => { ref.current.addFiles([binaryFile("data.zip")]); });
   await putOf((await opened("data.zip")).id);

@@ -16,6 +16,28 @@ import { formatApiError } from "@/lib/i18n/api-error";
 // decision happens inside the route, which only sees id + query string.
 const advisorSpawnSessions = new Set<string>();
 
+const OUTBOX_SCOPE_KEY = "omp-web:outbox-scope";
+let outboxScope: string | null = null;
+
+/** Nonsecret installation/auth fingerprint, not a cookie: reuse it offline, but never rebind a stored entry. */
+export function rememberOutboxScope(scope: string): void {
+  outboxScope = scope;
+  try { localStorage.setItem(OUTBOX_SCOPE_KEY, scope); } catch { /* Storage blocked: this page still knows it. */ }
+}
+
+export async function getOutboxScope(sessionId: string): Promise<string> {
+  if (!outboxScope) {
+    try { outboxScope = localStorage.getItem(OUTBOX_SCOPE_KEY); } catch { /* Ask the server instead. */ }
+  }
+  if (!outboxScope) {
+    const result = await sendAgentCommand<{ scope: string }>(sessionId, { type: "outbox_scope" });
+    if (!result?.scope) throw new Error("The message cannot be saved until omp-web has confirmed this installation.");
+    rememberOutboxScope(result.scope);
+    return result.scope;
+  }
+  return outboxScope;
+}
+
 // The `hang` sample's patience for a POST: 10 s plus 1 ms per 32 bytes to upload first (a 32 KB/s floor).
 const HANG_AFTER_MS = 10_000;
 

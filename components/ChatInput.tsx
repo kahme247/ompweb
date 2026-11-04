@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, useSyncExternalStore, forwardRef, memo, KeyboardEvent } from "react";
+import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { ChevronDown, ClipboardPaste, CornerDownRight, ListChecks, Loader2, Mic, Paperclip, Plus, RotateCw, Shrink, Snail, Sparkles, Wrench, X, Zap } from "lucide-react";
 import { getSubmitDuringRunBehavior, isWordCompletionEnabled } from "@/lib/composer-prefs";
@@ -15,8 +15,7 @@ import type { SttAfter } from "@/lib/stt";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { ContextDetailPanel } from "./ComposerPanels";
 import { RecordingDeck } from "./RecordingDeck";
-import { clearDraft, getDraft, mergeRecoveredText, recoverDraft, setDraft, subscribeDraftRecovery, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
-import { getPendingSends, retargetPendingSends, subscribePendingSends, trackPendingSend } from "@/lib/pending-sends";
+import { clearDraft, consumeDraft, getDraft, mergeRecoveredText, recoverDraft, setDraft, subscribeDraftConsumption, subscribeDraftRecovery, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import type { AttachedImage, AttachedTextFile } from "./ChatInput-draft-attachments";
 import {
@@ -174,17 +173,19 @@ const TOOL_PRESET_OPTIONS: Array<{ value: ToolPreset; descriptionKey: string }> 
 ];
 
 interface Props {
-  /** Only a rejected submission is restored; completed/superseded runs must not be replayed. `uploads`: the ids of
-   *  files sent As file, passed only when there are some. */
+  /** Without `outbox`, only a rejected submission is restored; completed/superseded runs must not be replayed.
+   *  `uploads`: the ids of files sent As file, passed only when there are some. */
   onSend: (message: string, images?: AttachedImage[], uploads?: string[]) => Promise<PromptSubmissionResult>;
+  /** Sends go through the message outbox (an existing session): the composer clears once `onSend` (or a queue
+   *  callback) reports the message stored, and keeps it otherwise. */
+  outbox?: boolean;
   /** Ghost-text word completion for the draft (omp `predict_word`); absent = no ghost text. */
   onPredictWord?: PredictWord;
   onPredictWordFeedback?: PredictWordFeedback;
   onAbort: () => void;
-  /** Steer/follow-up callbacks resolve false when omp refused the message. */
+  /** Steer/follow-up during a run (slash commands too): resolve true once the outbox has the message. */
   onSteer?: (message: string, images?: AttachedImage[], uploads?: string[]) => Promise<boolean>;
   onFollowUp?: (message: string, images?: AttachedImage[], uploads?: string[]) => Promise<boolean>;
-  onPromptWithStreamingBehavior?: (message: string, behavior: "steer" | "followUp", images?: AttachedImage[], uploads?: string[]) => Promise<boolean>;
   isStreaming: boolean;
   /** Refuse submission without treating a pending history edit as a model run. */
   submissionBlocked?: boolean;
@@ -276,7 +277,7 @@ export interface ChatInputHandle {
   prependText: (text: string) => void;
   addFiles: (files: File[]) => void;
   openContextPanel: () => void;
-  /** Retarget pending sends and captured queue recoveries before a confirmed move can render. */
+  /** Retarget captured queue recoveries before a confirmed move can render. */
   retargetPendingRecovery: (from: string, to: string) => void;
 }
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
@@ -365,7 +366,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
   onAudioUnlock,
-  onPromptWithStreamingBehavior,
+  outbox = false,
   submissionBlocked = false,
   advisorActive,
   advisorModel,
@@ -512,13 +513,20 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   fileIndexOwnerRef.current = fileIndexOwner;
   const draftKeyRef = useRef(draftKey);
   const consumedIdentityMoveRef = useRef<typeof draftIdentityMove>(undefined);
-  // Pending queue recoveries retain this identity across confirmed moves only.
+  // Pending queue edits retain this identity across confirmed moves only.
   // Navigation starts a new identity, even when a draft key is later reused.
   const draftRecoveryIdentityRef = useRef({ key: draftKey });
   const persistedDraftRef = useRef<ChatDraft | null>(null);
   // Async dictation and slash-command completions must see the latest edit gate.
   const submissionBlockedRef = useRef(submissionBlocked);
   const valueRef = useRef(value);
+  // An outbox send waiting to be stored: a second Enter must not send the same text again.
+  const holdingRef = useRef(false);
+  const composerAliveRef = useRef(true);
+  useLayoutEffect(() => {
+    composerAliveRef.current = true;
+    return () => { composerAliveRef.current = false; };
+  }, []);
   const attachedImagesRef = useRef(attachedImages);
   const attachedTextFilesRef = useRef(attachedTextFiles);
   // Bumped whenever the user clears/sends the composer: in-flight FileReader
@@ -612,7 +620,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     retargetPendingRecovery(from, to) {
       const identity = draftRecoveryIdentityRef.current;
       if (identity.key === from) identity.key = to;
-      retargetPendingSends(from, to);
     },
   }));
 
@@ -943,6 +950,34 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     }
   }, [clearImages, clearTextFiles, clearUploads, draftKey]);
 
+  /** A stored submission may finish after navigation/remount: clear only its unchanged draft, never a new composer's
+   * text or attachments. Capture before the asynchronous IndexedDB commit. */
+  const clearOnceStored = useCallback((raw: string) => {
+    const key = draftKeyRef.current;
+    const snapshot = key ? getDraft(key) : null;
+    const images = attachedImagesRef.current;
+    const files = attachedTextFilesRef.current;
+    const uploads = attachedUploadsRef.current;
+    return () => {
+      if (composerAliveRef.current && draftKeyRef.current === key
+        && valueRef.current === raw
+        && attachedImagesRef.current === images && attachedTextFilesRef.current === files && attachedUploadsRef.current === uploads) clearInput();
+      else if (key && snapshot) consumeDraft(key, snapshot);
+    };
+  }, [clearInput]);
+
+  useLayoutEffect(() => subscribeDraftConsumption((key, snapshot) => {
+    if (draftKeyRef.current !== key) return;
+    const uploads = attachedUploadsToDraftUploads(attachedUploadsRef.current);
+    const current: ChatDraft = {
+      value: valueRef.current,
+      images: attachedImagesRef.current.map(imageToDraftImage),
+      files: attachedTextFilesRef.current.map(textFileToDraftFile),
+      ...(uploads.length ? { uploads } : {}),
+    };
+    if (JSON.stringify(current) === JSON.stringify(snapshot)) clearInput();
+  }), [clearInput]);
+
   useLayoutEffect(() => {
     if (!draftKey || draftKeyRef.current !== draftKey) return;
     const draft = {
@@ -1126,13 +1161,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
    * success and only if it still holds what was sent (the user may have
    * started typing while the command ran). */
   const runBuiltinCommand = useCallback(async (msg: string, overrideText?: string): Promise<boolean> => {
-    if (submissionBlockedRef.current || !onBuiltinCommand) return false;
-    const sentValue = overrideText ?? valueRef.current;
-    const result = await onBuiltinCommand(msg);
-    if (!result.handled) return false;
-    if (!submissionBlockedRef.current && !result.error && !result.retainInput && (overrideText !== undefined || valueRef.current === sentValue)) clearInput();
-    return true;
-  }, [onBuiltinCommand, clearInput]);
+    if (submissionBlockedRef.current || holdingRef.current || !onBuiltinCommand) return false;
+    const stored = clearOnceStored(overrideText ?? valueRef.current);
+    holdingRef.current = true;
+    try {
+      const result = await onBuiltinCommand(msg);
+      if (!result.handled) return false;
+      if (!submissionBlockedRef.current && !result.error && !result.retainInput) stored();
+      return true;
+    } finally {
+      holdingRef.current = false;
+    }
+  }, [onBuiltinCommand, clearOnceStored]);
 
   /** `/btw` asks a side question beside any run: never a prompt, never
    * queued. Attachments cannot ride along, so refuse and keep the draft
@@ -1153,7 +1193,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length) return;
     // `!cmd` runs right away during a run too, as in omp's terminal; it is never queued as text.
     const shellCommand = msg.startsWith("!") && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length;
-    if (submissionBlockedRef.current || (isStreaming && !shellCommand)) return;
+    if (submissionBlockedRef.current || holdingRef.current || (isStreaming && !shellCommand)) return;
     onAudioUnlock?.();
     if (sendSideQuestion(msg, overrideText)) return;
     if (rejectsPendingUploads()) return;
@@ -1168,7 +1208,19 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const key = draftKeyRef.current;
     const images = attachedImagesRef.current.length ? attachedImagesRef.current : undefined;
     const recovery = { text: composedMessage, images: images?.map(imageToDraftImage), ...uploadRecovery(attachedUploadsRef.current) };
+    const stored = clearOnceStored(raw);
     const pending = onSend(composedMessage, images, ...uploadArgs(attachedUploadsRef.current));
+    if (outbox && !shellCommand) {
+      // Stored in this browser once accepted: clear only then (a reload in between keeps the draft), and only if the
+      // composer still holds what was sent. A refused one stays where it is.
+      holdingRef.current = true;
+      try {
+        if ((await pending).status === "accepted") stored();
+      } finally {
+        holdingRef.current = false;
+      }
+      return;
+    }
     clearInput();
     try {
       const result = await pending;
@@ -1180,7 +1232,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (key) recoverDraft(key, recovery);
       throw error;
     }
-  }, [value, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, rejectsOversizedPrompt, rejectsPendingUploads, runBuiltinCommand, sendSideQuestion]);
+  }, [value, isStreaming, onBuiltinCommand, onSend, outbox, clearInput, clearOnceStored, onAudioUnlock, rejectsOversizedPrompt, rejectsPendingUploads, runBuiltinCommand, sendSideQuestion]);
   const {
     isRecording,
     isPaused,
@@ -1619,10 +1671,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
     });
   }, [slashMatch, value]);
-  const sendingQueued = useSyncExternalStore(subscribePendingSends, getPendingSends, getPendingSends);
 
   const sendQueued = useCallback((mode: "steer" | "followup", overrideText?: string) => {
-    if (submissionBlockedRef.current) return;
+    if (submissionBlockedRef.current || holdingRef.current) return;
     const raw = overrideText ?? value;
     const msg = raw.trim();
     if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length) return;
@@ -1632,25 +1683,26 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       void handleSend(overrideText);
       return;
     }
+    const queue = mode === "steer" ? onSteer : onFollowUp;
+    if (!queue) return;
     const images = attachedImagesRef.current.length ? attachedImagesRef.current : undefined;
     const uploads = uploadArgs(attachedUploadsRef.current);
-    // The queue callbacks resolve false when omp refused the message: it goes
-    // back, text and attachments together, to the draft it was sent from, even
-    // if the user has typed or switched sessions since.
-    const recoveryIdentity = draftRecoveryIdentityRef.current;
-    const kept = { images: images?.map(imageToDraftImage), ...uploadRecovery(attachedUploadsRef.current) };
-    // Until omp answers, the message shows as "Sending…" above the composer:
-    // it is neither in the composer nor in omp's queue yet.
-    const trackSend = (queued: Promise<boolean>, text: string) => {
-      const reply = Promise.resolve(queued).then((ok) => {
-        if (ok === false && recoveryIdentity.key) recoverDraft(recoveryIdentity.key, { text, ...kept });
-      });
-      trackPendingSend(recoveryIdentity, text, reply);
+    // The outbox has it once the callback resolves true: clear only then, and only if the composer still holds what
+    // was sent. A refused one stays where it is.
+    const hold = (text: string) => {
+      const stored = clearOnceStored(raw);
+      holdingRef.current = true;
+      void Promise.resolve(queue(text, images, ...uploads))
+        .then((ok) => {
+          if (ok) stored();
+        })
+        .finally(() => {
+          holdingRef.current = false;
+        });
     };
     const files = attachedTextFilesRef.current;
     onAudioUnlock?.();
-    const streamingBehavior = mode === "steer" ? "steer" : "followUp";
-    if (msg.startsWith("/") && onPromptWithStreamingBehavior) {
+    if (msg.startsWith("/")) {
       const commandName = msg.slice(1).split(/\s+/)[0];
       // Same gate as the direct path (useAgentSession refuses /advisor while
       // disabled): queueing must not become a bypass around the toggle.
@@ -1666,8 +1718,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (expansion.kind === "expand") {
         const prompt = composeMessageWithTextAttachments(expansion.prompt, files);
         if (rejectsOversizedPrompt(prompt, attachedImagesRef.current)) return;
-        trackSend(onPromptWithStreamingBehavior(prompt, streamingBehavior, images, ...uploads), prompt);
-        clearInput();
+        hold(prompt);
         return;
       }
       if (expansion.kind === "usage-error") {
@@ -1677,21 +1728,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }));
         return;
       }
-      const prompt = composeMessageWithTextAttachments(msg, files);
-      if (rejectsOversizedPrompt(prompt, attachedImagesRef.current)) return;
-      trackSend(onPromptWithStreamingBehavior(prompt, streamingBehavior, images, ...uploads), prompt);
-      clearInput();
-      return;
     }
     const composedMessage = composeMessageWithTextAttachments(msg, files);
     if (rejectsOversizedPrompt(composedMessage, attachedImagesRef.current)) return;
-    if (mode === "steer" && onSteer) {
-      trackSend(onSteer(composedMessage, images, ...uploads), composedMessage);
-    } else if (mode === "followup" && onFollowUp) {
-      trackSend(onFollowUp(composedMessage, images, ...uploads), composedMessage);
-    }
-    clearInput();
-  }, [value, handleSend, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, t, advisorEnabled, rejectsOversizedPrompt, rejectsPendingUploads, sendSideQuestion]);
+    hold(composedMessage);
+  }, [value, handleSend, onSteer, onFollowUp, clearOnceStored, onAudioUnlock, t, advisorEnabled, rejectsOversizedPrompt, rejectsPendingUploads, sendSideQuestion]);
   // A typed message or attachment during a run is a queued follow-up — and so
   // is a dictation in progress: the primary button must take the same state it
   // would have if the composer already held text. Keep Stop as the action
@@ -1719,8 +1760,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   ];
   const firstQueued = queuedEntries[0] ?? null;
   const queuedCount = queuedEntries.length;
-  const sendingEntries = sendingQueued.filter((entry) => entry.key === draftKey);
-  const queueBarShown = queuedCount > 0 || sendingEntries.length > 0;
 
   const [queueExpanded, setQueueExpanded] = useState(false);
   const [queueActionPending, setQueueActionPending] = useState(false);
@@ -2809,7 +2848,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           })()}
         {/* Queued prompts panel / bar — attached to composer's top edge.
             When 1 item: compact single row. When multiple items: compact row with expand toggle, or full list when expanded. */}
-        {queueBarShown && (
+        {queuedCount > 0 && (
           <div
             aria-label={t("chatInput.queuedPrompts")}
             style={{
@@ -2820,7 +2859,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               overflow: "hidden",
             }}
           >
-            {queuedCount === 0 ? null : queuedCount === 1 ? (
+            {queuedCount === 1 ? (
               <div style={{
                 padding: "5px 8px 5px 12px",
                 display: "flex",
@@ -3011,17 +3050,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 )}
               </div>
             )}
-            {sendingEntries.length > 0 && <div style={{ maxHeight: 120, overflowY: "auto" }}>{sendingEntries.map((entry) => (
-              <div key={entry.id} style={{ padding: "5px 8px 5px 12px", display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-                <Loader2 size={12} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0, color: "var(--text-muted)", animation: "spin 0.8s linear infinite" }} />
-                <span role="status" style={{ flexShrink: 0, fontSize: 10, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--text-muted)" }}>
-                  {t("chatInput.queuedSending")}
-                </span>
-                <span title={entry.text} style={{ flex: 1, minWidth: 0, fontSize: 12, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {entry.text}
-                </span>
-              </div>
-            ))}</div>}
           </div>
         )}
         {/* Live agent status bar — attached to composer's top edge */}
@@ -3032,7 +3060,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             style={{
               border: `1px solid ${bashMode ? "var(--tool-bg)" : "color-mix(in srgb, var(--border) 70%, transparent)"}`,
               borderBottom: "none",
-              borderRadius: queueBarShown ? 0 : "var(--radius-card) var(--radius-card) 0 0",
+              borderRadius: queuedCount > 0 ? 0 : "var(--radius-card) var(--radius-card) 0 0",
               background: "var(--bg-panel)",
               padding: "6px 14px",
               display: "flex",
@@ -3056,7 +3084,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               flexDirection: "column",
               background: "var(--bg)",
               border: `1px solid ${bashMode ? "var(--tool-bg)" : "color-mix(in srgb, var(--border) 70%, transparent)"}`,
-              borderRadius: (queueBarShown || Boolean(statusText)) ? "0 0 var(--radius-card) var(--radius-card)" : "var(--radius-card)",
+              borderRadius: (queuedCount > 0 || Boolean(statusText)) ? "0 0 var(--radius-card) var(--radius-card)" : "var(--radius-card)",
               padding: "12px 12px 10px",
               boxShadow: "var(--shadow-card)",
             } as React.CSSProperties}
