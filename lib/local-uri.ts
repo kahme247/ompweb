@@ -1,7 +1,9 @@
 // `local://` URLs as omp's own local-protocol.ts reads them (`extractRelativePath` + `validateRelativePath`, omp
 // 18.3.1+ and the installed 18.15): the file an agent wrote with `local://x` is the one ompweb opens, and nothing omp
-// refuses is accepted here. Stricter in one way: a backslash is always a separator, so a leading one is absolute and
-// `a\..b` is refused off Windows too (omp reads it there as one file name).
+// refuses is accepted here. Stricter in a few ways, all on the safe side: a NUL byte and an empty path are refused; a
+// backslash is always a separator, so a leading one is absolute and `a\..b` is refused off Windows (omp reads it there
+// as one file name); on Windows a drive letter is absolute and an interior `..`-name (`a/..b`) is refused, which omp's
+// `includes("/..")` misses once `normalize` has turned the separators into backslashes.
 // Pure (no I/O, no `@/` imports): the open_file host tool in the browser and the server share it.
 
 // Scheme and authority (omp's LOCAL_AUTHORITY_RE), then the raw path; a query or fragment is not part of the path.
