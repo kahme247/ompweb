@@ -62,9 +62,7 @@ export async function authorizeFileAccess(
   // `~/.omp/AGENTS.md` open in the viewer, #135) also puts omp's credential
   // store inside an allowed root. Deny it before anything can stat, read or
   // download it, also through a symlink that resolves to it.
-  let realPath = filePath;
-  try { realPath = fs.realpathSync(filePath); } catch { /* missing: the stat below answers 404 */ }
-  if (isOmpSecretFile(filePath) || isOmpSecretFile(realPath)) return ACCESS_DENIED;
+  if (isOmpSecretFile(filePath)) return ACCESS_DENIED;
   const allowedByRoot = isFilePathAllowed(filePath, allowedRoots);
   const allowedBySessionReference =
     !allowedByRoot &&
