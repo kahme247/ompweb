@@ -18,18 +18,20 @@ The outbox moves ownership: once the user presses Send, omp-web is responsible f
 
 ### O1. What the user sees
 
-- Every submitted message (an idle prompt, a follow-up, a steer) appears at once as a **held bubble** at the end of the transcript, after the live turn: dimmed (`--text-muted` on `--user-bg` at reduced opacity), with a status line:
-  - **Sending** (spinner): on its way to the web server or the host.
-  - **Waiting for <host>** (clock icon): the host is offline; it goes when the host links again.
-  - **Not sent** (alert icon): omp refused it (O6). Actions: **Retry**, **Edit** (moves it back into the composer, removing it from the outbox), **Delete**.
+- Every submitted message (an idle prompt, a follow-up, a steer) appears at once as a **held bubble** at the end of the transcript, after the live turn: dimmed (`--text-muted` on `--user-bg` at reduced opacity), with a spinner and a status line naming the leg it is stuck on, as chat apps do:
+  - **Sending**: the browser has it; the web server has not confirmed it yet (offline phone, web server restarting).
+  - **Waiting for <host>** (clock icon): the web server has it; the host is offline. It goes when the host links again.
+  - **Delivering**: dispatched to the host, waiting for omp's answer.
+  - **Not sent** (alert icon, no spinner): it cannot go by itself (O6). Actions: **Edit** (moves it back into the composer and out of the outbox) and **Delete**. Transient failures are never "Not sent": they retry on their own, without a button.
 - Held bubbles are ordered by submission. Each has a mode chip (Prompt / Follow-up / Steer), changeable while it is held.
 - A held bubble leaves when omp has it: a prompt becomes the real user message when omp echoes it; a follow-up or steer becomes omp's queue chip (`queue_update`). There is no gap and no duplicate: the bubble stays until the replacing frame has been applied (O4).
-- While held, a bubble offers **Edit** and **Delete**. Once dispatched to the host (O3) it cannot be withdrawn: it shows **Sending** without actions until omp answers.
-- Every tab and device viewing the session sees the same held bubbles (O2). This is the one exception to "Never track chips client-side" in `AGENTS.md`: the outbox is server-owned and published like omp's queue, and it holds only what omp does not have yet. omp's queue stays omp's.
+- While held, a bubble offers **Edit** and **Delete**. Once dispatched to the host (O3) it cannot be withdrawn: it shows **Delivering** without actions until omp answers.
+- Every tab and device viewing the session sees the held bubbles the web server has (O2); a message still on its first leg shows only in the browser that sent it, as in any chat app. This is the one exception to "Never track chips client-side" in `AGENTS.md`: the outbox holds only what omp does not have yet, and omp's queue stays omp's.
 
 ### O2. Where the outbox lives
 
-- **Browser → web server.** The composer gives each message a client id (`Math.random().toString(36).slice(2, 12) + Date.now().toString(36)`, as the worker's ids) and keeps it in `sessionStorage` (text, mode, images, upload ids, draft key) until the server confirms it is stored. The message goes as `outbox_add {id, sessionId, mode, message, images?, uploads?}` over the browser link (a sequenced line, resent after a resume) or `POST /api/sessions/[id]/outbox` in SSE mode. `outbox_add` is idempotent by `id` on the server, with no time window: a repeat of a stored id answers the stored entry. This replaces the 10-minute `(session, rid)` dedupe for message sends.
+- **Browser (first leg).** Two outboxes, one per leg, keyed by the same message id. The browser's is owned by the event-stream worker (`lib/event-stream-worker.ts`), not by a tab or a composer: it already outlives tab switches and chat switches and already resends link lines. Each entry (id, session or chat id, mode, text, images, upload ids, draft key, created) is written to IndexedDB **before** the composer clears, so a reload, a closed tab or a crashed browser does not lose it: the next worker to start resends whatever IndexedDB still holds. The id is `Math.random().toString(36).slice(2, 12) + Date.now().toString(36)`, as the worker's other ids. The worker sends `outbox_add {id, sessionId | chatId, mode, message, images?, uploads?}` over the browser link (a sequenced line, resent after a resume) or `POST /api/sessions/[id]/outbox` in SSE mode, retrying with the transport's own back-off for as long as it takes, and deletes the IndexedDB entry only when the server answers that it stored it. Tabs render the worker's entries for their session merged with the server's `outbox_update` by id, so a message never shows twice and never disappears between the legs.
+- **Idempotence.** `outbox_add` is idempotent by `id` on the server, with no time window: a repeat of a stored id answers the stored entry, including one already delivered and removed (the server keeps delivered ids for 7 days). This replaces the 10-minute `(session, rid)` dedupe for message sends.
 - **Web server.** A per-session outbox in a SQLite store in omp-web's data dir (beside the notification store; `close(true)` on shutdown, WAL, 0600). Rows: `id, session_id, host_id, mode, message, images (JSON), uploads (JSON), state, error, created_at, dispatched_at`. It survives a web-server restart. The `session` channel carries an `outbox_update {entries}` snapshot frame on subscribe and on every change, with the same sequencing as `queue_update`.
 - **Host.** The host link already delivers a sequenced line exactly once to a running daemon (seq/ack, resend, duplicate drop). The gap is a daemon restart or a reply lost on the way back; O5 closes it.
 
@@ -50,13 +52,14 @@ The outbox moves ownership: once the user presses Send, omp-web is responsible f
 
 - Each dispatched command carries the outbox id as `outboxId`. The daemon records, per channel, the outbox ids it has written to the child's stdin (a bounded ring, 256 entries) and reports them in its `hello` (`channels[].delivered`) and in each `res`. This is an added optional field: a compatible link change (`LINK_PROTOCOL_VERSION` 7, `MIN` unchanged). A daemon on v6 or below reports nothing, and the web server treats a lost reply from it as **unknown** (below).
 - After a reconnect, an entry in flight whose id is in `delivered` is done (O4 then removes it as frames arrive); one whose id is absent was never written and goes again.
-- **Unknown** (a v6 daemon, or a daemon restart, which also kills its children): the entry becomes **Not sent** with "may have been sent", and Retry warns. It is never resent automatically.
+- **Unknown** (a v6 daemon, or a daemon restart, which also kills its children): the entry becomes **Not sent** with "may have been sent; check the transcript". It is never resent automatically; Edit puts it back in the composer if it did not arrive.
 - omp itself has no message id to dedupe on; the daemon's record is the delivery proof, because a line written to a live child's stdin reaches it.
 
 ### O6. Failures
 
-- omp refuses the command (validation, unknown command, oversized) → **Not sent** with omp's message. Nothing goes back into the composer by itself: Edit does that.
-- The web server refuses `outbox_add` (413, 429, unknown session) → the composer keeps the message in its local list as **Not sent**; nothing reached the server.
+- omp refuses the command (validation, unknown command, oversized) → **Not sent** with omp's message.
+- The web server refuses `outbox_add` for good (413, unknown session, 4xx other than 408/429) → **Not sent** in the sending browser only; nothing reached the server. 408, 429, 5xx and network errors are transient: the worker keeps it as **Sending** and retries.
+- Nothing goes back into the composer by itself: Edit does that.
 - A deleted session fails its entries; an archived one keeps them held until it is restored.
 
 ### O7. Chat ids: omp-web names the conversation, not omp
