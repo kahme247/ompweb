@@ -428,6 +428,13 @@ async function openFileChannel(rawPath: string, sessionId: string | null, handle
   if (!access.ok) return { ok: false, status: access.status, error: access.error, code: access.code };
   const { filePath } = access;
   if (!access.stat.isFile()) return { ok: false, status: 400, error: "Not a file", code: "not_a_file" };
+  // The gate authorized what this pathname resolves to now; that file is the only one the channel may report on.
+  let authorizedPath: string;
+  try {
+    authorizedPath = fs.realpathSync(filePath);
+  } catch {
+    return { ok: false, status: 404, error: "Not found", code: "file_not_found" };
+  }
   if (!handle.active) return SUBSCRIBED;
 
   handle.open();
@@ -436,7 +443,10 @@ async function openFileChannel(rawPath: string, sessionId: string | null, handle
   let lastSize = access.stat.size;
   const check = () => {
     try {
-      const stat = fs.statSync(filePath);
+      // A pathname swapped for a link to somewhere else is no longer the authorized file: it reads as gone, so nothing
+      // of the other file (its mtime, its size) is reported. A new subscription goes through the gate again.
+      if (fs.realpathSync(filePath) !== authorizedPath) throw new Error("not the authorized file");
+      const stat = fs.statSync(authorizedPath);
       // Some platforms emit watch events for file reads/attribute access.
       // Ignore those or the client's refresh read loops.
       if (stat.mtimeMs === lastMtimeMs && stat.size === lastSize) return;

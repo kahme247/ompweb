@@ -2149,6 +2149,26 @@ test("an open_file local:// call asks the server for the calling session's file 
   assert.deepEqual([answer?.body.id, answer?.body.isError, answer?.body.result.content[0].text], ["h1", false, "Opened local://note.md"]);
 });
 
+test("an open_file local:// call whose lookup fails answers the agent with that error and opens nothing", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  const lookupError = "File not found in this session's local:// directory";
+  world.holds.push({
+    match: (method, url) => method === "GET" && url.includes("/api/sessions/s1/local-file"),
+    produce: async () => ({ status: 404, value: { error: lookupError, code: "file_not_found" } }),
+  });
+  const opened = [];
+  const { es } = await startRun("s1", "q1", false, { onOpenFile: (path, name, sessionId) => { opened.push([path, name, sessionId]); } });
+  await act(async () => {
+    es.emit({ type: "host_tool_call", id: "h2", toolCallId: "c2", toolName: "open_file", arguments: { path: "local://absent.md" } });
+    await sleep(60);
+  });
+
+  assert.deepEqual(opened, [], "no tab opens for a file that is not there");
+  const answer = callsTo("POST", "/api/agent/s1").find((call) => call.body?.type === "host_tool_result");
+  assert.deepEqual([answer?.body.id, answer?.body.isError, answer?.body.result.content[0].text], ["h2", true, lookupError]);
+});
+
 test("SSE open merges the btw history; a no-op cancel re-reads it and settles a record omp lost", async () => {
   resetWorld();
   primeSession("s1", [userMsg("u0", "q")]);

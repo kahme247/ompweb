@@ -62,3 +62,20 @@ export function getRelativeFilePath(filePath: string, cwd?: string): string {
 export function joinFilePath(parent: string, child: string): string {
   return `${normalizeFilePathSlashes(parent).replace(/\/$/, "")}/${child}`;
 }
+
+/** The `/api/files` URL of a file. `sourceSessionId` is the session whose tab shows it: the server reads a file outside
+ * the allowed roots (a session's `local://` artifact, say) only for that session, so every read, download and preview
+ * link carries it. Required, so a caller that has none says so with `null`. */
+export function getFileApiUrl(
+  filePath: string,
+  type: "read" | "download" | "meta" | "preview",
+  sourceSessionId: string | null | undefined,
+  params: Record<string, string | number | undefined> = {},
+): string {
+  const searchParams = new URLSearchParams({ type });
+  if (sourceSessionId) searchParams.set("sessionId", sourceSessionId);
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined) searchParams.set(key, String(value));
+  }
+  return `/api/files/${encodeFilePathForApi(filePath)}?${searchParams.toString()}`;
+}

@@ -32,7 +32,7 @@ import { formatGenerationSpeed } from "@/lib/generation-speed";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useIsCompactOverlay } from "@/hooks/useIsCompactOverlay";
 import { copyText } from "@/lib/clipboard";
-import { encodeFilePathForApi, getFileName, getRelativeFilePath } from "@/lib/file-paths";
+import { getFileApiUrl, getFileName, getRelativeFilePath } from "@/lib/file-paths";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import { comparableProjectPath } from "@/lib/comparable-path";
@@ -1652,7 +1652,7 @@ export function AppShell({ appName }: { appName: string }) {
   const handleDownloadActiveFile = useCallback(() => {
     if (!activeFileTab) return;
     const link = document.createElement("a");
-    link.href = `/api/files/${encodeFilePathForApi(activeFileTab.filePath)}?type=download`;
+    link.href = getFileApiUrl(activeFileTab.filePath, "download", activeFileTab.sourceSessionId);
     link.download = activeFileTab.label;
     document.body.appendChild(link);
     link.click();

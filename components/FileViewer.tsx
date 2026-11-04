@@ -20,7 +20,7 @@ import {
   isDocumentPreviewPath,
   isImagePath,
 } from "@/lib/file-types";
-import { encodeFilePathForApi, getFileDirectory, getFileName, getRelativeFilePath } from "@/lib/file-paths";
+import { getFileApiUrl, getFileDirectory, getFileName, getRelativeFilePath } from "@/lib/file-paths";
 import { openEventStream } from "@/lib/event-stream";
 import { translate, useI18n } from "@/lib/i18n";
 import { resolveLocalFileHref } from "@/lib/file-links";
@@ -191,21 +191,6 @@ function SourceCodeRenderer({ rows, stylesheet, useInlineStyles, wrapLines }: So
       </span>
     );
   });
-}
-
-function getFileApiUrl(
-  filePath: string,
-  type: "read" | "download" | "meta" | "preview",
-  sourceSessionId?: string | null,
-  params: Record<string, string | number | undefined> = {},
-): string {
-  const encoded = encodeFilePathForApi(filePath);
-  const searchParams = new URLSearchParams({ type });
-  if (sourceSessionId) searchParams.set("sessionId", sourceSessionId);
-  for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined) searchParams.set(key, String(value));
-  }
-  return `/api/files/${encoded}?${searchParams.toString()}`;
 }
 
 interface FileWatchHandlers {
