@@ -320,6 +320,8 @@ function OmpWebTitle() {
   const reducedMotion = usePrefersReducedMotion();
   const commitHash = process.env.OMP_WEB_PUBLIC_COMMIT_HASH;
   const commitDate = process.env.OMP_WEB_PUBLIC_COMMIT_DATE;
+  const hasCommitDetails = Boolean(commitHash && commitDate);
+  const VersionTrigger = hasCommitDetails ? Popover.Trigger : "button";
 
   const target = showVersion ? `v${process.env.OMP_WEB_PUBLIC_APP_VERSION ?? "0.0.0"}` : "omp web";
   const display = useScramble(target, scrambling, reducedMotion);
@@ -347,7 +349,9 @@ function OmpWebTitle() {
 
   return (
     <Popover.Root open={showVersion} onOpenChange={handleVersionChange}>
-      <Popover.Trigger
+      <VersionTrigger
+        type="button"
+        onClick={hasCommitDetails ? undefined : () => handleVersionChange(!showVersion)}
         style={{
           background: "none", border: "none", padding: 0, cursor: "pointer",
           fontWeight: 700, fontSize: 14, letterSpacing: "-0.01em",
@@ -369,8 +373,8 @@ function OmpWebTitle() {
         ) : (
           <span style={{ color: showVersion ? "var(--accent)" : "var(--text)" }}>{display}</span>
         )}
-      </Popover.Trigger>
-      {commitHash && commitDate && (
+      </VersionTrigger>
+      {hasCommitDetails && (
         <Popover.Portal>
           <Popover.Positioner side="bottom" align="start" sideOffset={8} collisionPadding={8} style={{ zIndex: 220 }}>
             <Popover.Popup

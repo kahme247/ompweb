@@ -29,6 +29,16 @@ test("build identity follows HEAD and disappears only at an exact tag", (t) => {
   mkdirSync(archive);
   writeFileSync(path.join(archive, "package.json"), '{"version":"1.2.3"}');
   assert.equal(clientEnv(archive, "worker").OMP_WEB_PUBLIC_COMMIT_HASH, "");
+  const redirected = JSON.parse(execFileSync(process.execPath, ["-e", `
+    import { clientEnv } from ${JSON.stringify(path.join(import.meta.dir, "client-env.ts"))};
+    console.log(JSON.stringify(clientEnv(${JSON.stringify(archive)}, "worker")));
+  `], {
+    encoding: "utf8",
+    env: { ...process.env, GIT_DIR: path.join(root, ".git"), GIT_WORK_TREE: archive },
+  }));
+  assert.equal(redirected.OMP_WEB_PUBLIC_APP_VERSION, "1.2.3");
+  assert.equal(redirected.OMP_WEB_PUBLIC_COMMIT_HASH, "");
+  assert.equal(redirected.OMP_WEB_PUBLIC_COMMIT_DATE, "");
 
   git("tag", "v1.2.3");
   env = clientEnv(root, "worker");

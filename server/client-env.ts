@@ -20,7 +20,8 @@ export function clientEnv(root: string, worker: string) {
   let commitHash = "";
   let commitDate = "";
   try {
-    const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+    const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.toUpperCase().startsWith("GIT_")));
+    const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"] }).trim();
     if (!git("rev-parse", "--show-prefix") && !git("tag", "--points-at", "HEAD")) {
       [commitHash, commitDate] = git("log", "-1", "--no-show-signature", "--format=%H%n%cs").split("\n");
     }
