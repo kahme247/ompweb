@@ -477,23 +477,30 @@ export class StagedUploads {
     const name = sanitizeUploadName(meta.name);
     const ext = extname(name);
     const stem = name.slice(0, name.length - ext.length);
+    let stamped = false;
+    try {
+      // Retention must never observe the staged age through a newly published hard link.
+      const sent = new Date();
+      await utimes(part, sent, sent);
+      stamped = true;
+    } catch {
+      // A fresh copy below gets send-time mtime even when this inode cannot be stamped.
+    }
     for (let n = 0; ; n++) {
       const fileName = n === 0 ? name : `${stem} (${n})${ext}`;
       const target = join(dir, fileName);
-      // A hard link never replaces a file; another device (or a file system without links) gets a copy instead.
+      // A hard link never replaces a file; failed timestamping or unsupported links get a fresh copy.
       let linked = false;
-      try {
-        await link(part, target);
-        linked = true;
-        // A shared inode keeps the staged write time; if stamping fails, copy instead so retention starts at send.
-        const sent = new Date();
-        await utimes(target, sent, sent);
-      } catch (error) {
-        if (linked) await rm(target);
-        else {
+      if (stamped) {
+        try {
+          await link(part, target);
+          linked = true;
+        } catch (error) {
           if (errno(error) === "EEXIST" && n < 1000) continue;
           if (!["EXDEV", "EPERM", "ENOTSUP", "ENOSYS"].includes(errno(error) ?? "")) throw error;
         }
+      }
+      if (!linked) {
         let created = false;
         try {
           const output = await open(target, "wx", 0o600);
