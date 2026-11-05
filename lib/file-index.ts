@@ -1,6 +1,7 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
-import fs from "fs";
+import type { Dirent } from "fs";
+import { readdir } from "node:fs/promises";
 import path from "path";
 import { buildEntriesFromFiles, filterFileEntries, type FileIndexEntry } from "./file-fuzzy";
 import { createChildProcessEnvironment } from "./project-command-env";
@@ -91,18 +92,17 @@ async function listWithGit(cwd: string): Promise<FileListing | null> {
   }
 }
 
-function listWithWalk(cwd: string): FileListing {
+async function listWithWalk(cwd: string): Promise<FileListing> {
   const files: string[] = [];
-  const readDirectorySync = Reflect.get(fs, "readdirSync") as typeof fs.readdirSync;
   // BFS so shallow files win when the cap truncates the listing.
   const queue: Array<{ abs: string; rel: string; depth: number }> = [{ abs: cwd, rel: "", depth: 0 }];
   let head = 0;
   let hardTruncated = false;
   while (head < queue.length) {
     const { abs, rel, depth } = queue[head++]!;
-    let dirents: fs.Dirent[];
+    let dirents: Dirent[];
     try {
-      dirents = readDirectorySync(abs, { withFileTypes: true });
+      dirents = await readdir(abs, { withFileTypes: true });
     } catch {
       continue;
     }
