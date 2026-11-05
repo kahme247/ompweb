@@ -279,7 +279,7 @@ export interface ChatInputHandle {
   insertIfEmpty: (text: string) => void;
   prependText: (text: string) => void;
   addFiles: (files: File[]) => void;
-  /** Retarget captured queue recoveries before a confirmed move can render. */
+  /** Retarget pending sends and captured queue recoveries before a confirmed move can render. */
   retargetPendingRecovery: (from: string, to: string) => void;
 }
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
@@ -1808,7 +1808,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       // side question) must not enter the prompt queue: omp would treat the
       // text as an ordinary message. Run them now, mid-run included.
       if (CLIENT_ONLY_COMMAND_NAMES[commandName] === true && !ompCommandNames.has(commandName)) {
-        if (attachedImagesRef.current.length || attachedTextFilesRef.current.length) {
+        if (attachedImagesRef.current.length || attachedTextFilesRef.current.length || attachedUploadsRef.current.length) {
           toast.error(t("chatInput.commandAttachmentsUnsupported"));
           return;
         }
