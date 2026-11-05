@@ -15,22 +15,30 @@ export function isDormantSkillCommand(command: SlashCommandPaletteItem, dormantN
 }
 
 export const BUILTIN_SLASH_COMMAND_DEFS: { name: string; descriptionKey: string; argumentHintKey?: string }[] = [
-  // Web-native prompt-composing commands (goal/plan/... are TUI-only in omp and
-  // never execute over the RPC prompt path — see lib/web-slash-commands.ts).
+  // Web-native prompt-composing commands for names omp does not provide. When
+  // omp's catalog reports the same name (extension/custom/skill/builtin), the
+  // omp command wins and this entry is hidden.
   ...WEB_SLASH_COMMANDS.map((command) => ({
     name: command.name,
     descriptionKey: command.descriptionKey,
     argumentHintKey: command.argumentHintKey,
   })),
+  // omp's goal mode is an RPC command, not a slash builtin.
+  { name: "goal", descriptionKey: "chatInput.cmdGoal", argumentHintKey: "chatInput.cmdGoalArg" },
   { name: "btw", descriptionKey: "chatInput.cmdBtw", argumentHintKey: "chatInput.cmdBtwArg" },
-  { name: "compact", descriptionKey: "chatInput.cmdCompact" },
   { name: "reload", descriptionKey: "chatInput.cmdReload" },
   { name: "name", descriptionKey: "chatInput.cmdName" },
-  { name: "session", descriptionKey: "chatInput.cmdSession" },
   { name: "copy", descriptionKey: "chatInput.cmdCopy" },
 ];
 
-export const CLIENT_BUILTIN_COMMAND_NAMES = new Set(BUILTIN_SLASH_COMMAND_DEFS.map((def) => def.name));
+/** Commands omp has no slash equivalent for: the client always dispatches these. */
+export const CLIENT_ONLY_COMMAND_NAMES: Record<string, true> = {
+  goal: true,
+  btw: true,
+  reload: true,
+  name: true,
+  copy: true,
+};
 
 export const SLASH_SOURCES: SlashCommandSource[] = ["builtin", "extension", "prompt", "skill", "ompBuiltin"];
 
