@@ -841,6 +841,9 @@ during the wait.
   change, and opens without a wrapper while held entries exist. Observe the
   session-registry lifecycle too: an explicit command can create the ready
   wrapper without another outbox mutation; attach/rebind then announce `connected`.
+  Internal handoff observers protect lifetime but do not count as browser tabs
+  for host-tool/URI routing or disconnect cleanup. Only the submitted command's
+  own reply proves rejection; an older run's session-wide error cannot reject it.
   `GET /api/sessions/[id]/state` carries `outbox`, `outboxSettledIds` and
   `outboxScope` on every answer, an offline host's error included, so a reload
   subscribes to follow them. Upload completion receipts persist privately

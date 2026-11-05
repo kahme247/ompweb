@@ -564,6 +564,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const insertTextAtCursor = useCallback((text: string) => {
     const ta = textareaRef.current;
     if (!ta) {
+      const current = valueRef.current;
+      valueRef.current = current + (current ? " " : "") + text;
       setValue((v) => v + (v ? " " : "") + text);
       return;
     }
@@ -573,6 +575,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const after = ta.value.slice(end);
     const sep = before.length > 0 && !before.endsWith(" ") ? " " : "";
     const newVal = before + sep + text + after;
+    valueRef.current = newVal;
     setValue(newVal);
     setAtQuery(null);
     setSlashMatch(null);
@@ -985,6 +988,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const images = attachedImagesRef.current;
     const files = attachedTextFilesRef.current;
     const uploads = attachedUploadsRef.current;
+    const key = draftKeyRef.current;
+    // Dictation can submit before the layout persistence effect sees its inserted text.
+    if (key && draftRecoveryIdentityRef.current.key === key) {
+      setDraft(key, {
+        value: valueRef.current,
+        images: images.map(imageToDraftImage),
+        files: files.map(textFileToDraftFile),
+        uploads: attachedUploadsToDraftUploads(uploads),
+      });
+    }
     const pending = beginDraftSubmission(draftKeyRef.current);
     const commit = () => {
       endDraftSubmission(pending);
