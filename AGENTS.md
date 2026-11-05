@@ -1221,6 +1221,7 @@ during the wait.
 
 ### Session list caching — new sessions must appear immediately
 - The sidebar and command palette list sessions per host: `listSessionsAllHosts()` (`lib/hosts/session-index.ts`) calls each host's `listSessions` op and caches it 30 s per host (`LIST_TTL_MS`, the daemon's own TTL). **This machine's list is its daemon's**; a host that fails or is offline keeps its last list. Nothing on main parses session files to build it.
+- **A lookup miss is not deletion while any host's list is unavailable.** `hostForSessionId()` returns no host only after successful current-generation discovery across all registered hosts; offline or failed-refresh lists produce retryable 503, including a cold remote cache after main restarts while the local daemon is already online. Cached positive mappings remain usable. Outbox acceptance retains validated messages during unknown ownership and normal host-hello dispatch resolves them later; never guess a local owner or trust a caller's host hint.
 - The daemon's `listSessions` is `listAllSessions()` (`lib/session-reader.ts`): a 30 s TTL list cache plus an mtime-keyed directory walk in `lib/omp/session-files.ts` (`listSessionFiles`), both in the daemon process.
 - The walk cache keys on the **sessions root** mtime. On Windows/NTFS a new
   `.jsonl` inside an existing project subdirectory does NOT bump the root

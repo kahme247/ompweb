@@ -350,7 +350,7 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
     return invalid(`uploads must be at most ${MAX_UPLOADS_PER_MESSAGE} upload ids`);
   }
   const resolved = await resolveSessionHostOr404(sessionId);
-  // A 503 (this machine's sessions are unknown while its daemon is offline) still holds it: the dispatcher finds out.
+  // Unavailable host lists cannot prove absence: retain the entry until discovery can resolve its owner.
   if ("response" in resolved && resolved.response.status === 404) return resolved.response;
 
   const now = Date.now();
@@ -683,7 +683,8 @@ async function refused(entry: Row, response: Response, sent: boolean): Promise<O
   const error = typeof body.error === "string" ? body.error : `HTTP ${response.status}`;
   // Nothing reached omp: the session's entries wait for the host's next hello.
   if (body.hostOffline === true && (!sent || body.delivery === "refused")) return "offline";
-  if (body.code === "session_busy" || body.code === "session_restarting" || (!sent && body.code === "host_timeout")) return retry(entry);
+  if (body.code === "session_busy" || body.code === "session_restarting"
+    || (!sent && (body.code === "host_timeout" || body.code === "host_sessions_unavailable"))) return retry(entry);
   if (!sent && response.status === 404 && (await listArchivedSessions()).some((archive) => archive.id === entry.session_id)) {
     // An archived session keeps its entries held until it is restored (spec O6).
     if (!setState(entry.id, "held")) return "next";

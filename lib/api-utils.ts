@@ -9,7 +9,7 @@ import { getRpcSession, WebRpcError } from "./rpc-manager";
 const SESSION_NOT_FOUND = { error: "Session not found", code: "session_not_found" } as const;
 
 /** Resolve a session id to the host holding its file: a live session's own host first, then the
- * hosts' lists. A 404 JSON response when no host has it, 503 while this machine's sessions are unknown. */
+ * hosts' lists. A 404 JSON response only when absence is confirmed across all hosts; otherwise 503. */
 export async function resolveSessionHostOr404(
   id: string,
 ): Promise<{ host: Host } | { response: Response }> {
@@ -21,6 +21,7 @@ export async function resolveSessionHostOr404(
   } catch (error) {
     // Nothing was sent: a command the composer holds is refused, not lost.
     if (error instanceof HostOpError && error.code === "host_offline") return { response: apiErrorResponse(new WebRpcError(error.message, "host_offline", "refused")) };
+    if (error instanceof HostOpError && error.code === "host_sessions_unavailable") return { response: apiErrorResponse(error) };
     throw error;
   }
 }
