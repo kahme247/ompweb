@@ -9,28 +9,47 @@
 .table-auto-chart-toolbar button { display: inline-flex; align-items: center; gap: 5px; border: 0; background: transparent; color: var(--text-muted); padding: 4px; cursor: pointer; }
 .table-auto-chart-toolbar button:first-child { color: var(--text); font-weight: 600; }
 .table-auto-chart-toolbar button:last-child { margin-left: auto; }
-.table-auto-chart-toolbar select { min-width: 0; max-width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius-control); padding: 4px 6px; }
-.table-auto-chart-measure { overflow-wrap: anywhere; color: var(--text-muted); }
 .table-auto-chart-note { margin: 8px 0 12px !important; font-size: 11px; line-height: 1.6; color: var(--text-muted); }
-.table-auto-chart-rows { display: grid; gap: 10px; list-style: none !important; padding: 0 !important; margin: 0 !important; }
-.table-auto-chart-rows li { display: grid; grid-template-columns: minmax(0, 1fr) minmax(60px, 1.5fr) minmax(65px, auto); align-items: center; gap: 10px; margin: 0 !important; padding: 0; line-height: 1.5; font-size: 13px; }
+.table-auto-chart-group + .table-auto-chart-group { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+/* Series colours come from the theme; slot n pairs with SERIES_COLORS[n] in lib/table-chart.ts. */
+.table-auto-chart [data-series="0"] { --series: var(--accent); }
+.table-auto-chart [data-series="1"] { --series: var(--status-renamed); }
+.table-auto-chart [data-series="2"] { --series: var(--status-success); }
+.table-auto-chart [data-series="3"] { --series: var(--status-warning); }
+.table-auto-chart [data-series="4"] { --series: var(--text-muted); }
+.table-auto-chart-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; list-style: none !important; padding: 0 !important; margin: 0 0 12px !important; font-size: 12px; color: var(--text); }
+.table-auto-chart-legend li { display: inline-flex; align-items: center; gap: 6px; margin: 0 !important; padding: 0 !important; overflow-wrap: anywhere; }
+.table-auto-chart-swatch { flex: none; width: 12px; height: 12px; border-radius: 3px; background: var(--series); }
+/* One grid per group: every row, and the axis, subgrid the same label | track | value columns, so the axis ends line up with the tracks. */
+.table-auto-chart-rows { display: grid; grid-template-columns: minmax(0, 1fr) minmax(60px, 1.5fr) minmax(65px, auto); gap: 12px 10px; list-style: none !important; padding: 0 !important; margin: 0 !important; }
+.table-auto-chart-rows > li { display: grid; grid-template-columns: subgrid; grid-column: 1 / -1; align-items: center; margin: 0 !important; padding: 0 !important; line-height: 1.5; font-size: 13px; }
 .table-auto-chart-label { overflow-wrap: anywhere; color: var(--text); font-weight: 500; }
+.table-auto-chart-bars { display: grid; grid-template-columns: subgrid; grid-column: 2 / -1; row-gap: 4px; align-items: center; }
 .table-auto-chart-value { color: var(--text); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
-.table-auto-chart-track { height: 28px; position: relative; background: repeating-linear-gradient(to right, var(--border) 0 1px, transparent 1px 25%); }
+.table-auto-chart-track { height: 20px; position: relative; background: repeating-linear-gradient(to right, var(--border) 0 1px, transparent 1px 25%); }
 .table-auto-chart-zero { position: absolute; width: 1px; top: 0; bottom: 0; background: var(--text-dim); }
-.table-auto-chart-bar { position: absolute; top: 5px; height: 18px; border-radius: 3px; background: var(--accent); }
+.table-auto-chart-bar { position: absolute; top: 4px; height: 12px; border-radius: 3px; background: var(--series); }
 .table-auto-chart-bar.is-approximate { border: 1px dashed var(--text); }
-.table-auto-chart-axis { display: flex; justify-content: space-between; gap: 8px; margin: 9px 75px 0 29%; color: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
-@container tablechart (max-width: 520px) {
-  .table-auto-chart-rows li { grid-template-columns: minmax(0, 1fr) minmax(65px, auto); gap: 4px 10px; }
-  .table-auto-chart-label { grid-column: 1 / -1; }
-  .table-auto-chart-axis { margin-left: 0; }
-}
-
-.table-auto-chart-bar.is-range { border: 1px dashed var(--text-muted); background: repeating-linear-gradient(135deg, var(--accent) 0 2px, var(--bg-subtle) 2px 6px); }
-.table-auto-chart-limit { position: absolute; top: 3px; height: 23px; line-height: 23px; color: var(--text); font-size: 18px; font-weight: 600; }
+.table-auto-chart-bar.is-range { border: 1px dashed var(--text-muted); background: repeating-linear-gradient(135deg, var(--series) 0 2px, var(--bg-subtle) 2px 6px); }
+.table-auto-chart-limit { position: absolute; top: 0; height: 20px; line-height: 20px; color: var(--text); font-size: 15px; font-weight: 600; }
 .table-auto-chart-limit.is-upper { transform: translateX(-100%); border-right: 1px dashed var(--text-muted); padding-right: 2px; }
 .table-auto-chart-limit.is-lower { border-left: 1px dashed var(--text-muted); padding-left: 2px; }
+.table-auto-chart-rows > .table-auto-chart-axis { color: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.table-auto-chart-axis > div { grid-column: 2; display: flex; justify-content: space-between; gap: 8px; }
+@container tablechart (max-width: 520px) {
+  .table-auto-chart-rows { grid-template-columns: minmax(0, 1fr) minmax(65px, auto); }
+  .table-auto-chart-rows > li { row-gap: 4px; }
+  .table-auto-chart-label, .table-auto-chart-bars { grid-column: 1 / -1; }
+  .table-auto-chart-axis > div { grid-column: 1; }
+}
+/* Chrome 111–116 supports container queries, but not subgrid. Fixed value columns keep the fallback axes aligned. */
+@supports not (grid-template-columns: subgrid) {
+  .table-auto-chart-rows, .table-auto-chart-rows > li { grid-template-columns: minmax(0, 1fr) minmax(60px, 1.5fr) 8rem; column-gap: 10px; }
+  .table-auto-chart-bars { grid-template-columns: minmax(60px, 1fr) 8rem; column-gap: 10px; }
+  @container tablechart (max-width: 520px) {
+    .table-auto-chart-rows, .table-auto-chart-rows > li, .table-auto-chart-bars { grid-template-columns: minmax(0, 1fr) 8rem; }
+  }
+}
 @source inline("data-font-size");
 @source inline("data-ui-scale");
 @source inline("data-touch-targets");
@@ -4402,9 +4421,16 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
   .chat-stats-center {
     display: none !important;
   }
+  /* Drawers are sized with height, never bottom-anchored: Chrome treats a
+     bottom-anchored box padded with env(safe-area-inset-bottom) as a "complex
+     safe-area constraint" and stops drawing edge-to-edge, leaving the Android
+     navigation bar black in the installed app. */
   .sidebar-container {
     position: fixed !important;
-    inset: 0;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 100%;
     /* Full-screen drawer: safe-area padding (the list adds its own bottom). */
     padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px);
     transition: transform var(--dur-slow) var(--ease-out-warm);
@@ -4422,7 +4448,10 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
      takes the top inset so its background fills it, like the top bar's. */
   .right-panel-container {
     position: fixed;
-    inset: 0;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 100%;
     padding: 0 env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
     overflow: hidden;
     transition: transform var(--dur-slow) var(--ease-out-warm), visibility 0s;
@@ -4558,11 +4587,11 @@ html[data-touch-targets="accessible"] .right-panel-toolbar {
   border-radius: var(--radius-control);
   background: var(--bg-panel);
   color: var(--text);
-  box-shadow: var(--shadow-pop);
+  /* Shadow only while shown: parked above the viewport, its blur spilled onto the top bar. */
   transform: translateY(-150%);
   transition: transform var(--dur-fast) var(--ease-out-warm);
 }
-.skip-link:focus { transform: translateY(0); }
+.skip-link:focus { transform: translateY(0); box-shadow: var(--shadow-pop); }
 
 /* Touch target density options (Settings -> Touch Targets). */
 html[data-touch-targets="accessible"] :is(

@@ -33,6 +33,7 @@ import {
   type NotificationSupport,
 } from "@/lib/notification-client";
 import { BROWSER_TRANSPORTS, type BrowserTransport } from "@/lib/event-stream-protocol";
+import { setConnectionDiagnosticsEnabled, useConnectionDiagnosticsEnabled } from "@/lib/connection-diagnostics-prefs";
 const SettingsTabLoading = () => {
   const { t } = useI18n();
   return <div role="status" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>{t("settingsConfig.loadingSettings")}</div>;
@@ -175,6 +176,7 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { id: "message-during-active-run", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.messageDuringActiveRun", descKey: "settingsConfig.messageDuringActiveRunDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Message during active run", fallbackDesc: "What composer does on submit while agent runs. Steer interrupts; Queue follow-up delivers after finish.", scope: "UI" },
   { id: "word-completion", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.wordCompletion", descKey: "settingsConfig.wordCompletionDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Word completion", fallbackDesc: "Ghost text from omp's word prediction; Tab or → accepts. Auto enables it only with a mouse or trackpad (not on touch keyboards).", scope: "UI" },
   { id: "browser-transport", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.browserTransport", descKey: "settingsConfig.browserTransportDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Browser connection", fallbackDesc: "How browsers receive live updates and send chat commands: one WebSocket that picks up where it left off after a dropped connection (the default), or server-sent events + HTTP. A browser whose proxy blocks WebSockets falls back to server-sent events on its own. Every open browser switches within a few seconds.", scope: "UI" },
+  { id: "connection-diagnostics", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.connectionDiagnostics", descKey: "settingsConfig.connectionDiagnosticsDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Show connection diagnostics", fallbackDesc: "Adds a Connection tab to the right panel showing the connection this browser uses (WebSocket or server-sent events), its status and delivery latency statistics. Applies to this browser only.", scope: "UI" },
   // Tool Safety & Approvals
   { id: "approval-mode", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.approvalMode", descKey: "settingsConfig.approvalModeDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Approval Mode", fallbackDesc: "Choose when OMP asks before tool calls.", scope: "Native OMP" },
   { id: "bash-override", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.bashOverride", descKey: "settingsConfig.bashOverrideDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Bash Override", fallbackDesc: "Override default approval policy specifically for terminal commands.", scope: "Native OMP" },
@@ -860,6 +862,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const [submitBehavior, setSubmitBehavior] = useState<SubmitDuringRunBehavior>(() => getSubmitDuringRunBehavior());
   const [wordCompletion, setWordCompletion] = useState<WordCompletionMode>(() => getWordCompletionMode());
+  const connectionDiagnostics = useConnectionDiagnosticsEnabled();
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
     try {
@@ -1385,6 +1388,9 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                     </select>
                   </NativeSetting>
                   <BrowserTransportSetting />
+                  <NativeSetting searchId="connection-diagnostics" label={t("settingsConfig.connectionDiagnostics")} description={t("settingsConfig.connectionDiagnosticsDesc")} scope="UI">
+                    <ToggleSwitch checked={connectionDiagnostics} onChange={setConnectionDiagnosticsEnabled} />
+                  </NativeSetting>
                 </div>
               </div>
             )}

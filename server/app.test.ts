@@ -239,7 +239,7 @@ test("dev pages put the stylesheet before the pre-paint scripts, even when HTTP_
   assert.equal(page.status, 200);
   const body = await page.text();
   assert.match(body, /<link rel="manifest" href="\/api\/manifest"/);
-  // Bun moves the stylesheet after the inline scripts; the theme script reads --bg from it.
+  // Bun moves the stylesheet after the inline scripts; the theme script reads --bg-panel from it.
   assert.ok(body.indexOf('<link rel="stylesheet"') < body.indexOf("<script>void 0</script>"), body);
   // The worker bundle from memory (prod serves dist/event-stream-worker.js), revalidated like the service worker.
   const worker = await fetch(new URL("/event-stream-worker.js?v=abc", dev.url), { proxy: false });

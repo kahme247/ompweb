@@ -191,6 +191,7 @@ lib/
   web-password-hash.ts typed view of bin/omp-web-password-hash.js (the scrypt hash format)
   web-settings.ts      omp-web server settings (~/.omp/agent/omp-web-settings.json)
   transport-metrics.ts transport samples → `<agent dir>/omp-web/transport-metrics.jsonl` (renamed to `.jsonl.1` above 20 MiB)
+  transport-stats.ts   durations of transport samples (percentiles, per-metric derivation) shared by the worker's Connection tab stats and scripts/transport-metrics.ts
   skills-service.ts    skill listing via `omp skill list --json`; pure-Node replica scan as fallback
   tool-presets.ts      PRESET_NONE/DEFAULT/FULL + getToolNamesForPreset()
   types.ts             shared TypeScript types
@@ -215,6 +216,7 @@ components/
   BranchNavigator.tsx in-session branch switcher
   NotificationList.tsx notification history list + Mark all read/Clear actions (mobile right-panel tab, desktop bell popover)
   NotificationBell.tsx desktop top-bar bell: unread badge + floating NotificationList popover
+  ConnectionDiagnostics.tsx right-panel Connection tab: transport in use, status, latency stats (opt-in, Settings → Interface & Behavior)
   ChatMinimap.tsx     scroll minimap alongside the message list
   MarkdownBody.tsx    markdown renderer
   ModelsConfig.tsx    modal for models/auth configuration
@@ -240,7 +242,7 @@ hooks/
   useDragDrop.ts           shared drag/drop state
   useIsMobile.ts           responsive breakpoint hook
   usePrefersReducedMotion.ts OS reduce-motion preference (SMIL-safe)
-  useTheme.ts              theme state (localStorage key "omp-theme")
+  useTheme.ts              theme state (localStorage key "omp-theme"; top bar color → theme-color meta, "omp-theme-color" cookie and the manifest link's ?theme=, see lib/manifest-theme.ts)
   useNavigationHistory.ts  in-app back/forward stack (record/peek/commit/drop) for visited chat views
   useWordPrediction.ts     debounced omp predict_word ghost text + feedback
   useBtw.ts                /btw records/active panel/history dialog fed by btw_* SSE frames
@@ -874,9 +876,17 @@ during the wait.
     `socket`/`conn` (`sse`, `link`, `http`, `worker`) and `sockets`; the worker POSTs them to
     `/api/transport-metrics` every 30 s or 200 samples (a probe not answered within 10 s is abandoned, a POST within 10 s plus its body at 2 KB/s; a failed POST keeps its samples, so a timeout after the server processed it can duplicate them). The route appends JSONL to `<agent
     dir>/omp-web/transport-metrics.jsonl` (`.jsonl.1` above 20 MiB). One worker-wide clock (the
-    lowest-RTT of the last 20 link pings and SSE probes, at most 5 min old) times every sample.
+    lowest-RTT of the last 20 link pings and SSE probes, at most 5 min old unless it is the newest sample) times every sample.
     `bun scripts/transport-metrics.ts --since 2h` prints the per-transport summary (also `--until`,
     `--client`, `--file`).
+  - **Connection tab** (right panel, both layouts, shown while Settings → Interface & Behavior → "Show connection
+    diagnostics" is on, `omp-web:connection-diagnostics`, per browser). It polls the worker (`diag` op,
+    `requestConnectionDiagnostics`) once a second while visible: the mode in effect, fallback, status (`idle` when
+    no connection is needed, `down` after `SEND_DEADLINE_MS` without a connection), the last reconnect, and
+    per-transport stats (mean, p50, p95, p99.9 from 1000 values, max) of the worker's last 30 min of samples (at most
+    20 000, kept beside the POST buffer). Command rows include confirmed successful replies only; app ↔ omp and round-trip rows skip commands whose reply does not confirm omp got them (`NO_OMP_REPLY_COMMANDS`: the `NO_SPAWN_REPLIES` the web app answers itself, a test keeps them included, plus the results `dispatchCommand` forwards without awaiting omp). A new command of either kind belongs there. Shared durations
+    come from `lib/transport-stats.ts`; one-way estimates use clock correction and assume symmetric latency.
+    Without a SharedWorker (Chrome for Android) each tab has its own worker, so the numbers are that tab's.
   - **Worker rules.** Browser code: no `AbortSignal.timeout`/`any` or `Promise.withResolvers` (a test checks
     the bundle). Every global the worker uses must be injectable into the `vm` context of
     `lib/event-stream-worker.test.mjs`. The link URL is absolute (`new URL(path, self.location.href)`,

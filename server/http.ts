@@ -1,6 +1,7 @@
 import { realpathSync, statSync, type Stats } from "node:fs";
 import path from "node:path";
 import { getInstallName } from "@/lib/install-name";
+import { manifestHref, THEME_COLOR_COOKIE } from "@/lib/manifest-theme";
 
 const SECURITY_HEADERS = {
   "X-Content-Type-Options": "nosniff",
@@ -126,17 +127,22 @@ export async function serveFile(request: Request, root: string, dev: boolean): P
 
 const ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 
-/** dist/index.html with the install name as its titles and the (credentialed) manifest link. */
+/**
+ * dist/index.html with the install name as its titles and the (credentialed) manifest link, which carries the
+ * theme color the browser remembered (lib/manifest-theme.ts).
+ */
 export function renderIndex(html: string, request: Request): string {
   const name = getInstallName(request.headers).replace(/[&<>"']/g, (char) => ESCAPES[char]);
+  // manifestHref only lets a 6-digit hex color through, so the href needs no escaping.
+  const manifest = manifestHref(new Bun.CookieMap(request.headers.get("cookie") ?? "").get(THEME_COLOR_COOKIE));
   return html
     .replace("<title>omp web</title>", () => `<title>${name}</title>`)
     .replace('<meta name="apple-mobile-web-app-title" content="omp web"', () => `<meta name="apple-mobile-web-app-title" content="${name}"`)
-    .replace("</head>", '<link rel="manifest" href="/api/manifest" crossorigin="use-credentials"></head>');
+    .replace("</head>", () => `<link rel="manifest" href="${manifest}" crossorigin="use-credentials"></head>`);
 }
 
 /**
- * Bun moves the entry stylesheet to the end of <head>, after the pre-paint scripts. The theme script reads --bg from
+ * Bun moves the entry stylesheet to the end of <head>, after the pre-paint scripts. The theme script reads --bg-panel from
  * it for theme-color, and a stylesheet only blocks the scripts that follow it, so put it before them.
  */
 export function stylesheetFirst(html: string): string {

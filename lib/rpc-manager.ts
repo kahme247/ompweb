@@ -268,6 +268,8 @@ export class AgentSessionWrapper {
   /** A delta found no message to apply to: omp sends full updates until the message ends. */
   private recoveringUpdates = false;
   private liveToolEvents = new Map<string, SessionLiveToolEvent>();
+  /** Calls that returned: omp keeps sending `tool_execution_update` for a backgrounded job with no later end. */
+  private endedToolCalls = new Set<string>();
   /** Positive evidence for this run, retained after native completion but before disk append. */
   private responseObserved = false;
   private responseRunActive = false;
@@ -489,8 +491,14 @@ export class AgentSessionWrapper {
     this.clearLiveSnapshots();
     this.responseObserved = false;
     this.responseRunActive = false;
+    this.endedToolCalls.clear();
     this.streamId = randomUUID();
     this.streamSequence = 0;
+  }
+
+  private endTool(toolCallId: string): void {
+    this.liveToolEvents.delete(toolCallId);
+    this.endedToolCalls.add(toolCallId);
   }
 
   start(): void {
@@ -1392,23 +1400,27 @@ export class AgentSessionWrapper {
           this.streamingMessage = null;
           this.streamingMessageId = null;
         }
-        if (message?.role === "toolResult" && message.toolCallId) this.liveToolEvents.delete(message.toolCallId);
+        if (message?.role === "toolResult" && message.toolCallId) this.endTool(message.toolCallId);
         if (message?.role === "assistant") this.resumeDeltaUpdates();
         break;
       }
       case "tool_execution_start":
       case "tool_execution_update":
-        if (typeof event.toolCallId === "string") {
-          this.liveToolEvents.set(event.toolCallId, {
-            ...this.liveToolEvents.get(event.toolCallId),
-            ...event,
-            type: event.type,
-            toolCallId: event.toolCallId,
-          });
-        }
+        if (typeof event.toolCallId !== "string") break;
+        // A start is always a new execution, even of a reused id. A returned call's updates are stale: its row
+        // shows the committed result, so tabs and the snapshot both drop them (a tab would show it running again).
+        // shortcut: a wrapper adopted after a server restart never saw the ends and still passes those updates; filter against committed results if adopted chats show them.
+        if (event.type === "tool_execution_start") this.endedToolCalls.delete(event.toolCallId);
+        else if (this.endedToolCalls.has(event.toolCallId)) return;
+        this.liveToolEvents.set(event.toolCallId, {
+          ...this.liveToolEvents.get(event.toolCallId),
+          ...event,
+          type: event.type,
+          toolCallId: event.toolCallId,
+        });
         break;
       case "tool_execution_end":
-        if (typeof event.toolCallId === "string") this.liveToolEvents.delete(event.toolCallId);
+        if (typeof event.toolCallId === "string") this.endTool(event.toolCallId);
         break;
     }
     event.web = { streamId: this.streamId, sequence: ++this.streamSequence };

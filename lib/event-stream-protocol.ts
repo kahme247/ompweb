@@ -21,6 +21,7 @@
 // lib/event-stream-worker.ts imports this module (bundled by server/client-env.ts).
 
 import { isValidNotificationId } from "./notification-events";
+import type { DiagnosticStat } from "./transport-stats";
 
 export const EVENT_STREAM_PATH = "/api/events";
 export const MUX_CONTROL_EVENT = "mux";
@@ -49,6 +50,31 @@ export interface BrowserTransportState {
   transport: BrowserTransport;
 }
 
+/** The worker's answer to a `diag` poll (the right panel's Connection tab). Times are the browser's epoch ms. */
+/** Why the worker fell back to SSE: proxies refused the upgrade, or the server speaks another link version. */
+export type FallbackReason = "refused" | "version";
+
+export interface ConnectionDiagnostics {
+  /** The server's setting. */
+  setting: BrowserTransport;
+  /** In effect in this browser now: `sse` with `fallback` set while the WebSocket link is unusable. */
+  mode: BrowserTransport;
+  fallback: FallbackReason | null;
+  /** `idle`: no connection intended; `down`: no connection for long enough that commands fail. */
+  status: "idle" | "connected" | "connecting" | "down";
+  /** When the current connection attempt or outage began; null while idle or connected. */
+  since: number | null;
+  lastReconnect: { at: number; trigger: string; outageMs: number; resumed: boolean | null } | null;
+  /** Within `windowMs`; resumes and resyncs are the browser link's. */
+  reconnects: number;
+  resumes: number;
+  resyncs: number;
+  clockRttMs: number | null;
+  effectiveType: string | null;
+  windowMs: number;
+  stats: DiagnosticStat[];
+}
+
 export const BROWSER_LINK_PATH = "/api/events/link";
 export const BROWSER_LINK_VERSION = 1;
 /** How long the server keeps a link whose socket is gone, so the browser can resume it. */
@@ -56,6 +82,14 @@ export const LINK_RESUME_MS = 120_000;
 /** How long the server remembers a command's reply by (session, rid): a resend within it is answered, not run again.
  * Longer than LINK_RESUME_MS, so a command resent after a resync to the same server still finds it. */
 export const COMMAND_DEDUPE_MS = 600_000;
+
+/** Commands whose successful reply does not confirm an omp round trip, so their reply times say nothing about omp:
+ * answered by the web app itself when no omp child is alive (lib/agent-command.ts NO_SPAWN_REPLIES), or forwarded to
+ * omp without awaiting its reply (lib/rpc-manager.ts dispatchCommand). */
+export const NO_OMP_REPLY_COMMANDS: ReadonlySet<string> = new Set([
+  "predict_word", "predict_word_feedback", "get_btw_history", "btw_cancel",
+  "host_tool_result", "host_uri_result", "extension_ui_response",
+]);
 
 const REPEATABLE_COMMANDS = ["predict_word", "predict_word_feedback", "set_host_tools", "set_host_uri_schemes"];
 
