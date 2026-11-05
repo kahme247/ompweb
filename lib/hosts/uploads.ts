@@ -3,11 +3,12 @@
 // attach hard-linked (or copied) into the session's `local://uploads/`.
 // Loaded by the daemon through jiti: no `@/` imports and no Bun APIs.
 import { randomUUID } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
-import { appendFile, copyFile, link, lstat, mkdir, open, readdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { constants as fsConstants, createReadStream } from "node:fs";
+import { appendFile, link, lstat, mkdir, open, readdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
+import { pipeline } from "node:stream/promises";
 import { getAgentDir } from "../omp/paths";
 import { inspectUploadTargets, parseUploadConflictStrategy, validateUploadFileNames, type UploadConflictStrategy } from "../file-upload";
 import type { WorkspaceUploadResult } from "../workspace-types";
@@ -480,12 +481,20 @@ export class StagedUploads {
           if (errno(error) === "EEXIST" && n < 1000) continue;
           if (!["EXDEV", "EPERM", "ENOTSUP", "ENOSYS"].includes(errno(error) ?? "")) throw error;
         }
+        let created = false;
         try {
-          await copyFile(part, target, fsConstants.COPYFILE_EXCL);
+          const output = await open(target, "wx", 0o600);
+          created = true;
+          try {
+            // A fresh write has send-time mtime on every platform; native copyFile may preserve the staged time.
+            await pipeline(createReadStream(part), output.createWriteStream());
+          } finally {
+            await output.close();
+          }
         } catch (copyError) {
-          // EEXIST: the name is someone else's file, never ours to delete.
-          if (errno(copyError) === "EEXIST") {
-            if (n < 1000) continue;
+          if (!created) {
+            // The exclusive open never acquired this path: do not delete someone else's file.
+            if (errno(copyError) === "EEXIST" && n < 1000) continue;
             throw copyError;
           }
           await rm(target, { force: true });
