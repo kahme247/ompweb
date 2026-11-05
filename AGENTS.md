@@ -1080,6 +1080,9 @@ during the wait.
   and instruction roots. Reads and watches share explicit-root authorization;
   session references grant reads only, not listing or writes. Credential exclusions
   apply to canonical targets too.
+  Credential ownership checks resolve configured symlinks even when the final target is missing, without collapsing native `link/..` traversal. Profile config roots visible in a requested or canonical path remain protected when `profiles/` cannot be listed. Compare inode identities through original configured paths, not only potentially lossy string realpaths.
+  Record failures inspecting requested paths separately from owned credential directories and files. Known-secret matches remain denied first. Otherwise, a requested metadata failure terminates that operation with 404 `file_not_found`, even if a later lookup would succeed; never continue with an unclassified path. If the request metadata is sound but ownership metadata is unavailable, return 503 `credential_policy_unavailable` until it is accessible. Missing paths remain ordinary absence. Never change user filesystem permissions automatically.
+  Read owned directory entries and unresolved symlink targets as bytes: an undecodable protected filename, profile or target makes ownership metadata unavailable, while unrelated byte-named assets do not. For missing macOS targets, account for Unicode normalization and calibrate case aliases through existing directory metadata without creating files or crossing filesystem devices. This is not a portable filesystem-equivalence guarantee: prospective aliases on Linux casefold mounts and legacy HFS+ ignorable-character rules lack native coverage.
 - Successful selection, default cwd and worktree operations grant roots on the
   owning daemon. Browsing alone grants nothing. Main's `getAllowedFileRoots()`
   remains for the unrelated local config/import/skills readers, not workspace APIs.
