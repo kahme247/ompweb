@@ -69,6 +69,18 @@ trusted publisher and makes that release public only after npm accepts the
 package. A rerun can safely finish a release if npm has already accepted its
 version.
 
+### Build identity in the UI
+
+Click or tap the ompweb logo to reveal the package version. If the build's
+Git `HEAD` has no tag, the reveal also shows the full commit hash and the
+committer date in `YYYY-MM-DD` format. Any tag pointing exactly at `HEAD`
+keeps the version-only display; a tag on an ancestor does not.
+
+Both the production build and development server resolve this metadata from
+the source checkout. It is bundled into the client, including in npm packages
+and binary releases; no Git command runs when a user clicks the logo.
+Source archives without Git metadata keep the version-only display.
+
 ## Verify
 
 ```bash
