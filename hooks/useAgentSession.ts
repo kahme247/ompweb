@@ -3056,6 +3056,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (bashRunningRef.current || editInFlightRef.current) return;
+    // Invalidate snapshots and recovery waiters from before this local command.
+    bashRecoveryIdRef.current += 1;
     const inputText = `${excludeFromContext ? "!!" : "!"}${command}`;
     bashRunningRef.current = true;
     setPendingBash({ command, excludeFromContext });
@@ -4060,10 +4062,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       checking = true;
       const runId = promptRunIdRef.current;
+      const bashRecoveryId = bashRecoveryIdRef.current;
       void fetch(`/api/agent/${encodeURIComponent(sid)}`)
         .then((res) => (res.ok ? res.json() as Promise<{ running?: boolean; state?: AgentStateResponse }> : null))
         .then((data) => {
-          if (data && canAttach() && promptRunIdRef.current === runId) attachStartedRunRef.current(sid, data);
+          if (data && canAttach() && promptRunIdRef.current === runId && bashRecoveryIdRef.current === bashRecoveryId) attachStartedRunRef.current(sid, data);
         })
         .catch(() => {
           // Another running frame or the existing visibility/online reconciliation can recheck.
