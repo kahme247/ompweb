@@ -1186,6 +1186,7 @@
   "sessionSidebar.copyTranscript": "トランスクリプトをコピー",
   "sessionSidebar.copyTranscriptCopied": "トランスクリプトをコピーしました",
   "sessionSidebar.copyTranscriptFailed": "トランスクリプトをコピーできませんでした",
+  "sessionSidebar.unsentDraft": "未送信の下書き",
   "sessionSidebar.selectProjectFirst": "先にプロジェクトを選択してください",
   "sessionSidebar.switchWorktree": "ワークツリーを切り替え",
   "sessionSidebar.launchConfigDirectory": "ディレクトリ",

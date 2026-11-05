@@ -123,6 +123,11 @@ export function hasUnsentDrafts(): boolean {
   return drafts.size > 0;
 }
 
+/** Whether `key` holds unsent text or attachments (empty drafts are never stored). */
+export function hasDraft(key: string): boolean {
+  return drafts.has(key);
+}
+
 export function subscribeDrafts(listener: () => void): () => void {
   listeners.add(listener);
   return () => { listeners.delete(listener); };
