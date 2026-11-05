@@ -74,8 +74,9 @@ export const SESSION_OP_PARAMS: { readonly [K in keyof SessionOps]: readonly str
   validateCwd: ["path"],
 };
 
-/** Every op a daemon answers. Older daemons refuse newer ops with unknown_op; upload ops require v6. */
-export const HOST_OP_NAMES = [...(Object.keys(SESSION_OP_PARAMS) as (keyof SessionOps)[]), ...Object.keys(WORKSPACE_OP_PARAMS) as (keyof typeof WORKSPACE_OP_PARAMS)[], "spawn", "sessionFileExists", "invalidateSessionLists", "checkUpdates", "updateSoftware", "uploadStart", "uploadAbort", "uploadAttach"] as const;
+/** Every op a daemon answers. Older daemons refuse newer ops with unknown_op; upload ops require v6, `setUploadRetention`
+ * (docs/specs/2026-11-02-file-uploads-design.md, U6) is a compatible addition that older daemons answer 501. */
+export const HOST_OP_NAMES = [...(Object.keys(SESSION_OP_PARAMS) as (keyof SessionOps)[]), ...Object.keys(WORKSPACE_OP_PARAMS) as (keyof typeof WORKSPACE_OP_PARAMS)[], "spawn", "sessionFileExists", "invalidateSessionLists", "checkUpdates", "updateSoftware", "uploadStart", "uploadAbort", "uploadAttach", "setUploadRetention"] as const;
 
 export type HostOpName = (typeof HOST_OP_NAMES)[number];
 

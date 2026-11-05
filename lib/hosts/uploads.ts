@@ -2,16 +2,18 @@
 // staged as `<agent dir>/omp-web/uploads/<id>.part` plus `<id>.json`, written in order at the part's length, and on
 // attach hard-linked (or copied) into the session's `local://uploads/`.
 // Loaded by the daemon through jiti: no `@/` imports and no Bun APIs.
-import { randomUUID } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
-import { appendFile, copyFile, link, lstat, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { constants as fsConstants, createReadStream, realpathSync } from "node:fs";
+import { appendFile, link, lstat, mkdir, open, readdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
+import { pipeline } from "node:stream/promises";
 import { getAgentDir } from "../omp/paths";
 import { inspectUploadTargets, parseUploadConflictStrategy, validateUploadFileNames, type UploadConflictStrategy } from "../file-upload";
 import type { WorkspaceUploadResult } from "../workspace-types";
 import { authorizeWorkspaceDirectory } from "./workspace-roots";
+import { sessionPathKey } from "../paths";
 import { isValidSessionId } from "../session-file-references-core";
 import { isRecord } from "../type-guards";
 import { MAX_UPLOAD_BYTES, UPLOAD_ID_RE } from "../upload-limits";
@@ -19,6 +21,14 @@ import { HostOpError, LINK_LIMITS } from "./link-protocol";
 
 /** Uploads land in this subdirectory of the session's `local://` root. */
 export const UPLOADS_LOCAL_DIR = "uploads";
+
+/** Separate daemons' files inside omp's shared Windows temp root, including copied session UUIDs. */
+export function uploadOwnerNamespace(agentDir = getAgentDir()): string {
+  let canonical: string;
+  try { canonical = realpathSync.native(agentDir); }
+  catch { canonical = resolve(agentDir); }
+  return createHash("sha256").update(sessionPathKey(canonical)).digest("hex").slice(0, 32);
+}
 // Leaves room for ` (n)` under the usual 255-byte file name limit.
 const MAX_NAME_BYTES = 200;
 const MAX_EXT_BYTES = 20;
@@ -28,6 +38,26 @@ const WINDOWS_LOCAL_ROOT_MAX_CHARS = 180;
  * every UPLOAD_SWEEP_INTERVAL_MS). */
 export const STAGED_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 export const UPLOAD_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+
+let nameSteps: Promise<unknown> = Promise.resolve();
+/** Retention deletes by a file's stat: a publication must not put a new file at that name between the stat and the
+ * unlink. Every such step (the sweep's per-file stat-and-unlink, a publication's rename or link) runs alone here. */
+export function withUploadNameLock<T>(step: () => Promise<T>): Promise<T> {
+  const run = nameSteps.then(step, step);
+  nameSteps = run.catch(() => {});
+  return run;
+}
+
+/** Give the staged inode the send time, so a hard link to it never carries the staging age. False when it cannot. */
+async function stampSent(part: string): Promise<boolean> {
+  try {
+    const sent = new Date();
+    await utimes(part, sent, sent);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /** The longest prefix of `text` within `bytes` UTF-8 bytes, cut between code points. */
 function clipUtf8(text: string, bytes: number): string {
@@ -76,7 +106,7 @@ type WorkspaceReceipt = {
   directory: string; canonical: string; name: string; conflict: UploadConflictStrategy;
   candidate: string; identity: FileIdentity; parent: FileIdentity; result?: WorkspaceUploadResult;
 };
-/** Destination receipts are disjoint: workspace files never enter session attachment retention. */
+/** Receipts distinguish destinations; retention applies to every file placed in a selected session-upload folder. */
 type Meta = { name: string; size: number; type: string; created: number; attached?: Receipt; workspace?: WorkspaceReceipt };
 type OpenUpload = { name: string; type: string; size: number; attempt: string; received: number; chain: Promise<void>; timer: NodeJS.Timeout | undefined; active: number };
 
@@ -124,6 +154,7 @@ export class StagedUploads {
   private readonly open = new Map<string, OpenUpload>();
   /** Start, attach and abort for one id run in arrival order; other ids remain independent. */
   private readonly controls = new Map<string, Promise<void>>();
+  private readonly agentDir = getAgentDir();
 
   constructor(
     private readonly send: (ack: UploadAck) => void,
@@ -373,11 +404,14 @@ export class StagedUploads {
         source = await open(part, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
         const sourceInfo = await source.stat({ bigint: true });
         if (!sourceInfo.isFile() || sourceInfo.size !== BigInt(meta.size)) throw new HostOpError(409, "upload_incomplete", "The upload has not finished");
-        let copying = false;
-        try { await link(part, candidate); }
-        catch (error) {
-          if (!["EXDEV", "EPERM", "ENOTSUP", "ENOSYS"].includes(errno(error) ?? "")) throw error;
-          copying = true;
+        // An unstamped inode would carry its staging age into the folder: copy instead.
+        let copying = !await stampSent(part);
+        if (!copying) {
+          try { await link(part, candidate); }
+          catch (error) {
+            if (!["EXDEV", "EPERM", "ENOTSUP", "ENOSYS"].includes(errno(error) ?? "")) throw error;
+            copying = true;
+          }
         }
         if (copying) {
           candidateHandle = await open(candidate, "wx");
@@ -411,9 +445,9 @@ export class StagedUploads {
         const inspection = inspectUploadTargets(canonical, [name]);
         if (inspection.nonReplaceable.length) throw new HostOpError(409, "upload_conflict_non_replaceable", "A directory or symbolic link cannot be replaced");
         let skipped = false;
-        if (conflict === "overwrite") await rename(candidate, target);
+        if (conflict === "overwrite") await withUploadNameLock(() => rename(candidate, target));
         else {
-          try { await link(candidate, target); }
+          try { await withUploadNameLock(() => link(candidate, target)); }
           catch (error) {
             if (errno(error) !== "EEXIST") throw error;
             if (inspectUploadTargets(canonical, [name]).nonReplaceable.length) throw new HostOpError(409, "upload_conflict_non_replaceable", "A directory or symbolic link cannot be replaced");
@@ -458,26 +492,45 @@ export class StagedUploads {
     const size = meta ? await sizeOf(part) : null;
     if (!meta || size === null) throw new HostOpError(404, "upload_missing", "The upload is gone: attach the file again");
     if (this.open.has(id) || size !== meta.size) throw new HostOpError(409, "upload_incomplete", "The upload has not finished");
-    const dir = join(sessionLocalRoot(sessionFile, sessionId), UPLOADS_LOCAL_DIR);
+    const local = sessionLocalRoot(sessionFile, sessionId);
+    const relativeDir = local === join(tmpdir(), "omp-local", sessionId)
+      ? `${UPLOADS_LOCAL_DIR}/${uploadOwnerNamespace(this.agentDir)}` : UPLOADS_LOCAL_DIR;
+    const dir = join(local, relativeDir);
     await mkdir(dir, { recursive: true });
     const name = sanitizeUploadName(meta.name);
     const ext = extname(name);
     const stem = name.slice(0, name.length - ext.length);
+    // Retention must never observe the staged age through a newly published hard link.
+    const stamped = await stampSent(part);
     for (let n = 0; ; n++) {
       const fileName = n === 0 ? name : `${stem} (${n})${ext}`;
       const target = join(dir, fileName);
-      // A hard link never replaces a file; another device (or a file system without links) gets a copy instead.
-      try {
-        await link(part, target);
-      } catch (error) {
-        if (errno(error) === "EEXIST" && n < 1000) continue;
-        if (!["EXDEV", "EPERM", "ENOTSUP", "ENOSYS"].includes(errno(error) ?? "")) throw error;
+      // A hard link never replaces a file; failed timestamping or unsupported links get a fresh copy.
+      let linked = false;
+      if (stamped) {
         try {
-          await copyFile(part, target, fsConstants.COPYFILE_EXCL);
+          await withUploadNameLock(() => link(part, target));
+          linked = true;
+        } catch (error) {
+          if (errno(error) === "EEXIST" && n < 1000) continue;
+          if (!["EXDEV", "EPERM", "ENOTSUP", "ENOSYS"].includes(errno(error) ?? "")) throw error;
+        }
+      }
+      if (!linked) {
+        let created = false;
+        try {
+          const output = await withUploadNameLock(() => open(target, "wx", 0o600));
+          created = true;
+          try {
+            // A fresh write has send-time mtime on every platform; native copyFile may preserve the staged time.
+            await pipeline(createReadStream(part), output.createWriteStream());
+          } finally {
+            await output.close();
+          }
         } catch (copyError) {
-          // EEXIST: the name is someone else's file, never ours to delete.
-          if (errno(copyError) === "EEXIST") {
-            if (n < 1000) continue;
+          if (!created) {
+            // The exclusive open never acquired this path: do not delete someone else's file.
+            if (errno(copyError) === "EEXIST" && n < 1000) continue;
             throw copyError;
           }
           await rm(target, { force: true });
@@ -485,7 +538,7 @@ export class StagedUploads {
         }
       }
       // Publish atomically before removing the part; a failed receipt leaves the original metadata and data retryable.
-      const receipt: Receipt = { sessionFile, path: target, url: `local://${UPLOADS_LOCAL_DIR}/${fileName}` };
+      const receipt: Receipt = { sessionFile, path: target, url: `local://${relativeDir}/${fileName}` };
       const temporary = `${this.path(id, "json")}.${randomUUID()}.tmp`;
       try {
         await writeFile(temporary, JSON.stringify({ ...meta, attached: receipt } satisfies Meta), { flag: "wx" });

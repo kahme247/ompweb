@@ -459,6 +459,7 @@ parts of those routes stay on main.
 | `spawn {ch, cwd, sessionFile, toolNames, advisor}` | `startRpcSession` spawn |
 | `sessionFileExists {path}` / `invalidateSessionLists {path}` | `AgentSessionWrapper` |
 | `uploadStart {id, name, size, type, attempt}` / `uploadAbort {id}` / `uploadAttach {id, sessionFile, sessionId}` | new in v6: composer uploads (`docs/specs/2026-11-02-file-uploads-design.md`, U3, U5) |
+| `setUploadRetention {days}` | compatible addition (the link version is unchanged; older daemons answer 501 `unknown_op`, which main ignores): days to keep sent uploads, `null` = for ever; sent on every hello and when the web setting changes (`docs/specs/2026-11-02-file-uploads-design.md`, U6) |
 
 Op timeout: 30 s of silence (each result byte frame that arrives restarts it), then 504 naming the host; `uploadAttach` gets 10 minutes (a 2 GiB copy across file systems).
 
