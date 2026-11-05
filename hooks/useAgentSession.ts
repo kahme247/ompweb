@@ -1827,7 +1827,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // If the server reports idle while we still think it's running, finish
   // through the same path as prompt_done.
   const reconcileAgentState = useCallback(async (sid: string) => {
-    if (!agentRunningRef.current) return;
+    if (!agentRunningRef.current && !isCompactingRef.current) return;
     const runId = promptRunIdRef.current;
     const responseVersion = responseRunVersionRef.current;
     // One request at a time per run: concurrent triggers coalesce into the
@@ -1850,8 +1850,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const state = data.state;
       applySkillDiagnosticsSnapshot(skillDiagnosticsRevision, state?.skillDiagnostics);
       if (!promptDispatchPendingRef.current && state?.responseObserved) runHadContentRef.current = true;
-      // Mirror compaction state unconditionally: a missed compaction_end
-      // would otherwise leave the "Stop compaction" UI stuck. No state
+      // Manual compaction emits no completion event; native state releases
+      // its controls independently of live transcript hydration. No state
       // (wrapper destroyed) means nothing is compacting.
       isCompactingRef.current = state?.isCompacting ?? false;
       setIsCompacting(state?.isCompacting ?? false);
@@ -1884,13 +1884,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // request lost ownership to a newer acquire), the stale owner's
       // release() is a no-op — it must not clear the new run's lock.
       const reissue = guard.release(token);
-      if (reissue && agentRunningRef.current && promptRunIdRef.current === runId && sessionIdRef.current === sid) {
+      if (reissue && (agentRunningRef.current || isCompactingRef.current) && promptRunIdRef.current === runId && sessionIdRef.current === sid) {
         void reconcileAgentState(sid);
       }
     }
   }, [applyQueueStateSnapshot, applySkillDiagnosticsSnapshot, finishPromptWithoutStream, refreshSubagentRoster]);
 
-  // Recovery net for missed SSE events: while the agent is running, verify
+  // Recovery net for missed SSE events: while a prompt or compaction runs, verify
   // against the server periodically and whenever the tab returns to the
   // foreground or the network comes back.
   useEffect(() => {
@@ -1908,7 +1908,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const onVisible = () => {
       if (document.visibilityState === "visible") reconcile();
     };
-    const interval = agentRunning ? setInterval(reconcile, AGENT_STATE_RECONCILE_MS) : undefined;
+    const interval = agentRunning || isCompacting ? setInterval(reconcile, AGENT_STATE_RECONCILE_MS) : undefined;
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("online", reconcile);
     return () => {
@@ -1916,7 +1916,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("online", reconcile);
     };
-  }, [agentRunning, catchUp, reconcileAgentState, reconcileBtw]);
+  }, [agentRunning, isCompacting, catchUp, reconcileAgentState, reconcileBtw]);
 
   // A session can be mid-run without omp-web owning the process (someone is
   // driving it from a terminal, or from another omp-web window). Nothing
