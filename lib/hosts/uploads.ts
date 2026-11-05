@@ -467,15 +467,19 @@ export class StagedUploads {
       const fileName = n === 0 ? name : `${stem} (${n})${ext}`;
       const target = join(dir, fileName);
       // A hard link never replaces a file; another device (or a file system without links) gets a copy instead.
+      let linked = false;
       try {
         await link(part, target);
-        // The link shares the staged file's inode, whose mtime is its last write (up to 24 h ago); retention (U6) counts
-        // from the send, as it does for a copy. Best effort: without it the file simply expires a little sooner.
+        linked = true;
+        // A shared inode keeps the staged write time; if stamping fails, copy instead so retention starts at send.
         const sent = new Date();
-        await utimes(target, sent, sent).catch(() => {});
+        await utimes(target, sent, sent);
       } catch (error) {
-        if (errno(error) === "EEXIST" && n < 1000) continue;
-        if (!["EXDEV", "EPERM", "ENOTSUP", "ENOSYS"].includes(errno(error) ?? "")) throw error;
+        if (linked) await rm(target);
+        else {
+          if (errno(error) === "EEXIST" && n < 1000) continue;
+          if (!["EXDEV", "EPERM", "ENOTSUP", "ENOSYS"].includes(errno(error) ?? "")) throw error;
+        }
         try {
           await copyFile(part, target, fsConstants.COPYFILE_EXCL);
         } catch (copyError) {

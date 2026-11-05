@@ -31,7 +31,8 @@ function defaultRoots(): RetentionRoots {
 async function subdirs(dir: string): Promise<string[]> {
   try {
     return (await readdir(dir, { withFileTypes: true })).filter((entry) => entry.isDirectory()).map((entry) => join(dir, entry.name));
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.error(`[ompweb host] upload retention: cannot read ${dir}: ${(error as Error).message}`);
     return [];
   }
 }
@@ -51,7 +52,8 @@ async function sweepDir(dir: string, cutoff: () => number | null): Promise<boole
   let names: string[];
   try {
     names = await readdir(dir);
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.error(`[ompweb host] upload retention: cannot read ${dir}: ${(error as Error).message}`);
     return true;
   }
   for (const name of names) {
