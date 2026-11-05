@@ -3989,6 +3989,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // (another tab or device, or a send from a chat instance the user left).
   const attachLiveRun = useCallback((sid: string, agentState: { running?: boolean; state?: AgentStateResponse }) => {
     if (!agentState.running || eventSourceRef.current) return;
+    if (agentState.state?.isCompacting !== undefined) {
+      isCompactingRef.current = agentState.state.isCompacting;
+      setIsCompacting(agentState.state.isCompacting);
+    }
     void connectEvents(sid);
     if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
       agentRunningRef.current = true;
@@ -4032,35 +4036,51 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // The sidebar's running badge comes from this channel; a chat showing that
   // session without a stream rechecks omp and attaches, so it never needs a reload.
   useEffect(() => {
-    if (!session?.id) return;
+    const sid = session?.id;
+    if (!sid) return;
     const source = openEventStream({ kind: "running" });
+    let active = true;
     let checking = false;
-    source.onmessage = (e) => {
-      const sid = sessionIdRef.current;
-      // A run or shell this chat already shows (executeBash owns its own settlement), or a stream its backoff
-      // timer is reconnecting, is not news.
-      if (checking || !sid || !hookAliveRef.current || eventSourceRef.current || agentRunningRef.current || bashRunningRef.current || reconnectTimerRef.current) return;
-      let ids: unknown;
-      try {
-        const frame = JSON.parse(e.data) as { type?: string; runningSessionIds?: unknown };
-        if (frame.type !== "running") return;
-        ids = frame.runningSessionIds;
-      } catch {
+    let checkPending = false;
+    // A local run, shell or readiness wait owns its own settlement and stream.
+    const canAttach = () => active && hookAliveRef.current && sessionIdRef.current === sid
+      && !eventSourceRef.current && !agentRunningRef.current && !bashRunningRef.current && !reconnectTimerRef.current;
+    const checkRunning = () => {
+      if (!canAttach()) return;
+      if (checking) {
+        checkPending = true;
         return;
       }
-      if (!Array.isArray(ids) || !ids.includes(sid)) return;
       checking = true;
+      const runId = promptRunIdRef.current;
       void fetch(`/api/agent/${encodeURIComponent(sid)}`)
         .then((res) => (res.ok ? res.json() as Promise<{ running?: boolean; state?: AgentStateResponse }> : null))
         .then((data) => {
-          if (data && hookAliveRef.current && sessionIdRef.current === sid) attachStartedRunRef.current(sid, data);
+          if (data && canAttach() && promptRunIdRef.current === runId) attachStartedRunRef.current(sid, data);
         })
         .catch(() => {
-          // The next running frame retries.
+          // Another running frame or the existing visibility/online reconciliation can recheck.
         })
-        .finally(() => { checking = false; });
+        .finally(() => {
+          checking = false;
+          if (checkPending) {
+            checkPending = false;
+            checkRunning();
+          }
+        });
     };
-    return () => source.close();
+    source.onmessage = (e) => {
+      try {
+        const frame = JSON.parse(e.data) as { type?: string; runningSessionIds?: unknown };
+        if (frame.type === "running" && Array.isArray(frame.runningSessionIds) && frame.runningSessionIds.includes(sid)) checkRunning();
+      } catch {
+        // Ignore malformed running frames.
+      }
+    };
+    return () => {
+      active = false;
+      source.close();
+    };
   }, [session?.id]);
 
   // Load session on mount
