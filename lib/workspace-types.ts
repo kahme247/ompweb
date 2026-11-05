@@ -59,7 +59,7 @@ export interface WorkspaceOps {
 }
 
 export const WORKSPACE_OP_PARAMS: { readonly [K in keyof WorkspaceOps]: readonly string[] } = {
-  home: [], listFiles: ["input", "showHidden"], listFilesInRoot: ["input", "root"], fileInfo: ["input"], readTextFile: ["input"],
+  home: [], listFiles: ["input", "showHidden"], fileInfo: ["input"], readTextFile: ["input"],
   openFile: ["input"], readFileChunk: ["id", "offset", "length"], closeFile: ["id"],
   fileIndex: ["cwd", "query", "limit", "kind", "refresh"],
   readBashOutput: ["sessionId", "path"], openBashOutput: ["sessionId", "path"],
@@ -68,6 +68,8 @@ export const WORKSPACE_OP_PARAMS: { readonly [K in keyof WorkspaceOps]: readonly
   gitStatus: ["cwd"], gitDiff: ["cwd", "path"], githubRepo: ["cwd"],
   listWorktrees: ["cwd"], addWorktree: ["cwd", "branch"], removeWorktree: ["cwd", "path", "force"],
   browseDirectories: ["path"], defaultCwd: [], startClone: ["id", "parent", "url"], readClone: ["id", "cursor"], cancelClone: ["id"],
+  // Older peers cap the advertised prefix before filtering unknown capabilities.
+  listFilesInRoot: ["input", "root"],
 };
 
 export function isWorkspaceOp(value: string): value is keyof WorkspaceOps {

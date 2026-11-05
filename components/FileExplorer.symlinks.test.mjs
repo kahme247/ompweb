@@ -31,7 +31,7 @@ test("a link out of the workspace shows its target and neither expands nor opens
     ]);
   };
   const opened = [];
-  const { container } = render(React.createElement(FileExplorer, { cwd: "/ws", onOpenFile: (file) => opened.push(file) }));
+  const { container } = render(React.createElement(FileExplorer, { cwd: "/ws", hostId: "local", onOpenFile: (file) => opened.push(file) }));
   const row = (path) => container.querySelector(`[data-file-path="${path}"]`);
   await waitFor(() => assert.ok(row("/ws/escape")));
 

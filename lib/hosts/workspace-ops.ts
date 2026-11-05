@@ -2,7 +2,7 @@ import fs from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { authorizeFileAccess } from "../file-authorization";
-import { existingPathWithinRootsChecker, isAbsoluteFileRequestPath, isExistingFilePathAllowed, isFilePathAllowed, normalizeSlashes } from "../file-access";
+import { existingPathWithinRootsChecker, isAbsoluteFileRequestPath, isExistingFilePathAllowed, isFilePathAllowed } from "../file-access";
 import { resolveDirentIsDirectory } from "../file-dirent";
 import { indexWorkspaceFiles } from "../file-index";
 import { inspectUploadTargets, validateUploadFileNames } from "../file-upload";
@@ -72,7 +72,7 @@ async function listDirectory(input: WorkspaceFileRequest, root: string | null) {
   if (root !== null) {
     // The listed path is authorized already; the root can only narrow it.
     if (!isAbsoluteFileRequestPath(root)) throw new HostOpError(403, "outside_root", "Outside the explorer root");
-    insideRoot = existingPathWithinRootsChecker(new Set([normalizeSlashes(root)]));
+    insideRoot = existingPathWithinRootsChecker(new Set([root]));
     if (!insideRoot(checked.filePath)) throw new HostOpError(403, "outside_root", "Outside the explorer root");
   }
   const entries = fs.readdirSync(checked.filePath, { withFileTypes: true })
