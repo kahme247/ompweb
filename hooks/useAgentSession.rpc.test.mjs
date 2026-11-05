@@ -26,7 +26,8 @@ class FakeStream {
     this.channel = channel;
     this.readyState = FakeStream.CONNECTING;
     this.closedByCaller = false;
-    world.esInstances.push(this);
+    // The hook's `running` subscription is not a session observer: tests count those.
+    (channel.kind === "running" ? world.runningStreams : world.esInstances).push(this);
   }
   deliver(message) {
     this.port.onmessage?.({ data: { id: this.id, ...message } });
@@ -110,6 +111,7 @@ function jsonResponse(status, value) {
 // Backend snapshot the router serves. Tests mutate these between phases.
 const world = {
   esInstances: [],
+  runningStreams: [],
   calls: [],
   holds: [], // { match(method, url, body), produce: () => Promise<{ status, value }> }
   sessions: new Map(), // sid -> { leafId, messages, entryIds }
@@ -371,6 +373,7 @@ function callsTo(method, urlPart) {
 
 function resetWorld() {
   world.esInstances.length = 0;
+  world.runningStreams.length = 0;
   world.calls.length = 0;
   world.holds.length = 0;
   world.sessions.clear();
@@ -1808,6 +1811,642 @@ test("fatal SSE error mid-run reconnects after 1s and the new stream delivers ev
   });
   await settle();
   assert.equal(w.latest.agentRunning, false, "events must flow through the replacement stream");
+});
+
+test("a chat with no stream attaches when the running channel reports its session", async () => {
+  resetWorld();
+  primeSession("started-elsewhere", [userMsg("u0", "q")]);
+  const w = await mountSession("started-elsewhere");
+  assert.equal(world.esInstances.length, 0, "an idle chat has no observer");
+  const running = world.runningStreams.at(-1);
+  assert.ok(running, "the chat watches the running channel");
+  // Another chat instance (the user switched away and back) or device started the run after this one loaded,
+  // with a model and thinking level the chat has not seen.
+  assert.notEqual(w.latest.thinkingLevel, "high");
+  assert.notEqual(w.latest.displayModel?.modelId, "live-model");
+  world.agents.set("started-elsewhere", {
+    running: true,
+    state: { isStreaming: true, isPromptRunning: true, model: { provider: "test", id: "live-model" }, thinkingLevel: "high" },
+  });
+  await act(async () => {
+    running.deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["other"] }) });
+    await settle();
+  });
+  assert.equal(world.esInstances.length, 0, "another session's run is not this chat's");
+  await act(async () => {
+    running.deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["started-elsewhere"] }) });
+    await settle();
+  });
+  assert.equal(world.esInstances.length, 1, "the chat attaches its observer");
+  assert.equal(lastEs().channel.sessionId, "started-elsewhere");
+  assert.equal(w.latest.agentRunning, true);
+  assert.equal(w.latest.thinkingLevel, "high", "the composer shows the run's thinking level");
+  assert.equal(w.latest.displayModel.modelId, "live-model", "the composer shows the run's model");
+});
+
+test("a running attachment applies compaction before its observer opens", async () => {
+  resetWorld();
+  primeSession("compacting-elsewhere", [userMsg("u0", "q")]);
+  const w = await mountSession("compacting-elsewhere");
+  world.agents.set("compacting-elsewhere", { running: true, state: { isCompacting: true } });
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["compacting-elsewhere"] }) });
+    await settle();
+  });
+  assert.equal(lastEs().readyState, FakeStream.CONNECTING);
+  assert.equal(w.latest.isCompacting, true, "the compaction control immediately reflects the attached run");
+  await act(async () => { await w.latest.handleCompact(); });
+  assert.equal(world.calls.some((call) => call.body?.type === "compact"), false, "a second compaction cannot start");
+});
+
+test("compaction attached from another tab settles without replacing a historical view", async (t) => {
+  resetWorld();
+  const sid = "historical-compaction";
+  primeSession(sid, [userMsg("live", "current branch")]);
+  const w = await mountSession(sid);
+  const branch = { leafId: "branch", messages: [userMsg("old", "selected branch")], entryIds: ["branch-entry"] };
+  world.views.set(`${sid}:branch:false`, branch);
+  await act(async () => { await w.changeLeaf("branch"); });
+  world.agents.set(sid, { running: true, state: { isCompacting: true } });
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: [sid] }) });
+    await settle();
+    lastEs().open();
+    await settle();
+  });
+  assert.equal(w.latest.isCompacting, true);
+  assert.equal(w.latest.agentRunning, false, "manual compaction is not a prompt run");
+  world.agents.set(sid, { running: true, state: { isCompacting: false } });
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: [] }) });
+    t.mock.timers.tick(15_000);
+    await settle();
+  });
+  assert.equal(w.latest.isCompacting, false, "native idle state releases Stop compaction without a completion event");
+  assert.equal(w.latest.activeLeafId, "branch");
+  assert.deepEqual(w.latest.entryIds, branch.entryIds);
+  assert.deepEqual(w.latest.messages, branch.messages);
+});
+
+test("a refused compact command cannot unlock compaction attached from another tab", async () => {
+  resetWorld();
+  const sid = "attached-compaction-owner";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  world.agents.set(sid, { running: true, state: { isCompacting: true } });
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: [sid] }) });
+    await settle();
+  });
+  await act(async () => {
+    const result = await w.latest.handleBuiltinSlashCommand("/compact");
+    assert.ok(result.error, "a second compaction is refused");
+  });
+  assert.equal(w.latest.isCompacting, true, "the rejected command does not own the attached compaction");
+  await act(async () => { await w.latest.handleCompact(); });
+  assert.equal(world.calls.some(call => call.body?.type === "compact"), false, "neither control can start a second compaction");
+});
+
+test("an idle chat reconciles auto-compaction when its completion event is lost", async () => {
+  resetWorld();
+  const sid = "auto-compaction-owner";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  world.agents.set(sid, { running: true, state: {} });
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: [sid] }) });
+    await settle();
+    lastEs().open();
+    await settle();
+    lastEs().emit({ type: "auto_compaction_start" });
+  });
+  assert.equal(w.latest.isCompacting, true);
+  assert.equal(w.latest.agentRunning, false);
+  world.agents.set(sid, { running: true, state: { isCompacting: false } });
+  await act(async () => {
+    window.dispatchEvent(new Event("online"));
+    await settle();
+  });
+  assert.equal(w.latest.isCompacting, false, "the ref and rendered state share the same compaction lifecycle");
+});
+
+test("matching running frames received during an idle lookup trigger one fresh lookup", async () => {
+  resetWorld();
+  primeSession("late-start", [userMsg("u0", "q")]);
+  const w = await mountSession("late-start");
+  let release;
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === "/api/agent/late-start",
+    produce: () => new Promise((resolve) => { release = () => resolve({ value: { running: false, state: {} } }); }),
+  });
+  const running = world.runningStreams.at(-1);
+  const frame = { type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["late-start"] }) };
+  const gets = callsTo("GET", "/api/agent/late-start").length;
+  await act(async () => {
+    running.deliver(frame);
+    await Promise.resolve();
+  });
+  assert.equal(typeof release, "function", "the first lookup is in flight");
+  world.agents.set("late-start", { running: true, state: { isStreaming: true } });
+  await act(async () => {
+    running.deliver(frame);
+    running.deliver(frame);
+    release();
+    await settle();
+  });
+  assert.equal(callsTo("GET", "/api/agent/late-start").length, gets + 2, "overlapping frames coalesce, but are not dropped");
+  assert.equal(world.esInstances.length, 1);
+  assert.equal(w.latest.agentRunning, true);
+});
+
+test("an idle running lookup without a newer matching frame is not retried", async () => {
+  resetWorld();
+  primeSession("still-idle", [userMsg("u0", "q")]);
+  await mountSession("still-idle");
+  const gets = callsTo("GET", "/api/agent/still-idle").length;
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["still-idle"] }) });
+    await settle();
+  });
+  assert.equal(callsTo("GET", "/api/agent/still-idle").length, gets + 1);
+  assert.equal(world.esInstances.length, 0);
+});
+
+test("a delayed running lookup cannot take ownership of a locally started shell", async () => {
+  resetWorld();
+  primeSession("late-own-shell", [userMsg("u0", "q")]);
+  const w = await mountSession("late-own-shell");
+  let releaseLookup;
+  let releaseBash;
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === "/api/agent/late-own-shell",
+    produce: () => new Promise((resolve) => { releaseLookup = () => resolve({ value: { running: true, state: { isBashRunning: true } } }); }),
+  }, {
+    match: (method, url, body) => method === "POST" && url === "/api/agent/late-own-shell" && body?.type === "bash",
+    produce: () => new Promise((resolve) => { releaseBash = () => resolve({ value: { success: true, data: { output: "", exitCode: 0 } } }); }),
+  });
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["late-own-shell"] }) });
+    await Promise.resolve();
+  });
+  let bash;
+  await act(async () => { bash = w.latest.handleSend("!sleep 5"); await sleep(30); });
+  assert.equal(w.latest.bashRunning, true);
+  await act(async () => { releaseLookup(); await settle(); });
+  assert.equal(world.esInstances.length, 0, "executeBash still exclusively owns the command's settlement");
+  assert.equal(w.latest.bashRunning, true);
+  await act(async () => { releaseBash(); await bash; });
+  assert.equal(w.latest.bashRunning, false);
+});
+
+for (const stopped of [false, true]) {
+  test(`a delayed running lookup cannot resurrect a ${stopped ? "stopped" : "completed"} local shell`, async () => {
+    resetWorld();
+    const sid = stopped ? "stopped-local-shell" : "completed-local-shell";
+    primeSession(sid, [userMsg("u0", "q")]);
+    const w = await mountSession(sid);
+    let releaseLookup;
+    let releaseBash;
+    world.holds.push({
+      match: (method, url) => method === "GET" && url === `/api/agent/${sid}`,
+      produce: () => new Promise((resolve) => { releaseLookup = () => resolve({ value: { running: true, state: { isBashRunning: true } } }); }),
+    }, {
+      match: (method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "bash",
+      produce: () => new Promise((resolve) => { releaseBash = () => resolve({ value: { success: true, data: { output: "", exitCode: stopped ? 130 : 0, cancelled: stopped } } }); }),
+    });
+    await act(async () => {
+      world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: [sid] }) });
+      await Promise.resolve();
+    });
+    let bash;
+    await act(async () => { bash = w.latest.handleSend("!sleep 5"); await sleep(30); });
+    assert.equal(w.latest.bashRunning, true);
+    if (stopped) {
+      await act(async () => { await w.latest.handleAbort(); });
+      assert.equal(world.calls.some((call) => call.body?.type === "abort_bash"), true);
+    }
+    await act(async () => { releaseBash(); await bash; });
+    assert.equal(w.latest.bashRunning, false);
+    const streams = world.esInstances.length;
+    await act(async () => { releaseLookup(); await settle(); });
+    assert.equal(w.latest.bashRunning, false, "an obsolete snapshot cannot restart the settled shell's spinner");
+    assert.equal(world.esInstances.length, streams, "an obsolete shell lookup cannot acquire an observer");
+  });
+}
+
+test("a delayed running lookup cannot resurrect a run after a newer prompt fails startup", async () => {
+  resetWorld();
+  primeSession("failed-new-prompt", [userMsg("u0", "q")]);
+  const w = await mountSession("failed-new-prompt");
+  let release;
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === "/api/agent/failed-new-prompt",
+    produce: () => new Promise((resolve) => { release = () => resolve({ value: { running: true, state: { isStreaming: true } } }); }),
+  }, {
+    match: (method, url, body) => method === "POST" && url === "/api/agent/failed-new-prompt" && body?.type === "get_state",
+    produce: async () => ({ status: 500, value: { error: "Startup failed" } }),
+  });
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["failed-new-prompt"] }) });
+    await Promise.resolve();
+  });
+  await act(async () => {
+    const receipt = await w.latest.handleSend("new prompt");
+    assert.equal(receipt.status, "rejected");
+  });
+  assert.equal(w.latest.agentRunning, false);
+  assert.equal(world.esInstances.length, 0, "startup failed before opening an observer");
+  await act(async () => { release(); await settle(); });
+  assert.equal(world.esInstances.length, 0, "a lookup from an older prompt generation cannot attach");
+  assert.equal(w.latest.agentRunning, false);
+});
+
+test("a delayed running lookup cannot replace a side question's readiness wait", async () => {
+  resetWorld();
+  primeSession("late-btw", [userMsg("u0", "q")]);
+  const w = await mountSession("late-btw");
+  let release;
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === "/api/agent/late-btw",
+    produce: () => new Promise((resolve) => { release = () => resolve({ value: { running: true, state: { isStreaming: true } } }); }),
+  });
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["late-btw"] }) });
+    await Promise.resolve();
+  });
+  let asking;
+  await act(async () => { asking = w.latest.askBtw("side question"); await sleep(30); });
+  const source = lastEs();
+  assert.equal(source.readyState, FakeStream.CONNECTING);
+  const gets = callsTo("GET", "/api/sessions/late-btw/state").length;
+  await act(async () => { release(); await settle(); });
+  assert.equal(world.esInstances.length, 1);
+  assert.equal(source.closedByCaller, false);
+  assert.equal(w.latest.agentRunning, false, "the stale lookup cannot manufacture a prompt run");
+  assert.equal(callsTo("GET", "/api/sessions/late-btw/state").length, gets, "the stale lookup cannot refresh composer state");
+  await act(async () => { source.open(); await asking; });
+});
+
+test("a running frame never touches a chat that already has its stream", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  const { w } = await startRun("s1", "q1");
+  const streams = world.esInstances.length;
+  const gets = world.calls.filter((call) => call.method === "GET" && call.url === "/api/agent/s1").length;
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["s1"] }) });
+    await settle();
+  });
+  assert.equal(world.esInstances.length, streams);
+  assert.equal(world.calls.filter((call) => call.method === "GET" && call.url === "/api/agent/s1").length, gets);
+  assert.equal(w.latest.agentRunning, true);
+});
+
+test("a running frame leaves a shell command this idle chat runs to the chat", async () => {
+  resetWorld();
+  primeSession("own-shell", [userMsg("u0", "q")]);
+  const w = await mountSession("own-shell");
+  assert.equal(world.esInstances.length, 0, "an idle chat has no observer");
+  let release;
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url === "/api/agent/own-shell" && body?.type === "bash",
+    produce: () => new Promise((resolve) => { release = () => resolve({ value: { success: true, data: { output: "", exitCode: 0 } } }); }),
+  });
+  let bash;
+  await act(async () => { bash = w.latest.handleSend("!sleep 5"); await sleep(30); });
+  assert.equal(w.latest.bashRunning, true);
+  // omp reports the session running while its shell runs; executeBash owns that command's settlement.
+  world.agents.set("own-shell", { running: true, state: { isBashRunning: true } });
+  const gets = world.calls.filter((call) => call.method === "GET" && call.url === "/api/agent/own-shell").length;
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["own-shell"] }) });
+    await settle();
+  });
+  assert.equal(world.calls.filter((call) => call.method === "GET" && call.url === "/api/agent/own-shell").length, gets);
+  assert.equal(world.esInstances.length, 0);
+  world.agents.set("own-shell", { running: false, state: {} });
+  await act(async () => { release(); await bash; await settle(); });
+  assert.equal(w.latest.bashRunning, false);
+});
+
+/** Delivers a `running` frame listing `ids` on the hook's running subscription. */
+async function deliverRunning(ids) {
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ids }) });
+    await Promise.resolve();
+  });
+}
+
+/** Holds the next request `match` accepts; `release(value, status)` answers it. */
+function holdNext(match) {
+  const held = {};
+  world.holds.push({ match, produce: () => new Promise((resolve) => { held.release = (value, status = 200) => resolve({ status, value }); }) });
+  return held;
+}
+
+test("an idle snapshot cannot release a manual compaction this tab is still sending", async () => {
+  resetWorld();
+  const sid = "cold-compact";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  const compact = holdNext((method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "compact");
+  let compacting;
+  await act(async () => { compacting = w.latest.handleCompact(); await sleep(30); });
+  assert.equal(w.latest.isCompacting, true);
+  // omp is still starting: the state poll answers before the command reaches it.
+  await act(async () => { window.dispatchEvent(new Event("online")); await sleep(30); });
+  assert.equal(w.latest.isCompacting, true, "the command's own settlement releases Stop compaction");
+  await act(async () => { await w.latest.handleCompact(); });
+  assert.equal(callsTo("POST", `/api/agent/${sid}`).filter((call) => call.body?.type === "compact").length, 1, "no second compaction");
+  await act(async () => { compact.release({ success: true, data: {} }); await compacting; });
+  assert.equal(w.latest.isCompacting, false);
+});
+
+test("a late idle snapshot from an earlier compaction cannot release the next one", async () => {
+  resetWorld();
+  const sid = "two-compactions";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  world.agents.set(sid, { running: true, state: {} });
+  await deliverRunning([sid]);
+  await settle();
+  await act(async () => { lastEs().open(); await sleep(30); });
+  await act(async () => { lastEs().emit({ type: "auto_compaction_start" }); });
+  const poll = holdNext((method, url) => method === "GET" && url === `/api/agent/${sid}`);
+  await act(async () => { window.dispatchEvent(new Event("online")); await sleep(30); });
+  assert.equal(typeof poll.release, "function", "the poll for the first compaction is in flight");
+  await act(async () => {
+    lastEs().emit({ type: "auto_compaction_end" });
+    lastEs().emit({ type: "auto_compaction_start" });
+  });
+  await act(async () => { poll.release({ running: true, state: { isCompacting: false } }); await sleep(30); });
+  assert.equal(w.latest.isCompacting, true, "the second compaction is still running");
+});
+
+test("a failed running lookup is retried", async () => {
+  resetWorld();
+  const sid = "lookup-retry";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  world.holds.push({ match: (method, url) => method === "GET" && url === `/api/agent/${sid}`, produce: async () => ({ status: 503, value: { error: "busy" } }) });
+  world.agents.set(sid, { running: true, state: { isStreaming: true } });
+  await deliverRunning([sid]);
+  await settle();
+  assert.equal(world.esInstances.length, 0, "the failed lookup attached nothing");
+  await settle(1100);
+  assert.equal(world.esInstances.length, 1, "the retry attaches the run");
+  assert.equal(w.latest.agentRunning, true);
+});
+
+test("a running frame waits for the chat's first load, which it cannot invalidate", async () => {
+  resetWorld();
+  const sid = "hydrating";
+  primeSession(sid, [userMsg("u0", "q")]);
+  world.agents.set(sid, { running: true, state: { isStreaming: true } });
+  const load = holdNext((method, url) => method === "GET" && url.startsWith(`/api/sessions/${sid}?`));
+  const w = await mountSession(sid);
+  assert.equal(typeof load.release, "function", "the first load is in flight");
+  await deliverRunning([sid]);
+  await settle();
+  // On the old code the frame attached here, and the run's agent_start dropped the first load.
+  if (lastEs()) await act(async () => { lastEs().open(); lastEs().emit({ type: "agent_start" }); });
+  assert.equal(world.esInstances.length, 0, "no observer before the first load settles");
+  const session = world.sessions.get(sid);
+  await act(async () => {
+    load.release({ sessionId: sid, filePath: "/fixture/session.jsonl", tree: [], leafId: session.leafId, context: { todoPhases: [], thinkingLevel: "off", model: null, ...session } });
+    await settle();
+  });
+  assert.ok(w.latest.data, "the first load is kept");
+  assert.equal(world.esInstances.length, 1, "then the run is attached");
+  assert.equal(w.latest.agentRunning, true);
+});
+
+test("a running lookup from before an Edit cannot start a run during it", async () => {
+  resetWorld();
+  const sid = "lookup-edit";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  const lookup = holdNext((method, url) => method === "GET" && url === `/api/agent/${sid}`);
+  const edit = holdNext((method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "edit_message");
+  await deliverRunning([sid]);
+  let editing;
+  await act(async () => { editing = w.latest.handleEdit("e0", "q"); await sleep(30); });
+  await act(async () => { lookup.release({ running: true, state: { isStreaming: true } }); await settle(); });
+  assert.equal(world.esInstances.length, 0);
+  assert.equal(w.latest.agentRunning, false);
+  await act(async () => { edit.release({ success: true, data: { cancelled: true, leafId: null, sessionId: sid } }); await editing; });
+});
+
+test("a running lookup from before a completed Edit cannot attach its stale run", async () => {
+  resetWorld();
+  const sid = "lookup-edit-done";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  const lookup = holdNext((method, url) => method === "GET" && url === `/api/agent/${sid}`);
+  await deliverRunning([sid]);
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "edit_message",
+    produce: async () => ({ value: { success: true, data: { cancelled: true, leafId: null, sessionId: sid } } }),
+  });
+  await act(async () => { await w.latest.handleEdit("e0", "q"); });
+  await act(async () => { lookup.release({ running: true, state: { isStreaming: true } }); await settle(); });
+  assert.equal(world.esInstances.length, 0, "the snapshot predates the Edit");
+  assert.equal(w.latest.agentRunning, false);
+});
+
+test("a manual compaction settling during an auto-compaction leaves Stop to the auto-compaction", async () => {
+  resetWorld();
+  const sid = "manual-then-auto";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  world.agents.set(sid, { running: true, state: {} });
+  await deliverRunning([sid]);
+  await settle();
+  await act(async () => { lastEs().open(); await sleep(30); });
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "compact",
+    produce: async () => ({ value: { success: true, data: {} } }),
+  });
+  const reload = holdNext((method, url) => method === "GET" && url.startsWith(`/api/sessions/${sid}?`));
+  let compacting;
+  await act(async () => { compacting = w.latest.handleCompact(); await sleep(30); });
+  assert.equal(typeof reload.release, "function", "the manual compaction is reloading the transcript");
+  await act(async () => { lastEs().emit({ type: "auto_compaction_start" }); });
+  const session = world.sessions.get(sid);
+  await act(async () => {
+    reload.release({ sessionId: sid, filePath: "/fixture/session.jsonl", tree: [], leafId: session.leafId, context: { todoPhases: [], thinkingLevel: "off", model: null, ...session } });
+    await compacting;
+  });
+  assert.equal(w.latest.isCompacting, true, "the auto-compaction is still running");
+  await act(async () => { lastEs().emit({ type: "auto_compaction_end" }); });
+  assert.equal(w.latest.isCompacting, false);
+});
+
+test("a run reported while a send's stream connects is attached once that stream times out", async (t) => {
+  resetWorld();
+  const sid = "connect-then-remote";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let sending;
+  await act(async () => { sending = w.latest.handleSend("mine"); for (let i = 0; i < 30; i++) await Promise.resolve(); });
+  assert.equal(lastEs()?.readyState, FakeStream.CONNECTING, "the send's stream is still connecting");
+  world.agents.set(sid, { running: true, state: { isStreaming: true } });
+  await deliverRunning([sid]);
+  await act(async () => {
+    t.mock.timers.tick(60_001);
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+    assert.equal((await sending).status, "rejected");
+  });
+  assert.equal(world.esInstances.length, 2, "a new observer attaches the other tab's run");
+  assert.equal(w.latest.agentRunning, true);
+});
+
+test("a chat promoted from a new chat attaches a run reported after its first send failed", async (t) => {
+  resetWorld();
+  const sid = "promoted-later";
+  primeSession(sid, [userMsg("u0", "q")]);
+  let promoted = null;
+  const view = ownRoot(renderHook(({ session }) => useAgentSession({ session, newSessionCwd: session ? null : "/workspace", onSessionCreated: (created) => { promoted = created; } }), { initialProps: { session: null }, wrapper: TestRoot }));
+  await settle(30);
+  world.holds.push({ match: (method, url) => method === "POST" && url === "/api/agent/new", produce: async () => ({ value: { sessionId: sid } }) });
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let sending;
+  await act(async () => { sending = view.result.current.handleSend("first"); for (let i = 0; i < 30; i++) await Promise.resolve(); });
+  assert.equal(promoted?.id, sid);
+  // Promotion re-renders the same chat with its new session; no mount load runs for it.
+  await act(async () => { view.rerender({ session: promoted }); for (let i = 0; i < 30; i++) await Promise.resolve(); });
+  await act(async () => {
+    t.mock.timers.tick(60_001);
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+    assert.equal((await sending).status, "rejected");
+  });
+  world.agents.set(sid, { running: true, state: { isStreaming: true } });
+  const gets = callsTo("GET", `/api/agent/${sid}`).length;
+  await deliverRunning([sid]);
+  assert.equal(callsTo("GET", `/api/agent/${sid}`).length, gets + 1, "no mount load to wait for");
+  await act(async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); });
+  assert.equal(view.result.current.agentRunning, true);
+});
+
+test("a run reported while a side question's stream connects is attached once that stream times out", async (t) => {
+  resetWorld();
+  const sid = "btw-then-remote";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let asking;
+  await act(async () => { asking = w.latest.askBtw("side question"); for (let i = 0; i < 30; i++) await Promise.resolve(); });
+  const observer = lastEs();
+  assert.equal(observer.readyState, FakeStream.CONNECTING);
+  world.agents.set(sid, { running: true, state: { isStreaming: true } });
+  await deliverRunning([sid]);
+  await act(async () => {
+    t.mock.timers.tick(60_001);
+    for (let i = 0; i < 50; i++) await Promise.resolve();
+    assert.equal(await asking, false);
+  });
+  assert.equal(observer.closedByCaller, true, "the side question gave up its stream");
+  assert.equal(world.esInstances.length, 2, "the held frame attaches the run without another frame");
+  assert.equal(w.latest.agentRunning, true);
+});
+
+test("an auto-compaction whose end was missed cannot bring Stop back after a later manual compaction", async () => {
+  resetWorld();
+  const sid = "missed-auto-end";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  world.agents.set(sid, { running: true, state: {} });
+  await deliverRunning([sid]);
+  await settle();
+  await act(async () => { lastEs().open(); await sleep(30); lastEs().emit({ type: "auto_compaction_start" }); });
+  assert.equal(w.latest.isCompacting, true);
+  // The end event is lost; the state poll settles it.
+  world.agents.set(sid, { running: true, state: { isCompacting: false } });
+  await act(async () => { window.dispatchEvent(new Event("online")); await sleep(30); });
+  assert.equal(w.latest.isCompacting, false);
+  await act(async () => { await w.latest.handleCompact(); await sleep(30); });
+  assert.equal(w.latest.isCompacting, false, "the settled auto-compaction does not own Stop again");
+});
+
+test("a running lookup from before a manual compaction cannot release it", async () => {
+  resetWorld();
+  const sid = "lookup-compact";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  const lookup = holdNext((method, url) => method === "GET" && url === `/api/agent/${sid}`);
+  const compact = holdNext((method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "compact");
+  await deliverRunning([sid]);
+  let compacting;
+  await act(async () => { compacting = w.latest.handleCompact(); await sleep(30); });
+  await act(async () => { lookup.release({ running: true, state: { isCompacting: false } }); await settle(); });
+  assert.equal(w.latest.isCompacting, true);
+  await act(async () => { await w.latest.handleCompact(); });
+  assert.equal(callsTo("POST", `/api/agent/${sid}`).filter((call) => call.body?.type === "compact").length, 1, "no second compaction");
+  await act(async () => { compact.release({ success: true, data: {} }); await compacting; });
+});
+
+test("the first load's idle state cannot overwrite a compaction a later lookup found", async () => {
+  resetWorld();
+  const sid = "mount-vs-lookup";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const state = holdNext((method, url) => method === "GET" && url === `/api/sessions/${sid}/state`);
+  const w = await mountSession(sid);
+  world.agents.set(sid, { running: true, state: { isCompacting: true } });
+  await deliverRunning([sid]);
+  await settle();
+  await act(async () => { state.release({ running: false, state: { isCompacting: false } }); await settle(); });
+  assert.equal(w.latest.isCompacting, true, "the newer lookup's compaction stands");
+  await act(async () => { await w.latest.handleCompact(); });
+  assert.equal(callsTo("POST", `/api/agent/${sid}`).some((call) => call.body?.type === "compact"), false, "and the guard agrees with the control");
+});
+
+test("a run reported while a local send starts is attached once that send fails", async () => {
+  resetWorld();
+  const sid = "send-then-remote";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  const startup = holdNext((method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "get_state");
+  let sending;
+  await act(async () => { sending = w.latest.handleSend("mine"); await sleep(30); });
+  world.agents.set(sid, { running: true, state: { isStreaming: true } });
+  await deliverRunning([sid]);
+  await act(async () => {
+    startup.release({ error: "Startup failed" }, 500);
+    assert.equal((await sending).status, "rejected");
+  });
+  await settle();
+  assert.equal(world.esInstances.length, 1, "the other tab's run is attached");
+  assert.equal(w.latest.agentRunning, true);
+});
+
+test("a running lookup is dropped when the session left the running set meanwhile", async () => {
+  resetWorld();
+  const sid = "lookup-ended";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  const lookup = holdNext((method, url) => method === "GET" && url === `/api/agent/${sid}`);
+  await deliverRunning([sid]);
+  // The run ends (or its child exits) after the GET read its state, before the reply arrives.
+  await deliverRunning([]);
+  await act(async () => { lookup.release({ running: true, state: { isStreaming: true } }); await settle(); });
+  assert.equal(world.esInstances.length, 0, "the finished run is not attached");
+  assert.equal(w.latest.agentRunning, false);
+  assert.equal(world.calls.some((call) => call.body?.type === "set_host_tools"), false, "no registration that could spawn a replacement");
+});
+
+test("a running lookup is dropped when the chat's session identity moves meanwhile", async () => {
+  resetWorld();
+  const sid = "lookup-identity";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  const lookup = holdNext((method, url) => method === "GET" && url === `/api/agent/${sid}`);
+  await deliverRunning([sid]);
+  w.latest.sessionIdRef.current = "moved-identity";
+  await act(async () => { lookup.release({ running: true, state: { isStreaming: true } }); await settle(); });
+  assert.equal(world.esInstances.length, 0);
+  assert.equal(w.latest.agentRunning, false);
 });
 
 test("unmount mid-run closes the stream and late frames cannot resurrect state", async () => {

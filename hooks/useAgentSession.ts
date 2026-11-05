@@ -147,6 +147,8 @@ export type PromptSubmissionResult =
   | { status: "superseded" };
 
 const MAX_HANDLED_EDIT_HISTORY_MARKERS = 64;
+// A running-channel lookup that failed is retried after 1 s, 2 s and 4 s, then waits for the next frame.
+const RUNNING_LOOKUP_RETRIES = 3;
 
 /** Read the error carried by OMP's assistant/error frames without rendering
  * arbitrary payloads as [object Object]. OMP normally puts provider failures
@@ -463,6 +465,43 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // Mirror of the isCompacting state that survives render batching, so two
   // clicks in the same tick cannot double-send a compact command.
   const isCompactingRef = useRef(false);
+  // Bumped by every compaction start and end this tab sees (its own, or omp's
+  // auto-compaction): a native snapshot requested before the latest one is stale.
+  const compactionGenRef = useRef(0);
+  // This tab's manual compactions still in flight: omp may not have the command
+  // yet, so an idle snapshot cannot release them; the command's settlement does.
+  const localCompactionsRef = useRef(0);
+  // omp's auto-compaction between its start and end events: a manual compaction
+  // settling meanwhile leaves the control to it.
+  const autoCompactingRef = useRef(false);
+  // Bumped when an Edit starts: a running lookup from before it is stale.
+  const editGenRef = useRef(0);
+  // The session whose mount load is in flight; running-channel attaches wait for it.
+  const mountLoadingRef = useRef<string | null>(null);
+  // The running-channel recheck, run when a local operation releases the session.
+  const runningRecheckRef = useRef<(() => void) | null>(null);
+  const setCompacting = useCallback((value: boolean) => {
+    isCompactingRef.current = value;
+    setIsCompacting(value);
+  }, []);
+  // Apply omp's isCompacting from a snapshot requested at compaction generation `gen`.
+  const applyNativeCompacting = useCallback((value: boolean, gen: number) => {
+    if (compactionGenRef.current !== gen || (!value && localCompactionsRef.current > 0)) return;
+    // An idle snapshot also settles an auto-compaction whose end event was missed.
+    if (!value) autoCompactingRef.current = false;
+    setCompacting(value);
+  }, [setCompacting]);
+  // A manual compaction this tab sends owns the compacting state until its command settles.
+  const beginLocalCompaction = useCallback(() => {
+    localCompactionsRef.current += 1;
+    compactionGenRef.current += 1;
+    setCompacting(true);
+  }, [setCompacting]);
+  const endLocalCompaction = useCallback(() => {
+    localCompactionsRef.current -= 1;
+    compactionGenRef.current += 1;
+    setCompacting(localCompactionsRef.current > 0 || autoCompactingRef.current);
+  }, [setCompacting]);
   // Set while an interrupt-and-reply (abort_and_prompt) is in flight: the
   // aborted turn's terminal agent_end must not tear down the new run that is
   // starting. Cleared on the new run's agent_start (or the intercept itself).
@@ -1585,6 +1624,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (current && (result.status === "connected" || result.source.readyState === EVENT_STREAM_OPEN)) return;
     if (eventSourceRef.current === result.source) eventSourceRef.current = null;
     result.source.close();
+    // A running frame held back while this observer connected is the chat's again.
+    runningRecheckRef.current?.();
     throw new EventStreamConnectionError(current && result.status === "timeout" ? "timeout" : "closed");
   }, [addNotice, connectEvents]);
 
@@ -1827,9 +1868,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // If the server reports idle while we still think it's running, finish
   // through the same path as prompt_done.
   const reconcileAgentState = useCallback(async (sid: string) => {
-    if (!agentRunningRef.current) return;
+    if (!agentRunningRef.current && !isCompactingRef.current) return;
     const runId = promptRunIdRef.current;
     const responseVersion = responseRunVersionRef.current;
+    const compactionGen = compactionGenRef.current;
     // One request at a time per run: concurrent triggers coalesce into the
     // in-flight request and re-issue on its completion (see release below).
     const guard = reconcileGuardRef.current;
@@ -1850,11 +1892,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const state = data.state;
       applySkillDiagnosticsSnapshot(skillDiagnosticsRevision, state?.skillDiagnostics);
       if (!promptDispatchPendingRef.current && state?.responseObserved) runHadContentRef.current = true;
-      // Mirror compaction state unconditionally: a missed compaction_end
-      // would otherwise leave the "Stop compaction" UI stuck. No state
-      // (wrapper destroyed) means nothing is compacting.
-      isCompactingRef.current = state?.isCompacting ?? false;
-      setIsCompacting(state?.isCompacting ?? false);
+      // Manual compaction emits no completion event; native state releases
+      // its controls independently of live transcript hydration. No state
+      // (wrapper destroyed) means nothing is compacting. A compaction that
+      // started or ended meanwhile, or one this tab is still sending, wins.
+      applyNativeCompacting(state?.isCompacting ?? false, compactionGen);
       // Also mid-run: this poll is the only todo-phase refresh while streaming.
       if (state?.todoPhases !== undefined) setTodoPhases(state.todoPhases ?? []);
       // And the only reliable re-sync for a missed subagent lifecycle frame.
@@ -1884,13 +1926,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // request lost ownership to a newer acquire), the stale owner's
       // release() is a no-op — it must not clear the new run's lock.
       const reissue = guard.release(token);
-      if (reissue && agentRunningRef.current && promptRunIdRef.current === runId && sessionIdRef.current === sid) {
+      if (reissue && (agentRunningRef.current || isCompactingRef.current) && promptRunIdRef.current === runId && sessionIdRef.current === sid) {
         void reconcileAgentState(sid);
       }
     }
-  }, [applyQueueStateSnapshot, applySkillDiagnosticsSnapshot, finishPromptWithoutStream, refreshSubagentRoster]);
+  }, [applyNativeCompacting, applyQueueStateSnapshot, applySkillDiagnosticsSnapshot, finishPromptWithoutStream, refreshSubagentRoster]);
 
-  // Recovery net for missed SSE events: while the agent is running, verify
+  // Recovery net for missed SSE events: while a prompt or compaction runs, verify
   // against the server periodically and whenever the tab returns to the
   // foreground or the network comes back.
   useEffect(() => {
@@ -1908,7 +1950,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const onVisible = () => {
       if (document.visibilityState === "visible") reconcile();
     };
-    const interval = agentRunning ? setInterval(reconcile, AGENT_STATE_RECONCILE_MS) : undefined;
+    const interval = agentRunning || isCompacting ? setInterval(reconcile, AGENT_STATE_RECONCILE_MS) : undefined;
     document.addEventListener("visibilitychange", onVisible);
     window.addEventListener("online", reconcile);
     return () => {
@@ -1916,7 +1958,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("online", reconcile);
     };
-  }, [agentRunning, catchUp, reconcileAgentState, reconcileBtw]);
+  }, [agentRunning, isCompacting, catchUp, reconcileAgentState, reconcileBtw]);
 
   // A session can be mid-run without omp-web owning the process (someone is
   // driving it from a terminal, or from another omp-web window). Nothing
@@ -2511,12 +2553,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setRetryInfo(null);
         break;
       case "auto_compaction_start":
-        setIsCompacting(true);
+        compactionGenRef.current += 1;
+        autoCompactingRef.current = true;
+        setCompacting(true);
         setCompactError(null);
         setCompactResult(null);
         break;
       case "auto_compaction_end":
-        setIsCompacting(false);
+        compactionGenRef.current += 1;
+        autoCompactingRef.current = false;
+        if (localCompactionsRef.current === 0) setCompacting(false);
         if (event.errorMessage) {
           setCompactError(event.errorMessage as string);
           setCompactResult(null);
@@ -2678,7 +2724,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-}, [addNotice, catchUp, eventCoalescer, clearLiveToolResults, clearTerminalReconcileTimer, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, reloadActiveSessionHistory, mergeSubagents, onAgentEnd, reconcileAgentState, refreshLiveModelState, resetSubagentActivityState, applyAuthoritativeModel, applySkillDiagnosticsSnapshot, beginAuthoritativeModelSync, setLiveToolResult, surfaceQuotaOnStream, updateQueuedMessages, applyQueueStateSnapshot]);
+  }, [addNotice, catchUp, eventCoalescer, clearLiveToolResults, clearTerminalReconcileTimer, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, reloadActiveSessionHistory, mergeSubagents, onAgentEnd, reconcileAgentState, refreshLiveModelState, resetSubagentActivityState, applyAuthoritativeModel, applySkillDiagnosticsSnapshot, beginAuthoritativeModelSync, setCompacting, setLiveToolResult, surfaceQuotaOnStream, updateQueuedMessages, applyQueueStateSnapshot]);
   handleAgentEventRef.current = handleAgentEvent;
   syncActionsRef.current = {
     metadata: (context, version, hasLive = liveModelMeta !== null || currentModelOverride !== null) => {
@@ -2719,8 +2765,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           lastRunErrorRef.current = null;
         }
         if (!promptDispatchPendingRef.current && snapshot.responseObserved) runHadContentRef.current = true;
-        isCompactingRef.current = snapshot.isCompacting;
-        setIsCompacting(snapshot.isCompacting);
+        applyNativeCompacting(snapshot.isCompacting, compactionGenRef.current);
         if (!busy && agentRunningRef.current) {
           // Startup may still be sending the prompt; only a dispatched run can settle.
           if (!promptDispatchPendingRef.current && sessionIdRef.current) void reconcileAgentState(sessionIdRef.current);
@@ -3056,6 +3101,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (bashRunningRef.current || editInFlightRef.current) return;
+    // Invalidate snapshots and recovery waiters from before this local command.
+    bashRecoveryIdRef.current += 1;
     const inputText = `${excludeFromContext ? "!!" : "!"}${command}`;
     bashRunningRef.current = true;
     setPendingBash({ command, excludeFromContext });
@@ -3258,6 +3305,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       || forkInFlightRef.current || editInFlightRef.current) return false;
     const edit = { sessionId: sid, pendingHistoryChange: null as AgentEvent | null };
     editInFlightRef.current = edit;
+    editGenRef.current += 1;
     setEditingEntryId(entryId);
     contextRequestSeqRef.current += 1;
     catchUp.invalidate();
@@ -3600,8 +3648,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleCompact = useCallback(async () => {
     const sid = sessionIdRef.current;
     if (!sid || isCompactingRef.current || isCompacting || editInFlightRef.current) return;
-    isCompactingRef.current = true;
-    setIsCompacting(true);
+    beginLocalCompaction();
     setCompactError(null);
     setCompactResult(null);
     try {
@@ -3613,10 +3660,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setCompactError(e instanceof Error ? e.message : String(e));
       setCompactResult(null);
     } finally {
-      isCompactingRef.current = false;
-      setIsCompacting(false);
+      endLocalCompaction();
     }
-  }, [isCompacting, loadSession, refreshLiveModelState]);
+  }, [beginLocalCompaction, endLocalCompaction, isCompacting, loadSession, refreshLiveModelState]);
 
   // A remote workspace's path means nothing on this machine: its models come from the global list.
   const remoteWorkspace = session ? remoteHostId(session.hostId) !== undefined : newSessionHostId !== undefined;
@@ -3707,6 +3753,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return result;
     };
 
+    let ownsCompaction = false;
     try {
       // Commands that talk to the runtime create it here. /btw <question> and the web
       // prompt commands create it inside askBtw/handleSend, which attach their own stream.
@@ -3715,8 +3762,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         case "compact": {
           const sid = await ensureRuntime();
           if (!sid || isCompactingRef.current || isCompacting) return complete({ handled: true, error: translate("agentSession.noSessionToCompact") });
-          isCompactingRef.current = true;
-          setIsCompacting(true);
+          ownsCompaction = true;
+          beginLocalCompaction();
           setCompactError(null);
           setCompactResult(null);
           const result = await sendAgentCommand<CompactCommandResult>(sid, {
@@ -3725,8 +3772,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           });
           setCompactResult(readCompactResult(result, "manual"));
           await loadSession(sid, true);
-          isCompactingRef.current = false;
-          setIsCompacting(false);
           // loadSession resolves to null unless state was requested, so promote
           // unconditionally — promoteNewSession no-ops for existing sessions and
           // is idempotent via newSessionPromotedRef.
@@ -3829,12 +3874,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       return complete({ handled: true, error: e instanceof Error ? e.message : String(e) });
     } finally {
-      if (commandName === "compact") {
-        isCompactingRef.current = false;
-        setIsCompacting(false);
+      if (ownsCompaction) {
+        endLocalCompaction();
       }
     }
-  }, [addNotice, advisorEnabled, askBtw, ensureNewSession, handleSend, isCompacting, loadModels, loadSession, loadSlashCommands, openBtwHistory, promoteNewSession, onSessionStatsPanelOpen]);
+  }, [addNotice, advisorEnabled, askBtw, beginLocalCompaction, endLocalCompaction, ensureNewSession, handleSend, isCompacting, loadModels, loadSession, loadSlashCommands, openBtwHistory, promoteNewSession, onSessionStatsPanelOpen]);
 
   // Queued (undelivered) messages live in the queue panel only; the chat gets
   // the real user message when pi delivers it (user message_end event). An
@@ -3991,6 +4035,141 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     completionScrollAllowedRef.current = end.getBoundingClientRect().bottom - container.getBoundingClientRect().bottom <= 24;
   }, []);
 
+  // Attach to a run omp has going for `sid` when this chat has no stream yet: on
+  // load, and when the running channel reports a run that started after the load
+  // (another tab or device, or a send from a chat instance the user left).
+  const attachLiveRun = useCallback((sid: string, agentState: { running?: boolean; state?: AgentStateResponse }, compactionGen: number) => {
+    if (!agentState.running || eventSourceRef.current) return;
+    if (agentState.state?.isCompacting !== undefined) applyNativeCompacting(agentState.state.isCompacting, compactionGen);
+    void connectEvents(sid);
+    if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
+      agentRunningRef.current = true;
+      setAgentRunning(true);
+      setAgentPhase(agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
+      dispatch({ type: "start" });
+      // Register the host-tool + URI bridges so the agent can call
+      // open_url/notify/open_file and resolve pi-web://clipboard.
+      void registerHostTools(sid);
+      void registerHostUriSchemes(sid);
+      // Rehydrate the live roster (missed lifecycle/progress frames).
+      // Tracked + session-guarded: a session switch during the delay must
+      // not issue a stale get_subagents against the old session.
+      if (rosterRefreshTimerRef.current) {
+        clearTimeout(rosterRefreshTimerRef.current);
+        rosterRefreshTimerRef.current = null;
+      }
+      rosterRefreshTimerRef.current = setTimeout(() => {
+        rosterRefreshTimerRef.current = null;
+        if (sessionIdRef.current !== sid) return;
+        void refreshSubagentRoster(sid);
+      }, 600);
+      if (!agentState.state.isStreaming && agentState.state.isPromptRunning) {
+        void waitForPromptSettlement(sid);
+      }
+    }
+    if (agentState.state?.isBashRunning) {
+      bashRunningRef.current = true;
+      setBashRunning(true);
+      void waitForBashSettlement(sid);
+    }
+  }, [applyNativeCompacting, connectEvents, refreshSubagentRoster, registerHostTools, registerHostUriSchemes, waitForBashSettlement, waitForPromptSettlement]);
+  // The running-frame attach has no loadSession behind it: the run (maybe from another
+  // device) can use another model or thinking level, so sync them as a command does.
+  const attachStartedRunRef = useRef<(sid: string, agentState: { running?: boolean; state?: AgentStateResponse }, compactionGen: number) => void>(() => {});
+  attachStartedRunRef.current = (sid, agentState, compactionGen) => {
+    attachLiveRun(sid, agentState, compactionGen);
+    if (agentState.running) void refreshLiveModelState(sid);
+  };
+
+  // The sidebar's running badge comes from this channel; a chat showing that
+  // session without a stream rechecks omp and attaches, so it never needs a reload.
+  useEffect(() => {
+    const sid = session?.id;
+    if (!sid) return;
+    const source = openEventStream({ kind: "running" });
+    let active = true;
+    // The latest running frame named this session and no lookup has settled it yet.
+    let wanted = false;
+    let checking = false;
+    let frames = 0;
+    let failures = 0;
+    let retryTimer: NodeJS.Timeout | undefined;
+    const current = () => active && hookAliveRef.current && sessionIdRef.current === sid;
+    // The chat's own open stream, or the reconnect that restores it, carries the run. A stream still
+    // connecting does not: its readiness wait can still fail and close it.
+    const covered = () => eventSourceRef.current?.readyState === EVENT_STREAM_OPEN || Boolean(reconnectTimerRef.current);
+    // The mount's first load, a stream still connecting, and a local send, shell, Edit or compaction own
+    // the session until they settle; the frame stays wanted and their release rechecks it (runningRecheckRef).
+    const blocked = () => mountLoadingRef.current === sid || Boolean(eventSourceRef.current) || agentRunningRef.current
+      || bashRunningRef.current || Boolean(editInFlightRef.current) || localCompactionsRef.current > 0;
+    // Any local operation that started meanwhile makes a lookup stale.
+    const localGeneration = () => `${promptRunIdRef.current}:${bashRecoveryIdRef.current}:${editGenRef.current}:${compactionGenRef.current}`;
+    const checkRunning = () => {
+      clearTimeout(retryTimer);
+      retryTimer = undefined;
+      if (!wanted || !current()) return;
+      if (covered()) {
+        wanted = false;
+        return;
+      }
+      // A lookup in flight rechecks when it settles.
+      if (blocked() || checking) return;
+      checking = true;
+      const generation = localGeneration();
+      const compactionGen = compactionGenRef.current;
+      const framesBefore = frames;
+      let failed = false;
+      void fetch(`/api/agent/${encodeURIComponent(sid)}`)
+        .then((res) => (res.ok ? res.json() as Promise<{ running?: boolean; state?: AgentStateResponse }> : null))
+        .then((data) => {
+          if (!data) {
+            failed = true;
+            return;
+          }
+          // A newer frame without this session means the run this snapshot saw has ended.
+          if (!wanted || !current() || localGeneration() !== generation || covered() || blocked()) return;
+          failures = 0;
+          // A frame that arrived meanwhile may report a run this snapshot predates.
+          if (frames === framesBefore) wanted = false;
+          attachStartedRunRef.current(sid, data, compactionGen);
+        })
+        .catch(() => {
+          failed = true;
+        })
+        .finally(() => {
+          checking = false;
+          if (failed) {
+            if (wanted && current() && failures < RUNNING_LOOKUP_RETRIES) retryTimer = setTimeout(checkRunning, 1000 * 2 ** failures++);
+            return;
+          }
+          checkRunning();
+        });
+    };
+    runningRecheckRef.current = checkRunning;
+    source.onmessage = (e) => {
+      try {
+        const frame = JSON.parse(e.data) as { type?: string; runningSessionIds?: unknown };
+        if (frame.type !== "running" || !Array.isArray(frame.runningSessionIds)) return;
+        wanted = frame.runningSessionIds.includes(sid);
+        frames += 1;
+        failures = 0;
+        checkRunning();
+      } catch {
+        // Ignore malformed running frames.
+      }
+    };
+    return () => {
+      active = false;
+      clearTimeout(retryTimer);
+      if (runningRecheckRef.current === checkRunning) runningRecheckRef.current = null;
+      source.close();
+    };
+  }, [session?.id]);
+  // A local operation releasing the session rechecks a running frame it held back.
+  useEffect(() => {
+    runningRecheckRef.current?.();
+  }, [agentRunning, bashRunning, isCompacting, editingEntryId]);
+
   // Load session on mount
   // React StrictMode re-invokes this effect for the freshly mounted keyed
   // <ChatWindow> (setup → cleanup → setup), which made every session switch
@@ -4010,7 +4189,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       lastQuotaErrorRef.current = null;
       lastRunErrorRef.current = null;
       catchUp.select({ leafId: null, includePreCompaction: false });
+      const compactionGen = compactionGenRef.current;
+      mountLoadingRef.current = session.id;
       loadSession(session.id, true, true).then((loaded) => {
+        if (mountLoadingRef.current === session.id) mountLoadingRef.current = null;
         if (!hookAliveRef.current || sessionIdRef.current !== session.id) return;
         const agentState = loaded?.agentState;
         if (agentState?.exited) {
@@ -4024,55 +4206,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             });
           }
         }
-        if (agentState?.running && !eventSourceRef.current) {
-          void connectEvents(session.id);
-          if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
-            agentRunningRef.current = true;
-            setAgentRunning(true);
-            setAgentPhase(agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
-            dispatch({ type: "start" });
-            // Register the host-tool + URI bridges so the agent can call
-            // open_url/notify/open_file and resolve pi-web://clipboard.
-            void registerHostTools(session.id);
-            void registerHostUriSchemes(session.id);
-            // Rehydrate the live roster (missed lifecycle/progress frames).
-            // Tracked + session-guarded: a session switch during the delay must
-            // not issue a stale get_subagents against the old session.
-            if (rosterRefreshTimerRef.current) {
-              clearTimeout(rosterRefreshTimerRef.current);
-              rosterRefreshTimerRef.current = null;
-            }
-            const rosterTimerSid = session.id;
-            rosterRefreshTimerRef.current = setTimeout(() => {
-              rosterRefreshTimerRef.current = null;
-              if (sessionIdRef.current !== rosterTimerSid) return;
-              void refreshSubagentRoster(rosterTimerSid);
-            }, 600);
-            if (!agentState.state.isStreaming && agentState.state.isPromptRunning) {
-              void waitForPromptSettlement(session.id);
-            }
-          }
-          if (agentState.state?.isBashRunning) {
-            bashRunningRef.current = true;
-            setBashRunning(true);
-            void waitForBashSettlement(session.id);
-          }
-        }
+        if (agentState) attachLiveRun(session.id, agentState, compactionGen);
         if (agentState?.state) {
           // Model + thinking level are owned by loadSession (token-guarded);
           // re-applying this same snapshot here would mint a fresh token and
           // bypass the stale-response guard.
-          if (agentState.state.isCompacting !== undefined) setIsCompacting(agentState.state.isCompacting);
+          if (agentState.state.isCompacting !== undefined) applyNativeCompacting(agentState.state.isCompacting, compactionGen);
           if (agentState.state.contextUsage !== undefined) setContextUsage(agentState.state.contextUsage ?? null);
           if (agentState.state.systemPrompt !== undefined) setSystemPrompt(agentState.state.systemPrompt || null);
           if (agentState.state.extensionStatuses !== undefined) setExtensionStatuses(agentState.state.extensionStatuses ?? []);
           if (agentState.state.extensionWidgets !== undefined) setExtensionWidgets(agentState.state.extensionWidgets ?? []);
         }
         void catchUp.request();
+        runningRecheckRef.current?.();
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshSubagentRoster, registerHostTools, registerHostUriSchemes]);
+  }, [attachLiveRun]);
 
   useEffect(() => {
     onSystemPromptChange?.(systemPrompt);
