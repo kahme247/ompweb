@@ -8,6 +8,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Added
 
+- **Sidebar marks sessions with an unsent draft.** A session whose composer still holds text or attachments shows a small pencil beside its title, so a half-written message is easy to find again. The mark follows this browser tab's drafts.
 - **Identify untagged builds from the logo.** Clicking or tapping the ompweb logo still reveals the version; builds made from an untagged Git commit also show its full hash and commit date (`YYYY-MM-DD`). Builds made on a tag keep the version-only display. The metadata is embedded in the browser bundle, so installed packages and binaries do not need Git.
 - **Workspace file APIs run on the owning host.** Directory listings, file metadata and previews, downloads, file search and referenced shell output go through that machine's daemon, including This machine. File downloads stream in bounded chunks rather than being limited by the host link's per-result size. A stopped or older daemon reports unavailable or unsupported instead of reading a path on the web server.
 - **File tabs keep their owning workspace.** Files with the same path on different hosts open in separate tabs. Switching chats does not redirect a tab's reads, Markdown links, images or downloads to the new host. Explorer and composer file suggestions follow the selected host, and confirming an agent's file-open request keeps that request's source host. Mention and reveal actions are disabled while the active chat belongs to another host.
