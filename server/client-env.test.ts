@@ -108,7 +108,14 @@ test("shared checkouts retain explicit safe.directory trust", { skip: process.ge
   writeFileSync(globalConfig, `[safe]\n\tdirectory =\n\tdirectory = ${root}\n`);
   const untrustedConfig = path.join(root, "untrusted-config");
   writeFileSync(untrustedConfig, "[safe]\n\tdirectory =\n");
-  chownSync(root, 65534, 65534);
+  try {
+    chownSync(root, 65534, 65534);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "EPERM" && code !== "EACCES") throw error;
+    t.skip("Changing fixture ownership is not permitted");
+    return;
+  }
   const inspect = (overrides: NodeJS.ProcessEnv) => JSON.parse(execFileSync(process.execPath, ["-e", `
     import { clientEnv } from ${JSON.stringify(path.join(import.meta.dir, "client-env.ts"))};
     console.log(JSON.stringify(clientEnv(${JSON.stringify(root)}, "worker")));
