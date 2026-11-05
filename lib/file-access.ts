@@ -89,19 +89,21 @@ const OMP_ENV_NAME = /^\.env(?:\.|$)/i;
 const OMP_SECRET_NAME = /^(?:\.?agent\.db(?:[-.~].*)?|\.?models\.(?:yml|yaml|json)(?:[.~].*|-(?:backup|bak|old)(?:[.~-].*)?)?|\.env(?:\..*)?)$/i;
 const credentialPolicyUnavailable = () => new HostOpError(503, "credential_policy_unavailable", "Credential exclusions cannot be verified while their filesystem metadata is unreadable");
 
-/** Declaring a path safe requires readable ownership metadata; otherwise throws a 503 HostOpError. */
+/** Request metadata failures retain a 404; incomplete credential ownership metadata throws a 503. */
 export function isOmpSecretFile(filePath: string): boolean {
+  let requestUnavailable = false;
+  const markRequestUnavailable = () => { requestUnavailable = true; };
   // Follow the original path before any lexical normalization: link/.. is
   // resolved by the filesystem, not necessarily by path.resolve's string rules.
-  const requested = resolvedOrSelf(filePath);
+  const requested = resolvedOrSelf(filePath, markRequestUnavailable);
   const target = comparablePath(requested);
   const name = path.basename(requested);
-  const parents = new Set([path.dirname(requested), resolvedOrSelf(path.dirname(filePath))].map(comparablePath));
+  const parents = new Set([path.dirname(requested), resolvedOrSelf(path.dirname(filePath), markRequestUnavailable)].map(comparablePath));
   let metadataUnavailable = false;
   const markUnavailable = () => { metadataUnavailable = true; };
-  const configDirs = ompConfigDirs([filePath, requested], markUnavailable);
+  const configDirs = ompConfigDirs([filePath, requested], markUnavailable, markRequestUnavailable);
   const agentDirs = [getAgentDir(), ...configDirs.map((dir) => path.join(dir, "agent"))];
-  const requestedIdentity = fileIdentity(filePath);
+  const requestedIdentity = fileIdentity(filePath, markRequestUnavailable);
   const identity = requestedIdentity && requestedIdentity.nlink > 1 && requestedIdentity.ino > 0 ? requestedIdentity : null;
   for (const dir of new Set([...agentDirs, ...configDirs])) {
     const agentDir = agentDirs.includes(dir);
@@ -158,12 +160,13 @@ export function isOmpSecretFile(filePath: string): boolean {
     }
   }
   // Unknown off-tree aliases cannot be declared safe without complete ownership metadata.
+  if (requestUnavailable) throw new HostOpError(404, "file_not_found", "Not found");
   if (metadataUnavailable) throw credentialPolicyUnavailable();
   return false;
 }
 
 /** Default and genuine named-profile config roots, both loaded by omp's env.ts. */
-function ompConfigDirs(filePaths: string[], onUnavailable: () => void): string[] {
+function ompConfigDirs(filePaths: string[], onUnavailable: () => void, onRequestUnavailable: () => void): string[] {
   const configRoot = getConfigRoot();
   const profiles = path.join(configRoot, "profiles");
   const dirs = new Set([configRoot]);
@@ -178,9 +181,9 @@ function ompConfigDirs(filePaths: string[], onUnavailable: () => void): string[]
   const profileParent = comparablePath(resolvedOrSelf(profiles, onUnavailable));
   for (const file of filePaths) {
     const parent = path.dirname(file);
-    if (comparablePath(resolvedOrSelf(path.dirname(parent))) === profileParent) dirs.add(parent);
+    if (comparablePath(resolvedOrSelf(path.dirname(parent), onRequestUnavailable)) === profileParent) dirs.add(parent);
     if (path.posix.basename(comparablePath(parent)) === "agent"
-      && comparablePath(resolvedOrSelf(path.dirname(path.dirname(parent)))) === profileParent) dirs.add(path.dirname(parent));
+      && comparablePath(resolvedOrSelf(path.dirname(path.dirname(parent)), onRequestUnavailable)) === profileParent) dirs.add(path.dirname(parent));
   }
   return [...dirs];
 }
