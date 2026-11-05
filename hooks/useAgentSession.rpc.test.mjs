@@ -1859,7 +1859,7 @@ test("a running attachment applies compaction before its observer opens", async 
   assert.equal(world.calls.some((call) => call.body?.type === "compact"), false, "a second compaction cannot start");
 });
 
-test("compaction attached from another tab settles without replacing a historical view", async () => {
+test("compaction attached from another tab settles without replacing a historical view", async (t) => {
   resetWorld();
   const sid = "historical-compaction";
   primeSession(sid, [userMsg("live", "current branch")]);
@@ -1868,6 +1868,7 @@ test("compaction attached from another tab settles without replacing a historica
   world.views.set(`${sid}:branch:false`, branch);
   await act(async () => { await w.changeLeaf("branch"); });
   world.agents.set(sid, { running: true, state: { isCompacting: true } });
+  t.mock.timers.enable({ apis: ["setInterval"] });
   await act(async () => {
     world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: [sid] }) });
     await settle();
@@ -1879,13 +1880,55 @@ test("compaction attached from another tab settles without replacing a historica
   world.agents.set(sid, { running: true, state: { isCompacting: false } });
   await act(async () => {
     world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: [] }) });
-    window.dispatchEvent(new Event("online"));
+    t.mock.timers.tick(15_000);
     await settle();
   });
   assert.equal(w.latest.isCompacting, false, "native idle state releases Stop compaction without a completion event");
   assert.equal(w.latest.activeLeafId, "branch");
   assert.deepEqual(w.latest.entryIds, branch.entryIds);
   assert.deepEqual(w.latest.messages, branch.messages);
+});
+
+test("a refused compact command cannot unlock compaction attached from another tab", async () => {
+  resetWorld();
+  const sid = "attached-compaction-owner";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  world.agents.set(sid, { running: true, state: { isCompacting: true } });
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: [sid] }) });
+    await settle();
+  });
+  await act(async () => {
+    const result = await w.latest.handleBuiltinSlashCommand("/compact");
+    assert.ok(result.error, "a second compaction is refused");
+  });
+  assert.equal(w.latest.isCompacting, true, "the rejected command does not own the attached compaction");
+  await act(async () => { await w.latest.handleCompact(); });
+  assert.equal(world.calls.some(call => call.body?.type === "compact"), false, "neither control can start a second compaction");
+});
+
+test("an idle chat reconciles auto-compaction when its completion event is lost", async () => {
+  resetWorld();
+  const sid = "auto-compaction-owner";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  world.agents.set(sid, { running: true, state: {} });
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: [sid] }) });
+    await settle();
+    lastEs().open();
+    await settle();
+    lastEs().emit({ type: "auto_compaction_start" });
+  });
+  assert.equal(w.latest.isCompacting, true);
+  assert.equal(w.latest.agentRunning, false);
+  world.agents.set(sid, { running: true, state: { isCompacting: false } });
+  await act(async () => {
+    window.dispatchEvent(new Event("online"));
+    await settle();
+  });
+  assert.equal(w.latest.isCompacting, false, "the ref and rendered state share the same compaction lifecycle");
 });
 
 test("matching running frames received during an idle lookup trigger one fresh lookup", async () => {
