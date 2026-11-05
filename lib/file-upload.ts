@@ -1,5 +1,7 @@
 import fs from "fs";
 import path from "path";
+import { isOmpSecretFile } from "./file-access";
+import { HostOpError } from "./hosts/link-protocol";
 
 export const UPLOAD_CONFLICT_STRATEGIES = ["error", "overwrite", "skip"] as const;
 export type UploadConflictStrategy = typeof UPLOAD_CONFLICT_STRATEGIES[number];
@@ -46,6 +48,7 @@ export function inspectUploadTargets(directory: string, fileNames: string[]): Up
 
   for (const fileName of fileNames) {
     const destination = path.join(directory, fileName);
+    if (isOmpSecretFile(destination)) throw new HostOpError(403, "access_denied", "Access denied");
     let stat: fs.Stats;
     try {
       stat = fs.lstatSync(destination);
