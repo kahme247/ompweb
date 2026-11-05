@@ -102,7 +102,7 @@ export function isOmpSecretFile(filePath: string): boolean {
   }
   const configDirs = ompConfigDirs();
   const agentDirs = [getAgentDir(), ...configDirs.map((dir) => path.join(dir, "agent"))];
-  const identity = linkedFileIdentity(filePath);
+  const identity = linkedFileIdentity(requested);
   for (const dir of new Set([...agentDirs, ...configDirs])) {
     const agentDir = agentDirs.includes(dir);
     const namePattern = agentDir ? OMP_SECRET_NAME : OMP_ENV_NAME;
@@ -132,9 +132,10 @@ export function isOmpSecretFile(filePath: string): boolean {
       for (const name of sidecars) files.push(path.join(databaseDir, name));
     }
     for (const file of files) {
-      if (target === comparablePath(resolvedOrSelf(file))) return true;
+      const canonical = resolvedOrSelf(file);
+      if (target === comparablePath(canonical)) return true;
       if (identity) {
-        const other = linkedFileIdentity(file);
+        const other = linkedFileIdentity(canonical);
         if (other && identity.dev === other.dev && identity.ino === other.ino) return true;
       }
     }
@@ -162,8 +163,17 @@ function linkedFileIdentity(filePath: string) {
   }
 }
 
+function withoutWindowsStream(filePath: string): string {
+  if (process.platform !== "win32") return filePath;
+  const name = path.basename(filePath);
+  const stream = name.indexOf(":");
+  // Slice the final component only: preserve drive prefixes and native link/.. traversal.
+  return stream < 0 ? filePath : filePath.slice(0, filePath.lastIndexOf(name) + stream);
+}
+
 function resolvedOrSelf(dir: string): string {
-  try { return realpathSync.native(dir); } catch { return dir; }
+  const base = withoutWindowsStream(dir);
+  try { return withoutWindowsStream(realpathSync.native(base)); } catch { return base; }
 }
 
 /** Canonical comparison keys preserve literal POSIX backslashes and fold Windows path spelling only. */
