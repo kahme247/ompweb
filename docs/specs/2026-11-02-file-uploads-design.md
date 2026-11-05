@@ -104,6 +104,7 @@ The upload id is a client-generated UUID. It doubles as the binary frame id on b
   - Another owner, host, name, MIME type or size for a registered id is 409 `upload_id_conflict`, checked before changing its live state, queued frames, sink or attempt identity. A rejected start leaves the original upload usable.
   - An id still referenced by a retained outbox entry cannot start a replacement upload when its canonical completion registration is gone (`409 upload_id_conflict`). Accepted and in-flight attachment preparation also retains a private completion fingerprint; a later file with identical metadata but another completion generation is not authorized by the old intent.
   - Canonical completion records take precedence over stale main-side caches. Attach replays always ask the daemon to validate the actual regular file. A completed upload whose host start reports incomplete fails `upload_missing` and revokes only that completion generation; replacement bytes require fresh completion authority. Delayed native replies likewise forget only the generation they consumed, never a later reuse of the same id.
+  - First proof issuance atomically binds matching already-held legacy receipts to the same completed file. Original-owner preparation establishes its private generation before any await; subsequent completion replay cannot invalidate an unchanged legacy attachment.
 
 ### U6. Retention of sent uploads
 

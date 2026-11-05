@@ -2,7 +2,7 @@
 // message sent to an existing session is stored here before `outbox_add` answers, then sent to omp by one dispatcher
 // per session, oldest first and one at a time, and leaves once omp has it. The `session` channel shows the entries.
 import { chmodSync, closeSync, mkdirSync, openSync } from "fs";
-import { createHmac, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { join } from "path";
 import { Database } from "bun:sqlite";
 import { commandErrorResponse, runAgentCommand } from "./agent-command";
@@ -169,6 +169,26 @@ export function saveCompletedUpload(owner: string, receipt: OutboxUploadReceipt)
       if (stored.proof) return stored.scope === scope ? stored.proof : undefined;
       const proof = randomBytes(32).toString("base64url");
       database.prepare("UPDATE completed_uploads SET proof = ?, scope = ? WHERE id = ?").run(proof, scope, receipt.id);
+      const completionKey = createHash("sha256").update(proof).digest("hex");
+      const held = database.prepare("SELECT id, owner, upload_receipts FROM entries WHERE state != 'delivered' AND upload_receipts IS NOT NULL")
+        .all() as { id: string; owner: string; upload_receipts: string }[];
+      for (const entry of held) {
+        const receipts = JSON.parse(entry.upload_receipts) as OutboxUploadReceipt[];
+        let changed = false;
+        for (const saved of receipts) {
+          if (saved.id !== receipt.id || (saved.owner ?? entry.owner) !== owner || saved.completionKey !== undefined
+            || (saved.completedAt !== undefined && saved.completedAt !== stored.at)
+            || saved.hostId !== prior.hostId || saved.name !== prior.name || saved.size !== prior.size || saved.type !== prior.type) continue;
+          saved.completionKey = completionKey;
+          saved.completedAt = stored.at;
+          changed = true;
+        }
+        if (changed) {
+          const encoded = JSON.stringify(receipts);
+          database.prepare("UPDATE entries SET upload_receipts = ?, payload_bytes = payload_bytes + ? WHERE id = ?")
+            .run(encoded, Buffer.byteLength(encoded) - Buffer.byteLength(entry.upload_receipts), entry.id);
+        }
+      }
       return proof;
     }
     const proof = randomBytes(32).toString("base64url");

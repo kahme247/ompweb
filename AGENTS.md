@@ -860,6 +860,9 @@ during the wait.
   replay still asks the daemon to validate its real file; a missing completed
   file never resumes as replacement bytes under the old proof. Delayed native
   replies retire only their captured completion generation.
+  First proof issuance atomically binds matching retained legacy receipts too.
+  Original-owner preparation captures that private generation before awaiting
+  another command, so a completion replay cannot invalidate unchanged legacy files.
   Consecutive unsent outbox snapshots replace each other in the session
   backpressure queue. Resume and heartbeat do not serialize them while the sink
   is still behind; native events remain ordering fences, with genuine overflow
