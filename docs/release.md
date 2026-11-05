@@ -83,6 +83,9 @@ The metadata is bundled into the client, including in npm packages and binary
 releases; no Git command runs when a user clicks the logo.
 Source archives without Git metadata keep the version-only display.
 
+The development bootstrap initializes missing browser constants once. Empty
+commit fields are valid, and later hot reloads keep the existing listener.
+
 ## Verify
 
 ```bash
