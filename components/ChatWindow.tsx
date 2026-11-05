@@ -2,13 +2,14 @@
 import { sendAgentCommand } from "@/lib/agent-client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
-import { ArrowDown, ChevronDown, ChevronUp, Layers, Paperclip, Square } from "lucide-react";
+import { ArrowDown, ChevronDown, ChevronUp, Paperclip, Square } from "lucide-react";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
-import { collectToolResults, isGroupAnchor, planTranscriptRows, type ActivityPiece, type TranscriptRow } from "@/lib/chat-transcript-plan";
+import { collectToolResults, completedTurnReplyIndex, isGroupAnchor, planTranscriptRows, type ActivityPiece, type TranscriptRow, type TranscriptSegment } from "@/lib/chat-transcript-plan";
 import { isReplyBlock } from "@/lib/message-display";
 import { resolveForkTargets } from "@/lib/chat-fork";
 import { MessageView } from "./MessageView";
+import { AssistantOutputStep, AssistantTurnHeader, TurnProgressHistory } from "./TranscriptOutput";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ExtensionDialog } from "./ExtensionDialog";
 import { SubagentTranscriptDialog } from "./SubagentTranscriptDialog";
@@ -178,6 +179,16 @@ function withAssistantBlocks(
   return next;
 }
 
+function hasAssistantOutput(message: Partial<AgentMessage> | null): boolean {
+  return message?.role === "assistant" && ((Array.isArray(message.content) && message.content.some(block =>
+    block.type === "image" || (block.type === "text" && block.text.trim().length > 0),
+  )) || !!message.errorMessage?.trim() || message.stopReason === "error" || message.stopReason === "aborted");
+}
+
+function assistantModelName(message: AssistantMessage, names: Record<string, string>): string {
+  return names[`${message.provider}:${message.model}`] ?? names[message.model] ?? message.model ?? "";
+}
+
 // Retain the last successful value across welcome-screen remounts, not reloads.
 let lastKnownOmpVersion: string | undefined;
 
@@ -220,20 +231,15 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messag
   if (toolCallCount > 0) parts.push(tn("chatWindow.toolCallCount", toolCallCount));
 
   return (
-    <div style={{ marginBottom: 4 }}>
+    <div className="transcript-process-group">
       <button
         type="button"
         aria-expanded={expanded}
         onClick={() => setExpanded((v) => !v)}
         className="process-details-toggle"
+        aria-label={parts.join(" · ")}
         title={expanded ? t("chatWindow.collapseProcessDetails") : t("chatWindow.expandProcessDetails")}
       >
-        <Layers
-          size={12}
-          strokeWidth={1.8}
-          aria-hidden="true"
-          style={{ flexShrink: 0, color: "var(--accent)" }}
-        />
         <ChevronDown
           size={12}
           strokeWidth={1.8}
@@ -245,11 +251,12 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messag
           }}
         />
         <span className="process-details-label">
-          {parts.join(" · ")}
+          {toolCallCount > 0 ? tn("chatWindow.toolCallCount", toolCallCount) : t("chatWindow.processDetails")}
         </span>
       </button>
       {expanded && (
-        <div style={{ marginTop: 3 }}>
+        <div className="transcript-process-content">
+          <div className="transcript-process-caption">{tn("chatWindow.messageCount", messageCount)}</div>
           {children()}
         </div>
       )}
@@ -257,7 +264,8 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messag
   );
 }
 
-type RenderMessage = (idx: number, options?: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[] }) => ReactNode;
+type RenderMessageOptions = { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[]; final?: boolean; latest?: boolean; followingActivity?: ReactNode };
+type RenderMessage = (idx: number, options?: RenderMessageOptions) => ReactNode;
 
 /** Render a folded activity run exactly as it streamed: one entry per piece, never merged across messages. */
 export function renderActivityPieces(messages: AgentMessage[], pieces: ActivityPiece[], renderMessage: RenderMessage): ReactNode[] {
@@ -280,6 +288,7 @@ interface CommittedTranscriptProps {
   conversationMeta: { toolResultsMap: Map<string, ToolResultMessage>; lastAnchorIdx: number; visibleRefIndexByMessage: Map<number, number> };
   messageRefs: React.RefObject<(HTMLDivElement | null)[]>;
   isStreaming: boolean;
+  streamingHasOutput: boolean;
   sessionBusy: boolean;
   isCompacting: boolean;
   /** A run started outside this UI looks active from the transcript tail (see
@@ -303,6 +312,7 @@ interface CommittedTranscriptProps {
   showToolCallsUnfolded: boolean;
   expandThinkingByDefault: boolean;
   hideThinkingBlock: boolean;
+  searchQuery: string;
   visibleCount: number;
   /** True while the viewport is near the bottom of the conversation. When
    *  false (user is reading history), the render window anchors its top so
@@ -319,15 +329,22 @@ interface CommittedTranscriptProps {
  * change `streamingMessage`, rendered separately) do not re-run the O(history)
  * grouping/splitting work at display-frame cadence.
  */
-const CommittedTranscript = memo(function CommittedTranscript({
-  messages, entryIds, conversationMeta, messageRefs, isStreaming, sessionBusy, isCompacting, externalRunActive, isNew, forkingEntryId, editingEntryId,
+export const CommittedTranscript = memo(function CommittedTranscript({
+  messages, entryIds, conversationMeta, messageRefs, isStreaming, streamingHasOutput, sessionBusy, isCompacting, externalRunActive, isNew, forkingEntryId, editingEntryId,
   handleFork, handleEdit, modelNames, messageCwd, onOpenFile, sessionId,
-  toolCallsDefaultCollapsed, hideToolActivity, neverFoldActivity, showToolCallsUnfolded, expandThinkingByDefault, hideThinkingBlock, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
+  toolCallsDefaultCollapsed, hideToolActivity, neverFoldActivity, showToolCallsUnfolded, expandThinkingByDefault, hideThinkingBlock, searchQuery = "", visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
 }: CommittedTranscriptProps) {
   const { t } = useI18n();
   const { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage } = conversationMeta;
   // omp's `branch` command accepts a user entry only; see lib/chat-fork.ts.
   const forkTargets = useMemo(() => resolveForkTargets(messages, entryIds), [messages, entryIds]);
+  const latestOutputIndex = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (hasAssistantOutput(messages[index])) return index;
+      if (isGroupAnchor(messages[index])) break;
+    }
+    return -1;
+  }, [messages]);
 
   const attachVisibleRef = (idx: number, refIndex: number) => (el: HTMLDivElement | null) => {
     messageRefs.current[refIndex] = el;
@@ -359,7 +376,8 @@ const CommittedTranscript = memo(function CommittedTranscript({
     const canOfferFork = !sessionBusy && !isNew && !!forkTarget && forkableRow;
     const canOfferEdit = !sessionBusy && !isCompacting && !isNew && msg.role === "user" && !msg.branchSummary && !!entryIds[idx];
     const historyMutationPending = forkingEntryId !== null || editingEntryId !== null;
-    const view = (
+    const focusedOutput = hasAssistantOutput(msg);
+    const messageView = (
       <MessageView
         key={`${keyPrefix}-view-${idx}`}
         message={msg}
@@ -383,8 +401,16 @@ const CommittedTranscript = memo(function CommittedTranscript({
         expandThinkingByDefault={expandThinkingByDefault}
         hideThinking={hideThinkingBlock}
         sourceBlockIndices={options.sourceBlockIndices}
+        hideModelLabel={focusedOutput}
+        compactActions={focusedOutput}
       />
     );
+    const view = focusedOutput ? (
+      <AssistantOutputStep key={`${keyPrefix}-output-${idx}`} latest={options.latest ?? (idx === latestOutputIndex && !streamingHasOutput)} final={options.final}>
+        {messageView}
+        {options.followingActivity}
+      </AssistantOutputStep>
+    ) : <Fragment key={`${keyPrefix}-container-${idx}`}>{messageView}{options.followingActivity}</Fragment>;
     if (!isVisible || options.attachRef === false || currentRefIdx === undefined) return view;
     return (
       <div key={`${keyPrefix}-${idx}`} data-message-index={idx} ref={attachVisibleRef(idx, currentRefIdx)}>
@@ -437,55 +463,104 @@ const CommittedTranscript = memo(function CommittedTranscript({
   for (let rowIdx = startIndex; rowIdx < rows.length; rowIdx++) {
     const row = rows[rowIdx];
     if (row.kind === "message") {
+      const message = messages[row.index];
+      if (message.role === "assistant" && hasAssistantOutput(message)) rendered.push(<AssistantTurnHeader key={`orphan-model-${row.index}`} model={assistantModelName(message, modelNames)} />);
       rendered.push(renderMessage(row.index));
       continue;
     }
     const { userIndex: userIdx, endIndex: endIdx, segments } = row;
+    const turnActive = row.endIndex === messages.length && row.userIndex === lastAnchorIdx && (sessionBusy || externalRunActive || isStreaming);
+    const replyIndex = turnActive ? null : completedTurnReplyIndex(messages, userIdx, endIdx);
+    const finalSegment = replyIndex === null ? -1 : segments.findLastIndex(segment => segment.kind === "text" && segment.index === replyIndex && segment.last);
+    const firstText = segments.find(segment => segment.kind === "text");
+    const headerMessage = replyIndex !== null ? messages[replyIndex] : firstText ? messages[firstText.index] : null;
+    const turnHeader = headerMessage?.role === "assistant" ? <AssistantTurnHeader key={`header-${userIdx}`} model={assistantModelName(headerMessage, modelNames)} /> : null;
 
     if (rendersFlat(row)) {
-      // Live tail: stays flat so streaming updates and tool progress stay in
-      // view, and folds once the run ends.
-      for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
+      rendered.push(renderMessage(userIdx));
+      if (turnHeader) rendered.push(turnHeader);
+      let previousModel = headerMessage?.role === "assistant" ? `${headerMessage.provider}:${headerMessage.model}` : "";
+      for (let renderIdx = userIdx + 1; renderIdx < endIdx; renderIdx++) {
+        const message = messages[renderIdx];
+        if (message.role === "assistant" && hasAssistantOutput(message)) {
+          const model = `${message.provider}:${message.model}`;
+          if (model !== previousModel) rendered.push(<AssistantTurnHeader key={`header-${renderIdx}`} model={assistantModelName(message, modelNames)} />);
+          previousModel = model;
+        }
         rendered.push(renderMessage(renderIdx));
       }
       continue;
     }
 
     rendered.push(renderMessage(userIdx));
-    // A message split across segments keeps its navigation ref on the first one.
-    const attached = new Set<number>();
-    segments.forEach((segment, segmentIdx) => {
-      if (segment.kind === "text") {
-        const msg = messages[segment.index] as AssistantMessage;
-        const override = withAssistantBlocks(msg, segment.blocks, { omitUsage: !segment.last });
-        if (!segment.last) override.errorMessage = undefined;
-        rendered.push(renderMessage(segment.index, {
-          attachRef: !attached.has(segment.index),
-          keyPrefix: `text-${segmentIdx}`,
-          messageOverride: override,
-          ...(segment.last ? {} : { showTimestamp: false }),
-          // Thinking can ride in a text segment; deferred text loads by source index.
-          sourceBlockIndices: segment.blocks.map((block) => msg.content.indexOf(block)),
-        }));
-        attached.add(segment.index);
-        return;
-      }
+    if (turnHeader) rendered.push(turnHeader);
+    const lastTextSegment = segments.findLastIndex(segment => segment.kind === "text");
+    const renderActivity = (segment: Extract<TranscriptSegment, { kind: "activity" }>, segmentIdx: number, attached: Set<number>): ReactNode => {
       const refIdx = segment.pieces
-        .filter((piece) => !attached.has(piece.index))
-        .map((piece) => visibleRefIndexByMessage.get(piece.index))
+        .filter(piece => !attached.has(piece.index))
+        .map(piece => visibleRefIndexByMessage.get(piece.index))
         .find((value): value is number => typeof value === "number");
       for (const piece of segment.pieces) attached.add(piece.index);
-      rendered.push(
-        <div
-          key={`activity-${userIdx}-${segmentIdx}`}
-          ref={refIdx === undefined ? undefined : (el) => { messageRefs.current[refIdx] = el; }}
-        >
+      return (
+        <div key={`activity-${userIdx}-${segmentIdx}`} ref={refIdx === undefined ? undefined : el => { messageRefs.current[refIdx] = el; }}>
           <ProcessDetailsGroup messageCount={segment.stepCount} toolCallCount={segment.toolCallCount}>
             {() => renderActivityPieces(messages, segment.pieces, renderMessage)}
           </ProcessDetailsGroup>
-        </div>,
+        </div>
       );
-    });
+    };
+    const renderSegments = (from: number, to: number): ReactNode[] => {
+      const output: ReactNode[] = [];
+      // Each expansion gets its own ref plan; reopening history must attach
+      // the same message refs again rather than reusing a mutated set.
+      const attached = new Set<number>();
+      let previousModel = headerMessage?.role === "assistant" ? `${headerMessage.provider}:${headerMessage.model}` : "";
+      for (let segmentIdx = from; segmentIdx < to; segmentIdx += 1) {
+        const segment = segments[segmentIdx];
+        if (segment.kind === "text") {
+          const msg = messages[segment.index] as AssistantMessage;
+          const model = `${msg.provider}:${msg.model}`;
+          if (model !== previousModel) output.push(<AssistantTurnHeader key={`model-${userIdx}-${segmentIdx}`} model={assistantModelName(msg, modelNames)} />);
+          previousModel = model;
+          const override = withAssistantBlocks(msg, segment.blocks, { omitUsage: !segment.last });
+          if (!segment.last) override.errorMessage = undefined;
+          const attachRef = !attached.has(segment.index);
+          attached.add(segment.index);
+          const next = segments[segmentIdx + 1];
+          const followingActivity = segmentIdx + 1 < to && next?.kind === "activity" ? renderActivity(next, segmentIdx + 1, attached) : undefined;
+          output.push(renderMessage(segment.index, {
+            attachRef,
+            keyPrefix: `text-${segmentIdx}`,
+            messageOverride: override,
+            sourceBlockIndices: segment.blocks.map(block => msg.content.indexOf(block)),
+            latest: segment.index === latestOutputIndex && !streamingHasOutput && segmentIdx === lastTextSegment,
+            final: segmentIdx === finalSegment,
+            followingActivity,
+            ...(segment.last ? {} : { showTimestamp: false }),
+          }));
+          if (followingActivity) segmentIdx += 1;
+        } else {
+          output.push(renderActivity(segment, segmentIdx, attached));
+        }
+      }
+      return output;
+    };
+    const progress = finalSegment > 0 ? segments.slice(0, finalSegment) : [];
+    const outputCount = progress.filter(segment => segment.kind === "text").length;
+    if (outputCount > 0 && replyIndex !== null && !searchQuery.trim() && !expandThinkingByDefault && !showToolCallsUnfolded) {
+      const toolCallCount = progress.reduce((count, segment) => count + (segment.kind === "activity" ? segment.toolCallCount : 0), 0);
+      const progressIndices = new Set(progress.flatMap(segment => segment.kind === "text" ? [segment.index] : segment.pieces.map(piece => piece.index)));
+      progressIndices.delete(replyIndex);
+      rendered.push(
+        <TurnProgressHistory key={`progress-${userIdx}-${entryIds[replyIndex] ?? replyIndex}`} outputCount={outputCount} toolCallCount={toolCallCount}
+          collapsedRef={el => { for (const index of progressIndices) { const refIdx = visibleRefIndexByMessage.get(index); if (refIdx !== undefined) messageRefs.current[refIdx] = el; } }}>
+          {() => renderSegments(0, finalSegment)}
+        </TurnProgressHistory>,
+      );
+      rendered.push(...renderSegments(finalSegment, segments.length));
+    } else {
+      rendered.push(...renderSegments(0, segments.length));
+    }
   }
   return (
     <>
@@ -924,13 +999,18 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
     let hasCompaction = false;
     const visibleRefIndexByMessage = new Map<number, number>();
     let refIdx = 0;
+    let lastOutputModel: string | null = null;
 
     messages.forEach((message, index) => {
       if (message.role === "custom" && message.customType === "compaction") hasCompaction = true;
-      if (isGroupAnchor(message)) lastAnchorIdx = index;
+      if (isGroupAnchor(message)) {
+        lastAnchorIdx = index;
+        lastOutputModel = null;
+      }
+      if (message.role === "assistant" && hasAssistantOutput(message)) lastOutputModel = `${message.provider}:${message.model}`;
       if (message.role === "user" || message.role === "assistant") visibleRefIndexByMessage.set(index, refIdx++);
     });
-    return { toolResultsMap, lastAnchorIdx, hasCompaction, visibleRefIndexByMessage };
+    return { toolResultsMap, lastAnchorIdx, hasCompaction, visibleRefIndexByMessage, lastOutputModel };
   }, [messages]);
   // Runtime tool results span committed messages plus the tool calls omp is
   // still executing. A committed result always wins; the live snapshot only
@@ -1380,6 +1460,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
               conversationMeta={conversationMetaWithLive}
               messageRefs={messageRefs}
               isStreaming={streamState.isStreaming}
+              streamingHasOutput={hasAssistantOutput(streamState.streamingMessage)}
               sessionBusy={sessionBusy}
               isCompacting={isCompacting}
               externalRunActive={externalRunActive}
@@ -1398,6 +1479,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
               showToolCallsUnfolded={showToolCallsUnfolded}
               expandThinkingByDefault={expandThinkingByDefault}
               hideThinkingBlock={hideThinkingBlock}
+              searchQuery={searchQuery}
               visibleCount={visibleCount}
               nearBottom={nearBottom}
               sentinelRef={sentinelRef}
@@ -1405,10 +1487,13 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
             />
             {/* Also while held: a finished reply stays until its saved row
                 replaces it in the same render (useAgentSession-stream). */}
-            {streamState.streamingMessage && (
-              <MessageView
+            {streamState.streamingMessage && (() => {
+              const message = streamState.streamingMessage as AgentMessage;
+              const hasOutput = hasAssistantOutput(message);
+              const view = <MessageView
                 key={streamState.streamingMessage.timestamp ?? "stream"}
-                message={streamState.streamingMessage as AgentMessage}
+                message={message}
+                isStreaming={streamState.isStreaming}
                 modelNames={modelNames}
                 cwd={messageCwd}
                 onOpenFile={onOpenFile}
@@ -1417,8 +1502,15 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
                 expandThinkingByDefault={expandThinkingByDefault}
                 hideThinking={hideThinkingBlock}
                 liveTokensPerSecond={streamState.isStreaming ? tokensPerSecond : undefined}
-              />
-            )}
+                hideModelLabel={hasOutput}
+                compactActions={hasOutput}
+              />;
+              if (!hasOutput || message.role !== "assistant") return view;
+              return <>
+                {conversationMeta.lastOutputModel !== `${message.provider}:${message.model}` && <AssistantTurnHeader model={assistantModelName(message, modelNames)} />}
+                <AssistantOutputStep latest>{view}</AssistantOutputStep>
+              </>;
+            })()}
 
             {toolCallsDefaultCollapsed && pendingToolHeaders.map((tool) => (
               <div
