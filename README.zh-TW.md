@@ -39,7 +39,7 @@
 
 若要安裝此 Web 應用程式，請先登入後使用瀏覽器的安裝選單。
 網頁中單一的 manifest 連結會附帶認證資訊向 `/api/manifest` 發出請求；該端點使用現有的網頁密碼防護與 private、重新驗證（revalidating）快取機制。
-其 192×192 與 512×512 PNG 圖示直接以內嵌方式包含在打包資源中，因為 Android 原生安裝程式在抓取一般圖示網址時不會攜帶驗證 Cookie。安裝後應用程式仍會於 `/` 啟動，作用範圍（scope）為 `/`。
+其 192×192 與 512×512 PNG 圖示直接以內嵌方式包含在打包資源中，因為 Android 原生安裝程式在抓取一般圖示網址時不會攜帶驗證 Cookie。安裝後應用程式仍會於 `/` 啟動，作用範圍（scope）為 `/`。其 `theme_color` 與 `background_color` 來自清單連結的 `?theme=` 參數：Chrome 在重新整理已安裝應用程式的清單時不會附帶 Cookie，因此伺服器會將所選主題的色彩（記錄於 `omp-theme-color` Cookie 中）渲染至該連結。Chrome 153 及更新版本在下次檢查清單更新後，會據此為已安裝應用程式的 Android 導覽列著色。
 
 請保持 Cloudflare Access 與應用程式驗證處於啟用狀態；無需為 manifest 設定公開存取例外或 Access 略過規則。此機制並未加入離線支援。本機 Chromium 驗證已涵蓋受 Cookie 保護的中繼資料並封鎖 HTTP 圖示網址的情境（未產生任何安裝性錯誤）。專案維護者亦確認在 Cloudflare Access 保護下，實體手機安裝皆可正常運作。
 
