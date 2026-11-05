@@ -2330,6 +2330,46 @@ test("a chat promoted from a new chat attaches a run reported after its first se
   assert.equal(view.result.current.agentRunning, true);
 });
 
+test("a run reported while a side question's stream connects is attached once that stream times out", async (t) => {
+  resetWorld();
+  const sid = "btw-then-remote";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let asking;
+  await act(async () => { asking = w.latest.askBtw("side question"); for (let i = 0; i < 30; i++) await Promise.resolve(); });
+  const observer = lastEs();
+  assert.equal(observer.readyState, FakeStream.CONNECTING);
+  world.agents.set(sid, { running: true, state: { isStreaming: true } });
+  await deliverRunning([sid]);
+  await act(async () => {
+    t.mock.timers.tick(60_001);
+    for (let i = 0; i < 50; i++) await Promise.resolve();
+    assert.equal(await asking, false);
+  });
+  assert.equal(observer.closedByCaller, true, "the side question gave up its stream");
+  assert.equal(world.esInstances.length, 2, "the held frame attaches the run without another frame");
+  assert.equal(w.latest.agentRunning, true);
+});
+
+test("an auto-compaction whose end was missed cannot bring Stop back after a later manual compaction", async () => {
+  resetWorld();
+  const sid = "missed-auto-end";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  world.agents.set(sid, { running: true, state: {} });
+  await deliverRunning([sid]);
+  await settle();
+  await act(async () => { lastEs().open(); await sleep(30); lastEs().emit({ type: "auto_compaction_start" }); });
+  assert.equal(w.latest.isCompacting, true);
+  // The end event is lost; the state poll settles it.
+  world.agents.set(sid, { running: true, state: { isCompacting: false } });
+  await act(async () => { window.dispatchEvent(new Event("online")); await sleep(30); });
+  assert.equal(w.latest.isCompacting, false);
+  await act(async () => { await w.latest.handleCompact(); await sleep(30); });
+  assert.equal(w.latest.isCompacting, false, "the settled auto-compaction does not own Stop again");
+});
+
 test("a running lookup from before a manual compaction cannot release it", async () => {
   resetWorld();
   const sid = "lookup-compact";

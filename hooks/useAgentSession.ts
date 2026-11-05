@@ -487,6 +487,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // Apply omp's isCompacting from a snapshot requested at compaction generation `gen`.
   const applyNativeCompacting = useCallback((value: boolean, gen: number) => {
     if (compactionGenRef.current !== gen || (!value && localCompactionsRef.current > 0)) return;
+    // An idle snapshot also settles an auto-compaction whose end event was missed.
+    if (!value) autoCompactingRef.current = false;
     setCompacting(value);
   }, [setCompacting]);
   // A manual compaction this tab sends owns the compacting state until its command settles.
@@ -1622,6 +1624,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (current && (result.status === "connected" || result.source.readyState === EVENT_STREAM_OPEN)) return;
     if (eventSourceRef.current === result.source) eventSourceRef.current = null;
     result.source.close();
+    // A running frame held back while this observer connected is the chat's again.
+    runningRecheckRef.current?.();
     throw new EventStreamConnectionError(current && result.status === "timeout" ? "timeout" : "closed");
   }, [addNotice, connectEvents]);
 
