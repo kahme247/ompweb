@@ -57,17 +57,20 @@ export function applyOutboxSnapshot(current: ServerOutbox, entries: OutboxEntry[
   return { entries, seen: new Set([...current.seen, ...entries.map((entry) => entry.id), ...settledIds]) };
 }
 
-/** This session's held messages in submission order, merged by id: the server's snapshot wins over a confirmation it
- * has not covered yet (`stored`), which wins over the browser's own copy; delivered ones are gone. */
+/** This session's held messages in delivery order, merged by id: the server's snapshot wins over a confirmation it
+ * has not covered yet (`stored`), which wins over the browser's own copy; delivered ones are gone. Everything the
+ * server holds goes first (its snapshot in arrival order, then newer confirmations), then this browser's first-leg
+ * entries in the worker's submission order. The two `createdAt` clocks are never compared. */
 export function mergeHeldMessages(sessionId: string | null, local: LocalOutboxEntry[], stored: OutboxEntry[], server: ServerOutbox): HeldMessage[] {
-  const held = new Map<string, HeldMessage>();
-  for (const entry of local) {
-    if (entry.sessionId === sessionId && !server.seen.has(entry.id)) held.set(entry.id, { ...entry, local: true });
-  }
-  for (const entry of [...stored.filter((entry) => !server.seen.has(entry.id)), ...server.entries]) {
+  const held: HeldMessage[] = [];
+  const known = new Set<string>();
+  for (const entry of [...server.entries, ...stored.filter((entry) => !server.seen.has(entry.id))]) {
     if (entry.sessionId !== sessionId) continue;
-    if (entry.state === "delivered") held.delete(entry.id);
-    else held.set(entry.id, { ...entry, state: entry.state, local: false });
+    known.add(entry.id);
+    if (entry.state !== "delivered") held.push({ ...entry, state: entry.state, local: false });
   }
-  return [...held.values()].sort((a, b) => a.createdAt - b.createdAt);
+  for (const entry of local) {
+    if (entry.sessionId === sessionId && !server.seen.has(entry.id) && !known.has(entry.id)) held.push({ ...entry, local: true });
+  }
+  return held;
 }

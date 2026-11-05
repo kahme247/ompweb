@@ -837,6 +837,9 @@ during the wait.
   is retryable 429 while the browser keeps its copy. Never trim accepted rows.
   Storage startup failure remains retryable without a new send or hello;
   successful initialization installs hooks once and shutdown cancels retries.
+  Startup recovery fails a same-PID `delivering` row (a reused PID from the
+  last run) unless this process holds that claim in memory: an add accepted
+  before a delayed startup retry may already be in flight.
   Host offline → `waiting_host`; uncertain replies/child exits while delivering
   → `failed` with `mayHaveBeenSent`, never independently resent. The session carries
   `outbox_update {entries,settledIds}` (every non-delivered entry plus the latest
@@ -873,7 +876,9 @@ during the wait.
   backpressure queue. Resume and heartbeat do not serialize them while the sink
   is still behind; native events remain ordering fences, with genuine overflow
   handled by the existing resync limits. Never rewrite numbered or partial lines.
-- **Held bubbles** (`HeldMessageView`, after the live turn, submission order):
+- **Held bubbles** (`HeldMessageView`, after the live turn, delivery order:
+  server-held entries in arrival order, then this browser's first-leg entries
+  in submission order; browser and server `createdAt` are never compared):
   the hook merges the worker's entries (`subscribeOutbox`) with the server's
   snapshot by id; a server confirmation (`{stored}`) bridges until the server
   lists or settles its id (an older empty snapshot cannot hide it); seen and

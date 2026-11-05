@@ -513,7 +513,8 @@ function recoverDelivering(sessionId?: string, startup = false): void {
   const inFlight = db().prepare(`SELECT id, session_id, dispatch_pid FROM entries WHERE state = 'delivering'${sessionId ? " AND session_id = ?" : ""}`)
     .all(...(sessionId ? [sessionId] : [])) as { id: string; session_id: string; dispatch_pid: number | null }[];
   for (const entry of inFlight) {
-    if (!startup && entry.dispatch_pid === process.pid) continue;
+    // At startup a same-PID row is usually a reused PID from the last run; only a claim this process holds in memory is live.
+    if (entry.dispatch_pid === process.pid && (!startup || outbox().busy.has(entry.session_id))) continue;
     if (entry.dispatch_pid && entry.dispatch_pid !== process.pid) {
       try {
         process.kill(entry.dispatch_pid, 0);
