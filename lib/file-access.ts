@@ -117,8 +117,15 @@ export function isOmpSecretFile(filePath: string): boolean {
       const databaseDir = path.dirname(database);
       const databaseName = path.basename(database);
       const sidecars = new Set(["-wal", "-shm", "-journal"].map((suffix) => `${databaseName}${suffix}`));
+      const basename = process.platform === "win32" ? databaseName.toLowerCase() : databaseName;
       try {
-        for (const name of readdirSync(databaseDir)) if (name.startsWith(`${databaseName}.`)) sidecars.add(name);
+        for (const name of readdirSync(databaseDir)) {
+          const candidate = process.platform === "win32" ? name.toLowerCase() : name;
+          const suffix = candidate.startsWith(basename) ? candidate.slice(basename.length)
+            : candidate.startsWith(`.${basename}`) ? candidate.slice(basename.length + 1) : null;
+          // Apply the same agent.db copy/editor rule to a renamed canonical database.
+          if (suffix !== null && OMP_SECRET_NAME.test(`agent.db${suffix}`)) sidecars.add(name);
+        }
       } catch { /* absent database directory */ }
       for (const name of sidecars) files.push(path.join(databaseDir, name));
     }
