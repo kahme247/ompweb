@@ -662,6 +662,60 @@ function installPendingDictation({ holdUpload = false, holdClaim = false, after 
   };
 }
 
+for (const isStreaming of [false, true]) {
+  for (const edit of ["unchanged", "newer text", "equal-text retype"]) {
+    test(`automatic dictated ${isStreaming ? "queue" : "send"} ${edit === "unchanged" ? "clears after durable acceptance" : `preserves ${edit} through delayed acceptance`}`, async () => {
+      const dictation = installPendingDictation({ after: isStreaming ? "followup" : "send" });
+      const user = userEvent.setup();
+      let accept;
+      const stored = new Promise((resolve) => { accept = resolve; });
+      const submissions = [];
+      const submit = (name) => async (message, images) => {
+        submissions.push({ name, message, images });
+        await stored;
+        return name === "onSend" ? { status: "accepted" } : true;
+      };
+      await renderWithAttachments({
+        outbox: true,
+        isStreaming,
+        queueCallbacks: isStreaming,
+        onSend: submit("onSend"),
+        ...(isStreaming ? { onFollowUp: submit("onFollowUp") } : {}),
+      });
+      await user.type(screen.getByRole("textbox"), "draft prefix");
+      await user.click(screen.getByRole("button", { name: "Start dictation" }));
+      await user.click(isStreaming
+        ? screen.getByRole("button", { name: /^queue$/i })
+        : await screen.findByTitle("Transcribe and send"));
+      await waitFor(() => assert.equal(dictation.uploads.length, 1));
+      dictation.complete();
+      await waitFor(() => assert.equal(submissions.length, 1), { timeout: 3000 });
+      assert.equal(submissions[0].name, isStreaming ? "onFollowUp" : "onSend");
+      assertQueuedWithAttachments(submissions[0], "draft prefix transcribed words");
+      const textbox = screen.getByRole("textbox");
+      assert.equal(textbox.value, "draft prefix transcribed words", "the draft remains until storage accepts it");
+      assert.equal(getDraft(KEY)?.images.length, 1);
+      assert.equal(getDraft(KEY)?.files.length, 1);
+      if (edit !== "unchanged") {
+        fireEvent.change(textbox, { target: { value: "" } });
+        fireEvent.change(textbox, { target: { value: edit === "newer text" ? "typed after dictation" : "draft prefix transcribed words" } });
+      }
+      const beforeAcceptance = getDraft(KEY);
+      await act(async () => { accept(); await stored; });
+      if (edit === "unchanged") {
+        assert.equal(textbox.value, "", "durably stored dictation must not remain available to submit again");
+        assert.equal(getDraft(KEY), null, "the sent draft and its attachments are consumed");
+        assert.equal(screen.queryByRole("button", { name: /remove image/i }), null);
+        assert.equal(screen.queryByTitle("notes.txt"), null);
+      } else {
+        assert.equal(textbox.value, beforeAcceptance.value);
+        assert.deepEqual(getDraft(KEY), beforeAcceptance, "the newer draft retains its text and both attachments");
+      }
+      assert.equal(submissions.length, 1, "storage completion never resubmits");
+    });
+  }
+}
+
 for (const { label, queueCallbacks } of [
   { label: "idle composer", queueCallbacks: false },
   { label: "queue callbacks available", queueCallbacks: true },

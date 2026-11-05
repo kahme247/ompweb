@@ -359,9 +359,8 @@ function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, 
         void checkExpandedUser(event.message);
       }
     } else if (event.type === "process_exit") finish(CHILD_EXITED);
-    else if (event.type === "prompt_error") finish({ error: typeof event.errorMessage === "string" ? event.errorMessage : "omp refused the message" });
-    else if (event.type === "prompt_result" && event.status === "error") finish({ error: isRecord(event.error) && typeof event.error.message === "string" ? event.error.message : "omp refused the message" });
     else if (event.type === "agent_end" && event.isTerminal !== false && !wrapper.isAlive()) finish(CHILD_EXITED);
+    // Session-wide prompt failures may belong to an older run; only this command's reply can prove rejection.
   }, { internal: true });
   return {
     async handOff() {
@@ -546,9 +545,13 @@ export class AgentSessionWrapper {
     return this.historyEditInFlight;
   }
 
-  /** A web UI (SSE stream) is currently attached to this session. */
+  /** Any event observer is attached, including internal work that protects the session lifetime. */
   hasSubscribers(): boolean {
     return this.listeners.length > 0;
+  }
+
+  private hasBrowserSubscribers(): boolean {
+    return this.listeners.some((listener) => !this.internalListeners.has(listener));
   }
 
   /**
@@ -1219,10 +1222,7 @@ export class AgentSessionWrapper {
         // reject immediately so the agent never hangs on a tool nobody will
         // answer.
         if (id && toolName && (this.hostToolNames.has(toolName) || this.hostToolsUnknown)) {
-          // An adopted session's calls wait for a tab: an internal listener alone cannot answer them.
-          const ownTab = this.hostToolsUnknown
-            ? this.listeners.some((listener) => !this.internalListeners.has(listener))
-            : this.listeners.length > 0;
+          const ownTab = this.hasBrowserSubscribers();
           if (ownTab) {
             this.pendingHostTools.set(id, event);
             this.emit(event);
@@ -1271,7 +1271,7 @@ export class AgentSessionWrapper {
         const scheme = url.split(":")[0] ?? "";
         const operation = event.operation === "write" ? "write" : "read";
         const registered = this.hostUriSchemes.get(scheme);
-        if (id && scheme && registered && (operation !== "write" || registered.writable) && this.listeners.length > 0) {
+        if (id && scheme && registered && (operation !== "write" || registered.writable) && this.hasBrowserSubscribers()) {
           this.pendingHostUris.set(id, event);
           this.emit(event);
           notifyRunningChange();
@@ -1698,7 +1698,7 @@ export class AgentSessionWrapper {
       if (i !== -1) this.listeners.splice(i, 1);
       // No UI attached anymore: reject outstanding host tool calls so the
       // agent never waits forever on a tool nobody will answer.
-      if (this.listeners.length === 0) {
+      if (!this.hasBrowserSubscribers()) {
         this.rejectPendingHostTools("The web UI disconnected while the agent was waiting for this host tool", "own");
         this.rejectPendingHostUris("The web UI disconnected while the agent was waiting for this URI request");
         // The last tab left. Start (not extend) the reap clock, so a session
