@@ -21,6 +21,7 @@ import { translate, useI18n } from "@/lib/i18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import {
   encodeFilePathForApi,
+  getFileApiUrl,
   getFileDirectory,
   getRelativeFilePath,
   joinFilePath,
@@ -29,6 +30,10 @@ import {
 import type { GitFileStatus, GitFileStatusKind, GitStatusResponse } from "@/lib/git-types";
 import { MAX_RESULT_LIMIT, type FileIndexEntry } from "@/lib/file-fuzzy";
 import { buildSearchRows } from "@/lib/search-results";
+import { hostProjectKey } from "@/lib/project-ordering";
+import { uploadFile, type UploadHandle } from "@/lib/event-stream";
+import { MAX_UPLOAD_BYTES } from "@/lib/upload-limits";
+import type { UploadConflictStrategy } from "@/lib/file-upload";
 
 interface FileEntry {
   name: string;
@@ -49,6 +54,7 @@ interface FileNode {
 
 interface Props {
   cwd: string;
+  hostId: string;
   onOpenFile: (filePath: string, fileName: string) => void;
   refreshKey?: number;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
@@ -74,7 +80,6 @@ export interface FileExplorerHandle {
 }
 
 type UploadPhase = "idle" | "checking" | "uploading";
-type UploadConflictStrategy = "error" | "overwrite" | "skip";
 
 interface UploadError {
   name: string;
@@ -96,15 +101,15 @@ interface UploadSummary {
   errors: UploadError[];
 }
 
+interface UploadOperation { files: File[]; hostId: string; directory: string; key: string; controller: AbortController; handle?: UploadHandle }
 interface PendingConflict {
-  files: File[];
+  operation: UploadOperation;
   conflicts: string[];
   nonReplaceable: string[];
 }
 
-async function fetchEntries(dirPath: string, showHidden: boolean): Promise<FileNode[]> {
-  const encoded = encodeFilePathForApi(dirPath);
-  const res = await fetch(`/api/files/${encoded}?type=list${showHidden ? "&hidden=1" : ""}`);
+async function fetchEntries(dirPath: string, showHidden: boolean, hostId: string): Promise<FileNode[]> {
+  const res = await fetch(getFileApiUrl(dirPath, "list", hostId, null, showHidden ? { hidden: 1 } : {}));
   if (!res.ok) {
     let message = translate("fileExplorer.loadFailed", { status: res.status });
     try {
@@ -126,8 +131,8 @@ async function fetchEntries(dirPath: string, showHidden: boolean): Promise<FileN
   }));
 }
 
-async function fetchGitStatus(cwd: string): Promise<GitStatusResponse> {
-  const params = new URLSearchParams({ cwd });
+async function fetchGitStatus(cwd: string, hostId: string): Promise<GitStatusResponse> {
+  const params = new URLSearchParams({ cwd, hostId });
   const res = await fetch(`/api/git/status?${params.toString()}`);
   if (!res.ok) throw new Error(translate("fileExplorer.gitStatusFailed", { status: res.status }));
   return res.json() as Promise<GitStatusResponse>;
@@ -151,40 +156,6 @@ export const GIT_STATUS_COLORS: Record<GitFileStatusKind, string> = {
   conflict: "var(--status-error)",
 };
 
-function uploadFiles(
-  targetDirectory: string,
-  files: File[],
-  strategy: UploadConflictStrategy,
-  onProgress: (progress: number) => void,
-): Promise<{ status: number; data: UploadResponse }> {
-  return new Promise((resolve, reject) => {
-    const formData = new FormData();
-    files.forEach((file) => formData.append("files", file, file.name));
-
-    const xhr = new XMLHttpRequest();
-    xhr.open(
-      "POST",
-      `/api/files/${encodeFilePathForApi(targetDirectory)}?type=upload&conflict=${strategy}`,
-    );
-    xhr.upload.onprogress = (event) => {
-      if (event.lengthComputable && event.total > 0) {
-        onProgress(Math.round((event.loaded / event.total) * 100));
-      }
-    };
-    xhr.onerror = () => reject(new Error(translate("fileExplorer.uploadNetworkError")));
-    xhr.onabort = () => reject(new Error(translate("fileExplorer.uploadCancelled")));
-    xhr.onload = () => {
-      let data: UploadResponse = {};
-      try {
-        data = JSON.parse(xhr.responseText) as UploadResponse;
-      } catch {
-        if (xhr.responseText) data.error = xhr.responseText;
-      }
-      resolve({ status: xhr.status, data });
-    };
-    xhr.send(formData);
-  });
-}
 
 function DismissButton({ onClick, title }: { onClick: () => void; title: string }) {
   return (
@@ -248,6 +219,7 @@ interface ExplorerRowProps {
   rowHeight: number;
   rowCount: number;
   cwd: string;
+  hostId: string;
   open: boolean;
   loading: boolean;
   highlighted: boolean;
@@ -270,6 +242,7 @@ const ExplorerRow = memo(function ExplorerRow({
   rowCount,
   rowHeight,
   cwd,
+  hostId,
   open,
   loading,
   highlighted,
@@ -472,7 +445,7 @@ const ExplorerRow = memo(function ExplorerRow({
       {!node.isDir && (
         <Tooltip content={downloadLabel}>
           <a
-            href={`/api/files/${encodeFilePathForApi(node.fullPath)}?type=download`}
+            href={getFileApiUrl(node.fullPath, "download", hostId)}
             download
             onClick={(e) => e.stopPropagation()}
             aria-label={downloadLabel}
@@ -506,6 +479,7 @@ const ExplorerRow = memo(function ExplorerRow({
 
 export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileExplorer({
   cwd,
+  hostId,
   onOpenFile,
   refreshKey,
   onAtMention,
@@ -548,8 +522,18 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchFailed, setSearchFailed] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const prevCwdRef = useRef<string | null>(null);
+  const prevWorkspaceRef = useRef<string | null>(null);
+  const workspaceKey = hostProjectKey(hostId, cwd);
+  const workspaceRef = useRef(workspaceKey);
+  workspaceRef.current = workspaceKey;
   const uploadInputRef = useRef<HTMLInputElement>(null);
+  const uploadOperationRef = useRef<UploadOperation | null>(null);
+  useEffect(() => () => {
+    const operation = uploadOperationRef.current;
+    uploadOperationRef.current = null;
+    operation?.controller.abort();
+    operation?.handle?.abort();
+  }, [workspaceKey]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const loadingPathsRef = useRef<Set<string>>(new Set());
   // Listing generation: advanced whenever every cached listing is dropped
@@ -614,6 +598,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       const forceRefresh = consumedRefreshTokenRef.current !== requestedToken;
       const params = new URLSearchParams({
         cwd,
+        hostId,
         q: query,
         limit: String(MAX_RESULT_LIMIT),
         // The panel lists files, so directories must be dropped before the
@@ -645,7 +630,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     return () => { clearTimeout(timer); controller.abort(); };
     // refreshToken participates so the toolbar refresh button and a finished
     // upload re-run the visible query against a freshly built listing.
-  }, [cwd, fileSearchOpen, searchQuery, refreshToken]);
+  }, [cwd, hostId, fileSearchOpen, searchQuery, refreshToken]);
 
   // Rows stay in the order the index ranked them, so the closest name matches
   // sit at the top. Folding them into a directory tree would re-sort them
@@ -723,10 +708,10 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     // The shared loading bookkeeping belongs to the current generation only:
     // a superseded response must neither clear the current request's spinner
     // nor touch the ref the new dedupe guard reads.
-    const isCurrent = () => listingGenerationRef.current === generation;
+    const isCurrent = () => listingGenerationRef.current === generation && workspaceRef.current === workspaceKey;
     loadingPathsRef.current.add(dirPath);
     setLoadingPaths((prev) => new Set(prev).add(dirPath));
-    return fetchEntries(dirPath, showHidden)
+    return fetchEntries(dirPath, showHidden, hostId)
       .then((entries) => {
         if (!isCurrent()) return;
         setChildrenByPath((prev) => {
@@ -748,7 +733,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
           return next;
         });
       });
-  }, [cwd, showHidden]);
+  }, [cwd, hostId, showHidden, workspaceKey]);
 
   // Scroll the virtual window so a row is visible, then focus it. The focus
   // retries across frames: the scroll triggers an async window re-render and
@@ -889,74 +874,86 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     }
   }, [cwd]);
 
-  const performUpload = useCallback(async (
-    files: File[],
-    strategy: UploadConflictStrategy,
-  ) => {
+  const performUpload = useCallback(async (operation: UploadOperation, strategy: UploadConflictStrategy) => {
+    if (operation !== uploadOperationRef.current || operation.key !== workspaceRef.current || operation.controller.signal.aborted) return;
     setPendingConflict(null);
     setUploadError(null);
     setUploadProgress(0);
     setUploadPhase("uploading");
-
+    const summary: UploadSummary = { uploaded: [], skipped: [], errors: [] };
+    const total = operation.files.reduce((sum, file) => sum + file.size, 0);
+    let completed = 0;
+    const current = () => operation === uploadOperationRef.current && operation.key === workspaceRef.current;
     try {
-      const { status, data } = await uploadFiles(cwd, files, strategy, setUploadProgress);
-      if (status === 409 && data.conflicts?.length) {
-        setPendingConflict({
-          files,
-          conflicts: data.conflicts,
-          nonReplaceable: data.nonReplaceable ?? [],
+      for (const file of operation.files) {
+        if (operation.controller.signal.aborted) break;
+        const handle = uploadFile(file, operation.hostId, (received) => {
+          if (current()) setUploadProgress(total ? Math.floor(100 * (completed + received) / total) : 0);
         });
-        return;
+        operation.handle = handle;
+        try {
+          await handle.promise;
+          if (operation.controller.signal.aborted) break;
+          const params = new URLSearchParams({ type: "upload", hostId: operation.hostId, conflict: strategy });
+          const response = await fetch(`/api/files/${encodeFilePathForApi(operation.directory)}?${params}`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ uploads: [{ id: handle.id, name: file.name }] }),
+            signal: operation.controller.signal,
+          });
+          const data = await response.json() as UploadResponse;
+          if (!response.ok) throw new Error(data.error ?? translate("fileExplorer.uploadFailed", { status: response.status }));
+          summary.uploaded.push(...data.uploaded ?? []);
+          summary.skipped.push(...data.skipped ?? []);
+          summary.errors.push(...data.errors ?? []);
+          // Published destinations survive abort; dispose only the upload's staging and receipt.
+          handle.abort();
+        } catch (error) {
+          if (operation.controller.signal.aborted) break;
+          summary.errors.push({ name: file.name, error: error instanceof Error ? error.message : String(error) });
+        } finally { operation.handle = undefined; }
+        completed += file.size;
       }
-      if (status < 200 || status >= 300) {
-        throw new Error(data.error ?? translate("fileExplorer.uploadFailed", { status }));
+      if (current()) {
+        applyUploadResult(summary);
+        if (operation.controller.signal.aborted) setUploadError(t("fileExplorer.uploadCancelled"));
+        else setUploadProgress(100);
       }
-      setUploadProgress(100);
-      applyUploadResult(data);
-    } catch (uploadFailure) {
-      setUploadError(uploadFailure instanceof Error ? uploadFailure.message : String(uploadFailure));
     } finally {
-      setUploadPhase("idle");
+      if (current()) { uploadOperationRef.current = null; setUploadPhase("idle"); }
     }
-  }, [applyUploadResult, cwd]);
+  }, [applyUploadResult, t]);
 
   const prepareUpload = useCallback(async (files: File[]) => {
     if (files.length === 0 || uploadBusy) return;
+    const operation: UploadOperation = { files, hostId, directory: cwd, key: workspaceKey, controller: new AbortController() };
+    uploadOperationRef.current?.controller.abort();
+    uploadOperationRef.current = operation;
+    const current = () => operation === uploadOperationRef.current && operation.key === workspaceRef.current;
     setUploadSummary(null);
     setHighlightedPaths(new Set());
     setPendingConflict(null);
     setUploadError(null);
     setUploadProgress(0);
     setUploadPhase("checking");
-
     try {
-      const res = await fetch(
-        `/api/files/${encodeFilePathForApi(cwd)}?type=upload-check`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ fileNames: files.map((file) => file.name) }),
-        },
-      );
-      const data = await res.json().catch(() => ({})) as UploadResponse;
-      if (!res.ok) throw new Error(data.error ?? translate("fileExplorer.uploadCheckFailed", { status: res.status }));
-
+      if (files.some((file) => file.size > MAX_UPLOAD_BYTES)) throw new Error(t("errors.upload_too_large"));
+      const params = new URLSearchParams({ type: "upload-check", hostId });
+      const response = await fetch(`/api/files/${encodeFilePathForApi(cwd)}?${params}`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fileNames: files.map((file) => file.name) }), signal: operation.controller.signal,
+      });
+      const data = await response.json() as UploadResponse;
+      if (!current() || operation.controller.signal.aborted) return;
+      if (!response.ok) throw new Error(data.error ?? translate("fileExplorer.uploadCheckFailed", { status: response.status }));
       if (data.conflicts?.length) {
-        setPendingConflict({
-          files,
-          conflicts: data.conflicts,
-          nonReplaceable: data.nonReplaceable ?? [],
-        });
+        setPendingConflict({ operation, conflicts: data.conflicts, nonReplaceable: data.nonReplaceable ?? [] });
         return;
       }
-
-      await performUpload(files, "error");
-    } catch (uploadFailure) {
-      setUploadError(uploadFailure instanceof Error ? uploadFailure.message : String(uploadFailure));
-    } finally {
-      setUploadPhase("idle");
-    }
-  }, [cwd, performUpload, uploadBusy]);
+      await performUpload(operation, "error");
+    } catch (error) {
+      if (current()) setUploadError(operation.controller.signal.aborted ? t("fileExplorer.uploadCancelled") : error instanceof Error ? error.message : String(error));
+    } finally { if (current()) setUploadPhase("idle"); }
+  }, [cwd, hostId, workspaceKey, performUpload, uploadBusy, t]);
 
   const handleUploadInput = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
@@ -985,8 +982,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   onRefreshDoneRef.current = onRefreshDone;
 
   useEffect(() => {
-    const cwdChanged = prevCwdRef.current !== cwd;
-    prevCwdRef.current = cwd;
+    const cwdChanged = prevWorkspaceRef.current !== workspaceKey;
+    prevWorkspaceRef.current = workspaceKey;
 
     // Reset expanded state only when cwd changes, not on refreshKey bumps
     if (cwdChanged) {
@@ -997,6 +994,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       setUploadSummary(null);
       setPendingConflict(null);
       setUploadError(null);
+      setUploadPhase("idle");
+      setUploadProgress(0);
       setChildrenByPath(new Map());
       loadingPathsRef.current = new Set();
       setLoadingPaths(new Set());
@@ -1022,7 +1021,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       for (const path of expandedPathsRef.current) fetchDir(path);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cwd, refreshKey, treeRefreshKey]);
+  }, [cwd, hostId, workspaceKey, refreshKey, treeRefreshKey]);
 
   // Flipping "Show hidden items" changes what every listing returns, so no
   // cached directory listing may survive it: drop the map (the root and every
@@ -1055,7 +1054,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const [isGitRepo, setIsGitRepo] = useState(false);
   useEffect(() => {
     let cancelled = false;
-    fetchGitStatus(cwd)
+    fetchGitStatus(cwd, hostId)
       .then((status) => {
         if (cancelled) return;
         setGitFiles(status.isGitRepository ? status.files : []);
@@ -1067,7 +1066,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         setIsGitRepo(false);
       });
     return () => { cancelled = true; };
-  }, [cwd, refreshKey, treeRefreshKey]);
+  }, [cwd, hostId, refreshKey, treeRefreshKey]);
 
   useEffect(() => {
     onGitStatusChange?.(gitFiles.length, isGitRepo);
@@ -1153,6 +1152,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                   rowHeight={rowHeight}
                   rowCount={rows.length}
                   cwd={cwd}
+                  hostId={hostId}
                   open={false}
                   loading={false}
                   highlighted={false}
@@ -1180,6 +1180,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                 rowHeight={rowHeight}
                 rowCount={rows.length}
                 cwd={cwd}
+                hostId={hostId}
                 open={node.isDir && expandedPaths.has(node.fullPath)}
                 loading={loadingPaths.has(node.fullPath)}
                 highlighted={highlightedPaths.has(node.fullPath)}
@@ -1291,6 +1292,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                 <Upload size={13} strokeWidth={2} aria-hidden="true" />
               )}
               {uploadPhase === "uploading" && <span style={{ fontSize: 10 }}>{uploadProgress}%</span>}
+              <button type="button" onClick={() => { uploadOperationRef.current?.controller.abort(); uploadOperationRef.current?.handle?.abort(); }} style={{ border: "none", background: "transparent", color: "var(--text)", cursor: "pointer" }}>{t("fileExplorer.cancel")}</button>
             </div>
             {uploadPhase === "uploading" && (
               <div style={{ height: 3, marginTop: 4, overflow: "hidden", borderRadius: 2, background: "var(--border)" }}>
@@ -1311,10 +1313,10 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
               </div>
             )}
             <div style={{ display: "flex", gap: 5, marginTop: 7 }}>
-              <button type="button" onClick={() => void performUpload(pendingConflict.files, "overwrite")} style={{ height: 24, minHeight: 24, padding: "0 8px", border: "1px solid var(--status-error)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--status-error)", cursor: "pointer", fontSize: 11 }}>
+              <button type="button" onClick={() => void performUpload(pendingConflict.operation, "overwrite")} style={{ height: 24, minHeight: 24, padding: "0 8px", border: "1px solid var(--status-error)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--status-error)", cursor: "pointer", fontSize: 11 }}>
                 {t("fileExplorer.replace")}
               </button>
-              <button type="button" onClick={() => void performUpload(pendingConflict.files, "skip")} style={{ height: 24, minHeight: 24, padding: "0 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}>
+              <button type="button" onClick={() => void performUpload(pendingConflict.operation, "skip")} style={{ height: 24, minHeight: 24, padding: "0 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}>
                 {t("fileExplorer.skipExisting")}
               </button>
               <button type="button" onClick={() => setPendingConflict(null)} style={{ height: 24, minHeight: 24, padding: "0 8px", border: "none", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text-muted)", cursor: "pointer", fontSize: 11 }}>

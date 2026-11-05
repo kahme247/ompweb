@@ -9,6 +9,8 @@ export interface Tab {
   id: string;
   label: string;
   filePath: string;
+  hostId: string;
+  sourceCwd: string | null;
   sourceSessionId?: string | null;
 }
 

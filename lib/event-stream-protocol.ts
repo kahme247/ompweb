@@ -34,7 +34,7 @@ export type EventStreamChannel =
   /** Notifications the server routes to the tab with this notification client id. */
   | { kind: "notifications"; clientId: string }
   | { kind: "session"; sessionId: string }
-  | { kind: "file"; path: string; sessionId: string | null }
+  | { kind: "file"; path: string; hostId?: string; sessionId: string | null }
   /** Host tool calls (open_url, notify, open_file) from sessions no tab is watching. */
   | { kind: "host-tools" }
   /** Settings → Hosts: the `GET /api/hosts` body on subscribe and after every change. */
@@ -138,7 +138,8 @@ export function parseEventStreamChannel(value: unknown): EventStreamChannel | nu
       if (!isBoundedString(channel.path, MAX_PATH_LENGTH)) return null;
       const sessionId = channel.sessionId ?? null;
       if (sessionId !== null && !isBoundedString(sessionId, MAX_ID_LENGTH)) return null;
-      return { kind: "file", path: channel.path, sessionId };
+      if (channel.hostId !== undefined && !isBoundedString(channel.hostId, MAX_ID_LENGTH)) return null;
+      return { kind: "file", path: channel.path, sessionId, ...(channel.hostId === undefined ? {} : { hostId: channel.hostId as string }) };
     }
     default:
       return null;

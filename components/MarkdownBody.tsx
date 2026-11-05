@@ -3,7 +3,8 @@
 import { Children, cloneElement, isValidElement, useContext, useMemo, type ComponentProps, type MouseEvent, type ReactElement, type ReactNode } from "react";
 import ReactMarkdown, { type Components, type UrlTransform } from "react-markdown";
 import { remarkInlineCodeFileLinks, resolveLocalFileHref } from "@/lib/file-links";
-import { encodeFilePathForApi } from "@/lib/file-paths";
+import { getFileApiUrl } from "@/lib/file-paths";
+import { WorkspaceFileContext } from "@/lib/workspace-file-context";
 import { AgentLinkContext, agentAwareUrlTransform, agentLinkIds, remarkAgentLinks } from "../lib/agent-links";
 import { GithubRepoContext, remarkGithubRefs } from "../lib/github-refs";
 import { normalizeDisplayMath, useMarkdownPlugins, type MarkdownPlugins } from "../lib/markdown";
@@ -26,6 +27,7 @@ interface MarkdownBodyProps {
 
 export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile, suppressImages = false, autoCharts = false }: MarkdownBodyProps) {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
+  const fileSource = useContext(WorkspaceFileContext);
   const { remarkPlugins: baseRemarkPlugins, rehypePlugins } = useMarkdownPlugins(normalizedMarkdown);
   const githubRepo = useContext(GithubRepoContext);
   // GitHub refs run first: `agent://Foo#12` must not become an issue link.
@@ -47,7 +49,7 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
       if (suppressImages) return alt ?? null;
       const filePath = typeof src === "string" ? resolveLocalFileHref(src, cwd) : null;
       const imageSrc = filePath
-        ? `/api/files/${encodeFilePathForApi(filePath)}?type=read`
+        ? getFileApiUrl(filePath, "read", fileSource?.hostId ?? "local", fileSource?.sessionId)
         : src;
       // Dynamic local paths are served directly by the file API.
       return <ClickableImage src={imageSrc} alt={alt ?? ""} loading="lazy" {...imgProps} />;
@@ -159,7 +161,7 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
       );
     },
     };
-  }, [isStreaming, cwd, onOpenFile, suppressImages, openAgentLink, autoCharts]);
+  }, [isStreaming, cwd, onOpenFile, suppressImages, openAgentLink, autoCharts, fileSource]);
 
   return (
     <div className={["markdown-body", className].filter(Boolean).join(" ")}>

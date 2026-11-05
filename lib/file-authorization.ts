@@ -2,7 +2,7 @@ import fs from "fs";
 import { homedir } from "os";
 import path from "path";
 import {
-  getAllowedFileRoots,
+
   isExistingFilePathAllowed,
   isFilePathAllowed,
   isOmpSecretFile,
@@ -11,6 +11,7 @@ import {
   resolveRequestedFilePath,
 } from "./file-access";
 import { isFilePathReferencedBySession } from "./session-file-references";
+import { normalizeForComparison } from "./paths";
 
 /** Rebuild an absolute path from `/api/files/[...path]` catch-all segments. */
 export function filePathFromSegments(segments: string[]): string {
@@ -55,8 +56,8 @@ export async function authorizeFileAccess(
   segments: string[],
   sessionId: string | null,
   allowSessionReference: boolean,
+  allowedRoots: Set<string>,
 ): Promise<FileAccessDecision> {
-  const allowedRoots = await getAllowedFileRoots();
   const filePath = resolveReadFilePath(segments, allowedRoots);
   const allowedByRoot = isFilePathAllowed(filePath, allowedRoots);
   const allowedBySessionReference =
@@ -69,6 +70,16 @@ export async function authorizeFileAccess(
   // store inside an allowed root. Deny it before anything can stat, read or
   // download it, also through a symlink that resolves to it.
   if (isOmpSecretFile(filePath)) return ACCESS_DENIED;
+
+  let realPath: string;
+  try {
+    realPath = fs.realpathSync(filePath);
+  } catch {
+    return { ok: false, status: 404, error: "Not found", code: "file_not_found" };
+  }
+  if (allowedBySessionReference && normalizeForComparison(realPath) !== normalizeForComparison(filePath)
+    && !isExistingFilePathAllowed(realPath, allowedRoots)
+    && !await isFilePathReferencedBySession(realPath, sessionId)) return ACCESS_DENIED;
 
   let stat: fs.Stats;
   try {

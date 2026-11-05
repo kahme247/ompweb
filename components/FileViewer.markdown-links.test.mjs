@@ -10,8 +10,10 @@ const originalFetch = globalThis.fetch;
 const originalWorker = globalThis.Worker;
 afterEach(async () => {
   // The viewer's lazy chunks resolve after the assertions; let them land before jsdom closes.
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  cleanup();
+  await React.act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    cleanup();
+  });
   globalThis.fetch = originalFetch;
   globalThis.Worker = originalWorker;
   delete window.matchMedia;
@@ -36,6 +38,7 @@ async function renderPreview(filePath, opened) {
   window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
   const view = render(React.createElement(FileViewer, {
     filePath,
+    hostId: "local",
     cwd: "/ws",
     sourceSessionId: "s1",
     onOpenFile: (file) => opened.push(file),

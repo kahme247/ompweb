@@ -1084,7 +1084,7 @@ export class AgentSessionWrapper {
           if (otherTabs.size > 0) {
             this.pendingHostTools.set(id, { ...event, webCrossSession: true });
             const args = event.arguments && typeof event.arguments === "object" ? event.arguments as Record<string, unknown> : {};
-            const call: CrossSessionHostToolCall = { sessionId: this.sessionId, id, toolName, arguments: args };
+            const call: CrossSessionHostToolCall = { sessionId: this.sessionId, hostId: this.host.id, cwd: this.cwd, id, toolName, arguments: args };
             for (const listener of otherTabs) {
               try { listener(call); } catch { /* ignore listener errors */ }
             }

@@ -529,10 +529,26 @@ Notes:
 - **Trust:** a linked host runs omp with full tool access on that machine for
   whoever controls the ompweb server or the token. Keep the token private and
   revoke it when a machine is retired.
-- **Not available on remote hosts yet:** the file explorer, Git and worktree
-  panels, directory browsing, archiving sessions, and the Skills, Plugins, Agents
-  and MCP settings only work on the machine ompweb runs on. Chat, session history,
-  notifications and starting sessions work on every host.
+- **Workspace files on every host:** Explorer, previews, downloads, file search,
+  @-mentions and live file watching use the owning machine's daemon, including
+  This machine. Explorer uploads accept up to 2 GiB per file with no 100 MiB batch
+  cap; preview limits remain 256 KiB for text and 10 MiB for images/DOCX.
+  File tabs retain their source host when you switch chats. An unavailable or
+  older daemon reports offline or asks for an update; main never substitutes its
+  own filesystem.
+- **Git and worktrees on every host:** status, diffs, GitHub issue links, and
+  worktree creation, selection and removal run on the owning daemon. Dirty
+  worktrees still require explicit force confirmation. Switching a worktree
+  changes where new sessions start, not an open conversation.
+- **Directory browsing and cloning on every host:** the Add workspace picker
+  navigates that host's directories and clones HTTPS/SSH repositories there.
+  Cancelling waits for the clone process and safe cleanup; interrupted connections
+  report an unknown outcome rather than pretending the clone was cancelled.
+  If the destination changes during cleanup, captured data is preserved in a
+  private quarantine and the error gives its location; inspect it before removing
+  or restoring anything.
+- **Not available on remote hosts yet:** session archiving and the Skills,
+  Plugins, Agents and MCP settings. Transcript search still scans this machine.
 - **Agent-started sessions:** with agent tools enabled, an agent can pass a `host`
   to `new_session` (it defaults to the agent's own host). A remote host asks for
   confirmation each time unless **Agents can start sessions here without asking**

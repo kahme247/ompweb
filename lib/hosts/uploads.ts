@@ -4,10 +4,14 @@
 // Loaded by the daemon through jiti: no `@/` imports and no Bun APIs.
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { appendFile, copyFile, link, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, copyFile, link, lstat, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { getAgentDir } from "../omp/paths";
+import { inspectUploadTargets, parseUploadConflictStrategy, validateUploadFileNames, type UploadConflictStrategy } from "../file-upload";
+import type { WorkspaceUploadResult } from "../workspace-types";
+import { authorizeWorkspaceDirectory } from "./workspace-roots";
 import { isValidSessionId } from "../session-file-references-core";
 import { isRecord } from "../type-guards";
 import { MAX_UPLOAD_BYTES, UPLOAD_ID_RE } from "../upload-limits";
@@ -67,8 +71,13 @@ export function sessionLocalRoot(sessionFile: string, sessionId: string, platfor
 export type UploadAck = { id: string; attempt: string; received: number; done: boolean; error?: { status: number; code: string; message: string } };
 
 type Receipt = { sessionFile: string; path: string; url: string };
-/** `attached`: the receipt of a finished attach, kept (the `.part` is gone) so an attach retried after a lost reply is answered again. */
-type Meta = { name: string; size: number; type: string; created: number; attached?: Receipt };
+type FileIdentity = { dev: string; ino: string };
+type WorkspaceReceipt = {
+  directory: string; canonical: string; name: string; conflict: UploadConflictStrategy;
+  candidate: string; identity: FileIdentity; parent: FileIdentity; result?: WorkspaceUploadResult;
+};
+/** Destination receipts are disjoint: workspace files never enter session attachment retention. */
+type Meta = { name: string; size: number; type: string; created: number; attached?: Receipt; workspace?: WorkspaceReceipt };
 type OpenUpload = { name: string; type: string; size: number; attempt: string; received: number; chain: Promise<void>; timer: NodeJS.Timeout | undefined; active: number };
 
 const errno = (error: unknown) => (error as NodeJS.ErrnoException | null)?.code;
@@ -101,6 +110,15 @@ async function sync(path: string): Promise<void> {
   }
 }
 
+
+async function identity(path: string): Promise<FileIdentity> {
+  const info = await lstat(path, { bigint: true });
+  return { dev: String(info.dev), ino: String(info.ino) };
+}
+
+function sameIdentity(a: FileIdentity, b: FileIdentity): boolean { return a.dev === b.dev && a.ino === b.ino; }
+
+const uncertainPublication = () => new HostOpError(409, "upload_publish_uncertain", "Publication may have completed; check the destination before uploading again");
 /** This daemon's staged uploads. Frames for one upload are written in arrival order; `send` gets each `upload_ack`. */
 export class StagedUploads {
   private readonly open = new Map<string, OpenUpload>();
@@ -133,13 +151,38 @@ export class StagedUploads {
       if (!isRecord(meta) || typeof meta.name !== "string" || !Number.isSafeInteger(meta.size) || typeof meta.type !== "string") return null;
       const { attached } = meta;
       if (attached !== undefined && !(isRecord(attached) && typeof attached.sessionFile === "string" && typeof attached.path === "string" && typeof attached.url === "string")) return null;
+      const { workspace } = meta;
+      if (workspace !== undefined && !(isRecord(workspace) && typeof workspace.directory === "string" && typeof workspace.canonical === "string"
+        && typeof workspace.name === "string" && parseUploadConflictStrategy(workspace.conflict as string) === workspace.conflict
+        && typeof workspace.candidate === "string" && isRecord(workspace.identity) && typeof workspace.identity.dev === "string" && typeof workspace.identity.ino === "string"
+        && isRecord(workspace.parent) && typeof workspace.parent.dev === "string" && typeof workspace.parent.ino === "string"
+        && (workspace.result === undefined || (isRecord(workspace.result) && typeof workspace.result.path === "string" && typeof workspace.result.name === "string" && typeof workspace.result.skipped === "boolean")))) return null;
       return meta as Meta;
     } catch {
       return null;
     }
   }
 
+  private async saveMeta(id: string, meta: Meta): Promise<void> {
+    const temporary = `${this.path(id, "json")}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, JSON.stringify(meta), { flag: "wx" });
+      await rename(temporary, this.path(id, "json"));
+    } finally { await rm(temporary, { force: true }); }
+  }
+
+  private async removeCandidate(receipt: WorkspaceReceipt): Promise<void> {
+    try {
+      if (sameIdentity(await identity(receipt.canonical), receipt.parent) && sameIdentity(await identity(receipt.candidate), receipt.identity)) {
+        await rm(receipt.candidate);
+      }
+    } catch (error) {
+      if (errno(error) !== "ENOENT") console.error("[ompweb host] could not clean workspace upload candidate", error);
+    }
+  }
   private async remove(id: string): Promise<void> {
+    const receipt = (await this.meta(id))?.workspace;
+    if (receipt) await this.removeCandidate(receipt);
     await rm(this.path(id, "part"), { force: true });
     await rm(this.path(id, "json"), { force: true });
   }
@@ -163,13 +206,16 @@ export class StagedUploads {
     } catch {
       return;
     }
-    for (const name of names) {
+    for (const name of names.sort((a, b) => Number(b.endsWith(".json")) - Number(a.endsWith(".json")))) {
       const id = name.split(".")[0];
       if (this.open.has(id) || this.controls.has(id)) continue;
       const file = join(this.dir, name);
       try {
         const modified = (await stat(file)).mtimeMs;
-        if (!this.open.has(id) && !this.controls.has(id) && now - modified > STAGED_MAX_AGE_MS) await rm(file, { force: true });
+        if (!this.open.has(id) && !this.controls.has(id) && now - modified > STAGED_MAX_AGE_MS) {
+          if (name === `${id}.json` && isUploadId(id)) await this.abort(id);
+          else await rm(file, { force: true });
+        }
       } catch {
         // Gone already, or unreadable: the next sweep tries again.
       }
@@ -205,6 +251,10 @@ export class StagedUploads {
     await mkdir(this.dir, { recursive: true });
     const part = this.path(id, "part");
     const meta = await this.meta(id);
+    if (meta?.workspace) {
+      if (meta.name !== name || meta.type !== type || meta.size !== size) throw new HostOpError(409, "upload_id_conflict", "The upload id is in use for another file");
+      return { received: size, done: true };
+    }
     if (meta?.attached) {
       if (meta.name !== name || meta.type !== type || meta.size !== size) throw new HostOpError(409, "upload_id_conflict", "The upload id is in use for another file");
       await requireReceiptTarget(meta.attached);
@@ -281,6 +331,111 @@ export class StagedUploads {
     });
   }
 
+  async publish(id: string, directory: string, name: string, conflict: UploadConflictStrategy): Promise<WorkspaceUploadResult> {
+    if (!isUploadId(id) || typeof name !== "string" || validateUploadFileNames([name]) || parseUploadConflictStrategy(conflict) !== conflict) {
+      throw new HostOpError(400, "invalid_request", "Invalid workspace upload");
+    }
+    return this.control(id, async () => {
+      const meta = await this.meta(id);
+      if (!meta) throw new HostOpError(404, "upload_missing", "The upload is gone");
+      if (meta.attached) throw new HostOpError(409, "upload_destination_conflict", "The upload already belongs to a session");
+      let receipt = meta.workspace;
+      if (receipt) {
+        if (receipt.directory !== directory || receipt.name !== name || receipt.conflict !== conflict) {
+          throw new HostOpError(409, "upload_destination_conflict", "The upload already has another destination");
+        }
+        if (receipt.result) return receipt.result;
+        const canonical = await authorizeWorkspaceDirectory(directory);
+        if (canonical !== receipt.canonical || !sameIdentity(await identity(canonical), receipt.parent)) throw uncertainPublication();
+        const target = join(canonical, name);
+        try {
+          if (!sameIdentity(await identity(target), receipt.identity)) throw uncertainPublication();
+        } catch { throw uncertainPublication(); }
+        receipt.result = { path: target, name, skipped: false };
+        await this.saveMeta(id, meta);
+        await this.removeCandidate(receipt);
+        return receipt.result;
+      }
+      if (meta.name !== name) throw new HostOpError(409, "upload_destination_conflict", "The file name differs from the staged upload");
+      const canonical = await authorizeWorkspaceDirectory(directory);
+      const part = this.path(id, "part");
+      if (this.open.has(id) || await sizeOf(part) !== meta.size) throw new HostOpError(409, "upload_incomplete", "The upload has not finished");
+      const parent = await identity(canonical);
+      const target = join(canonical, name);
+      // shortcut: a crash before the prepared receipt can leave a private sibling; add preparation journaling if automatic crash cleanup is required.
+      const candidate = join(canonical, `.omp-upload-${randomUUID()}`);
+      let owned: FileIdentity | undefined;
+      let source: FileHandle | undefined, candidateHandle: FileHandle | undefined, parentHandle: FileHandle | undefined;
+      try {
+        parentHandle = await open(canonical, fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY ?? 0) | (fsConstants.O_NOFOLLOW ?? 0));
+        const parentInfo = await parentHandle.stat({ bigint: true });
+        if (!sameIdentity({ dev: String(parentInfo.dev), ino: String(parentInfo.ino) }, parent)) throw uncertainPublication();
+        source = await open(part, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+        const sourceInfo = await source.stat({ bigint: true });
+        if (!sourceInfo.isFile() || sourceInfo.size !== BigInt(meta.size)) throw new HostOpError(409, "upload_incomplete", "The upload has not finished");
+        let copying = false;
+        try { await link(part, candidate); }
+        catch (error) {
+          if (!["EXDEV", "EPERM", "ENOTSUP", "ENOSYS"].includes(errno(error) ?? "")) throw error;
+          copying = true;
+        }
+        if (copying) {
+          candidateHandle = await open(candidate, "wx");
+          const info = await candidateHandle.stat({ bigint: true });
+          owned = { dev: String(info.dev), ino: String(info.ino) };
+          if (meta.size) {
+            const buffer = Buffer.allocUnsafe(Math.min(LINK_LIMITS.pieceBytes, meta.size));
+            for (let at = 0; at < meta.size;) {
+              const { bytesRead } = await source.read(buffer, 0, Math.min(buffer.length, meta.size - at), at);
+              if (!bytesRead) throw new HostOpError(409, "upload_changed", "The staged file changed during copying");
+              for (let written = 0; written < bytesRead;) {
+                const { bytesWritten } = await candidateHandle.write(buffer, written, bytesRead - written, at + written);
+                if (!bytesWritten) throw new HostOpError(507, "upload_write_failed", "The upload could not be written");
+                written += bytesWritten;
+              }
+              at += bytesRead;
+            }
+          }
+          await candidateHandle.sync();
+        } else {
+          owned = { dev: String(sourceInfo.dev), ino: String(sourceInfo.ino) };
+          candidateHandle = await open(candidate, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+          const info = await candidateHandle.stat({ bigint: true });
+          if (!sameIdentity({ dev: String(info.dev), ino: String(info.ino) }, owned)) throw uncertainPublication();
+        }
+        receipt = { directory, canonical, name, conflict, candidate, identity: owned, parent };
+        meta.workspace = receipt;
+        await this.saveMeta(id, meta);
+        if (await authorizeWorkspaceDirectory(directory) !== canonical || !sameIdentity(await identity(canonical), parent)
+          || !sameIdentity(await identity(candidate), owned)) throw uncertainPublication();
+        const inspection = inspectUploadTargets(canonical, [name]);
+        if (inspection.nonReplaceable.length) throw new HostOpError(409, "upload_conflict_non_replaceable", "A directory or symbolic link cannot be replaced");
+        let skipped = false;
+        if (conflict === "overwrite") await rename(candidate, target);
+        else {
+          try { await link(candidate, target); }
+          catch (error) {
+            if (errno(error) !== "EEXIST") throw error;
+            if (inspectUploadTargets(canonical, [name]).nonReplaceable.length) throw new HostOpError(409, "upload_conflict_non_replaceable", "A directory or symbolic link cannot be replaced");
+            if (conflict === "error") throw new HostOpError(409, "upload_conflict", "A file already exists");
+            skipped = true;
+          }
+        }
+        receipt.result = { path: target, name, skipped };
+        try { await this.saveMeta(id, meta); }
+        catch { throw uncertainPublication(); }
+        await this.removeCandidate(receipt);
+        await rm(part, { force: true }).catch((error) => console.error("[ompweb host] could not remove published staging", error));
+        return receipt.result;
+      } catch (error) {
+        if (owned) await this.removeCandidate({ directory, canonical, name, conflict, candidate, identity: owned, parent });
+        throw error;
+      } finally {
+        await Promise.all([candidateHandle?.close(), source?.close(), parentHandle?.close()]);
+      }
+    });
+  }
+
   /** Op uploadAttach: hard-link (or copy) a finished upload into the session's `local://uploads/`, never over an
    * existing file (a taken name gets ` (1)`, ` (2)`, ...). `sessionFile` is already confined to the sessions directory. */
   async attach(id: unknown, sessionFile: string, sessionId: unknown): Promise<{ path: string; url: string }> {
@@ -291,6 +446,7 @@ export class StagedUploads {
   private async finishAttach(id: string, sessionFile: string, sessionId: string): Promise<{ path: string; url: string }> {
     const part = this.path(id, "part");
     const meta = await this.meta(id);
+    if (meta?.workspace) throw new HostOpError(409, "upload_destination_conflict", "The upload already belongs to a workspace");
     if (meta?.attached) {
       // Attached already (the reply was lost): the same session file gets the same answer, any other one finds it gone.
       if (meta.attached.sessionFile === sessionFile) {

@@ -251,6 +251,8 @@ interface ControlFrame {
   sub?: unknown;
   connectionId?: unknown;
   transport?: unknown;
+  status?: unknown;
+  code?: unknown;
 }
 
 const encoder = new TextEncoder();
@@ -449,12 +451,10 @@ function handleControl(frame: ControlFrame, conn: Conn): void {
     subscription.state = OPEN;
     post(subscription.client, { id: subscription.streamId, type: "open" });
   } else if (frame.type === "end") {
-    // The server ended this subscription (watcher died, unserializable
-    // frame): reconnect it like EventSource would reconnect a closed stream.
-    notifyError(subscription, CONNECTING);
-    clearTimeout(subscription.retryTimer);
-    subscription.retryTimer = setTimeout(() => subscribe(subscription), RESUBSCRIBE_DELAY_MS);
+    // A server-ended channel keeps EventSource's reconnect semantics.
+    retrySubscription(subscription);
   } else if (frame.type === "refused") {
+    if (transientFileRefusal(subscription, frame.status, frame.code)) return retrySubscription(subscription);
     // The link's answer to a failed `sub`: fatal, like a refused POST below.
     release(subscription);
     notifyError(subscription, CLOSED);
@@ -531,13 +531,24 @@ function subscribe(subscription: Subscription): void {
       scheduleReconnect();
       return;
     }
-    // Refused (409 unmanaged session, 403/404 file, ...): fatal, like an
-    // EventSource HTTP error. The tab decides whether to retry.
+    if (transientFileRefusal(subscription, response.status, body?.code)) return retrySubscription(subscription);
+    // Other refusals are terminal; the tab decides whether to reopen them.
     release(subscription);
     notifyError(subscription, CLOSED);
   }, () => {
     if (!stale()) scheduleReconnect();
   });
+}
+
+function transientFileRefusal(subscription: Subscription, status: unknown, code: unknown): boolean {
+  return subscription.channel.kind === "file"
+    && ((status === 503 && code === "host_offline") || (status === 504 && code === "host_timeout"));
+}
+
+function retrySubscription(subscription: Subscription): void {
+  notifyError(subscription, CONNECTING);
+  clearTimeout(subscription.retryTimer);
+  subscription.retryTimer = setTimeout(() => subscribe(subscription), RESUBSCRIBE_DELAY_MS);
 }
 
 function release(subscription: Subscription): void {

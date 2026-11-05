@@ -1,8 +1,10 @@
 import { randomUUID } from "crypto";
-import fs from "fs";
-import { authorizeFileAccess } from "./file-authorization";
 import { filePathApiSegments } from "./file-paths";
-import { hostsSnapshot, onHostsChange } from "./hosts/hub";
+import { hostsSnapshot, onHostsChange, onWorkspaceFile } from "./hosts/hub";
+import { resolveWorkspaceHost } from "./api-utils";
+import { isLinkUp } from "./hosts/host";
+import { HostOpError } from "./hosts/link-protocol";
+import type { WorkspaceFileEvent } from "./workspace-types";
 import { attachNotificationClient } from "./notification-hub";
 import { getExitedRpcSessions, getRpcSession, getRunningRpcSessions, subscribeHostToolCalls, subscribeRunningSessions } from "./rpc-manager";
 import { subscribeSessionFileChanges } from "./session-watcher";
@@ -332,7 +334,7 @@ async function openChannel(channel: EventStreamChannel, handle: SubscriptionHand
     case "session":
       return openSessionChannel(channel.sessionId, handle);
     case "file":
-      return openFileChannel(channel.path, channel.sessionId, handle);
+      return openFileChannel(channel.path, channel.sessionId, channel.hostId, handle);
     case "host-tools":
       return openHostToolsChannel(handle);
     case "hosts":
@@ -423,51 +425,42 @@ function openSessionChannel(sessionId: string, handle: SubscriptionHandle): Subs
 }
 
 // Change notifications for one file open in the viewer.
-async function openFileChannel(rawPath: string, sessionId: string | null, handle: SubscriptionHandle): Promise<SubscribeResult> {
-  const access = await authorizeFileAccess(filePathApiSegments(rawPath), sessionId, true);
-  if (!access.ok) return { ok: false, status: access.status, error: access.error, code: access.code };
-  const { filePath } = access;
-  if (!access.stat.isFile()) return { ok: false, status: 400, error: "Not a file", code: "not_a_file" };
-  if (!handle.active) return SUBSCRIBED;
-
-  handle.open();
-  handle.send({ type: "connected", filePath });
-  let lastMtimeMs = access.stat.mtimeMs;
-  let lastSize = access.stat.size;
-  const check = () => {
-    try {
-      const stat = fs.statSync(filePath);
-      // Some platforms emit watch events for file reads/attribute access.
-      // Ignore those or the client's refresh read loops.
-      if (stat.mtimeMs === lastMtimeMs && stat.size === lastSize) return;
-      lastMtimeMs = stat.mtimeMs;
-      lastSize = stat.size;
-      handle.send({ type: "change", mtime: stat.mtime.toISOString(), size: stat.size });
-    } catch {
-      if (lastSize === -1) return; // already reported gone
-      lastSize = -1;
-      handle.send({ type: "change", mtime: new Date().toISOString(), size: 0 });
-    }
-  };
-  let trailing: ReturnType<typeof setTimeout> | undefined;
-  let watcher: fs.FSWatcher;
-  try {
-    watcher = fs.watch(filePath, () => {
-      check();
-      // Bun's fs.watch drops an event within ~2 ms of the previous one; re-stat
-      // once the burst is quiet so a rapid second save still reports.
-      clearTimeout(trailing);
-      trailing = setTimeout(check, 50);
-    });
-  } catch {
-    handle.send({ type: "error", message: "Failed to watch file" });
-    handle.end();
-    return SUBSCRIBED;
+async function openFileChannel(rawPath: string, sessionId: string | null, hostId: string | undefined, handle: SubscriptionHandle): Promise<SubscribeResult> {
+  const resolved = await resolveWorkspaceHost(hostId, sessionId);
+  if ("response" in resolved) {
+    const body = await resolved.response.json();
+    return { ok: false, status: resolved.response.status, error: body.error, code: body.code };
   }
-  watcher.on("error", () => handle.end());
-  handle.setDetach(() => {
-    clearTimeout(trailing);
-    watcher.close();
+  const { host } = resolved;
+  const id = randomUUID(), epoch = randomUUID();
+  let opened = false;
+  const pending: WorkspaceFileEvent[] = [];
+  const detachEvent = onWorkspaceFile(host.id, id, epoch, (event) => {
+    if (!handle.active) return;
+    if (!opened) { pending.push(event); return; }
+    handle.send(event);
+    if (event.type === "error") handle.end();
   });
-  return SUBSCRIBED;
+  const detachStatus = host.onStatus((status) => { if (!isLinkUp(status)) handle.end(); });
+  handle.setDetach(() => {
+    detachEvent(); detachStatus();
+    void host.workspaceOps.unwatchFile(id, epoch).catch(() => {});
+  });
+  try {
+    const result = await host.workspaceOps.watchFile(id, epoch, { segments: filePathApiSegments(rawPath), sessionId });
+    if (!result.ok) { detachEvent(); detachStatus(); return result; }
+    if (!handle.active) { void host.workspaceOps.unwatchFile(id, epoch).catch(() => {}); return SUBSCRIBED; }
+    const info = result.value;
+    handle.open();
+    // A new watch epoch always refreshes bytes missed during the disconnected interval.
+    handle.send({ type: "change", mtime: new Date(info.mtimeMs).toISOString(), size: info.size });
+    handle.send({ type: "connected", filePath: info.path });
+    opened = true;
+    for (const event of pending) { handle.send(event); if (event.type === "error") handle.end(); }
+    return SUBSCRIBED;
+  } catch (error) {
+    detachEvent(); detachStatus();
+    if (error instanceof HostOpError) return { ok: false, status: error.status, code: error.code, error: error.message };
+    throw error;
+  }
 }
