@@ -85,10 +85,12 @@ export function getConfigAgentRoots(): string[] {
 const OMP_SECRET_NAME = /^(?:agent\.db(?:-wal|-shm|-journal|\..+)?|models\.(?:yml|yaml|json))$/i;
 
 export function isOmpSecretFile(filePath: string): boolean {
-  const requested = path.resolve(filePath);
-  const target = comparablePath(resolvedOrSelf(requested));
+  // Follow the original path before any lexical normalization: link/.. is
+  // resolved by the filesystem, not necessarily by path.resolve's string rules.
+  const requested = resolvedOrSelf(filePath);
+  const target = comparablePath(requested);
   const protectedName = OMP_SECRET_NAME.test(path.basename(requested));
-  const parents = new Set([path.dirname(requested), resolvedOrSelf(path.dirname(requested))].map(comparablePath));
+  const parents = new Set([path.dirname(requested), resolvedOrSelf(path.dirname(filePath))].map(comparablePath));
   const profiles = comparablePath(path.join(getConfigRoot(), "profiles"));
   if (protectedName) {
     for (const parent of parents) {
@@ -130,13 +132,13 @@ function ompAgentDirs(): string[] {
 }
 
 function resolvedOrSelf(dir: string): string {
-  try { return realpathSync(dir); } catch { return dir; }
+  try { return realpathSync.native(dir); } catch { return dir; }
 }
 
-/** `filePath` with `/` separators, lowercased on Windows, where paths compare case-insensitively. */
+/** Canonical comparison keys preserve literal POSIX backslashes and fold Windows path spelling only. */
 function comparablePath(filePath: string): string {
-  const normalized = normalizeSlashes(filePath).replace(/\/+$/, "");
-  return isWindowsAbsolutePath(normalized) ? normalized.toLowerCase() : normalized;
+  const normalized = (process.platform === "win32" ? normalizeSlashes(filePath) : filePath).replace(/\/+$/, "");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
 export async function getAllowedFileRoots(): Promise<Set<string>> {
