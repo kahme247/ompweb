@@ -1,10 +1,10 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
-import fs from "fs";
+import type { Dirent } from "fs";
+import { readdir } from "node:fs/promises";
 import path from "path";
 import { buildEntriesFromFiles, filterFileEntries, type FileIndexEntry } from "./file-fuzzy";
 import { createChildProcessEnvironment } from "./project-command-env";
-import { isIgnoredFileEntry } from "./file-dirent";
 import type { WorkspaceIndex } from "./workspace-types";
 const execFileAsync = promisify(execFile);
 
@@ -14,6 +14,7 @@ const MAX_FILES = 5000;
 /** Hard caps on the full in-memory listing that ?q= searches against */
 const GIT_HARD_CAP = 200_000;
 const WALK_HARD_CAP = 50_000;
+const WALK_DIR_CAP = 50_000;
 const MAX_WALK_DEPTH = 8;
 const CACHE_TTL_MS = 10_000;
 const CACHE_MAX_ENTRIES = 20;
@@ -91,26 +92,31 @@ async function listWithGit(cwd: string): Promise<FileListing | null> {
   }
 }
 
-function listWithWalk(cwd: string): FileListing {
+async function listWithWalk(cwd: string): Promise<FileListing> {
   const files: string[] = [];
-  const readDirectorySync = Reflect.get(fs, "readdirSync") as typeof fs.readdirSync;
   // BFS so shallow files win when the cap truncates the listing.
   const queue: Array<{ abs: string; rel: string; depth: number }> = [{ abs: cwd, rel: "", depth: 0 }];
   let head = 0;
+  let hardTruncated = false;
   while (head < queue.length) {
     const { abs, rel, depth } = queue[head++]!;
-    let dirents: fs.Dirent[];
+    let dirents: Dirent[];
     try {
-      dirents = readDirectorySync(abs, { withFileTypes: true });
+      dirents = await readdir(abs, { withFileTypes: true });
     } catch {
       continue;
     }
     for (const d of dirents) {
-      if (isIgnoredFileEntry(d.name)) continue;
+      // Never follow symlinked directories out of cwd or into a loop.
       const childRel = rel ? `${rel}/${d.name}` : d.name;
       if (d.isDirectory()) {
         if (depth + 1 <= MAX_WALK_DEPTH) {
-          queue.push({ abs: path.join(abs, d.name), rel: childRel, depth: depth + 1 });
+          // Bound the queue too, even when one directory has many empty children.
+          if (queue.length < WALK_DIR_CAP) {
+            queue.push({ abs: path.join(abs, d.name), rel: childRel, depth: depth + 1 });
+          } else {
+            hardTruncated = true;
+          }
         }
       } else if (d.isFile()) {
         if (files.length >= WALK_HARD_CAP) {
@@ -120,7 +126,7 @@ function listWithWalk(cwd: string): FileListing {
       }
     }
   }
-  return { files, hardTruncated: false };
+  return { files, hardTruncated };
 }
 
 export async function indexWorkspaceFiles(cwd: string, query: string, limit: number, kind: "all" | "file", forceRefresh: boolean): Promise<WorkspaceIndex> {

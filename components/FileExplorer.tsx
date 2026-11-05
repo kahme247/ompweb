@@ -40,6 +40,10 @@ interface FileEntry {
   isDir: boolean;
   size: number;
   modified: string;
+  /** The symlink's raw `readlink` text (also for a dangling link). */
+  linkTarget?: string;
+  /** A symlink whose target lies outside the explorer root (or is dangling). */
+  outsideRoot?: boolean;
 }
 
 
@@ -49,6 +53,8 @@ interface FileNode {
   isDir: boolean;
   size: number;
   children?: FileNode[];
+  linkTarget?: string;
+  outsideRoot?: boolean;
   loaded?: boolean;
 }
 
@@ -63,8 +69,6 @@ interface Props {
   onRefreshDone?: () => void;
   fileSearchOpen?: boolean;
   onFileSearchOpenChange?: (open: boolean) => void;
-  /** List the IGNORED_NAMES directories (build/, dist/, …) the tree hides by default. */
-  showHidden?: boolean;
   /** Absolute path of the file open in the right panel — rendered selected. */
   activeFilePath?: string | null;
   /** Absolute path to expand, highlight, and scroll into view (one-shot). */
@@ -108,8 +112,8 @@ interface PendingConflict {
   nonReplaceable: string[];
 }
 
-async function fetchEntries(dirPath: string, showHidden: boolean, hostId: string): Promise<FileNode[]> {
-  const res = await fetch(getFileApiUrl(dirPath, "list", hostId, null, showHidden ? { hidden: 1 } : {}));
+async function fetchEntries(dirPath: string, root: string, hostId: string): Promise<FileNode[]> {
+  const res = await fetch(getFileApiUrl(dirPath, "list", hostId, null, { root }));
   if (!res.ok) {
     let message = translate("fileExplorer.loadFailed", { status: res.status });
     try {
@@ -125,6 +129,8 @@ async function fetchEntries(dirPath: string, showHidden: boolean, hostId: string
     name: e.name,
     fullPath: joinFilePath(dirPath, e.name),
     isDir: e.isDir,
+    linkTarget: e.linkTarget,
+    outsideRoot: e.outsideRoot,
     size: e.size,
     children: e.isDir ? [] : undefined,
     loaded: !e.isDir,
@@ -199,7 +205,8 @@ function flattenVisibleRows(
 ): FlatRow[] {
   for (const node of nodes) {
     out.push({ kind: "node", node, depth });
-    if (node.isDir && expandedPaths.has(node.fullPath)) {
+    // A dir flagged after it was expanded keeps its stale listing out of the tree.
+    if (node.isDir && !node.outsideRoot && expandedPaths.has(node.fullPath)) {
       const children = childrenByPath.get(node.fullPath);
       if (children) {
         if (children.length === 0) {
@@ -276,6 +283,10 @@ const ExplorerRow = memo(function ExplorerRow({
   );
   const mentionLabel = t("fileExplorer.insertPathIntoChat");
   const downloadLabel = t("fileExplorer.downloadFile");
+  // A link out of the workspace is listed but cannot be opened from the tree.
+  const blocked = node.outsideRoot === true;
+  const outsideLabel = t("fileExplorer.outsideRoot");
+  const linkSuffix = node.linkTarget !== undefined ? ", link to " + node.linkTarget : "";
 
   return (
     <div
@@ -290,15 +301,19 @@ const ExplorerRow = memo(function ExplorerRow({
       data-file-path={node.fullPath}
       aria-selected={highlighted || isActiveFile}
       aria-current={isActiveFile ? "true" : undefined}
-      aria-expanded={node.isDir ? open : undefined}
+      aria-expanded={node.isDir && !blocked ? open : undefined}
+      aria-disabled={blocked || undefined}
+      title={blocked ? outsideLabel : undefined}
       aria-level={row.depth + 1}
       aria-setsize={rowCount}
       aria-posinset={index + 1}
       // Search rows repeat names such as route.ts, so the directory has to be
       // part of the accessible name, not just the dimmed text beside it.
-      aria-label={node.isDir
-        ? (node.name + " (folder" + (open ? ", expanded" : ", collapsed") + ")")
-        : (secondaryLabel ? (node.name + " (file, " + secondaryLabel + ")") : (node.name + " (file)"))}
+      aria-label={blocked
+        ? (node.name + " (" + (node.isDir ? "folder" : "file") + linkSuffix + ", " + outsideLabel + ")")
+        : node.isDir
+          ? (node.name + " (folder" + linkSuffix + (open ? ", expanded" : ", collapsed") + ")")
+          : (secondaryLabel ? (node.name + " (file, " + secondaryLabel + ")") : (node.name + " (file" + linkSuffix + ")"))}
       style={{
         display: "flex",
         alignItems: "center",
@@ -306,8 +321,9 @@ const ExplorerRow = memo(function ExplorerRow({
         paddingLeft: 8 + row.depth * 14,
         paddingRight: 8,
         height: rowHeight,
-        cursor: "pointer",
-        background: isActiveFile ? "var(--bg-selected)" : hovered ? "var(--bg-hover)" : "transparent",
+        cursor: blocked ? "default" : "pointer",
+        opacity: blocked ? 0.5 : 1,
+        background: isActiveFile ? "var(--bg-selected)" : hovered && !blocked ? "var(--bg-hover)" : "transparent",
         borderRadius: "var(--radius-control)",
         userSelect: "none",
         boxShadow: focused ? "inset 0 0 0 1px color-mix(in srgb, var(--accent) 70%, transparent)" : isActiveFile ? "inset 2px 0 0 var(--accent)" : "none",
@@ -315,7 +331,7 @@ const ExplorerRow = memo(function ExplorerRow({
         transition: `background var(--dur-fast) var(--ease-out-warm)`,
       }}
     >
-      {node.isDir && (
+      {node.isDir && !blocked && (
         <ChevronRight
           size={10}
           strokeWidth={2}
@@ -328,7 +344,7 @@ const ExplorerRow = memo(function ExplorerRow({
           aria-hidden="true"
         />
       )}
-      {!node.isDir && <span style={{ width: 10, flexShrink: 0 }} />}
+      {(!node.isDir || blocked) && <span style={{ width: 10, flexShrink: 0 }} />}
       <span style={{ flexShrink: 0, display: "flex", alignItems: "center", color: node.isDir ? "var(--text-muted)" : "var(--text-dim)" }}>
         {node.isDir ? (
           open ? <FolderOpen size={14} strokeWidth={1.8} aria-hidden="true" /> : <Folder size={14} strokeWidth={1.8} aria-hidden="true" />
@@ -344,13 +360,30 @@ const ExplorerRow = memo(function ExplorerRow({
           textOverflow: "ellipsis",
           whiteSpace: "nowrap",
           // Prefer the name, but let it shrink to keep row actions reachable.
-          flex: secondaryLabel ? "0 1 auto" : 1,
-          maxWidth: secondaryLabel ? "72%" : undefined,
+          flex: secondaryLabel || node.linkTarget !== undefined ? "0 1 auto" : 1,
+          maxWidth: secondaryLabel ? "72%" : node.linkTarget !== undefined ? "65%" : undefined,
         }}
-        title={node.fullPath}
+        title={blocked ? outsideLabel : node.fullPath}
       >
         {node.name}
       </span>
+      {node.linkTarget !== undefined && (
+        // Like `ls -l`: where the link leads, whether or not it can be opened.
+        <span
+          style={{
+            flex: "1 1 0",
+            minWidth: 0,
+            fontSize: 11,
+            color: "var(--text-dim)",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+          title={node.linkTarget}
+        >
+          {"→ "}{node.linkTarget}
+        </span>
+      )}
       {secondaryLabel && (
         // Search rows are flat, so the directory is the only context a row has.
         <span
@@ -442,7 +475,7 @@ const ExplorerRow = memo(function ExplorerRow({
           </button>
         </Tooltip>
       )}
-      {!node.isDir && (
+      {!node.isDir && !blocked && (
         <Tooltip content={downloadLabel}>
           <a
             href={getFileApiUrl(node.fullPath, "download", hostId)}
@@ -488,7 +521,6 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   onRefreshDone,
   fileSearchOpen = false,
   onFileSearchOpenChange,
-  showHidden = false,
   activeFilePath = null,
   revealPath = null,
   onRevealDone,
@@ -537,14 +569,10 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const scrollRef = useRef<HTMLDivElement>(null);
   const loadingPathsRef = useRef<Set<string>>(new Set());
   // Listing generation: advanced whenever every cached listing is dropped
-  // (cwd change, hidden-items flip). An in-flight fetch carries the
-  // generation it started on; a response of an older one is discarded, so it
-  // cannot repopulate the cleared map, resurrect the hidden-item mode it
-  // listed, or clear the new request's loading state.
+  // (cwd change). An in-flight fetch carries the generation it started on; a
+  // response of an older one is discarded, so it cannot repopulate the cleared
+  // map or clear the new request's loading state.
   const listingGenerationRef = useRef(0);
-  // Last hidden-items mode the listing cache was built for (see the flip
-  // effect below); initialised to the mount value so mounting never counts.
-  const prevShowHiddenRef = useRef(showHidden);
   const rootRequestRef = useRef(0);
   const expandedPathsRef = useRef<Set<string>>(new Set());
   expandedPathsRef.current = expandedPaths;
@@ -711,7 +739,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     const isCurrent = () => listingGenerationRef.current === generation && workspaceRef.current === workspaceKey;
     loadingPathsRef.current.add(dirPath);
     setLoadingPaths((prev) => new Set(prev).add(dirPath));
-    return fetchEntries(dirPath, showHidden, hostId)
+    return fetchEntries(dirPath, cwd, hostId)
       .then((entries) => {
         if (!isCurrent()) return;
         setChildrenByPath((prev) => {
@@ -733,7 +761,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
           return next;
         });
       });
-  }, [cwd, hostId, showHidden, workspaceKey]);
+  }, [cwd, hostId, workspaceKey]);
 
   // Scroll the virtual window so a row is visible, then focus it. The focus
   // retries across frames: the scroll triggers an async window re-render and
@@ -769,6 +797,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
 
   const handleActivateRow = useCallback((node: FileNode, index: number) => {
     setFocusedIndex(index);
+    if (node.outsideRoot) return;
     if (node.isDir) {
       setExpandedPaths((prev) => {
         if (prev.has(node.fullPath)) {
@@ -810,7 +839,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         }
       }
     } else if (event.key === "ArrowRight") {
-      if (!node.isDir) return;
+      if (!node.isDir || node.outsideRoot) return;
       event.preventDefault();
       if (!expandedPathsRef.current.has(node.fullPath)) {
         handleToggleExpanded(node.fullPath, true);
@@ -1023,23 +1052,6 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cwd, hostId, workspaceKey, refreshKey, treeRefreshKey]);
 
-  // Flipping "Show hidden items" changes what every listing returns, so no
-  // cached directory listing may survive it: drop the map (the root and every
-  // expanded directory are then re-fetched by the effects above — the cached
-  // listings of collapsed directories would otherwise be served stale when
-  // they expand) and supersede the generation, so listings still in flight
-  // from the previous mode are discarded instead of repopulating the map.
-  // Expansion state is deliberately kept.
-  useEffect(() => {
-    if (prevShowHiddenRef.current === showHidden) return;
-    prevShowHiddenRef.current = showHidden;
-    listingGenerationRef.current += 1;
-    setChildrenByPath(new Map());
-    loadingPathsRef.current = new Set();
-    setLoadingPaths(new Set());
-    setTreeRefreshKey((key) => key + 1);
-  }, [showHidden]);
-
   // Fetch any expanded directory that has no listing yet. Clicks, keyboard,
   // and reveal all funnel through expandedPaths, so this single effect covers
   // every expansion path — including levels that mount while a reveal
@@ -1181,7 +1193,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                 rowCount={rows.length}
                 cwd={cwd}
                 hostId={hostId}
-                open={node.isDir && expandedPaths.has(node.fullPath)}
+                open={node.isDir && !node.outsideRoot && expandedPaths.has(node.fullPath)}
                 loading={loadingPaths.has(node.fullPath)}
                 highlighted={highlightedPaths.has(node.fullPath)}
                 isActiveFile={!node.isDir && normalizedActiveFilePath === normalizeFilePathSlashes(node.fullPath)}
