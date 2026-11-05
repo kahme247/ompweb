@@ -15,9 +15,10 @@ The composer refuses every file that is neither an image nor text (a `.zip` cann
 - When the prompt is sent, the server appends one block to the message:
   ```
   Attached files (this session's local:// directory):
-  - local://uploads/data.zip (/home/u/.omp/agent/sessions/…/local/uploads/data.zip, 12.3 MB, application/zip)
+  - [`local://uploads/data.zip`](/home/u/.omp/agent/sessions/…/local/uploads/data.zip) (/home/u/.omp/agent/sessions/…/local/uploads/data.zip, 12.3 MB, application/zip)
   ```
-  The `local://` URL is for omp's tools; the absolute path is for shell commands.
+  The `local://` URL is for omp's tools; the absolute path in the parentheses, exact, is for shell commands. Each URL is a Markdown link (a code span whose fence outruns any backtick run in it) to the percent-encoded path (`encodeURI`, plus `(`, `)`, `#`, `?`, `&`), so the chat opens the file from it whatever the name holds. Chat Markdown keeps Windows drive hrefs (`C:%5C…`, `C:/…`), which the sanitizer would otherwise read as a scheme. Where the chat has no file panel (a remote host's session, whose files main cannot read), a path link renders as its text.
+  Local file links handle modified left-clicks in the file panel and suppress middle-click navigation to filesystem paths.
 - Limits: 2 GiB per file, 20 files per message.
 
 ### U2. What the composer does

@@ -101,6 +101,8 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
     // flag must replace an idle child to take effect; busy children keep
     // running and pick the flag up at the next natural respawn.
     const existing = getRpcSession(id);
+    let resumeId = id;
+    let resumeHost: AgentSessionWrapper["host"] | undefined;
     const noSpawn = Object.hasOwn(NO_SPAWN_REPLIES, type);
     const liveOnly = LIVE_SESSION_ONLY.has(type);
     if (existing?.isAlive()) {
@@ -111,6 +113,8 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
       // Disposing a child behind a down link would wait for the link to return.
       const offline = hostOfflineResponse(existing.host);
       if (offline) return offline;
+      resumeId = existing.sessionId;
+      resumeHost = existing.host;
       await existing.destroyAndWait();
     }
     if (noSpawn) return Response.json({ success: true, data: NO_SPAWN_REPLIES[type] });
@@ -121,12 +125,12 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
       );
     }
 
-    const resolved = await resolveSessionHostOr404(id);
+    const resolved = resumeHost ? { host: resumeHost } : await resolveSessionHostOr404(resumeId);
     if ("response" in resolved) return resolved.response;
     const { host } = resolved;
     const offline = hostOfflineResponse(host);
     if (offline) return offline;
-    const target = await sessionSpawnTarget(id, host);
+    const target = await sessionSpawnTarget(resumeId, host);
     if (!target) return Response.json({ error: "Session not found", code: "session_not_found" }, { status: 404 });
 
     // A cold set_model must reach omp before the saved model is restored:

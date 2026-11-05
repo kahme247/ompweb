@@ -207,6 +207,8 @@ export type ExtensionUiRequest =
       method: "input";
       title: string;
       placeholder?: string;
+      secret?: boolean;
+      password?: boolean;
       timeout?: number;
       expiresAt?: number;
     }

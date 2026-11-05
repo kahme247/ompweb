@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from "fs";
+import { existsSync, readdirSync, realpathSync } from "fs";
 import { homedir } from "os";
 import path from "path";
 import { getAgentDir, getConfigRoot } from "./omp/paths";
@@ -67,30 +67,78 @@ export function getConfigAgentRoots(): string[] {
 }
 
 /**
- * Files inside the omp config/agent roots that must stay unreadable through the
- * generic file API even though their directory is an allowed root (#135).
+ * omp's own secret files, which must stay unreadable through the generic file
+ * API even though their directory is an allowed root (#135).
  *
- * `~/.omp/agent/agent.db` is omp's credential store (API keys) and `models.yml`
- * can carry an `apiKey` for custom models, so making the config root readable
- * to view a rule file would also hand out secrets over `?type=download`. Both
- * are already reachable through their purpose-built routes
- * (`app/api/auth/api-key/*`, `app/api/models-config/route.ts`) which redact or
- * scope what they return, so nothing legitimate needs the generic path.
+ * `agent.db` is omp's credential store (API keys; its SQLite sidecars and
+ * backups hold the same) and `models.yml` can carry an `apiKey` for custom
+ * models (`models.yaml` / `models.json` are its other names). Both are already
+ * reachable through their purpose-built routes (`app/api/auth/api-key/*`,
+ * `app/api/models-config/route.ts`), which redact or scope what they return.
+ *
+ * Only the files omp itself keeps are denied: those directly in an agent dir
+ * (`PI_CODING_AGENT_DIR`, `<config root>/agent`, `<config root>/profiles/<name>/agent`).
+ * A file of the same name deeper down, such as an upload in a session's
+ * `local/uploads/`, is not omp's and opens like any other. Resolve both the
+ * agent directories and their protected files: either can be symlinked.
  */
-const CONFIG_ROOT_DENIED_FILES: ReadonlySet<string> = new Set(["agent.db", "models.yml"]);
+const OMP_SECRET_NAME = /^(?:agent\.db(?:-wal|-shm|-journal|\..+)?|models\.(?:yml|yaml|json))$/i;
 
-export function isConfigRootDeniedFile(filePath: string): boolean {
-  const base = normalizeSlashes(filePath);
-  const name = base.slice(base.lastIndexOf("/") + 1).toLowerCase();
-  // SQLite sidecars carry the same credentials as the db itself.
-  if (CONFIG_ROOT_DENIED_FILES.has(name)) return true;
-  return CONFIG_ROOT_DENIED_FILES.has(name.split(".").slice(0, -1).join(".")) && name.includes(".db");
+export function isOmpSecretFile(filePath: string): boolean {
+  // Follow the original path before any lexical normalization: link/.. is
+  // resolved by the filesystem, not necessarily by path.resolve's string rules.
+  const requested = resolvedOrSelf(filePath);
+  const target = comparablePath(requested);
+  const protectedName = OMP_SECRET_NAME.test(path.basename(requested));
+  const parents = new Set([path.dirname(requested), resolvedOrSelf(path.dirname(filePath))].map(comparablePath));
+  const profiles = comparablePath(path.join(getConfigRoot(), "profiles"));
+  if (protectedName) {
+    for (const parent of parents) {
+      if (path.posix.basename(parent) === "agent" && path.posix.dirname(path.posix.dirname(parent)) === profiles) return true;
+    }
+  }
+  for (const dir of ompAgentDirs()) {
+    if (protectedName && (parents.has(comparablePath(dir)) || parents.has(comparablePath(resolvedOrSelf(dir))))) return true;
+    const names = new Set(["agent.db", "models.yml", "models.yaml", "models.json"]);
+    try {
+      for (const name of readdirSync(dir)) if (OMP_SECRET_NAME.test(name)) names.add(name);
+    } catch { /* missing directory: the fixed names still cover dangling credential links */ }
+    const files = [...names].map((name) => path.join(dir, name));
+    // SQLite sidecars/backups may live beside the canonical database and may
+    // themselves be symlinks. Compare exact resolved files, never a path prefix.
+    const database = resolvedOrSelf(path.join(dir, "agent.db"));
+    const databaseDir = path.dirname(database);
+    const databaseName = path.basename(database);
+    const sidecars = new Set(["-wal", "-shm", "-journal"].map((suffix) => `${databaseName}${suffix}`));
+    try {
+      for (const name of readdirSync(databaseDir)) if (name.startsWith(`${databaseName}.`)) sidecars.add(name);
+    } catch { /* absent database directory */ }
+    for (const name of sidecars) files.push(path.join(databaseDir, name));
+    for (const file of files) {
+      if (target === comparablePath(resolvedOrSelf(file))) return true;
+    }
+  }
+  return false;
 }
 
-/** True when `filePath` lives under one of the omp config/agent roots. */
-export function isUnderConfigRoot(filePath: string, configRoots: readonly string[]): boolean {
-  const target = normalizeSlashes(filePath);
-  return configRoots.some((root) => isPathWithinRoots(target, new Set([normalizeSlashes(root)])));
+/** Every agent dir omp may keep its secrets in: the active one, the default one and each profile's. */
+function ompAgentDirs(): string[] {
+  const configRoot = getConfigRoot();
+  const dirs = [getAgentDir(), path.join(configRoot, "agent")];
+  try {
+    for (const profile of readdirSync(path.join(configRoot, "profiles"))) dirs.push(path.join(configRoot, "profiles", profile, "agent"));
+  } catch { /* no profiles */ }
+  return dirs;
+}
+
+function resolvedOrSelf(dir: string): string {
+  try { return realpathSync.native(dir); } catch { return dir; }
+}
+
+/** Canonical comparison keys preserve literal POSIX backslashes and fold Windows path spelling only. */
+function comparablePath(filePath: string): string {
+  const normalized = (process.platform === "win32" ? normalizeSlashes(filePath) : filePath).replace(/\/+$/, "");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
 export async function getAllowedFileRoots(): Promise<Set<string>> {

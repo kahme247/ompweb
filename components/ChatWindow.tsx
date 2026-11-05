@@ -1542,6 +1542,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
             {extensionDialog && (
               <div style={{ marginBottom: 8 }}>
                 <ExtensionDialog
+                  key={extensionDialog.id}
                   request={extensionDialog}
                   onRespond={respondToExtensionUi}
                   attached
