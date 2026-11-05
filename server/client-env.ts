@@ -22,7 +22,7 @@ export function clientEnv(root: string, worker: string) {
   try {
     const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
     if (!git("rev-parse", "--show-prefix") && !git("tag", "--points-at", "HEAD")) {
-      [commitHash, commitDate] = git("log", "-1", "--format=%H%n%cs").split("\n");
+      [commitHash, commitDate] = git("log", "-1", "--no-show-signature", "--format=%H%n%cs").split("\n");
     }
   } catch {
     // Source archives and installed packages need not have Git metadata or Git installed.
