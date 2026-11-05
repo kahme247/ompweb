@@ -1844,6 +1844,116 @@ test("a chat with no stream attaches when the running channel reports its sessio
   assert.equal(w.latest.displayModel.modelId, "live-model", "the composer shows the run's model");
 });
 
+test("a running attachment applies compaction before its observer opens", async () => {
+  resetWorld();
+  primeSession("compacting-elsewhere", [userMsg("u0", "q")]);
+  const w = await mountSession("compacting-elsewhere");
+  world.agents.set("compacting-elsewhere", { running: true, state: { isCompacting: true } });
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["compacting-elsewhere"] }) });
+    await settle();
+  });
+  assert.equal(lastEs().readyState, FakeStream.CONNECTING);
+  assert.equal(w.latest.isCompacting, true, "the compaction control immediately reflects the attached run");
+  await act(async () => { await w.latest.handleCompact(); });
+  assert.equal(world.calls.some((call) => call.body?.type === "compact"), false, "a second compaction cannot start");
+});
+
+test("matching running frames received during an idle lookup trigger one fresh lookup", async () => {
+  resetWorld();
+  primeSession("late-start", [userMsg("u0", "q")]);
+  const w = await mountSession("late-start");
+  let release;
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === "/api/agent/late-start",
+    produce: () => new Promise((resolve) => { release = () => resolve({ value: { running: false, state: {} } }); }),
+  });
+  const running = world.runningStreams.at(-1);
+  const frame = { type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["late-start"] }) };
+  const gets = callsTo("GET", "/api/agent/late-start").length;
+  await act(async () => {
+    running.deliver(frame);
+    await Promise.resolve();
+  });
+  assert.equal(typeof release, "function", "the first lookup is in flight");
+  world.agents.set("late-start", { running: true, state: { isStreaming: true } });
+  await act(async () => {
+    running.deliver(frame);
+    running.deliver(frame);
+    release();
+    await settle();
+  });
+  assert.equal(callsTo("GET", "/api/agent/late-start").length, gets + 2, "overlapping frames coalesce, but are not dropped");
+  assert.equal(world.esInstances.length, 1);
+  assert.equal(w.latest.agentRunning, true);
+});
+
+test("an idle running lookup without a newer matching frame is not retried", async () => {
+  resetWorld();
+  primeSession("still-idle", [userMsg("u0", "q")]);
+  await mountSession("still-idle");
+  const gets = callsTo("GET", "/api/agent/still-idle").length;
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["still-idle"] }) });
+    await settle();
+  });
+  assert.equal(callsTo("GET", "/api/agent/still-idle").length, gets + 1);
+  assert.equal(world.esInstances.length, 0);
+});
+
+test("a delayed running lookup cannot take ownership of a locally started shell", async () => {
+  resetWorld();
+  primeSession("late-own-shell", [userMsg("u0", "q")]);
+  const w = await mountSession("late-own-shell");
+  let releaseLookup;
+  let releaseBash;
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === "/api/agent/late-own-shell",
+    produce: () => new Promise((resolve) => { releaseLookup = () => resolve({ value: { running: true, state: { isBashRunning: true } } }); }),
+  }, {
+    match: (method, url, body) => method === "POST" && url === "/api/agent/late-own-shell" && body?.type === "bash",
+    produce: () => new Promise((resolve) => { releaseBash = () => resolve({ value: { success: true, data: { output: "", exitCode: 0 } } }); }),
+  });
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["late-own-shell"] }) });
+    await Promise.resolve();
+  });
+  let bash;
+  await act(async () => { bash = w.latest.handleSend("!sleep 5"); await sleep(30); });
+  assert.equal(w.latest.bashRunning, true);
+  await act(async () => { releaseLookup(); await settle(); });
+  assert.equal(world.esInstances.length, 0, "executeBash still exclusively owns the command's settlement");
+  assert.equal(w.latest.bashRunning, true);
+  await act(async () => { releaseBash(); await bash; });
+  assert.equal(w.latest.bashRunning, false);
+});
+
+test("a delayed running lookup cannot replace a side question's readiness wait", async () => {
+  resetWorld();
+  primeSession("late-btw", [userMsg("u0", "q")]);
+  const w = await mountSession("late-btw");
+  let release;
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === "/api/agent/late-btw",
+    produce: () => new Promise((resolve) => { release = () => resolve({ value: { running: true, state: { isStreaming: true } } }); }),
+  });
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["late-btw"] }) });
+    await Promise.resolve();
+  });
+  let asking;
+  await act(async () => { asking = w.latest.askBtw("side question"); await sleep(30); });
+  const source = lastEs();
+  assert.equal(source.readyState, FakeStream.CONNECTING);
+  const gets = callsTo("GET", "/api/sessions/late-btw/state").length;
+  await act(async () => { release(); await settle(); });
+  assert.equal(world.esInstances.length, 1);
+  assert.equal(source.closedByCaller, false);
+  assert.equal(w.latest.agentRunning, false, "the stale lookup cannot manufacture a prompt run");
+  assert.equal(callsTo("GET", "/api/sessions/late-btw/state").length, gets, "the stale lookup cannot refresh composer state");
+  await act(async () => { source.open(); await asking; });
+});
+
 test("a running frame never touches a chat that already has its stream", async () => {
   resetWorld();
   primeSession("s1", [userMsg("u0", "q")]);
