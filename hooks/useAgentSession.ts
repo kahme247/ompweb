@@ -329,6 +329,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // False once this hook instance unmounts: background loops (prompt/bash
   // settlement polling) must not keep firing on a dead instance.
   const hookAliveRef = useRef(true);
+  const pendingHostToolControllersRef = useRef(new Map<string, AbortController>());
   const [modelNames, setModelNames] = useState<Record<string, string>>({});
   const [modelList, setModelList] = useState<ModelEntry[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
@@ -1581,20 +1582,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const handleHostToolCall = useCallback(async (id: string, toolName: string, args: Record<string, unknown>) => {
     const sid = sessionIdRef.current;
-    if (!sid) return;
-    const { text, isError } = await runHostTool(toolName, args, {
-      openUrl: onOpenUrl ?? ((url) => {
-        window.open(url, "_blank", "noopener,noreferrer")?.focus?.();
-        return `Opened ${url}`;
-      }),
-      openFile: onOpenFile ? (path, name) => {
-        if (!hookAliveRef.current) throw new Error("File not opened: the requesting chat is no longer active");
-        onOpenFile(path, name, {
-          sessionId: sid, hostId: session?.hostId ?? newSessionHostId ?? "local", cwd: session?.cwd ?? newSessionCwd,
-        });
-      } : undefined,
-    }, sid);
-    await respondHostTool(sid, id, text, isError);
+    if (!sid || pendingHostToolControllersRef.current.has(id)) return;
+    const controller = new AbortController();
+    pendingHostToolControllersRef.current.set(id, controller);
+    try {
+      const { text, isError } = await runHostTool(toolName, args, {
+        openUrl: onOpenUrl ?? ((url) => {
+          window.open(url, "_blank", "noopener,noreferrer")?.focus?.();
+          return `Opened ${url}`;
+        }),
+        openFile: onOpenFile ? (path, name) => {
+          if (!hookAliveRef.current) throw new Error("File not opened: the requesting chat is no longer active");
+          onOpenFile(path, name, {
+            sessionId: sid, hostId: session?.hostId ?? newSessionHostId ?? "local", cwd: session?.cwd ?? newSessionCwd,
+          });
+        } : undefined,
+      }, sid, controller.signal);
+      if (!controller.signal.aborted) await respondHostTool(sid, id, text, isError);
+    } finally {
+      pendingHostToolControllersRef.current.delete(id);
+    }
   }, [onOpenFile, onOpenUrl, respondHostTool, session?.hostId, session?.cwd, newSessionHostId, newSessionCwd]);
 
   /** Answer a host_uri_request (agent read/write of a registered scheme). */
@@ -2713,6 +2720,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const toolName = typeof event.toolName === "string" ? event.toolName : "";
         const args = isRecord(event.arguments) ? event.arguments : {};
         if (id && toolName) void handleHostToolCall(id, toolName, args);
+        break;
+      }
+      case "host_tool_cancel": {
+        if (typeof event.targetId === "string") pendingHostToolControllersRef.current.get(event.targetId)?.abort();
         break;
       }
       case "host_uri_request": {
@@ -4440,8 +4451,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // This lifetime cleanup must survive the mount-load latch's early return
     // on StrictMode replay. The observer may attach after that first cleanup.
     hookAliveRef.current = true;
+    const pendingHostTools = pendingHostToolControllersRef.current;
     return () => {
       hookAliveRef.current = false;
+      for (const controller of pendingHostTools.values()) controller.abort();
       clearTerminalReconcileTimer();
       bashRecoveryIdRef.current += 1;
       eventCoalescerRef.current?.reset();

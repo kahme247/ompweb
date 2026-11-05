@@ -2921,6 +2921,35 @@ test("an open_file local:// call whose lookup fails answers the agent with that 
   assert.deepEqual([answer?.body.id, answer?.body.isError, answer?.body.result.content[0].text], ["h2", true, lookupError]);
 });
 
+test("canceling a pending file open leaves other requests and a later run untouched", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  let release;
+  world.holds.push({
+    match: (method, url) => method === "GET" && url.includes("/api/sessions/s1/local-file"),
+    produce: () => new Promise(resolve => { release = () => resolve({ value: { path: "/sessions/s1/local/canceled.md" } }); }),
+  });
+  const opened = [];
+  const { w, es } = await startRun("s1", "q1", false, { onOpenFile: (...args) => { opened.push(args); } });
+  await act(async () => {
+    es.emit({ type: "host_tool_call", id: "canceled-open", toolName: "open_file", arguments: { path: "local://canceled.md" } });
+    await sleep(10);
+  });
+  assert.equal(typeof release, "function");
+  await act(async () => {
+    es.emit({ type: "host_tool_cancel", targetId: "canceled-open" });
+    es.emit({ type: "host_tool_call", id: "other-open", toolName: "open_file", arguments: { path: "/workspace/other.md" } });
+    es.emit({ type: "agent_start" });
+    release();
+    await settle();
+  });
+  assert.deepEqual(opened, [["/workspace/other.md", "other.md", "s1"]]);
+  assert.equal(w.latest.agentRunning, true);
+  const answers = callsTo("POST", "/api/agent/s1").filter(call => call.body?.type === "host_tool_result");
+  assert.ok(answers.some(call => call.body.id === "other-open" && !call.body.isError));
+  assert.ok(!answers.some(call => call.body.id === "canceled-open"), "a withdrawn request is not answered later");
+});
+
 test("a delayed local-file lookup cannot open a tab after its chat unmounts", async () => {
   resetWorld();
   primeSession("s1", [userMsg("u0", "q")]);
@@ -2942,8 +2971,7 @@ test("a delayed local-file lookup cannot open a tab after its chat unmounts", as
   await act(async () => { release(); await settle(); });
   assert.deepEqual(opened, [], "the previous chat cannot take over the new view");
   const answer = callsTo("POST", "/api/agent/s1").find(call => call.body?.type === "host_tool_result");
-  assert.equal(answer?.body.isError, true, "the requesting agent learns that no file was opened");
-  assert.match(answer.body.result.content[0].text, /no longer active/i);
+  assert.equal(answer, undefined, "leaving the chat must not send a late callback that could restart its child");
 });
 
 test("a delayed local-file lookup survives a confirmed Edit identity move", async (t) => {

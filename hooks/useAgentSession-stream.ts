@@ -340,12 +340,15 @@ export interface HostToolHandlers {
 export const LOCAL_FILE_LOOKUP_TIMEOUT_MS = 30_000;
 
 /** A session's `local://` file as the absolute path the file viewer opens, found by the server that holds the session. */
-async function resolveLocalFile(sessionId: string | undefined, uri: string): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
+async function resolveLocalFile(sessionId: string | undefined, uri: string, signal?: AbortSignal): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
   if (!sessionId) return { ok: false, error: "A local:// file belongs to a session, and no session asked for it" };
   const unanswered = { ok: false as const, error: `Could not open ${uri}: the server did not answer` };
   // An AbortController and a timer, not AbortSignal.timeout (older browsers lack it): a stalled request must not leave
   // the agent's tool call pending until the tab goes away.
   const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) controller.abort();
   const timer = setTimeout(() => controller.abort(), LOCAL_FILE_LOOKUP_TIMEOUT_MS);
   try {
     const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/local-file?uri=${encodeURIComponent(uri)}`, { signal: controller.signal });
@@ -357,6 +360,7 @@ async function resolveLocalFile(sessionId: string | undefined, uri: string): Pro
     return unanswered;
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
   }
 }
 
@@ -372,8 +376,11 @@ export async function runHostTool(
   args: Record<string, unknown>,
   handlers: HostToolHandlers,
   sessionId: string | undefined,
+  signal?: AbortSignal,
 ): Promise<{ text: string; isError: boolean }> {
   const str = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
+  const canceled = { text: "Host tool request canceled", isError: true };
+  if (signal?.aborted) return canceled;
   switch (toolName) {
     case "open_url": {
       const raw = str(args.url) ?? "";
@@ -386,10 +393,12 @@ export async function runHostTool(
       if (typeof Notification !== "undefined") {
         try {
           const permission = Notification.permission === "default" ? await Notification.requestPermission() : Notification.permission;
+          if (signal?.aborted) return canceled;
           if (permission === "granted") {
             const options = { body: message, icon: "/icon-192.png", badge: "/badge-96.png" };
             // Chrome on Android only allows notifications through a service worker.
             const registration = "serviceWorker" in navigator ? await navigator.serviceWorker.getRegistration() : undefined;
+            if (signal?.aborted) return canceled;
             if (registration) await registration.showNotification(title, options);
             else new Notification(title, options);
           }
@@ -404,7 +413,8 @@ export async function runHostTool(
       if (!requested) return { text: "No path provided", isError: true };
       let path = requested;
       if (isLocalUri(requested)) {
-        const resolved = await resolveLocalFile(sessionId, requested);
+        const resolved = await resolveLocalFile(sessionId, requested, signal);
+        if (signal?.aborted) return canceled;
         if (!resolved.ok) return { text: resolved.error, isError: true };
         path = resolved.path;
       }
