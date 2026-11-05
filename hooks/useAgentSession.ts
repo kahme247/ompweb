@@ -1587,9 +1587,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         window.open(url, "_blank", "noopener,noreferrer")?.focus?.();
         return `Opened ${url}`;
       }),
-      openFile: onOpenFile ? (path, name) => onOpenFile(path, name, {
-        sessionId: sid, hostId: session?.hostId ?? newSessionHostId ?? "local", cwd: session?.cwd ?? newSessionCwd,
-      }) : undefined,
+      openFile: onOpenFile ? (path, name) => {
+        if (!hookAliveRef.current) throw new Error("File not opened: the requesting chat is no longer active");
+        onOpenFile(path, name, {
+          sessionId: sid, hostId: session?.hostId ?? newSessionHostId ?? "local", cwd: session?.cwd ?? newSessionCwd,
+        });
+      } : undefined,
     }, sid);
     await respondHostTool(sid, id, text, isError);
   }, [onOpenFile, onOpenUrl, respondHostTool, session?.hostId, session?.cwd, newSessionHostId, newSessionCwd]);

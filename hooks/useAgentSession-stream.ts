@@ -412,8 +412,8 @@ export async function runHostTool(
       if (handlers.openFile) {
         try {
           text = handlers.openFile(path, path.split(/[\\/]/).pop() || path);
-        } catch {
-          // ignore navigation failures
+        } catch (error) {
+          return { text: error instanceof Error ? error.message : `Could not open ${requested}`, isError: true };
         }
       }
       return { text: text || `Opened ${requested}`, isError: false };

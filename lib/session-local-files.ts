@@ -35,7 +35,7 @@ async function sessionLocalRootFor(sessionId: string | null): Promise<SessionLoc
     };
   }
   const sessionFile = running?.sessionFile || (await sessionSpawnTarget(sessionId, host))?.sessionFile;
-  return sessionFile ? { ok: true, root: sessionLocalRoot(sessionFile, sessionId) } : SESSION_NOT_FOUND;
+  return sessionFile ? { ok: true, root: sessionLocalRoot(sessionFile, running?.sessionId ?? sessionId) } : SESSION_NOT_FOUND;
 }
 
 /** True when `target`, or its nearest existing ancestor (so a missing file still counts), resolves through symlinks to

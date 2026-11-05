@@ -673,11 +673,13 @@ export function AppShell({ appName }: { appName: string }) {
   const [autoNameStatus, setAutoNameStatus] = useState<AutoNameStatus>({ kind: "idle" });
   const autoNameTimerRef = useRef<TimerHandle | undefined>(undefined);
   const activeSessionIdRef = useRef<string | null>(selectedSession?.id ?? null);
+  const activeSettingsTabRef = useRef(settingsTab);
   const archiveRetryTimerRef = useRef<TimerHandle | undefined>(undefined);
   useEffect(() => () => clearTimeout(archiveRetryTimerRef.current), []);
   useLayoutEffect(() => {
     activeSessionIdRef.current = selectedSession?.id ?? null;
-  }, [selectedSession?.id]);
+    activeSettingsTabRef.current = settingsTab;
+  }, [selectedSession?.id, settingsTab]);
   const handleSessionStatsChange = useCallback((stats: SessionStatsInfo | null) => {
     setSessionStats(stats);
   }, []);
@@ -1573,11 +1575,11 @@ export function AppShell({ appName }: { appName: string }) {
   const handleSessionOpenUrl = useCallback((url: string) => requestOpenUrl(url, selectedSession?.id ?? "", false), [requestOpenUrl, selectedSession?.id]);
   const handleCrossSessionHostTool = useCallback(async (call: CrossSessionHostToolCall) => {
     // Full-page Settings hides the chat, so its session counts as not viewed.
-    const viewing = call.sessionId === selectedSession?.id && !settingsTab;
+    const viewing = () => call.sessionId === activeSessionIdRef.current && !activeSettingsTabRef.current;
     const { text, isError } = await runHostTool(call.toolName, call.arguments, {
-      openUrl: (url) => requestOpenUrl(url, call.sessionId, !viewing),
+      openUrl: (url) => requestOpenUrl(url, call.sessionId, !viewing()),
       openFile: (path, name) => {
-        if (viewing) return handleOpenFile(path, name, call);
+        if (viewing()) return handleOpenFile(path, name, call);
         setPendingOpens((queue) => [...queue, { kind: "file", target: path, name, sessionId: call.sessionId, source: call, crossSession: true }]);
         return `Asked the user to confirm opening ${path}; they are viewing another omp-web session.`;
       },
@@ -1592,7 +1594,7 @@ export function AppShell({ appName }: { appName: string }) {
     } catch (e) {
       console.error("Failed to send host tool result:", e);
     }
-  }, [handleOpenFile, requestOpenUrl, selectedSession?.id, settingsTab]);
+  }, [handleOpenFile, requestOpenUrl]);
   const crossSessionHostToolRef = useRef(handleCrossSessionHostTool);
   useEffect(() => { crossSessionHostToolRef.current = handleCrossSessionHostTool; }, [handleCrossSessionHostTool]);
   useEffect(() => {

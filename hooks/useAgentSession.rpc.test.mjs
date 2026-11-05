@@ -2921,6 +2921,58 @@ test("an open_file local:// call whose lookup fails answers the agent with that 
   assert.deepEqual([answer?.body.id, answer?.body.isError, answer?.body.result.content[0].text], ["h2", true, lookupError]);
 });
 
+test("a delayed local-file lookup cannot open a tab after its chat unmounts", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  primeSession("s2", [userMsg("u0", "another chat")]);
+  let release;
+  world.holds.push({
+    match: (method, url) => method === "GET" && url.includes("/api/sessions/s1/local-file"),
+    produce: () => new Promise(resolve => { release = () => resolve({ value: { path: "/sessions/s1/local/note.md" } }); }),
+  });
+  const opened = [];
+  const { w, es } = await startRun("s1", "q1", false, { onOpenFile: (...args) => { opened.push(args); } });
+  await act(async () => {
+    es.emit({ type: "host_tool_call", id: "late-open", toolName: "open_file", arguments: { path: "local://note.md" } });
+    await sleep(10);
+  });
+  assert.equal(typeof release, "function", "the original session's lookup is pending");
+  await act(async () => { w.unmount(); });
+  await mountSession("s2");
+  await act(async () => { release(); await settle(); });
+  assert.deepEqual(opened, [], "the previous chat cannot take over the new view");
+  const answer = callsTo("POST", "/api/agent/s1").find(call => call.body?.type === "host_tool_result");
+  assert.equal(answer?.body.isError, true, "the requesting agent learns that no file was opened");
+  assert.match(answer.body.result.content[0].text, /no longer active/i);
+});
+
+test("a delayed local-file lookup survives a confirmed Edit identity move", async (t) => {
+  resetWorld();
+  const sid = "file-open-before-move";
+  const target = `${sid}-owned`;
+  const native = primeEditableHistory(sid);
+  native.moveTo = target;
+  await attachEditableWrapper(t, native);
+  const opened = [];
+  const w = await mountMovableChat(sid, { onOpenFile: (...args) => { opened.push(args); } });
+  let release;
+  world.holds.push({
+    match: (method, url) => method === "GET" && url.includes(`/api/sessions/${sid}/local-file`),
+    produce: () => new Promise(resolve => { release = () => resolve({ value: { path: `/sessions/${target}/local/note.md` } }); }),
+  });
+  await act(async () => {
+    lastEs().emit({ type: "host_tool_call", id: "moved-open", toolName: "open_file", arguments: { path: "local://note.md" } });
+    await sleep(10);
+  });
+  assert.equal(typeof release, "function");
+  await confirmEdit(w.view, w.editButton());
+  await until(() => w.selectedId === target, "the real Edit response confirms the new identity before the lookup completes");
+  await act(async () => { release(); await settle(); });
+  assert.deepEqual(opened, [[`/sessions/${target}/local/note.md`, "note.md", sid]], "the same conversation retains the request's source alias");
+  const answer = callsTo("POST", `/api/agent/${sid}`).find(call => call.body?.type === "host_tool_result");
+  assert.equal(answer?.body.isError, false);
+});
+
 test("SSE open merges the btw history; a no-op cancel re-reads it and settles a record omp lost", async () => {
   resetWorld();
   primeSession("s1", [userMsg("u0", "q")]);
@@ -3638,7 +3690,7 @@ async function attachEditableWrapper(t, native, { holdHistory = false } = {}) {
   };
 }
 
-async function mountMovableChat(initialId) {
+async function mountMovableChat(initialId, { onOpenFile } = {}) {
   const chatInputRef = React.createRef();
   let selectedId = initialId;
   let navigate;
@@ -3655,7 +3707,7 @@ async function mountMovableChat(initialId) {
       window.history.replaceState(null, "", `?session=${encodeURIComponent(id)}`);
     };
     return React.createElement(ChatWindow, {
-      key: navigationKey, session, newSessionCwd: null, chatInputRef, onBranchDataChange,
+      key: navigationKey, session, newSessionCwd: null, chatInputRef, onBranchDataChange, onOpenFile,
       onSessionMoved(oldId, newId) {
         if (selectedId !== oldId) return;
         selectedId = newId;
