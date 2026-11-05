@@ -130,7 +130,7 @@ async function flushOutbox() {
     // Oldest first, and a session's later entries wait while an earlier one fails: the server queues by arrival.
     entries.sort(compareOutbox);
     const waiting = new Set();
-    for (const { id, sessionId, scope, advisor, mode, message, images, uploads, state, createdAt } of entries) {
+    for (const { id, sessionId, scope, advisor, mode, message, images, uploads, uploadProofs, state, createdAt } of entries) {
       // Expired or unscoped rows must never be rebound: the page's worker marks them not sent.
       if (state !== "sending" || typeof scope !== "string" || !scope || Date.now() - createdAt > 7 * 24 * 60 * 60 * 1000 || waiting.has(sessionId)) continue;
       // A running worker may have added or accepted an entry since our snapshot: only the shared session head can go.
@@ -141,7 +141,7 @@ async function flushOutbox() {
       let error;
       let timer;
       try {
-        const body = JSON.stringify({ type: "outbox_add", id, scope, mode, message, images, uploads });
+        const body = JSON.stringify({ type: "outbox_add", id, scope, mode, message, images, uploads, uploadProofs });
         // Include the body read: a half-open POST must not keep every later sync entry waiting forever.
         const controller = new AbortController();
         timer = setTimeout(() => controller.abort(), 40_000 + Math.ceil(body.length / 2));

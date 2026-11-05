@@ -59,7 +59,7 @@ export interface CommandReply {
 type CommandMessage = { cmd: number; http: true } | ({ cmd: number } & Omit<CommandReply, "via">);
 
 /** The worker about an upload: progress (the bytes the host has), its failure, or `http` (SSE mode: the tab uploads it). */
-type UploadMessage = { up: string; received: number; done: boolean } | { up: string; error: { status: number; code: string; message: string } } | { up: string; http: true };
+type UploadMessage = { up: string; received: number; done: boolean; proof?: string } | { up: string; error: { status: number; code: string; message: string } } | { up: string; http: true };
 
 type DiagnosticsMessage = { diag: number; data: ConnectionDiagnostics };
 
@@ -77,6 +77,7 @@ export interface LocalOutboxEntry {
   message: string;
   images?: { type: "image"; data: string; mimeType: string }[];
   uploads?: string[];
+  uploadProofs?: Record<string, string>;
   createdAt: number;
   /** Allocated atomically by IndexedDB acceptance; absent only on preexisting rows. */
   enqueueOrder?: number;
@@ -369,11 +370,11 @@ function postOutboxOnExit(): void {
   if (outboxPartial) return;
   let left = KEEPALIVE_BYTES;
   const sessions = new Set<string>();
-  for (const { id, sessionId, scope, advisor, mode, message, images, uploads, state, createdAt } of outboxEntries ?? []) {
+  for (const { id, sessionId, scope, advisor, mode, message, images, uploads, uploadProofs, state, createdAt } of outboxEntries ?? []) {
     if (state !== "sending" || typeof scope !== "string" || !scope || Date.now() - createdAt > 7 * 24 * 60 * 60 * 1000 || sessions.has(sessionId)) continue;
     sessions.add(sessionId);
     if (!addedHere.has(id)) continue;
-    const body = JSON.stringify({ type: "outbox_add", id, scope, mode, message, images, uploads });
+    const body = JSON.stringify({ type: "outbox_add", id, scope, mode, message, images, uploads, uploadProofs });
     const bytes = new Blob([body]).size;
     if (bytes > left) continue;
     left -= bytes;
@@ -536,7 +537,7 @@ export class UploadFailedError extends Error {
 export interface UploadHandle {
   id: string;
   /** Resolves once the host has every byte (synced); rejects with UploadFailedError, or a network error over HTTP. */
-  promise: Promise<void>;
+  promise: Promise<{ proof?: string }>;
   /** Stops it, requests deletion of the staged file, and rejects a pending upload. */
   abort(): void;
 }
@@ -594,17 +595,17 @@ export function uploadFile(
     onProgress(received);
   };
   // One start: the transport is chosen anew each time (it may have changed while the upload waited).
-  const attempt = () => new Promise<void>((resolve, reject) => {
+  const attempt = () => new Promise<{ proof?: string }>((resolve, reject) => {
     const request = new AbortController();
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let deadline = outageAt === null ? null : outageAt + RESUME_GIVE_UP_MS;
-    const finish = (error?: unknown) => {
+    const finish = (error?: unknown, result?: { proof?: string }) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       controller.signal.removeEventListener("abort", cancel);
-      if (error === undefined) resolve();
+      if (error === undefined) resolve(result ?? {});
       else reject(error);
     };
     const cancel = () => {
@@ -645,7 +646,7 @@ export function uploadFile(
     const overHttp = () => {
       if (settled) return;
       viaLink = false;
-      uploadOverHttp(id, file, hostId, report, request.signal).then(() => finish(), finish);
+      uploadOverHttp(id, file, hostId, report, request.signal).then((result) => finish(undefined, result), finish);
     };
     viaLink = link !== null;
     if (!link) return overHttp();
@@ -653,7 +654,7 @@ export function uploadFile(
       if (settled) return;
       if ("http" in message) overHttp();
       else if ("error" in message) finish(new UploadFailedError(message.error.status, message.error.code, message.error.message));
-      else if (report(message.received) && message.done) finish();
+      else if (report(message.received) && message.done) finish(undefined, typeof message.proof === "string" ? { proof: message.proof } : {});
     });
   });
   const promise = (async () => {
@@ -698,12 +699,13 @@ export function discardUpload(id: string, hostId: string): void {
 
 /** POST opens or resumes it at the host's offset; each PUT carries up to HTTP_UPLOAD_BYTES from the offset the server
  * last reported (a 409 `upload_offset` says where to go on from). */
-async function uploadOverHttp(id: string, file: File, hostId: string, onProgress: (received: number) => void, signal: AbortSignal): Promise<void> {
+async function uploadOverHttp(id: string, file: File, hostId: string, onProgress: (received: number) => void, signal: AbortSignal): Promise<{ proof?: string }> {
+  let proof: string | undefined;
   const answer = async (response: Response, from: number): Promise<number> => {
     const body = await response.json().catch((error: unknown) => {
       if (!(error instanceof SyntaxError)) throw error;
       return {};
-    }) as { received?: unknown; error?: string; code?: string };
+    }) as { received?: unknown; proof?: unknown; error?: string; code?: string };
     if (!response.ok && !(response.status === 409 && body.code === "upload_offset")) {
       throw new UploadFailedError(response.status, body.code ?? "upload_failed", body.error ?? `HTTP ${response.status}`);
     }
@@ -712,6 +714,7 @@ async function uploadOverHttp(id: string, file: File, hostId: string, onProgress
     if (!Number.isSafeInteger(received) || received < 0 || received > file.size || (from >= 0 && received === from)) {
       throw new UploadFailedError(response.status, "upload_failed", "The server reported no progress");
     }
+    if (response.ok && received === file.size && typeof body.proof === "string") proof = body.proof;
     onProgress(received);
     return received;
   };
@@ -725,4 +728,5 @@ async function uploadOverHttp(id: string, file: File, hostId: string, onProgress
     const body = file.slice(received, received + HTTP_UPLOAD_BYTES);
     received = await answer(await fetch(`/api/uploads/${id}?offset=${received}`, { method: "PUT", body, signal }), received);
   }
+  return proof === undefined ? {} : { proof };
 }

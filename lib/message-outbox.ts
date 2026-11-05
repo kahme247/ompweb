@@ -2,7 +2,7 @@
 // message sent to an existing session is stored here before `outbox_add` answers, then sent to omp by one dispatcher
 // per session, oldest first and one at a time, and leaves once omp has it. The `session` channel shows the entries.
 import { chmodSync, closeSync, mkdirSync, openSync } from "fs";
-import { createHmac } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { join } from "path";
 import { Database } from "bun:sqlite";
 import { commandErrorResponse, runAgentCommand } from "./agent-command";
@@ -16,7 +16,7 @@ import { getRpcSession, getRpcSessionKeys, tapSessionFrames, type AgentEvent, ty
 import { isRecord } from "./type-guards";
 import type { OutboxEntry, OutboxMode } from "./types";
 import { MAX_UPLOADS_PER_MESSAGE, UPLOAD_ID_RE } from "./upload-limits";
-import { restoreOutboxUploads, snapshotOutboxUploads, type OutboxUploadReceipt } from "./uploads";
+import { snapshotOutboxUploads, UploadError, type OutboxUploadReceipt } from "./uploads";
 import { resolveWebAuthSecret } from "./web-auth-secret";
 
 /** Delivered (and removed) ids answer a repeated `outbox_add` this long (spec O2: idempotent by id); the browser gives
@@ -112,15 +112,21 @@ function db(): Database {
       }
     }
     database.exec("PRAGMA synchronous = NORMAL");
-    database.exec(SCHEMA);
-    const columns = database.prepare("PRAGMA table_info(entries)").all() as { name: string }[];
-    for (const [name, type] of [["dispatch_pid", "INTEGER"], ["upload_receipts", "TEXT"], ["payload_bytes", "INTEGER NOT NULL DEFAULT 0"], ["previous_entry_ids", "TEXT"], ["source_session_id", "TEXT"]]) {
-      if (!columns.some((column) => column.name === name)) database.exec(`ALTER TABLE entries ADD COLUMN ${name} ${type}`);
-    }
-    database.exec("UPDATE entries SET source_session_id = session_id WHERE source_session_id IS NULL");
-    for (const entry of database.prepare(`SELECT ${COLUMNS} FROM entries WHERE state != 'delivered' AND payload_bytes = 0`).all() as Row[]) {
-      database.prepare("UPDATE entries SET payload_bytes = ? WHERE id = ?").run(Buffer.byteLength(JSON.stringify(toEntry(entry))) + 8192, entry.id);
-    }
+    database.transaction(() => {
+      database.exec(SCHEMA);
+      const columns = database.prepare("PRAGMA table_info(entries)").all() as { name: string }[];
+      for (const [name, type] of [["dispatch_pid", "INTEGER"], ["upload_receipts", "TEXT"], ["payload_bytes", "INTEGER NOT NULL DEFAULT 0"], ["previous_entry_ids", "TEXT"], ["source_session_id", "TEXT"]]) {
+        if (!columns.some((column) => column.name === name)) database.exec(`ALTER TABLE entries ADD COLUMN ${name} ${type}`);
+      }
+      const uploadColumns = database.prepare("PRAGMA table_info(completed_uploads)").all() as { name: string }[];
+      for (const name of ["proof", "scope"]) {
+        if (!uploadColumns.some((column) => column.name === name)) database.exec(`ALTER TABLE completed_uploads ADD COLUMN ${name} TEXT`);
+      }
+      database.exec("UPDATE entries SET source_session_id = session_id WHERE source_session_id IS NULL");
+      for (const entry of database.prepare(`SELECT ${COLUMNS} FROM entries WHERE state != 'delivered' AND payload_bytes = 0`).all() as Row[]) {
+        database.prepare("UPDATE entries SET payload_bytes = ? WHERE id = ?").run(Buffer.byteLength(JSON.stringify(toEntry(entry))) + 8192, entry.id);
+      }
+    }).immediate();
   } catch (error) {
     database.close(true);
     throw error;
@@ -148,20 +154,49 @@ export function closeOutboxStore(): void {
   globalThis.__ompOutboxStore = undefined;
 }
 
-/** Private completed-upload receipts: committed before the browser receives "done", even before an outbox_add. */
-export function saveCompletedUpload(owner: string, receipt: OutboxUploadReceipt): void {
-  db().prepare("INSERT OR REPLACE INTO completed_uploads (id, owner, receipt, at) VALUES (?, ?, ?, ?)").run(receipt.id, owner, JSON.stringify(receipt), Date.now());
+/** Main-issued completion authority is committed before "done"; replays never renew its original staging lifetime. */
+export function saveCompletedUpload(owner: string, receipt: OutboxUploadReceipt): string | undefined {
+  const database = db();
+  return database.transaction(() => {
+    const stored = database.prepare("SELECT owner, receipt, at, proof, scope FROM completed_uploads WHERE id = ?").get(receipt.id) as CompletedUploadRow | null;
+    const scope = outboxScope();
+    if (stored) {
+      const prior = JSON.parse(stored.receipt) as OutboxUploadReceipt;
+      if (stored.owner !== owner || prior.hostId !== receipt.hostId || prior.name !== receipt.name || prior.size !== receipt.size || prior.type !== receipt.type) {
+        throw new UploadError(409, "upload_id_conflict", "Another upload has this id");
+      }
+      if (Date.now() - stored.at > STAGED_MAX_AGE_MS) return undefined;
+      if (stored.proof) return stored.scope === scope ? stored.proof : undefined;
+      const proof = randomBytes(32).toString("base64url");
+      database.prepare("UPDATE completed_uploads SET proof = ?, scope = ? WHERE id = ?").run(proof, scope, receipt.id);
+      return proof;
+    }
+    const proof = randomBytes(32).toString("base64url");
+    database.prepare("INSERT INTO completed_uploads (id, owner, receipt, at, proof, scope) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(receipt.id, owner, JSON.stringify(receipt), Date.now(), proof, scope);
+    return proof;
+  }).immediate();
 }
 
-/** A receipt belongs only to its original requestOwner; no browser-supplied metadata can create one. */
-export function completedUpload(id: string): { owner: string; receipt: OutboxUploadReceipt } | null {
-  const stored = db().prepare("SELECT owner, receipt, at FROM completed_uploads WHERE id = ?").get(id) as { owner: string; receipt: string; at: number } | null;
+interface CompletedUploadRow { owner: string; receipt: string; at: number; proof: string | null; scope: string | null }
+
+/** Private authority only: never include this result in browser snapshots or native commands. */
+export function completedUpload(id: string): { owner: string; receipt: OutboxUploadReceipt; at: number; proof: string | null; scope: string | null } | null {
+  const stored = db().prepare("SELECT owner, receipt, at, proof, scope FROM completed_uploads WHERE id = ?").get(id) as CompletedUploadRow | null;
   if (!stored || Date.now() - stored.at > STAGED_MAX_AGE_MS) return null;
-  return { owner: stored.owner, receipt: JSON.parse(stored.receipt) as OutboxUploadReceipt };
+  return { ...stored, receipt: JSON.parse(stored.receipt) as OutboxUploadReceipt };
 }
 
-export function forgetCompletedUpload(id: string): void {
-  db().prepare("DELETE FROM completed_uploads WHERE id = ?").run(id);
+export function forgetCompletedUpload(id: string, expected?: Pick<CompletedUploadRow, "owner" | "at" | "proof">): void {
+  if (expected) {
+    db().prepare("DELETE FROM completed_uploads WHERE id = ? AND owner = ? AND at = ? AND proof IS ?")
+      .run(id, expected.owner, expected.at, expected.proof);
+  } else db().prepare("DELETE FROM completed_uploads WHERE id = ?").run(id);
+}
+
+/** Accepted authority reserves an id even if its staging registration was canceled or consumed. */
+export function outboxUsesUpload(id: string): boolean {
+  return db().prepare("SELECT 1 FROM entries, json_each(entries.uploads) AS upload WHERE entries.state != 'delivered' AND upload.value = ? LIMIT 1").get(id) !== null;
 }
 
 function row(id: string): Row | null {
@@ -288,7 +323,7 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
     return oversized ? Response.json({ error: imageError, code: "request_too_large" }, { status: 413 }) : invalid(imageError);
   }
   if (uploads !== undefined && (
-    !Array.isArray(uploads) || uploads.length > MAX_UPLOADS_PER_MESSAGE
+    !Array.isArray(uploads) || uploads.length > MAX_UPLOADS_PER_MESSAGE || new Set(uploads).size !== uploads.length
     || !uploads.every((upload) => typeof upload === "string" && UPLOAD_ID_RE.test(upload))
   )) {
     return invalid(`uploads must be at most ${MAX_UPLOADS_PER_MESSAGE} upload ids`);
@@ -301,23 +336,31 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
   const database = db();
   database.prepare("DELETE FROM entries WHERE state = 'delivered' AND done_at < ?").run(now - KEEP_DELIVERED_MS);
   const keys = sessionKeys(sessionId);
-  const payloadBytes = Buffer.byteLength(JSON.stringify({ id, sessionId, mode, message, images, uploads, state: "waiting_host", createdAt: now })) + 8192;
-  const accepted = database.transaction(() => {
-    if (row(id)) return true; // a concurrent repeat takes no capacity
-    const total = database.prepare(`SELECT COALESCE(SUM(payload_bytes), 0) AS bytes FROM entries WHERE session_id IN (${slots(keys)}) AND state != 'delivered'`).get(...keys) as { bytes: number };
-    if (total.bytes + payloadBytes > MAX_OUTBOX_BYTES - 64 * 1024) return false;
-    const global = database.prepare("SELECT COALESCE(SUM(payload_bytes), 0) AS bytes, COUNT(*) AS count FROM entries WHERE state != 'delivered'").get() as { bytes: number; count: number };
-    if (global.bytes + payloadBytes > MAX_GLOBAL_OUTBOX_BYTES || global.count >= MAX_GLOBAL_OUTBOX_ENTRIES) return false;
-    database.prepare(`INSERT INTO entries (${COLUMNS}, payload_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'held', NULL, 0, ?, ?, NULL, ?, ?)`).run(
-      id, sessionId, mode, message,
-      Array.isArray(images) && images.length ? JSON.stringify(images) : null,
-      Array.isArray(uploads) && uploads.length ? JSON.stringify(uploads) : null,
-      owner, advisor ? 1 : 0, now,
-      Array.isArray(uploads) && uploads.length ? JSON.stringify(snapshotOutboxUploads(uploads as string[], owner)) : null,
-      sessionId, payloadBytes,
-    );
-    return true;
-  }).immediate();
+  const entryBytes = Buffer.byteLength(JSON.stringify({ id, sessionId, mode, message, images, uploads, state: "waiting_host", createdAt: now })) + 8192;
+  let accepted: boolean;
+  try {
+    accepted = database.transaction(() => {
+      if (row(id)) return true; // a concurrent repeat takes no capacity or renewed proof
+      const uploadReceipts = snapshotOutboxUploads(Array.isArray(uploads) ? uploads as string[] : [], owner, command.uploadProofs);
+      const savedUploads = uploadReceipts.length ? JSON.stringify(uploadReceipts) : null;
+      const payloadBytes = entryBytes + (savedUploads ? Buffer.byteLength(savedUploads) : 0);
+      const total = database.prepare(`SELECT COALESCE(SUM(payload_bytes), 0) AS bytes FROM entries WHERE session_id IN (${slots(keys)}) AND state != 'delivered'`).get(...keys) as { bytes: number };
+      if (total.bytes + payloadBytes > MAX_OUTBOX_BYTES - 64 * 1024) return false;
+      const global = database.prepare("SELECT COALESCE(SUM(payload_bytes), 0) AS bytes, COUNT(*) AS count FROM entries WHERE state != 'delivered'").get() as { bytes: number; count: number };
+      if (global.bytes + payloadBytes > MAX_GLOBAL_OUTBOX_BYTES || global.count >= MAX_GLOBAL_OUTBOX_ENTRIES) return false;
+      database.prepare(`INSERT INTO entries (${COLUMNS}, payload_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'held', NULL, 0, ?, ?, NULL, ?, ?)`).run(
+        id, sessionId, mode, message,
+        Array.isArray(images) && images.length ? JSON.stringify(images) : null,
+        Array.isArray(uploads) && uploads.length ? JSON.stringify(uploads) : null,
+        owner, advisor ? 1 : 0, now,
+        savedUploads,
+        sessionId, payloadBytes,
+      );
+      return true;
+    }).immediate();
+  } catch (error) {
+    return commandErrorResponse(error);
+  }
   if (!accepted) return Response.json({ error: "The message outbox is full. It will accept more messages after held entries drain or are deleted.", code: "outbox_full" }, { status: 429 });
   if (!entryBelongsToSession(row(id)!, sessionId)) return Response.json({ error: "This message id belongs to another session", code: "outbox_id_conflict" }, { status: 409 });
   publish(sessionId);
@@ -502,7 +545,10 @@ async function deliver(entry: Row): Promise<Outcome> {
   // A cold start can discover native aliases. Re-select across them before claiming, so an older alias wins.
   const oldest = db().prepare(`SELECT id FROM entries WHERE session_id IN (${slots(keys)}) AND state IN ('held', 'waiting_host') ORDER BY rowid LIMIT 1`).get(...keys) as { id: string } | null;
   if (oldest?.id !== current.id) return "next";
-  if (current.upload_receipts) restoreOutboxUploads(JSON.parse(current.upload_receipts) as OutboxUploadReceipt[], current.owner);
+  const uploadReceipts = current.upload_receipts ? JSON.parse(current.upload_receipts) as OutboxUploadReceipt[] : undefined;
+  if (uploadReceipts?.some((receipt) => receipt.completedAt !== undefined && Date.now() - receipt.completedAt > STAGED_MAX_AGE_MS)) {
+    return fail(current, "The attached files are gone: attach them again", false);
+  }
   const command: Record<string, unknown> = {
     ...commandOf(current, !idle),
     message: current.message,
@@ -548,7 +594,7 @@ async function deliver(entry: Row): Promise<Outcome> {
   publish(sessionId);
   try {
     // attachUploads mutates this same command before writing it: the watcher matches the final attachment block too.
-    const response = await runAgentCommand(sessionId, command, current.advisor === 1, current.owner);
+    const response = await runAgentCommand(sessionId, command, current.advisor === 1, current.owner, uploadReceipts);
     if (!response.ok) return refused(current, response, true);
     const body = await response.json() as { data?: { agentInvoked?: boolean } };
     if (row(current.id)?.state === "failed") return "next";

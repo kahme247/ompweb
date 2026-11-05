@@ -175,7 +175,7 @@ const TOOL_PRESET_OPTIONS: Array<{ value: ToolPreset; descriptionKey: string }> 
 interface Props {
   /** Without `outbox`, only a rejected submission is restored; completed/superseded runs must not be replayed.
    *  `uploads`: the ids of files sent As file, passed only when there are some. */
-  onSend: (message: string, images?: AttachedImage[], uploads?: string[]) => Promise<PromptSubmissionResult>;
+  onSend: (message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>) => Promise<PromptSubmissionResult>;
   /** Sends go through the message outbox (an existing session): the composer clears once `onSend` (or a queue
    *  callback) reports the message stored, and keeps it otherwise. */
   outbox?: boolean;
@@ -184,8 +184,8 @@ interface Props {
   onPredictWordFeedback?: PredictWordFeedback;
   onAbort: () => void;
   /** Steer/follow-up during a run (slash commands too): resolve true once the outbox has the message. */
-  onSteer?: (message: string, images?: AttachedImage[], uploads?: string[]) => Promise<boolean>;
-  onFollowUp?: (message: string, images?: AttachedImage[], uploads?: string[]) => Promise<boolean>;
+  onSteer?: (message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>) => Promise<boolean>;
+  onFollowUp?: (message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>) => Promise<boolean>;
   isStreaming: boolean;
   /** Refuse submission without treating a pending history edit as a model run. */
   submissionBlocked?: boolean;
@@ -666,10 +666,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       patchUpload(id, patch);
     };
     handle.promise.then(
-      () => settle({ status: "done", received: size, error: null }),
+      ({ proof }) => settle({ status: "done", received: size, error: null, proof }),
       // 410: the worker already cancelled it on its host (the page went into the back/forward cache). A Retry under a
       // new id starts over, so the cancel still pending for this one can never reach it.
-      (error: unknown) => settle({ status: "error", error: uploadErrorMessage(error), ...(error instanceof UploadFailedError && error.status === 410 ? { id: newUploadId() } : {}) }),
+      (error: unknown) => settle({ status: "error", error: uploadErrorMessage(error), ...(error instanceof UploadFailedError && error.status === 410 ? { id: newUploadId(), proof: undefined } : {}) }),
     );
   }, [patchUpload]);
 

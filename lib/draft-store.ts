@@ -16,13 +16,14 @@ export interface ChatDraftUpload {
   name: string;
   size: number;
   hostId: string;
+  proof?: string;
 }
 
 export interface ChatDraft {
   value: string;
   images: ChatDraftImage[];
   files: ChatDraftFile[];
-  /** Finished uploads; unlike images and files they survive a reload (only their ids are stored). */
+  /** Finished uploads; unlike images and files their metadata survives a reload. */
   uploads?: ChatDraftUpload[];
 }
 
@@ -73,7 +74,8 @@ function isDraftUpload(value: unknown): value is ChatDraftUpload {
   if (!value || typeof value !== "object") return false;
   const upload = value as Record<string, unknown>;
   return typeof upload.id === "string" && typeof upload.name === "string" && typeof upload.hostId === "string"
-    && Number.isSafeInteger(upload.size) && (upload.size as number) >= 0;
+    && Number.isSafeInteger(upload.size) && (upload.size as number) >= 0
+    && (upload.proof === undefined || typeof upload.proof === "string");
 }
 
 const drafts: Map<string, ChatDraft> = (globalThis.__ompChatDrafts ??= readStoredDrafts());
@@ -201,7 +203,7 @@ export function isSameDraft(a: ChatDraft | undefined, b: ChatDraft): boolean {
   return uploadsA.length === uploadsB.length
     && a.images.every((image, i) => image.data === b.images[i].data && image.mimeType === b.images[i].mimeType)
     && a.files.every((file, i) => file.name === b.files[i].name && file.mimeType === b.files[i].mimeType && file.content === b.files[i].content && file.size === b.files[i].size)
-    && uploadsA.every((upload, i) => upload.id === uploadsB[i].id && upload.name === uploadsB[i].name && upload.size === uploadsB[i].size && upload.hostId === uploadsB[i].hostId);
+    && uploadsA.every((upload, i) => upload.id === uploadsB[i].id && upload.name === uploadsB[i].name && upload.size === uploadsB[i].size && upload.hostId === uploadsB[i].hostId && upload.proof === uploadsB[i].proof);
 }
 
 /** A durable outbox commit consumes only the draft it was sent from: the same edit revision AND unchanged content

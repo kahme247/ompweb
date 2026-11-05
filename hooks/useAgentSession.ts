@@ -2929,7 +2929,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   /** Holds a message in the outbox (docs/specs/2026-11-04-message-outbox-design.md): true once this browser has
    * stored it, after which omp-web delivers it whatever this tab does next. It shows as a held bubble until omp has it. */
-  const holdMessage = useCallback(async (sid: string, mode: OutboxMode, message: string, images?: AttachedImage[], uploads?: string[]) => {
+  const holdMessage = useCallback(async (sid: string, mode: OutboxMode, message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>) => {
     try {
       await addToOutbox({
         id: newOutboxId(),
@@ -2940,6 +2940,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         message,
         ...(images?.length ? { images: images.map(({ data, mimeType }) => ({ type: "image" as const, data, mimeType })) } : {}),
         ...(uploads?.length ? { uploads } : {}),
+        ...(uploadProofs ? { uploadProofs } : {}),
         createdAt: Date.now(),
       });
     } catch (e) {
@@ -2975,7 +2976,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return snapshot.entryIds;
   }, []);
 
-  const handleSend = useCallback(async (message: string, images?: AttachedImage[], uploads?: string[]): Promise<PromptSubmissionResult> => {
+  const handleSend = useCallback(async (message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>): Promise<PromptSubmissionResult> => {
     const trimmedMessage = message.trim();
     if (!trimmedMessage && !images?.length && !uploads?.length) return { status: "rejected" };
     if (bashRunningRef.current || editInFlightRef.current) return { status: "rejected" };
@@ -3021,7 +3022,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         catchUp.select({ leafId: null, includePreCompaction: catchUp.view().includePreCompaction });
         void catchUp.request();
       }
-      return await holdMessage(sessionIdRef.current ?? session.id, "prompt", message, images, uploads)
+      return await holdMessage(sessionIdRef.current ?? session.id, "prompt", message, images, uploads, uploadProofs)
         ? { status: "accepted" }
         : { status: "rejected" };
     }
@@ -3107,6 +3108,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             message,
             ...(piImages?.length ? { images: piImages } : {}),
             ...(uploads?.length ? { uploads } : {}),
+            ...(uploadProofs ? { uploadProofs } : {}),
           }));
         }
       }
@@ -4019,13 +4021,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // A steer or follow-up is held in the outbox like a prompt: its held bubble becomes omp's queue chip (queue_update)
   // or, delivered at once, the user message omp echoes. A slash command keeps its text; the server sends it as a
   // `prompt` with this streamingBehavior, the only command in which omp runs it.
-  const handleQueued = useCallback(async (mode: "steer" | "followUp", message: string, images?: AttachedImage[], uploads?: string[]) => {
+  const handleQueued = useCallback(async (mode: "steer" | "followUp", message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>) => {
     const sid = sessionIdRef.current;
     if (!sid || editInFlightRef.current) return false;
-    return holdMessage(sid, mode, message, images, uploads);
+    return holdMessage(sid, mode, message, images, uploads, uploadProofs);
   }, [holdMessage]);
-  const handleSteer = useCallback((message: string, images?: AttachedImage[], uploads?: string[]) => handleQueued("steer", message, images, uploads), [handleQueued]);
-  const handleFollowUp = useCallback((message: string, images?: AttachedImage[], uploads?: string[]) => handleQueued("followUp", message, images, uploads), [handleQueued]);
+  const handleSteer = useCallback((message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>) => handleQueued("steer", message, images, uploads, uploadProofs), [handleQueued]);
+  const handleFollowUp = useCallback((message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>) => handleQueued("followUp", message, images, uploads, uploadProofs), [handleQueued]);
 
   const heldMessagesRef = useRef(heldMessages);
   heldMessagesRef.current = heldMessages;

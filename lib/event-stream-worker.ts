@@ -34,7 +34,7 @@
 //                 { cmd: n, http: true }  (SSE mode: the tab POSTs the command itself)
 //                 { cmd: n, status, body, recvAt, repliedAt, attempts, deduped, behindBytes,
 //                   socket, behindSameBytes, behindOtherBytes, replyBehindOtherBytes }
-//                 { up: id, received, done } | { up: id, error: { status, code, message } }  (an upload's progress, failure)
+//                 { up: id, received, done, proof? } | { up: id, error: { status, code, message } }  (an upload's progress, failure)
 //                 { up: id, http: true }  (SSE mode: the tab uploads it over HTTP itself)
 //                 { diag: n, data }  (ConnectionDiagnostics, lib/event-stream.ts)
 //                 { outboxAdded: n, error?: string }  (committed to IndexedDB, or refused with error: keep the draft)
@@ -255,6 +255,7 @@ interface DownHead {
   id?: unknown;
   received?: unknown;
   done?: unknown;
+  proof?: unknown;
   start?: unknown;
   code?: unknown;
   message?: unknown;
@@ -1386,7 +1387,7 @@ function onUploadLine(head: DownHead): void {
     return;
   }
   watchUpload(upload);
-  post(upload.client, { up: upload.id, received: upload.acked, done });
+  post(upload.client, { up: upload.id, received: upload.acked, done, ...(done && typeof head.proof === "string" ? { proof: head.proof } : {}) });
   if (!done) return pump(upload);
   dropUpload(upload);
   linkIdle();
@@ -1903,8 +1904,8 @@ async function sendOutbox(sessionId: string): Promise<void> {
   if (Date.now() - item.entry.createdAt > OUTBOX_MAX_AGE_MS) return failOutbox(item, "Not sent within 7 days.");
   if (typeof item.entry.scope !== "string" || !item.entry.scope) return failOutbox(item, "This message has no saved installation or sign-in scope and cannot be sent.");
   item.inFlight = true;
-  const { id, scope, advisor, mode, message, images, uploads } = item.entry;
-  const body = JSON.stringify({ type: "outbox_add", id, scope, mode, message, images, uploads });
+  const { id, scope, advisor, mode, message, images, uploads, uploadProofs } = item.entry;
+  const body = JSON.stringify({ type: "outbox_add", id, scope, mode, message, images, uploads, uploadProofs });
   // A tab of the worker's own (not in `clients`): the command takes the current transport as a tab's would.
   const port: Port = {
     onmessage: null,
