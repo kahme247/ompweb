@@ -565,7 +565,17 @@ async function deliver(entry: Row): Promise<Outcome> {
   // A cold start can discover native aliases. Re-select across them before claiming, so an older alias wins.
   const oldest = db().prepare(`SELECT id FROM entries WHERE session_id IN (${slots(keys)}) AND state IN ('held', 'waiting_host') ORDER BY rowid LIMIT 1`).get(...keys) as { id: string } | null;
   if (oldest?.id !== current.id) return "next";
-  const uploadReceipts = current.upload_receipts ? JSON.parse(current.upload_receipts) as OutboxUploadReceipt[] : undefined;
+  // Give legacy accepted authority its immutable generation before transcript/attachment preparation can yield.
+  for (const receipt of current.upload_receipts ? JSON.parse(current.upload_receipts) as OutboxUploadReceipt[] : []) {
+    if (receipt.completionKey !== undefined) continue;
+    const stored = completedUpload(receipt.id);
+    if (stored && !stored.proof && stored.owner === (receipt.owner ?? current.owner)
+      && (receipt.completedAt === undefined || receipt.completedAt === stored.at)
+      && stored.receipt.hostId === receipt.hostId && stored.receipt.name === receipt.name
+      && stored.receipt.size === receipt.size && stored.receipt.type === receipt.type) saveCompletedUpload(stored.owner, stored.receipt);
+  }
+  const savedUploads = row(current.id)?.upload_receipts;
+  const uploadReceipts = savedUploads ? JSON.parse(savedUploads) as OutboxUploadReceipt[] : undefined;
   if (uploadReceipts?.some((receipt) => receipt.completedAt !== undefined && Date.now() - receipt.completedAt > STAGED_MAX_AGE_MS)) {
     return fail(current, "The attached files are gone: attach them again", false);
   }
