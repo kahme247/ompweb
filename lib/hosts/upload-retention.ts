@@ -10,21 +10,24 @@ import { getAgentDir, getArchivedSessionsDir, getSessionsDir } from "../omp/path
 import { isRecord } from "../type-guards";
 import { isUploadRetentionDays } from "../upload-limits";
 import { HostOpError } from "./link-protocol";
-import { UPLOADS_LOCAL_DIR } from "./uploads";
+import { UPLOADS_LOCAL_DIR, uploadOwnerNamespace } from "./uploads";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** Where sent uploads live: `<sessions>/<project>/<session>/local/uploads/*`, the same under the archive (a session's
- * artifacts directory moves there whole), and on Windows the long-path fallback `<tmp>/omp-local/<session id>/uploads/*`
- * (`sessionLocalRoot` in uploads.ts). `tmp` is null where that fallback never applies. */
+ * artifacts directory moves there whole), and this daemon's namespace within the Windows fallback uploads directory.
+ * `tmp` is null where that fallback never applies. */
 export interface RetentionRoots {
   sessions: string;
   archive: string;
-  tmp: string | null;
+  tmp: { dir: string; namespace: string } | null;
 }
 
 function defaultRoots(): RetentionRoots {
-  return { sessions: getSessionsDir(), archive: getArchivedSessionsDir(), tmp: process.platform === "win32" ? join(tmpdir(), "omp-local") : null };
+  return {
+    sessions: getSessionsDir(), archive: getArchivedSessionsDir(),
+    tmp: process.platform === "win32" ? { dir: join(tmpdir(), "omp-local"), namespace: uploadOwnerNamespace() } : null,
+  };
 }
 
 /** The directories (never symlinks) directly in `dir`; empty when it cannot be read. */
@@ -92,8 +95,11 @@ export async function sweepSentUploads(days: number | (() => number | null), now
       }
     }
   }
-  if (roots.tmp) {
-    for (const session of await subdirs(roots.tmp)) folders.push(join(session, UPLOADS_LOCAL_DIR));
+  if (roots.tmp && await isRealDir(roots.tmp.dir)) {
+    for (const session of await subdirs(roots.tmp.dir)) {
+      const uploads = join(session, UPLOADS_LOCAL_DIR);
+      if (await isRealDir(uploads)) folders.push(join(uploads, roots.tmp.namespace));
+    }
   }
   for (const folder of folders) {
     if (await isRealDir(folder) && !(await sweepDir(folder, cutoff))) return;

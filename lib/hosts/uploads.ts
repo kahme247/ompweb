@@ -2,8 +2,8 @@
 // staged as `<agent dir>/omp-web/uploads/<id>.part` plus `<id>.json`, written in order at the part's length, and on
 // attach hard-linked (or copied) into the session's `local://uploads/`.
 // Loaded by the daemon through jiti: no `@/` imports and no Bun APIs.
-import { randomUUID } from "node:crypto";
-import { constants as fsConstants, createReadStream } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { constants as fsConstants, createReadStream, realpathSync } from "node:fs";
 import { appendFile, link, lstat, mkdir, open, readdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,6 +13,7 @@ import { getAgentDir } from "../omp/paths";
 import { inspectUploadTargets, parseUploadConflictStrategy, validateUploadFileNames, type UploadConflictStrategy } from "../file-upload";
 import type { WorkspaceUploadResult } from "../workspace-types";
 import { authorizeWorkspaceDirectory } from "./workspace-roots";
+import { sessionPathKey } from "../paths";
 import { isValidSessionId } from "../session-file-references-core";
 import { isRecord } from "../type-guards";
 import { MAX_UPLOAD_BYTES, UPLOAD_ID_RE } from "../upload-limits";
@@ -20,6 +21,14 @@ import { HostOpError, LINK_LIMITS } from "./link-protocol";
 
 /** Uploads land in this subdirectory of the session's `local://` root. */
 export const UPLOADS_LOCAL_DIR = "uploads";
+
+/** Separate daemons' files inside omp's shared Windows temp root, including copied session UUIDs. */
+export function uploadOwnerNamespace(agentDir = getAgentDir()): string {
+  let canonical: string;
+  try { canonical = realpathSync.native(agentDir); }
+  catch { canonical = resolve(agentDir); }
+  return createHash("sha256").update(sessionPathKey(canonical)).digest("hex").slice(0, 32);
+}
 // Leaves room for ` (n)` under the usual 255-byte file name limit.
 const MAX_NAME_BYTES = 200;
 const MAX_EXT_BYTES = 20;
@@ -125,6 +134,7 @@ export class StagedUploads {
   private readonly open = new Map<string, OpenUpload>();
   /** Start, attach and abort for one id run in arrival order; other ids remain independent. */
   private readonly controls = new Map<string, Promise<void>>();
+  private readonly agentDir = getAgentDir();
 
   constructor(
     private readonly send: (ack: UploadAck) => void,
@@ -459,7 +469,10 @@ export class StagedUploads {
     const size = meta ? await sizeOf(part) : null;
     if (!meta || size === null) throw new HostOpError(404, "upload_missing", "The upload is gone: attach the file again");
     if (this.open.has(id) || size !== meta.size) throw new HostOpError(409, "upload_incomplete", "The upload has not finished");
-    const dir = join(sessionLocalRoot(sessionFile, sessionId), UPLOADS_LOCAL_DIR);
+    const local = sessionLocalRoot(sessionFile, sessionId);
+    const relativeDir = local === join(tmpdir(), "omp-local", sessionId)
+      ? `${UPLOADS_LOCAL_DIR}/${uploadOwnerNamespace(this.agentDir)}` : UPLOADS_LOCAL_DIR;
+    const dir = join(local, relativeDir);
     await mkdir(dir, { recursive: true });
     const name = sanitizeUploadName(meta.name);
     const ext = extname(name);
@@ -502,7 +515,7 @@ export class StagedUploads {
         }
       }
       // Publish atomically before removing the part; a failed receipt leaves the original metadata and data retryable.
-      const receipt: Receipt = { sessionFile, path: target, url: `local://${UPLOADS_LOCAL_DIR}/${fileName}` };
+      const receipt: Receipt = { sessionFile, path: target, url: `local://${relativeDir}/${fileName}` };
       const temporary = `${this.path(id, "json")}.${randomUUID()}.tmp`;
       try {
         await writeFile(temporary, JSON.stringify({ ...meta, attached: receipt } satisfies Meta), { flag: "wx" });
