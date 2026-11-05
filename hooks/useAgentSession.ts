@@ -471,10 +471,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // This tab's manual compactions still in flight: omp may not have the command
   // yet, so an idle snapshot cannot release them; the command's settlement does.
   const localCompactionsRef = useRef(0);
+  // omp's auto-compaction between its start and end events: a manual compaction
+  // settling meanwhile leaves the control to it.
+  const autoCompactingRef = useRef(false);
   // Bumped when an Edit starts: a running lookup from before it is stale.
   const editGenRef = useRef(0);
-  // The session whose mount hydration has settled; running-channel attaches wait for it.
-  const hydratedSessionRef = useRef<string | null>(null);
+  // The session whose mount load is in flight; running-channel attaches wait for it.
+  const mountLoadingRef = useRef<string | null>(null);
   // The running-channel recheck, run when a local operation releases the session.
   const runningRecheckRef = useRef<(() => void) | null>(null);
   const setCompacting = useCallback((value: boolean) => {
@@ -495,7 +498,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const endLocalCompaction = useCallback(() => {
     localCompactionsRef.current -= 1;
     compactionGenRef.current += 1;
-    setCompacting(false);
+    setCompacting(localCompactionsRef.current > 0 || autoCompactingRef.current);
   }, [setCompacting]);
   // Set while an interrupt-and-reply (abort_and_prompt) is in flight: the
   // aborted turn's terminal agent_end must not tear down the new run that is
@@ -2547,12 +2550,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       case "auto_compaction_start":
         compactionGenRef.current += 1;
+        autoCompactingRef.current = true;
         setCompacting(true);
         setCompactError(null);
         setCompactResult(null);
         break;
       case "auto_compaction_end":
         compactionGenRef.current += 1;
+        autoCompactingRef.current = false;
         if (localCompactionsRef.current === 0) setCompacting(false);
         if (event.errorMessage) {
           setCompactError(event.errorMessage as string);
@@ -4086,12 +4091,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     let failures = 0;
     let retryTimer: NodeJS.Timeout | undefined;
     const current = () => active && hookAliveRef.current && sessionIdRef.current === sid;
-    // The chat's own stream, or the reconnect that restores it, carries the run.
-    const covered = () => Boolean(eventSourceRef.current || reconnectTimerRef.current);
-    // The mount's hydration and a local send, shell, Edit or compaction own the session until they
-    // settle; the frame stays wanted and their release rechecks it (runningRecheckRef).
-    const blocked = () => hydratedSessionRef.current !== sid || agentRunningRef.current || bashRunningRef.current
-      || Boolean(editInFlightRef.current) || localCompactionsRef.current > 0;
+    // The chat's own open stream, or the reconnect that restores it, carries the run. A stream still
+    // connecting does not: its readiness wait can still fail and close it.
+    const covered = () => eventSourceRef.current?.readyState === EVENT_STREAM_OPEN || Boolean(reconnectTimerRef.current);
+    // The mount's first load, a stream still connecting, and a local send, shell, Edit or compaction own
+    // the session until they settle; the frame stays wanted and their release rechecks it (runningRecheckRef).
+    const blocked = () => mountLoadingRef.current === sid || Boolean(eventSourceRef.current) || agentRunningRef.current
+      || bashRunningRef.current || Boolean(editInFlightRef.current) || localCompactionsRef.current > 0;
     // Any local operation that started meanwhile makes a lookup stale.
     const localGeneration = () => `${promptRunIdRef.current}:${bashRecoveryIdRef.current}:${editGenRef.current}:${compactionGenRef.current}`;
     const checkRunning = () => {
@@ -4179,8 +4185,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       lastRunErrorRef.current = null;
       catchUp.select({ leafId: null, includePreCompaction: false });
       const compactionGen = compactionGenRef.current;
+      mountLoadingRef.current = session.id;
       loadSession(session.id, true, true).then((loaded) => {
-        hydratedSessionRef.current = session.id;
+        if (mountLoadingRef.current === session.id) mountLoadingRef.current = null;
         if (!hookAliveRef.current || sessionIdRef.current !== session.id) return;
         const agentState = loaded?.agentState;
         if (agentState?.exited) {

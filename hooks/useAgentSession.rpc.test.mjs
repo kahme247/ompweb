@@ -2238,6 +2238,98 @@ test("a running lookup from before an Edit cannot start a run during it", async 
   await act(async () => { edit.release({ success: true, data: { cancelled: true, leafId: null, sessionId: sid } }); await editing; });
 });
 
+test("a running lookup from before a completed Edit cannot attach its stale run", async () => {
+  resetWorld();
+  const sid = "lookup-edit-done";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  const lookup = holdNext((method, url) => method === "GET" && url === `/api/agent/${sid}`);
+  await deliverRunning([sid]);
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "edit_message",
+    produce: async () => ({ value: { success: true, data: { cancelled: true, leafId: null, sessionId: sid } } }),
+  });
+  await act(async () => { await w.latest.handleEdit("e0", "q"); });
+  await act(async () => { lookup.release({ running: true, state: { isStreaming: true } }); await settle(); });
+  assert.equal(world.esInstances.length, 0, "the snapshot predates the Edit");
+  assert.equal(w.latest.agentRunning, false);
+});
+
+test("a manual compaction settling during an auto-compaction leaves Stop to the auto-compaction", async () => {
+  resetWorld();
+  const sid = "manual-then-auto";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  world.agents.set(sid, { running: true, state: {} });
+  await deliverRunning([sid]);
+  await settle();
+  await act(async () => { lastEs().open(); await sleep(30); });
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "compact",
+    produce: async () => ({ value: { success: true, data: {} } }),
+  });
+  const reload = holdNext((method, url) => method === "GET" && url.startsWith(`/api/sessions/${sid}?`));
+  let compacting;
+  await act(async () => { compacting = w.latest.handleCompact(); await sleep(30); });
+  assert.equal(typeof reload.release, "function", "the manual compaction is reloading the transcript");
+  await act(async () => { lastEs().emit({ type: "auto_compaction_start" }); });
+  const session = world.sessions.get(sid);
+  await act(async () => {
+    reload.release({ sessionId: sid, filePath: "/fixture/session.jsonl", tree: [], leafId: session.leafId, context: { todoPhases: [], thinkingLevel: "off", model: null, ...session } });
+    await compacting;
+  });
+  assert.equal(w.latest.isCompacting, true, "the auto-compaction is still running");
+  await act(async () => { lastEs().emit({ type: "auto_compaction_end" }); });
+  assert.equal(w.latest.isCompacting, false);
+});
+
+test("a run reported while a send's stream connects is attached once that stream times out", async (t) => {
+  resetWorld();
+  const sid = "connect-then-remote";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let sending;
+  await act(async () => { sending = w.latest.handleSend("mine"); for (let i = 0; i < 30; i++) await Promise.resolve(); });
+  assert.equal(lastEs()?.readyState, FakeStream.CONNECTING, "the send's stream is still connecting");
+  world.agents.set(sid, { running: true, state: { isStreaming: true } });
+  await deliverRunning([sid]);
+  await act(async () => {
+    t.mock.timers.tick(60_001);
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+    assert.equal((await sending).status, "rejected");
+  });
+  assert.equal(world.esInstances.length, 2, "a new observer attaches the other tab's run");
+  assert.equal(w.latest.agentRunning, true);
+});
+
+test("a chat promoted from a new chat attaches a run reported after its first send failed", async (t) => {
+  resetWorld();
+  const sid = "promoted-later";
+  primeSession(sid, [userMsg("u0", "q")]);
+  let promoted = null;
+  const view = ownRoot(renderHook(({ session }) => useAgentSession({ session, newSessionCwd: session ? null : "/workspace", onSessionCreated: (created) => { promoted = created; } }), { initialProps: { session: null }, wrapper: TestRoot }));
+  await settle(30);
+  world.holds.push({ match: (method, url) => method === "POST" && url === "/api/agent/new", produce: async () => ({ value: { sessionId: sid } }) });
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let sending;
+  await act(async () => { sending = view.result.current.handleSend("first"); for (let i = 0; i < 30; i++) await Promise.resolve(); });
+  assert.equal(promoted?.id, sid);
+  // Promotion re-renders the same chat with its new session; no mount load runs for it.
+  await act(async () => { view.rerender({ session: promoted }); for (let i = 0; i < 30; i++) await Promise.resolve(); });
+  await act(async () => {
+    t.mock.timers.tick(60_001);
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+    assert.equal((await sending).status, "rejected");
+  });
+  world.agents.set(sid, { running: true, state: { isStreaming: true } });
+  const gets = callsTo("GET", `/api/agent/${sid}`).length;
+  await deliverRunning([sid]);
+  assert.equal(callsTo("GET", `/api/agent/${sid}`).length, gets + 1, "no mount load to wait for");
+  await act(async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); });
+  assert.equal(view.result.current.agentRunning, true);
+});
+
 test("a running lookup from before a manual compaction cannot release it", async () => {
   resetWorld();
   const sid = "lookup-compact";
