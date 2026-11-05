@@ -199,7 +199,7 @@ test("a queued message shows Sending… only in its own chat, across the remount
   await act(async () => { accept(); });
   await waitFor(() => assert.equal(screen.queryByRole("status"), null, "omp's queue chip takes over"));
   remounted.rerender(React.createElement(ChatInput, { ...props, queuedMessages: { followUp: [calls[0].message], steering: [] } }));
-  assert.equal(screen.getByTitle(calls[0].message).textContent, calls[0].message, "omp's accepted follow-up is rendered as a queue chip");
+  assert.match(screen.getByLabelText("Queued prompts").textContent, /notes\.txt/, "omp's accepted attachment is rendered in the queue");
   assert.equal(getDraft(KEY), null, "nothing goes back into the composer");
 });
 
