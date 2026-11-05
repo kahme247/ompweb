@@ -40,15 +40,25 @@ export function resolveHostOrError(hostId: unknown): { host: Host } | { response
   return offline ? { response: offline } : { host };
 }
 
-export async function resolveWorkspaceHost(hostId: unknown, sessionId: string | null): Promise<{ host: Host } | { response: Response }> {
-  if (!sessionId) return resolveHostOrError(hostId);
-  const session = await resolveSessionHostOr404(sessionId);
+/** The host a workspace request runs on, plus the session identity to send it: a live session's own current id and file
+ * (its alias is only a way in), else the id the request gave and no file. Only the file routes use the identity. */
+export async function resolveWorkspaceHost(
+  hostId: unknown,
+  sessionId: string | null,
+): Promise<{ host: Host; sessionId: string | null; sessionFile: string | null } | { response: Response }> {
+  if (!sessionId) {
+    const resolved = resolveHostOrError(hostId);
+    return "response" in resolved ? resolved : { host: resolved.host, sessionId: null, sessionFile: null };
+  }
+  const live = getRpcSession(sessionId);
+  const running = live?.isAlive() ? live : undefined;
+  const session = running ? { host: running.host } : await resolveSessionHostOr404(sessionId);
   if ("response" in session) return session;
   if (hostId !== undefined && hostId !== session.host.id) {
     return { response: Response.json({ error: "The session belongs to another host", code: "workspace_host_mismatch" }, { status: 409 }) };
   }
   const offline = hostOfflineResponse(session.host);
-  return offline ? { response: offline } : session;
+  return offline ? { response: offline } : { host: session.host, sessionId: running?.sessionId ?? sessionId, sessionFile: running?.sessionFile || null };
 }
 
 /** The JSON error response for a failed host op. */

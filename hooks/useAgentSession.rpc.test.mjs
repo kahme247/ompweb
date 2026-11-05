@@ -2896,7 +2896,7 @@ test("an open_file local:// call asks the server for the calling session's file 
   const lookups = callsTo("GET", "/api/sessions/s1/local-file");
   assert.equal(lookups.length, 1, "one lookup, for the session that asked");
   assert.equal(new URL(lookups[0].url, "http://localhost").searchParams.get("uri"), "local://note.md");
-  assert.deepEqual(opened, [["/sessions/s1/local/note.md", "note.md", "s1"]]);
+  assert.deepEqual(opened, [["/sessions/s1/local/note.md", "note.md", { sessionId: "s1", hostId: "local", cwd: "/workspace" }]]);
   const answer = callsTo("POST", "/api/agent/s1").find((call) => call.body?.type === "host_tool_result");
   assert.deepEqual([answer?.body.id, answer?.body.isError, answer?.body.result.content[0].text], ["h1", false, "Opened local://note.md"]);
 });
@@ -2943,7 +2943,7 @@ test("canceling a pending file open leaves other requests and a later run untouc
     release();
     await settle();
   });
-  assert.deepEqual(opened, [["/workspace/other.md", "other.md", "s1"]]);
+  assert.deepEqual(opened, [["/workspace/other.md", "other.md", { sessionId: "s1", hostId: "local", cwd: "/workspace" }]]);
   assert.equal(w.latest.agentRunning, true);
   const answers = callsTo("POST", "/api/agent/s1").filter(call => call.body?.type === "host_tool_result");
   assert.ok(answers.some(call => call.body.id === "other-open" && !call.body.isError));
@@ -2996,7 +2996,7 @@ test("a delayed local-file lookup survives a confirmed Edit identity move", asyn
   await confirmEdit(w.view, w.editButton());
   await until(() => w.selectedId === target, "the real Edit response confirms the new identity before the lookup completes");
   await act(async () => { release(); await settle(); });
-  assert.deepEqual(opened, [[`/sessions/${target}/local/note.md`, "note.md", sid]], "the same conversation retains the request's source alias");
+  assert.deepEqual(opened, [[`/sessions/${target}/local/note.md`, "note.md", { sessionId: sid, hostId: "local", cwd: "/workspace" }]], "the same conversation retains the request's source alias and host");
   const answer = callsTo("POST", `/api/agent/${sid}`).find(call => call.body?.type === "host_tool_result");
   assert.equal(answer?.body.isError, false);
 });

@@ -38,16 +38,17 @@ async function resolveReadFilePath(
   allowedRoots: Set<string>,
   sessionId: string | null,
   allowSessionReference: boolean,
+  sessionFile?: string | null,
 ): Promise<{ filePath: string; localRoot: string | null }> {
   // `~/…` names the server user's home, never a workspace-relative candidate.
   const homePath = segments[0] === "~";
   const absolutePath = homePath ? normalizeSlashes(path.join(homedir(), ...segments.slice(1))) : filePathFromSegments(segments);
   let filePath = absolutePath;
-  let localRoot = allowSessionReference ? await sessionLocalRootContaining(absolutePath, sessionId) : null;
+  let localRoot = allowSessionReference ? await sessionLocalRootContaining(absolutePath, sessionId, sessionFile) : null;
   // A session-owned absolute path must not be shadowed by a workspace-relative namesake, even when it is missing.
   if (!homePath && !localRoot && !isFilePathAllowed(absolutePath, allowedRoots)) {
     filePath = resolveRequestedFilePath(segments.join("/"), allowedRoots) ?? absolutePath;
-    if (filePath !== absolutePath && allowSessionReference) localRoot = await sessionLocalRootContaining(filePath, sessionId);
+    if (filePath !== absolutePath && allowSessionReference) localRoot = await sessionLocalRootContaining(filePath, sessionId, sessionFile);
   }
   return { filePath, localRoot };
 }
@@ -70,8 +71,9 @@ export async function authorizeFileAccess(
   sessionId: string | null,
   allowSessionReference: boolean,
   allowedRoots: Set<string>,
+  sessionFile?: string | null,
 ): Promise<FileAccessDecision> {
-  const { filePath, localRoot } = await resolveReadFilePath(segments, allowedRoots, sessionId, allowSessionReference);
+  const { filePath, localRoot } = await resolveReadFilePath(segments, allowedRoots, sessionId, allowSessionReference, sessionFile);
   const allowedByRoot = isFilePathAllowed(filePath, allowedRoots);
   // Even an allowed ancestor or transcript reference cannot bypass the session-local root's narrower confinement.
   const allowedBySessionReference =

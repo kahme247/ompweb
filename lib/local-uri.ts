@@ -19,8 +19,8 @@ export function isLocalUri(input: string): boolean {
 const fail = (error: string): LocalUriParse => ({ ok: false, error });
 
 /** The path under the session's local root that `input` names, or why it names none. Resolving it against a root and
- * confining it there (symlinks included) is the caller's job. `platform` decides whether a drive letter is absolute. */
-export function parseLocalUri(input: string, platform: NodeJS.Platform = process.platform): LocalUriParse {
+ * confining it there (symlinks included) is the caller's job. `platform: null` leaves drive-letter rules to the owning host. */
+export function parseLocalUri(input: string, platform: NodeJS.Platform | null = process.platform): LocalUriParse {
   const match = LOCAL_URI_RE.exec(input);
   if (!match) return fail("Not a local:// URL");
   // The authority is the first path segment, decoded once with the rest, as written (a second decode corrupts `%`).
