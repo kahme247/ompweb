@@ -66,6 +66,10 @@ test("an Attached files line opens its upload, POSIX or Windows, whatever the na
   assert.deepEqual(links.map((a) => a.textContent), ["local://uploads/a (1) #2 &amp; 50%.txt", "local://uploads/[z] b.bin"]);
   for (const link of links) assert.equal(fireEvent.click(link, { button: 0 }), false, "click default must be prevented");
   assert.equal(fireEvent.click(links[0], { button: 0, ctrlKey: true }), false, "a modified click opens the file too");
+  for (const link of links) {
+    const middleClick = new MouseEvent("auxclick", { button: 1, bubbles: true, cancelable: true });
+    assert.equal(fireEvent(link, middleClick), false, "middle-click must not navigate to the filesystem href");
+  }
   assert.deepEqual(opened, ["/home/u/s/local/uploads/a (1) #2 &amp; 50%.txt", "d:/Users/me/.omp/s/local/uploads/[z] b.bin", "/home/u/s/local/uploads/a (1) #2 &amp; 50%.txt"]);
 });
 
