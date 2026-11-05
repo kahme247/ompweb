@@ -1314,6 +1314,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [applyQueueStateSnapshot, applySkillDiagnosticsSnapshot]);
 
+  // A held-message stream ("connected" mode) was opened without asking omp whether a run is going; the running
+  // channel treats an open stream as carrying the run, so the chat asks once that stream attaches (below).
+  const adoptObservedRunRef = useRef<(sid: string, source: EventStream) => void>(() => {});
   /** `restoreWrapper`: re-register what a wrapper loses (host tools, URI schemes, roster) once attached. "connected":
    * the session may have no wrapper yet (the server opens the channel for its held messages alone, docs/specs/
    * 2026-11-04-message-outbox-design.md): do everything that talks to omp only on `connected`, which comes once one
@@ -1370,6 +1373,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // Subscribe, then snapshot: OMP does not replay queue or diagnostics
         // updates emitted before this stream opened.
         void refreshAgentSnapshots(sid);
+        if (restoreWrapper === "connected") adoptObservedRunRef.current(sid, es);
       };
       es.onopen = () => {
         if (!hookAliveRef.current || eventSourceRef.current !== es || sessionIdRef.current !== sid) return;
@@ -4125,13 +4129,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     completionScrollAllowedRef.current = end.getBoundingClientRect().bottom - container.getBoundingClientRect().bottom <= 24;
   }, []);
 
-  // Attach to a run omp has going for `sid` when this chat has no stream yet: on
-  // load, and when the running channel reports a run that started after the load
-  // (another tab or device, or a send from a chat instance the user left).
-  const attachLiveRun = useCallback((sid: string, agentState: { running?: boolean; state?: AgentStateResponse }, compactionGen: number) => {
-    if (!agentState.running || eventSourceRef.current) return;
+  // Apply a run omp has going for `sid` to this chat: its phase, bridges, roster and settlement waits.
+  const applyLiveRun = useCallback((sid: string, agentState: { running?: boolean; state?: AgentStateResponse }, compactionGen: number) => {
     if (agentState.state?.isCompacting !== undefined) applyNativeCompacting(agentState.state.isCompacting, compactionGen);
-    void connectEvents(sid);
     if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
       agentRunningRef.current = true;
       setAgentRunning(true);
@@ -4162,7 +4162,33 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setBashRunning(true);
       void waitForBashSettlement(sid);
     }
-  }, [applyNativeCompacting, connectEvents, refreshSubagentRoster, registerHostTools, registerHostUriSchemes, waitForBashSettlement, waitForPromptSettlement]);
+  }, [applyNativeCompacting, refreshSubagentRoster, registerHostTools, registerHostUriSchemes, waitForBashSettlement, waitForPromptSettlement]);
+  // Attach to a run omp has going for `sid` when this chat has no stream yet: on
+  // load, and when the running channel reports a run that started after the load
+  // (another tab or device, or a send from a chat instance the user left).
+  const attachLiveRun = useCallback((sid: string, agentState: { running?: boolean; state?: AgentStateResponse }, compactionGen: number) => {
+    if (!agentState.running || eventSourceRef.current) return;
+    void connectEvents(sid);
+    applyLiveRun(sid, agentState, compactionGen);
+  }, [applyLiveRun, connectEvents]);
+  adoptObservedRunRef.current = (sid, source) => {
+    if (agentRunningRef.current || bashRunningRef.current) return;
+    // Any local operation that started meanwhile owns the session's state: this answer would be stale.
+    const generation = () => `${promptRunIdRef.current}:${bashRecoveryIdRef.current}:${editGenRef.current}:${compactionGenRef.current}`;
+    const before = generation();
+    const compactionGen = compactionGenRef.current;
+    void fetch(`/api/agent/${encodeURIComponent(sid)}`)
+      .then((res) => (res.ok ? res.json() as Promise<{ running?: boolean; state?: AgentStateResponse }> : null))
+      .then((data) => {
+        if (!data?.running || !hookAliveRef.current || sessionIdRef.current !== sid || eventSourceRef.current !== source
+          || generation() !== before || agentRunningRef.current || bashRunningRef.current) return;
+        applyLiveRun(sid, data, compactionGen);
+        void refreshLiveModelState(sid);
+      })
+      .catch(() => {
+        // The stream's own frames (agent_end, the next agent_start) still carry the run.
+      });
+  };
   // The running-frame attach has no loadSession behind it: the run (maybe from another
   // device) can use another model or thinking level, so sync them as a command does.
   const attachStartedRunRef = useRef<(sid: string, agentState: { running?: boolean; state?: AgentStateResponse }, compactionGen: number) => void>(() => {});

@@ -2135,30 +2135,27 @@ for (const stopped of [false, true]) {
   });
 }
 
-test("a delayed running lookup cannot resurrect a run after a newer prompt fails startup", async () => {
+test("a delayed running lookup cannot attach after a newer send went to the outbox", async () => {
   resetWorld();
-  primeSession("failed-new-prompt", [userMsg("u0", "q")]);
-  const w = await mountSession("failed-new-prompt");
+  primeSession("held-new-prompt", [userMsg("u0", "q")]);
+  const w = await mountSession("held-new-prompt");
   let release;
   world.holds.push({
-    match: (method, url) => method === "GET" && url === "/api/agent/failed-new-prompt",
+    match: (method, url) => method === "GET" && url === "/api/agent/held-new-prompt",
     produce: () => new Promise((resolve) => { release = () => resolve({ value: { running: true, state: { isStreaming: true } } }); }),
-  }, {
-    match: (method, url, body) => method === "POST" && url === "/api/agent/failed-new-prompt" && body?.type === "get_state",
-    produce: async () => ({ status: 500, value: { error: "Startup failed" } }),
   });
   await act(async () => {
-    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["failed-new-prompt"] }) });
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["held-new-prompt"] }) });
     await Promise.resolve();
   });
+  world.outboxHold = true;
   await act(async () => {
     const receipt = await w.latest.handleSend("new prompt");
-    assert.equal(receipt.status, "rejected");
+    assert.equal(receipt.status, "accepted");
   });
-  assert.equal(w.latest.agentRunning, false);
-  assert.equal(world.esInstances.length, 0, "startup failed before opening an observer");
+  assert.equal(world.esInstances.length, 1, "the held message opened the chat's stream");
   await act(async () => { release(); await settle(); });
-  assert.equal(world.esInstances.length, 0, "a lookup from an older prompt generation cannot attach");
+  assert.equal(world.esInstances.length, 1, "a lookup from an older prompt generation cannot attach a second stream");
   assert.equal(w.latest.agentRunning, false);
 });
 
@@ -2383,24 +2380,34 @@ test("a manual compaction settling during an auto-compaction leaves Stop to the 
   assert.equal(w.latest.isCompacting, false);
 });
 
-test("a run reported while a send's stream connects is attached once that stream times out", async (t) => {
+test("a run reported while a sent message waits in the outbox is adopted once its stream attaches", async () => {
   resetWorld();
-  const sid = "connect-then-remote";
+  const sid = "held-then-remote";
   primeSession(sid, [userMsg("u0", "q")]);
   const w = await mountSession(sid);
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  let sending;
-  await act(async () => { sending = w.latest.handleSend("mine"); for (let i = 0; i < 30; i++) await Promise.resolve(); });
-  assert.equal(lastEs()?.readyState, FakeStream.CONNECTING, "the send's stream is still connecting");
+  world.outboxHold = true;
+  await act(async () => { assert.equal((await w.latest.handleSend("mine")).status, "accepted"); });
+  assert.equal(world.outbox.length, 1, "the message waits in the outbox, not in a local startup");
+  // Another tab's run starts while this held message's stream is still connecting.
   world.agents.set(sid, { running: true, state: { isStreaming: true } });
   await deliverRunning([sid]);
-  await act(async () => {
-    t.mock.timers.tick(60_001);
-    for (let i = 0; i < 30; i++) await Promise.resolve();
-    assert.equal((await sending).status, "rejected");
-  });
-  assert.equal(world.esInstances.length, 2, "a new observer attaches the other tab's run");
+  await settle();
+  assert.equal(world.esInstances.length, 1, "the held message's stream is the chat's only observer");
+  assert.equal(w.latest.agentRunning, false, "nothing is adopted before the stream attaches");
+  await act(async () => { lastEs().open(); lastEs().emit({ type: "connected" }); await settle(); });
+  assert.equal(world.esInstances.length, 1, "the run is adopted on that stream, not a second one");
   assert.equal(w.latest.agentRunning, true);
+});
+
+test("an idle session's held-message stream adopts no run", async () => {
+  resetWorld();
+  const sid = "held-idle";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  world.outboxHold = true;
+  await act(async () => { assert.equal((await w.latest.handleSend("mine")).status, "accepted"); });
+  await act(async () => { lastEs().open(); lastEs().emit({ type: "connected" }); await settle(); });
+  assert.equal(w.latest.agentRunning, false);
 });
 
 test("a chat promoted from a new chat attaches a run reported after its first send failed", async (t) => {
@@ -2500,25 +2507,6 @@ test("the first load's idle state cannot overwrite a compaction a later lookup f
   assert.equal(w.latest.isCompacting, true, "the newer lookup's compaction stands");
   await act(async () => { await w.latest.handleCompact(); });
   assert.equal(callsTo("POST", `/api/agent/${sid}`).some((call) => call.body?.type === "compact"), false, "and the guard agrees with the control");
-});
-
-test("a run reported while a local send starts is attached once that send fails", async () => {
-  resetWorld();
-  const sid = "send-then-remote";
-  primeSession(sid, [userMsg("u0", "q")]);
-  const w = await mountSession(sid);
-  const startup = holdNext((method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "get_state");
-  let sending;
-  await act(async () => { sending = w.latest.handleSend("mine"); await sleep(30); });
-  world.agents.set(sid, { running: true, state: { isStreaming: true } });
-  await deliverRunning([sid]);
-  await act(async () => {
-    startup.release({ error: "Startup failed" }, 500);
-    assert.equal((await sending).status, "rejected");
-  });
-  await settle();
-  assert.equal(world.esInstances.length, 1, "the other tab's run is attached");
-  assert.equal(w.latest.agentRunning, true);
 });
 
 test("a running lookup is dropped when the session left the running set meanwhile", async () => {
