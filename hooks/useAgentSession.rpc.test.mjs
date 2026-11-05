@@ -6530,6 +6530,42 @@ test("send captures saved entries newer than the last rendered transcript throug
   assert.equal(w.latest.notices.filter((notice) => notice.type === "error").length, 1, "previous answer must not count as replacement success");
 });
 
+for (const outcome of ["failed", "delivered"]) {
+  test(`an outbox attempt ${outcome} before agent_start cannot lend its history boundary to a later turn`, async () => {
+    resetWorld();
+    const sid = `outbox-ended-boundary-${outcome}`;
+    primeSession(sid, [userMsg("u0", "old question")]);
+    world.agents.set(sid, { running: true, state: { isStreaming: false } });
+    const w = await mountSession(sid);
+    const es = lastEs();
+    await act(() => es.open());
+    const entry = {
+      id: "no-run-attempt", sessionId: sid, mode: "prompt", message: "/local-command",
+      state: "delivering", previousEntryIds: ["e0"], createdAt: 1,
+    };
+    await act(() => {
+      es.emit({ type: "outbox_update", entries: [entry], settledIds: [] });
+      es.emit({
+        type: "outbox_update",
+        entries: outcome === "failed" ? [{ ...entry, state: "failed", error: "Refused" }] : [],
+        settledIds: outcome === "delivered" ? [entry.id] : [],
+      });
+    });
+    // Saved work from elsewhere arrives after the attempt, but before a separate new turn.
+    saveSession(sid, [userMsg("u0", "old question"), userMsg("u1", "intervening question"), assistantMsg("a1", "Earlier answer")]);
+    await act(() => es.emit({ type: "message_end", message: userMsg("u1", "intervening question") }, { persist: false }));
+    await settle();
+    assert.deepEqual(w.latest.entryIds, ["e0", "e1", "e2"]);
+    await act(() => {
+      es.emit({ type: "agent_start" });
+      es.emit({ type: "agent_end", isTerminal: true });
+    });
+    await settle();
+    assert.equal(w.latest.agentRunning, false);
+    assert.equal(w.latest.notices.filter((notice) => notice.type === "error").length, 1, "the intervening saved answer is not a response to the empty new turn");
+  });
+}
+
 test("deleting a failed browser-held message removes it only after the durable IndexedDB delete commits", async (t) => {
   resetWorld();
   const sid = "outbox-local-delete";

@@ -2231,7 +2231,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (Array.isArray(event.entries)) {
           outboxFrameSeenRef.current = true;
           const delivering = (event.entries as OutboxEntry[]).find((entry) => entry.state === "delivering" && Array.isArray(entry.previousEntryIds));
-          if (delivering?.previousEntryIds) dispatchBaselineRef.current = delivering.previousEntryIds;
+          dispatchBaselineRef.current = delivering?.previousEntryIds ?? null;
           serverOutboxRef.current = applyOutboxSnapshot(serverOutboxRef.current, event.entries as OutboxEntry[], Array.isArray(event.settledIds) ? event.settledIds as string[] : []);
           setServerOutbox(serverOutboxRef.current);
           // Retire only confirmations the server has listed or settled; an older empty snapshot can overtake an ACK.
