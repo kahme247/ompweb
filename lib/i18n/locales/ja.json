@@ -781,7 +781,7 @@
   "fileExplorer.newlyUploaded": "新規アップロード",
   "fileExplorer.noFilesFound": "ファイルが見つかりません",
   "fileExplorer.noMatchingFiles": "一致するファイルがありません",
-  "fileExplorer.outsideRoot": "このワークスペースの外を指しています",
+  "fileExplorer.outsideRoot": "このワークスペースの外、または存在しないリンク先を指しています",
   "fileExplorer.replace": "置き換え",
   "fileExplorer.searchFailed": "検索に失敗しました",
   "fileExplorer.searchFiles": "ファイルを検索",

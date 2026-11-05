@@ -798,7 +798,7 @@
   "fileExplorer.newlyUploaded": "Newly uploaded",
   "fileExplorer.noFilesFound": "No files found",
   "fileExplorer.noMatchingFiles": "No matching files",
-  "fileExplorer.outsideRoot": "Points outside this workspace",
+  "fileExplorer.outsideRoot": "Points outside this workspace or to a missing target",
   "fileExplorer.replace": "Replace",
   "fileExplorer.searchFailed": "Search failed",
   "fileExplorer.searchFiles": "Search files",

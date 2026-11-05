@@ -781,7 +781,7 @@
   "fileExplorer.newlyUploaded": "新上传",
   "fileExplorer.noFilesFound": "未找到文件",
   "fileExplorer.noMatchingFiles": "没有匹配的文件",
-  "fileExplorer.outsideRoot": "指向此工作区之外",
+  "fileExplorer.outsideRoot": "指向此工作区之外或不存在的目标",
   "fileExplorer.replace": "替换",
   "fileExplorer.searchFailed": "搜索失败",
   "fileExplorer.searchFiles": "搜索文件",

@@ -13,6 +13,7 @@ const MAX_FILES = 5000;
 /** Hard caps on the full in-memory listing that ?q= searches against */
 const GIT_HARD_CAP = 200_000;
 const WALK_HARD_CAP = 50_000;
+const WALK_DIR_CAP = 50_000;
 const MAX_WALK_DEPTH = 8;
 const CACHE_TTL_MS = 10_000;
 const CACHE_MAX_ENTRIES = 20;
@@ -96,6 +97,7 @@ function listWithWalk(cwd: string): FileListing {
   // BFS so shallow files win when the cap truncates the listing.
   const queue: Array<{ abs: string; rel: string; depth: number }> = [{ abs: cwd, rel: "", depth: 0 }];
   let head = 0;
+  let hardTruncated = false;
   while (head < queue.length) {
     const { abs, rel, depth } = queue[head++]!;
     let dirents: fs.Dirent[];
@@ -109,7 +111,12 @@ function listWithWalk(cwd: string): FileListing {
       const childRel = rel ? `${rel}/${d.name}` : d.name;
       if (d.isDirectory()) {
         if (depth + 1 <= MAX_WALK_DEPTH) {
-          queue.push({ abs: path.join(abs, d.name), rel: childRel, depth: depth + 1 });
+          // Bound the queue too, even when one directory has many empty children.
+          if (queue.length < WALK_DIR_CAP) {
+            queue.push({ abs: path.join(abs, d.name), rel: childRel, depth: depth + 1 });
+          } else {
+            hardTruncated = true;
+          }
         }
       } else if (d.isFile()) {
         if (files.length >= WALK_HARD_CAP) {
@@ -119,7 +126,7 @@ function listWithWalk(cwd: string): FileListing {
       }
     }
   }
-  return { files, hardTruncated: false };
+  return { files, hardTruncated };
 }
 
 export async function indexWorkspaceFiles(cwd: string, query: string, limit: number, kind: "all" | "file", forceRefresh: boolean): Promise<WorkspaceIndex> {
