@@ -1080,6 +1080,9 @@ during the wait.
   and instruction roots. Reads and watches share explicit-root authorization;
   session references grant reads only, not listing or writes. Credential exclusions
   apply to canonical targets too.
+  Credential ownership checks resolve configured symlinks even when the final target is missing, without collapsing native `link/..` traversal. Profile config roots visible in a requested or canonical path remain protected when `profiles/` cannot be listed. Compare inode identities through original configured paths, not only potentially lossy string realpaths.
+  Record unexpected failures inspecting owned directories and files; an unmatched query returns 503 `credential_policy_unavailable` until that metadata is accessible. Known-secret matches remain denied before the final availability check. Ordinary requested-path failures retain their normal read errors, and missing owned paths remain ordinary absence. Never change user filesystem permissions automatically.
+  Read owned directory entries as bytes: an undecodable protected filename or profile makes ownership metadata unavailable, while unrelated byte-named assets do not. For missing macOS targets, account for Unicode normalization and calibrate case aliases through existing directory metadata without creating files or crossing filesystem devices.
 - Successful selection, default cwd and worktree operations grant roots on the
   owning daemon. Browsing alone grants nothing. Main's `getAllowedFileRoots()`
   remains for the unrelated local config/import/skills readers, not workspace APIs.

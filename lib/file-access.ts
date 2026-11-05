@@ -1,10 +1,12 @@
-import { existsSync, readdirSync, realpathSync, statSync } from "fs";
+import { existsSync, lstatSync, readdirSync, readlinkSync, realpathSync, statSync } from "fs";
 import { homedir } from "os";
 import path from "path";
+import { isUtf8 } from "node:buffer";
 import { getAgentDir, getConfigRoot } from "./omp/paths";
 import { isWindowsAbsolutePath } from "./paths";
 import { hostSessions } from "./hosts/session-index";
 import { LOCAL_HOST_ID } from "./hosts/registry";
+import { HostOpError } from "./hosts/link-protocol";
 
 export { isWindowsAbsolutePath } from "./paths";
 
@@ -85,80 +87,110 @@ export function getConfigAgentRoots(): string[] {
  */
 const OMP_ENV_NAME = /^\.env(?:\.|$)/i;
 const OMP_SECRET_NAME = /^(?:\.?agent\.db(?:[-.~].*)?|\.?models\.(?:yml|yaml|json)(?:[.~].*|-(?:backup|bak|old)(?:[.~-].*)?)?|\.env(?:\..*)?)$/i;
+const credentialPolicyUnavailable = () => new HostOpError(503, "credential_policy_unavailable", "Credential exclusions cannot be verified while their filesystem metadata is unreadable");
 
+/** Declaring a path safe requires readable ownership metadata; otherwise throws a 503 HostOpError. */
 export function isOmpSecretFile(filePath: string): boolean {
   // Follow the original path before any lexical normalization: link/.. is
   // resolved by the filesystem, not necessarily by path.resolve's string rules.
   const requested = resolvedOrSelf(filePath);
   const target = comparablePath(requested);
   const name = path.basename(requested);
-  const protectedName = OMP_SECRET_NAME.test(name);
   const parents = new Set([path.dirname(requested), resolvedOrSelf(path.dirname(filePath))].map(comparablePath));
-  const profiles = comparablePath(path.join(getConfigRoot(), "profiles"));
-  if (protectedName) {
-    for (const parent of parents) {
-      if (path.posix.basename(parent) === "agent" && path.posix.dirname(path.posix.dirname(parent)) === profiles) return true;
-    }
-  }
-  const configDirs = ompConfigDirs();
+  let metadataUnavailable = false;
+  const markUnavailable = () => { metadataUnavailable = true; };
+  const configDirs = ompConfigDirs([filePath, requested], markUnavailable);
   const agentDirs = [getAgentDir(), ...configDirs.map((dir) => path.join(dir, "agent"))];
-  const identity = linkedFileIdentity(requested);
+  const requestedIdentity = fileIdentity(filePath);
+  const identity = requestedIdentity && requestedIdentity.nlink > 1 && requestedIdentity.ino > 0 ? requestedIdentity : null;
   for (const dir of new Set([...agentDirs, ...configDirs])) {
     const agentDir = agentDirs.includes(dir);
     const namePattern = agentDir ? OMP_SECRET_NAME : OMP_ENV_NAME;
-    if (namePattern.test(name) && (parents.has(comparablePath(dir)) || parents.has(comparablePath(resolvedOrSelf(dir))))) return true;
+    if (namePattern.test(name) && (parents.has(comparablePath(dir)) || parents.has(comparablePath(resolvedOrSelf(dir, markUnavailable))))) return true;
     const names = new Set(agentDir ? ["agent.db", "models.yml", "models.yaml", "models.json", ".env"] : [".env"]);
     try {
-      for (const name of readdirSync(dir)) if (namePattern.test(name)) names.add(name);
-    } catch { /* missing directory: the fixed names still cover dangling credential links */ }
+      for (const entry of readdirSync(dir, { encoding: "buffer" })) {
+        const name = entry.toString("utf8");
+        if (namePattern.test(name)) {
+          if (isUtf8(entry)) names.add(name);
+          else metadataUnavailable = true;
+        }
+      }
+    } catch (error) {
+      if (!isMissingPathError(error)) metadataUnavailable = true;
+    }
     const files = [...names].map((name) => path.join(dir, name));
     if (agentDir) {
       // SQLite sidecars/backups may live beside the canonical database and may
       // themselves be symlinks. Compare exact resolved files, never a path prefix.
-      const database = resolvedOrSelf(path.join(dir, "agent.db"));
+      const database = resolvedOrSelf(path.join(dir, "agent.db"), markUnavailable);
       const databaseDir = path.dirname(database);
       const databaseName = path.basename(database);
       const sidecars = new Set(["-wal", "-shm", "-journal"].map((suffix) => `${databaseName}${suffix}`));
       const basename = process.platform === "win32" ? databaseName.toLowerCase() : databaseName;
       try {
-        for (const name of readdirSync(databaseDir)) {
+        for (const entry of readdirSync(databaseDir, { encoding: "buffer" })) {
+          const name = entry.toString("utf8");
           const candidate = process.platform === "win32" ? name.toLowerCase() : name;
           const suffix = candidate.startsWith(basename) ? candidate.slice(basename.length)
             : candidate.startsWith(`.${basename}`) ? candidate.slice(basename.length + 1) : null;
           // Apply the same agent.db copy/editor rule to a renamed canonical database.
-          if (suffix !== null && OMP_SECRET_NAME.test(`agent.db${suffix}`)) sidecars.add(name);
+          if (suffix !== null && OMP_SECRET_NAME.test(`agent.db${suffix}`)) {
+            if (isUtf8(entry)) sidecars.add(name);
+            else metadataUnavailable = true;
+          }
         }
-      } catch { /* absent database directory */ }
+      } catch (error) {
+        if (!isMissingPathError(error)) metadataUnavailable = true;
+      }
       for (const name of sidecars) files.push(path.join(databaseDir, name));
     }
     for (const file of files) {
-      const canonical = resolvedOrSelf(file);
+      const canonical = resolvedOrSelf(file, markUnavailable);
       if (target === comparablePath(canonical)) return true;
+      if (process.platform === "darwin" && !requestedIdentity && prospectiveMacAlias(requested, canonical, markUnavailable)) return true;
       if (identity) {
-        const other = linkedFileIdentity(canonical);
+        // Stat the configured path first: a canonical string can lose POSIX byte filenames.
+        const other = fileIdentity(file, markUnavailable)
+          ?? (canonical !== file ? fileIdentity(canonical, markUnavailable) : null);
         if (other && identity.dev === other.dev && identity.ino === other.ino) return true;
       }
     }
   }
+  // Unknown off-tree aliases cannot be declared safe without complete ownership metadata.
+  if (metadataUnavailable) throw credentialPolicyUnavailable();
   return false;
 }
 
 /** Default and genuine named-profile config roots, both loaded by omp's env.ts. */
-function ompConfigDirs(): string[] {
+function ompConfigDirs(filePaths: string[], onUnavailable: () => void): string[] {
   const configRoot = getConfigRoot();
-  const dirs = [configRoot];
+  const profiles = path.join(configRoot, "profiles");
+  const dirs = new Set([configRoot]);
   try {
-    for (const profile of readdirSync(path.join(configRoot, "profiles"))) dirs.push(path.join(configRoot, "profiles", profile));
-  } catch { /* no profiles */ }
-  return dirs;
+    for (const profile of readdirSync(profiles, { encoding: "buffer" })) {
+      if (isUtf8(profile)) dirs.add(path.join(profiles, profile.toString("utf8")));
+      else onUnavailable();
+    }
+  } catch (error) {
+    if (!isMissingPathError(error)) onUnavailable();
+  }
+  const profileParent = comparablePath(resolvedOrSelf(profiles, onUnavailable));
+  for (const file of filePaths) {
+    const parent = path.dirname(file);
+    if (comparablePath(resolvedOrSelf(path.dirname(parent))) === profileParent) dirs.add(parent);
+    if (path.posix.basename(comparablePath(parent)) === "agent"
+      && comparablePath(resolvedOrSelf(path.dirname(path.dirname(parent)))) === profileParent) dirs.add(path.dirname(parent));
+  }
+  return [...dirs];
 }
 
-function linkedFileIdentity(filePath: string) {
+function fileIdentity(filePath: string, onUnavailable?: () => void) {
   try {
-    const stat = statSync(filePath, { bigint: true });
-    // Only multiply linked files can alias a different credential path.
-    return stat.isFile() && stat.nlink > 1 && stat.ino > 0 ? stat : null;
-  } catch {
+    const stat = statSync(withoutWindowsStream(filePath), { bigint: true });
+    return stat.isFile() ? stat : null;
+  } catch (error) {
+    if (!isMissingPathError(error)) onUnavailable?.();
     return null;
   }
 }
@@ -171,9 +203,76 @@ function withoutWindowsStream(filePath: string): string {
   return stream < 0 ? filePath : filePath.slice(0, filePath.lastIndexOf(name) + stream);
 }
 
-function resolvedOrSelf(dir: string): string {
+function resolvedOrSelf(dir: string, onUnavailable?: () => void, seen?: Set<string>): string {
   const base = withoutWindowsStream(dir);
-  try { return withoutWindowsStream(realpathSync.native(base)); } catch { return base; }
+  try {
+    return withoutWindowsStream(realpathSync.native(base));
+  } catch (error) {
+    if (!isMissingPathError(error)) { onUnavailable?.(); return base; }
+  }
+  const visited = seen ?? new Set<string>();
+  if (visited.has(base)) { onUnavailable?.(); return base; }
+  visited.add(base);
+  let current = base;
+  let suffix = "";
+  for (;;) {
+    try {
+      if (lstatSync(current).isSymbolicLink()) {
+        const link = readlinkSync(current);
+        const target = path.isAbsolute(link) ? link : joinWithoutNormalizing(resolvedOrSelf(path.dirname(current), onUnavailable, visited), link);
+        return resolvedOrSelf(suffix ? joinWithoutNormalizing(target, suffix) : target, onUnavailable, visited);
+      }
+      const canonical = withoutWindowsStream(realpathSync.native(current));
+      return suffix ? joinWithoutNormalizing(canonical, suffix) : canonical;
+    } catch (error) {
+      if (!isMissingPathError(error)) { onUnavailable?.(); return base; }
+      const parent = path.dirname(current);
+      if (parent === current) return base;
+      suffix = suffix ? `${path.basename(current)}${path.sep}${suffix}` : path.basename(current);
+      current = parent;
+    }
+  }
+}
+
+/** path.join would collapse link/.. before the filesystem can follow the link. */
+function joinWithoutNormalizing(parent: string, child: string): string {
+  return `${parent}${parent.endsWith(path.sep) ? "" : path.sep}${child}`;
+}
+
+/** Missing targets have no inode: calibrate macOS name folding without creating a probe file. */
+function prospectiveMacAlias(requested: string, owned: string, onUnavailable: () => void): boolean {
+  const left = requested.normalize("NFD");
+  const right = owned.normalize("NFD");
+  if (left === right) return true;
+  if (left.toUpperCase() !== right.toUpperCase()) return false;
+  let directory = path.dirname(owned);
+  for (;;) {
+    try {
+      const original = statSync(directory, { bigint: true });
+      const parent = path.dirname(directory);
+      if (!original.isDirectory() || parent === directory || statSync(parent, { bigint: true }).dev !== original.dev) break;
+      const alternate = path.basename(directory).replace(/[a-zA-Z]/, (letter) => letter === letter.toUpperCase() ? letter.toLowerCase() : letter.toUpperCase());
+      if (alternate !== path.basename(directory)) {
+        try {
+          const alias = statSync(path.join(parent, alternate), { bigint: true });
+          return original.dev === alias.dev && original.ino === alias.ino;
+        } catch (error) {
+          if (!isMissingPathError(error)) break;
+          const stillPresent = statSync(directory, { bigint: true });
+          if (original.dev === stillPresent.dev && original.ino === stillPresent.ino) return false;
+          break;
+        }
+      }
+      directory = parent;
+    } catch (error) {
+      if (!isMissingPathError(error)) break;
+      const parent = path.dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
+  }
+  onUnavailable();
+  return false;
 }
 
 /** Canonical comparison keys preserve literal POSIX backslashes and fold Windows path spelling only. */
@@ -285,4 +384,9 @@ export function isExistingPathWithinRoots(target: string, roots: Set<string>): b
 
 export function isExistingFilePathAllowed(target: string, allowedRoots: Set<string>): boolean {
   return isExistingPathWithinRoots(target, allowedRoots);
+}
+
+function isMissingPathError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "ENOENT" || code === "ENOTDIR";
 }
