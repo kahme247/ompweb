@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, 
 import { homedir } from "os";
 import { isAbsolute, resolve } from "path";
 import { comparableProjectPath } from "./comparable-path";
+import { isValidOmpProfile } from "./omp-profile";
 import { getAgentDir } from "./omp/paths";
 import type { ManagedProject, ProjectLaunchConfig } from "./types";
 
@@ -63,9 +64,11 @@ function canonicalProjectPath(value: string): string {
 
 /** Launch args the web UI manages itself; a workspace config must never carry
  *  them (bare or `--flag=value`), or a stored config could hijack the session
- *  boundary (`--cwd`/`--resume`) or the rpc-ui mode. */
-const RESERVED_LAUNCH_ARGS: Record<string, true> = { "--mode": true, "rpc-ui": true, "--cwd": true, "--resume": true };
-const RESERVED_LAUNCH_ARG_PREFIXES = ["--mode=", "--cwd=", "--resume="];
+ *  boundary (`--cwd`/`--resume`/`--profile`) or the rpc-ui mode. `--profile`
+ *  is reserved too: it would bypass the validated `profile` field and could
+ *  hand omp a name it rejects, failing every session in the workspace. */
+const RESERVED_LAUNCH_ARGS: Record<string, true> = { "--mode": true, "rpc-ui": true, "--cwd": true, "--resume": true, "--profile": true };
+const RESERVED_LAUNCH_ARG_PREFIXES = ["--mode=", "--cwd=", "--resume=", "--profile="];
 export function isReservedLaunchArg(arg: string): boolean {
   return RESERVED_LAUNCH_ARGS[arg] === true || RESERVED_LAUNCH_ARG_PREFIXES.some((prefix) => arg.startsWith(prefix));
 }
@@ -75,7 +78,10 @@ function parseLaunchConfig(item: Record<string, unknown>): ProjectLaunchConfig |
   const raw = item.launchConfig;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const value = raw as Record<string, unknown>;
-  const profile = typeof value.profile === "string" && value.profile.trim() && !value.profile.trim().startsWith("-") ? value.profile.trim() : undefined;
+  const rawProfile = typeof value.profile === "string" && value.profile.trim() && !value.profile.trim().startsWith("-") ? value.profile.trim() : undefined;
+  // A profile omp would reject (e.g. containing a space) must not reach the
+  // spawn boundary: it makes every session in the workspace fail at startup.
+  const profile = rawProfile !== undefined && isValidOmpProfile(rawProfile) ? rawProfile : undefined;
   const advisor = value.advisor === true ? true : undefined;
   const extraArgs = Array.isArray(value.extraArgs)
     ? value.extraArgs.filter((arg): arg is string => typeof arg === "string" && arg.length > 0 && arg.length <= 256 && !isReservedLaunchArg(arg)).slice(0, 32)
