@@ -28,18 +28,28 @@ export function filePathFromSegments(segments: string[]): string {
  * indistinguishable from a relative one once it is joined — `filePathFromSegments`
  * guesses absolute by prefixing `/`, which is right for every real browse and
  * wrong for the bare workspace paths `MarkdownBody` linkifies (#135). Try the
- * absolute reading first and, only when no allowed root authorizes it, fan the
- * request out over the roots. Writes deliberately skip this (see the files
- * route's `getUploadDirectory`): a relative upload path must not select the
- * target dir.
+ * absolute reading first and, only when neither an allowed root nor the owning
+ * session's local root authorizes it, fan out over the roots. Writes skip this
+ * (see the files route's `getUploadDirectory`): a relative upload path must
+ * not select the target dir.
  */
-function resolveReadFilePath(segments: string[], allowedRoots: Set<string>): string {
-  // `~/…` chat links name the server user's home, as the agent's shell did.
-  // The expanded path then faces the same root/reference checks as any other.
-  if (segments[0] === "~") return normalizeSlashes(path.join(homedir(), ...segments.slice(1)));
-  const absolutePath = filePathFromSegments(segments);
-  if (isFilePathAllowed(absolutePath, allowedRoots)) return absolutePath;
-  return resolveRequestedFilePath(segments.join("/"), allowedRoots) ?? absolutePath;
+async function resolveReadFilePath(
+  segments: string[],
+  allowedRoots: Set<string>,
+  sessionId: string | null,
+  allowSessionReference: boolean,
+): Promise<{ filePath: string; localRoot: string | null }> {
+  // `~/…` names the server user's home, never a workspace-relative candidate.
+  const homePath = segments[0] === "~";
+  const absolutePath = homePath ? normalizeSlashes(path.join(homedir(), ...segments.slice(1))) : filePathFromSegments(segments);
+  let filePath = absolutePath;
+  let localRoot = allowSessionReference ? await sessionLocalRootContaining(absolutePath, sessionId) : null;
+  // A session-owned absolute path must not be shadowed by a workspace-relative namesake, even when it is missing.
+  if (!homePath && !localRoot && !isFilePathAllowed(absolutePath, allowedRoots)) {
+    filePath = resolveRequestedFilePath(segments.join("/"), allowedRoots) ?? absolutePath;
+    if (filePath !== absolutePath && allowSessionReference) localRoot = await sessionLocalRootContaining(filePath, sessionId);
+  }
+  return { filePath, localRoot };
 }
 
 export type FileAccessDecision =
@@ -61,23 +71,16 @@ export async function authorizeFileAccess(
   allowSessionReference: boolean,
   allowedRoots: Set<string>,
 ): Promise<FileAccessDecision> {
-  const filePath = resolveReadFilePath(segments, allowedRoots);
+  const { filePath, localRoot } = await resolveReadFilePath(segments, allowedRoots, sessionId, allowSessionReference);
   const allowedByRoot = isFilePathAllowed(filePath, allowedRoots);
-  // A session's own local:// directory is its artifact store wherever its host
-  // keeps it (a custom session dir, Windows's temp fallback). Reads inside it
-  // are confined to it, symlinks included, even when the transcript names the
-  // path too.
-  const localRoot = !allowedByRoot && allowSessionReference ? await sessionLocalRootContaining(filePath, sessionId) : null;
+  // Even an allowed ancestor or transcript reference cannot bypass the session-local root's narrower confinement.
   const allowedBySessionReference =
     !allowedByRoot &&
     !localRoot &&
     allowSessionReference &&
     await isFilePathReferencedBySession(filePath, sessionId);
   if (!allowedByRoot && !localRoot && !allowedBySessionReference) return ACCESS_DENIED;
-  // Making the omp config root readable (so `~/.agents/AGENTS.md` and
-  // `~/.omp/AGENTS.md` open in the viewer, #135) also puts omp's credential
-  // store inside an allowed root. Deny it before anything can stat, read or
-  // download it, also through a symlink that resolves to it.
+  // Authorize the namespace before canonical secret probing touches the filesystem.
   if (isOmpSecretFile(filePath)) return ACCESS_DENIED;
 
   let realPath: string;
