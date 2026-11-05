@@ -42,6 +42,7 @@ export function validateUploadFileNames(fileNames: string[]): string | null {
   return null;
 }
 
+/** Reject protected destinations before reporting filename conflicts, including for daemon-side publication. */
 export function inspectUploadTargets(directory: string, fileNames: string[]): UploadTargetInspection {
   const conflicts: string[] = [];
   const nonReplaceable: string[] = [];
