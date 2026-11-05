@@ -1629,7 +1629,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       const reply = Promise.resolve(queued).then((ok) => {
         if (ok === false && recoveryIdentity.key) recoverDraft(recoveryIdentity.key, { text, ...kept });
       });
-      trackPendingSend(recoveryIdentity.key, text, reply);
+      trackPendingSend(recoveryIdentity, text, reply);
     };
     const files = attachedTextFilesRef.current;
     onAudioUnlock?.();
