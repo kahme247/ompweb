@@ -12,7 +12,7 @@ import { STAGED_MAX_AGE_MS } from "./hosts/uploads";
 import { validateAgentImages, MAX_AGENT_COMMAND_REQUEST_BYTES, MAX_ATTACHED_IMAGE_BYTES, MAX_TOTAL_ATTACHED_IMAGE_BYTES, MAX_ATTACHED_IMAGES, getBase64DecodedByteLength } from "./image-attachments";
 import { listArchivedSessions } from "./omp/archive";
 import { getAgentDir } from "./omp/paths";
-import { getRpcSession, getRpcSessionKeys, tapSessionFrames, type AgentEvent, type AgentSessionWrapper } from "./rpc-manager";
+import { getRpcSession, getRpcSessionKeys, onSessionMove, tapSessionFrames, type AgentEvent, type AgentSessionWrapper } from "./rpc-manager";
 import { isRecord } from "./type-guards";
 import type { OutboxEntry, OutboxMode } from "./types";
 import { MAX_UPLOADS_PER_MESSAGE, UPLOAD_ID_RE } from "./upload-limits";
@@ -291,8 +291,9 @@ function publish(sessionId: string): void {
   }
 }
 
-function setState(id: string, state: OutboxEntry["state"], error: string | null = null, mayHaveBeenSent = false): void {
-  db().prepare("UPDATE entries SET state = ?, error = ?, may_have_been_sent = ?, previous_entry_ids = CASE WHEN ? = 'delivering' THEN previous_entry_ids ELSE NULL END WHERE id = ?").run(state, error?.slice(0, 1024) ?? null, mayHaveBeenSent ? 1 : 0, state, id);
+function setState(id: string, state: OutboxEntry["state"], error: string | null = null, mayHaveBeenSent = false): boolean {
+  return db().prepare("UPDATE entries SET state = ?, error = ?, may_have_been_sent = ?, previous_entry_ids = CASE WHEN ? = 'delivering' THEN previous_entry_ids ELSE NULL END WHERE id = ? AND state IN ('held', 'waiting_host', 'delivering')")
+    .run(state, error?.slice(0, 1024) ?? null, mayHaveBeenSent ? 1 : 0, state, id).changes > 0;
 }
 
 /** Delivered, or removed by the user: the id stays (without the message) so a late resend of it (keepalive, Background
@@ -482,10 +483,14 @@ export function startOutbox(): void {
   const detachFrames = tapSessionFrames((wrapper, event) => {
     if (globalThis.__ompOutbox === state && state.started) onChildExit(wrapper, event);
   });
+  const detachMoves = onSessionMove((from) => {
+    if (globalThis.__ompOutbox === state && state.started) publish(from);
+  });
   state.detach = () => {
     process.removeListener("exit", closeOutboxStore);
     detachHello();
     detachFrames();
+    detachMoves();
   };
   // A live owner at boot can die later without another add or hello. Recover its claim, never resend it.
   const maintenance = setInterval(() => {
@@ -546,10 +551,10 @@ async function deliver(entry: Row): Promise<Outcome> {
   const generation = priorWrapper?.getMessageCommandGeneration() ?? 0;
   const competingPending = priorWrapper?.hasPendingMessageCommands() ?? false;
   const started = await runAgentCommand(sessionId, { type: "get_state" }, entry.advisor === 1, entry.owner);
-  if (!started.ok) return refused(entry, started, false);
   const wrapper = getRpcSession(sessionId);
   const current = row(entry.id);
   if (!current || (current.state !== "held" && current.state !== "waiting_host")) return "next";
+  if (!started.ok) return refused(current, started, false);
   if (!wrapper?.isAlive()) return retry(current);
   if (wrapper.getMessageCommandGeneration() !== (priorWrapper === wrapper ? generation : 0)
     || (competingPending && !wrapper.hasPendingMessageCommands())) return "next";
@@ -651,14 +656,13 @@ function commandOf(entry: Row, running: boolean): { type: string; streamingBehav
 
 
 function fail(entry: Row, error: string, mayHaveBeenSent: boolean): Outcome {
-  setState(entry.id, "failed", error, mayHaveBeenSent);
-  publish(entry.session_id);
+  if (setState(entry.id, "failed", error, mayHaveBeenSent)) publish(entry.session_id);
   return "next";
 }
 
 /** Not sent yet, for a passing reason: held again and tried after RETRY_MS. */
 function retry(entry: Row): Outcome {
-  setState(entry.id, "held");
+  if (!setState(entry.id, "held")) return "next";
   publish(entry.session_id);
   const state = outbox();
   const retries = (state.retries ??= new Set());
@@ -674,13 +678,15 @@ function retry(entry: Row): Outcome {
 /** A non-2xx answer to the start (`sent` false) or to the message itself (spec O6). */
 async function refused(entry: Row, response: Response, sent: boolean): Promise<Outcome> {
   const body = await response.json().catch(() => ({})) as { error?: unknown; code?: unknown; hostOffline?: unknown; delivery?: unknown };
+  const current = row(entry.id);
+  if (!current || current.state === "delivered" || current.state === "failed") return "next";
   const error = typeof body.error === "string" ? body.error : `HTTP ${response.status}`;
   // Nothing reached omp: the session's entries wait for the host's next hello.
   if (body.hostOffline === true && (!sent || body.delivery === "refused")) return "offline";
   if (body.code === "session_busy" || body.code === "session_restarting" || (!sent && body.code === "host_timeout")) return retry(entry);
   if (!sent && response.status === 404 && (await listArchivedSessions()).some((archive) => archive.id === entry.session_id)) {
     // An archived session keeps its entries held until it is restored (spec O6).
-    setState(entry.id, "held");
+    if (!setState(entry.id, "held")) return "next";
     publish(entry.session_id);
     return "wait";
   }

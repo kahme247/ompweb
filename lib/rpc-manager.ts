@@ -2850,6 +2850,7 @@ declare global {
   var __ompHostToolListeners: Set<(call: CrossSessionHostToolCall) => void> | undefined;
   var __ompExitedSessions: Map<string, ExitedRpcSession> | undefined;
   var __ompFrameTaps: Set<(wrapper: AgentSessionWrapper, event: AgentEvent) => void> | undefined;
+  var __ompSessionMoveListeners: Set<(from: string, to: string) => void> | undefined;
 }
 
 function getExitedMap(): Map<string, ExitedRpcSession> {
@@ -2961,6 +2962,13 @@ export function tapSessionFrames(tap: (wrapper: AgentSessionWrapper, event: Agen
   const taps = (globalThis.__ompFrameTaps ??= new Set());
   taps.add(tap);
   return () => { taps.delete(tap); };
+}
+
+/** Confirmed ownership moves only, after registry aliases exist and before observers see the new identity. */
+export function onSessionMove(listener: (from: string, to: string) => void): () => void {
+  const listeners = (globalThis.__ompSessionMoveListeners ??= new Set());
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
 }
 
 // ----------------------------------------------------------------------------
@@ -3322,6 +3330,7 @@ export async function startRpcSession(
     if (sessionFile && realSessionId !== sessionId) {
       registry.set(sessionId, created);
       created.keepMovedFromId(sessionId);
+      for (const listener of globalThis.__ompSessionMoveListeners ?? []) listener(sessionId, realSessionId);
     }
     // A successful respawn supersedes the crash record.
     clearExitedRpcSession(sessionId);
@@ -3341,10 +3350,11 @@ function registerSession(created: AgentSessionWrapper): void {
     for (const [key, wrapper] of registry) if (wrapper === created) registry.delete(key);
     notifyRunningChange({ refreshSessionList: true });
   });
-  created.onIdentityChange((_oldId, newId, options) => {
+  created.onIdentityChange((oldId, newId, options) => {
     // A move keeps the old ids routable; a branch/new/switch serves another conversation, so every old key goes.
     if (!options?.keepOldId) for (const [key, wrapper] of registry) if (wrapper === created) registry.delete(key);
     registry.set(newId, created);
+    if (options?.keepOldId) for (const listener of globalThis.__ompSessionMoveListeners ?? []) listener(oldId, newId);
     notifyRunningChange({ refreshSessionList: true });
   });
   registry.set(created.sessionId, created);
