@@ -2879,9 +2879,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Newer queued message/tool events belong to fields we will retain below.
       // Flush rather than dropping them when another snapshot field is recoverable.
       eventCoalescer.flush();
-      const busy = snapshot.isStreaming || snapshot.isPromptRunning || snapshot.isCompacting;
+      // A compaction keeps a running prompt alive (omp may compact mid-run), but alone it is no
+      // prompt run: nothing would end it with a reply, and settling it reported an empty response.
+      const promptBusy = snapshot.isStreaming || snapshot.isPromptRunning;
+      const busy = promptBusy || snapshot.isCompacting;
       if (fields.lifecycle) {
-        if (busy && !agentRunningRef.current) {
+        if (promptBusy && !agentRunningRef.current) {
           promptRunIdRef.current += 1;
           runPreviousEntryIdsRef.current = dispatchBaselineRef.current ?? catchUp.history()?.entryIds ?? [];
           dispatchBaselineRef.current = null;
@@ -2898,7 +2901,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (!promptDispatchPendingRef.current && sessionIdRef.current) void reconcileAgentState(sessionIdRef.current);
           return;
         }
-        if (busy && !agentRunningRef.current) {
+        if (promptBusy && !agentRunningRef.current) {
           agentRunningRef.current = true;
           setAgentRunning(true);
         }
