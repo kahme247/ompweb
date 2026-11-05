@@ -2293,7 +2293,8 @@ export class AgentSessionWrapper {
     };
   }
 
-  private async sendNativeMessageCommand<T = unknown>(command: { type: string; [key: string]: unknown }, timeoutMs?: number): Promise<T> {
+  /** `origin`: the command a caller submitted through `send`; marked once its native message write begins. */
+  private async sendNativeMessageCommand<T = unknown>(command: { type: string; [key: string]: unknown }, timeoutMs?: number, origin?: object): Promise<T> {
     const message = IMAGE_BEARING_COMMANDS.has(command.type);
     const proof = message && !this.messageReplacement && !this.hasPendingMessageCommands()
       ? watchReplacement(this, command, this.nativeQueuedMessages, this.messageCommandGeneration, false,
@@ -2302,6 +2303,7 @@ export class AgentSessionWrapper {
     if (message) {
       this.messageCommandGeneration += 1;
       this.pendingMessageCommands += 1;
+      if (origin) nativeWrites().add(origin);
     }
     const generation = this.messageCommandGeneration;
     try {
@@ -2385,7 +2387,7 @@ export class AgentSessionWrapper {
             message: command.message as string,
             ...(toImageContents(command.images) ? { images: toImageContents(command.images) } : {}),
             ...(streamingBehavior ? { streamingBehavior } : {}),
-          }, PROMPT_ACK_TIMEOUT_MS);
+          }, PROMPT_ACK_TIMEOUT_MS, command);
           // Slash commands fully consumed by a builtin report agentInvoked:false
           // in the ack itself — no prompt_result frame follows.
           if (ack?.agentInvoked === false && !streamingBehavior) {
@@ -2435,7 +2437,7 @@ export class AgentSessionWrapper {
           type,
           message: command.message as string,
           ...(toImageContents(command.images) ? { images: toImageContents(command.images) } : {}),
-        });
+        }, undefined, command);
         return null;
       }
 
@@ -2678,11 +2680,14 @@ export class AgentSessionWrapper {
         const merged = loadWebServerSettings().agentToolsEnabled
           ? [...valid, ...AGENT_TOOL_DEFINITIONS.filter((t) => !valid.some((v) => v.name === t.name))]
           : valid;
-        await this.proc.sendCommand({ type: "set_host_tools", tools: merged });
-        this.hostToolNames = new Set(merged.map((t) => t.name as string));
-        this.registeredHostTools = valid.filter((tool) => !AGENT_TOOL_NAMES.has(tool.name as string));
-        // omp now knows exactly these: an adopted child's lost registration is replaced.
-        this.hostToolsUnknown = false;
+        // Applied as the successful reply is read, before a call in the same host-link batch is routed.
+        await this.proc.sendCommand({ type: "set_host_tools", tools: merged }, undefined, (success) => {
+          if (!success) return;
+          this.hostToolNames = new Set(merged.map((t) => t.name as string));
+          this.registeredHostTools = valid.filter((tool) => !AGENT_TOOL_NAMES.has(tool.name as string));
+          // omp now knows exactly these: an adopted child's lost registration is replaced.
+          this.hostToolsUnknown = false;
+        });
         return null;
       }
 
@@ -2697,14 +2702,16 @@ export class AgentSessionWrapper {
 
       case "set_host_uri_schemes": {
         const schemes = Array.isArray(command.schemes) ? command.schemes as Array<{ scheme?: unknown; writable?: unknown; [key: string]: unknown }> : [];
-        await this.proc.sendCommand({ type: "set_host_uri_schemes", schemes });
-        this.registeredHostUriSchemes = schemes;
-        this.hostUriSchemes = new Map();
-        for (const entry of schemes) {
-          if (typeof entry.scheme === "string" && entry.scheme) {
-            this.hostUriSchemes.set(entry.scheme, { writable: entry.writable === true });
+        await this.proc.sendCommand({ type: "set_host_uri_schemes", schemes }, undefined, (success) => {
+          if (!success) return;
+          this.registeredHostUriSchemes = schemes;
+          this.hostUriSchemes = new Map();
+          for (const entry of schemes) {
+            if (typeof entry.scheme === "string" && entry.scheme) {
+              this.hostUriSchemes.set(entry.scheme, { writable: entry.writable === true });
+            }
           }
-        }
+        });
         return null;
       }
 
@@ -2724,6 +2731,7 @@ export class AgentSessionWrapper {
           const result: unknown = await this.sendNativeMessageCommand(
             command as { type: string },
             type === "predict_word" ? PREDICT_WORD_TIMEOUT_MS : undefined,
+            command,
           );
           if (type === "set_thinking_level") this.invalidateSessionLists();
           return result ?? null;
@@ -2750,7 +2758,7 @@ export class AgentSessionWrapper {
       type: "follow_up",
       message: command.message as string,
       ...(images ? { images } : {}),
-    });
+    }, undefined, command);
     return { queued: true, queue: "followUp", reason: "shellRunning" };
   }
 
@@ -2851,6 +2859,16 @@ declare global {
   var __ompExitedSessions: Map<string, ExitedRpcSession> | undefined;
   var __ompFrameTaps: Set<(wrapper: AgentSessionWrapper, event: AgentEvent) => void> | undefined;
   var __ompSessionMoveListeners: Set<(from: string, to: string) => void> | undefined;
+  var __ompNativeWrites: WeakSet<object> | undefined;
+}
+
+function nativeWrites(): WeakSet<object> {
+  return (globalThis.__ompNativeWrites ??= new WeakSet());
+}
+
+/** True once some wrapper began writing this submitted command to omp's stdin; never before. */
+export function nativeWriteStarted(command: object): boolean {
+  return nativeWrites().has(command);
 }
 
 function getExitedMap(): Map<string, ExitedRpcSession> {

@@ -843,9 +843,15 @@ during the wait.
   Host offline → `waiting_host`; uncertain replies/child exits while delivering
   → `failed` with `mayHaveBeenSent`, never independently resent. Anything that
   stops an entry before its native write (an error before the claim, omp exiting
-  during preparation) leaves it unsent: it is held and retried after `RETRY_MS`,
-  never marked possibly sent. Internal `/rename` and `/mcp` prompts stay counted
-  as message commands, so an outbox watch never claims an echo they cause. The session carries
+  during preparation, attachment copies or a send fence inside `runAgentCommand`)
+  leaves it unsent: it is held and retried after `RETRY_MS`, never marked
+  possibly sent. The boundary is `nativeWriteStarted(command)`, set by whichever
+  wrapper's `sendNativeMessageCommand` begins writing that submitted command
+  object, never inferred from one wrapper's generation (a respawned child may
+  write it). Internal `/rename` and `/mcp` prompts stay counted as message
+  commands, so an outbox watch never claims an echo they cause. Host tool and URI
+  scheme registrations apply in `sendCommand`'s `onReply` (success only), so a
+  call omp sends in the same batch as the reply is routed. The session carries
   `outbox_update {entries,settledIds}` (every non-delivered entry plus the latest
   256 delivered/removed ids, retained 8 days) on subscribe and on every
   change, and opens without a wrapper while held entries exist. Observe the

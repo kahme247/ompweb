@@ -12,7 +12,7 @@ import { STAGED_MAX_AGE_MS } from "./hosts/uploads";
 import { validateAgentImages, MAX_AGENT_COMMAND_REQUEST_BYTES, MAX_ATTACHED_IMAGE_BYTES, MAX_TOTAL_ATTACHED_IMAGE_BYTES, MAX_ATTACHED_IMAGES, getBase64DecodedByteLength } from "./image-attachments";
 import { listArchivedSessions } from "./omp/archive";
 import { getAgentDir } from "./omp/paths";
-import { getRpcSession, getRpcSessionKeys, onSessionMove, tapSessionFrames, type AgentEvent, type AgentSessionWrapper } from "./rpc-manager";
+import { getRpcSession, getRpcSessionKeys, nativeWriteStarted, onSessionMove, tapSessionFrames, type AgentEvent, type AgentSessionWrapper } from "./rpc-manager";
 import { isRecord } from "./type-guards";
 import type { OutboxEntry, OutboxMode } from "./types";
 import { MAX_UPLOADS_PER_MESSAGE, UPLOAD_ID_RE } from "./upload-limits";
@@ -80,7 +80,7 @@ interface Row {
 
 declare global {
   var __ompOutboxStore: { path: string; db: Database } | undefined;
-  var __ompOutbox: { busy: Set<string>; listeners: Map<string, Set<(entries: OutboxEntry[]) => void>>; started: boolean; maintenance?: NodeJS.Timeout; startupRetry?: NodeJS.Timeout; retries?: Set<NodeJS.Timeout>; detach?: () => void; preparing?: Set<string> } | undefined;
+  var __ompOutbox: { busy: Set<string>; listeners: Map<string, Set<(entries: OutboxEntry[]) => void>>; started: boolean; maintenance?: NodeJS.Timeout; startupRetry?: NodeJS.Timeout; retries?: Set<NodeJS.Timeout>; detach?: () => void; preparing?: Map<string, object> } | undefined;
 }
 
 // globalThis, like the rpc-manager registry: survives a `bun --hot` re-evaluation.
@@ -532,13 +532,17 @@ function recoverDelivering(sessionId?: string, startup = false): void {
 }
 
 /** Lifecycle bookkeeping only. Text equality is NOT delivery identity, especially after an unknown/lost reply.
- * An entry this process claimed but has not written yet is left to its dispatcher, which retries it. */
+ * An entry this process claimed but whose command no wrapper has begun writing is left to its dispatcher, which
+ * retries it. */
 function onChildExit(wrapper: AgentSessionWrapper, event: AgentEvent): void {
   if (event.type !== "process_exit") return;
   const preparing = outbox().preparing;
   for (const key of sessionKeys(wrapper.sessionId)) {
     const inFlight = db().prepare(`SELECT ${COLUMNS} FROM entries WHERE session_id = ? AND state = 'delivering'`).all(key) as Row[];
-    for (const entry of inFlight) if (!preparing?.has(entry.id)) fail(entry, "omp exited while this message was being delivered", true);
+    for (const entry of inFlight) {
+      const command = preparing?.get(entry.id);
+      if (!command || nativeWriteStarted(command)) fail(entry, "omp exited while this message was being delivered", true);
+    }
   }
 }
 
@@ -598,11 +602,13 @@ async function deliver(entry: Row): Promise<Outcome> {
   };
   const claimed = db().prepare(`UPDATE entries SET state = 'delivering', dispatch_pid = ? WHERE id = ? AND state IN ('held', 'waiting_host') AND NOT EXISTS (SELECT 1 FROM entries WHERE session_id IN (${slots(keys)}) AND state = 'delivering')`).run(process.pid, current.id, ...keys);
   if (!claimed.changes) return "wait";
-  // Claimed but not written yet: anything going wrong until the native write leaves it unsent, so it is retried.
-  const preparing = (outbox().preparing ??= new Set());
-  preparing.add(current.id);
+  // Claimed but not written yet: anything that stops it before a wrapper begins its native write (including
+  // attachment preparation and fences inside runAgentCommand) leaves it unsent, so it is retried.
+  const preparing = (outbox().preparing ??= new Map());
+  preparing.set(current.id, command);
   let baseline: { data?: { queuedMessages?: unknown } };
   let previousEntryIds: string[] | undefined;
+  let handedOn = false;
   try {
     baseline = await started.json() as { data?: { queuedMessages?: unknown } };
     if (idle) {
@@ -636,18 +642,23 @@ async function deliver(entry: Row): Promise<Outcome> {
       publish(sessionId);
       return "next";
     }
+    handedOn = true;
   } catch (error) {
     console.warn(`[omp-web] outbox: ${error instanceof Error ? error.message : String(error)}`);
     return retry(current);
   } finally {
-    preparing.delete(current.id);
+    if (!handedOn) preparing.delete(current.id);
   }
   const replacement = wrapper.watchMessageReplacement(command, baseline.data?.queuedMessages, priorWrapper === wrapper ? generation : 0, competingPending, previousEntryIds);
   publish(sessionId);
   try {
     // attachUploads mutates this same command before writing it: the watcher matches the final attachment block too.
     const response = await runAgentCommand(sessionId, command, current.advisor === 1, current.owner, uploadReceipts);
-    if (!response.ok) return refused(current, response, true);
+    if (!response.ok) {
+      // Nothing was written and the child is gone (its exit was left to us): a known-unsent message is retried.
+      if (!nativeWriteStarted(command) && !wrapper.isAlive()) return retry(current);
+      return refused(current, response, true);
+    }
     const body = await response.json() as { data?: { agentInvoked?: boolean } };
     if (row(current.id)?.state === "failed") return "next";
     const handOff = body.data?.agentInvoked === false ? {} : await replacement.handOff();
@@ -657,6 +668,7 @@ async function deliver(entry: Row): Promise<Outcome> {
     publish(sessionId);
     return "next";
   } finally {
+    preparing.delete(current.id);
     replacement.stop();
   }
 }
