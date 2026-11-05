@@ -1859,6 +1859,35 @@ test("a running attachment applies compaction before its observer opens", async 
   assert.equal(world.calls.some((call) => call.body?.type === "compact"), false, "a second compaction cannot start");
 });
 
+test("compaction attached from another tab settles without replacing a historical view", async () => {
+  resetWorld();
+  const sid = "historical-compaction";
+  primeSession(sid, [userMsg("live", "current branch")]);
+  const w = await mountSession(sid);
+  const branch = { leafId: "branch", messages: [userMsg("old", "selected branch")], entryIds: ["branch-entry"] };
+  world.views.set(`${sid}:branch:false`, branch);
+  await act(async () => { await w.changeLeaf("branch"); });
+  world.agents.set(sid, { running: true, state: { isCompacting: true } });
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: [sid] }) });
+    await settle();
+    lastEs().open();
+    await settle();
+  });
+  assert.equal(w.latest.isCompacting, true);
+  assert.equal(w.latest.agentRunning, false, "manual compaction is not a prompt run");
+  world.agents.set(sid, { running: true, state: { isCompacting: false } });
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: [] }) });
+    window.dispatchEvent(new Event("online"));
+    await settle();
+  });
+  assert.equal(w.latest.isCompacting, false, "native idle state releases Stop compaction without a completion event");
+  assert.equal(w.latest.activeLeafId, "branch");
+  assert.deepEqual(w.latest.entryIds, branch.entryIds);
+  assert.deepEqual(w.latest.messages, branch.messages);
+});
+
 test("matching running frames received during an idle lookup trigger one fresh lookup", async () => {
   resetWorld();
   primeSession("late-start", [userMsg("u0", "q")]);
