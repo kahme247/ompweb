@@ -106,7 +106,9 @@ export function snapshotOutboxUploads(ids: string[], owner: string, proofs?: unk
     const receipt = stored?.receipt ?? (upload && { id, hostId: upload.hostId, name: upload.name, size: upload.size, type: upload.type, attached: upload.attached });
     if (!receipt) throw missing();
     if (!stored && upload && !upload.done) throw new UploadError(409, "upload_incomplete", "The upload has not finished");
-    const completionKey = stored?.proof ? completionIdentity(stored.proof) : upload?.completionKey;
+    // Bind original-owner legacy preparation before an await can promote its canonical receipt.
+    const proof = stored?.proof ?? (stored && actualOwner === owner ? saveCompletedUpload(owner, stored.receipt) : undefined);
+    const completionKey = proof ? completionIdentity(proof) : upload?.completionKey;
     return { ...receipt, owner: actualOwner, ...(stored ? { completedAt: stored.at } : {}), ...(completionKey ? { completionKey } : {}) };
   });
 }
