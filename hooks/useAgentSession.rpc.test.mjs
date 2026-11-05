@@ -1928,6 +1928,68 @@ test("a delayed running lookup cannot take ownership of a locally started shell"
   assert.equal(w.latest.bashRunning, false);
 });
 
+for (const stopped of [false, true]) {
+  test(`a delayed running lookup cannot resurrect a ${stopped ? "stopped" : "completed"} local shell`, async () => {
+    resetWorld();
+    const sid = stopped ? "stopped-local-shell" : "completed-local-shell";
+    primeSession(sid, [userMsg("u0", "q")]);
+    const w = await mountSession(sid);
+    let releaseLookup;
+    let releaseBash;
+    world.holds.push({
+      match: (method, url) => method === "GET" && url === `/api/agent/${sid}`,
+      produce: () => new Promise((resolve) => { releaseLookup = () => resolve({ value: { running: true, state: { isBashRunning: true } } }); }),
+    }, {
+      match: (method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "bash",
+      produce: () => new Promise((resolve) => { releaseBash = () => resolve({ value: { success: true, data: { output: "", exitCode: stopped ? 130 : 0, cancelled: stopped } } }); }),
+    });
+    await act(async () => {
+      world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: [sid] }) });
+      await Promise.resolve();
+    });
+    let bash;
+    await act(async () => { bash = w.latest.handleSend("!sleep 5"); await sleep(30); });
+    assert.equal(w.latest.bashRunning, true);
+    if (stopped) {
+      await act(async () => { await w.latest.handleAbort(); });
+      assert.equal(world.calls.some((call) => call.body?.type === "abort_bash"), true);
+    }
+    await act(async () => { releaseBash(); await bash; });
+    assert.equal(w.latest.bashRunning, false);
+    const streams = world.esInstances.length;
+    await act(async () => { releaseLookup(); await settle(); });
+    assert.equal(w.latest.bashRunning, false, "an obsolete snapshot cannot restart the settled shell's spinner");
+    assert.equal(world.esInstances.length, streams, "an obsolete shell lookup cannot acquire an observer");
+  });
+}
+
+test("a delayed running lookup cannot resurrect a run after a newer prompt fails startup", async () => {
+  resetWorld();
+  primeSession("failed-new-prompt", [userMsg("u0", "q")]);
+  const w = await mountSession("failed-new-prompt");
+  let release;
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === "/api/agent/failed-new-prompt",
+    produce: () => new Promise((resolve) => { release = () => resolve({ value: { running: true, state: { isStreaming: true } } }); }),
+  }, {
+    match: (method, url, body) => method === "POST" && url === "/api/agent/failed-new-prompt" && body?.type === "get_state",
+    produce: async () => ({ status: 500, value: { error: "Startup failed" } }),
+  });
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ["failed-new-prompt"] }) });
+    await Promise.resolve();
+  });
+  await act(async () => {
+    const receipt = await w.latest.handleSend("new prompt");
+    assert.equal(receipt.status, "rejected");
+  });
+  assert.equal(w.latest.agentRunning, false);
+  assert.equal(world.esInstances.length, 0, "startup failed before opening an observer");
+  await act(async () => { release(); await settle(); });
+  assert.equal(world.esInstances.length, 0, "a lookup from an older prompt generation cannot attach");
+  assert.equal(w.latest.agentRunning, false);
+});
+
 test("a delayed running lookup cannot replace a side question's readiness wait", async () => {
   resetWorld();
   primeSession("late-btw", [userMsg("u0", "q")]);
