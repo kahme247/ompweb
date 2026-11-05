@@ -76,20 +76,22 @@ export function getConfigAgentRoots(): string[] {
  * reachable through their purpose-built routes (`app/api/auth/api-key/*`,
  * `app/api/models-config/route.ts`), which redact or scope what they return.
  *
- * Only the files omp itself keeps are denied: those directly in an agent dir
- * (`PI_CODING_AGENT_DIR`, `<config root>/agent`, `<config root>/profiles/<name>/agent`).
- * A file of the same name deeper down, such as an upload in a session's
- * `local/uploads/`, is not omp's and opens like any other. Resolve both the
- * agent directories and their protected files: either can be symlinked.
+ * Only direct files in an agent dir are denied, including credential copies
+ * and editor swaps. `.env` files are also protected at the config root: omp's
+ * packages/utils/src/env.ts loads that root and getAgentDir(), including profiles.
+ * Independent session uploads and package assets remain readable. Resolve both
+ * the owned directories and their protected files: either can be symlinked.
  */
-const OMP_SECRET_NAME = /^(?:agent\.db(?:-wal|-shm|-journal|\..+)?|models\.(?:yml|yaml|json))$/i;
+const OMP_ENV_NAME = /^\.env(?:\.|$)/i;
+const OMP_SECRET_NAME = /^(?:\.?agent\.db(?:[-.~].*)?|\.?models\.(?:yml|yaml|json)(?:[.~].*|-(?:backup|bak|old)(?:[.~-].*)?)?|\.env(?:\..*)?)$/i;
 
 export function isOmpSecretFile(filePath: string): boolean {
   // Follow the original path before any lexical normalization: link/.. is
   // resolved by the filesystem, not necessarily by path.resolve's string rules.
   const requested = resolvedOrSelf(filePath);
   const target = comparablePath(requested);
-  const protectedName = OMP_SECRET_NAME.test(path.basename(requested));
+  const name = path.basename(requested);
+  const protectedName = OMP_SECRET_NAME.test(name);
   const parents = new Set([path.dirname(requested), resolvedOrSelf(path.dirname(filePath))].map(comparablePath));
   const profiles = comparablePath(path.join(getConfigRoot(), "profiles"));
   if (protectedName) {
@@ -97,23 +99,29 @@ export function isOmpSecretFile(filePath: string): boolean {
       if (path.posix.basename(parent) === "agent" && path.posix.dirname(path.posix.dirname(parent)) === profiles) return true;
     }
   }
-  for (const dir of ompAgentDirs()) {
-    if (protectedName && (parents.has(comparablePath(dir)) || parents.has(comparablePath(resolvedOrSelf(dir))))) return true;
-    const names = new Set(["agent.db", "models.yml", "models.yaml", "models.json"]);
+  const configDirs = ompConfigDirs();
+  const agentDirs = [getAgentDir(), ...configDirs.map((dir) => path.join(dir, "agent"))];
+  for (const dir of new Set([...agentDirs, ...configDirs])) {
+    const agentDir = agentDirs.includes(dir);
+    const namePattern = agentDir ? OMP_SECRET_NAME : OMP_ENV_NAME;
+    if (namePattern.test(name) && (parents.has(comparablePath(dir)) || parents.has(comparablePath(resolvedOrSelf(dir))))) return true;
+    const names = new Set(agentDir ? ["agent.db", "models.yml", "models.yaml", "models.json", ".env"] : [".env"]);
     try {
-      for (const name of readdirSync(dir)) if (OMP_SECRET_NAME.test(name)) names.add(name);
+      for (const name of readdirSync(dir)) if (namePattern.test(name)) names.add(name);
     } catch { /* missing directory: the fixed names still cover dangling credential links */ }
     const files = [...names].map((name) => path.join(dir, name));
-    // SQLite sidecars/backups may live beside the canonical database and may
-    // themselves be symlinks. Compare exact resolved files, never a path prefix.
-    const database = resolvedOrSelf(path.join(dir, "agent.db"));
-    const databaseDir = path.dirname(database);
-    const databaseName = path.basename(database);
-    const sidecars = new Set(["-wal", "-shm", "-journal"].map((suffix) => `${databaseName}${suffix}`));
-    try {
-      for (const name of readdirSync(databaseDir)) if (name.startsWith(`${databaseName}.`)) sidecars.add(name);
-    } catch { /* absent database directory */ }
-    for (const name of sidecars) files.push(path.join(databaseDir, name));
+    if (agentDir) {
+      // SQLite sidecars/backups may live beside the canonical database and may
+      // themselves be symlinks. Compare exact resolved files, never a path prefix.
+      const database = resolvedOrSelf(path.join(dir, "agent.db"));
+      const databaseDir = path.dirname(database);
+      const databaseName = path.basename(database);
+      const sidecars = new Set(["-wal", "-shm", "-journal"].map((suffix) => `${databaseName}${suffix}`));
+      try {
+        for (const name of readdirSync(databaseDir)) if (name.startsWith(`${databaseName}.`)) sidecars.add(name);
+      } catch { /* absent database directory */ }
+      for (const name of sidecars) files.push(path.join(databaseDir, name));
+    }
     for (const file of files) {
       if (target === comparablePath(resolvedOrSelf(file))) return true;
     }
@@ -121,12 +129,12 @@ export function isOmpSecretFile(filePath: string): boolean {
   return false;
 }
 
-/** Every agent dir omp may keep its secrets in: the active one, the default one and each profile's. */
-function ompAgentDirs(): string[] {
+/** Default and genuine named-profile config roots, both loaded by omp's env.ts. */
+function ompConfigDirs(): string[] {
   const configRoot = getConfigRoot();
-  const dirs = [getAgentDir(), path.join(configRoot, "agent")];
+  const dirs = [configRoot];
   try {
-    for (const profile of readdirSync(path.join(configRoot, "profiles"))) dirs.push(path.join(configRoot, "profiles", profile, "agent"));
+    for (const profile of readdirSync(path.join(configRoot, "profiles"))) dirs.push(path.join(configRoot, "profiles", profile));
   } catch { /* no profiles */ }
   return dirs;
 }
