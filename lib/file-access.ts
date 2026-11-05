@@ -218,7 +218,9 @@ function resolvedOrSelf(dir: string, onUnavailable?: () => void, seen?: Set<stri
   for (;;) {
     try {
       if (lstatSync(current).isSymbolicLink()) {
-        const link = readlinkSync(current);
+        const bytes = readlinkSync(current, { encoding: "buffer" });
+        if (!isUtf8(bytes)) { onUnavailable?.(); return base; }
+        const link = bytes.toString("utf8");
         const target = path.isAbsolute(link) ? link : joinWithoutNormalizing(resolvedOrSelf(path.dirname(current), onUnavailable, visited), link);
         return resolvedOrSelf(suffix ? joinWithoutNormalizing(target, suffix) : target, onUnavailable, visited);
       }
@@ -240,11 +242,12 @@ function joinWithoutNormalizing(parent: string, child: string): string {
 }
 
 /** Missing targets have no inode: calibrate macOS name folding without creating a probe file. */
+// shortcut: add mount-specific calibration before supporting prospective aliases on Linux casefold filesystems.
 function prospectiveMacAlias(requested: string, owned: string, onUnavailable: () => void): boolean {
   const left = requested.normalize("NFD");
   const right = owned.normalize("NFD");
   if (left === right) return true;
-  if (left.toUpperCase() !== right.toUpperCase()) return false;
+  if (left.toLowerCase().toUpperCase() !== right.toLowerCase().toUpperCase()) return false;
   let directory = path.dirname(owned);
   for (;;) {
     try {
