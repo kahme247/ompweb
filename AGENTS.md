@@ -841,7 +841,11 @@ during the wait.
   last run) unless this process holds that claim in memory: an add accepted
   before a delayed startup retry may already be in flight.
   Host offline → `waiting_host`; uncertain replies/child exits while delivering
-  → `failed` with `mayHaveBeenSent`, never independently resent. The session carries
+  → `failed` with `mayHaveBeenSent`, never independently resent. Anything that
+  stops an entry before its native write (an error before the claim, omp exiting
+  during preparation) leaves it unsent: it is held and retried after `RETRY_MS`,
+  never marked possibly sent. Internal `/rename` and `/mcp` prompts stay counted
+  as message commands, so an outbox watch never claims an echo they cause. The session carries
   `outbox_update {entries,settledIds}` (every non-delivered entry plus the latest
   256 delivered/removed ids, retained 8 days) on subscribe and on every
   change, and opens without a wrapper while held entries exist. Observe the

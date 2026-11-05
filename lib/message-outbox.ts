@@ -80,7 +80,7 @@ interface Row {
 
 declare global {
   var __ompOutboxStore: { path: string; db: Database } | undefined;
-  var __ompOutbox: { busy: Set<string>; listeners: Map<string, Set<(entries: OutboxEntry[]) => void>>; started: boolean; maintenance?: NodeJS.Timeout; startupRetry?: NodeJS.Timeout; retries?: Set<NodeJS.Timeout>; detach?: () => void } | undefined;
+  var __ompOutbox: { busy: Set<string>; listeners: Map<string, Set<(entries: OutboxEntry[]) => void>>; started: boolean; maintenance?: NodeJS.Timeout; startupRetry?: NodeJS.Timeout; retries?: Set<NodeJS.Timeout>; detach?: () => void; preparing?: Set<string> } | undefined;
 }
 
 // globalThis, like the rpc-manager registry: survives a `bun --hot` re-evaluation.
@@ -441,7 +441,10 @@ export function pumpOutbox(sessionId: string): void {
     const message = error instanceof Error ? error.message : String(error);
     console.warn(`[omp-web] outbox delivery failed: ${message}`);
     try {
-      if (row(next.id)?.state === "delivering") fail(next, message, true);
+      // Thrown before the claim, it is not sent and nothing else would pump it again.
+      const state = row(next.id)?.state;
+      if (state === "delivering") fail(next, message, true);
+      else if (state === "held" || state === "waiting_host") retry(next);
     } catch {
       // The store itself failed; the next start settles a "delivering" row.
     }
@@ -528,12 +531,14 @@ function recoverDelivering(sessionId?: string, startup = false): void {
   }
 }
 
-/** Lifecycle bookkeeping only. Text equality is NOT delivery identity, especially after an unknown/lost reply. */
+/** Lifecycle bookkeeping only. Text equality is NOT delivery identity, especially after an unknown/lost reply.
+ * An entry this process claimed but has not written yet is left to its dispatcher, which retries it. */
 function onChildExit(wrapper: AgentSessionWrapper, event: AgentEvent): void {
   if (event.type !== "process_exit") return;
+  const preparing = outbox().preparing;
   for (const key of sessionKeys(wrapper.sessionId)) {
     const inFlight = db().prepare(`SELECT ${COLUMNS} FROM entries WHERE session_id = ? AND state = 'delivering'`).all(key) as Row[];
-    for (const entry of inFlight) fail(entry, "omp exited while this message was being delivered", true);
+    for (const entry of inFlight) if (!preparing?.has(entry.id)) fail(entry, "omp exited while this message was being delivered", true);
   }
 }
 
@@ -593,38 +598,49 @@ async function deliver(entry: Row): Promise<Outcome> {
   };
   const claimed = db().prepare(`UPDATE entries SET state = 'delivering', dispatch_pid = ? WHERE id = ? AND state IN ('held', 'waiting_host') AND NOT EXISTS (SELECT 1 FROM entries WHERE session_id IN (${slots(keys)}) AND state = 'delivering')`).run(process.pid, current.id, ...keys);
   if (!claimed.changes) return "wait";
-  const baseline = await started.json() as { data?: { queuedMessages?: unknown } };
+  // Claimed but not written yet: anything going wrong until the native write leaves it unsent, so it is retried.
+  const preparing = (outbox().preparing ??= new Set());
+  preparing.add(current.id);
+  let baseline: { data?: { queuedMessages?: unknown } };
   let previousEntryIds: string[] | undefined;
-  if (idle) {
-    try {
-      const boundary = await wrapper.withPendingCommand(() => wrapper.host.sessionOps.readContext(wrapper.sessionId, undefined, { boundary: true, deferThinking: true, deferMedia: true, includePreCompaction: false, sync: null }));
-      let entryIds: string[];
-      if (boundary.ok && isRecord(boundary.value) && Array.isArray(boundary.value.entryIds) && boundary.value.entryIds.every((id) => typeof id === "string")) {
-        entryIds = boundary.value.entryIds;
-      } else if (!boundary.ok && boundary.status === 404 && !(await wrapper.host.sessionFileExists(wrapper.sessionFile))) {
-        entryIds = [];
-      } else if (!boundary.ok) {
-        return refused(current, Response.json({ error: boundary.error, code: boundary.code, hostOffline: boundary.code === "host_offline" }, { status: boundary.status }), false);
-      } else {
-        return fail(current, "Could not read the saved transcript boundary before sending", false);
+  try {
+    baseline = await started.json() as { data?: { queuedMessages?: unknown } };
+    if (idle) {
+      try {
+        const boundary = await wrapper.withPendingCommand(() => wrapper.host.sessionOps.readContext(wrapper.sessionId, undefined, { boundary: true, deferThinking: true, deferMedia: true, includePreCompaction: false, sync: null }));
+        let entryIds: string[];
+        if (boundary.ok && isRecord(boundary.value) && Array.isArray(boundary.value.entryIds) && boundary.value.entryIds.every((id) => typeof id === "string")) {
+          entryIds = boundary.value.entryIds;
+        } else if (!boundary.ok && boundary.status === 404 && !(await wrapper.host.sessionFileExists(wrapper.sessionFile))) {
+          entryIds = [];
+        } else if (!boundary.ok) {
+          return refused(current, Response.json({ error: boundary.error, code: boundary.code, hostOffline: boundary.code === "host_offline" }, { status: boundary.status }), false);
+        } else {
+          return fail(current, "Could not read the saved transcript boundary before sending", false);
+        }
+        db().prepare("UPDATE entries SET previous_entry_ids = ? WHERE id = ?").run(JSON.stringify(entryIds), current.id);
+        previousEntryIds = entryIds;
+        if (Buffer.byteLength(JSON.stringify({ entries: outboxEntries(sessionId), settledIds: outboxSettledIds(sessionId) })) > MAX_OUTBOX_BYTES) {
+          return fail(current, "The saved transcript boundary exceeds the outbox snapshot limit", false);
+        }
+      } catch (error) {
+        return refused(current, apiErrorResponse(error), false);
       }
-      db().prepare("UPDATE entries SET previous_entry_ids = ? WHERE id = ?").run(JSON.stringify(entryIds), current.id);
-      previousEntryIds = entryIds;
-      if (Buffer.byteLength(JSON.stringify({ entries: outboxEntries(sessionId), settledIds: outboxSettledIds(sessionId) })) > MAX_OUTBOX_BYTES) {
-        return fail(current, "The saved transcript boundary exceeds the outbox snapshot limit", false);
-      }
-    } catch (error) {
-      return refused(current, apiErrorResponse(error), false);
     }
-  }
-  if (!wrapper.isAlive()) return fail(current, "omp exited before this message was dispatched", true);
-  if (row(current.id)?.state !== "delivering") return "next";
-  if (wrapper.getMessageCommandGeneration() !== (priorWrapper === wrapper ? generation : 0)
-    || (competingPending && !wrapper.hasPendingMessageCommands())) {
-    // Another command finished during preparation, before THIS native write: discard stale mode/queue/history data.
-    setState(current.id, "held");
-    publish(sessionId);
-    return "next";
+    if (!wrapper.isAlive()) return retry(current);
+    if (row(current.id)?.state !== "delivering") return "next";
+    if (wrapper.getMessageCommandGeneration() !== (priorWrapper === wrapper ? generation : 0)
+      || (competingPending && !wrapper.hasPendingMessageCommands())) {
+      // Another command finished during preparation, before THIS native write: discard stale mode/queue/history data.
+      setState(current.id, "held");
+      publish(sessionId);
+      return "next";
+    }
+  } catch (error) {
+    console.warn(`[omp-web] outbox: ${error instanceof Error ? error.message : String(error)}`);
+    return retry(current);
+  } finally {
+    preparing.delete(current.id);
   }
   const replacement = wrapper.watchMessageReplacement(command, baseline.data?.queuedMessages, priorWrapper === wrapper ? generation : 0, competingPending, previousEntryIds);
   publish(sessionId);
