@@ -131,8 +131,14 @@ async function flushOutbox() {
     entries.sort(compareOutbox);
     const waiting = new Set();
     for (const { id, sessionId, scope, advisor, mode, message, images, uploads, uploadProofs, state, createdAt } of entries) {
-      // Expired or unscoped rows must never be rebound: the page's worker marks them not sent.
-      if (state !== "sending" || typeof scope !== "string" || !scope || Date.now() - createdAt > 7 * 24 * 60 * 60 * 1000 || waiting.has(sessionId)) continue;
+      if (state !== "sending" || waiting.has(sessionId)) continue;
+      // Expired or unscoped rows are never rebound: they are not sent, so they stop blocking that session's later entries.
+      const stale = Date.now() - createdAt > 7 * 24 * 60 * 60 * 1000 ? "Not sent within 7 days."
+        : typeof scope !== "string" || !scope ? "This message has no saved installation or sign-in scope and cannot be sent." : null;
+      if (stale) {
+        await markOutboxFailed(db, id, stale);
+        continue;
+      }
       // A running worker may have added or accepted an entry since our snapshot: only the shared session head can go.
       const current = await done(db.transaction("entries").objectStore("entries").getAll());
       const head = current.filter((entry) => entry.sessionId === sessionId && entry.state === "sending").sort(compareOutbox)[0];

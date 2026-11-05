@@ -807,7 +807,10 @@ during the wait.
   wait for the IndexedDB transaction to complete. Allocate logical enqueue
   order and insert a unique ID atomically; clock ties and worker restarts must
   not reorder entries or overwrite a held intent. An entry still unsent seven
-  days after `createdAt` fails instead (server IDs live eight days). Pagehide
+  days after `createdAt` fails instead (server IDs live eight days); an
+  unscoped one fails too. Every sender, Background Sync included, persists
+  that failure before moving on, so a stale head never blocks the session's
+  later entries. Pagehide
   sends each session's head only (64 KiB total, no incomplete ordering view).
   Background Sync registers `omp-outbox` only after the active service worker
   proves outbox capability; an old push-only worker is not sufficient.
