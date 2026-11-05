@@ -2421,6 +2421,21 @@ test("a run reported while a local send starts is attached once that send fails"
   assert.equal(w.latest.agentRunning, true);
 });
 
+test("a running lookup is dropped when the session left the running set meanwhile", async () => {
+  resetWorld();
+  const sid = "lookup-ended";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  const lookup = holdNext((method, url) => method === "GET" && url === `/api/agent/${sid}`);
+  await deliverRunning([sid]);
+  // The run ends (or its child exits) after the GET read its state, before the reply arrives.
+  await deliverRunning([]);
+  await act(async () => { lookup.release({ running: true, state: { isStreaming: true } }); await settle(); });
+  assert.equal(world.esInstances.length, 0, "the finished run is not attached");
+  assert.equal(w.latest.agentRunning, false);
+  assert.equal(world.calls.some((call) => call.body?.type === "set_host_tools"), false, "no registration that could spawn a replacement");
+});
+
 test("a running lookup is dropped when the chat's session identity moves meanwhile", async () => {
   resetWorld();
   const sid = "lookup-identity";

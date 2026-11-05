@@ -4126,7 +4126,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             failed = true;
             return;
           }
-          if (!current() || localGeneration() !== generation || covered() || blocked()) return;
+          // A newer frame without this session means the run this snapshot saw has ended.
+          if (!wanted || !current() || localGeneration() !== generation || covered() || blocked()) return;
           failures = 0;
           // A frame that arrived meanwhile may report a run this snapshot predates.
           if (frames === framesBefore) wanted = false;
