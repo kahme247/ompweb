@@ -2130,6 +2130,178 @@ test("a running frame leaves a shell command this idle chat runs to the chat", a
   assert.equal(w.latest.bashRunning, false);
 });
 
+/** Delivers a `running` frame listing `ids` on the hook's running subscription. */
+async function deliverRunning(ids) {
+  await act(async () => {
+    world.runningStreams.at(-1).deliver({ type: "message", data: JSON.stringify({ type: "running", runningSessionIds: ids }) });
+    await Promise.resolve();
+  });
+}
+
+/** Holds the next request `match` accepts; `release(value, status)` answers it. */
+function holdNext(match) {
+  const held = {};
+  world.holds.push({ match, produce: () => new Promise((resolve) => { held.release = (value, status = 200) => resolve({ status, value }); }) });
+  return held;
+}
+
+test("an idle snapshot cannot release a manual compaction this tab is still sending", async () => {
+  resetWorld();
+  const sid = "cold-compact";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  const compact = holdNext((method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "compact");
+  let compacting;
+  await act(async () => { compacting = w.latest.handleCompact(); await sleep(30); });
+  assert.equal(w.latest.isCompacting, true);
+  // omp is still starting: the state poll answers before the command reaches it.
+  await act(async () => { window.dispatchEvent(new Event("online")); await sleep(30); });
+  assert.equal(w.latest.isCompacting, true, "the command's own settlement releases Stop compaction");
+  await act(async () => { await w.latest.handleCompact(); });
+  assert.equal(callsTo("POST", `/api/agent/${sid}`).filter((call) => call.body?.type === "compact").length, 1, "no second compaction");
+  await act(async () => { compact.release({ success: true, data: {} }); await compacting; });
+  assert.equal(w.latest.isCompacting, false);
+});
+
+test("a late idle snapshot from an earlier compaction cannot release the next one", async () => {
+  resetWorld();
+  const sid = "two-compactions";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  world.agents.set(sid, { running: true, state: {} });
+  await deliverRunning([sid]);
+  await settle();
+  await act(async () => { lastEs().open(); await sleep(30); });
+  await act(async () => { lastEs().emit({ type: "auto_compaction_start" }); });
+  const poll = holdNext((method, url) => method === "GET" && url === `/api/agent/${sid}`);
+  await act(async () => { window.dispatchEvent(new Event("online")); await sleep(30); });
+  assert.equal(typeof poll.release, "function", "the poll for the first compaction is in flight");
+  await act(async () => {
+    lastEs().emit({ type: "auto_compaction_end" });
+    lastEs().emit({ type: "auto_compaction_start" });
+  });
+  await act(async () => { poll.release({ running: true, state: { isCompacting: false } }); await sleep(30); });
+  assert.equal(w.latest.isCompacting, true, "the second compaction is still running");
+});
+
+test("a failed running lookup is retried", async () => {
+  resetWorld();
+  const sid = "lookup-retry";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  world.holds.push({ match: (method, url) => method === "GET" && url === `/api/agent/${sid}`, produce: async () => ({ status: 503, value: { error: "busy" } }) });
+  world.agents.set(sid, { running: true, state: { isStreaming: true } });
+  await deliverRunning([sid]);
+  await settle();
+  assert.equal(world.esInstances.length, 0, "the failed lookup attached nothing");
+  await settle(1100);
+  assert.equal(world.esInstances.length, 1, "the retry attaches the run");
+  assert.equal(w.latest.agentRunning, true);
+});
+
+test("a running frame waits for the chat's first load, which it cannot invalidate", async () => {
+  resetWorld();
+  const sid = "hydrating";
+  primeSession(sid, [userMsg("u0", "q")]);
+  world.agents.set(sid, { running: true, state: { isStreaming: true } });
+  const load = holdNext((method, url) => method === "GET" && url.startsWith(`/api/sessions/${sid}?`));
+  const w = await mountSession(sid);
+  assert.equal(typeof load.release, "function", "the first load is in flight");
+  await deliverRunning([sid]);
+  await settle();
+  // On the old code the frame attached here, and the run's agent_start dropped the first load.
+  if (lastEs()) await act(async () => { lastEs().open(); lastEs().emit({ type: "agent_start" }); });
+  assert.equal(world.esInstances.length, 0, "no observer before the first load settles");
+  const session = world.sessions.get(sid);
+  await act(async () => {
+    load.release({ sessionId: sid, filePath: "/fixture/session.jsonl", tree: [], leafId: session.leafId, context: { todoPhases: [], thinkingLevel: "off", model: null, ...session } });
+    await settle();
+  });
+  assert.ok(w.latest.data, "the first load is kept");
+  assert.equal(world.esInstances.length, 1, "then the run is attached");
+  assert.equal(w.latest.agentRunning, true);
+});
+
+test("a running lookup from before an Edit cannot start a run during it", async () => {
+  resetWorld();
+  const sid = "lookup-edit";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  const lookup = holdNext((method, url) => method === "GET" && url === `/api/agent/${sid}`);
+  const edit = holdNext((method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "edit_message");
+  await deliverRunning([sid]);
+  let editing;
+  await act(async () => { editing = w.latest.handleEdit("e0", "q"); await sleep(30); });
+  await act(async () => { lookup.release({ running: true, state: { isStreaming: true } }); await settle(); });
+  assert.equal(world.esInstances.length, 0);
+  assert.equal(w.latest.agentRunning, false);
+  await act(async () => { edit.release({ success: true, data: { cancelled: true, leafId: null, sessionId: sid } }); await editing; });
+});
+
+test("a running lookup from before a manual compaction cannot release it", async () => {
+  resetWorld();
+  const sid = "lookup-compact";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  const lookup = holdNext((method, url) => method === "GET" && url === `/api/agent/${sid}`);
+  const compact = holdNext((method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "compact");
+  await deliverRunning([sid]);
+  let compacting;
+  await act(async () => { compacting = w.latest.handleCompact(); await sleep(30); });
+  await act(async () => { lookup.release({ running: true, state: { isCompacting: false } }); await settle(); });
+  assert.equal(w.latest.isCompacting, true);
+  await act(async () => { await w.latest.handleCompact(); });
+  assert.equal(callsTo("POST", `/api/agent/${sid}`).filter((call) => call.body?.type === "compact").length, 1, "no second compaction");
+  await act(async () => { compact.release({ success: true, data: {} }); await compacting; });
+});
+
+test("the first load's idle state cannot overwrite a compaction a later lookup found", async () => {
+  resetWorld();
+  const sid = "mount-vs-lookup";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const state = holdNext((method, url) => method === "GET" && url === `/api/sessions/${sid}/state`);
+  const w = await mountSession(sid);
+  world.agents.set(sid, { running: true, state: { isCompacting: true } });
+  await deliverRunning([sid]);
+  await settle();
+  await act(async () => { state.release({ running: false, state: { isCompacting: false } }); await settle(); });
+  assert.equal(w.latest.isCompacting, true, "the newer lookup's compaction stands");
+  await act(async () => { await w.latest.handleCompact(); });
+  assert.equal(callsTo("POST", `/api/agent/${sid}`).some((call) => call.body?.type === "compact"), false, "and the guard agrees with the control");
+});
+
+test("a run reported while a local send starts is attached once that send fails", async () => {
+  resetWorld();
+  const sid = "send-then-remote";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  const startup = holdNext((method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "get_state");
+  let sending;
+  await act(async () => { sending = w.latest.handleSend("mine"); await sleep(30); });
+  world.agents.set(sid, { running: true, state: { isStreaming: true } });
+  await deliverRunning([sid]);
+  await act(async () => {
+    startup.release({ error: "Startup failed" }, 500);
+    assert.equal((await sending).status, "rejected");
+  });
+  await settle();
+  assert.equal(world.esInstances.length, 1, "the other tab's run is attached");
+  assert.equal(w.latest.agentRunning, true);
+});
+
+test("a running lookup is dropped when the chat's session identity moves meanwhile", async () => {
+  resetWorld();
+  const sid = "lookup-identity";
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  const lookup = holdNext((method, url) => method === "GET" && url === `/api/agent/${sid}`);
+  await deliverRunning([sid]);
+  w.latest.sessionIdRef.current = "moved-identity";
+  await act(async () => { lookup.release({ running: true, state: { isStreaming: true } }); await settle(); });
+  assert.equal(world.esInstances.length, 0);
+  assert.equal(w.latest.agentRunning, false);
+});
+
 test("unmount mid-run closes the stream and late frames cannot resurrect state", async () => {
   resetWorld();
   primeSession("s1", [userMsg("u0", "q")]);
