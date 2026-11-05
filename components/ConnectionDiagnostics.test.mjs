@@ -62,8 +62,6 @@ function rightPanelProps(overrides) {
     fileSearchOpen: false,
     onToggleFileSearch: () => {},
     onFileSearchOpenChange: () => {},
-    showHiddenFiles: false,
-    onToggleShowHiddenFiles: () => {},
     explorerUploadBusy: false,
     onUploadBusyChange: () => {},
     explorerGitCount: 0,

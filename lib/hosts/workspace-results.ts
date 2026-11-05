@@ -55,7 +55,9 @@ export function validWorkspaceResult(op: keyof WorkspaceOps, result: unknown): b
       ? count(value.size) && count(value.maxBytes)
       : value.tooLarge === false && typeof value.output === "string" && value.output.length <= 5 * 1024 * 1024;
     case "listFiles": return text(value.path) && Array.isArray(value.entries) && value.entries.every((entry) =>
-      isRecord(entry) && text(entry.name) && typeof entry.isDir === "boolean" && count(entry.size) && text(entry.modified));
+      isRecord(entry) && text(entry.name) && typeof entry.isDir === "boolean" && count(entry.size) && text(entry.modified)
+      && (entry.linkTarget === undefined || text(entry.linkTarget))
+      && (entry.outsideRoot === undefined || typeof entry.outsideRoot === "boolean"));
     case "fileIndex": return Array.isArray(value.files)
       ? value.files.length <= 5000 && value.files.every(text) && typeof value.truncated === "boolean"
       : Array.isArray(value.matches) && value.matches.length <= 200 && value.matches.every((entry) =>

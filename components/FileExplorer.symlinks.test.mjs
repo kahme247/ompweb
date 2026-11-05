@@ -36,7 +36,10 @@ test("a link out of the workspace shows its target and neither expands nor opens
   await waitFor(() => assert.ok(row("/ws/escape")));
 
   // The explorer states its root, so the server can hold the tree to it.
-  assert.ok(lists[0].includes("type=list&root=%2Fws"), lists[0]);
+  const listParams = new URL(lists[0], "http://localhost").searchParams;
+  assert.equal(listParams.get("type"), "list");
+  assert.equal(listParams.get("root"), "/ws");
+  assert.equal(listParams.get("hostId"), "local");
 
   const outsideLabel = translate("fileExplorer.outsideRoot");
   assert.notEqual(outsideLabel, "fileExplorer.outsideRoot", "the string exists in the locale files");
