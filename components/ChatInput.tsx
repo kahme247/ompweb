@@ -278,7 +278,6 @@ export interface ChatInputHandle {
   insertIfEmpty: (text: string) => void;
   prependText: (text: string) => void;
   addFiles: (files: File[]) => void;
-  openContextPanel: () => void;
   /** Retarget pending sends and captured queue recoveries before a confirmed move can render. */
   retargetPendingRecovery: (from: string, to: string) => void;
 }
@@ -1681,7 +1680,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       // side question) must not enter the prompt queue: omp would treat the
       // text as an ordinary message. Run them now, mid-run included.
       if (CLIENT_ONLY_COMMAND_NAMES[commandName] === true && !ompCommandNames.has(commandName)) {
-        if (attachedImagesRef.current.length || attachedTextFilesRef.current.length) {
+        if (attachedImagesRef.current.length || attachedTextFilesRef.current.length || attachedUploadsRef.current.length) {
           toast.error(t("chatInput.commandAttachmentsUnsupported"));
           return;
         }
@@ -1699,7 +1698,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         if (expansion.kind === "expand") {
           const prompt = composeMessageWithTextAttachments(expansion.prompt, files);
           if (rejectsOversizedPrompt(prompt, attachedImagesRef.current)) return;
-          recoverOnFailure(onPromptWithStreamingBehavior(prompt, streamingBehavior, images), prompt);
+          trackSend(onPromptWithStreamingBehavior(prompt, streamingBehavior, images, ...uploads), prompt);
           clearInput();
           return;
         }
@@ -1716,7 +1715,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         clearInput();
         return;
       }
-
     }
     const composedMessage = composeMessageWithTextAttachments(msg, files);
     if (rejectsOversizedPrompt(composedMessage, attachedImagesRef.current)) return;

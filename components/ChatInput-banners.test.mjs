@@ -2,11 +2,12 @@ import "../tests/setup-dom.mjs";
 import assert from "node:assert/strict";
 import test, { afterEach } from "node:test";
 import React from "react";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react/pure.js";
-import { createJiti } from "jiti";
 
-const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
-const { ComposerModeStatus } = await jiti.import("./ChatInput-banners.tsx");
+// Imported after the jsdom globals exist: Testing Library binds its queries at
+// module evaluation, and a static import can run before `setup-dom.mjs`.
+const { act, cleanup, fireEvent, render, screen } = await import("@testing-library/react/pure.js");
+
+const { ComposerModeStatus } = await import("./ChatInput-banners.tsx");
 
 const goal = (overrides = {}) => ({
   id: "g1",

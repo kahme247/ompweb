@@ -241,7 +241,7 @@ function unrecordedHeldBash<T extends { command: string; after: number }>(messag
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
     session, newSessionCwd, newSessionHostId, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved,
-    modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsPanelOpen,
+    modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange,
     onOpenFile, onOpenUrl,
   } = opts;
   const reducedMotion = usePrefersReducedMotion();

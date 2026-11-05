@@ -503,7 +503,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
   );
 });
 
-export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatus: channelHostStatus, hostLabel, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, neverFoldActivity = false, showToolCallsUnfolded = false, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders, searchQuery = "", searchTarget = null, onSearchTargetHandled }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatus: channelHostStatus, hostLabel, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, neverFoldActivity = false, showToolCallsUnfolded = false, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders, searchQuery = "", searchTarget = null, onSearchTargetHandled }: Props) {
   const { t, tn } = useI18n();
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -569,7 +569,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
     btw, askBtw,
   } = useAgentSession({
     session, newSessionCwd, newSessionHostId, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked, onSessionMoved: handleSessionMoved,
-    modelsRefreshKey, chatInputRef: composerRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsPanelOpen,
+    modelsRefreshKey, chatInputRef: composerRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange,
     onOpenFile, onOpenUrl,
   });
   useEffect(() => {
