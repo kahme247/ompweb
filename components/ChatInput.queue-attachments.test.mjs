@@ -174,11 +174,92 @@ test("a refused follow-up goes back whole to its draft, ahead of what was typed 
   const calls = await renderRunningWithAttachments({ queued: new Promise((resolve) => { refuse = () => resolve(false); }) });
   fireEvent.click(screen.getByRole("button", { name: /queue/i }));
   await waitFor(() => assert.equal(calls.length, 1));
+  assert.equal(screen.getByRole("status").textContent, "Sending…", "the in-flight message shows until omp answers");
   fireEvent.change(screen.getByRole("textbox"), { target: { value: "typed meanwhile" } });
   await act(async () => { refuse(); });
+  await waitFor(() => assert.equal(screen.queryByRole("status"), null, "the sending row goes once omp answered"));
   await waitFor(() => assert.deepEqual(getDraft(KEY)?.images, [{ data: PNG, mimeType: "image/png" }]));
   assert.equal(getDraft(KEY)?.value, `${calls[0].message}\n\ntyped meanwhile`, "the text, file contents included, comes back too");
   assert.equal(screen.getByRole("textbox").value, `${calls[0].message}\n\ntyped meanwhile`);
+});
+
+test("a queued message shows Sending… only in its own chat, across the remount a chat switch causes, until omp takes it", async () => {
+  let accept;
+  const { calls, rerender } = await renderWithAttachments({ queued: new Promise((resolve) => { accept = () => resolve(true); }) });
+  fireEvent.click(screen.getByRole("button", { name: /queue/i }));
+  await waitFor(() => assert.equal(calls.length, 1));
+  assert.equal(screen.getByRole("status").textContent, "Sending…");
+  rerender({ draftKey: "another-chat" });
+  assert.equal(screen.queryByRole("status"), null, "another chat's composer does not show it");
+  // AppShell remounts ChatWindow on every chat switch: a fresh composer must still see the send.
+  cleanup();
+  const props = { draftKey: KEY, isStreaming: true, onSend: async () => ({ status: "accepted" }), onAbort() {}, onFollowUp: async () => true };
+  const remounted = render(React.createElement(ChatInput, props));
+  assert.equal(screen.getByRole("status").textContent, "Sending…", "back in its chat while still in flight");
+  await act(async () => { accept(); });
+  await waitFor(() => assert.equal(screen.queryByRole("status"), null, "omp's queue chip takes over"));
+  remounted.rerender(React.createElement(ChatInput, { ...props, queuedMessages: { followUp: [calls[0].message], steering: [] } }));
+  assert.match(screen.getByLabelText("Queued prompts").textContent, /notes\.txt/, "omp's accepted attachment is rendered in the queue");
+  assert.equal(getDraft(KEY), null, "nothing goes back into the composer");
+});
+
+test("pending queued sends follow a confirmed session move and recover a refusal into its new draft", async (t) => {
+  let refuse;
+  const targetKey = `${KEY}-moved`;
+  t.after(() => clearDraft(targetKey));
+  const { calls, ref, rerender } = await renderWithAttachments({
+    queued: new Promise((resolve) => { refuse = () => resolve(false); }),
+  });
+  fireEvent.click(screen.getByRole("button", { name: /queue/i }));
+  await waitFor(() => assert.equal(calls.length, 1));
+  assert.equal(screen.getByRole("status").textContent, "Sending…");
+  try {
+    await act(async () => {
+      ref.current.retargetPendingRecovery(KEY, targetKey);
+      rerender({ draftKey: targetKey, draftIdentityMove: { from: KEY, to: targetKey } });
+    });
+    assert.equal(screen.getByRole("status").textContent, "Sending…", "the pending row belongs to the confirmed conversation");
+  } finally {
+    await act(async () => { refuse(); });
+  }
+  await waitFor(() => assert.equal(screen.queryByRole("status"), null, "the original reply still clears the moved row"));
+  assert.equal(getDraft(targetKey)?.value, calls[0].message, "a refusal follows the confirmed conversation too");
+  assert.deepEqual(getDraft(targetKey)?.images, [{ data: PNG, mimeType: "image/png" }]);
+  assert.equal(screen.getByRole("textbox").value, calls[0].message);
+  assert.equal(getDraft(KEY), null, "the old draft is not recreated");
+});
+
+test("a refusal after remount and confirmed identity move recovers into the moved conversation", async (t) => {
+  const targetKey = `${KEY}-remounted-moved`;
+  t.after(() => clearDraft(targetKey));
+  let refuse;
+  const { calls } = await renderWithAttachments({
+    queued: new Promise((resolve) => { refuse = () => resolve(false); }),
+  });
+  fireEvent.click(screen.getByRole("button", { name: /queue/i }));
+  await waitFor(() => assert.equal(calls.length, 1));
+  cleanup();
+  const props = { isStreaming: true, onSend: async () => ({ status: "accepted" }), onAbort() {}, onFollowUp: async () => true };
+  render(React.createElement(ChatInput, { ...props, draftKey: "unrelated-chat" }));
+  assert.equal(screen.queryByRole("status"), null);
+  cleanup();
+  const ref = React.createRef();
+  const remounted = render(React.createElement(ChatInput, { ...props, ref, draftKey: KEY }));
+  assert.equal(screen.getByRole("status").textContent, "Sending…");
+  try {
+    await act(() => {
+      ref.current.retargetPendingRecovery(KEY, targetKey);
+      remounted.rerender(React.createElement(ChatInput, { ...props, ref, draftKey: targetKey, draftIdentityMove: { from: KEY, to: targetKey } }));
+    });
+    assert.equal(screen.getByRole("status").textContent, "Sending…");
+  } finally {
+    await act(async () => { refuse(); });
+  }
+  await waitFor(() => assert.equal(screen.queryByRole("status"), null));
+  assert.equal(getDraft(KEY), null, "the original mount's callback cannot recreate the obsolete key");
+  assert.equal(getDraft(targetKey)?.value, calls[0].message);
+  assert.deepEqual(getDraft(targetKey)?.images, [{ data: PNG, mimeType: "image/png" }]);
+  assert.equal(screen.getByRole("textbox").value, calls[0].message);
 });
 
 for (const { label, fill, oversized } of [
