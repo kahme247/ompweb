@@ -64,6 +64,34 @@ async function access(input: WorkspaceFileRequest, reference: boolean) {
   if (!checked.ok) throw new HostOpError(checked.status, checked.code, checked.error);
   return checked;
 }
+async function listDirectory(input: WorkspaceFileRequest, root: string | null) {
+  if (root !== null && typeof root !== "string") throw invalid();
+  const checked = await access(input, false);
+  if (!checked.stat.isDirectory()) throw new HostOpError(400, "not_a_directory", "Not a directory");
+  let insideRoot: ((target: string) => boolean) | null = null;
+  if (root !== null) {
+    // The listed path is authorized already; the root can only narrow it.
+    if (!isAbsoluteFileRequestPath(root)) throw new HostOpError(403, "outside_root", "Outside the explorer root");
+    insideRoot = existingPathWithinRootsChecker(new Set([normalizeSlashes(root)]));
+    if (!insideRoot(checked.filePath)) throw new HostOpError(403, "outside_root", "Outside the explorer root");
+  }
+  const entries = fs.readdirSync(checked.filePath, { withFileTypes: true })
+    .flatMap((entry) => {
+      const entryPath = path.join(checked.filePath, entry.name);
+      const isDir = resolveDirentIsDirectory(entry, entryPath);
+      const isLink = entry.isSymbolicLink();
+      if (isDir === null && !isLink) return [];
+      let linkTarget: string | undefined;
+      if (isLink) {
+        try { linkTarget = fs.readlinkSync(entryPath); }
+        catch { /* Replaced since readdir: list it without a target. */ }
+      }
+      const outsideRoot = insideRoot !== null && isLink && !insideRoot(entryPath);
+      return [{ name: entry.name, isDir: isDir ?? false, size: 0, modified: "",
+        ...(linkTarget !== undefined && { linkTarget }), ...(outsideRoot && { outsideRoot }) }];
+    }).sort((a, b) => a.isDir !== b.isDir ? (a.isDir ? -1 : 1) : a.name.localeCompare(b.name));
+  return { path: checked.filePath, entries };
+}
 async function openFile(input: WorkspaceFileRequest) {
   const checked = await access(input, true);
   if (!checked.stat.isFile()) throw new HostOpError(400, "not_a_file", "Not a file");
@@ -155,35 +183,11 @@ export function createWorkspaceService(uploads: StagedUploads, emit: (id: string
       return inspectUploadTargets(await authorizeWorkspaceDirectory(directory), names);
     }),
     publishUpload: (id, directory, name, conflict) => result(() => uploads.publish(id, directory, name, conflict)),
-    listFiles: (input, root) => result(async () => {
-      if (root !== null && typeof root !== "string") throw invalid();
-      const checked = await access(input, false);
-      if (!checked.stat.isDirectory()) throw new HostOpError(400, "not_a_directory", "Not a directory");
-      let insideRoot: ((target: string) => boolean) | null = null;
-      if (root !== null) {
-        // The listed path is authorized already; the root can only narrow it.
-        if (!isAbsoluteFileRequestPath(root)) throw new HostOpError(403, "outside_root", "Outside the explorer root");
-        insideRoot = existingPathWithinRootsChecker(new Set([normalizeSlashes(root)]));
-        if (!insideRoot(checked.filePath)) throw new HostOpError(403, "outside_root", "Outside the explorer root");
-      }
-      const readDirectorySync = Reflect.get(fs, "readdirSync") as typeof fs.readdirSync;
-      const entries = readDirectorySync(checked.filePath, { withFileTypes: true })
-        .flatMap((entry) => {
-          const entryPath = path.join(checked.filePath, entry.name);
-          const isDir = resolveDirentIsDirectory(entry, entryPath);
-          const isLink = entry.isSymbolicLink();
-          if (isDir === null && !isLink) return [];
-          let linkTarget: string | undefined;
-          if (isLink) {
-            try { linkTarget = fs.readlinkSync(entryPath); }
-            catch { /* Replaced since readdir: list it without a target. */ }
-          }
-          const outsideRoot = insideRoot !== null && isLink && !insideRoot(entryPath);
-          return [{ name: entry.name, isDir: isDir ?? false, size: 0, modified: "",
-            ...(linkTarget !== undefined && { linkTarget }), ...(outsideRoot && { outsideRoot }) }];
-        }).sort((a, b) => a.isDir !== b.isDir ? (a.isDir ? -1 : 1) : a.name.localeCompare(b.name));
-      return { path: checked.filePath, entries };
+    listFiles: (input, showHidden) => result(async () => {
+      if (typeof showHidden !== "boolean") throw invalid();
+      return listDirectory(input, null);
     }),
+    listFilesInRoot: (input, root) => result(() => listDirectory(input, root)),
     fileInfo: (input) => result(async () => { const checked = await access(input, true); return fileInfo(checked.filePath, checked.stat); }),
     openFile: (input) => result(async () => { const opened = await openFile(input); return reads.add(opened.handle, opened.info); }),
     readFileChunk: (id, offset, length) => result(() => reads.read(id, offset, length)),

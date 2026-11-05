@@ -89,7 +89,8 @@ authorizeFileAccess(segments: string[], sessionId: string | null,
   allowSessionReference: boolean, roots: Set<string>): Promise<FileAccessDecision>;
 // WorkspaceOps additions
 home(): Promise<OpResult<{home: string}>>;
-listFiles(input: WorkspaceFileRequest, root: string | null): Promise<OpResult<WorkspaceDirectoryListing>>;
+listFiles(input: WorkspaceFileRequest, showHidden: boolean): Promise<OpResult<WorkspaceDirectoryListing>>;
+listFilesInRoot(input: WorkspaceFileRequest, root: string | null): Promise<OpResult<WorkspaceDirectoryListing>>;
 fileInfo(input: WorkspaceFileRequest): Promise<OpResult<WorkspaceFileInfo>>;
 readTextFile(input: WorkspaceFileRequest): Promise<OpResult<{content: string; language: string; size: number}>>;
 openFile(input: WorkspaceFileRequest): Promise<OpResult<WorkspaceRead>>;

@@ -54,7 +54,7 @@ export function validWorkspaceResult(op: keyof WorkspaceOps, result: unknown): b
     case "readBashOutput": return value.tooLarge === true
       ? count(value.size) && count(value.maxBytes)
       : value.tooLarge === false && typeof value.output === "string" && value.output.length <= 5 * 1024 * 1024;
-    case "listFiles": return text(value.path) && Array.isArray(value.entries) && value.entries.every((entry) =>
+    case "listFiles": case "listFilesInRoot": return text(value.path) && Array.isArray(value.entries) && value.entries.every((entry) =>
       isRecord(entry) && text(entry.name) && typeof entry.isDir === "boolean" && count(entry.size) && text(entry.modified)
       && (entry.linkTarget === undefined || text(entry.linkTarget))
       && (entry.outsideRoot === undefined || typeof entry.outsideRoot === "boolean"));

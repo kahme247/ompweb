@@ -31,7 +31,8 @@ export type WorkspaceDirectoryBrowse =
 
 export interface WorkspaceOps {
   home(): Promise<OpResult<{ home: string }>>;
-  listFiles(input: WorkspaceFileRequest, root: string | null): Promise<OpResult<WorkspaceDirectoryListing>>;
+  listFiles(input: WorkspaceFileRequest, showHidden: boolean): Promise<OpResult<WorkspaceDirectoryListing>>;
+  listFilesInRoot(input: WorkspaceFileRequest, root: string | null): Promise<OpResult<WorkspaceDirectoryListing>>;
   fileInfo(input: WorkspaceFileRequest): Promise<OpResult<WorkspaceFileInfo>>;
   readTextFile(input: WorkspaceFileRequest): Promise<OpResult<{ content: string; language: string; size: number }>>;
   openFile(input: WorkspaceFileRequest): Promise<OpResult<WorkspaceRead>>;
@@ -58,7 +59,7 @@ export interface WorkspaceOps {
 }
 
 export const WORKSPACE_OP_PARAMS: { readonly [K in keyof WorkspaceOps]: readonly string[] } = {
-  home: [], listFiles: ["input", "root"], fileInfo: ["input"], readTextFile: ["input"],
+  home: [], listFiles: ["input", "showHidden"], listFilesInRoot: ["input", "root"], fileInfo: ["input"], readTextFile: ["input"],
   openFile: ["input"], readFileChunk: ["id", "offset", "length"], closeFile: ["id"],
   fileIndex: ["cwd", "query", "limit", "kind", "refresh"],
   readBashOutput: ["sessionId", "path"], openBashOutput: ["sessionId", "path"],
