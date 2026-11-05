@@ -10,7 +10,7 @@ import { getAgentDir, getArchivedSessionsDir, getSessionsDir } from "../omp/path
 import { isRecord } from "../type-guards";
 import { isUploadRetentionDays } from "../upload-limits";
 import { HostOpError } from "./link-protocol";
-import { UPLOADS_LOCAL_DIR, uploadOwnerNamespace } from "./uploads";
+import { UPLOADS_LOCAL_DIR, uploadOwnerNamespace, withUploadNameLock } from "./uploads";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -62,12 +62,17 @@ async function sweepDir(dir: string, cutoff: () => number | null): Promise<boole
   for (const name of names) {
     const file = join(dir, name);
     try {
-      const info = await lstat(file);
-      if (!info.isFile()) continue;
-      // Read per file: a setting made longer (or Never) while this sweep runs must not lose a file to the old one.
-      const current = cutoff();
-      if (current === null) return false;
-      if (info.mtimeMs < current) await unlink(file);
+      // Locked from stat to unlink: a publication cannot replace this name with a fresh file in between.
+      const stop = await withUploadNameLock(async () => {
+        const info = await lstat(file);
+        if (!info.isFile()) return false;
+        // Read per file: a setting made longer (or Never) while this sweep runs must not lose a file to the old one.
+        const current = cutoff();
+        if (current === null) return true;
+        if (info.mtimeMs < current) await unlink(file);
+        return false;
+      });
+      if (stop) return false;
     } catch {
       // Skipped.
     }

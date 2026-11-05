@@ -39,6 +39,26 @@ const WINDOWS_LOCAL_ROOT_MAX_CHARS = 180;
 export const STAGED_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 export const UPLOAD_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 
+let nameSteps: Promise<unknown> = Promise.resolve();
+/** Retention deletes by a file's stat: a publication must not put a new file at that name between the stat and the
+ * unlink. Every such step (the sweep's per-file stat-and-unlink, a publication's rename or link) runs alone here. */
+export function withUploadNameLock<T>(step: () => Promise<T>): Promise<T> {
+  const run = nameSteps.then(step, step);
+  nameSteps = run.catch(() => {});
+  return run;
+}
+
+/** Give the staged inode the send time, so a hard link to it never carries the staging age. False when it cannot. */
+async function stampSent(part: string): Promise<boolean> {
+  try {
+    const sent = new Date();
+    await utimes(part, sent, sent);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** The longest prefix of `text` within `bytes` UTF-8 bytes, cut between code points. */
 function clipUtf8(text: string, bytes: number): string {
   let out = "";
@@ -384,11 +404,14 @@ export class StagedUploads {
         source = await open(part, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
         const sourceInfo = await source.stat({ bigint: true });
         if (!sourceInfo.isFile() || sourceInfo.size !== BigInt(meta.size)) throw new HostOpError(409, "upload_incomplete", "The upload has not finished");
-        let copying = false;
-        try { await link(part, candidate); }
-        catch (error) {
-          if (!["EXDEV", "EPERM", "ENOTSUP", "ENOSYS"].includes(errno(error) ?? "")) throw error;
-          copying = true;
+        // An unstamped inode would carry its staging age into the folder: copy instead.
+        let copying = !await stampSent(part);
+        if (!copying) {
+          try { await link(part, candidate); }
+          catch (error) {
+            if (!["EXDEV", "EPERM", "ENOTSUP", "ENOSYS"].includes(errno(error) ?? "")) throw error;
+            copying = true;
+          }
         }
         if (copying) {
           candidateHandle = await open(candidate, "wx");
@@ -422,9 +445,9 @@ export class StagedUploads {
         const inspection = inspectUploadTargets(canonical, [name]);
         if (inspection.nonReplaceable.length) throw new HostOpError(409, "upload_conflict_non_replaceable", "A directory or symbolic link cannot be replaced");
         let skipped = false;
-        if (conflict === "overwrite") await rename(candidate, target);
+        if (conflict === "overwrite") await withUploadNameLock(() => rename(candidate, target));
         else {
-          try { await link(candidate, target); }
+          try { await withUploadNameLock(() => link(candidate, target)); }
           catch (error) {
             if (errno(error) !== "EEXIST") throw error;
             if (inspectUploadTargets(canonical, [name]).nonReplaceable.length) throw new HostOpError(409, "upload_conflict_non_replaceable", "A directory or symbolic link cannot be replaced");
@@ -477,15 +500,8 @@ export class StagedUploads {
     const name = sanitizeUploadName(meta.name);
     const ext = extname(name);
     const stem = name.slice(0, name.length - ext.length);
-    let stamped = false;
-    try {
-      // Retention must never observe the staged age through a newly published hard link.
-      const sent = new Date();
-      await utimes(part, sent, sent);
-      stamped = true;
-    } catch {
-      // A fresh copy below gets send-time mtime even when this inode cannot be stamped.
-    }
+    // Retention must never observe the staged age through a newly published hard link.
+    const stamped = await stampSent(part);
     for (let n = 0; ; n++) {
       const fileName = n === 0 ? name : `${stem} (${n})${ext}`;
       const target = join(dir, fileName);
@@ -493,7 +509,7 @@ export class StagedUploads {
       let linked = false;
       if (stamped) {
         try {
-          await link(part, target);
+          await withUploadNameLock(() => link(part, target));
           linked = true;
         } catch (error) {
           if (errno(error) === "EEXIST" && n < 1000) continue;
@@ -503,7 +519,7 @@ export class StagedUploads {
       if (!linked) {
         let created = false;
         try {
-          const output = await open(target, "wx", 0o600);
+          const output = await withUploadNameLock(() => open(target, "wx", 0o600));
           created = true;
           try {
             // A fresh write has send-time mtime on every platform; native copyFile may preserve the staged time.
