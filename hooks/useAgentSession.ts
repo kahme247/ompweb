@@ -2511,11 +2511,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setRetryInfo(null);
         break;
       case "auto_compaction_start":
+        isCompactingRef.current = true;
         setIsCompacting(true);
         setCompactError(null);
         setCompactResult(null);
         break;
       case "auto_compaction_end":
+        isCompactingRef.current = false;
         setIsCompacting(false);
         if (event.errorMessage) {
           setCompactError(event.errorMessage as string);
@@ -3709,6 +3711,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return result;
     };
 
+    let ownsCompaction = false;
     try {
       // Commands that talk to the runtime create it here. /btw <question> and the web
       // prompt commands create it inside askBtw/handleSend, which attach their own stream.
@@ -3717,6 +3720,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         case "compact": {
           const sid = await ensureRuntime();
           if (!sid || isCompactingRef.current || isCompacting) return complete({ handled: true, error: translate("agentSession.noSessionToCompact") });
+          ownsCompaction = true;
           isCompactingRef.current = true;
           setIsCompacting(true);
           setCompactError(null);
@@ -3831,7 +3835,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       return complete({ handled: true, error: e instanceof Error ? e.message : String(e) });
     } finally {
-      if (commandName === "compact") {
+      if (ownsCompaction) {
         isCompactingRef.current = false;
         setIsCompacting(false);
       }
