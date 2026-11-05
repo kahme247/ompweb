@@ -7,21 +7,25 @@ const { act, cleanup, render, screen } = await import("@testing-library/react/pu
 const { SessionItem } = await import("@/components/SessionSidebar-rows");
 const { clearDraft, setDraft } = await import("@/lib/draft-store");
 
-const session = { id: "draft-row", name: "Draft row", firstMessage: "", cwd: "/w", modified: new Date().toISOString() };
+const session = (id) => ({ id, name: id, firstMessage: "", cwd: "/w", modified: new Date().toISOString() });
+const row = (id) => React.createElement(SessionItem, { session: session(id), isSelected: false, onClick() {}, relativeTimeNow: Date.now() });
+const mark = () => screen.queryByRole("img", { name: "Unsent draft" });
 
 test("a session row marks unsent composer content and drops the mark once it is gone", () => {
-  render(React.createElement(SessionItem, { session, isSelected: false, onClick() {}, relativeTimeNow: Date.now() }));
-  const mark = () => screen.queryByRole("img", { name: "Unsent draft" });
   try {
-    assert.equal(mark(), null);
-    act(() => setDraft(session.id, { value: "", images: [], files: [], uploads: [{ id: "u", name: "a.bin", size: 1, hostId: "local" }] }));
+    // A draft that exists before the row mounts (restored after a reload, a re-expanded project).
+    setDraft("draft-a", { value: "half-written", images: [], files: [] });
+    const { rerender } = render(row("draft-a"));
+    assert.equal(mark()?.getAttribute("title"), "Unsent draft", "marked on first paint, with its tooltip");
+    rerender(row("draft-b"));
+    assert.equal(mark(), null, "a row follows its own session's draft only");
+    act(() => setDraft("draft-b", { value: "", images: [], files: [], uploads: [{ id: "u", name: "a.bin", size: 1, hostId: "local" }] }));
     assert.ok(mark(), "an attachment-only draft counts");
-    act(() => setDraft("other-session", { value: "elsewhere", images: [], files: [] }));
-    act(() => setDraft(session.id, { value: "", images: [], files: [] }));
+    act(() => setDraft("draft-b", { value: "", images: [], files: [] }));
     assert.equal(mark(), null, "an emptied draft clears the mark, whatever other sessions hold");
   } finally {
-    clearDraft(session.id);
-    clearDraft("other-session");
+    clearDraft("draft-a");
+    clearDraft("draft-b");
     cleanup();
   }
 });
