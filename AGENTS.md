@@ -840,6 +840,20 @@ during the wait.
   subscribes to follow them. Upload completion receipts persist privately
   before the completion ACK, so upload ids survive a restart even before
   outbox_add reaches the server.
+  Completion replies also carry upload-specific `proof`; browser-held entries
+  retain it as `uploadProofs` across re-login. The dispatcher receives accepted
+  original-owner receipts out of band, never from client JSON. Private proof
+  columns and other schema migrations share one immediate discovery/ALTER
+  transaction so concurrent instances cannot race the upgrade.
+  Upload authority is revalidated inside the same immediate transaction as
+  outbox insertion, after asynchronous lookups. Private completion fingerprints
+  bind later preparation to the original file generation. A UUID still referenced
+  by a retained outbox entry cannot be repurposed after its canonical upload
+  registration is canceled or consumed; cancellation must never substitute bytes.
+  Canonical completion records refresh stale main-side caches. Every attachment
+  replay still asks the daemon to validate its real file; a missing completed
+  file never resumes as replacement bytes under the old proof. Delayed native
+  replies retire only their captured completion generation.
   Consecutive unsent outbox snapshots replace each other in the session
   backpressure queue. Resume and heartbeat do not serialize them while the sink
   is still behind; native events remain ordering fences, with genuine overflow
@@ -1422,12 +1436,24 @@ during the wait.
   if known. All of it is in memory: the hourly sweep is the backstop.
 - Error codes: composer uploads use `upload_id_conflict` (another upload has
   this id); `upload_conflict` stays the file manager's.
-- SSE mode uses the same registry over HTTP (`/api/uploads`). Upload owner =
-  `requestOwner(req)` (`lib/web-auth.ts`), the browser link's owner too; attach
-  requires the same owner and the session's host.
-- The registry is in memory: a main restart loses finished-but-unsent uploads
-  ("attach the file again"); unfinished ones resume. Switching chats aborts
-  in-flight uploads; drafts keep only finished ones (`sessionStorage`).
+- SSE mode uses the same registry over HTTP (`/api/uploads`). `requestOwner(req)`
+  (`lib/web-auth.ts`) still binds upload start, chunks and cancel to the original
+  login, and still binds browser-link resume; it is not made stable across login.
+  Attachment is also allowed by a server-issued, upload-specific completion proof
+  in the same installation/auth scope and within the existing 24-hour lifetime.
+  Main stores it privately before reporting completion; completion replays reuse
+  it without renewing expiry. Never accept caller-supplied owners or receipts,
+  and never send proofs to the daemon/omp, public outbox snapshots or logs.
+- `uploadFile().promise` returns `{proof?}`. Finished chips/drafts retain the proof;
+  Send/steer/follow-up pass the optional fourth `uploadProofs` argument through
+  IndexedDB, keepalive and Background Sync. The server validates that authority
+  and privately snapshots each upload's actual original owner for accepted
+  dispatch, including mixed owners and main restarts. Host/session/file checks
+  and submission fences remain. Legacy no-proof files remain original-owner-only.
+- The live upload registry is in memory, but completed receipts/proofs are durable
+  until their existing expiry. A main restart no longer loses a finished-but-unsent
+  attachment. Switching chats aborts in-flight uploads; drafts keep only finished
+  ones and their proofs (`sessionStorage`).
 
 ### Voice transcription jobs (`lib/stt-jobs.ts`, `/api/stt`, `hooks/useDictation.ts`)
 - The browser never waits on the STT endpoint: `POST /api/stt` keeps the

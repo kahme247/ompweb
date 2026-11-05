@@ -1,13 +1,13 @@
 // Composer uploads on the main server (docs/specs/2026-11-02-file-uploads-design.md, U3 to U5): an in-memory registry
 // of the uploads browsers send through it, relaying their bytes to the target host's daemon and the host's acks back,
 // and attaching finished ones to a prompt. The server keeps no upload bytes on its own disk.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { RequestBodyTooLargeError } from "./bounded-form-data";
 import { dropUploadFrames, getHost, hostUploadOp, onHostHello, onUploadEvent, sendUploadFrame, type UploadAck } from "./hosts/hub";
 import { HostOpError, LINK_LIMITS } from "./hosts/link-protocol";
 import { isRecord } from "./type-guards";
 import { formatUploadSize, MAX_UPLOAD_BYTES, MAX_UPLOADS_PER_MESSAGE, UPLOAD_ID_RE, UPLOAD_WINDOW_BYTES } from "./upload-limits";
-import { completedUpload, forgetCompletedUpload, saveCompletedUpload } from "./message-outbox";
+import { completedUpload, forgetCompletedUpload, outboxScope, outboxUsesUpload, saveCompletedUpload } from "./message-outbox";
 
 /** Unfinished uploads one owner may have registered: each may hold a window of bytes in its host link's queue. */
 const MAX_OPEN_UPLOADS_PER_OWNER = 32;
@@ -19,7 +19,7 @@ const MAX_PENDING_ABORTS_PER_HOST = 1000;
 
 /** Who hears back about one upload: a browser link, or an HTTP request waiting for its chunk's ack. */
 export interface UploadSink {
-  ack(received: number, done: boolean): void;
+  ack(received: number, done: boolean, proof?: string): void;
   error(status: number, code: string, message: string): void;
 }
 
@@ -60,8 +60,9 @@ interface Upload {
   live: boolean;
   sink: UploadSink | null;
   attached: { sessionFile: string; path: string; url: string } | null;
+  completionKey?: string;
   /** The attach in flight, shared by overlapping attaches of this upload to this session file. */
-  attaching?: { sessionFile: string; result: Promise<{ sessionFile: string; path: string; url: string }> } | null;
+  attaching?: { sessionFile: string; completionKey?: string; result: Promise<{ sessionFile: string; path: string; url: string }> } | null;
   attempt: string;
   touched: number;
 }
@@ -75,39 +76,77 @@ export interface OutboxUploadReceipt {
   size: number;
   type: string;
   attached: Upload["attached"];
+  /** Private accepted authority; optional only for entries written before upload continuity. */
+  owner?: string;
+  completedAt?: number;
+  /** Nonsecret completion identity: an accepted receipt cannot authorize a replacement file with the same UUID. */
+  completionKey?: string;
 }
 
-/** Snapshot only this owner's finished uploads. Missing, incomplete or someone else's ids are left out: the normal
- * takeUploads/attachUploads checks fail them at dispatch, never send a message without its files. */
-export function snapshotOutboxUploads(ids: string[], owner: string): OutboxUploadReceipt[] {
-  return ids.flatMap((id) => {
+function completionIdentity(proof: string): string {
+  return createHash("sha256").update(proof).digest("hex");
+}
+
+/** Snapshot authoritative completed metadata and its original owner, never caller-supplied receipts or owner strings. */
+export function snapshotOutboxUploads(ids: string[], owner: string, proofs?: unknown): OutboxUploadReceipt[] {
+  if (proofs !== undefined && (!isRecord(proofs) || Object.keys(proofs).length > MAX_UPLOADS_PER_MESSAGE
+    || Object.entries(proofs).some(([id, proof]) => !ids.includes(id) || typeof proof !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(proof)))) {
+    throw new UploadError(400, "invalid_uploads", "uploadProofs must map attached upload ids to completion proofs");
+  }
+  return ids.map((id) => {
     const upload = uploads().get(id);
-    if (!upload) {
-      const stored = completedUpload(id);
-      return stored?.owner === owner ? [stored.receipt] : [];
+    const stored = completedUpload(id);
+    const actualOwner = stored?.owner ?? upload?.owner;
+    if (!actualOwner) throw missing();
+    const claim = isRecord(proofs) && Object.hasOwn(proofs, id) ? proofs[id] as string : undefined;
+    if (claim !== undefined || actualOwner !== owner) {
+      if (!claim || !stored?.proof || stored.scope !== outboxScope()
+        || !timingSafeEqual(Buffer.from(claim), Buffer.from(stored.proof))) throw missing();
     }
-    if (upload.owner !== owner || !upload.done) return [];
-    const { hostId, name, size, type, attached } = upload;
-    return [{ id, hostId, name, size, type, attached }];
+    const receipt = stored?.receipt ?? (upload && { id, hostId: upload.hostId, name: upload.name, size: upload.size, type: upload.type, attached: upload.attached });
+    if (!receipt) throw missing();
+    if (!stored && upload && !upload.done) throw new UploadError(409, "upload_incomplete", "The upload has not finished");
+    const completionKey = stored?.proof ? completionIdentity(stored.proof) : upload?.completionKey;
+    return { ...receipt, owner: actualOwner, ...(stored ? { completedAt: stored.at } : {}), ...(completionKey ? { completionKey } : {}) };
   });
 }
 
-/** Restore trusted SQLite receipts only when the live registry has none; never replace another owner's registration.
- * Host/session/owner checks still run through takeUploads and attachUploads before any message goes to omp. */
+function sameMetadata(upload: Pick<Upload, "hostId" | "name" | "size" | "type">, receipt: OutboxUploadReceipt): boolean {
+  return upload.hostId === receipt.hostId && upload.name === receipt.name && upload.size === receipt.size && upload.type === receipt.type;
+}
+
+function sameUpload(upload: Upload, receipt: OutboxUploadReceipt, owner: string): boolean {
+  if (upload.owner !== owner || !sameMetadata(upload, receipt) || upload.completionKey !== receipt.completionKey) return false;
+  const current = completedUpload(receipt.id);
+  // Consumed rows may be absent, but a later completion never inherits an earlier operation's authority.
+  return !current || (current.owner === owner && sameMetadata(current.receipt, receipt)
+    && (current.proof ? completionIdentity(current.proof) : undefined) === receipt.completionKey);
+}
+
+/** Restore private accepted receipts, refreshing stale caches only from the canonical completion generation. */
 export function restoreOutboxUploads(receipts: OutboxUploadReceipt[], owner: string): void {
   const registry = uploads();
-  for (const { id, hostId, name, size, type, attached } of receipts) {
-    if (registry.has(id)) continue;
+  for (const receipt of receipts) {
+    const { id, hostId, name, size, type, attached, completionKey } = receipt;
+    const originalOwner = receipt.owner ?? owner;
+    const current = completedUpload(id);
+    if (current && (current.owner !== originalOwner || !sameMetadata(current.receipt, receipt)
+      || (current.proof ? completionIdentity(current.proof) : undefined) !== completionKey)) continue;
+    const cached = registry.get(id);
+    if (cached && (sameUpload(cached, receipt, originalOwner) || !current)) continue;
     registry.set(id, {
-      hostId, owner, name, size, type, attached,
+      hostId, owner: originalOwner, name, size, type, attached, completionKey,
       received: size, sent: size, done: true, live: false, sink: null, attempt: "", touched: Date.now(),
     });
   }
 }
 
-function persistCompletedUpload(id: string, upload: Upload): void {
+function persistCompletedUpload(id: string, upload: Upload): string {
   const { hostId, name, size, type, attached, owner } = upload;
-  saveCompletedUpload(owner, { id, hostId, name, size, type, attached });
+  const proof = saveCompletedUpload(owner, { id, hostId, name, size, type, attached });
+  if (!proof) throw missing();
+  upload.completionKey = completionIdentity(proof);
+  return proof;
 }
 
 declare global {
@@ -163,6 +202,10 @@ function onHostEvent(hostId: string, ack: UploadAck | null): void {
   if (!upload || upload.hostId !== hostId || upload.attempt !== ack.attempt) return;
   if (ack.error) {
     map.delete(ack.id);
+    const stored = completedUpload(ack.id);
+    if (stored && sameUpload(upload, { ...stored.receipt, completionKey: stored.proof ? completionIdentity(stored.proof) : undefined }, stored.owner)) {
+      forgetCompletedUpload(ack.id, stored);
+    }
     dropUploadFrames(hostId, ack.id);
     // A daemon's status is untrusted: Response.json throws on one outside 200-599.
     const status = ack.error.status >= 400 && ack.error.status <= 599 ? ack.error.status : 502;
@@ -172,17 +215,19 @@ function onHostEvent(hostId: string, ack: UploadAck | null): void {
   upload.received = Math.min(upload.size, Math.max(upload.received, ack.received));
   upload.done = ack.done && upload.received === upload.size;
   upload.touched = Date.now();
+  let proof: string | undefined;
   if (upload.done) {
     try {
       // Before its done ACK: an outbox_add may never reach main until after a restart.
-      persistCompletedUpload(ack.id, upload);
-    } catch {
+      proof = persistCompletedUpload(ack.id, upload);
+    } catch (error) {
       upload.done = upload.live = false;
-      upload.sink?.error(500, "upload_receipt_failed", "Could not save the completed upload; retry the upload");
+      if (error instanceof UploadError) upload.sink?.error(error.status, error.code, error.message);
+      else upload.sink?.error(500, "upload_receipt_failed", "Could not save the completed upload; retry the upload");
       return;
     }
   }
-  if (upload.live) upload.sink?.ack(upload.received, upload.done);
+  if (upload.live) upload.sink?.ack(upload.received, upload.done, proof);
 }
 
 const missing = () => new UploadError(404, "upload_missing", "The upload is gone: attach the file again");
@@ -207,7 +252,7 @@ function makeRoom(map: Map<string, Upload>, owner: string): void {
 /** Register (or re-register, to resume) an upload and open it on its host; resolves the host's offset. Of starts that
  * overlap, the latest one's answer sets where the bytes go on from. `onRegistered` transfers sink ownership
  * synchronously after preflight accepts this start, before asking the host. Throws HostOpError. */
-export async function startUpload(req: UploadStartRequest): Promise<{ received: number }> {
+export async function startUpload(req: UploadStartRequest): Promise<{ received: number; proof?: string }> {
   const { id, hostId, owner, name, size, type, sink } = req;
   if (
     typeof id !== "string" || !UPLOAD_ID_RE.test(id) || typeof hostId !== "string" || !hostId
@@ -222,8 +267,9 @@ export async function startUpload(req: UploadStartRequest): Promise<{ received: 
   const stored = completedUpload(id);
   if (stored) {
     if (stored.owner !== owner) throw new UploadError(409, "upload_id_conflict", "Another upload has this id");
-    restoreOutboxUploads([stored.receipt], owner);
+    restoreOutboxUploads([{ ...stored.receipt, owner: stored.owner, completionKey: stored.proof ? completionIdentity(stored.proof) : undefined }], owner);
   }
+  if (!stored && outboxUsesUpload(id)) throw new UploadError(409, "upload_id_conflict", "Another upload has this id");
   let upload = map.get(id);
   const known = upload !== undefined;
   if (upload && (upload.owner !== owner || upload.hostId !== hostId || upload.name !== name || upload.type !== type || upload.size !== size)) {
@@ -261,13 +307,26 @@ export async function startUpload(req: UploadStartRequest): Promise<{ received: 
   if (!isRecord(result) || typeof result.received !== "number" || !Number.isSafeInteger(result.received) || result.received < 0 || result.received > size || typeof result.done !== "boolean") {
     throw new UploadError(502, "host_bad_result", "The host sent an invalid uploadStart result");
   }
+  let proof: string | undefined;
   if (upload.attempt === attempt) {
+    if (stored && (!result.done || result.received !== size)) {
+      forgetCompletedUpload(id, stored);
+      map.delete(id);
+      throw missing();
+    }
     upload.received = upload.sent = result.received;
     upload.done = result.done && result.received === size;
     upload.live = !upload.done;
-    if (upload.done) persistCompletedUpload(id, upload);
+    if (upload.done) {
+      try { proof = persistCompletedUpload(id, upload); }
+      catch (error) { upload.done = upload.live = false; throw error; }
+    }
   }
-  return { received: result.received };
+  else if (stored && result.done && result.received === size) {
+    const current = completedUpload(id);
+    if (current?.proof && current.proof === stored.proof && current.scope === outboxScope()) proof = current.proof;
+  }
+  return { received: result.received, ...(proof ? { proof } : {}) };
 }
 
 /** Delete an upload here and on its host, telling its sink why. */
@@ -310,26 +369,29 @@ export function forwardUploadFrame(owner: string, id: string, bytes: Uint8Array,
 
 /** HTTP form of the window (PUT /api/uploads/<id>?offset=N): `body` at the host's offset, cut into pieces, answered
  * once the host has acked through its end. */
-export function putUploadChunk(id: string, owner: string, offset: number, body: Uint8Array): Promise<{ received: number; done: boolean }> {
+export function putUploadChunk(id: string, owner: string, offset: number, body: Uint8Array): Promise<{ received: number; done: boolean; proof?: string }> {
   const upload = uploads().get(id);
   if (!upload || upload.owner !== owner) return Promise.reject(missing());
   if (offset !== upload.received || upload.sent !== upload.received || (!upload.live && !upload.done)) {
     return Promise.reject(new UploadError(409, "upload_offset", "The upload is at another offset", upload.received));
   }
-  if (body.byteLength === 0) return Promise.resolve({ received: upload.received, done: upload.done });
+  if (body.byteLength === 0) {
+    const proof = upload.done ? persistCompletedUpload(id, upload) : undefined;
+    return Promise.resolve({ received: upload.received, done: upload.done, ...(proof ? { proof } : {}) });
+  }
   const target = offset + body.byteLength;
-  const { promise, resolve, reject } = Promise.withResolvers<{ received: number; done: boolean }>();
+  const { promise, resolve, reject } = Promise.withResolvers<{ received: number; done: boolean; proof?: string }>();
   const previous = upload.sink;
-  const finish = (error: UploadError | null, received = 0, done = false) => {
+  const finish = (error: UploadError | null, received = 0, done = false, proof?: string) => {
     clearTimeout(timer);
     if (upload.sink === sink) upload.sink = previous;
     if (error) reject(error);
-    else resolve({ received, done });
+    else resolve({ received, done, ...(proof ? { proof } : {}) });
   };
   const sink: UploadSink = {
-    ack(received, done) {
+    ack(received, done, proof) {
       // The last byte resolves on `done` only: the host's final fsync may outlast its ack coalescing, and a send needs the file finished.
-      if ((received >= target && target < upload.size) || done) finish(null, received, done);
+      if ((received >= target && target < upload.size) || done) finish(null, received, done, proof);
       else timer.refresh();
     },
     error(status, code, message) {
@@ -354,7 +416,7 @@ export async function abortUpload(id: string, owner: string, hostId?: string): P
   const stored = completedUpload(id);
   if (stored) {
     if (stored.owner !== owner) return;
-    restoreOutboxUploads([stored.receipt], owner);
+    restoreOutboxUploads([{ ...stored.receipt, owner: stored.owner, completionKey: stored.proof ? completionIdentity(stored.proof) : undefined }], owner);
   }
   const upload = map.get(id);
   if (upload) {
@@ -375,10 +437,14 @@ export function releaseUploadSink(id: string, sink: UploadSink): void {
 
 const PROMPT_TYPES: Record<string, true> = { prompt: true, steer: true, follow_up: true };
 
-/** The `uploads` of an agent command, taken off it (omp never sees the field) and checked: ids of finished uploads of
- * `owner`, on a prompt, steer or follow_up only. Null when it names none. Throws UploadError. */
-export function takeUploads(command: Record<string, unknown>, owner: string): string[] | null {
-  if (!Object.hasOwn(command, "uploads")) return null;
+/** Remove browser-only fields before native dispatch. Trusted receipts are supplied ONLY by the server dispatcher. */
+export function takeUploads(command: Record<string, unknown>, owner: string, trusted?: OutboxUploadReceipt[]): { ids: string[]; receipts: OutboxUploadReceipt[] } | null {
+  const proofs = command.uploadProofs;
+  delete command.uploadProofs;
+  if (!Object.hasOwn(command, "uploads")) {
+    if (proofs !== undefined) snapshotOutboxUploads([], owner, proofs);
+    return null;
+  }
   const ids = command.uploads;
   delete command.uploads;
   if (
@@ -387,15 +453,19 @@ export function takeUploads(command: Record<string, unknown>, owner: string): st
   ) {
     throw new UploadError(400, "invalid_uploads", `uploads must be at most ${MAX_UPLOADS_PER_MESSAGE} distinct upload ids`);
   }
-  if (ids.length === 0) return null;
-  if (typeof command.type !== "string" || !Object.hasOwn(PROMPT_TYPES, command.type)) throw new UploadError(400, "invalid_uploads", "Only a prompt, steer or follow_up attaches files");
-  restoreOutboxUploads(snapshotOutboxUploads(ids as string[], owner), owner);
-  for (const id of ids as string[]) {
-    const upload = uploads().get(id);
-    if (!upload || upload.owner !== owner) throw missing();
+  if (ids.length && (typeof command.type !== "string" || !Object.hasOwn(PROMPT_TYPES, command.type))) {
+    throw new UploadError(400, "invalid_uploads", "Only a prompt, steer or follow_up attaches files");
+  }
+  const receipts = trusted ?? snapshotOutboxUploads(ids as string[], owner, proofs);
+  if (receipts.length !== ids.length || !ids.every((id) => receipts.some((receipt) => receipt.id === id))) throw missing();
+  if (!ids.length) return null;
+  restoreOutboxUploads(receipts, owner);
+  for (const receipt of receipts) {
+    const upload = uploads().get(receipt.id);
+    if (!upload || !sameUpload(upload, receipt, receipt.owner ?? owner)) throw missing();
     if (!upload.done) throw new UploadError(409, "upload_incomplete", "The upload has not finished");
   }
-  return ids as string[];
+  return { ids: ids as string[], receipts };
 }
 
 /** Link (or copy) each upload into the session's `local://uploads/` on its host and append the block naming them to the
@@ -405,30 +475,34 @@ export async function attachUploads(
   owner: string,
   session: { readonly host: { readonly id: string }; readonly sessionFile: string; readonly sessionId: string },
   command: Record<string, unknown>,
+  receipts?: OutboxUploadReceipt[],
 ): Promise<void> {
   const { sessionFile, sessionId } = session;
   if (!sessionFile) throw new UploadError(409, "session_file_unknown", "The session has no file yet to attach files to");
   const lines: string[] = [];
   for (const id of ids) {
     const upload = uploads().get(id);
-    if (!upload || upload.owner !== owner) throw missing();
+    const receipt = receipts?.find((receipt) => receipt.id === id);
+    if (!upload || (receipt ? !sameUpload(upload, receipt, receipt.owner ?? owner) : upload.owner !== owner)) throw missing();
+    if (!upload.done) throw new UploadError(409, "upload_incomplete", "The upload has not finished");
     if (upload.hostId !== session.host.id) throw new UploadError(409, "upload_wrong_host", "The file was uploaded to another host than the session's");
-    if (upload.attached?.sessionFile !== sessionFile) {
-      // One host op per upload and session file: an overlapping attach awaits it, or the host links a second ` (1)` copy.
-      if (upload.attaching?.sessionFile !== sessionFile) {
-        const result = hostUploadOp(upload.hostId, "uploadAttach", { id, sessionFile, sessionId }).then((answer) => {
-          if (!isRecord(answer) || typeof answer.path !== "string" || typeof answer.url !== "string") {
-            throw new UploadError(502, "host_bad_result", "The host sent an invalid uploadAttach result");
-          }
-          return { sessionFile, path: answer.path, url: answer.url };
-        });
-        upload.attaching = { sessionFile, result };
-        const settled = () => { if (upload.attaching?.result === result) upload.attaching = null; };
-        result.then(settled, settled);
-      }
-      upload.attached = await upload.attaching!.result;
+    // The daemon owns receipt/file validation, including replays after an earlier successful attach.
+    if (upload.attaching?.sessionFile !== sessionFile || upload.attaching.completionKey !== upload.completionKey) {
+      const completionKey = upload.completionKey;
+      const result = hostUploadOp(upload.hostId, "uploadAttach", { id, sessionFile, sessionId }).then((answer) => {
+        if (!isRecord(answer) || typeof answer.path !== "string" || typeof answer.url !== "string") {
+          throw new UploadError(502, "host_bad_result", "The host sent an invalid uploadAttach result");
+        }
+        return { sessionFile, path: answer.path, url: answer.url };
+      });
+      upload.attaching = { sessionFile, completionKey, result };
+      const settled = () => { if (upload.attaching?.result === result) upload.attaching = null; };
+      result.then(settled, settled);
     }
-    const { url, path } = upload.attached!;
+    const attached = await upload.attaching!.result;
+    if (uploads().get(id) !== upload || (receipt && !sameUpload(upload, receipt, receipt.owner ?? owner))) throw missing();
+    upload.attached = attached;
+    const { url, path } = attached;
     lines.push(`- ${url} (${path}, ${formatUploadSize(upload.size)}, ${upload.type || "application/octet-stream"})`);
   }
   const block = `Attached files (this session's local:// directory):\n${lines.join("\n")}`;
@@ -437,9 +511,16 @@ export async function attachUploads(
 }
 
 /** The prompt carrying these uploads reached omp: their registry entries go. */
-export function forgetUploads(ids: string[]): void {
+export function forgetUploads(ids: string[], owner: string, receipts?: OutboxUploadReceipt[]): void {
   for (const id of ids) {
-    uploads().delete(id);
-    forgetCompletedUpload(id);
+    const upload = uploads().get(id);
+    const receipt = receipts?.find((receipt) => receipt.id === id);
+    const expectedOwner = receipt?.owner ?? owner;
+    if (upload && (!upload.done || (receipt ? !sameUpload(upload, receipt, expectedOwner) : upload.owner !== expectedOwner))) continue;
+    const stored = completedUpload(id);
+    if (stored && (stored.owner !== expectedOwner || !receipt || !sameMetadata(stored.receipt, receipt)
+      || (stored.proof ? completionIdentity(stored.proof) : undefined) !== receipt.completionKey)) continue;
+    if (upload) uploads().delete(id);
+    if (stored) forgetCompletedUpload(id, stored);
   }
 }

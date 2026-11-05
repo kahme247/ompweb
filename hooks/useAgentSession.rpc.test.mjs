@@ -539,6 +539,67 @@ test("upload ids ride the prompt and follow-up bodies; a files-only prompt is se
   assert.deepEqual(callsTo("POST", "/api/agent/").find((call) => call.body?.type === "follow_up")?.body.uploads, [id]);
 });
 
+test("upload continuity: an uploaded file reaches held outbox intent after a real ChatWindow remount", async (t) => {
+  resetWorld();
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
+  const sid = "proof-upload-remount";
+  t.after(() => clearDraft(sid));
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.outboxHold = true;
+  world.holds.push(
+    { match: (method, url) => method === "POST" && url === "/api/uploads", produce: async () => ({ value: { received: 0 } }) },
+    { match: (method, url) => method === "PUT" && url.startsWith("/api/uploads/"), produce: async () => ({ value: { received: 8, done: true, proof: "accepted-completion-proof" } }) },
+  );
+  const chatInputRef = React.createRef();
+  const mount = async () => {
+    const view = ownRoot(render(React.createElement(ChatWindow, {
+      session: sessionInfo(sid), newSessionCwd: null, chatInputRef,
+    }), { wrapper: TestRoot }));
+    await settle();
+    return view;
+  };
+  const first = await mount();
+  await act(async () => {
+    chatInputRef.current.addFiles([new File([new Uint8Array([0x50, 0x4b, 3, 4, 0, 0, 0, 0])], "proof.zip", { type: "application/zip" })]);
+  });
+  await until(() => getDraft(sid)?.uploads?.length === 1, "the completed file must reach the draft");
+  const id = getDraft(sid).uploads[0].id;
+  await act(() => first.unmount());
+  const second = await mount();
+  assert.ok(second.getByText("proof.zip"), "the remounted real composer owns the completed attachment");
+  await act(async () => { fireEvent.keyDown(second.getByRole("textbox"), { key: "Enter" }); });
+  await until(() => world.outbox.length === 1, "Send must commit the file-only message to the worker");
+  assert.deepEqual(world.outbox[0].uploads, [id]);
+  assert.deepEqual(world.outbox[0].uploadProofs, { [id]: "accepted-completion-proof" }, "the durable intent retains completion authority, not just the chip");
+  assert.equal(getDraft(sid), null, "the stored intent consumes the unchanged draft");
+  await act(() => second.unmount());
+  await mount();
+  assert.deepEqual(world.outbox[0].uploadProofs, { [id]: "accepted-completion-proof" }, "a new hook lifetime cannot strip the held intent");
+});
+
+for (const [preference, mode] of [["steer", "steer"], ["followup", "followUp"]]) {
+  test(`upload continuity: real composer ${mode} preserves completed proof in held intent`, async (t) => {
+    resetWorld();
+    const { setDraft, getDraft, clearDraft } = await import("@/lib/draft-store");
+    const sid = `proof-queue-${mode}`;
+    t.after(() => clearDraft(sid));
+    primeSession(sid, [userMsg("u0", "before")]);
+    world.agents.set(sid, { running: true, state: { isStreaming: true, isPromptRunning: true } });
+    world.outboxHold = true;
+    localStorage.setItem("omp-web:submit-during-run", preference);
+    setDraft(sid, { value: "with my file", images: [], files: [], uploads: [{ id: "queue-upload", name: "queued.zip", size: 8, hostId: "local", proof: "queue-completion-proof" }] });
+    const view = ownRoot(render(React.createElement(ChatWindow, { session: sessionInfo(sid), newSessionCwd: null }), { wrapper: TestRoot }));
+    await settle();
+    await act(async () => { lastEs()?.open(); });
+    await settle();
+    await act(async () => { fireEvent.keyDown(view.getByRole("textbox"), { key: "Enter" }); });
+    await until(() => world.outbox.length === 1, "queue submission must reach worker storage");
+    assert.equal(world.outbox[0].mode, mode);
+    assert.deepEqual(world.outbox[0].uploadProofs, { "queue-upload": "queue-completion-proof" });
+    assert.equal(getDraft(sid), null, "the real composer clears only after its intent is stored");
+  });
+}
+
 test("a shell-queued outbox prompt and steer use queue_update without a phantom turn or reply notice", async () => {
   resetWorld();
   primeSession("bash-queue", [userMsg("u0", "q")]);
@@ -3145,6 +3206,29 @@ test("relocation keeps the source and existing target finished uploads", async (
   assert.equal(getDraft(sid), null);
 });
 
+test("upload continuity: confirmed identity move retains proof through composer persistence and outbox submission", async (t) => {
+  resetWorld();
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
+  const sid = "proof-edit-move", target = `${sid}-owned`;
+  t.after(() => { clearDraft(sid); clearDraft(target); });
+  const upload = { id: "moved-upload", name: "moved.zip", size: 8, hostId: "local", proof: "moved-completion-proof" };
+  setDraft(sid, { value: "", images: [], files: [], uploads: [upload] });
+  const native = primeEditableHistory(sid);
+  native.moveTo = target;
+  await attachEditableWrapper(t, native);
+  const w = await mountMovableChat(sid);
+  await confirmEdit(w.view, w.editButton());
+  await until(() => w.selectedId === target, "the confirmed target must own the composer");
+  await settle();
+  assert.deepEqual(getDraft(target)?.uploads, [upload], "the live composer must preserve proof when rewriting its moved draft");
+  assert.equal(getDraft(sid), null);
+  world.outboxHold = true;
+  await act(async () => { fireEvent.keyDown(w.view.getByRole("textbox"), { key: "Enter" }); });
+  await until(() => world.outbox.length === 1, "the moved composer must store its message");
+  assert.equal(world.outbox[0].sessionId, target);
+  assert.deepEqual(world.outbox[0].uploadProofs, { "moved-upload": "moved-completion-proof" });
+});
+
 test("relocation merges an upload both drafts hold once", async (t) => {
   resetWorld();
   const { getDraft, setDraft, clearDraft, subscribeDrafts } = await import("@/lib/draft-store");
@@ -4903,6 +4987,27 @@ test("a fresh chat's first prompt attaches one event stream instead of an observ
   assert.equal(streamsBeforeOpen, 1, "the prompt owns the only stream");
   assert.equal(world.esInstances.length, 1);
   assert.equal(callsTo("POST", "/api/agent/fresh-send").some((call) => call.body?.type === "prompt"), true);
+});
+
+test("upload continuity: a fresh chat sends completion proof only with its direct prompt", async () => {
+  resetWorld();
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ value: { sessionId: "proof-fresh" } }),
+  });
+  const w = await mountSession(null, undefined, { newSessionCwd: "/workspace", onSessionCreated() {} });
+  let sending;
+  await act(async () => {
+    sending = w.latest.handleSend("first file", undefined, ["fresh-upload"], { "fresh-upload": "fresh-completion-proof" });
+    await sleep(30);
+  });
+  let receipt;
+  await act(async () => { lastEs().open(); receipt = await sending; });
+  assert.equal(receipt.status, "accepted");
+  assert.equal("uploadProofs" in callsTo("POST", "/api/agent/new")[0].body, false, "runtime creation has no attachment authority");
+  const prompt = callsTo("POST", "/api/agent/proof-fresh").find((call) => call.body?.type === "prompt");
+  assert.deepEqual(prompt?.body.uploads, ["fresh-upload"]);
+  assert.deepEqual(prompt?.body.uploadProofs, { "fresh-upload": "fresh-completion-proof" });
 });
 
 test("a fresh chat's /btw question attaches one event stream instead of an observer plus its own", async () => {
