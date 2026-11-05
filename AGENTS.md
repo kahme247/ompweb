@@ -288,7 +288,7 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
 - The binary needs `process.env.NODE_ENV` defined as `"production"` at build time (`scripts/build-binary.ts`): a plain `bun build --compile` inlines `"development"`, and the server then never writes the daemon's link. `npm run smoke -- --binary` catches that (no session lists).
 - `Bun.serve` turns on `SO_REUSEPORT` when `development` is false, so a second omp-web would share the port instead of failing; `startServer` passes `reusePort: false`, and `startProduction` (`server/app.ts`) reports an `EADDRINUSE` in one line.
 - The web-server in-app update worker runs on Node (`OMP_WEB_NODE_BIN`, the launcher's `process.execPath`), not Bun. The compiled web server updates by download (`lib/self-update.ts`). Host-daemon updates use their own helper in `lib/hosts/update-worker.ts`, including for binary hosts; never reuse the web-server worker to restart a host.
-- Bun's `fs.watch` drops an event that follows the previous one within ~2 ms, so the file channel (`openFileChannel`, `lib/event-stream-hub.ts`) re-stats the file ~50 ms after every event.
+- The daemon-owned watcher (`lib/hosts/workspace-watch.ts`) re-stats ~50 ms after every event to catch burst saves (Bun may drop native events within ~2 ms); main only routes its sequenced watch events.
 - `bun:sqlite` `.get()` returns `null` for no row (not `undefined`).
 - `bun:sqlite` `close()` keeps the database file open while prepared statements are alive (until GC), so Windows cannot remove or replace it: the stores close with `close(true)`, which finalizes them (`closeNotificationStore`, `closeUsageDatabase`).
 - `readSttConfig` lives in server-only `lib/stt-jobs.ts`; the browser bundle must never import it.
@@ -525,11 +525,16 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   (`confirmFromServer`). Local callers never ask for this machine. A remote
   caller asks before any other host unless that host allows agent starts, and
   always before this machine, for `new_session` and `send_to_session` alike.
-- **Not yet remote:** Explorer, Git, Worktrees, the Skills/Plugins/Agents/MCP
-  settings tabs and directory browsing show "Not available on remote hosts
-  yet". Archive is refused for a remote session (501 `remote_unavailable`, the
-  menu item disabled): the Archived Sessions browser reads this machine's archive
-  only, so it could not be restored. Sub-projects 2 and 3 of the spec add ops for them.
+- **Workspace operations are daemon-owned** (`lib/workspace-types.ts`,
+  `lib/hosts/workspace-ops.ts`; design `docs/specs/2026-11-03-remote-workspaces-design.md`).
+  Files/index/shell output/watch, Git/worktrees, browsing/default cwd and clone
+  APIs use `Host.workspaceOps` for every host, including local. Optional hello
+  capabilities gate old daemons; unavailable operations never fall back to main.
+  File tabs retain host/cwd/session ownership. Upload publication extends the
+  existing staged 2 GiB uploader; its workspace receipts are not session attachments.
+- **Not yet remote:** Skills/Plugins/Agents/MCP settings and session archiving.
+  Archive remains 501 `remote_unavailable` with its menu item disabled; transcript
+  search and the archive browser still read this machine's files.
 
 #### Local daemon (`docs/specs/2026-10-29-local-daemon-design.md`)
 - **Two services.** `ompweb` (web) and `ompweb-host` (`ompweb host`, the daemon) are installed together by `ompweb systemd install`, `ompweb launchd install` and the Windows tray install; uninstall removes both, `ompweb systemd restart` restarts the web unit only. The daemon owns this machine's omp children, so a web restart, update or redeploy leaves runs going; restarting the daemon ends them (auto-resume then resumes the sessions that were running). An upgrade restarts the daemon only when the running daemon's link version is outside the new release's `[MIN_LINK_PROTOCOL_VERSION, LINK_PROTOCOL_VERSION]` range (it would get 4426 or 426 and exit); a daemon inside the range keeps running.
@@ -1014,11 +1019,11 @@ during the wait.
 
 ### Worktrees and project grouping
 - `lib/worktree.ts` resolves linked worktree top-levels back to the main repo `projectRoot`; `listAllSessions()` attaches that to each `SessionInfo` so all worktrees for one repo are grouped together in the sidebar.
-- Worktree operations are served by `/api/worktrees` and guarded by the same allowed-root rules as `/api/files`.
+- `/api/worktrees` delegates authorized operations and root grants to the owning daemon; only that host's session-list cache is invalidated on main.
 - New worktrees are created under `<repoRoot>-worktrees/<sanitized-branch>`. Existing branches are reused; otherwise `git worktree add -b` creates the branch.
 - Removing a dirty worktree returns `409` with `{ dirty: true }` so the UI can ask before retrying with `force`.
 - The file panel's **Worktrees** tab (`components/WorktreesPanel.tsx`) switches, creates, and removes worktrees; the new-session screen's worktree `<select>` (AppShell, shown when the selected workspace has 2+ worktrees) only switches. `SessionSidebar` owns the per-repo worktree cache and the actions and emits them as a `WorktreeContext` (`onWorktreeContextChange`, null unless the active workspace is a Git top-level repo); AppShell hands it to both. Switching moves the sidebar's effective cwd (where a new session starts), not the open session.
-- Explorer, Git, and file viewers use `explorerCwd` in AppShell: the open session's cwd first, then the sidebar's cwd, then the new-session cwd. Mention/copy-path helpers resolve relative paths against the same value.
+- Explorer and Git pair `explorerCwd` with its owning host. Each file tab instead retains its source host/cwd/session; relative links and downloads use that source after chat switches. Worktree caches, contexts and pending actions also include host identity.
 - Sessions whose cwd points at a removed worktree are inferred back into the main project instead of becoming a phantom project row.
 
 ### Managed projects sidebar (`lib/project-registry.ts`, `/api/projects`)
@@ -1060,18 +1065,28 @@ during the wait.
 - Only `https://`, `ssh://` and scp-like `user@host:path` URLs are accepted
   (`cloneDirectoryName`); git also runs with `GIT_ALLOW_PROTOCOL=https:ssh`
   and `GIT_TERMINAL_PROMPT=0`, so credentials must come from helpers/agents.
-- The POST streams NDJSON (`output` chunks, then one of `done` / `cancelled` /
-  `error`). Cancel is `DELETE { id }`: the POST stream stays open until the
-  partial clone is deleted, so the UI can confirm the cleanup. A client
-  disconnect cancels and cleans up too. An existing target is refused (409).
+- The POST streams NDJSON from daemon-owned jobs (`lib/hosts/workspace-clone.ts`);
+  DELETE carries `{ id, hostId }` and waits for process exit and identity-checked
+  cleanup. Cleanup captures into a private quarantine, verifies identity there,
+  and removes only the owned clone. A raced replacement is preserved and its
+  recovery location is shown. Existing targets are refused (409). Link/main
+  restarts leave jobs alive, but the UI reports uncertain
+  outcomes on a lost stream. Unobserved jobs cancel after two minutes; an unknown
+  job on a replacement daemon never means successful cancellation.
 
 ### File access allow-list
-- `/api/files` is intentionally not a general filesystem browser. Allowed roots come from this machine's session cwds and their resolved project roots (as its daemon lists them: `hostSessions("local")`, the last list while the daemon is offline), `~/omp-cwd-*`, and roots explicitly added with `allowFileRoot()`. Other hosts' paths never reach it.
-- `/api/cwd/validate`, `/api/default-cwd`, and `/api/worktrees` call `allowFileRoot()` when they make a new location browsable.
+- `/api/files` is not a general filesystem browser. `workspace-roots.ts` discovers
+  that daemon's sessions/projects, explicit validated grants, scratch directories
+  and instruction roots. Reads and watches share explicit-root authorization;
+  session references grant reads only, not listing or writes. Credential exclusions
+  apply to canonical targets too.
+- Successful selection, default cwd and worktree operations grant roots on the
+  owning daemon. Browsing alone grants nothing. Main's `getAllowedFileRoots()`
+  remains for the unrelated local config/import/skills readers, not workspace APIs.
 - The session-id → file path cache (`cacheSessionPath`, `lib/session-reader.ts`) on main is filled by main's own scans and by wrappers on the local host; it only serves the readers listed under "Session list caching".
 
 ### Explorer hidden items
-- The tree skip-list (`IGNORED_NAMES`/`IGNORED_SUFFIXES`) is **duplicated** in `app/api/files/[...path]/route.ts` and `app/api/file-index/route.ts` — edit both or extract a shared module.
+- The tree and index share `isIgnoredFileEntry` in `lib/file-dirent.ts`.
 - The Explorer's "Show hidden items" toggle sends `?hidden=1`, which bypasses the skip-list for `type=list` only. It deliberately does NOT touch `/api/file-index` — @-mentions and file search keep ignoring those paths. State is AppShell-owned (localStorage `omp-web:show-hidden-files`, off by default); flipping it makes `FileExplorer` drop its cached listings and re-read the visible directories, keeping expansion.
 
 ### Session list caching — new sessions must appear immediately
@@ -1085,7 +1100,7 @@ during the wait.
   `invalidateSessionFileListCache()` — never add a session-mutation path that
   forgets this. Regression test: `session-reader.test.mjs`.
 - A mutation that main triggers calls `invalidateLocalSessionLists()`: it clears main's per-host entry and sends the daemon `invalidateSessionLists` (the daemon runs the invalidation above). A route that changes this machine's session files and does not call it leaves the sidebar stale for up to 30 s.
-- **Still read on main, from this machine's own files** (main and the daemon share a machine, so these see the same sessions): transcript search (`session-content-search.ts`, `/api/sessions/search`), the session file watcher (`session-watcher.ts`), archive list/restore (`/api/sessions/archive`), import (`/api/sessions/import`), usage (`usage-db.ts`), and the bash-output, subagent-history and file-reference readers (`session-file-references.ts`, `subagent-history.ts`). They use main's own copies of `session-reader` and its caches, so they are invalidated separately (`invalidateSessionListCache()`); a new reader of session files on main for a session that may be remote is a bug.
+- **Still read on main, from this machine's own files:** transcript search (`session-content-search.ts`, `/api/sessions/search`), the session watcher (`session-watcher.ts`), archive list/restore, import, usage (`usage-db.ts`), subagent history and local file-reference readers. Their main-side session caches are invalidated separately. Workspace shell-output authorization and bytes now come from the owning daemon; new remote-capable readers must use the host seam.
 
 ### Chat scroll-follow
 - `useAgentSession` follows the conversation: the effect depends on both

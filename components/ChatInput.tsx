@@ -38,7 +38,7 @@ import {
 } from "./ChatInput-uploads";
 import { discardUpload, newUploadId, uploadFile, UploadFailedError, type UploadHandle } from "@/lib/event-stream";
 import { MAX_UPLOAD_BYTES, MAX_UPLOADS_PER_MESSAGE } from "@/lib/upload-limits";
-import { LOCAL_HOST_ID } from "@/lib/project-ordering";
+import { hostProjectKey, LOCAL_HOST_ID } from "@/lib/project-ordering";
 import {
   BUILTIN_SLASH_COMMAND_DEFS,
   CLIENT_BUILTIN_COMMAND_NAMES,
@@ -250,7 +250,7 @@ interface Props {
   onBuiltinCommand?: (message: string) => Promise<BuiltinSlashCommandResult>;
   onAudioUnlock?: () => void;
   draftKey?: string;
-  /** The host files sent As file are uploaded to: the session's, or the new chat's (this machine when absent). */
+  /** Owning host for file uploads and the @ file index (this machine when absent). */
   uploadHostId?: string;
   /** Backend-confirmed ownership relocation, distinct from navigating to a draft. */
   draftIdentityMove?: { from: string; to: string; sourceDraft?: ChatDraft };
@@ -472,9 +472,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [atActiveIndex, setAtActiveIndex] = useState(0);
   const [historyMenuOpen, setHistoryMenuOpen] = useState(false);
   const [historyActiveIndex, setHistoryActiveIndex] = useState(0);
-  const [fileIndex, setFileIndex] = useState<{ cwd: string; entries: FileIndexEntry[]; truncated: boolean } | null>(null);
+  const [fileIndex, setFileIndex] = useState<{ workspaceKey: string; entries: FileIndexEntry[]; truncated: boolean } | null>(null);
   const [fileIndexLoading, setFileIndexLoading] = useState(false);
-  const [atServerResult, setAtServerResult] = useState<{ cwd: string; query: string; matches: FileIndexEntry[] } | null>(null);
+  const [atServerResult, setAtServerResult] = useState<{ workspaceKey: string; query: string; matches: FileIndexEntry[] } | null>(null);
   const [retryNow, setRetryNow] = useState(() => Date.now());
   useEffect(() => {
     if (!retryInfo?.delayMs || !retryInfo?.startedAt) return;
@@ -505,8 +505,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const slashItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const atItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const historyItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const fileIndexMetaRef = useRef<{ cwd: string; fetchedAt: number } | null>(null);
-  const fileIndexFetchingRef = useRef<string | null>(null);
+  const fileIndexMetaRef = useRef<{ workspaceKey: string; fetchedAt: number } | null>(null);
+  const fileIndexFetchingRef = useRef<{ workspaceKey: string; controller: AbortController } | null>(null);
+  const fileIndexOwner = hostProjectKey(uploadHostId, cwd ?? "");
+  const fileIndexOwnerRef = useRef(fileIndexOwner);
+  fileIndexOwnerRef.current = fileIndexOwner;
   const draftKeyRef = useRef(draftKey);
   const consumedIdentityMoveRef = useRef<typeof draftIdentityMove>(undefined);
   // Pending queue recoveries retain this identity across confirmed moves only.
@@ -1279,17 +1282,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const slashMenuOpenActive = slashQuery !== null;
   useEffect(() => {
+    if (uploadHostId !== LOCAL_HOST_ID) { setDormantSkillNames(new Set()); return; }
     if (!slashMenuOpenActive || !cwd) return;
     const controller = new AbortController();
     void fetch(`/api/skills?cwd=${encodeURIComponent(cwd)}`, { signal: controller.signal })
       .then((response) => response.ok ? response.json() as Promise<{ skills?: Array<{ name?: string; disableModelInvocation?: boolean }> }> : null)
       .then((data) => {
-        if (!data) return;
+        if (!data || controller.signal.aborted) return;
         setDormantSkillNames(new Set((data.skills ?? []).flatMap((skill) => skill.disableModelInvocation && skill.name ? [skill.name] : [])));
       })
       .catch(() => {});
     return () => controller.abort();
-  }, [cwd, slashMenuOpenActive]);
+  }, [cwd, uploadHostId, slashMenuOpenActive]);
 
   const builtinSlashCommands: SlashCommandPaletteItem[] = React.useMemo(
     () => BUILTIN_SLASH_COMMAND_DEFS
@@ -1393,38 +1397,41 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const atQueryText = atQuery?.query ?? null;
   const atLocalMatches: FileIndexEntry[] = React.useMemo(() => (
-    atQueryText !== null && fileIndex && fileIndex.cwd === cwd
+    atQueryText !== null && fileIndex && fileIndex.workspaceKey === fileIndexOwner
       ? filterFileEntries(fileIndex.entries, atQueryText)
       : []
-  ), [atQueryText, fileIndex, cwd]);
+  ), [atQueryText, fileIndex, fileIndexOwner]);
 
   // When the client index is truncated (repo larger than the index cap),
   // local filtering cannot see deep files, so queries are also ranked
   // server-side against the full listing. Local matches render immediately
   // and are replaced when the (debounced) server result for the current
   // query arrives; stale responses are ignored via the query/cwd tag.
-  const needsServerSearch = Boolean(atQueryText && fileIndex?.truncated && fileIndex.cwd === cwd);
+  const needsServerSearch = Boolean(atQueryText && fileIndex?.truncated && fileIndex.workspaceKey === fileIndexOwner);
   useEffect(() => {
     if (!needsServerSearch || !cwd || !atQueryText) return;
-    const fetchCwd = cwd;
+    const workspaceKey = fileIndexOwner;
+    const controller = new AbortController();
     const query = atQueryText;
     const timer = setTimeout(() => {
-      fetch(`/api/file-index?cwd=${encodeURIComponent(fetchCwd)}&q=${encodeURIComponent(query)}`)
+      fetch(`/api/file-index?cwd=${encodeURIComponent(cwd)}&hostId=${encodeURIComponent(uploadHostId)}&q=${encodeURIComponent(query)}`, { signal: controller.signal })
         .then((res) => {
           if (!res.ok) throw new Error(`file search failed: ${res.status}`);
           return res.json() as Promise<{ matches?: FileIndexEntry[] }>;
         })
-        .then((data) => setAtServerResult({ cwd: fetchCwd, query, matches: data.matches ?? [] }))
-        .catch(() => {
-          // Keep showing local matches; the next keystroke retries.
-        });
+        .then((data) => {
+          if (!controller.signal.aborted && fileIndexOwnerRef.current === workspaceKey) {
+            setAtServerResult({ workspaceKey, query, matches: data.matches ?? [] });
+          }
+        })
+        .catch(() => {});
     }, 150);
-    return () => clearTimeout(timer);
-  }, [needsServerSearch, atQueryText, cwd]);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [needsServerSearch, atQueryText, cwd, uploadHostId, fileIndexOwner]);
 
   const serverResultInUse = needsServerSearch
     && atServerResult !== null
-    && atServerResult.cwd === cwd
+    && atServerResult.workspaceKey === fileIndexOwner
     && atServerResult.query === atQueryText;
   const atMatches: FileIndexEntry[] = serverResultInUse ? atServerResult.matches : atLocalMatches;
   const historyMenuVisible = historyMenuOpen && inputHistory.length > 0;
@@ -1463,38 +1470,38 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const atTokenActive = atQuery !== null;
   useEffect(() => {
     if (!atTokenActive || !cwd) return;
+    const workspaceKey = fileIndexOwner;
     const meta = fileIndexMetaRef.current;
-    if (meta && meta.cwd === cwd && Date.now() - meta.fetchedAt < 10_000) return;
-    if (fileIndexFetchingRef.current === cwd) return;
-    fileIndexFetchingRef.current = cwd;
-    const fetchCwd = cwd;
-    // Abort the previous fetch when the cwd changes or the menu closes, so a
-    // slow response for an old directory cannot flip the loading state after
-    // a newer one has taken over.
+    if (meta?.workspaceKey === workspaceKey && Date.now() - meta.fetchedAt < 10_000) return;
+    if (fileIndexFetchingRef.current?.workspaceKey === workspaceKey) return;
     const controller = new AbortController();
+    const request = { workspaceKey, controller };
+    fileIndexFetchingRef.current = request;
     setFileIndexLoading(true);
-    fetch(`/api/file-index?cwd=${encodeURIComponent(fetchCwd)}`, { signal: controller.signal })
+    fetch(`/api/file-index?cwd=${encodeURIComponent(cwd)}&hostId=${encodeURIComponent(uploadHostId)}`, { signal: controller.signal })
       .then((res) => {
         if (!res.ok) throw new Error(`file index failed: ${res.status}`);
         return res.json() as Promise<{ files?: string[]; truncated?: boolean }>;
       })
       .then((data) => {
-        setFileIndex({ cwd: fetchCwd, entries: buildEntriesFromFiles(data.files ?? []), truncated: !!data.truncated });
-        fileIndexMetaRef.current = { cwd: fetchCwd, fetchedAt: Date.now() };
+        if (controller.signal.aborted || fileIndexOwnerRef.current !== workspaceKey) return;
+        setFileIndex({ workspaceKey, entries: buildEntriesFromFiles(data.files ?? []), truncated: !!data.truncated });
+        fileIndexMetaRef.current = { workspaceKey, fetchedAt: Date.now() };
       })
       .catch(() => {
-        // Leave any previous index in place; next open retries. Aborts land
-        // here too, which is exactly the desired no-op.
-        fileIndexMetaRef.current = null;
+        if (fileIndexFetchingRef.current === request && !controller.signal.aborted) fileIndexMetaRef.current = null;
       })
       .finally(() => {
-        if (fileIndexFetchingRef.current === fetchCwd) {
+        if (fileIndexFetchingRef.current === request) {
           fileIndexFetchingRef.current = null;
           setFileIndexLoading(false);
         }
       });
-    return () => controller.abort();
-  }, [atTokenActive, cwd]);
+    return () => {
+      controller.abort();
+      if (fileIndexFetchingRef.current === request) fileIndexFetchingRef.current = null;
+    };
+  }, [atTokenActive, cwd, uploadHostId, fileIndexOwner]);
 
   const applyAtCompletion = useCallback((entry: FileIndexEntry) => {
     if (!atQuery) return;
@@ -2689,11 +2696,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             </div>
           )}
           {atMenuVisible && (() => {
-            const indexLoading = fileIndexLoading && (!fileIndex || fileIndex.cwd !== cwd);
+            const indexLoading = fileIndexLoading && (!fileIndex || fileIndex.workspaceKey !== fileIndexOwner);
             const matchCountLabel = tn("chatInput.matchCount", atMatches.length);
             // With a truncated index, local results are provisional — the
             // debounced server search over the full listing replaces them.
-            const truncatedHint = fileIndex?.truncated && !serverResultInUse
+            const truncatedHint = fileIndex?.workspaceKey === fileIndexOwner && fileIndex.truncated && !serverResultInUse
               ? ` · ${atQuery.query ? t("chatInput.searchingAllFiles") : t("chatInput.indexTruncated")}`
               : "";
             return (

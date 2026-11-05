@@ -5,6 +5,8 @@
 import { isValidSessionId } from "../session-file-references-core";
 import { UPLOAD_ID_RE } from "../upload-limits";
 import type { SessionOps } from "./session-ops";
+import { isWorkspaceOp, WORKSPACE_OP_PARAMS } from "../workspace-types";
+import type { WorkspaceFileEvent } from "../workspace-types";
 
 /** 6: composer uploads (docs/specs/2026-11-02-file-uploads-design.md, U5): binary down frames carry upload bytes, the
  * `upload_ack` up message, the `uploadStart`/`uploadAbort`/`uploadAttach` ops. 5: a line over `pieceBytes` goes as
@@ -73,7 +75,7 @@ export const SESSION_OP_PARAMS: { readonly [K in keyof SessionOps]: readonly str
 };
 
 /** Every op a daemon answers. Older daemons refuse newer ops with unknown_op; upload ops require v6. */
-export const HOST_OP_NAMES = [...(Object.keys(SESSION_OP_PARAMS) as (keyof SessionOps)[]), "spawn", "sessionFileExists", "invalidateSessionLists", "checkUpdates", "updateSoftware", "uploadStart", "uploadAbort", "uploadAttach"] as const;
+export const HOST_OP_NAMES = [...(Object.keys(SESSION_OP_PARAMS) as (keyof SessionOps)[]), ...Object.keys(WORKSPACE_OP_PARAMS) as (keyof typeof WORKSPACE_OP_PARAMS)[], "spawn", "sessionFileExists", "invalidateSessionLists", "checkUpdates", "updateSoftware", "uploadStart", "uploadAbort", "uploadAttach"] as const;
 
 export type HostOpName = (typeof HOST_OP_NAMES)[number];
 
@@ -122,6 +124,7 @@ export type UpMessage =
       ompVersion: string | null;
       /** Running daemon's application version; absent on older hosts. */
       ompwebVersion?: string;
+      workspaceOps?: string[];
       platform: string;
       home: string;
       /** omp's `tools.approval.extension: allow` on the host: a run adopted after a web restart had no spawn to report it. */
@@ -139,6 +142,7 @@ export type UpMessage =
   /** v6: the daemon has written `received` bytes of upload `id` for this start `attempt`, `done` once all of them are
    * written and synced; with `error` the upload failed and its staged file is gone. */
   | { type: "upload_ack"; seq: number; id: string; attempt: string; received: number; done: boolean; error?: { status: number; code: string; message: string } }
+  | { type: "workspace_file"; seq: number; id: string; epoch: string; event: WorkspaceFileEvent }
   | { type: "res"; seq: number; id: string; ok: true; result?: unknown; blob?: { bytes: number } }
   | {
       type: "res";
@@ -247,7 +251,7 @@ export function isHostOp(name: string): name is HostOpName {
 }
 
 const DOWN_TYPES: readonly string[] = ["welcome", "stdin", "kill", "req", "ping", "pong", "ack"];
-const UP_TYPES: readonly string[] = ["hello", "stdout", "stderr", "exit", "resync", "stats", "res", "upload_ack", "ping", "pong", "ack"];
+const UP_TYPES: readonly string[] = ["hello", "stdout", "stderr", "exit", "resync", "stats", "res", "upload_ack", "workspace_file", "ping", "pong", "ack"];
 
 /** `otherDirection`: the types only the other direction decodes; one of those arrived on the wrong way. */
 function unknownMessage(o: Obj, otherDirection: readonly string[]): UnknownMessage {
@@ -395,6 +399,7 @@ export function decodeUp(line: string): UpMessage | UnknownMessage {
         v: int(o, "v"),
         ompVersion: nullable(o, "ompVersion", str),
         ...(o.ompwebVersion === undefined ? {} : { ompwebVersion: str(o, "ompwebVersion") }),
+        ...(o.workspaceOps === undefined ? {} : { workspaceOps: strings(o, "workspaceOps").slice(0, Object.keys(WORKSPACE_OP_PARAMS).length).filter(isWorkspaceOp) }),
         platform: str(o, "platform"),
         home: str(o, "home"),
         autoApproveExtension: bool(o, "autoApproveExtension"),
@@ -422,6 +427,14 @@ export function decodeUp(line: string): UpMessage | UnknownMessage {
       if (!UPLOAD_ID_RE.test(attempt)) fail("attempt must be a UUIDv4");
       const ack = { type: "upload_ack" as const, seq: seqNum(o, "seq"), id: str(o, "id"), attempt, received: seqNum(o, "received"), done: bool(o, "done") };
       return o.error === undefined ? ack : { ...ack, error: errorBody(o.error) };
+    }
+    case "workspace_file": {
+      const event = o.event;
+      if (!isObj(event)) fail("event must be an object");
+      const value = event.type === "change"
+        ? { type: "change" as const, mtime: str(event, "mtime"), size: seqNum(event, "size") }
+        : event.type === "error" ? { type: "error" as const, message: str(event, "message") } : fail("Invalid workspace file event");
+      return { type: "workspace_file", seq: seqNum(o, "seq"), id: str(o, "id"), epoch: str(o, "epoch"), event: value };
     }
     case "res":
       return res(o);

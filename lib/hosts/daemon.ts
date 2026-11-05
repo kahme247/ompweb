@@ -45,6 +45,9 @@ import packageJson from "../../package.json";
 import { acknowledgeHostUpdateHealth, checkHostUpdates, configureHostUpdateSafety, getHostUpdateOperation, HostUpdateError, startHostUpdate } from "./updates";
 import type { HostUpdateCompatibility, HostUpdateOperation } from "./update-types";
 import { StagedUploads, UPLOAD_SWEEP_INTERVAL_MS } from "./uploads";
+import { isWorkspaceOp, WORKSPACE_OP_PARAMS } from "../workspace-types";
+import { createWorkspaceService } from "./workspace-ops";
+import { grantWorkspaceRoot, invalidateWorkspaceRoots } from "./workspace-roots";
 
 const FIRST_RETRY_MS = 1_000;
 const MAX_RETRY_MS = 60_000;
@@ -172,6 +175,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   let updateStateWarningLogged = false;
   // Upload acks go under the upload's own key, fair with the channels.
   const uploads = new StagedUploads((ack) => void queue({ type: "upload_ack", ...ack }, `up:${ack.id}`));
+  const workspace = createWorkspaceService(uploads, (id, epoch, event) => void queue({ type: "workspace_file", id, epoch, event }, `watch:${id}`));
   void uploads.sweep();
   // A cancel that never reached this host (the browser closed while offline) leaves its staged file: an idle host still
   // deletes it once it expires, not only at start or on the next upload.
@@ -503,7 +507,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     const session = isRecord(args) && typeof args.id === "string" && isValidSessionId(args.id) ? args.id : null;
     try {
       const result = await runOp(op, args);
-      const media = op === "readMedia" && isRecord(result) && result.ok === true && result.value instanceof Uint8Array ? result.value : null;
+      const media = (op === "readMedia" || op === "readFileChunk") && isRecord(result) && result.ok === true && result.value instanceof Uint8Array ? result.value : null;
       const json = media ? undefined : JSON.stringify(result);
       const blob = media ?? (json !== undefined && Buffer.byteLength(json) > LINK_LIMITS.inlineResultBytes ? Buffer.from(json) : null);
       if (!blob) {
@@ -535,12 +539,17 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     // An older daemon than main: callers fall back on the 501.
     if (!isHostOp(op)) throw new HostOpError(501, "unknown_op", `Unknown host op: ${op}`);
     if (!isRecord(args)) throw new HostOpError(400, "invalid_request", "Host op arguments must be an object");
+    if (isWorkspaceOp(op)) {
+      const run = workspace.ops[op] as (...values: unknown[]) => Promise<unknown>;
+      return run(...WORKSPACE_OP_PARAMS[op].map((name) => args[name]));
+    }
     switch (op) {
       case "spawn":
         return spawnChannel(args);
       case "sessionFileExists":
         return localHost.sessionFileExists(sessionsPath(args.path));
       case "invalidateSessionLists":
+        invalidateWorkspaceRoots();
         return localHost.invalidateSessionLists(args.path === undefined ? undefined : sessionsPath(args.path));
       case "checkUpdates":
         if (args.force !== undefined && typeof args.force !== "boolean") throw new HostOpError(400, "invalid_request", "force must be a boolean");
@@ -548,6 +557,12 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       case "updateSoftware":
         if ((args.target !== "ompweb" && args.target !== "omp") || typeof args.version !== "string") throw new HostOpError(400, "invalid_request", "Invalid host update");
         return startHostUpdate(args.target, args.version, updateCompatibility(args.compatibility));
+      case "validateCwd": {
+        if (typeof args.path !== "string") throw new HostOpError(400, "invalid_request", "Invalid workspace path");
+        const selected = await sessionOps.validateCwd(args.path);
+        if (selected.ok) grantWorkspaceRoot(selected.value.cwd);
+        return selected;
+      }
       case "uploadStart":
         return uploads.start(args);
       case "uploadAbort":
@@ -556,7 +571,9 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
         return uploads.attach(args.id, sessionsPath(args.sessionFile), args.sessionId);
       default: {
         const run = sessionOps[op] as (...params: unknown[]) => Promise<unknown>;
-        return run.apply(sessionOps, SESSION_OP_PARAMS[op].map((name) => args[name]));
+        const result = await run.apply(sessionOps, SESSION_OP_PARAMS[op].map((name) => args[name]));
+        if (op === "addProject" || op === "updateProject" || op === "hideProject") invalidateWorkspaceRoots();
+        return result;
       }
     }
   }
@@ -627,6 +644,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
     const end = (closed: SocketEnd | string) => {
       clearTimeout(watchdog);
       socket = null;
+      workspace.onDisconnect();
       linked = null;
       inFlight = [];
       inFlightBytes = 0;
@@ -687,6 +705,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
           v: LINK_PROTOCOL_VERSION,
           ompVersion,
           ompwebVersion: packageJson.version,
+          workspaceOps: Object.keys(WORKSPACE_OP_PARAMS),
           platform: process.platform,
           home: homedir(),
           autoApproveExtension: localHost.autoApproveExtension(),
@@ -761,6 +780,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       clearTimeout(flushTimer);
       clearTimeout(statsTimer);
       clearInterval(sweepTimer);
+      await workspace.stop();
       const live = [...channels.values()].map(({ transport }) => transport);
       const exits = live.map((transport) => {
         const { promise, resolve } = Promise.withResolvers<void>();

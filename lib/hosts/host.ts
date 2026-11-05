@@ -1,5 +1,6 @@
 import type { RpcTransport } from "../omp/rpc-transport";
 import type { SessionOps } from "./session-ops";
+import type { WorkspaceOps } from "../workspace-types";
 
 export type HostStatus = "online" | "offline" | "needs-upgrade" | "omp-missing";
 
@@ -39,4 +40,6 @@ export interface Host {
   autoApproveExtension(): boolean;
   /** Session and project file operations, run on this host. */
   readonly sessionOps: SessionOps;
+  readonly workspaceOps: WorkspaceOps;
+  supportsWorkspaceOp(name: keyof WorkspaceOps): boolean;
 }

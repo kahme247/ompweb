@@ -518,6 +518,8 @@ export interface SessionContext {
 /** A host tool call for a session no tab is watching, sent to every open tab. */
 export interface CrossSessionHostToolCall {
   sessionId: string;
+  hostId: string;
+  cwd: string;
   id: string;
   toolName: string;
   arguments: Record<string, unknown>;

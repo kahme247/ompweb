@@ -18,6 +18,7 @@ import { hasVisibleAssistantContent } from "@/lib/assistant-response";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
 import { HostOfflineError, TransportLostError, sendAgentCommand, setSessionAdvisorSpawn } from "@/lib/agent-client";
 import type { HostStatus } from "@/lib/hosts/host";
+import type { WorkspaceFileSource } from "@/lib/workspace-types";
 import { newChatDraftKey, remoteHostId } from "@/lib/project-ordering";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "@/lib/skill-diagnostics";
 import { clearDraft, getDraft, mergeRecoveredText, recoverDraft, setDraft, toDraftImages, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
@@ -202,7 +203,7 @@ export interface UseAgentSessionOptions {
   onSessionStatsPanelOpen?: () => void;
   setToolPreset?: (preset: "none" | "default" | "full") => void;
   /** Opens a file in the web UI's file viewer (used by the open_file host tool). */
-  onOpenFile?: (filePath: string, name: string, sessionId?: string) => void;
+  onOpenFile?: (filePath: string, name: string, source: WorkspaceFileSource) => void;
   /** Handles the open_url host tool (may ask the user first); returns the result text. */
   onOpenUrl?: (url: string) => string;
 }
@@ -1489,10 +1490,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         window.open(url, "_blank", "noopener,noreferrer")?.focus?.();
         return `Opened ${url}`;
       }),
-      openFile: onOpenFile ? (path, name) => onOpenFile(path, name, sid) : undefined,
+      openFile: onOpenFile ? (path, name) => onOpenFile(path, name, {
+        sessionId: sid, hostId: session?.hostId ?? newSessionHostId ?? "local", cwd: session?.cwd ?? newSessionCwd,
+      }) : undefined,
     });
     await respondHostTool(sid, id, text, isError);
-  }, [onOpenFile, onOpenUrl, respondHostTool]);
+  }, [onOpenFile, onOpenUrl, respondHostTool, session?.hostId, session?.cwd, newSessionHostId, newSessionCwd]);
 
   /** Answer a host_uri_request (agent read/write of a registered scheme). */
   const respondHostUri = useCallback(async (sid: string, id: string, frame: { content?: string; contentType?: "text/markdown" | "application/json" | "text/plain"; isError?: boolean; error?: string }) => {

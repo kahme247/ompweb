@@ -127,7 +127,7 @@ export function launchConfigForCwd(cwd: string): ProjectLaunchConfig | undefined
 }
 
 /** This machine: `child_process.spawn` and direct `fs`. */
-export const localHost: Host = {
+export const localHost: Omit<Host, "workspaceOps" | "supportsWorkspaceOp"> = {
   id: "local",
   label: "This machine",
   sessionOps,

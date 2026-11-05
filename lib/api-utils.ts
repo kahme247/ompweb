@@ -39,6 +39,17 @@ export function resolveHostOrError(hostId: unknown): { host: Host } | { response
   return offline ? { response: offline } : { host };
 }
 
+export async function resolveWorkspaceHost(hostId: unknown, sessionId: string | null): Promise<{ host: Host } | { response: Response }> {
+  if (!sessionId) return resolveHostOrError(hostId);
+  const session = await resolveSessionHostOr404(sessionId);
+  if ("response" in session) return session;
+  if (hostId !== undefined && hostId !== session.host.id) {
+    return { response: Response.json({ error: "The session belongs to another host", code: "workspace_host_mismatch" }, { status: 409 }) };
+  }
+  const offline = hostOfflineResponse(session.host);
+  return offline ? { response: offline } : session;
+}
+
 /** The JSON error response for a failed host op. */
 export function opErrorResponse(result: Extract<OpResult<unknown>, { ok: false }>): Response {
   return Response.json({ error: result.error, code: result.code }, { status: result.status });

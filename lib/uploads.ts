@@ -7,6 +7,8 @@ import { dropUploadFrames, getHost, hostUploadOp, onHostHello, onUploadEvent, se
 import { HostOpError, LINK_LIMITS } from "./hosts/link-protocol";
 import { isRecord } from "./type-guards";
 import { formatUploadSize, MAX_UPLOAD_BYTES, MAX_UPLOADS_PER_MESSAGE, UPLOAD_ID_RE, UPLOAD_WINDOW_BYTES } from "./upload-limits";
+import type { UploadConflictStrategy } from "./file-upload";
+import type { WorkspaceUploadResult } from "./workspace-types";
 
 /** Unfinished uploads one owner may have registered: each may hold a window of bytes in its host link's queue. */
 const MAX_OPEN_UPLOADS_PER_OWNER = 32;
@@ -63,6 +65,7 @@ interface Upload {
   attaching?: { sessionFile: string; result: Promise<{ sessionFile: string; path: string; url: string }> } | null;
   attempt: string;
   touched: number;
+  workspace?: { directory: string; name: string; conflict: UploadConflictStrategy; pending?: Promise<WorkspaceUploadResult>; result?: WorkspaceUploadResult; timer?: NodeJS.Timeout };
 }
 
 declare global {
@@ -326,6 +329,7 @@ export function takeUploads(command: Record<string, unknown>, owner: string): st
     const upload = uploads().get(id);
     if (!upload || upload.owner !== owner) throw missing();
     if (!upload.done) throw new UploadError(409, "upload_incomplete", "The upload has not finished");
+    if (upload.workspace) throw new UploadError(409, "upload_destination_conflict", "The upload belongs to a workspace");
   }
   return ids as string[];
 }
@@ -345,6 +349,7 @@ export async function attachUploads(
     const upload = uploads().get(id);
     if (!upload || upload.owner !== owner) throw missing();
     if (upload.hostId !== session.host.id) throw new UploadError(409, "upload_wrong_host", "The file was uploaded to another host than the session's");
+    if (upload.workspace) throw new UploadError(409, "upload_destination_conflict", "The upload belongs to a workspace");
     if (upload.attached?.sessionFile !== sessionFile) {
       // One host op per upload and session file: an overlapping attach awaits it, or the host links a second ` (1)` copy.
       if (upload.attaching?.sessionFile !== sessionFile) {
@@ -380,4 +385,32 @@ function markdownCode(text: string): string {
 /** The prompt carrying these uploads reached omp: their registry entries go. */
 export function forgetUploads(ids: string[]): void {
   for (const id of ids) uploads().delete(id);
+}
+
+/** Bind one completed upload to one authorized workspace destination, including lost-reply retries. */
+export async function publishWorkspaceUpload(id: string, owner: string, hostId: string, directory: string, name: string, conflict: UploadConflictStrategy): Promise<WorkspaceUploadResult> {
+  const upload = uploads().get(id);
+  if (!upload || upload.owner !== owner) throw missing();
+  if (upload.hostId !== hostId) throw new UploadError(409, "upload_wrong_host", "The file was uploaded to another host");
+  if (!upload.done) throw new UploadError(409, "upload_incomplete", "The upload has not finished");
+  if (upload.attached || upload.attaching || upload.name !== name) throw new UploadError(409, "upload_destination_conflict", "The upload already has another destination");
+  const binding = upload.workspace ??= { directory, name, conflict };
+  if (binding.directory !== directory || binding.name !== name || binding.conflict !== conflict) throw new UploadError(409, "upload_destination_conflict", "The upload already has another destination");
+  clearTimeout(binding.timer);
+  const expire = () => {
+    binding.timer = setTimeout(() => { if (uploads().get(id) === upload && !binding.pending) uploads().delete(id); }, UPLOAD_IDLE_MS);
+    binding.timer.unref?.();
+  };
+  if (binding.result) { expire(); return binding.result; }
+  if (binding.pending) return binding.pending;
+  const host = getHost(hostId);
+  if (!host) throw missing();
+  const pending = host.workspaceOps.publishUpload(id, directory, name, conflict).then((result) => {
+    if (!result.ok) throw new UploadError(result.status, result.code, result.error);
+    binding.result = result.value;
+    return result.value;
+  });
+  binding.pending = pending;
+  try { return await pending; }
+  finally { binding.pending = undefined; expire(); }
 }

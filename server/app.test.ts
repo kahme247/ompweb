@@ -26,6 +26,9 @@ Object.assign(process.env, ENV);
 const { startServer } = await import("./app");
 const { browserLinkTimings } = await import("@/lib/browser-link");
 const server = startServer({ port: 0, hostname: "127.0.0.1", dev: false, root });
+const { linkLocalDaemon } = await import("../lib/hosts/link-driver.test-helper.mjs");
+const { flushLinkSamples } = await import("../lib/hosts/hub");
+const daemon = await linkLocalDaemon();
 const url = (pathname: string) => new URL(pathname, server.url);
 
 /**
@@ -58,6 +61,9 @@ function rawRequest(
 }
 
 after(async () => {
+  daemon.drop();
+  await daemon.workspace.stop();
+  flushLinkSamples();
   await server.stop(true);
   for (const [name, value] of Object.entries(saved)) {
     if (value === undefined) delete process.env[name];
