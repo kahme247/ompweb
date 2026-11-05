@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, realpathSync } from "fs";
+import { existsSync, readdirSync, realpathSync, statSync } from "fs";
 import { homedir } from "os";
 import path from "path";
 import { getAgentDir, getConfigRoot } from "./omp/paths";
@@ -81,6 +81,7 @@ export function getConfigAgentRoots(): string[] {
  * packages/utils/src/env.ts loads that root and getAgentDir(), including profiles.
  * Independent session uploads and package assets remain readable. Resolve both
  * the owned directories and their protected files: either can be symlinked.
+ * Hard links retain distinct paths, so compare their device/inode identity too.
  */
 const OMP_ENV_NAME = /^\.env(?:\.|$)/i;
 const OMP_SECRET_NAME = /^(?:\.?agent\.db(?:[-.~].*)?|\.?models\.(?:yml|yaml|json)(?:[.~].*|-(?:backup|bak|old)(?:[.~-].*)?)?|\.env(?:\..*)?)$/i;
@@ -101,6 +102,7 @@ export function isOmpSecretFile(filePath: string): boolean {
   }
   const configDirs = ompConfigDirs();
   const agentDirs = [getAgentDir(), ...configDirs.map((dir) => path.join(dir, "agent"))];
+  const identity = linkedFileIdentity(filePath);
   for (const dir of new Set([...agentDirs, ...configDirs])) {
     const agentDir = agentDirs.includes(dir);
     const namePattern = agentDir ? OMP_SECRET_NAME : OMP_ENV_NAME;
@@ -131,6 +133,10 @@ export function isOmpSecretFile(filePath: string): boolean {
     }
     for (const file of files) {
       if (target === comparablePath(resolvedOrSelf(file))) return true;
+      if (identity) {
+        const other = linkedFileIdentity(file);
+        if (other && identity.dev === other.dev && identity.ino === other.ino) return true;
+      }
     }
   }
   return false;
@@ -144,6 +150,16 @@ function ompConfigDirs(): string[] {
     for (const profile of readdirSync(path.join(configRoot, "profiles"))) dirs.push(path.join(configRoot, "profiles", profile));
   } catch { /* no profiles */ }
   return dirs;
+}
+
+function linkedFileIdentity(filePath: string) {
+  try {
+    const stat = statSync(filePath, { bigint: true });
+    // Only multiply linked files can alias a different credential path.
+    return stat.isFile() && stat.nlink > 1 && stat.ino > 0 ? stat : null;
+  } catch {
+    return null;
+  }
 }
 
 function resolvedOrSelf(dir: string): string {
