@@ -70,23 +70,27 @@ to upload or download a large file.
 Checked against freshly fetched `upstream/main` on 2026-11-03, including
 kahme247/ompweb#378 (`f4cf9749`).
 
-- The tree hides its named skip-list (`node_modules`, `.git`, `dist`, `build`
-  and similar generated/cache entries) and `.pyc` files by default. The
-  **Show hidden items** toggle sends `hidden=1` for directory listings and
-  bypasses that skip-list. It is not a blanket dotfile filter and never bypasses
-  file authorization. Preserve the toggle, its preference and stale-listing
-  fencing when threading host identity through the client and daemon.
-- The toggle affects tree listings only. File-index search uses Git's tracked
-  and non-ignored untracked files; its non-Git fallback still applies the named
-  skip-list and `.pyc` exclusion. Do not silently make the toggle expand search
-  scope as part of remote parity.
+- The tree lists every name, including `.git`, generated output and dotfiles,
+  and reads a directory only after it is expanded. The former hidden-items
+  toggle and named skip-list are removed by the Explorer follow-up.
+- Root-confined listings use the additive `listFilesInRoot` capability.
+  A daemon with only the original boolean `listFiles` operation requires an
+  update for the new Explorer; the original wire operation remains available
+  to older main servers. No fallback bypasses confinement.
+- File-index search and @-mentions use Git's tracked and non-ignored untracked
+  files. The non-Git fallback has no named exclusions but indexes regular files
+  only, skipping symlinks to both files and directories. It reads directories
+  asynchronously so other daemon requests can progress, preserving breadth-first
+  ordering and bounds on depth, files and queued directories.
 - The unqueried file-index response returns at most 5,000 paths. Queried search
   ranks against the full cached listing, not that 5,000-path prefix. Explorer
   requests at most 200 file matches; the default `@` suggestion limit is 20.
   Search queries are sliced to 500 JavaScript string code units.
 - The full Git listing is capped at 200,000 paths. The fallback filesystem
-  walk is capped at 50,000 files and eight directory levels below the root.
-  The listing cache lasts 10 seconds, and Refresh bypasses it. Preserve
+  walk is capped at 50,000 files, 50,000 queued/read directories and eight
+  directory levels below the root.
+  The listing cache lasts 10 seconds, and Refresh bypasses it. Concurrent
+  requests, including Refresh, still join an already-running scan. Preserve
   existing truncation reporting; do not apply these index caps to ordinary
   per-directory tree listing.
 - Downloads and streamed PDF/audio have no explicit whole-file size cap in

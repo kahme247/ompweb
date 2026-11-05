@@ -146,7 +146,7 @@ export async function GET(
     if ("response" in resolved) return resolved.response;
     const { host } = resolved;
     if (type === "list") {
-      const result = await host.workspaceOps.listFiles(input, searchParams.get("hidden") === "1");
+      const result = await host.workspaceOps.listFilesInRoot(input, searchParams.get("root"));
       return result.ok ? Response.json(result.value) : opErrorResponse(result);
     }
     const checked = await host.workspaceOps.fileInfo(input);
