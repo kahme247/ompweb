@@ -77,9 +77,10 @@ committer date in `YYYY-MM-DD` format. Any tag pointing exactly at `HEAD`
 keeps the version-only display; a tag on an ancestor does not.
 
 Both the production build and development server resolve this metadata from
-the source checkout, ignoring inherited `GIT_*` repository overrides. It is
-bundled into the client, including in npm packages and binary releases;
-no Git command runs when a user clicks the logo.
+the source checkout, ignoring inherited repository-location overrides. Explicit
+`safe.directory` trust from Git's configured files or `GIT_CONFIG_COUNT` is preserved.
+The metadata is bundled into the client, including in npm packages and binary
+releases; no Git command runs when a user clicks the logo.
 Source archives without Git metadata keep the version-only display.
 
 ## Verify

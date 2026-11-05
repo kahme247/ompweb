@@ -20,7 +20,20 @@ export function clientEnv(root: string, worker: string) {
   let commitHash = "";
   let commitDate = "";
   try {
-    const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.toUpperCase().startsWith("GIT_")));
+    const entries = Object.entries(process.env);
+    const env = Object.fromEntries(entries.filter(([name]) => !name.toUpperCase().startsWith("GIT_") || /^GIT_CONFIG_(GLOBAL|SYSTEM|NOSYSTEM)$/i.test(name)));
+    // Preserve explicit ownership trust, not config that could redirect the repository.
+    const count = Number(process.env.GIT_CONFIG_COUNT);
+    let safeDirectories = 0;
+    for (let i = 0; Number.isSafeInteger(count) && i < Math.min(count, entries.length); i++) {
+      if (process.env[`GIT_CONFIG_KEY_${i}`]?.toLowerCase() !== "safe.directory") continue;
+      const value = process.env[`GIT_CONFIG_VALUE_${i}`];
+      if (value === undefined) continue;
+      env[`GIT_CONFIG_KEY_${safeDirectories}`] = "safe.directory";
+      env[`GIT_CONFIG_VALUE_${safeDirectories}`] = value;
+      safeDirectories++;
+    }
+    if (safeDirectories > 0) env.GIT_CONFIG_COUNT = String(safeDirectories);
     const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"] }).trim();
     if (!git("rev-parse", "--show-prefix") && !git("tag", "--points-at", "HEAD")) {
       [commitHash, commitDate] = git("log", "-1", "--no-show-signature", "--format=%H%n%cs").split("\n");
