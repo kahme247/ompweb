@@ -86,7 +86,7 @@ type WorkspaceReceipt = {
   directory: string; canonical: string; name: string; conflict: UploadConflictStrategy;
   candidate: string; identity: FileIdentity; parent: FileIdentity; result?: WorkspaceUploadResult;
 };
-/** Destination receipts are disjoint: workspace files never enter session attachment retention. */
+/** Receipts distinguish destinations; retention applies to every file placed in a selected session-upload folder. */
 type Meta = { name: string; size: number; type: string; created: number; attached?: Receipt; workspace?: WorkspaceReceipt };
 type OpenUpload = { name: string; type: string; size: number; attempt: string; received: number; chain: Promise<void>; timer: NodeJS.Timeout | undefined; active: number };
 
