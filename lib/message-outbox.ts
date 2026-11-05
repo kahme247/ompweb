@@ -350,8 +350,9 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
     return invalid(`uploads must be at most ${MAX_UPLOADS_PER_MESSAGE} upload ids`);
   }
   const resolved = await resolveSessionHostOr404(sessionId);
-  // Unavailable host lists cannot prove absence: retain the entry until discovery can resolve its owner.
-  if ("response" in resolved && resolved.response.status === 404) return resolved.response;
+  // Unavailable host lists cannot prove absence: retain the entry until discovery can resolve its owner. An archived
+  // session is not gone either: its entries wait until it is restored (spec O6).
+  if ("response" in resolved && resolved.response.status === 404 && !(await isArchived(sessionId))) return resolved.response;
 
   const now = Date.now();
   const database = db();
@@ -655,9 +656,10 @@ async function deliver(entry: Row): Promise<Outcome> {
     // attachUploads mutates this same command before writing it: the watcher matches the final attachment block too.
     const response = await runAgentCommand(sessionId, command, current.advisor === 1, current.owner, uploadReceipts);
     if (!response.ok) {
-      // Nothing was written and the child is gone (its exit was left to us): a known-unsent message is retried.
-      if (!nativeWriteStarted(command) && !wrapper.isAlive()) return retry(current);
-      return refused(current, response, true);
+      // Nothing was written: a gone child is retried, and any other refusal is classified as not sent.
+      const written = nativeWriteStarted(command);
+      if (!written && !wrapper.isAlive()) return retry(current);
+      return refused(current, response, written);
     }
     const body = await response.json() as { data?: { agentInvoked?: boolean } };
     if (row(current.id)?.state === "failed") return "next";
@@ -714,7 +716,7 @@ async function refused(entry: Row, response: Response, sent: boolean): Promise<O
   if (body.hostOffline === true && (!sent || body.delivery === "refused")) return "offline";
   if (body.code === "session_busy" || body.code === "session_restarting"
     || (!sent && (body.code === "host_timeout" || body.code === "host_sessions_unavailable"))) return retry(entry);
-  if (!sent && response.status === 404 && (await listArchivedSessions()).some((archive) => archive.id === entry.session_id)) {
+  if (!sent && response.status === 404 && (await isArchived(entry.session_id))) {
     // An archived session keeps its entries held until it is restored (spec O6).
     if (!setState(entry.id, "held")) return "next";
     publish(entry.session_id);
@@ -722,4 +724,8 @@ async function refused(entry: Row, response: Response, sent: boolean): Promise<O
   }
   // A lost reply (delivery unknown), a server error or an unresponsive child after the message went: omp may have it.
   return fail(entry, error, sent && (response.status >= 500 || body.code === "session_unresponsive"));
+}
+
+async function isArchived(sessionId: string): Promise<boolean> {
+  return (await listArchivedSessions()).some((archive) => archive.id === sessionId);
 }

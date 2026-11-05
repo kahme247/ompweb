@@ -844,11 +844,16 @@ during the wait.
   → `failed` with `mayHaveBeenSent`, never independently resent. Anything that
   stops an entry before its native write (an error before the claim, omp exiting
   during preparation, attachment copies or a send fence inside `runAgentCommand`)
-  leaves it unsent: it is held and retried after `RETRY_MS`, never marked
-  possibly sent. The boundary is `nativeWriteStarted(command)`, set by whichever
-  wrapper's `sendNativeMessageCommand` begins writing that submitted command
-  object, never inferred from one wrapper's generation (a respawned child may
-  write it). Internal `/rename` and `/mcp` prompts stay counted as message
+  leaves it unsent, never marked possibly sent: a gone child is retried after
+  `RETRY_MS`, and any other refusal (an attach op's `host_offline` included) is
+  classified as not sent (`waiting_host` for an outage). The boundary is
+  `nativeWriteStarted(command)`, set by whichever wrapper's
+  `sendNativeMessageCommand` begins writing that submitted command object, never
+  inferred from one wrapper's generation (a respawned child may write it); test
+  fakes record their write in the same `__ompNativeWrites` registry. An
+  `outbox_add` for an archived session is accepted and held until it is restored
+  (the restore route pumps it); only a session neither listed nor archived is a
+  404. Internal `/rename` and `/mcp` prompts stay counted as message
   commands, so an outbox watch never claims an echo they cause. Host tool and URI
   scheme registrations apply in `sendCommand`'s `onReply` (success only), so a
   call omp sends in the same batch as the reply is routed. The session carries
