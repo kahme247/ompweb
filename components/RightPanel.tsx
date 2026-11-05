@@ -6,7 +6,6 @@ import {
   ChevronsDownUp,
   Copy,
   Download,
-  Eye,
   FileX,
   Files,
   Folder,
@@ -55,9 +54,6 @@ interface Props {
   fileSearchOpen: boolean;
   onToggleFileSearch: () => void;
   onFileSearchOpenChange: (open: boolean) => void;
-  /** Explorer tree includes the directories hidden by default (build/, dist/, …). */
-  showHiddenFiles: boolean;
-  onToggleShowHiddenFiles: () => void;
   explorerUploadBusy: boolean;
   onUploadBusyChange: (busy: boolean) => void;
   explorerGitCount: number;
@@ -111,8 +107,6 @@ export const RightPanel = memo(function RightPanel({
   fileSearchOpen,
   onToggleFileSearch,
   onFileSearchOpenChange,
-  showHiddenFiles,
-  onToggleShowHiddenFiles,
   explorerUploadBusy,
   onUploadBusyChange,
   explorerGitCount,
@@ -240,17 +234,6 @@ export const RightPanel = memo(function RightPanel({
                 onMouseLeave={(e) => { if (fileSearchOpen) return; e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
               >
                 <Search size={13} strokeWidth={2} aria-hidden="true" />
-              </button>
-              <button
-                onClick={onToggleShowHiddenFiles}
-                title={t("fileExplorer.showHiddenItems")}
-                aria-label={t("fileExplorer.showHiddenItems")}
-                aria-pressed={showHiddenFiles}
-                style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, padding: 0, background: showHiddenFiles ? "var(--bg-hover)" : "none", border: "none", borderRadius: "var(--radius-control)", color: showHiddenFiles ? "var(--accent)" : "var(--text-dim)", cursor: "pointer" }}
-                onMouseEnter={(e) => { if (showHiddenFiles) return; e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
-                onMouseLeave={(e) => { if (showHiddenFiles) return; e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
-              >
-                <Eye size={13} strokeWidth={2} aria-hidden="true" />
               </button>
               <button
                 onClick={() => fileExplorerRef.current?.openUploadPicker()}
@@ -438,7 +421,6 @@ export const RightPanel = memo(function RightPanel({
                   onRefreshDone={onExplorerRefreshDone}
                   fileSearchOpen={fileSearchOpen}
                   onFileSearchOpenChange={onFileSearchOpenChange}
-                  showHidden={showHiddenFiles}
                   activeFilePath={activeFileSameHost ? activeFileTab?.filePath ?? null : null}
                   revealPath={revealPath}
                   onRevealDone={onRevealDone}
