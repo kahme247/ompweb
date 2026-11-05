@@ -1432,6 +1432,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
       };
       es.onerror = () => {
+        // The server rejected this chat's pending host tools when its subscription left (rejectPendingHostTools), and
+        // the cancel it emitted had no listener: withdraw them here so nothing answers or opens a settled call.
+        if (eventSourceRef.current === es) {
+          for (const controller of pendingHostToolControllersRef.current.values()) controller.abort();
+        }
         if (es.readyState === EVENT_STREAM_CLOSED) {
           // Fatal error (409 unmanaged wrapper, worker failure): the stream
           // will not reconnect on its own. Settle the Promise and schedule a manual
@@ -1591,10 +1596,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           window.open(url, "_blank", "noopener,noreferrer")?.focus?.();
           return `Opened ${url}`;
         }),
-        openFile: onOpenFile ? (path, name) => {
+        openFile: onOpenFile ? (path, name, owner) => {
           if (!hookAliveRef.current) throw new Error("File not opened: the requesting chat is no longer active");
           onOpenFile(path, name, {
-            sessionId: sid, hostId: session?.hostId ?? newSessionHostId ?? "local", cwd: session?.cwd ?? newSessionCwd,
+            sessionId: owner ?? sid, hostId: session?.hostId ?? newSessionHostId ?? "local", cwd: session?.cwd ?? newSessionCwd,
           });
         } : undefined,
       }, sid, controller.signal);

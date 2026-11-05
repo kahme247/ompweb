@@ -13,9 +13,12 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   try {
     const resolved = await resolveWorkspaceHost(undefined, id);
     if ("response" in resolved) return resolved.response;
-    const result = await resolved.host.workspaceOps.resolveLocalFile(resolved.sessionId ?? id, uri, resolved.sessionFile);
+    const owner = resolved.sessionId ?? id;
+    const result = await resolved.host.workspaceOps.resolveLocalFile(owner, uri, resolved.sessionFile);
     if (!result.ok) return opErrorResponse(result);
-    return Response.json({ path: result.value.path }, { headers: { "Cache-Control": "no-store" } });
+    // The live conversation owns the file: a tab authorized through the alias the request named would lose access once
+    // that alias is dropped with its wrapper.
+    return Response.json({ path: result.value.path, sessionId: owner }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return apiErrorResponse(error);
   }

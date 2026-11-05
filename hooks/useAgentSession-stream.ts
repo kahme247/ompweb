@@ -331,8 +331,9 @@ export function isSafeOpenUrl(raw: unknown): boolean {
 export interface HostToolHandlers {
   /** Open a validated URL; returns the result text reported to the agent. */
   openUrl: (url: string) => string;
-  /** Open a file tab; may return the result text reported to the agent. */
-  openFile?: (path: string, name: string) => string | void;
+  /** Open a file tab; may return the result text reported to the agent. `ownerSessionId` is set when the server
+   * resolved a `local://` file for a session under another id (an alias): the tab belongs to that owner. */
+  openFile?: (path: string, name: string, ownerSessionId?: string) => string | void;
 }
 
 /** How long a `local://` lookup may take before the agent is told the server did not answer: the host ops behind it give
@@ -340,7 +341,7 @@ export interface HostToolHandlers {
 export const LOCAL_FILE_LOOKUP_TIMEOUT_MS = 30_000;
 
 /** A session's `local://` file as the absolute path the file viewer opens, found by the server that holds the session. */
-async function resolveLocalFile(sessionId: string | undefined, uri: string, signal?: AbortSignal): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
+async function resolveLocalFile(sessionId: string | undefined, uri: string, signal?: AbortSignal): Promise<{ ok: true; path: string; sessionId?: string } | { ok: false; error: string }> {
   if (!sessionId) return { ok: false, error: "A local:// file belongs to a session, and no session asked for it" };
   const unanswered = { ok: false as const, error: `Could not open ${uri}: the server did not answer` };
   // An AbortController and a timer, not AbortSignal.timeout (older browsers lack it): a stalled request must not leave
@@ -352,9 +353,9 @@ async function resolveLocalFile(sessionId: string | undefined, uri: string, sign
   const timer = setTimeout(() => controller.abort(), LOCAL_FILE_LOOKUP_TIMEOUT_MS);
   try {
     const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/local-file?uri=${encodeURIComponent(uri)}`, { signal: controller.signal });
-    const body = (await response.json().catch(() => ({}))) as { path?: unknown; error?: unknown };
+    const body = (await response.json().catch(() => ({}))) as { path?: unknown; sessionId?: unknown; error?: unknown };
     if (controller.signal.aborted) return unanswered;
-    if (response.ok && typeof body.path === "string") return { ok: true, path: body.path };
+    if (response.ok && typeof body.path === "string") return { ok: true, path: body.path, ...(typeof body.sessionId === "string" ? { sessionId: body.sessionId } : {}) };
     return { ok: false, error: typeof body.error === "string" ? body.error : `Could not open ${uri} (HTTP ${response.status})` };
   } catch {
     return unanswered;
@@ -412,16 +413,18 @@ export async function runHostTool(
       const requested = str(args.path) ?? "";
       if (!requested) return { text: "No path provided", isError: true };
       let path = requested;
+      let owner: string | undefined;
       if (isLocalUri(requested)) {
         const resolved = await resolveLocalFile(sessionId, requested, signal);
         if (signal?.aborted) return canceled;
         if (!resolved.ok) return { text: resolved.error, isError: true };
         path = resolved.path;
+        owner = resolved.sessionId;
       }
       let text: string | void = undefined;
       if (handlers.openFile) {
         try {
-          text = handlers.openFile(path, path.split(/[\\/]/).pop() || path);
+          text = handlers.openFile(path, path.split(/[\\/]/).pop() || path, owner);
         } catch (error) {
           return { text: error instanceof Error ? error.message : `Could not open ${requested}`, isError: true };
         }

@@ -58,6 +58,12 @@ class FakeStream {
     this.readyState = FakeStream.CLOSED;
     this.deliver({ type: "error", readyState: FakeStream.CLOSED });
   }
+  dropRecoverably() {
+    // The connection drops and will reconnect: the server already lost this subscription.
+    if (this.closedByCaller) return;
+    this.readyState = FakeStream.CONNECTING;
+    this.deliver({ type: "error", readyState: FakeStream.CONNECTING });
+  }
 }
 
 /** The port of the worker the tab's transport started; tests flip its transport. */
@@ -2899,6 +2905,47 @@ test("an open_file local:// call asks the server for the calling session's file 
   assert.deepEqual(opened, [["/sessions/s1/local/note.md", "note.md", { sessionId: "s1", hostId: "local", cwd: "/workspace" }]]);
   const answer = callsTo("POST", "/api/agent/s1").find((call) => call.body?.type === "host_tool_result");
   assert.deepEqual([answer?.body.id, answer?.body.isError, answer?.body.result.content[0].text], ["h1", false, "Opened local://note.md"]);
+});
+
+test("an open_file local:// tab is owned by the session the server resolved, while the answer goes to the caller", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  world.holds.push({
+    match: (method, url) => method === "GET" && url.includes("/api/sessions/s1/local-file"),
+    produce: async () => ({ value: { path: "/tmp/omp-local/s1-moved/note.md", sessionId: "s1-moved" } }),
+  });
+  const opened = [];
+  const { es } = await startRun("s1", "q1", false, { onOpenFile: (...args) => { opened.push(args); } });
+  await act(async () => {
+    es.emit({ type: "host_tool_call", id: "owned", toolName: "open_file", arguments: { path: "local://note.md" } });
+    await sleep(60);
+  });
+  assert.deepEqual(opened, [["/tmp/omp-local/s1-moved/note.md", "note.md", { sessionId: "s1-moved", hostId: "local", cwd: "/workspace" }]]);
+  const answer = callsTo("POST", "/api/agent/s1").find((call) => call.body?.type === "host_tool_result");
+  assert.deepEqual([answer?.body.id, answer?.body.isError], ["owned", false], "the caller still gets the answer");
+});
+
+test("a lookup pending when the chat's subscription drops is withdrawn, not answered or opened later", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  let release;
+  world.holds.push({
+    match: (method, url) => method === "GET" && url.includes("/api/sessions/s1/local-file"),
+    produce: () => new Promise(resolve => { release = () => resolve({ value: { path: "/sessions/s1/local/note.md" } }); }),
+  });
+  const opened = [];
+  const { es } = await startRun("s1", "q1", false, { onOpenFile: (...args) => { opened.push(args); } });
+  await act(async () => {
+    es.emit({ type: "host_tool_call", id: "dropped", toolName: "open_file", arguments: { path: "local://note.md" } });
+    await sleep(10);
+  });
+  assert.equal(typeof release, "function", "the lookup is pending");
+  // The server rejected the call when its only listener left; the cancel it emitted reached no one.
+  await act(async () => { es.dropRecoverably(); });
+  await act(async () => { release(); await settle(); });
+  assert.deepEqual(opened, [], "no tab opens for a call the server already settled");
+  const answer = callsTo("POST", "/api/agent/s1").find(call => call.body?.type === "host_tool_result" && call.body.id === "dropped");
+  assert.equal(answer, undefined, "no late result for an already-rejected call");
 });
 
 test("an open_file local:// call whose lookup fails answers the agent with that error and opens nothing", async () => {

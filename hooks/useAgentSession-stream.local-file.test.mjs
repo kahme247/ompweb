@@ -46,7 +46,7 @@ test("a local:// lookup that answers in time is not cut short", async (t) => {
   const opened = [];
   const result = await runHostTool("open_file", { path: "local://note.md" }, { openUrl: () => "", openFile: (...args) => { opened.push(args); } }, "s1");
   assert.deepEqual(result, { text: "Opened local://note.md", isError: false });
-  assert.deepEqual(opened, [["/sessions/s1/local/note.md", "note.md"]]);
+  assert.deepEqual(opened, [["/sessions/s1/local/note.md", "note.md", undefined]], "no owner other than the caller was named");
   // The deadline timer is not left running after the answer: nothing fires when it would have.
   t.mock.timers.tick(LOCAL_FILE_LOOKUP_TIMEOUT_MS * 2);
   assert.equal(requestSignal.aborted, false, "a completed lookup leaves no deadline timer");
