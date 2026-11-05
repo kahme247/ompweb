@@ -4,7 +4,7 @@
 // composer uploads) names the directory.
 import { realpathSync, statSync, type Stats } from "node:fs";
 import path from "node:path";
-import { isPathWithinRoots, normalizeSlashes } from "./file-access";
+import { isOmpSecretFile, isPathWithinRoots, normalizeSlashes } from "./file-access";
 import { LOCAL_HOST_ID } from "./hosts/registry";
 import { hostForSessionId, sessionSpawnTarget } from "./hosts/session-index";
 import { sessionLocalRoot } from "./hosts/uploads";
@@ -72,6 +72,7 @@ export async function resolveSessionLocalFile(
   if (!located.ok) return located;
   const target = path.resolve(located.root, relative);
   if (resolvesOutside(located.root, target)) return { ok: false, status: 403, code: "access_denied", error: "Access denied" };
+  if (isOmpSecretFile(target)) return { ok: false, status: 403, code: "access_denied", error: "Access denied" };
   let stat: Stats;
   try {
     stat = statSync(target);
