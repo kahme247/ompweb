@@ -8,7 +8,7 @@ import { translate, useI18n } from "@/lib/i18n";
 import { collectToolResults, isGroupAnchor, planTranscriptRows, type ActivityPiece, type TranscriptRow } from "@/lib/chat-transcript-plan";
 import { isReplyBlock } from "@/lib/message-display";
 import { resolveForkTargets } from "@/lib/chat-fork";
-import { MessageView } from "./MessageView";
+import { HeldMessageView, MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ExtensionDialog } from "./ExtensionDialog";
 import { SubagentTranscriptDialog } from "./SubagentTranscriptDialog";
@@ -572,7 +572,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
     isNew, hostStatus: frameHostStatus,
     sessionIdRef, messagesEndRef, scrollContainerRef, holdScrollPosition,
     handleSend, handleAbort, handleFork, handleEdit, handleModelChange, retrySession,
-    handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction, handleCompact,
+    handleSteer, handleFollowUp, handleAbortCompaction, handleCompact,
+    heldMessages, deleteHeldMessage,
     removeQueuedMessage, promoteQueuedToSteer,
     handleBuiltinSlashCommand, togglePreCompactionHistory,
     handleThinkingLevelChange, handleFastModeChange, handleSlowModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
@@ -1132,7 +1133,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
       onAbort={handleAbort}
       onSteer={agentRunning ? handleSteer : undefined}
       onFollowUp={agentRunning ? handleFollowUp : undefined}
-      onPromptWithStreamingBehavior={agentRunning ? handlePromptWithStreamingBehavior : undefined}
+      outbox={!isNew}
       isStreaming={sessionBusy}
       submissionBlocked={editingEntryId !== null}
       model={displayModelValue}
@@ -1202,7 +1203,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
     return <WorkspaceState kind="loading" title={t("chatWindow.loadingSession")} />;
   }
 
-  if (error) {
+  if (error && heldMessages.length === 0 && !(currentHostStatus && !isLinkUp(currentHostStatus))) {
     return (
       <WorkspaceState
         kind="error"
@@ -1357,6 +1358,14 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
             <div style={{ maxWidth: isMobile ? CHAT_COLUMN_MAX_WIDTH : CHAT_COLUMN_MAX_WIDTH_DESKTOP, margin: "0 auto" }}>
               <ExtensionStatusBar statuses={extensionStatuses} />
               <ExtensionWidgets widgets={aboveEditorWidgets} />
+              {error && (
+                <div role="alert" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 12, padding: "8px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", color: "var(--status-error)" }}>
+                  <span>{error}</span>
+                  <button type="button" className="load-retry-button" onClick={retrySession} style={{ flexShrink: 0, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer" }}>
+                    {t("chatWindow.retry")}
+                  </button>
+                </div>
+              )}
 
             {conversationMeta.hasCompaction && (
               <div
@@ -1467,6 +1476,11 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
                 sessionId={session?.id ?? sessionIdRef.current ?? undefined}
               />
             )}
+
+            {/* After the live turn, in submission order: what omp does not have yet. */}
+            {heldMessages.map((held) => (
+              <HeldMessageView key={held.id} held={held} hostLabel={hostLabel} onDelete={deleteHeldMessage} />
+            ))}
 
             <div ref={messagesEndRef} />
             </div>

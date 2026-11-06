@@ -60,7 +60,7 @@ interface PendingCommand {
   resolve: (data: unknown) => void;
   reject: (error: Error) => void;
   timer?: NodeJS.Timeout;
-  onReply?: () => void;
+  onReply?: (success: boolean) => void;
 }
 
 export interface RpcProcessOptions {
@@ -335,8 +335,8 @@ export class RpcProcess {
    * reclaims wedged children via idle-kill and dispose(). Callers that want a
    * cap pass `timeoutMs` (>0); when set, the timer is unref'd so it never
    * keeps the event loop alive on its own. `onReply` runs synchronously when
-   * the response is read, before any frame after it is dispatched. */
-  sendCommand<T = unknown>(command: { type: string; [key: string]: unknown }, timeoutMs?: number, onReply?: () => void): Promise<T> {
+   * the response is read, before any frame after it is dispatched; it is told whether the command succeeded. */
+  sendCommand<T = unknown>(command: { type: string; [key: string]: unknown }, timeoutMs?: number, onReply?: (success: boolean) => void): Promise<T> {
     if (this.exited) {
       return Promise.reject(new Error("omp RPC process has exited"));
     }
@@ -421,7 +421,7 @@ export class RpcProcess {
     }
     this.pending.delete(id);
     if (entry.timer) clearTimeout(entry.timer);
-    entry.onReply?.();
+    entry.onReply?.(response.success === true);
     if (response.success) {
       entry.resolve(response.data);
     } else {

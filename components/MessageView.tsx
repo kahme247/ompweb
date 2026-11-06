@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useState, useId, useRef, useEffect, useLayoutEffect, useMemo, useCallback, useContext, type ComponentProps } from "react";
-import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, ChevronDown, Brain, EyeOff, CircleAlert, CircleSlash, LoaderCircle, FileText, Search, FileEdit, Terminal, CheckSquare, Bot, Code2, Globe, MessagesSquare, Wrench, Volume2, Square } from "lucide-react";
+import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, ChevronDown, Brain, EyeOff, CircleAlert, CircleSlash, Clock, LoaderCircle, FileText, Search, FileEdit, Terminal, CheckSquare, Bot, Code2, Globe, MessagesSquare, Wrench, Volume2, Square, Trash2, Paperclip } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
 import { WorkspaceFileContext } from "@/lib/workspace-file-context";
 import { AgentLinkContext, agentLinkIds } from "../lib/agent-links";
@@ -47,6 +47,7 @@ import type {
   ToolCallContent,
   ThinkingContent,
 } from "@/lib/types";
+import type { HeldMessage } from "@/hooks/useAgentSession-queue";
 
 function ToolCategoryIcon({
   category,
@@ -509,6 +510,88 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
           )}
           {time && <span style={{ fontSize: 10, color: "var(--text-dim)" }}>{time}</span>}
           </div>
+      </div>
+    </div>
+  );
+}
+
+const heldActionStyle = {
+  display: "flex", alignItems: "center", gap: 4, padding: "3px 8px", height: 24, minHeight: 24,
+  background: "none", border: "none", borderRadius: 5, color: "var(--text-dim)", cursor: "pointer",
+  fontSize: 11, whiteSpace: "nowrap",
+} as const;
+
+/** A message omp-web holds until omp has it (docs/specs/2026-11-04-message-outbox-design.md O1): dimmed, after the
+ * live turn, naming the leg it waits on. Delete only while nothing of it can have reached omp. */
+export function HeldMessageView({ held, hostLabel, onDelete }: {
+  held: HeldMessage;
+  hostLabel?: string;
+  onDelete?: (id: string) => void;
+}) {
+  const { t, locale } = useI18n();
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const failed = held.state === "failed";
+  const status = failed
+    ? held.mayHaveBeenSent ? t("heldMessage.mayHaveBeenSent") : held.error ? t("heldMessage.notSentReason", { reason: held.error }) : t("heldMessage.notSent")
+    : held.state === "waiting_host" ? t("heldMessage.waitingForHost", { host: hostLabel || t("heldMessage.theHost") })
+    : held.state === "held" ? t("heldMessage.waiting")
+    : held.state === "delivering" ? t("heldMessage.delivering")
+    : t("heldMessage.sending");
+  const waits = held.state === "waiting_host" || held.state === "held";
+  const StatusIcon = failed ? CircleAlert : waits ? Clock : LoaderCircle;
+  const canDelete = !!onDelete && (failed || waits);
+  const mode = held.mode === "steer" ? t("heldMessage.modeSteer") : held.mode === "followUp" ? t("heldMessage.modeFollowUp") : t("heldMessage.modePrompt");
+  const time = formatTime(held.createdAt, locale);
+  return (
+    <div data-held-message={held.state} style={{ marginBottom: 18, display: "flex", flexDirection: "column", alignItems: "flex-end", paddingRight: 6 }}>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", maxWidth: "85%", minWidth: 0 }}>
+        <div
+          className="chat-message-card"
+          style={{
+            maxWidth: "100%", minWidth: 0, background: "var(--user-bg)", border: "none", borderLeft: "3px solid var(--accent)",
+            borderRadius: "var(--radius-card)", padding: "8px 12px", fontSize: "var(--chat-user-font-size)",
+            lineHeight: "var(--chat-line-height)", color: "var(--text-muted)", opacity: 0.7, wordBreak: "break-word",
+            maxHeight: USER_BUBBLE_MAX_HEIGHT, overflowY: "auto",
+          }}
+        >
+          {held.images?.length ? (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: held.message ? 8 : 0 }}>
+              {held.images.map((image, i) => (
+                <img key={i} src={`data:${image.mimeType};base64,${image.data}`} alt="" style={{ maxWidth: 120, maxHeight: 120, borderRadius: 6, objectFit: "contain", display: "block" }} />
+              ))}
+            </div>
+          ) : null}
+          {held.message && <SafeMarkdownBody className="markdown-user-message">{held.message}</SafeMarkdownBody>}
+          {held.uploads?.length ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4, fontSize: 11 }}>
+              <Paperclip size={11} strokeWidth={1.8} aria-hidden />
+              {t("heldMessage.files", { count: held.uploads.length })}
+            </div>
+          ) : null}
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "flex-end", gap: 6, marginTop: 3, width: "100%", fontSize: 11 }}>
+          <span style={{ padding: "1px 6px", border: "1px solid var(--border)", borderRadius: 999, color: "var(--text-dim)" }}>{mode}</span>
+          <span style={{ display: "flex", alignItems: "center", gap: 4, color: failed ? "var(--status-error)" : "var(--text-dim)" }}>
+            <StatusIcon size={12} strokeWidth={1.8} className={failed || waits ? undefined : "activity-row-spinner"} aria-hidden />
+            {status}
+          </span>
+          {canDelete && <>
+            <button type="button" className="ui-focus-ring" style={heldActionStyle} onClick={() => setConfirmingDelete(true)} aria-label={t("heldMessage.deleteTitle")}>
+              <Trash2 size={11} strokeWidth={1.8} aria-hidden />
+              {t("heldMessage.delete")}
+            </button>
+            <ConfirmDialog
+              open={confirmingDelete}
+              onOpenChange={setConfirmingDelete}
+              title={t("heldMessage.deleteTitle")}
+              description={t(failed && held.mayHaveBeenSent ? "heldMessage.deleteConfirmMayHaveBeenSent" : "heldMessage.deleteConfirmBody")}
+              confirmLabel={t("heldMessage.delete")}
+              cancelLabel={t("chatInput.cancel")}
+              onConfirm={() => { setConfirmingDelete(false); onDelete!(held.id); }}
+            />
+          </>}
+          {time && <span style={{ fontSize: 10, color: "var(--text-dim)" }}>{time}</span>}
+        </div>
       </div>
     </div>
   );

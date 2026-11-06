@@ -588,8 +588,8 @@ executor-style promises instead. Server code may use them freely.
   - The confirmed-move callback synchronously calls `ChatInputHandle.retargetPendingRecovery(from, to)` before state updates or parent callbacks. This advances only captured queue-recovery ownership, closing the acknowledgement-to-commit gap; layout hydration still owns the live composer key/state. Do not turn this pre-commit ownership handoff into eager draft hydration.
   - Pending transcription keeps its original server scope/job/claim ownership. Confirmed moves record a tab-local recovery association so the target can rediscover that job after navigation/remount; other clients' drafts and server scopes are not migrated. A hard reload before an upload acknowledgement can leave multiple possible source jobs; retain recovery and report ambiguity rather than guess or reupload.
   - Event connections own their readiness waits: replacement and unmount settle the old wait as closed, clear its timers/coalesced work and close its observer. Late continuations must not attach streams to an unmounted hook or let a stale connection authorize a new operation. Keep lifetime cleanup separate from the mount-load latch so StrictMode setup/cleanup replay still cleans up observers attached afterward.
-  A user's prompt is the exception to "abandoned readiness": when its chat unmounts during startup (the user switched chats while omp spawned), `handleSend` still sends the prompt, opens no observer, skips host-tool/roster setup and returns `accepted`, as the new-chat path does.
-  Ordinary `ChatInput.onSend` returns `Promise<PromptSubmissionResult>` (`accepted` / `rejected` / `superseded`). Only rejection restores composed text/file contents and images through `recoverDraft`; its receipt supplies the promoted real-session draft key when a new chat became a session, otherwise the composer uses the originating key captured before submission. Superseded failures must not reinsert a processed turn or reset a newer run. The composer owns recovery; `useAgentSession.handleSend` must not separately insert failed-send text and duplicate it.
+  A new chat's first prompt is the exception to "abandoned readiness": when its chat unmounts while omp spawns, `handleSend` still sends the prompt, opens no observer, skips host-tool/roster setup and returns `accepted`. An existing session's messages need no exception: they go through the message outbox (below), which delivers them with no tab involved.
+  Ordinary `ChatInput.onSend` returns `Promise<PromptSubmissionResult>` (`accepted` / `rejected` / `superseded`). With `outbox` (an existing session) the composer clears only once `onSend` (or `onSteer`/`onFollowUp`) reports the message stored in the browser's outbox, and only if it still holds what was sent; a refusal leaves it in place. For a new chat only rejection restores composed text/file contents and images through `recoverDraft`; its receipt supplies the promoted real-session draft key when the new chat became a session, otherwise the composer uses the originating key captured before submission. Superseded failures must not reinsert a processed turn or reset a newer run. The composer owns recovery; `useAgentSession.handleSend` must not separately insert failed-send text and duplicate it.
 - **In-session branch** (Continue button / BranchNavigator): reads a historical view of the entry tree within the same file; it does not change the live agent's context. Multiple entries share the same `parentId`. Switching between them calls `/api/sessions/[id]/context?leafId=` through `handleLeafChange`; never use that read-only path to implement Edit.
 
 ### ToolCall field normalization
@@ -730,6 +730,8 @@ handled or safely ignored.
 The queue panel renders omp's snapshot only: `get_state.queuedMessages` on
 load/reconcile/stream open and live `queue_update` frames. Never track chips
 client-side — every client viewing the session must show the same queue.
+The one exception is what omp does not have yet: the message outbox's held
+bubbles (below), never omp's queue.
 One sequence (`queueSeqRef`) orders every source: a get_state snapshot takes
 a number when requested and applies only if no newer snapshot or
 `queue_update` was applied (HTTP and SSE can reorder). Edit/Delete use
@@ -762,10 +764,11 @@ during the wait.
   of throwing (`queueWhileShellRunning` in `lib/rpc-manager.ts`): the frame is
   forwarded as omp's `follow_up` — never aborted, never reimplemented here —
   and the reply reports it (`{queued:true, queue:"followUp",
-  reason:"shellRunning"}`), which the hook surfaces as a notice while rolling
-  the phantom optimistic turn back. The chip still comes from omp's snapshot.
-  This applies only with no turn streaming: during a turn, prompts and steers
-  reach omp unchanged.
+  reason:"shellRunning"}`). For an outbox entry the dispatcher treats it as a
+  follow-up (its held bubble becomes the chip); a new chat's first prompt
+  surfaces it as a notice while rolling the phantom optimistic turn back. The
+  chip still comes from omp's snapshot. This applies only with no turn
+  streaming: during a turn, prompts and steers reach omp unchanged.
 - A `!cmd` submitted during a run is never queued as text: `sendQueued` hands
   it to `handleSend`, which runs it at once beside the turn, as omp's terminal
   does. omp holds such a result back until a later prompt starts (with omp
@@ -784,6 +787,153 @@ during the wait.
   prompt later. Other tabs see it only from then on. Stop (`handleAbort`)
   stops a running turn first, as omp's Esc does; `abort_bash` only when no
   turn runs.
+
+### Message outbox (`lib/message-outbox.ts`, `lib/event-stream-worker.ts`, `docs/specs/2026-11-04-message-outbox-design.md`)
+- **Every message to an existing session is held until acceptance is confirmed**:
+  an idle prompt, follow-up or steer (slash commands too; `!cmd` and `/btw`
+  retain their own paths). Send ends once browser storage commits. Retain
+  unconfirmed outcomes visibly across reconnects, restarts and host outages;
+  uncertain host delivery is not independently retried. Native process crashes
+  preclude an unconditional exactly-once guarantee. New chats keep their first
+  `ensureNewSession` + prompt path (phase 1).
+- **Browser leg.** `addToOutbox` (`lib/event-stream.ts`) hands the entry to the
+  event-stream worker, which commits it to IndexedDB (`omp-web-outbox`/`entries`)
+  and only then answers, so the composer clears only then. Missing IndexedDB
+  or a failed transaction rejects the add and preserves the draft. The worker sends `outbox_add` over its current transport
+  (a link `cmd`, or POST `/api/agent/[id]` in SSE mode), one entry per session at
+  a time, oldest first; 401/408/429/5xx/network retry with backoff (1 s → 30 s,
+  at once on a wake), other 4xx mark it failed. Delete its browser copy only
+  after a matching successful outbox receipt, not an arbitrary HTTP 200, and
+  wait for the IndexedDB transaction to complete. Allocate logical enqueue
+  order and insert a unique ID atomically; clock ties and worker restarts must
+  not reorder entries or overwrite a held intent. An entry still unsent seven
+  days after `createdAt` fails instead (server IDs live eight days); an
+  unscoped one fails too. Every sender, Background Sync included, persists
+  that failure before moving on, so a stale head never blocks the session's
+  later entries. Pagehide
+  sends each session's head only (64 KiB total, no incomplete ordering view).
+  Background Sync registers `omp-outbox` only after the active service worker
+  proves outbox capability; an old push-only worker is not sufficient.
+  A transient initial IndexedDB read failure must not latch the SharedWorker
+  unusable: later list/add/delete operations retry the existing shared load,
+  with one retry attempt shared by concurrent tabs. Persistent failures still
+  preserve drafts and stored rows rather than claiming successful storage.
+- **Idempotent by id.** `outbox_add`/`outbox_remove` are agent
+  commands in `runAgentCommand`, before any wrapper spawn; a repeat of a known
+  id answers the stored entry. These and `outbox_scope` are in
+  `isIdempotentCommand`, so the link's `(session, rid)` dedupe never remembers
+  them and a resync resends them.
+- **Scope follows the installation, not the cookie.** The state route's
+  `outboxScope` (or `outbox_scope` command) is a nonsecret installation/auth
+  fingerprint, cached for offline enqueue. Every browser entry persists it
+  unchanged; worker, keepalive and SW sends never rebind an old row.
+  Replacement installation/credentials refuse it permanently with
+  `outbox_scope_changed`; normal same-owner re-login keeps it. With no cached
+  scope, a first-ever offline send must retain its draft until the server can
+  identify itself.
+- **Server leg.** SQLite and a per-conversation FIFO dispatcher (aliases share
+  the same claim) send through the wrapper. Acceptance is bounded by the
+  per-alias 16 MiB limit and the global 256 MiB/1,000-active-row pool; overflow
+  is retryable 429 while the browser keeps its copy. Never trim accepted rows.
+  Storage startup failure remains retryable without a new send or hello;
+  successful initialization installs hooks once and shutdown cancels retries.
+  Startup recovery fails a same-PID `delivering` row (a reused PID from the
+  last run) unless this process holds that claim in memory: an add accepted
+  before a delayed startup retry may already be in flight.
+  Host offline → `waiting_host`; uncertain replies/child exits while delivering
+  → `failed` with `mayHaveBeenSent`, never independently resent. Anything that
+  stops an entry before its native write (an error before the claim, omp exiting
+  during preparation, attachment copies or a send fence inside `runAgentCommand`)
+  leaves it unsent, never marked possibly sent: a gone child is retried after
+  `RETRY_MS`, and any other refusal (an attach op's `host_offline` included) is
+  classified as not sent (`waiting_host` for an outage). The boundary is
+  `nativeWriteStarted(command)`, set by whichever wrapper's
+  `sendNativeMessageCommand` begins writing that submitted command object, never
+  inferred from one wrapper's generation (a respawned child may write it); test
+  fakes record their write in the same `__ompNativeWrites` registry. An
+  `outbox_add` for an archived session is accepted and held until it is restored
+  (the restore route pumps it); only a session neither listed nor archived is a
+  404. Internal `/rename` and `/mcp` prompts stay counted as message
+  commands, so an outbox watch never claims an echo they cause. Host tool and URI
+  scheme registrations apply in `sendCommand`'s `onReply` (success only), so a
+  call omp sends in the same batch as the reply is routed. The session carries
+  `outbox_update {entries,settledIds}` (every non-delivered entry plus the latest
+  256 delivered/removed ids, retained 8 days) on subscribe and on every
+  change, and opens without a wrapper while held entries exist. Observe the
+  session-registry lifecycle too: an explicit command can create the ready
+  wrapper without another outbox mutation; attach/rebind then announce `connected`.
+  Internal handoff observers protect lifetime but do not count as browser tabs
+  for host-tool/URI routing or disconnect cleanup. Only the submitted command's
+  own reply proves rejection; an older run's session-wide error cannot reject it.
+  `GET /api/sessions/[id]/state` carries `outbox`, `outboxSettledIds` and
+  `outboxScope` on every answer, an offline host's error included, so a reload
+  subscribes to follow them. Upload completion receipts persist privately
+  before the completion ACK, so upload ids survive a restart even before
+  outbox_add reaches the server.
+  Completion replies also carry upload-specific `proof`; browser-held entries
+  retain it as `uploadProofs` across re-login. The dispatcher receives accepted
+  original-owner receipts out of band, never from client JSON. Private proof
+  columns and other schema migrations share one immediate discovery/ALTER
+  transaction so concurrent instances cannot race the upgrade.
+  Upload authority is revalidated inside the same immediate transaction as
+  outbox insertion, after asynchronous lookups. Private completion fingerprints
+  bind later preparation to the original file generation. A UUID still referenced
+  by a retained outbox entry cannot be repurposed after its canonical upload
+  registration is canceled or consumed; cancellation must never substitute bytes.
+  Canonical completion records refresh stale main-side caches. Every attachment
+  replay still asks the daemon to validate its real file; a missing completed
+  file never resumes as replacement bytes under the old proof. Delayed native
+  replies retire only their captured completion generation.
+  First proof issuance atomically binds matching retained legacy receipts too.
+  Original-owner preparation captures that private generation before awaiting
+  another command, so a completion replay cannot invalidate unchanged legacy files.
+  Consecutive unsent outbox snapshots replace each other in the session
+  backpressure queue. Resume and heartbeat do not serialize them while the sink
+  is still behind; native events remain ordering fences, with genuine overflow
+  handled by the existing resync limits. Never rewrite numbered or partial lines.
+- **Held bubbles** (`HeldMessageView`, after the live turn, delivery order:
+  server-held entries in arrival order, then this browser's first-leg entries
+  in submission order; browser and server `createdAt` are never compared):
+  the hook merges the worker's entries (`subscribeOutbox`) with the server's
+  snapshot by id; a server confirmation (`{stored}`) bridges until the server
+  lists or settles its id (an older empty snapshot cannot hide it); seen and
+  settled ids prevent late ACKs from resurrecting delivered entries. States:
+  Sending (browser, locked while its first-leg command may be in flight),
+  Waiting to send / Waiting for <host> (Delete), Delivering (locked),
+  Not sent (Delete). The delivery mode is a read-only label. Delete
+  (`deleteHeldMessage`) awaits the IndexedDB delete commit for a browser-held
+  entry; a server entry sends `outbox_remove`, refused with 409
+  `outbox_dispatched` once delivering. A late commit consumes only the original
+  draft's unchanged content and edit generation, including after remount.
+  Equal text after newer typing is not unchanged; hydration is not a user edit.
+  Active submission ownership lives in the shared draft store, not a composer
+  mount. Confirmed identity moves transfer it synchronously before React commits;
+  live draft hydration and source-snapshot merging still belong to layout.
+  Mark accepted attachment reads as edits before asynchronous completion, not
+  only when their chips appear. During pre-commit identity handoff, do not
+  recreate the obsolete draft key or consume capacity belonging to other drafts.
+- **Run state comes from omp's frames**, never from Send: `agent_start` starts
+  the run. The server captures `previousEntryIds` before dispatch and publishes
+  it only on the active delivering entry, before omp frames; recovery must use
+  this authoritative boundary, not cached/late-fetched history that could
+  mistake the previous saved answer for a new response. The boundary is
+  cleared after handoff/failure, never kept in tombstones.
+  Active replacement inference also requires unambiguous message admission:
+  an intervening message command from another origin cannot supply this
+  attempt's identical echo. Retain uncertainty instead of guessing ownership.
+  A later new idle message may renew an ambiguous child through the existing
+  awaited restart lifecycle: require authoritative native settlement, a saved
+  session, no active/queued/background work, dialogs, history mutation or unrelated
+  pending command, and stable child/admission identity across preparation awaits.
+  Recheck before teardown; never infer old acceptance from time or settlement,
+  and never replay old uncertain entries. Preserve accepted host-tool and URI
+  registrations under current policy before submitting to the replacement child.
+  A prompt's bubble leaves when the server sees omp's reply and echo;
+  the hook shows omp's echoed user message (`echoedUserMessage`) until the
+  transcript catch-up has its saved copy (same timestamp and text), so there is
+  no gap. A follow-up or steer becomes omp's queue chip. Stream connections
+  opened for held messages (`connectEvents(sid, "connected")`) talk to omp only
+  after `connected`, since any command would start a wrapper.
 
 ### Live event stream: one socket per browser (`/api/events`)
 - Browsers cap HTTP/1.1 at **6 connections per host across all tabs**, and an
@@ -1094,6 +1244,7 @@ during the wait.
 
 ### Session list caching — new sessions must appear immediately
 - The sidebar and command palette list sessions per host: `listSessionsAllHosts()` (`lib/hosts/session-index.ts`) calls each host's `listSessions` op and caches it 30 s per host (`LIST_TTL_MS`, the daemon's own TTL). **This machine's list is its daemon's**; a host that fails or is offline keeps its last list. Nothing on main parses session files to build it.
+- **A lookup miss is not deletion while any host's list is unavailable.** `hostForSessionId()` returns no host only after successful current-generation discovery across all registered hosts; offline or failed-refresh lists produce retryable 503, including a cold remote cache after main restarts while the local daemon is already online. Cached positive mappings remain usable. Outbox acceptance retains validated messages during unknown ownership and normal host-hello dispatch resolves them later; never guess a local owner or trust a caller's host hint.
 - The daemon's `listSessions` is `listAllSessions()` (`lib/session-reader.ts`): a 30 s TTL list cache plus an mtime-keyed directory walk in `lib/omp/session-files.ts` (`listSessionFiles`), both in the daemon process.
 - The walk cache keys on the **sessions root** mtime. On Windows/NTFS a new
   `.jsonl` inside an existing project subdirectory does NOT bump the root
@@ -1340,12 +1491,24 @@ during the wait.
   if known. All of it is in memory: the hourly sweep is the backstop.
 - Error codes: composer uploads use `upload_id_conflict` (another upload has
   this id); `upload_conflict` stays the file manager's.
-- SSE mode uses the same registry over HTTP (`/api/uploads`). Upload owner =
-  `requestOwner(req)` (`lib/web-auth.ts`), the browser link's owner too; attach
-  requires the same owner and the session's host.
-- The registry is in memory: a main restart loses finished-but-unsent uploads
-  ("attach the file again"); unfinished ones resume. Switching chats aborts
-  in-flight uploads; drafts keep only finished ones (`sessionStorage`).
+- SSE mode uses the same registry over HTTP (`/api/uploads`). `requestOwner(req)`
+  (`lib/web-auth.ts`) still binds upload start, chunks and cancel to the original
+  login, and still binds browser-link resume; it is not made stable across login.
+  Attachment is also allowed by a server-issued, upload-specific completion proof
+  in the same installation/auth scope and within the existing 24-hour lifetime.
+  Main stores it privately before reporting completion; completion replays reuse
+  it without renewing expiry. Never accept caller-supplied owners or receipts,
+  and never send proofs to the daemon/omp, public outbox snapshots or logs.
+- `uploadFile().promise` returns `{proof?}`. Finished chips/drafts retain the proof;
+  Send/steer/follow-up pass the optional fourth `uploadProofs` argument through
+  IndexedDB, keepalive and Background Sync. The server validates that authority
+  and privately snapshots each upload's actual original owner for accepted
+  dispatch, including mixed owners and main restarts. Host/session/file checks
+  and submission fences remain. Legacy no-proof files remain original-owner-only.
+- The live upload registry is in memory, but completed receipts/proofs are durable
+  until their existing expiry. A main restart no longer loses a finished-but-unsent
+  attachment. Switching chats aborts in-flight uploads; drafts keep only finished
+  ones and their proofs (`sessionStorage`).
 
 ### Voice transcription jobs (`lib/stt-jobs.ts`, `/api/stt`, `hooks/useDictation.ts`)
 - The browser never waits on the STT endpoint: `POST /api/stt` keeps the

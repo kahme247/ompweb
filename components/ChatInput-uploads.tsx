@@ -16,6 +16,7 @@ export interface AttachedUpload {
   name: string;
   size: number;
   hostId: string;
+  proof?: string;
   /** The picked file, to retry or switch back to Inline with; null for one restored from a draft (finished). */
   file: File | null;
   /** Bytes the host has. */
@@ -33,12 +34,15 @@ export function draftUploadsToAttachedUploads(uploads: ChatDraftUpload[] | undef
 
 /** Only finished uploads go into a draft: one in flight is lost with the page (spec U2). */
 export function attachedUploadsToDraftUploads(uploads: AttachedUpload[]): ChatDraftUpload[] {
-  return uploads.filter((upload) => upload.status === "done").map(({ id, name, size, hostId }) => ({ id, name, size, hostId }));
+  return uploads.filter((upload) => upload.status === "done").map(({ id, name, size, hostId, proof }) => ({ id, name, size, hostId, ...(proof !== undefined ? { proof } : {}) }));
 }
 
-/** The upload ids for a send callback: an argument only when there are some (images otherwise stay the last). */
-export function uploadArgs(uploads: AttachedUpload[]): [] | [string[]] {
-  return uploads.length ? [uploads.map((upload) => upload.id)] : [];
+/** Upload ids and, when present, their completion proofs; no extra arguments for legacy uploads. */
+export function uploadArgs(uploads: AttachedUpload[]): [ids?: string[], proofs?: Record<string, string>] {
+  if (!uploads.length) return [];
+  const ids = uploads.map((upload) => upload.id);
+  const proofs = uploads.flatMap(({ id, proof }) => proof !== undefined ? [[id, proof]] : []);
+  return proofs.length ? [ids, Object.fromEntries(proofs)] : [ids];
 }
 
 /** What a refused send puts back into its draft, besides text and images. */
