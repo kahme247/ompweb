@@ -39,8 +39,8 @@ Not a goal: two daemons on one agent dir, or two daemons sharing one omp process
 
 ### M4. Commands and replies
 
-- The daemon assigns each link an id (`l1`, `l2`, …, never reused while the daemon runs) and sends it in a new hello field `link: {id, notifier}`. A v7 server prefixes every command id it sends to omp with `<id>:` (`RpcProcess` already takes an `idPrefix`).
-- A `response` line goes only to the link whose prefix its `id` carries. A `response` without a known prefix (an omp-initiated reply, a v6 link's command) goes to every joined link, as today.
+- The daemon assigns each link an id (`l1`, `l2`, …, never reused while the daemon runs) and sends it in its hello on that link (`link: {id, notifier}`).
+- The daemon records the `id` of every command a link writes to a channel's stdin. A `response` whose `id` it recorded goes only to that link, and the record is dropped. A `response` with an unknown or absent id goes to every joined link. Command ids are already unique per server (`RpcProcess` prefixes each with a random `w<uuid8>-`), so servers need no change; the daemon's own commands use the prefix `d:` and their replies go to no link.
 - Commands from several links reach omp in arrival order. omp serializes prompts and queues follow-ups itself; the queue, run state, `/btw`, todos and subagents reach every link through omp's own output and snapshots, so both UIs show one conversation. A prompt sent from one server appears on the other exactly like one sent there: omp echoes it as a user message, and nothing marks which server sent it.
 
 ### M5. Rejoin at any point
@@ -55,12 +55,12 @@ Three layers, none of which keeps a session's history in the daemon:
 
 The daemon decides when a process stops; the two web-server timers in `lib/rpc-manager.ts` (`DISCONNECT_DESTROY_MS`, `IDLE_DESTROY_MS`) no longer run for v7 hosts.
 
-- **Interest.** Each server sends `interest {ch, on}` (sequenced, hub → daemon) when its interest changes: on while it has a tab attached to the session (an `onEvent` listener) or a command of its own unanswered, off otherwise. A link that drops keeps its interest for 2 min (`DISCONNECT_GRACE_MS`), so a restarting server keeps the sessions its tabs show.
+- **Interest.** Each server sends `interest {ch, on, preparing}` (sequenced, hub → daemon) when its state changes: on while it has a tab attached to the session (an `onEvent` listener) or a command of its own unanswered; `preparing` protects command preparation such as a slow upload attachment before prompt stdin exists. A link that drops keeps its interest for 2 min (`DISCONNECT_GRACE_MS`), so a restarting server keeps the sessions its tabs show.
 - **Run state.** The daemon reads it from the process's output: a run starts at `agent_start` and ends at a terminal `agent_end`; background work ends at `session_settled`. A command is in flight from its stdin line until its `response`.
 - **Stops**, each logged with its reason:
   - abandoned: no link has interest, no run, no background work and no command in flight, for 2 min (`OMP_WEB_DISCONNECT_DESTROY_MS` keeps its meaning and its `0`);
-  - idle: no run and no command for 10 min, whatever the interest;
-  - asked: a server's `kill {ch}` (delete, reload, omp update, a failed take-over), unchanged.
+  - idle: no run, background work, command, startup, blocking request or command preparation for 10 min, whatever the tab interest;
+  - asked: a server's explicit `kill {ch}` (delete, reload, omp update). Failure to attach/reconcile a server closes that server's membership, never the shared process.
 - A stop is a kill escalating to force after 5 s, as today, and every joined link gets the channel's `exit`.
 - A link going down never stops a process; neither does a link going away for good (its interest ends after the grace).
 
@@ -80,26 +80,30 @@ The daemon decides when a process stops; the two web-server timers in `lib/rpc-m
 ### M9. Shared requests
 
 - **Dialogs** (blocking `extension_ui_request`): every joined link gets the request, so it shows on every UI. The daemon forwards the first `extension_ui_response` for an id to omp, drops later ones, and sends every other joined link the cancel omp itself would send (`extension_ui_request` with `method: "cancel"`, `targetId`), which closes their dialog through the existing code.
-- **Tool calls.** omp runs every tool call once. Its own tools (bash, read, edit, task, …) run inside omp on the host, and their `tool_execution_*` frames and results stream to every joined link like any other output (M2); nothing here is new. The only calls that leave omp are the callbacks it makes to the web app for tools the web app supplies (`host_tool_call`, `host_uri_request`: `open_url`, `notify` and `open_file` in a browser tab, `list_sessions` / `new_session` / `send_to_session` on the server). Each needs one executor, so the daemon sends it to one link: the link that last sent a prompt, steer or follow-up on that channel if it registered the tool, else the earliest-linked one that did; if that link drops with the call open, the next registrant. The single result goes back to omp, whose execution frames reach every link. Registration: each server sends its tools and URI schemes per channel (`host_tools {ch, tools, schemes}`, hub → daemon) instead of its own `set_host_tools` / `set_host_uri_schemes`, and the daemon gives omp the union by name. With no registrant the call waits in the daemon (today's parking, moved).
+- **Tool calls.** omp executes normal tools once on the host; their progress and results fan out to every joined link. Only web-supplied callbacks (`host_tool_call`, `host_uri_request`: browser `open_url`, `notify`, `open_file`, and server `list_sessions` / `new_session` / `send_to_session`) need an executor selection: choose the last prompt/steer/follow-up sender if eligible, otherwise the earliest-linked registrant. Once dispatched, keep the same executor across reconnects: losing a socket is not proof that its action did not happen, so never blindly re-execute on another server. Only undispatched calls may choose another registrant. Registrations arrive as `host_tools {ch, tools, schemes}`; the daemon supplies their validated union to omp. With no registrant a call waits in the daemon. The single callback result goes back to omp; the execution frames and committed result reach both UIs.
 - **Notifications**: the daemon marks one link as notifier (`link.notifier` in the hello, then sequenced `notifier {on}` on change): the earliest-linked v7 link that is up. Only the notifier publishes (`notification-hub.ts`); every server shows the shared history. A v6 link always publishes.
 - **Session lists**: when a session file changes in a way that invalidates the daemon's list (`invalidateSessionLists`, renames, titles, deletes, new sessions), the daemon sends `sessions_changed` to every link, which drops that host's 30 s list cache on each server.
 
 ### M10. Compatibility
 
 - `LINK_PROTOCOL_VERSION` 7, `MIN_LINK_PROTOCOL_VERSION` stays 4. v7 adds `hello.link`, the ops `open` and `close`, and the messages `interest`, `host_tools`, `notifier` and `sessions_changed`.
-- A v6 link to a v7 daemon behaves exactly as today: `spawn`, its own timers and startup settings, kills of unadopted channels. It sees only the channels it spawned, and no other link joins them. Its replies go to it alone.
+- A v6 link to a v7 daemon behaves exactly as today: `spawn`, its own timers and startup settings, kills of unadopted channels. It sees only the channels it spawned, and no other link joins them. Its replies go to it alone. A session never gets two processes: a v6 `spawn` for a session a v7 link's channel runs, or a v7 `open` for one a v6 channel runs, is refused with 409 `session_running_elsewhere`.
 - A v7 server keeps linking v4–v6 daemons with today's behaviour (one link, server-side lifecycle).
 - Shared files of the agent dir stay shared: `omp-web-settings.json`, `projects.json`, `hosts.json`, the notification store. A staging server's settings change applies to production too; that is accepted.
 
 ## Rollout
 
-1. Release the v7 server and daemon together. Deploy the web server first (it links today's v6 daemon unchanged), then restart `ompweb-host` once. That restart ends the running omp processes, so it is scheduled with the user; with auto-resume on, the v7 daemon resumes them (M7). Remote hosts update from Settings → Hosts.
+1. Release the v7 server and daemon together. Deploy the web server first (it links today's v6 daemon unchanged), then schedule the initial daemon restart with the user while the host has no active or unsettled sessions: a v6 daemon has no `host-running.json` to recover. Subsequent v7 daemon restarts use M7's tested recovery. Remote hosts update from Settings → Hosts under the same initial-upgrade precondition.
 2. `ompweb-stage` (ai-harness-settings): `on <ref>` starts `ompweb-staging`, which adds its own entry to `host.json`; production keeps its link. `off` stops staging and removes the entry. `on` refuses while the daemon speaks less than v7. The takeover code (stopping production, pinning `host.json`, deleting the interrupted-sessions list) is deleted; `ui` stays.
-3. pr-watcher posts to the primary `url` again, since production never loses the machine.
+3. pr-watcher can keep following the primary `url`, since production never loses the machine. Preserve the existing recovery fix unless the new configuration demonstrably requires a change.
 
 ## Testing
 
-- Daemon unit tests with two fake hubs on one daemon: output to both in order; replies only to the sender; joining mid-stream gets the whole message first; first dialog answer wins and the other link gets the cancel; a tool call goes to the last prompter, then to the next registrant when it drops; interest, the 2 min grace and both stops; `host-running.json` written, claimed and the resume prompt sent once; notifier handoff; `sessions_changed` to every link; a v6 link isolated as described.
+- Daemon tests with two fake hubs: output order and sender-only replies, including chunked responses; whole streaming message on join; first dialog answer and cancellation on the other link; last-active callback selection with no duplicate action after link loss; interest, preparation protection and grace periods; single resume; notifier handoff; list invalidation; legacy isolation.
 - Integration (`npm run smoke` extended): one real daemon, two real servers. A prompt sent on A shows as a user message on B; a dialog answered on B closes on A; restarting A keeps the process and B's view; B joining mid-stream renders the open message; the process stops only after both drop interest.
 - Compatibility: a v6 server against the v7 daemon, and a v7 server against a v6 daemon, pass today's host tests.
 - Live, at a time agreed with the user: production and staging on one session, each item above checked.
+
+## Planning clarifications for review
+
+The implementation plan corrects four details discovered against the current source: command correlation uses the existing RPC ids (the prefix is not a constructor option); a dispatched callback cannot safely be retried elsewhere; preparation/background work must protect host idle cleanup; and the first upgrade cannot recover a manifest the old daemon never wrote. These are included in the plan-review gate, not permission to deploy or change production now.
