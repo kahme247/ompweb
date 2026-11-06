@@ -136,6 +136,9 @@ export function planTurnSegments(
  *   turn that ends in tool calls has no answer yet, so it folds completely.
  * - A provider error on an intermediate message disables the fold for the turn,
  *   so the failure stays visible in place instead of hiding inside the fold.
+ * - Thinking (`showThinking`) and tool calls (`showToolCalls`) arrive inside
+ *   text segments as non-reply blocks. They stay in place; only the reply text
+ *   around them folds. The fold sits where its first piece was.
  */
 function foldToFinalAnswer(messages: AgentMessage[], segments: TranscriptSegment[]): TranscriptSegment[] {
   let finalIdx = -1;
@@ -148,30 +151,41 @@ function foldToFinalAnswer(messages: AgentMessage[], segments: TranscriptSegment
   const final = finalIdx >= 0 ? segments[finalIdx] : null;
   const tail = finalIdx >= 0 ? segments.slice(finalIdx + 1) : [];
 
-  const pieces: ActivityPiece[] = [];
-  let toolCallCount = 0;
+  const out: TranscriptSegment[] = [];
+  const folded: Extract<TranscriptSegment, { kind: "activity" }> = { kind: "activity", pieces: [], stepCount: 0, toolCallCount: 0 };
   const addPiece = (piece: ActivityPiece) => {
-    const prev = pieces.at(-1);
+    if (folded.pieces.length === 0) out.push(folded);
+    const prev = folded.pieces.at(-1);
     // Blocks of one message that were split into text/activity runs render as one entry again.
     if (prev?.blocks && piece.blocks && prev.index === piece.index) {
-      pieces[pieces.length - 1] = { index: prev.index, blocks: [...prev.blocks, ...piece.blocks] };
+      folded.pieces[folded.pieces.length - 1] = { index: prev.index, blocks: [...prev.blocks, ...piece.blocks] };
     } else {
-      pieces.push(piece);
+      folded.pieces.push(piece);
     }
   };
   for (const segment of head) {
     if (segment.kind === "activity") {
       for (const piece of segment.pieces) addPiece(piece);
-      toolCallCount += segment.toolCallCount;
+      folded.toolCallCount += segment.toolCallCount;
       continue;
     }
     if ((messages[segment.index] as AssistantMessage).errorMessage?.trim()) return segments;
-    if (segment.blocks.length > 0) addPiece({ index: segment.index, blocks: segment.blocks });
+    const runs: { reply: boolean; blocks: AssistantContentBlock[] }[] = [];
+    for (const block of segment.blocks) {
+      const reply = isReplyBlock(block);
+      const run = runs.at(-1);
+      if (run?.reply === reply) run.blocks.push(block);
+      else runs.push({ reply, blocks: [block] });
+    }
+    for (const [i, run] of runs.entries()) {
+      if (run.reply) addPiece({ index: segment.index, blocks: run.blocks });
+      else out.push({ kind: "text", index: segment.index, blocks: run.blocks, last: segment.last && i === runs.length - 1 });
+    }
   }
-  if (pieces.length === 0) return segments;
+  if (folded.pieces.length === 0) return segments;
+  folded.stepCount = folded.pieces.length;
 
-  const folded: TranscriptSegment = { kind: "activity", pieces, stepCount: pieces.length, toolCallCount };
-  return final ? [folded, final, ...tail] : [folded];
+  return final ? [...out, final, ...tail] : out;
 }
 
 /**
