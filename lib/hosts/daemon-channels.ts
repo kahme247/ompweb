@@ -30,6 +30,8 @@ type Channel = {
   replacing?: boolean;
   /** The link holding the history-edit lease: other links' history mutations are refused. */
   editor?: string;
+  /** Why the daemon stopped it (lifecycle reason or "asked"); unset for a crash. */
+  stopReason?: string;
 };
 type ChannelDeps = {
   spawn(launch: SpawnRequest): Promise<SpawnResult>;
@@ -234,7 +236,7 @@ export class ChannelTable {
         startup: Promise.resolve(), exited: false, opened: false, fullFallback: false };
       this.channels.set(ch, channel);
       if (legacy === null) {
-        channel.lifecycle = new ChannelLifecycle({ stop: reason => { this.deps.log(`channel ${ch}: stopping (${reason})`); this.stopChannel(channel); }, onRunning: () => this.deps.runningChanged?.() });
+        channel.lifecycle = new ChannelLifecycle({ stop: reason => { this.deps.log(`channel ${ch}: stopping (${reason})`); this.stopChannel(channel, reason); }, onRunning: () => this.deps.runningChanged?.() });
         if (preparingLinkId) channel.lifecycle.setPreparing(preparingLinkId, true);
         channel.shared = new SharedRequests({ members: () => [...channel.members.keys()], isUp: id => channel.members.get(id)?.link.isUp() ?? false,
           deliver: (id, lines) => { const member = channel.members.get(id); if (member) for (const line of lines) this.deliver(channel, member, { type: "stdout", ch, line }); },
@@ -249,7 +251,8 @@ export class ChannelTable {
         channel.internal.clear(); channel.commands.clear(); this.channels.delete(ch);
         // An open result still on its way must carry this exit after it (see release).
         if ([...channel.members.values()].some(member => member.paused)) this.exitedHandoffs.set(ch, channel);
-        this.broadcast(channel, { type: "exit", ch, code, signal }); this.deps.runningChanged?.();
+        // A planned stop names its reason, so web apps do not report it as a crash.
+        this.broadcast(channel, { type: "exit", ch, code, signal, ...(channel.stopReason ? { reason: channel.stopReason } : {}) }); this.deps.runningChanged?.();
         this.deps.channelsChanged?.(ch);
       });
       if (legacy === null) channel.startup = this.configure(channel).finally(() => channel.lifecycle?.setStartup(false));
@@ -474,7 +477,7 @@ export class ChannelTable {
     channel.editor = link.id;
   }
   setTools(link: DaemonLink, ch: string, tools: unknown[], schemes: HostUriScheme[]): void { this.member(link, ch).shared?.setTools(link.id, tools, schemes); }
-  kill(link: DaemonLink, ch: string, force: boolean): void { const channel = this.member(link, ch); if (force) channel.transport.killTree(true); else this.stopChannel(channel); }
+  kill(link: DaemonLink, ch: string, force: boolean): void { const channel = this.member(link, ch); if (force) { channel.stopReason ??= "asked"; channel.transport.killTree(true); } else this.stopChannel(channel); }
   close(link: DaemonLink, ch: string): void {
     const channel = this.member(link, ch); channel.members.delete(link.id); channel.lifecycle?.setPreparing(link.id, false); channel.lifecycle?.linkGone(link.id); channel.shared?.remove(link.id);
     if (channel.editor === link.id) channel.editor = undefined;
@@ -564,7 +567,8 @@ export class ChannelTable {
     }
   }
 
-  private stopChannel(channel: Channel): void {
+  private stopChannel(channel: Channel, reason = "asked"): void {
+    channel.stopReason ??= reason;
     channel.transport.killTree(false); clearTimeout(channel.forceTimer);
     if (!channel.exited) { channel.forceTimer = setTimeout(() => channel.transport.killTree(true), 5000); channel.forceTimer.unref?.(); }
   }

@@ -159,7 +159,8 @@ export type UpMessage =
     }
   | { type: "stdout"; seq: number; ch: string; line: string }
   | { type: "stderr"; seq: number; ch: string; chunk: string }
-  | { type: "exit"; seq: number; ch: string; code: number | null; signal: string | null }
+  /** `reason`: v7, the daemon stopped it on purpose (abandoned, idle, asked); absent for a crash. */
+  | { type: "exit"; seq: number; ch: string; code: number | null; signal: string | null; reason?: string }
   | { type: "resync"; seq: number; ch: string }
   | { type: "notifier"; seq: number; on: boolean }
   | { type: "sessions_changed"; seq: number }
@@ -459,6 +460,7 @@ export function decodeUp(line: string): UpMessage | UnknownMessage {
         ch: str(o, "ch"),
         code: nullable(o, "code", int),
         signal: nullable(o, "signal", str),
+        ...(o.reason === undefined ? {} : { reason: str(o, "reason") }),
       };
     case "resync":
       return { type: "resync", seq: seqNum(o, "seq"), ch: str(o, "ch") };

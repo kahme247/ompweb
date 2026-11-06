@@ -1110,6 +1110,13 @@ export class AgentSessionWrapper {
     sourceProc: RpcProcess = this.proc,
   ): void {
     if (!this._alive || sourceProc === this.expectedExitProc) return;
+    // The shared host stopped it on purpose (abandoned, idle, another server's request): not a crash.
+    const planned = this.hostOwnedLifecycle ? sourceProc.transport?.stopReason : undefined;
+    if (planned) {
+      if (this.streaming || this.promptRunning) this.emit({ type: "agent_end", isTerminal: true, messages: [] });
+      this.destroy(`host-${planned}`);
+      return;
+    }
     const detail = (stderrTail.trim().split("\n").pop() ?? "").slice(-500);
     const status = signal ? `signal ${signal}` : `code ${code ?? "null"}`;
     // Spec Rules → Reattach: a run whose child vanished while its host link was

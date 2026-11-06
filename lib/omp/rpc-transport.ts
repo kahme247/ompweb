@@ -26,6 +26,8 @@ export interface RpcTransport {
   readonly lost?: boolean;
   /** The daemon, rather than this web server, owns process-wide settings and stop timers. */
   readonly hostOwnedLifecycle?: boolean;
+  /** The host stopped the child on purpose (lifecycle or a server's request): not a crash. */
+  readonly stopReason?: string;
   setInterest?(on: boolean): void;
   setPreparing?(on: boolean, takeOver?: boolean): void;
   /** Acquire (rejects while another server edits) or release the host's history-edit lease. */

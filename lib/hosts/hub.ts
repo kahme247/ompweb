@@ -889,7 +889,7 @@ function applyUp(link: Link, message: UpMessage | UnknownMessage, whole?: UpMess
     case "exit": {
       const transport = link.channels.get(message.ch);
       link.channels.delete(message.ch);
-      return transport?.deliverExit(message.code, message.signal as NodeJS.Signals | null);
+      return transport?.deliverExit(message.code, message.signal as NodeJS.Signals | null, message.reason);
     }
     case "res":
       return settle(link, message);
@@ -1291,8 +1291,12 @@ export class RemoteRpcTransport implements RpcTransport {
     if (this.hostOwnedLifecycle) void this.resync();
   }
 
-  deliverExit(code: number | null, signal: NodeJS.Signals | null): void {
+  /** Set when the host stopped the child on purpose (see the `exit` message's `reason`). */
+  stopReason?: string;
+
+  deliverExit(code: number | null, signal: NodeJS.Signals | null, reason?: string): void {
     if (this.exitInfo) return;
+    this.stopReason = reason;
     this.exitInfo = [code, signal];
     notify(this.exitListeners, code, signal);
   }
