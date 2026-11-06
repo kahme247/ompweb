@@ -40,11 +40,14 @@ export function resolveHostOrError(hostId: unknown): { host: Host } | { response
   return offline ? { response: offline } : { host };
 }
 
-/** The host a workspace request runs on, plus the session identity to send it: a live session's own current id and file
- * (its alias is only a way in), else the id the request gave and no file. Only the file routes use the identity. */
+/** The host a workspace request runs on, plus the session identity to send it. File reads and watches keep the id the
+ * request gave: a tab owns the session it was opened for, and a later move must not swap in another session's root.
+ * Its live file is passed only while the wrapper still reports that id. `followAlias` (a new `local://` lookup) uses
+ * a live session's current id and file instead, since an alias is only a way in. */
 export async function resolveWorkspaceHost(
   hostId: unknown,
   sessionId: string | null,
+  { followAlias = false }: { followAlias?: boolean } = {},
 ): Promise<{ host: Host; sessionId: string | null; sessionFile: string | null } | { response: Response }> {
   if (!sessionId) {
     const resolved = resolveHostOrError(hostId);
@@ -58,7 +61,9 @@ export async function resolveWorkspaceHost(
     return { response: Response.json({ error: "The session belongs to another host", code: "workspace_host_mismatch" }, { status: 409 }) };
   }
   const offline = hostOfflineResponse(session.host);
-  return offline ? { response: offline } : { host: session.host, sessionId: running?.sessionId ?? sessionId, sessionFile: running?.sessionFile || null };
+  if (offline) return { response: offline };
+  if (followAlias && running) return { host: session.host, sessionId: running.sessionId, sessionFile: running.sessionFile || null };
+  return { host: session.host, sessionId, sessionFile: running?.sessionId === sessionId ? running.sessionFile || null : null };
 }
 
 /** The JSON error response for a failed host op. */

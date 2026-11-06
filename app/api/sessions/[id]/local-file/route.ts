@@ -11,7 +11,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   const parsed = parseLocalUri(uri, null);
   if (!parsed.ok) return Response.json({ error: parsed.error, code: "invalid_local_uri" }, { status: 400 });
   try {
-    const resolved = await resolveWorkspaceHost(undefined, id);
+    const resolved = await resolveWorkspaceHost(undefined, id, { followAlias: true });
     if ("response" in resolved) return resolved.response;
     const owner = resolved.sessionId ?? id;
     const result = await resolved.host.workspaceOps.resolveLocalFile(owner, uri, resolved.sessionFile);
