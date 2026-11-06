@@ -1433,6 +1433,8 @@ test("drops candidates expanding beyond per-file and aggregate limits post-read"
     assert.equal(draft?.files?.length, 1, "only file fitting within aggregate limit is retained");
     assert.equal(draft.files[0].name, "file1.txt");
   });
+});
+
 test("a second Enter must not invoke a pending slash builtin twice; success clears unchanged text", async (t) => {
   override(window.HTMLElement.prototype, "scrollIntoView", () => {});
   let finish;
