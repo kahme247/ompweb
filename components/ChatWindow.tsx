@@ -1345,6 +1345,9 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
             left: 0,
             right: 0,
             zIndex: 40,
+            // Scrolls inside the clipped area, so a focused dismiss button below a short chat area stays reachable.
+            maxHeight: "calc(100% - 12px)",
+            overflowY: "auto",
             padding: `0 ${CHAT_COLUMN_PADDING}px`,
             pointerEvents: "none",
           }}
