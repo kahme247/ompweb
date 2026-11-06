@@ -27,6 +27,7 @@ Not a goal: two daemons on one agent dir, or two daemons sharing one omp process
 - One channel table for the daemon. Every line an omp process prints is queued on every link that has joined that channel (M3), in the order omp printed it. A link's backlog never delays another link.
 - The hello lists every channel to every link (`{ch, sessionId, cwd, pending}` as today). A v7 server joins the listed channels it has wrappers for, or adopts them as today; it no longer kills a listed channel it cannot adopt (M6 decides stops).
 - After a channel starts or acquires its authoritative session identity, `channels_changed {channels}` carries the same listing to every v7 link. This lets a server discover background runs after its initial hello, even without a tab opening that session.
+- A successful handshake sends a fresh listing to cover channels created after the hello snapshot. Listings announce additions; only an authoritative hello or an explicit exit removes a joined transport. Passive joins carry `expectedChannel` and cannot cold-spawn a channel that has already ended.
 - The per-channel buffer cap (32 MB) is per link: past it, that link gets `resync {ch}` and the others are untouched.
 
 ### M3. Joining a session
@@ -35,6 +36,9 @@ Not a goal: two daemons on one agent dir, or two daemons sharing one omp process
   - A running channel for `sessionId` (matched on `PendingRequests.sessionId`): the link joins it. The result carries `ch`, `joined: true`, the channel's open blocking requests (`pending`, as in the hello) and, when an assistant message is streaming, that message whole (M5).
   - None: the daemon spawns with `launch` (today's `localHost.spawnRpc`), records `launch` on the channel (M7) and returns `joined: false`. Concurrent `open`s for one session share the spawn.
   - `sessionId: null` always spawns (a new chat).
+- `open` also accepts optional `expectedChannel`, `replaceAdvisor` and `preparing`. An expected-channel join must match the existing running channel or fail without spawning. An explicit Advisor preference may atomically replace only an idle, unprotected child; busy children retain their mode. A command open's preparation handoff protects startup and the first send against a competing replacement, and transfers into normal command accounting.
+- The result reports `advisorSpawned`, the actual native spawn flag including workspace-forced Advisor mode, rather than inferring it from the requesting server's preference.
+- Only a native `session-persistence` move keeps old identity aliases; deliberate fork/new/switch transitions drop them. Copy-on-write may retain the original file, so its existence alone does not distinguish a move from a fork. Aliases route continuation commands; delete/archive still target the requested stored session id and never silently delete a different id.
 - A joining link receives every line printed after the `open` result, and none before it; the result and the first line go out under the same sender key, so the order holds.
 - `close {ch}`: the link leaves the channel (no more lines). It does not stop the process.
 
@@ -57,6 +61,7 @@ Three layers, none of which keeps a session's history in the daemon:
 The daemon decides when a process stops; the two web-server timers in `lib/rpc-manager.ts` (`DISCONNECT_DESTROY_MS`, `IDLE_DESTROY_MS`) no longer run for v7 hosts.
 
 - **Interest.** Each server sends `interest {ch, on, preparing}` (sequenced, hub → daemon) when its state changes: on while it has a tab attached to the session (an `onEvent` listener) or a command of its own unanswered; `preparing` protects command preparation such as a slow upload attachment before prompt stdin exists. A link that drops keeps its interest for 2 min (`DISCONNECT_GRACE_MS`), so a restarting server keeps the sessions its tabs show.
+  Every successful re-open reasserts current interest/preparation, including after the disconnect grace expired. Explicit close clears its preparation handoff; a dropped socket retains the bounded grace.
 - **Run state.** The daemon reads it from the process's output: a run starts at `agent_start` and ends at a terminal `agent_end`; background work ends at `session_settled`. A command is in flight from its stdin line until its `response`.
 - **Stops**, each logged with its reason:
   - abandoned: no link has interest, no run, no background work and no command in flight, for 2 min (`OMP_WEB_DISCONNECT_DESTROY_MS` keeps its meaning and its `0`);
@@ -95,8 +100,8 @@ The daemon decides when a process stops; the two web-server timers in `lib/rpc-m
 ## Rollout
 
 1. Release the v7 server and daemon together. Deploy the web server first (it links today's v6 daemon unchanged), then schedule the initial daemon restart with the user while the host has no active or unsettled sessions: a v6 daemon has no `host-running.json` to recover. Subsequent v7 daemon restarts use M7's tested recovery. Remote hosts update from Settings → Hosts under the same initial-upgrade precondition.
-2. `ompweb-stage` (ai-harness-settings): `on <ref>` starts `ompweb-staging`, which adds its own entry to `host.json`; production keeps its link. `off` stops staging and removes the entry. `on` refuses while the daemon speaks less than v7. The takeover code (stopping production, pinning `host.json`, deleting the interrupted-sessions list) is deleted; `ui` stays.
-3. pr-watcher can keep following the primary `url`, since production never loses the machine. Preserve the existing recovery fix unless the new configuration demonstrably requires a change.
+2. Start an additional compatible web server; local bootstrap adds its own link, while remote hosts use `ompweb host login --add --url <url>` with the token on stdin. Stopping or unregistering that server must not restart the primary or the daemon. Deployment-specific automation lives outside this repository.
+3. Existing clients of the primary continue using its URL: the primary no longer loses the host when the additional web server connects.
 
 ## Testing
 

@@ -539,7 +539,7 @@ function onChildExit(wrapper: AgentSessionWrapper, event: AgentEvent): void {
   if (event.type !== "process_exit") return;
   const preparing = outbox().preparing;
   for (const key of sessionKeys(wrapper.sessionId)) {
-    const inFlight = db().prepare(`SELECT ${COLUMNS} FROM entries WHERE session_id = ? AND state = 'delivering'`).all(key) as Row[];
+    const inFlight = db().prepare(`SELECT ${COLUMNS} FROM entries WHERE session_id = ? AND state = 'delivering' AND dispatch_pid = ?`).all(key, process.pid) as Row[];
     for (const entry of inFlight) {
       const command = preparing?.get(entry.id);
       if (!command || nativeWriteStarted(command)) fail(entry, "omp exited while this message was being delivered", true);

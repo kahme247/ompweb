@@ -249,12 +249,11 @@ See the spec's final section: correlate using existing RPC ids; never repeat an 
 **Whole-branch gate before publication or deployment:** run `npm test`, `npm run typecheck`, `npm run lint`, `npm run build` and `npm run smoke -- --second-server` on the integrated head. Exercise both rendered browser views against the throwaway two-server setup: send from each view, observe matching messages/tool results, answer one dialog and verify both close, reconnect one view without disturbing the other. Then request one condensed `reviewer` round covering contract, hostile correctness, test honesty and unnecessary complexity. Resolve findings, run affected proof once more, publish the implementation PR and register pr-watcher. CI/bot reviews follow repository policy. No production cutover occurs until the release is verified and the user approves its timing.
 
 
-### Task 12 (ai-harness-settings, after the release is deployed): staging links instead of taking over
+### Task 12: Enable a second web server after the verified release
 
-**Files:**
-- Modify in a new ai-harness-settings worktree: `ai-dev/deploy/ompweb-stage`, `ai-dev/omp/agent/policy/worktrees.md`.
-- Inspect `integration-ci/pr-watcher/pr-watcher.mjs`: keep working delivery routing unless the approved new configuration requires a concrete change; do not blindly revert another session's recovery fix.
+**Files:** no additional product files; deployment-specific automation belongs
+to the deployment environment, not this repository.
 
-- [ ] **Step 1:** `on <ref>` verifies the running daemon supports v7 and the staged server supports shared lifecycle before starting it. Retain protocol-range validation. Start `ompweb-staging`, await its authenticated host-status response using host id `local` (not the editable `ai-dev` label), and confirm production is still linked. Delete every takeover step. `off` removes the staging link via Task 2's `host logout --url` and stops the unit; no production restart, daemon restart, pinning or deletion of recovery state.
-- [ ] **Step 2:** Live check with the user: production and staging on one session, Review Focus items 1, 3 and 4 by hand.
-- [ ] **Step 3:** Commit and push only the repositories actually changed, using their required linked worktrees; sync their primaries through the permitted fast-forward workflow.
+- [ ] **Step 1:** Verify the installed daemon and both web servers support shared-host v7. Upgrade the first legacy daemon only in an agreed quiescent window.
+- [ ] **Step 2:** Register the additional server through bootstrap or `ompweb host login --add --url <url>` (token from stdin), keeping the primary connected. Remove it with `ompweb host logout --url <url>`, without restarting the primary or daemon.
+- [ ] **Step 3:** In the deployment environment, confirm both views drive one session, then stop/rejoin one server while the other remains usable. Keep environment-specific scripts and service policy outside this upstream repository.

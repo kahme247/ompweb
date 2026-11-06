@@ -24,6 +24,9 @@ type Channel = {
   ready: Promise<RpcFrameRecord | null>; noteReady(frame: RpcFrameRecord | null): void; readyTimer: NodeJS.Timeout;
   startup: Promise<void>; exited: boolean; opened: boolean; fullFallback: boolean; forceTimer?: NodeJS.Timeout;
   identityRefresh?: Promise<void>;
+  identityRefreshAgain?: boolean;
+  sessionMovePending?: boolean;
+  replacing?: boolean;
 };
 type ChannelDeps = {
   spawn(launch: SpawnRequest): Promise<SpawnResult>;
@@ -62,14 +65,80 @@ export class ChannelTable {
   async open(link: DaemonLink, args: OpenChannelRequest): Promise<OpenChannelResult> {
     if (this.goneLinks.has(link.id)) throw new HostOpError(503, "host_link_closed", "The host link closed during open");
     if (link.version < 7) throw invalid("open requires link protocol v7");
-    if (!isRecord(args) || !(args.sessionId === null || typeof args.sessionId === "string" && isValidSessionId(args.sessionId)) || !isRecord(args.launch)) throw invalid();
-    const channel = await this.ensure(args.sessionId, args.launch as unknown as SpawnRequest, null);
-    if (this.goneLinks.has(link.id)) throw new HostOpError(503, "host_link_closed", "The host link closed during open");
-    if (channel.exited || (args.sessionId !== null && this.mutating.has(args.sessionId)) || this.mutating.has(args.launch.sessionFile)) return this.open(link, args);
+    if (!isRecord(args) || !(args.sessionId === null || typeof args.sessionId === "string" && isValidSessionId(args.sessionId)) || !isRecord(args.launch)
+      || (args.replaceAdvisor !== undefined && typeof args.replaceAdvisor !== "boolean") || (args.preparing !== undefined && typeof args.preparing !== "boolean")
+      || (args.expectedChannel !== undefined && (typeof args.expectedChannel !== "string" || !args.expectedChannel || args.replaceAdvisor === true))) throw invalid();
+    let channel: Channel;
+    if (args.expectedChannel !== undefined) {
+      const advertised = this.channels.get(args.expectedChannel);
+      if (!advertised || advertised.exited || advertised.replacing || advertised.legacy !== null || args.sessionId === null || !advertised.aliases.has(args.sessionId)) {
+        throw new HostOpError(404, "session_not_running", "The advertised session channel is no longer running");
+      }
+      await advertised.startup;
+      if (advertised.exited || this.channels.get(args.expectedChannel) !== advertised || !advertised.aliases.has(args.sessionId)) {
+        throw new HostOpError(404, "session_not_running", "The advertised session channel is no longer running");
+      }
+      channel = advertised;
+    } else {
+      channel = await this.ensure(args.sessionId, args.launch as unknown as SpawnRequest, null, undefined, args.preparing ? link.id : undefined);
+    }
+    if (this.goneLinks.has(link.id)) {
+      channel.lifecycle?.linkGone(link.id);
+      throw new HostOpError(503, "host_link_closed", "The host link closed during open");
+    }
+    if (channel.exited || (args.sessionId !== null && this.mutating.has(args.sessionId)) || this.mutating.has(args.launch.sessionFile)) {
+      if (args.expectedChannel !== undefined) throw new HostOpError(404, "session_not_running", "The advertised session channel is stopping");
+      return this.open(link, args);
+    }
+    if (args.replaceAdvisor && (channel.launch.advisor || channel.launchAdvisor) !== (args.launch.advisor || channel.launchAdvisor) && channel.lifecycle?.isIdle) {
+      const replacement = await this.replaceAdvisor(channel, link, args);
+      if (!replacement) return this.open(link, args);
+      channel = replacement;
+    }
+    if (this.goneLinks.has(link.id)) {
+      channel.lifecycle?.linkGone(link.id);
+      throw new HostOpError(503, "host_link_closed", "The host link closed during open");
+    }
     const joined = channel.opened;
     channel.opened = true;
     this.join(channel, link);
+    if (args.preparing) channel.lifecycle?.setPreparing(link.id, true);
     return this.snapshot(channel, link, joined);
+  }
+
+  /** Keep every alias/file fenced until the new child has its startup and source preparation lease. */
+  private async replaceAdvisor(channel: Channel, link: DaemonLink, args: OpenChannelRequest): Promise<Channel | null> {
+    const keys = new Set([...channel.aliases, ...channel.files]);
+    if (args.sessionId) keys.add(args.sessionId);
+    if (args.launch.sessionFile) keys.add(args.launch.sessionFile);
+    for (const key of keys) {
+      const pending = this.mutating.get(key);
+      if (pending) { await pending; return null; }
+    }
+    const { promise, resolve } = Promise.withResolvers<void>();
+    for (const key of keys) this.mutating.set(key, promise);
+    channel.replacing = true;
+    try {
+      const exit = Promise.withResolvers<void>();
+      channel.transport.onExit(() => exit.resolve());
+      this.stopChannel(channel);
+      await exit.promise;
+      const launch = this.deps.prepareLaunch({ ...channel.launch, advisor: args.launch.advisor,
+        ...(args.launch.spawnModel ? { spawnModel: args.launch.spawnModel } : {}) });
+      const spawning = this.create(launch, channel.pending.sessionId, null, undefined, args.preparing ? link.id : undefined);
+      this.pendingSpawns.add(spawning);
+      try {
+        const replacement = await spawning;
+        for (const alias of channel.aliases) replacement.aliases.add(alias);
+        for (const file of channel.files) replacement.files.add(file);
+        return replacement;
+      } finally {
+        this.pendingSpawns.delete(spawning);
+      }
+    } finally {
+      for (const key of keys) if (this.mutating.get(key) === promise) this.mutating.delete(key);
+      resolve();
+    }
   }
 
   private pendingFor(channel: Channel, link: DaemonLink): string[] | null {
@@ -78,10 +147,10 @@ export class ChannelTable {
   }
   private snapshot(channel: Channel, link: DaemonLink, joined: boolean): OpenChannelResult {
     return { ch: channel.ch, joined, pending: this.pendingFor(channel, link), streaming: channel.snapshot.whole(), cwd: channel.cwd,
-      fellBack: channel.fellBack, launchAdvisor: channel.launchAdvisor, autoApproveExtension: this.deps.autoApproveExtension?.() ?? false };
+      fellBack: channel.fellBack, launchAdvisor: channel.launchAdvisor, advisorSpawned: channel.launch.advisor || channel.launchAdvisor, autoApproveExtension: this.deps.autoApproveExtension?.() ?? false };
   }
 
-  async spawnLegacy(link: DaemonLink, args: SpawnRequest & { ch: string }): Promise<Omit<OpenChannelResult, "ch" | "joined" | "pending" | "streaming">> {
+  async spawnLegacy(link: DaemonLink, args: SpawnRequest & { ch: string }): Promise<Omit<OpenChannelResult, "ch" | "joined" | "pending" | "streaming" | "advisorSpawned">> {
     if (this.goneLinks.has(link.id)) throw new HostOpError(503, "host_link_closed", "The host link is closed");
     if (typeof args.ch !== "string" || !args.ch || this.channels.has(args.ch) || this.reservedChannels.has(args.ch)) throw invalid("Invalid channel id");
     this.reservedChannels.add(args.ch);
@@ -98,18 +167,18 @@ export class ChannelTable {
     return { cwd: channel.cwd, fellBack: channel.fellBack, launchAdvisor: channel.launchAdvisor, autoApproveExtension: this.deps.autoApproveExtension?.() ?? false };
   }
 
-  private async ensure(id: string | null, requested: SpawnRequest, legacy: string | null, ch?: string): Promise<Channel> {
+  private async ensure(id: string | null, requested: SpawnRequest, legacy: string | null, ch?: string, preparingLinkId?: string): Promise<Channel> {
     const launch = this.deps.prepareLaunch(requested);
     const file = launch.sessionFile;
     const identity = id ?? this.identity(launch);
     const mutation = (identity === null ? undefined : this.mutating.get(identity)) ?? this.mutating.get(file);
-    if (mutation) { await mutation; return this.ensure(id, requested, legacy, ch); }
+    if (mutation) { await mutation; return this.ensure(id, requested, legacy, ch, preparingLinkId); }
     const existing = this.find(identity, file);
     if (existing) {
       if (legacy !== null || existing.legacy !== null) throw collision();
       await existing.startup;
-      if ((identity !== null && this.mutating.has(identity)) || this.mutating.has(file)) return this.ensure(id, requested, legacy, ch);
-      if (existing.exited) return this.ensure(id, requested, legacy, ch);
+      if ((identity !== null && this.mutating.has(identity)) || this.mutating.has(file)) return this.ensure(id, requested, legacy, ch, preparingLinkId);
+      if (existing.exited) return this.ensure(id, requested, legacy, ch, preparingLinkId);
       return existing;
     }
     const key = identity ?? (file || null);
@@ -117,23 +186,23 @@ export class ChannelTable {
     if (pending) {
       const channel = await pending;
       if (legacy !== null || channel.legacy !== null) throw collision();
-      if ((identity !== null && this.mutating.has(identity)) || this.mutating.has(file)) return this.ensure(id, requested, legacy, ch);
-      if (channel.exited) return this.ensure(id, requested, legacy, ch);
+      if ((identity !== null && this.mutating.has(identity)) || this.mutating.has(file)) return this.ensure(id, requested, legacy, ch, preparingLinkId);
+      if (channel.exited) return this.ensure(id, requested, legacy, ch, preparingLinkId);
       return channel;
     }
     const refreshing = [...this.channels.values()].flatMap(channel => channel.identityRefresh ? [channel.identityRefresh] : []);
-    if (refreshing.length > 0) { await Promise.all(refreshing); return this.ensure(id, requested, legacy, ch); }
+    if (refreshing.length > 0) { await Promise.all(refreshing); return this.ensure(id, requested, legacy, ch, preparingLinkId); }
     if (id !== null && file === "") throw new HostOpError(404, "session_not_running", "The session listed by the host is no longer running");
     // The header and requested identity must agree; aliases are accepted only for a running channel.
     const headerId = this.identity(launch);
     if (id !== null && headerId === null) throw new HostOpError(404, "session_not_found", "The session launch file no longer exists");
     if (id !== null && headerId !== null && headerId !== id) throw invalid("Session identity does not match its launch file");
-    const spawn = this.create(launch, identity, legacy, ch);
+    const spawn = this.create(launch, identity, legacy, ch, preparingLinkId);
     this.pendingSpawns.add(spawn);
     if (key !== null) this.spawning.set(key, spawn);
     try {
       const channel = await spawn;
-      if ((identity !== null && this.mutating.has(identity)) || this.mutating.has(file)) return this.ensure(id, requested, legacy, ch);
+      if ((identity !== null && this.mutating.has(identity)) || this.mutating.has(file)) return this.ensure(id, requested, legacy, ch, preparingLinkId);
       return channel;
     }
     finally {
@@ -142,7 +211,7 @@ export class ChannelTable {
     }
   }
 
-  private async create(launch: SpawnRequest, identity: string | null, legacy: string | null, requestedCh?: string): Promise<Channel> {
+  private async create(launch: SpawnRequest, identity: string | null, legacy: string | null, requestedCh?: string, preparingLinkId?: string): Promise<Channel> {
     this.spawningCount++;
     try {
       if (this.stopped) throw new HostOpError(503, "host_stopping", "ompweb host is stopping");
@@ -158,6 +227,7 @@ export class ChannelTable {
       this.channels.set(ch, channel);
       if (legacy === null) {
         channel.lifecycle = new ChannelLifecycle({ stop: reason => { this.deps.log(`channel ${ch}: stopping (${reason})`); this.stopChannel(channel); }, onRunning: () => this.deps.runningChanged?.() });
+        if (preparingLinkId) channel.lifecycle.setPreparing(preparingLinkId, true);
         channel.shared = new SharedRequests({ members: () => [...channel.members.keys()], isUp: id => channel.members.get(id)?.link.isUp() ?? false,
           deliver: (id, lines) => { const member = channel.members.get(id); if (member) for (const line of lines) this.deliver(channel, member, { type: "stdout", ch, line }); },
           write: frame => { void this.command(channel, frame).catch(error => this.deps.log(`channel ${ch}: ${String(error)}`)); } });
@@ -207,23 +277,43 @@ export class ChannelTable {
     const timer = setTimeout(() => { channel.internal.delete(id); channel.lifecycle?.forgetCommand(id); reject(new Error(`omp ${frame.type} timed out`)); }, 5000); timer.unref?.();
     channel.internal.set(id, { resolve, reject, timer }); channel.lifecycle?.noteStdin(command);
     channel.transport.write(line, error => {
-      if (error) { const pending = channel.internal.get(id); if (!pending) return; clearTimeout(pending.timer); channel.internal.delete(id); channel.lifecycle?.forgetCommand(id); reject(error); }
+      if (error) { const pending = channel.internal.get(id); if (!pending) return; clearTimeout(pending.timer); channel.internal.delete(id); channel.lifecycle?.forgetCommand(id, true); reject(error); }
     });
     return promise;
   }
 
   private refreshIdentity(channel: Channel): void {
-    if (channel.identityRefresh || channel.exited) return;
+    if (channel.exited) return;
+    if (channel.identityRefresh) { channel.identityRefreshAgain = true; return; }
     const request = channel.opened ? this.command(channel, { type: "get_state" }) : channel.startup.then(() => this.command(channel, { type: "get_state" }));
     channel.identityRefresh = request.then(() => {})
       .catch(error => this.deps.log(`channel ${channel.ch}: could not refresh identity: ${String(error)}`))
-      .finally(() => { channel.identityRefresh = undefined; });
+      .finally(() => {
+        channel.identityRefresh = undefined;
+        if (channel.identityRefreshAgain) {
+          channel.identityRefreshAgain = false;
+          this.refreshIdentity(channel);
+        }
+      });
   }
 
   private stdout(channel: Channel, line: string): void {
     if (channel.legacy !== null) {
+      if (line.includes('"session-persistence"')) {
+        try {
+          const notice = JSON.parse(line);
+          if (notice.type === "notice" && notice.source === "session-persistence" && notice.level !== "error") channel.sessionMovePending = true;
+        } catch { /* Chunked frames are tracked by PendingRequests below. */ }
+      }
+      const oldId = channel.pending.sessionId;
       channel.pending.noteStdout(line);
-      if (channel.pending.sessionId) channel.aliases.add(channel.pending.sessionId);
+      if (channel.pending.sessionId) {
+        if (oldId && oldId !== channel.pending.sessionId) {
+          if (!channel.sessionMovePending) { channel.aliases.clear(); channel.files.clear(); }
+          channel.sessionMovePending = false;
+        }
+        channel.aliases.add(channel.pending.sessionId);
+      }
       this.broadcast(channel, { type: "stdout", ch: channel.ch, line }); return;
     }
     let frame: RpcFrameRecord | undefined;
@@ -245,11 +335,17 @@ export class ChannelTable {
     if (frame.type === "response" && frame.command === "get_state" && frame.success === true && isRecord(frame.data)) {
       const id = frame.data.sessionId;
       if (typeof id === "string" && isValidSessionId(id) && id !== channel.pending.sessionId) {
+        if (channel.pending.sessionId && !channel.sessionMovePending) {
+          channel.aliases.clear();
+          channel.files.clear();
+        }
+        channel.sessionMovePending = false;
         channel.pending.sessionId = id; channel.aliases.add(id); if (channel.opened) this.deps.channelsChanged?.(channel.ch);
       }
       if (typeof frame.data.sessionFile === "string") { try { const launch = this.deps.prepareLaunch({ ...channel.launch, sessionFile: frame.data.sessionFile }); channel.launch = launch; channel.files.add(launch.sessionFile); } catch { /* Never trust an out-of-root native path. */ } }
       this.deps.runningChanged?.();
     }
+    if (frame.type === "notice" && frame.source === "session-persistence" && frame.level !== "error") channel.sessionMovePending = true;
     if (frame.type === "agent_start" || (frame.type === "notice" && frame.source === "session-persistence")) this.refreshIdentity(channel);
     if (frame.type === "agent_start" || frame.type === "agent_end" || frame.type === "session_info_update") this.deps.sessionsChanged?.();
     if (frame.type === "response" && typeof frame.id === "string") {
@@ -312,6 +408,15 @@ export class ChannelTable {
     let parsed: unknown; try { parsed = JSON.parse(line); } catch { throw invalid("Invalid RPC command"); }
     if (!isRecord(parsed) || typeof parsed.type !== "string") throw invalid("Invalid RPC command");
     const frame = parsed as RpcFrameRecord;
+    if (channel.replacing) {
+      if (typeof frame.id === "string") {
+        const member = channel.members.get(link.id)!;
+        this.deliver(channel, member, { type: "stdout", ch, line: JSON.stringify({ type: "response", id: frame.id, command: frame.type,
+          success: false, code: "session_restarting", error: "This session is restarting to apply advisor mode; retry once it is ready" }) });
+      }
+      return;
+    }
+    if (["branch", "new_session", "switch_session"].includes(frame.type)) channel.sessionMovePending = false;
     if (["set_event_filter", "negotiate_protocol", "set_subagent_subscription", "set_ask_dialog", "set_host_tools", "set_host_uri_schemes"].includes(frame.type)) throw invalid("This command is owned by the host daemon");
     if (["extension_ui_response", "host_tool_result", "host_uri_result"].includes(frame.type)) {
       if (!channel.shared?.answer(link.id, frame)) return;
@@ -323,7 +428,7 @@ export class ChannelTable {
     channel.lifecycle?.noteStdin(frame);
     channel.transport.write(line.endsWith("\n") ? line : line + "\n", error => {
       if (!error || typeof frame.id !== "string") return;
-      channel.commands.delete(frame.id); channel.lifecycle?.forgetCommand(frame.id);
+      channel.commands.delete(frame.id); channel.lifecycle?.forgetCommand(frame.id, true);
       const member = channel.members.get(link.id);
       if (member) this.deliver(channel, member, { type: "stdout", ch, line: JSON.stringify({ type: "response", id: frame.id, command: frame.type, success: false, error: error.message }) });
     });
@@ -334,7 +439,7 @@ export class ChannelTable {
   setTools(link: DaemonLink, ch: string, tools: unknown[], schemes: string[]): void { this.member(link, ch).shared?.setTools(link.id, tools, schemes); }
   kill(link: DaemonLink, ch: string, force: boolean): void { const channel = this.member(link, ch); if (force) channel.transport.killTree(true); else this.stopChannel(channel); }
   close(link: DaemonLink, ch: string): void {
-    const channel = this.member(link, ch); channel.members.delete(link.id); channel.lifecycle?.linkGone(link.id); channel.shared?.remove(link.id);
+    const channel = this.member(link, ch); channel.members.delete(link.id); channel.lifecycle?.setPreparing(link.id, false); channel.lifecycle?.linkGone(link.id); channel.shared?.remove(link.id);
     link.discard(ch);
     for (const [id, owner] of channel.commands) if (owner?.id === link.id) channel.commands.set(id, null);
   }
@@ -359,10 +464,16 @@ export class ChannelTable {
   }
   async recover(entries: HostResumeEntry[]): Promise<void> {
     await Promise.all(entries.map(async entry => {
-      const channel = await this.ensure(entry.sessionId, entry.launch, null);
-      channel.opened = true;
-      this.deps.channelsChanged?.(channel.ch);
-      await this.command(channel, { type: "prompt", message: RESUME_PROMPT });
+      const lease = "d:resume";
+      const channel = await this.ensure(entry.sessionId, entry.launch, null, undefined, lease);
+      channel.lifecycle?.setPreparing(lease, true);
+      try {
+        channel.opened = true;
+        this.deps.channelsChanged?.(channel.ch);
+        await this.command(channel, { type: "prompt", message: RESUME_PROMPT });
+      } finally {
+        channel.lifecycle?.setPreparing(lease, false);
+      }
     }));
   }
   async mutateSession<T>(id: string, action: (canonicalId: string, liveIds: string[]) => Promise<T>): Promise<T> {
@@ -374,22 +485,24 @@ export class ChannelTable {
       for (const key of [...(channel?.aliases ?? []), ...(channel?.files ?? [])]) keys.add(key);
       for (const key of keys) this.mutating.set(key, promise);
     };
-    let channel = this.find(id, "");
-    protect(channel);
+    // Continuation aliases never retarget a destructive action to a different stored session.
+    const findTarget = () => {
+      for (const live of this.channels.values()) if (live.pending.sessionId === id) return live;
+      return undefined;
+    };
+    let channel = findTarget();
+    protect();
     try {
-      if (!channel) channel = await this.spawning.get(id)?.catch(() => undefined);
-      if (!channel) {
-        await Promise.all([...this.channels.values()].flatMap(live => live.identityRefresh ? [live.identityRefresh] : []));
-        channel = this.find(id, "");
-      }
+      if (!channel) await this.spawning.get(id)?.catch(() => undefined);
+      await Promise.all([...this.channels.values()].flatMap(live => live.identityRefresh ? [live.identityRefresh] : []));
+      channel = findTarget();
       protect(channel);
-      const canonicalId = channel?.pending.sessionId ?? id;
       if (channel && !channel.exited) {
         const exit = Promise.withResolvers<void>();
         channel.transport.onExit(() => exit.resolve()); this.stopChannel(channel); await exit.promise;
       }
-      const liveIds = [...this.channels.values()].flatMap(live => [...live.aliases]);
-      return await action(canonicalId, liveIds);
+      const liveIds = [...this.channels.values()].flatMap(live => live.pending.sessionId ? [live.pending.sessionId] : []);
+      return await action(id, liveIds);
     } finally {
       for (const key of keys) if (this.mutating.get(key) === promise) this.mutating.delete(key);
       resolve();

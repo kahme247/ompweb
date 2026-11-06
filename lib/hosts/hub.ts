@@ -782,7 +782,7 @@ const ORPHAN_KILL_GRACE_MS = 5_000;
  */
 function reattach(link: Link, listed: HelloChannel[], refreshExisting = true): void {
   const live = new Set(listed.map(({ ch }) => ch));
-  for (const [ch, transport] of link.channels) {
+  for (const [ch, transport] of refreshExisting ? link.channels : []) {
     // A spawn still in flight is not listed yet.
     if (!transport.spawned || live.has(ch)) continue;
     link.channels.delete(ch);
@@ -793,8 +793,9 @@ function reattach(link: Link, listed: HelloChannel[], refreshExisting = true): v
     const existing = link.channels.get(ch);
     if (existing) {
       if (existing.hostOwnedLifecycle) {
+        const identityChanged = sessionId !== null && existing.session !== sessionId;
         if (sessionId) existing.session = sessionId;
-        if (refreshExisting) existing.deliverResync();
+        if (refreshExisting || identityChanged) existing.deliverResync();
       }
       continue;
     }
@@ -810,9 +811,9 @@ function reattach(link: Link, listed: HelloChannel[], refreshExisting = true): v
       link.channels.set(ch, child);
       child.adoption = (async () => {
         try {
-          const spawned = await link.host.spawnRpc({ cwd, recordedCwd: cwd, sessionFile: "", advisor: false }, sessionId);
+          const spawned = await link.host.spawnRpc({ cwd, recordedCwd: cwd, sessionFile: "", advisor: false }, sessionId, { expectedChannel: ch });
           if (spawned.transport !== child) throw new Error("Host changed a listed channel while joining");
-          return await adopt(link, child, sessionId, spawned.cwd, [...(spawned.pending ?? []), ...(spawned.streaming ? [spawned.streaming] : [])]);
+          return await adopt(link, child, sessionId, spawned.cwd, [...(spawned.pending ?? []), ...(spawned.streaming ? [spawned.streaming] : [])], spawned);
         } catch (error) {
           child.close();
           console.warn(`[omp-web] could not join session ${sessionId} on ${labelOf(link.id)}: ${error instanceof Error ? error.message : String(error)}`);
@@ -841,11 +842,11 @@ function killOrphan(orphan: RemoteRpcTransport): void {
 /** Spec "Adopting live children": a session wrapper takes the child over, by
  * the identity the child itself reports (a new session is in no list before
  * its first reply is written). Failed shared adoption leaves only this link; legacy adoption kills. */
-async function adopt(link: Link, child: RemoteRpcTransport, sessionId: string, cwd: string, replay: string[]): Promise<boolean> {
+async function adopt(link: Link, child: RemoteRpcTransport, sessionId: string, cwd: string, replay: string[], metadata?: Pick<SpawnResult, "advisorSpawned" | "launchAdvisor">): Promise<boolean> {
   try {
     // Dynamic: rpc-manager imports this module.
     const { adoptRpcSession } = await import("../rpc-manager");
-    await adoptRpcSession({ host: link.host, transport: child, sessionId, cwd, replay });
+    await adoptRpcSession({ host: link.host, transport: child, sessionId, cwd, replay, ...metadata });
     return true;
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
@@ -1109,6 +1110,7 @@ export class RemoteRpcTransport implements RpcTransport {
   private closed = false;
   private interested = false;
   private preparing = 0;
+  private preparationHandoff = false;
   private opening: OpenChannelRequest | null = null;
   private refreshing = false;
 
@@ -1179,6 +1181,10 @@ export class RemoteRpcTransport implements RpcTransport {
     if (!this.hostOwnedLifecycle || this.closed || this.exitInfo) return;
     const wasPreparing = this.preparing > 0;
     this.preparing = Math.max(0, this.preparing + (on ? 1 : -1));
+    if (on && this.preparationHandoff) {
+      this.preparationHandoff = false;
+      this.preparing -= 1; // The first real command takes over the open-to-send lease without a false gap.
+    }
     if (wasPreparing !== (this.preparing > 0)) this.sendInterest();
   }
 
@@ -1202,7 +1208,20 @@ export class RemoteRpcTransport implements RpcTransport {
   }
 
   noteOpen(opening: OpenChannelRequest): void {
-    this.opening = opening;
+    // Reconciliation is a read/join, never another explicit advisor change.
+    this.opening = { sessionId: opening.sessionId, launch: opening.launch, expectedChannel: this.ch };
+    if (opening.preparing && !this.preparationHandoff) {
+      this.preparationHandoff = true;
+      this.preparing += 1;
+    }
+    if (this.interested || this.preparing > 0) this.sendInterest();
+  }
+
+  replayOpen(pending: string[], streaming: string | null): void {
+    if (this.lineListeners.length === 0) return;
+    notify(this.resyncListeners);
+    for (const line of pending) this.deliverLine(line);
+    if (streaming) this.deliverLine(streaming);
   }
 
   async resync(): Promise<void> {
@@ -1214,6 +1233,7 @@ export class RemoteRpcTransport implements RpcTransport {
       await request(this.hostId, "open", { ...this.opening, sessionId }, linkTimings.opTimeoutMs, (value) => {
         if (!isOpenResult(value) || value.ch !== this.ch || value.pending === null) throw new Error("Host could not reconcile the shared channel");
         this.refreshing = false;
+        if (this.interested || this.preparing > 0) this.sendInterest();
         notify(this.resyncListeners);
         for (const line of value.pending) this.deliverLine(line);
         if (value.streaming) this.deliverLine(value.streaming);
@@ -1259,8 +1279,8 @@ export class RemoteRpcTransport implements RpcTransport {
   }
 
   deliverResync(): void {
+    notify(this.resyncListeners);
     if (this.hostOwnedLifecycle) void this.resync();
-    else notify(this.resyncListeners);
   }
 
   deliverExit(code: number | null, signal: NodeJS.Signals | null): void {
@@ -1293,10 +1313,11 @@ function isSpawnResult(value: unknown): value is { cwd: string; fellBack: boolea
 
 function isOpenResult(value: unknown): value is OpenChannelResult {
   if (!isRecord(value)) return false;
-  const { ch, joined, pending, streaming } = value;
+  const { ch, joined, pending, streaming, advisorSpawned } = value;
   return isSpawnResult(value)
     && typeof ch === "string" && ch.length > 0
     && typeof joined === "boolean"
+    && typeof advisorSpawned === "boolean"
     && (pending === null || (Array.isArray(pending) && pending.every((line) => typeof line === "string")))
     && (streaming === null || typeof streaming === "string");
 }
@@ -1343,13 +1364,15 @@ export class RemoteHost implements Host {
     };
   }
 
-  async spawnRpc(spawnRequest: SpawnRequest, sessionId: string | null = null): Promise<SpawnResult> {
+  async spawnRpc(spawnRequest: SpawnRequest, sessionId: string | null = null, options?: { replaceAdvisor?: boolean; preparing?: boolean; expectedChannel?: string }): Promise<SpawnResult> {
     const link = linkFor(this.id);
     if (link.status === "omp-missing") throw new HostOpError(503, "host_omp_missing", `omp is not installed on ${this.label}`);
     if ((link.hostVersion ?? 0) >= 7) {
-      const opening: OpenChannelRequest = { sessionId, launch: spawnRequest };
+      const opening: OpenChannelRequest = { sessionId, launch: spawnRequest, ...options };
       return await request(this.id, "open", opening, linkTimings.opTimeoutMs, (value) => {
-        if (!isOpenResult(value)) throw new HostOpError(502, "host_bad_result", `${this.label} sent an invalid open result`);
+        if (!isOpenResult(value) || (options?.expectedChannel !== undefined && value.ch !== options.expectedChannel)) {
+          throw new HostOpError(502, "host_bad_result", `${this.label} sent an invalid open result`);
+        }
         if (value.pending === null) {
           void request(this.id, "close", { ch: value.ch }).catch(() => {});
           throw new HostOpError(502, "host_pending_overflow", "The shared channel's pending requests could not be restored");
@@ -1359,7 +1382,8 @@ export class RemoteHost implements Host {
         transport.noteOpen(opening);
         link.channels.set(value.ch, transport);
         link.autoApprove = value.autoApproveExtension;
-        return { transport, cwd: value.cwd, fellBack: value.fellBack, launchAdvisor: value.launchAdvisor, joined: value.joined, pending: value.pending, streaming: value.streaming };
+        transport.replayOpen(value.pending, value.streaming);
+        return { transport, cwd: value.cwd, fellBack: value.fellBack, launchAdvisor: value.launchAdvisor, advisorSpawned: value.advisorSpawned, joined: value.joined, pending: value.pending, streaming: value.streaming };
       }) as SpawnResult;
     }
     const ch = randomUUID();

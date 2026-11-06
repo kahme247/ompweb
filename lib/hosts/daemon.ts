@@ -139,7 +139,16 @@ export function runHostDaemon(options: DaemonOptions): { stop(): Promise<void>; 
         ack: link.ackedDown, channels: channels.listing(link, replay),
         ...(link.version >= 7 ? { link: { id: link.id, notifier: notifierId === link.id } } : {}) }),
       handleDown,
-      onState: (link, up) => { if (up) channels.linkUp(link); else { services.get(link.id)?.onDisconnect(); channels.linkDown(link); } electNotifier(); },
+      onState: (link, up) => {
+        if (up) {
+          channels.linkUp(link);
+          if (link.version >= 7) link.queue({ type: "channels_changed", channels: channels.listing(link, false) }, "channels");
+        } else {
+          services.get(link.id)?.onDisconnect();
+          channels.linkDown(link);
+        }
+        electNotifier();
+      },
       onBlob: (link, id, bytes) => { if (uploadOwners.get(id)?.link === link) uploads.write(id, bytes); },
       reload: (source, unauthorized) => reconcile(source, unauthorized),
       onEnd: (link, why) => {

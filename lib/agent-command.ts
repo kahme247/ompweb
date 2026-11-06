@@ -109,7 +109,8 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
     const noSpawn = Object.hasOwn(NO_SPAWN_REPLIES, type);
     const liveOnly = LIVE_SESSION_ONLY.has(type);
     if (existing?.isAlive()) {
-      if (existing.hostOwnedLifecycle || noSpawn || liveOnly || existing.advisorSpawned === advisor || existing.isRunning() || existing.isEditingHistory()) {
+      if (noSpawn || liveOnly || (existing.adopted && !existing.hostOwnedLifecycle)
+        || existing.advisorSpawned === (advisor === true || existing.launchAdvisor === true) || existing.isRunning() || existing.isEditingHistory()) {
         const result = await send(existing);
         return Response.json({ success: true, data: result });
       }
@@ -118,7 +119,7 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
       if (offline) return offline;
       resumeId = existing.sessionId;
       resumeHost = existing.host;
-      await existing.destroyAndWait();
+      if (!existing.hostOwnedLifecycle) await existing.destroyAndWait("advisor", true);
     }
     if (noSpawn) return Response.json({ success: true, data: NO_SPAWN_REPLIES[type] });
     if (liveOnly) {
@@ -155,7 +156,7 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
         ? `${command.provider}/${command.modelId}`
         : undefined;
 
-    const { session } = await startRpcSession(id, target.sessionFile, target.cwd, undefined, advisor, target.recordedCwd, spawnModel, host);
+    const { session } = await startRpcSession(id, target.sessionFile, target.cwd, undefined, advisor, target.recordedCwd, spawnModel, host, true);
     if (spawnModel) {
       // Try the normal RPC first: when it succeeds it also records the new
       // model in the session, so later spawns restore it without an override.

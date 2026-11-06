@@ -81,8 +81,8 @@ export const HOST_OP_NAMES = [...(Object.keys(SESSION_OP_PARAMS) as (keyof Sessi
 
 export type HostOpName = (typeof HOST_OP_NAMES)[number];
 
-export type OpenChannelRequest = { sessionId: string | null; launch: SpawnRequest };
-export type OpenChannelResult = { ch: string; joined: boolean; pending: string[] | null; streaming: string | null; cwd: string; fellBack: boolean; launchAdvisor: boolean; autoApproveExtension: boolean };
+export type OpenChannelRequest = { sessionId: string | null; launch: SpawnRequest; replaceAdvisor?: boolean; preparing?: boolean; expectedChannel?: string };
+export type OpenChannelResult = { ch: string; joined: boolean; pending: string[] | null; streaming: string | null; cwd: string; fellBack: boolean; launchAdvisor: boolean; advisorSpawned: boolean; autoApproveExtension: boolean };
 
 /** A failed host op, as carried by `res {ok: false, error}`. */
 export class HostOpError extends Error {

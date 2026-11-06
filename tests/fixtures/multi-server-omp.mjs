@@ -8,7 +8,16 @@ if (process.argv.includes("--version")) {
 const sessionId = process.env.OMP_MULTI_SESSION_ID;
 const sessionFile = process.env.OMP_MULTI_SESSION_FILE;
 const record = (entry) => fs.appendFileSync(process.env.OMP_MULTI_LOG, `${JSON.stringify({ pid: process.pid, ...entry })}\n`);
-const out = (frame) => process.stdout.write(`${JSON.stringify(frame)}\n`);
+let chunkNumber = 0;
+const out = (frame) => {
+  const data = Buffer.from(JSON.stringify(frame));
+  if (data.length <= 1024 * 1024) return process.stdout.write(`${data}\n`);
+  const count = Math.ceil(data.length / 262144), chunkId = `native-chunk-${++chunkNumber}`;
+  for (let index = 0; index < count; index++) process.stdout.write(`${JSON.stringify({
+    type: "rpc_chunk", chunkId, index, count, byteLength: data.length,
+    data: data.subarray(index * 262144, (index + 1) * 262144).toString("base64"),
+  })}\n`);
+};
 const resumed = process.argv.includes("--resume");
 record({ type: "start", resumed });
 let streaming = false;
@@ -63,15 +72,20 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
         out(question);
         return;
       }
-      const assistant = { role: "assistant", content: [{ type: "text", text: "one" }], timestamp: Date.now() };
+      const assistant = { role: "assistant", content: [{ type: "text", text: "" }], timestamp: Date.now() };
       out({ type: "message_start", messageId: `a${n}`, message: assistant });
-      out({ type: "message_update", messageId: `a${n}`, message: assistant });
+      assistant.content[0].text = "one";
+      out({ type: "message_update", messageId: `a${n}`, message: { role: "assistant" },
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "one" } });
       out({ type: "tool_execution_start", toolCallId: `t${n}`, toolName: "read", args: { path: "shared.txt" } });
-      out({ type: "tool_execution_end", toolCallId: `t${n}`, toolName: "read", result: { content: [{ type: "text", text: "one shared result" }] }, isError: false });
+      out({ type: "tool_execution_end", toolCallId: `t${n}`, toolName: "read",
+        result: { content: [{ type: "text", text: "one shared result" }],
+          ...(command.message === "from B" ? { details: { largeResult: "x".repeat(1_100_000) } } : {}) }, isError: false });
       timer = setInterval(() => {
         if (command.message === "slow" && !fs.existsSync(process.env.OMP_MULTI_RELEASE_FILE)) return;
         assistant.content[0].text = "one two";
-        out({ type: "message_update", messageId: `a${n}`, message: assistant });
+        out({ type: "message_update", messageId: `a${n}`, message: { role: "assistant" },
+          assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: " two" } });
         messages.push(assistant);
         persist(assistant);
         out({ type: "message_end", messageId: `a${n}`, message: assistant });

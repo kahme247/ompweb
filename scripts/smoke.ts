@@ -100,6 +100,8 @@ const env: Record<string, string | undefined> = {
   USERPROFILE: home,
   PI_CODING_AGENT_DIR: agentDir,
   OMP_WEB_OMP_BIN: fakeOmp,
+  // A smoke launched from an installed agent inherits its package root; test this install instead.
+  OMP_WEB_PACKAGE_DIR: dir,
 };
 for (const name of ["OMP_WEB_PASSWORD", "OMP_WEB_PASSWORD_HASH"]) delete env[name];
 

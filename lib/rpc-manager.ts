@@ -34,7 +34,7 @@ import type {
   WebSessionState,
 } from "./pi-types";
 import type { AgentMessage, CrossSessionHostToolCall, CrossSessionHostToolEvent, ExitedRpcSession, ExtensionWidgetItem } from "./types";
-import { isLinkUp, type Host, type HostStatus } from "./hosts/host";
+import { isLinkUp, type Host, type HostStatus, type SpawnRequest, type SpawnResult } from "./hosts/host";
 import { freezeHostLinks, getHost, hostOwnsLifecycle, isNotifier, lastUplinkAt, listHosts, orphanExit } from "./hosts/hub";
 import { LOCAL_HOST_ID } from "./hosts/registry";
 import type { OpResult } from "./hosts/session-ops";
@@ -589,6 +589,27 @@ export class AgentSessionWrapper {
     return this.historyEditInFlight;
   }
 
+  /** A native terminal event can leave background work unsettled; advisor changes wait for it too. */
+  canReplaceAdvisor(): boolean {
+    return this.isAlive() && !this.restarting && !this.handshaking && !this.unsettled && !this.messageBoundaryBusy();
+  }
+
+  async replaceAdvisorIfIdle(launch: SpawnRequest, preparing: boolean): Promise<SpawnResult | null> {
+    if (!this.hostOwnedLifecycle || !this.canReplaceAdvisor()) return null;
+    const old = this.proc;
+    this.restarting = true;
+    this.expectedExitProc = old;
+    try {
+      const spawned = await this.host.spawnRpc(launch, this._sessionId, { replaceAdvisor: true, preparing });
+      if (spawned.transport === old.transport) return null; // A peer became busy before the daemon's atomic check.
+      await this.destroyAndWait("advisor");
+      return spawned;
+    } finally {
+      if (this.expectedExitProc === old) this.expectedExitProc = null;
+      this.restarting = false;
+    }
+  }
+
   /** Any event observer is attached, including internal work that protects the session lifetime. */
   hasSubscribers(): boolean {
     return this.listeners.length > 0;
@@ -761,7 +782,10 @@ export class AgentSessionWrapper {
       const state = await this.getStateWithTimeout();
       if (!this._alive) return;
       const wasRunning = this.streaming || this.promptRunning;
+      const oldId = this._sessionId;
+      const moved = this.sessionMovePending;
       this.applyIdentity(state);
+      if (oldId && oldId !== this._sessionId && !moved) this.onIdentityChangeCallback?.(oldId, this._sessionId);
       // The run ended while its frames were lost: end it for clients, as on exit.
       if (wasRunning && !state.isStreaming && !state.isCompacting && !this.awaitingAgentStart && this.promptDispatchPendingCount === 0) {
         this.emit({ type: "agent_end", isTerminal: true, messages: [] });
@@ -909,7 +933,7 @@ export class AgentSessionWrapper {
     }
   }
 
-  /** Taken over from a previous run of this server (see adopt): its spawn-time --advisor flag is unknown. */
+  /** Joined an existing protocol endpoint; only legacy adoption loses spawn-time advisor metadata. */
   get adopted(): boolean {
     return this._adopted;
   }
@@ -3272,15 +3296,18 @@ function createAgentToolOps(): AgentToolSessionOps {
     async createSession(input) {
       const host = getHost(input.hostId);
       if (!host) throw new Error(`Unknown host: ${input.hostId}`);
-      const started = await startNewRpcSession(host, input.cwd);
+      const preparing = !!(input.prompt || input.name || (input.provider && input.modelId));
+      const started = await startNewRpcSession(host, input.cwd, undefined, undefined, preparing);
       if (!started.ok) throw new Error(started.error);
       const { session, realSessionId } = started.value;
       try {
-        if (input.provider && input.modelId) {
-          await session.send({ type: "set_model", provider: input.provider, modelId: input.modelId });
-        }
-        if (input.name) await session.send({ type: "set_session_name", name: input.name });
-        if (input.prompt) await session.send({ type: "prompt", message: input.prompt });
+        const run = async () => {
+          if (input.provider && input.modelId) await session.send({ type: "set_model", provider: input.provider, modelId: input.modelId });
+          if (input.name) await session.send({ type: "set_session_name", name: input.name });
+          if (input.prompt) await session.send({ type: "prompt", message: input.prompt });
+        };
+        if (preparing) await session.withPendingCommand(run);
+        else await run();
       } catch (error) {
         // As /api/agent/new: behind a dropped link the prompt may be running there, so the wrapper stays.
         if (!(error instanceof WebRpcError && error.code === "host_offline")) await session.destroyAndWait();
@@ -3341,13 +3368,14 @@ export async function startNewRpcSession(
   cwd: string,
   toolNames?: string[],
   advisor?: boolean,
+  preparingCommand = false,
 ): Promise<OpResult<{ session: AgentSessionWrapper; realSessionId: string }>> {
   const validated = await host.sessionOps.validateCwd(cwd);
   if (!validated.ok) return validated;
   const spawnCwd = validated.value.cwd;
   // Unique per call: startRpcSession coalesces concurrent callers that share a key onto one session.
   const tempKey = `__new__${randomUUID()}`;
-  const started = await startRpcSession(tempKey, "", spawnCwd, toolNames, advisor, undefined, undefined, host);
+  const started = await startRpcSession(tempKey, "", spawnCwd, toolNames, advisor, undefined, undefined, host, preparingCommand);
   // Without this a file request under a brand-new cwd would 403 for up to the allowed-roots cache TTL.
   // Never for another host: its paths do not exist on this machine.
   if (host.id === LOCAL_HOST_ID) allowFileRoot(spawnCwd);
@@ -3377,9 +3405,12 @@ export async function startRpcSession(
    * the user is never stuck on the unrestorable model. */
   spawnModel?: string,
   host: Host = getHost(LOCAL_HOST_ID),
+  preparingCommand = false,
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
+  const launch: SpawnRequest = { cwd, recordedCwd: recordedCwd ?? null, sessionFile, toolNames, advisor: advisor === true, spawnModel };
+  let replacement: SpawnResult | undefined;
 
   // A child of this session the host still ran from before a restart of this
   // server is being adopted or killed. Waiting here, before the registry and
@@ -3402,12 +3433,18 @@ export async function startRpcSession(
     // replace the child so the toggle takes effect on the next prompt. Busy
     // children are kept (a mid-run swap would drop in-flight work) and pick
     // the new flag up at the next natural respawn; callers that pass no
-    // advisor opinion (undefined) simply reuse whatever is running. An adopted
-    // child's flag is unknown, so it is never replaced over it.
-    if (existing.hostOwnedLifecycle || advisor === undefined || existing.adopted || existing.advisorSpawned === effectiveAdvisor || existing.isRunning() || existing.isEditingHistory()) {
+    // advisor opinion (undefined) simply reuse whatever is running. Only a legacy
+    // adopted child's flag is unknown; shared channels report their actual launch mode.
+    if (advisor === undefined || (existing.adopted && !existing.hostOwnedLifecycle) || existing.advisorSpawned === effectiveAdvisor
+      || existing.isRunning() || existing.isEditingHistory() || (existing.hostOwnedLifecycle && !existing.canReplaceAdvisor())) {
       return { session: existing, realSessionId: sessionId };
     }
-    await existing.destroyAndWait();
+    if (existing.hostOwnedLifecycle) {
+      replacement = await existing.replaceAdvisorIfIdle(launch, preparingCommand) ?? undefined;
+      if (!replacement) return { session: existing, realSessionId: sessionId };
+    } else {
+      await existing.destroyAndWait("advisor", true);
+    }
   }
   // A wrapper whose omp child is still flushing/exiting must fully dispose
   // before a replacement spawns — two children touching the same .jsonl would
@@ -3434,7 +3471,7 @@ export async function startRpcSession(
     // The wrapper needs the process and the process's onExit needs the wrapper;
     // the holder breaks that cycle (onExit only fires once the child dies).
     const holder: { wrapper?: AgentSessionWrapper } = {};
-    const spawned = await host.spawnRpc({ cwd, recordedCwd: recordedCwd ?? null, sessionFile, toolNames, advisor: advisor === true, spawnModel }, sessionFile ? sessionId : null);
+    const spawned = replacement ?? await host.spawnRpc(launch, sessionFile ? sessionId : null, { replaceAdvisor: advisor !== undefined, preparing: preparingCommand });
     const proc = new RpcProcess({
       cwd: spawned.cwd,
       transport: spawned.transport,
@@ -3445,7 +3482,7 @@ export async function startRpcSession(
       proc,
       spawned.cwd,
       recordedCwd,
-      advisor === true || spawned.launchAdvisor,
+      spawned.transport.hostOwnedLifecycle ? spawned.advisorSpawned! : advisor === true || spawned.launchAdvisor,
       sessionFile ? sessionId : "",
       DISCONNECT_DESTROY_MS,
       host,
@@ -3544,13 +3581,19 @@ function registerSession(created: AgentSessionWrapper): void {
  * the child being killed, when this server already starts or keeps a wrapper
  * for the session (never two children on one file) or when the re-sync fails.
  */
-export async function adoptRpcSession({ host, transport, sessionId, cwd, replay }: {
+export async function adoptRpcSession({ host, transport, sessionId, cwd, replay, advisorSpawned, launchAdvisor }: {
   host: Host;
   transport: RpcTransport;
   sessionId: string;
   cwd: string;
   replay: string[];
+  advisorSpawned?: boolean;
+  launchAdvisor?: boolean;
 }): Promise<AgentSessionWrapper> {
+  if (transport.hostOwnedLifecycle && typeof advisorSpawned !== "boolean") {
+    transport.close!();
+    throw new Error("The shared host did not report the child's actual advisor mode");
+  }
   const registry = getRegistry();
   const locks = getLocks();
   if (locks.has(sessionId) || registry.has(sessionId)) {
@@ -3560,8 +3603,8 @@ export async function adoptRpcSession({ host, transport, sessionId, cwd, replay 
   }
   const holder: { wrapper?: AgentSessionWrapper } = {};
   const proc = new RpcProcess({ cwd, transport, adopted: { protocolVersion: 2 }, onExit: (info) => holder.wrapper?.handleProcessExit(info, proc) });
-  // Spawn-time facts (--advisor, a cwd fallback) died with the server that spawned it.
-  const created = new AgentSessionWrapper(proc, cwd, cwd, false, sessionId, DISCONNECT_DESTROY_MS, host);
+  // Legacy adoption cannot recover spawn-time flags; a shared daemon returns the actual launch metadata.
+  const created = new AgentSessionWrapper(proc, cwd, cwd, advisorSpawned ?? false, sessionId, DISCONNECT_DESTROY_MS, host, launchAdvisor ?? false);
   holder.wrapper = created;
   created.start();
   const adopting = (async () => {
