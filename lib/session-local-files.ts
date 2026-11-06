@@ -10,7 +10,7 @@ import { readSessionHeaderSync } from "./omp/session-files";
 import { isValidSessionId } from "./session-file-references-core";
 import { resolveSessionPath } from "./session-reader";
 
-type SessionLocalFailure = { ok: false; status: 400 | 403 | 404; code: string; error: string };
+type SessionLocalFailure = { ok: false; status: 400 | 403 | 404 | 503; code: string; error: string };
 type SessionLocalRoot = { ok: true; root: string } | SessionLocalFailure;
 
 const SESSION_NOT_FOUND: SessionLocalFailure = { ok: false, status: 404, code: "session_not_found", error: "Session not found" };
@@ -32,13 +32,17 @@ async function sessionLocalRootFor(sessionId: string | null, hint: string | null
 }
 
 /** True when `target`, or its nearest existing ancestor (so a missing file still counts), resolves through symlinks to
- * somewhere outside `root`. A root that does not exist has nothing in it to escape. */
-function resolvesOutside(root: string, target: string): boolean {
+ * somewhere outside `root`. A root that does not exist has nothing in it to escape; null when the root exists but
+ * cannot be canonicalized, so confinement cannot be checked and the caller refuses. */
+function resolvesOutside(root: string, target: string): boolean | null {
   let realRoot: string;
   try {
     realRoot = realpathSync(root);
-  } catch {
-    return false;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // Only a root that is not there has nothing in it to escape; any other failure cannot vouch for confinement.
+    if (code === "ENOENT" || code === "ENOTDIR") return false;
+    return null;
   }
   for (let current = target; ; ) {
     try {
@@ -66,7 +70,9 @@ export async function resolveSessionLocalFile(
   const located = await sessionLocalRootFor(sessionId, sessionFile);
   if (!located.ok) return located;
   const target = path.resolve(located.root, relative);
-  if (resolvesOutside(located.root, target)) return { ok: false, status: 403, code: "access_denied", error: "Access denied" };
+  const outside = resolvesOutside(located.root, target);
+  if (outside === null) return { ok: false, status: 503, code: "local_root_unavailable", error: "The session's local:// directory could not be checked" };
+  if (outside) return { ok: false, status: 403, code: "access_denied", error: "Access denied" };
   if (isOmpSecretFile(target)) return { ok: false, status: 403, code: "access_denied", error: "Access denied" };
   let stat: Stats;
   try {
