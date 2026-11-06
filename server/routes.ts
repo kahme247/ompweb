@@ -28,6 +28,7 @@ import * as hostsIdUpdates from "@/app/api/hosts/[id]/updates/route";
 import * as manifest from "@/app/api/manifest/route";
 import * as mcp from "@/app/api/mcp/route";
 import * as mediaHash from "@/app/api/media/[hash]/route";
+import * as mobileAccess from "@/app/api/mobile-access/route";
 import * as modelRoles from "@/app/api/model-roles/route";
 import * as modelsConfigCatalog from "@/app/api/models-config/catalog/route";
 import * as modelsConfig from "@/app/api/models-config/route";
@@ -123,6 +124,7 @@ export const ROUTE_MODULES: Record<string, RouteModule> = {
   "manifest": manifest,
   "mcp": mcp,
   "media/[hash]": mediaHash,
+  "mobile-access": mobileAccess,
   "model-roles": modelRoles,
   "models-config/catalog": modelsConfigCatalog,
   "models-config": modelsConfig,
