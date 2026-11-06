@@ -11,7 +11,9 @@ export interface OmpUpdateStatus {
   updatesDisabled?: boolean;
 }
 
-export const OMP_UPDATE_CHECK_TIMEOUT_MS = 15_000;
+// A cold `omp update --check` on Windows regularly needs ~20 s (Node CLI startup
+// plus network); 15 s made the very first check after boot fail with update_failed.
+export const OMP_UPDATE_CHECK_TIMEOUT_MS = 30_000;
 export const OMP_UPDATE_CHECK_TTL_MS = 60 * 60 * 1000;
 
 /** Run a raw `omp update [args]` subcommand. Install durability
