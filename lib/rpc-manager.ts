@@ -32,7 +32,7 @@ import type {
   SessionStatsInfo,
   WebSessionState,
 } from "./pi-types";
-import type { AgentMessage, CrossSessionHostToolCall, ExitedRpcSession, ExtensionWidgetItem } from "./types";
+import type { AgentMessage, CrossSessionHostToolCall, CrossSessionHostToolEvent, ExitedRpcSession, ExtensionWidgetItem } from "./types";
 import { isLinkUp, type Host, type HostStatus } from "./hosts/host";
 import { freezeHostLinks, getHost, lastUplinkAt, listHosts, orphanExit } from "./hosts/hub";
 import { LOCAL_HOST_ID } from "./hosts/registry";
@@ -455,7 +455,7 @@ export class AgentSessionWrapper {
   private hostToolsUnknown = false;
   private _adopted = false;
   /** host_tool_call ids awaiting a host_tool_result from the browser. */
-  private pendingHostTools: Map<string, UnsequencedAgentEvent> = new Map();
+  private pendingHostTools = new Map<string, { event: UnsequencedAgentEvent; crossSessionId?: string }>();
   /** Own host calls no tab has seen yet (see parkHostTool), with their deadlines. */
   private parkedHostTools = new Map<string, ReturnType<typeof setTimeout>>();
   /** Listeners omp-web attaches itself (waitForTurnEnd), not tabs: a parked host call waits for a tab. */
@@ -1224,14 +1224,14 @@ export class AgentSessionWrapper {
         if (id && toolName && (this.hostToolNames.has(toolName) || this.hostToolsUnknown)) {
           const ownTab = this.hasBrowserSubscribers();
           if (ownTab) {
-            this.pendingHostTools.set(id, event);
+            this.pendingHostTools.set(id, { event });
             this.emit(event);
             notifyRunningChange();
             return;
           }
           const otherTabs = getHostToolListeners();
           if (otherTabs.size > 0) {
-            this.pendingHostTools.set(id, { ...event, webCrossSession: true });
+            this.pendingHostTools.set(id, { event, crossSessionId: this.sessionId });
             const args = event.arguments && typeof event.arguments === "object" ? event.arguments as Record<string, unknown> : {};
             const call: CrossSessionHostToolCall = { sessionId: this.sessionId, hostId: this.host.id, cwd: this.cwd, id, toolName, arguments: args };
             for (const listener of otherTabs) {
@@ -1254,9 +1254,7 @@ export class AgentSessionWrapper {
       }
       case "host_tool_cancel": {
         const targetId = typeof event.targetId === "string" ? event.targetId : "";
-        if (targetId && this.pendingHostTools.delete(targetId)) {
-          this.unparkHostTool(targetId);
-          this.emit(event);
+        if (targetId && this.cancelPendingHostTool(targetId)) {
           notifyRunningChange();
           return;
         }
@@ -1417,18 +1415,33 @@ export class AgentSessionWrapper {
     this.emit({ type: "notice", level: "warning", message: `Rejected unavailable host tool: ${toolName}` });
   }
 
+  /** Withdraw the browser operation using the identity under which it was delivered. */
+  private cancelPendingHostTool(id: string): boolean {
+    const pending = this.pendingHostTools.get(id);
+    if (!pending) return false;
+    this.pendingHostTools.delete(id);
+    this.unparkHostTool(id);
+    const event = { type: "host_tool_cancel", targetId: id };
+    this.emit(event);
+    if (pending.crossSessionId !== undefined) {
+      for (const listener of getHostToolListeners()) {
+        try { listener({ type: "host_tool_cancel", targetId: id, sessionId: pending.crossSessionId }); } catch { /* ignore listener errors */ }
+      }
+    }
+    return true;
+  }
+
   /**
    * Reject outstanding host tool calls (browser disconnected / destroy): "own" ones went to this session's
    * stream, "cross" ones to other open tabs (see subscribeHostToolCalls).
    */
   private rejectPendingHostTools(message: string, which: "all" | "own" | "cross" = "all"): void {
-    for (const [id, event] of this.pendingHostTools) {
-      const cross = event.webCrossSession === true;
+    for (const [id, pending] of this.pendingHostTools) {
+      const cross = pending.crossSessionId !== undefined;
       if ((which === "own" && cross) || (which === "cross" && !cross)) continue;
       // No tab ever received it: its own deadline settles it (see parkHostTool).
       if (which === "own" && this.parkedHostTools.has(id)) continue;
-      this.pendingHostTools.delete(id);
-      this.unparkHostTool(id);
+      this.cancelPendingHostTool(id);
       this.proc.sendFrame({
         type: "host_tool_result",
         id,
@@ -1444,7 +1457,7 @@ export class AgentSessionWrapper {
    * within the disconnect window it is settled, so the agent never waits forever.
    */
   private parkHostTool(id: string, event: UnsequencedAgentEvent): void {
-    this.pendingHostTools.set(id, event);
+    this.pendingHostTools.set(id, { event });
     const timer = setTimeout(() => {
       this.parkedHostTools.delete(id);
       if (!this.pendingHostTools.delete(id)) return;
@@ -1690,7 +1703,7 @@ export class AgentSessionWrapper {
     // Own host calls parked while no tab could answer go to the first tab that attaches, once.
     for (const id of internal ? [] : [...this.parkedHostTools.keys()]) {
       this.unparkHostTool(id);
-      const event = this.pendingHostTools.get(id);
+      const event = this.pendingHostTools.get(id)?.event;
       if (event) listener({ ...event, web: { streamId: this.streamId, sequence: ++this.streamSequence } });
     }
     return () => {
@@ -2808,7 +2821,7 @@ export class AgentSessionWrapper {
     // The registry drops this wrapper only once the child has really exited.
     const disposed = this.proc.dispose().catch(() => {}).then(() => this.onDestroyCallback?.());
     this.destroyPromise = disposed;
-    this.pendingHostTools.clear();
+    for (const id of this.pendingHostTools.keys()) this.cancelPendingHostTool(id);
     for (const timer of this.parkedHostTools.values()) clearTimeout(timer);
     this.parkedHostTools.clear();
     this.hostToolNames.clear();
@@ -2855,7 +2868,7 @@ declare global {
   var __ompSessions: Map<string, AgentSessionWrapper> | undefined;
   var __ompStartLocks: Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> | undefined;
   var __ompRunningListeners: Set<(update: RunningSessionUpdate) => void> | undefined;
-  var __ompHostToolListeners: Set<(call: CrossSessionHostToolCall) => void> | undefined;
+  var __ompHostToolListeners: Set<(call: CrossSessionHostToolEvent) => void> | undefined;
   var __ompExitedSessions: Map<string, ExitedRpcSession> | undefined;
   var __ompFrameTaps: Set<(wrapper: AgentSessionWrapper, event: AgentEvent) => void> | undefined;
   var __ompSessionMoveListeners: Set<(from: string, to: string) => void> | undefined;
@@ -2996,13 +3009,13 @@ export function onSessionMove(listener: (from: string, to: string) => void): () 
 // open omp-web tab (over the `host-tools` event-stream channel) instead of being rejected.
 // ----------------------------------------------------------------------------
 
-function getHostToolListeners(): Set<(call: CrossSessionHostToolCall) => void> {
+function getHostToolListeners(): Set<(call: CrossSessionHostToolEvent) => void> {
   if (!globalThis.__ompHostToolListeners) globalThis.__ompHostToolListeners = new Set();
   return globalThis.__ompHostToolListeners;
 }
 
 /** Subscribe to host tool calls for sessions no tab is currently watching. */
-export function subscribeHostToolCalls(listener: (call: CrossSessionHostToolCall) => void): () => void {
+export function subscribeHostToolCalls(listener: (call: CrossSessionHostToolEvent) => void): () => void {
   const listeners = getHostToolListeners();
   listeners.add(listener);
   return () => {

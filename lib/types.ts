@@ -525,6 +525,12 @@ export interface CrossSessionHostToolCall {
   arguments: Record<string, unknown>;
 }
 
+export type CrossSessionHostToolEvent = (CrossSessionHostToolCall & { type?: "host_tool_call" }) | {
+  type: "host_tool_cancel";
+  sessionId: string;
+  targetId: string;
+};
+
 export interface ExitedRpcSession {
   id: string;
   cwd: string;

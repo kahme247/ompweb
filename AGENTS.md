@@ -60,7 +60,7 @@ goes through that host.
 Shared foundations in `lib/omp/`:
 
 - `paths.ts` — Node port of omp's directory resolution (`~/.omp/agent`,
-  XDG, session dir slugs).
+  XDG, session dir slugs) and `sessionLocalRoot`, omp's `local://` root rule.
 - `omp-cli.ts` — locate/probe the installed `omp` binary (`resolveOmpBin`,
   `getOmpVersion`).
 - `rpc-process.ts` — process + NDJSON protocol layer (`RpcProcess`).
@@ -94,6 +94,7 @@ app/api/
   sessions/[id]/context/route.ts  GET ?leafId= — context for a specific leaf
   sessions/[id]/matches/route.ts  GET ?q=&limit= — best `limit` search hits in the active conversation (best match, then newest); Load more asks for a longer prefix
   sessions/[id]/export/route.ts   GET exported HTML for a session
+  sessions/[id]/local-file/route.ts GET ?uri=local://<file> → `{ path, sessionId }`: the absolute path of a file in the session's own local:// directory, resolved on the owning host's daemon, and the canonical session that owns it (a live alias resolves to its current id; the tab must store that, since the alias goes with its wrapper). The open_file host tool then reads it through /api/files with that `sessionId`; 400 `invalid_local_uri` / `not_a_file`, 404 `session_not_found` / `file_not_found`, 403 on a symlink out, 501 `workspace_unsupported` for a host daemon that predates `resolveLocalFile`
   agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? }
   agent/[id]/route.ts             GET state | POST any RPC command
   events/route.ts                 GET multiplexed SSE | POST subscribe/unsubscribe channels
@@ -141,7 +142,7 @@ lib/
     local-bootstrap.ts web server side of the local link: `localLinkUrl`, `ensureLocalHostLink` (the `local` record + `host.json`)
     host-login.ts      `host.json` (`loginHost`, `readHostLogin`) and `isLoopbackHost`, shared by the daemon and local-bootstrap
     session-ops.ts     file-reading half of the session/project routes, run on the owning host's daemon (this machine's too)
-    uploads.ts         daemon side of composer uploads: `StagedUploads` (staging dir `<agent dir>/omp-web/uploads/`, offset writes, 24 h sweep, attach into the session's `local/uploads/`), `sanitizeUploadName`, `sessionLocalRoot`
+    uploads.ts         daemon side of composer uploads: `StagedUploads` (staging dir `<agent dir>/omp-web/uploads/`, offset writes, 24 h sweep, attach into the session's `local/uploads/`), `sanitizeUploadName`
     upload-retention.ts  daemon side of sent-upload retention: `UploadRetention` (op `setUploadRetention`, `<agent dir>/omp-web/upload-retention.json`, sweep at start and every 24 h), `sweepSentUploads`; `upload-retention-sync.ts` is main's side (`startUploadRetentionSync` on every hello, `pushUploadRetention` when the setting changes)
     link-protocol.ts   link messages, codec, binary blob frames, close codes, size limits, `HOST_OP_NAMES`, `SeqWindow`/`Outbox`, `LinkSender`/`PartJoiner` (pieces, fair sending)
     hub.ts             main side: the link's upgrade and `websocket` handler (`handleLinkUpgrade`, `hostLinkSocket`), `RemoteHost`, `getHost`, `listHosts`, adoption of live children (`reattach`/`adopt`), orphans, `freezeHostLinks`, `hosts` change events
@@ -163,9 +164,11 @@ lib/
   event-stream-hub.ts  server connections + running/session/file channels for /api/events (SSE) and the browser link (`FrameSink`); `broadcastBrowserTransport`
   event-stream-protocol.ts  wire contract shared by hub, route, and facade
   file-access.ts       allowed file roots for /api/files and worktrees
-  file-authorization.ts  single allow-list gate for /api/files and the file channel
+  file-authorization.ts  single allow-list gate for /api/files and the file channel: allowed roots, the session's own `local://` directory (confined, symlinks included) or the session transcript's references
   media-cache.ts       tool-result images → /api/media URLs; media copies + thumbnails
-  file-paths.ts        client/server path encoding helpers
+  file-paths.ts        client/server path encoding helpers; `getFileApiUrl`, the one builder of a file tab's `/api/files` URLs
+  local-uri.ts         `local://` parsing exactly as omp's local-protocol.ts reads it (pure; browser and server)
+  session-local-files.ts  daemon side: a session's `local://` root (`sessionLocalRootFor`: verified live-file hint, else the daemon's session index, then `sessionLocalRoot`), a path resolved inside it, and the file gate's check
   github-refs.ts       remark plugin linking #N / owner/repo#N + GithubRepoContext
   git-clone.ts         pure clone helpers: URL→directory name (https/ssh only), \r-aware progress log
   github-repo.ts       server: pick the gh-default GitHub remote from git config
@@ -1509,6 +1512,17 @@ during the wait.
   until their existing expiry. A main restart no longer loses a finished-but-unsent
   attachment. Switching chats aborts in-flight uploads; drafts keep only finished
   ones and their proofs (`sessionStorage`).
+
+### open_file and `local://`
+- The `open_file` host tool takes an absolute path, a workspace-relative path or a `local://` URL. `runHostTool` (`hooks/useAgentSession-stream.ts`) resolves a `local://` URL **before** a tab exists, with the id of the session that called (`useAgentSession` for the viewed session, `AppShell` for a call from another one), through `GET /api/sessions/[id]/local-file`: the tab, its de-duplication and the cross-session confirmation all see the absolute path and `sourceSessionId`, so two sessions' `local://note.md` are two files.
+- `lib/session-local-files.ts` resolves on the **owning Node daemon**, without consulting main's live-session or host state. Main's `GET /api/sessions/[id]/local-file` checks shared URI syntax (early 400), uses `resolveWorkspaceHost(undefined, id, { followAlias: true })` to canonicalize a live alias to its current ID and file, and calls the additive `resolveLocalFile(id, uri, sessionFile)` workspace op. An older daemon answers 501 `workspace_unsupported`; there is no main-disk fallback. The daemon applies its native URI rules and uses a live-file hint only after checking realpath containment in its sessions directory and the header's session ID; otherwise its own `resolveSessionPath` decides, including any custom file its index knows. `sessionLocalRoot` (`lib/omp/paths.ts`) retains omp's Windows temp fallback. File GET and watch carry the tab's own ID (and the live file hint only while the wrapper still reports that ID) to `authorizeFileAccess` and `sessionLocalRootContaining`. Never derive the root from cwd or the viewed session, and never read artifact contents in the resolver. The response path must be absolute, and confinement compares native paths without rewriting literal POSIX backslashes.
+- `lib/local-uri.ts` reads the URL as omp 18.3.1+'s `extractRelativePath`/`validateRelativePath` do: the authority is the first path segment and is decoded once, with the rest (`local://100%25.md` is `100%.md`; a second decode would open another file); query and fragment are dropped; a segment that is `..` or starts with `..` (`..hidden.md`, `a/..b`), and an absolute suffix (`/x`, `\x`; on Windows also `C:x`), are refused. A colon is an ordinary character off Windows. The resolver answers in this order, so the agent hears it before any tab opens: 503 `local_root_unavailable` when the session's existing local root cannot be canonicalized (only a missing root counts as having nothing to escape), 403 for a path that leaves the root through a symlink (or a link loop), 404 `file_not_found` for a file that is not there, 400 `not_a_file` for a directory (`local://.`, `local://dir/`) or other non-file.
+- `runHostTool` bounds the lookup with `LOCAL_FILE_LOOKUP_TIMEOUT_MS` (an `AbortController` and timer, not `AbortSignal.timeout`): a stalled lookup reports an error to the agent. Viewed-chat and global handlers own request-scoped controllers; native `host_tool_cancel`, request withdrawal and unmount abort pending lookups and suppress late open/confirmation and result callbacks. Cross-session cancellation uses the privately captured original source alias, keyed with the request ID, so another session's identical ID is unaffected. Confirmed identity moves keep the mounted request valid. The shell rechecks the committed session and Settings view at completion before using its existing confirmation. A thrown opener becomes `isError`, never a false “Opened” result.
+  A resolved `local://` tab stores the route's returned `sessionId` (the canonical owner) as `sourceSessionId`; the `host_tool_result` still goes to the calling id. A subscription error (the viewed chat's `session` stream or AppShell's `host-tools` stream) also aborts pending lookups: the server already rejected those calls when the subscription left, and the `host_tool_cancel` it emitted had no listener.
+  File reads, downloads and watches (`/api/files`, the `file` channel) keep the tab's own `sessionId` and never follow an alias: a tab opened for A stays confined to A's root after omp later moves A to B, and the live wrapper's file is passed as a hint only while it still reports that id. Only the `local://` lookup uses `resolveWorkspaceHost(..., { followAlias: true })`.
+- Every file-tab URL uses `getFileApiUrl` with that tab's host ID and source session ID, including both Download controls. `authorizeFileAccess` grants session-local access only for reads, downloads and file watch, never listing. It confines realpaths even when the transcript names the path. Both it and the resolver apply `isOmpSecretFile`: owned credentials and symlink/hard-link aliases stay private, while independent `agent.db` or `models.yml` artifacts remain usable.
+- The daemon file watch re-authorizes its target and rejects a pathname swapped for an outside symlink without reporting the outside file's metadata. Its error ends the subscription; a fresh subscription performs authorization again.
+- A session-local absolute target takes precedence over workspace-relative fallback, even if a workspace contains a file mirroring its entire pathname or the artifact is missing. Apply its local-root realpath restriction even when a broader config/workspace root also admits the path.
 
 ### Voice transcription jobs (`lib/stt-jobs.ts`, `/api/stt`, `hooks/useDictation.ts`)
 - The browser never waits on the STT endpoint: `POST /api/stt` keeps the

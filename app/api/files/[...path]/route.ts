@@ -141,10 +141,10 @@ export async function GET(
     const { searchParams } = new URL(request.url);
     const type = parseFileRequestType(searchParams.get("type") ?? "list");
     if (!type) return Response.json({ error: "Invalid file request type", code: "invalid_request_type" }, { status: 400 });
-    const input = { segments, sessionId: searchParams.get("sessionId") };
-    const resolved = await resolveWorkspaceHost(searchParams.get("hostId") ?? undefined, input.sessionId);
+    const resolved = await resolveWorkspaceHost(searchParams.get("hostId") ?? undefined, searchParams.get("sessionId"));
     if ("response" in resolved) return resolved.response;
     const { host } = resolved;
+    const input = { segments, sessionId: resolved.sessionId, sessionFile: resolved.sessionFile };
     if (type === "list") {
       const result = await host.workspaceOps.listFilesInRoot(input, searchParams.get("root"));
       return result.ok ? Response.json(result.value) : opErrorResponse(result);
