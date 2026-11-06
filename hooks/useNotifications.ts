@@ -155,7 +155,7 @@ export function useNotifications({ sessionId, locale, onOpenSession }: { session
     };
     // This tab's own channel: the server delivers here while it is open, on any
     // view (the chat, Settings, ...), and counts the tab as reachable.
-    const stream = openEventStream({ kind: "notifications", clientId: notificationClientId });
+    const stream = openEventStream({ kind: "notifications", clientId: notificationClientId, deviceId: getNotificationDeviceId() });
     stream.onmessage = ({ data }) => {
       try {
         const frame: unknown = JSON.parse(data);
