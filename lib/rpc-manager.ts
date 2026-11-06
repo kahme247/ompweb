@@ -385,7 +385,8 @@ function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, 
       // frames lost meanwhile (a link drop, a daemon `resync`) may have carried the echo.
       const dropped = !userMessageSeen && !text.trimStart().startsWith("/") && wrapper.getFrameGaps() === gapsAtStart
         && (event.agentInvoked === false || event.status === "aborted" || event.status === "error");
-      const reason = isRecord(event.error) && typeof event.error.message === "string" ? event.error.message
+      // A failed hand-off needs a non-empty error: callers treat an empty one as delivered.
+      const reason = isRecord(event.error) && typeof event.error.message === "string" && event.error.message.trim() ? event.error.message
         : dropped ? "Stopped before omp showed it" : unshown.error;
       finish({ error: reason, mayHaveBeenSent: !dropped });
     } else if (event.type === "agent_end" && event.isTerminal !== false && !wrapper.isAlive()) finish(CHILD_EXITED);
