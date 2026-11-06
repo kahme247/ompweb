@@ -291,6 +291,7 @@ function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, 
   const boundary = previousEntryIds ? new Set(previousEntryIds) : null;
   const openedUserMessages = new Set<string>();
   let userMessageSeen = false;
+  const gapsAtStart = wrapper.getFrameGaps();
   let timer: NodeJS.Timeout | undefined;
   let commandId: string | undefined;
   let expansionRetry: NodeJS.Timeout | undefined;
@@ -368,8 +369,9 @@ function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, 
     else if (event.type === "prompt_result" && commandId !== undefined && event.id === commandId && !(userMessageSeen && text.trimStart().startsWith("/"))) {
       // omp finished this prompt with no echo, so none will come (an expanded slash template is left to its context check).
       // It reached no transcript when omp showed no user message (an input hook may rewrite the text) and ran no turn
-      // for it: Stop or a refusal during setup, an aborted or failed run. A slash command may have acted on its own.
-      const dropped = !userMessageSeen && !text.trimStart().startsWith("/")
+      // for it: Stop or a refusal during setup, an aborted or failed run. A slash command may have acted on its own, and
+      // frames lost meanwhile (a link drop, a daemon `resync`) may have carried the echo.
+      const dropped = !userMessageSeen && !text.trimStart().startsWith("/") && wrapper.getFrameGaps() === gapsAtStart
         && (event.agentInvoked === false || event.status === "aborted" || event.status === "error");
       const reason = isRecord(event.error) && typeof event.error.message === "string" ? event.error.message
         : dropped ? "Stopped before omp showed it" : "omp finished this message without showing it";
@@ -401,6 +403,8 @@ export class AgentSessionWrapper {
   private promptDispatchPendingCount = 0;
   private historyMutationPendingCount = 0;
   private messageCommandGeneration = 0;
+  /** Times this child's frames may have been lost (`reconcileAfterGap`). */
+  private frameGaps = 0;
   private confirmedMessageCommandGeneration = 0;
   private pendingMessageCommands = 0;
   private nativeQueuedMessages: unknown = { steering: [], followUp: [] };
@@ -711,6 +715,7 @@ export class AgentSessionWrapper {
 
   /** Frames may have been lost (link down, `resync`): re-read omp's state, as the client's get_state reconcile does. */
   private async reconcileAfterGap(): Promise<void> {
+    this.frameGaps += 1;
     // A lost delta would corrupt its message silently: rebuild from the next full update instead.
     this.openMessages.clear();
     try {
@@ -2272,6 +2277,8 @@ export class AgentSessionWrapper {
   }
   /** Process-local admission only, not a native message id: overlapping writes make echo inference uncertain. */
   getMessageCommandGeneration(): number { return this.messageCommandGeneration; }
+  /** Changes whenever frames may have been lost, so a missing echo then proves nothing. */
+  getFrameGaps(): number { return this.frameGaps; }
   /** ACKs/settlement aren't command-specific echo receipts: earlier writes need an uncontended replacement proof. */
   hasPendingMessageCommands(): boolean {
     return this.pendingMessageCommands > 0 || this.confirmedMessageCommandGeneration !== this.messageCommandGeneration;
