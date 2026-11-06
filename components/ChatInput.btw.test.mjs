@@ -50,6 +50,18 @@ for (const isStreaming of [false, true]) {
   });
 }
 
+for (const behavior of ["queue", "steer"]) {
+  test(`/btw offers Send during a run regardless of the ${behavior} preference`, async () => {
+    localStorage.setItem("omp-web:submit-during-run", behavior);
+    const user = userEvent.setup();
+    const { calls } = renderComposer({ isStreaming: true });
+    await user.type(screen.getByRole("textbox"), "/btw what is 2+2");
+    await user.click(screen.getByRole("button", { name: "Send", exact: true }));
+    await waitFor(() => assert.deepEqual(calls, [["onBuiltinCommand", "/btw what is 2+2"]]));
+    await waitFor(() => assert.equal(screen.getByRole("textbox").value, ""));
+  });
+}
+
 test("/btw with an attachment is refused and keeps the draft and the attachment", async () => {
   const user = userEvent.setup();
   const { calls, ref } = renderComposer({ isStreaming: false });
