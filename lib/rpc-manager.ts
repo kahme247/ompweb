@@ -2178,11 +2178,12 @@ export class AgentSessionWrapper {
     notifyRunningChange();
     try {
       if (proc.transport?.setEditing) {
-        await proc.transport.setEditing(true).catch((error: unknown) => {
+        leased = await proc.transport.setEditing(true).then(() => true, (error: unknown) => {
           if (error instanceof HostOpError && error.code === "session_busy") throw new WebRpcError(error.message, "session_busy");
+          // shortcut: pre-release v7 daemons (62a195b) lack the op; edit unfenced across servers until they restart.
+          if (error instanceof HostOpError && error.code === "unknown_op") return false;
           throw error;
         });
-        leased = true;
       }
       const before = await this.getStateWithTimeout();
       if (persistenceError) throw persistenceError;
