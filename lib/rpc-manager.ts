@@ -27,6 +27,7 @@ import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./
 import { eventWithToolResultImageUrls } from "./media-cache";
 import type {
   BashResultInfo,
+  ExtensionUiResponse,
   OmpModel,
   RpcAvailableSlashCommand,
   RpcSessionState,
@@ -63,6 +64,22 @@ interface CompactionResultLike {
   tokensAfter?: number;
 }
 
+/**
+ * Read a millisecond setting without turning a typo into "off": only a finite,
+ * non-negative number is accepted (`0` keeps its documented "disabled" meaning
+ * in both consumers). `5m`, `-1` or an empty value used to evaluate to 0 via
+ * `Number(...) || 0`, which silently disabled the very watchdog that rescues a
+ * wedged child. Such a value now keeps the default and warns once at startup.
+ */
+export function readNonNegativeMs(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const parsed = raw.trim() === "" ? Number.NaN : Number(raw);
+  if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+  console.warn(`[omp-web] ignoring invalid ${name}="${raw}" (expected milliseconds >= 0); using ${fallback}.`);
+  return fallback;
+}
+
 const IDLE_DESTROY_MS = 10 * 60 * 1000;
 /**
  * How long a session may sit with **no web UI attached** before its omp child is
@@ -79,19 +96,39 @@ const IDLE_DESTROY_MS = 10 * 60 * 1000;
  * the idle backstop. Set `OMP_WEB_DISCONNECT_DESTROY_MS=0` to disable reaping
  * and fall back to IDLE_DESTROY_MS alone.
  */
-const DISCONNECT_DESTROY_MS = process.env.OMP_WEB_DISCONNECT_DESTROY_MS !== undefined
-  ? Math.max(0, Number(process.env.OMP_WEB_DISCONNECT_DESTROY_MS) || 0)
-  : 120_000;
+const DISCONNECT_DESTROY_MS = readNonNegativeMs("OMP_WEB_DISCONNECT_DESTROY_MS", 120_000);
+/**
+ * How long a child may go without any positive evidence of life (a frame or a
+ * successful command answer) before a *timed-out* command is allowed to
+ * dispose it. omp blocks its event loop for tens of seconds on large sessions,
+ * so a timeout alone only means "busy"; five minutes of complete silence on a
+ * child that then misses another answer means wedged. Set
+ * `OMP_WEB_STALL_DESTROY_MS=0` to disable the watchdog (a stalled child then
+ * lives until the disconnect reaper or process exit).
+ */
+const STALL_DESTROY_MS = readNonNegativeMs("OMP_WEB_STALL_DESTROY_MS", 5 * 60_000);
+/** Refuse a new command while this many are already awaiting omp. Requests
+ * cannot pin the wrapper (and the child's stdin) without bound. */
+const MAX_PENDING_COMMANDS = 32;
 const READY_TIMEOUT_MS = 120_000;
 const MCP_LIST_TIMEOUT_MS = 15_000;
+/** Bounds one request's wait for an answer. It says nothing about the child:
+ * omp blocks its event loop for tens of seconds on large sessions (a 2.8 MB
+ * transcript answered `get_state` after 49 s), so an expired wait means "busy",
+ * never "dead" — see `slowSessionError()`. */
 const GET_STATE_TIMEOUT_MS = 5_000;
 /** Cap on the *acknowledgement* of a prompt frame — not on model execution.
  * omp acks a prompt as soon as it accepts it and the run then reports through
- * events (agent_start/agent_end), so an ack that never arrives means the child
- * is wedged: without this the API request (and the UI spinner behind it) would
- * stay pending forever. Generous enough to cover slow local startup work the
- * child does before acking. */
+ * events (agent_start/agent_end), so without this bound the API request (and
+ * the UI spinner behind it) would stay pending for as long as omp is blocked.
+ * Generous enough to cover slow local startup work the child does before
+ * acking. */
 const PROMPT_ACK_TIMEOUT_MS = 30_000;
+/** Stable code for "omp did not answer this command in time". The session keeps
+ * running; clients answer with HTTP 503 and retry instead of treating the run
+ * as ended. */
+const SESSION_SLOW_CODE = "session_slow";
+const SESSION_SLOW_MESSAGE = "omp is busy and did not answer in time; the session keeps running.";
 /** Title generation is an LLM call on omp's side. */
 const GENERATE_TITLE_TIMEOUT_MS = 60_000;
 const RENAME_POLL_INTERVAL_MS = 500;
@@ -119,17 +156,46 @@ export class WebRpcError extends Error {
   /** `host_offline` only: "refused" when nothing was sent, "unknown" when the
    * link dropped after the command left, so it may still run on the host. */
   readonly delivery?: "refused" | "unknown";
+  /** Extra machine-readable facts the agent route forwards next to `code`
+   * (`maybeStarted`, `abortUnconfirmed`). */
+  readonly details: Record<string, unknown> | undefined;
 
-  constructor(message: string, code: string, delivery?: "refused" | "unknown") {
+  constructor(message: string, code: string, delivery?: "refused" | "unknown", details?: Record<string, unknown>) {
     super(message);
     this.name = "WebRpcError";
     this.code = code;
     if (delivery) this.delivery = delivery;
+    this.details = details;
   }
 }
 
+const SESSION_SLOW_MAYBE_STARTED_MESSAGE =
+  "omp is busy and did not acknowledge the message in time; it may still be running. The session keeps running.";
+const SESSION_SLOW_ABORT_UNCONFIRMED_MESSAGE =
+  "omp is busy and did not answer the abort in time; the abort is not confirmed and the session keeps running.";
+
+/** A command timeout means omp is busy, not dead. omp blocks its event loop
+ * for tens of seconds on large sessions, so a missing answer only ends this
+ * request's wait — the child, and any run it is executing, keeps going and
+ * keeps reporting through frames. Only the liveness watchdog
+ * (`destroyIfStalled`) may dispose a child with no evidence of life for
+ * `STALL_DESTROY_MS`; a mere timeout never does. Recycling a child here killed
+ * live runs and made omp record a `dispose` ("Generation stopped by user"). */
+function slowSessionError(details?: Record<string, unknown>): WebRpcError {
+  return new WebRpcError(
+    details?.abortUnconfirmed
+      ? SESSION_SLOW_ABORT_UNCONFIRMED_MESSAGE
+      : details?.maybeStarted
+        ? SESSION_SLOW_MAYBE_STARTED_MESSAGE
+        : SESSION_SLOW_MESSAGE,
+    SESSION_SLOW_CODE,
+    undefined,
+    details,
+  );
+}
+
 /** Shape check for an ask-dialog `answers` payload; omp validates the content. */
-function isAskAnswers(value: unknown): boolean {
+export function isAskAnswers(value: unknown): boolean {
   return Array.isArray(value) && value.every((answer: unknown) =>
     isRecord(answer)
     && typeof answer.id === "string"
@@ -169,12 +235,30 @@ const PASSTHROUGH_COMMANDS = new Set([
   "btw",
   "btw_cancel",
   "get_btw_history",
+  // Goal mode (`{type:"goal", op}`) has the same shape as omp's RPC frame and
+  // is the only way native clients reach it; every op answers `{goal, state}`.
+  "goal",
 ]);
 
 // Outlasts omp's cold prediction-daemon start (up to 3 × 30s start rounds plus a
 // 30s first completion), so omp's answer or error decides; a wedged daemon still
 // cannot pin the request forever.
 const PREDICT_WORD_TIMEOUT_MS = 125_000;
+
+// Passthrough commands whose answer legitimately takes minutes and therefore
+// stays uncapped, mirroring the explicit switch cases (compact, bash,
+// branch/fork). `predict_word` has its own (generous) PREDICT_WORD_TIMEOUT_MS.
+// Every other command — including the control commands that used to call
+// `sendRpc` without a bound (set_model, set_fast_mode, set_slow_mode,
+// get_session_stats, get_last_assistant_text, get_commands,
+// new_session/switch_session) — goes through `sendControl`, so a wedged child
+// answers `session_slow` instead of pinning the request forever.
+const UNBOUNDED_PASSTHROUGH_COMMANDS = new Set([
+  "login",        // interactive login flow (browser/device code)
+  "btw",          // LLM side question
+  "handoff",      // starts a new session and may run model work
+  "export_html",  // walks the whole transcript
+]);
 
 // Commands that can carry user-attached images to the model. All of them must
 // pass the same server-side per-image/count/aggregate validation before the
@@ -443,6 +527,15 @@ export class AgentSessionWrapper {
   private reapTimer: ReturnType<typeof setTimeout> | null = null;
   private reapDeadline = 0;
   private lastActivityAt = 0;
+  /** Last frame the child sent. `silentForMs` reports from here: a command
+   * answer is not a frame, so polls never move this clock. */
+  private lastFrameAt = 0;
+  /** Last positive evidence that the child's event loop is alive: a frame or a
+   * successful command answer (an `RpcCommandError` counts too — omp replied).
+   * Timed-out answers, polls and `send()` writes deliberately do not move it:
+   * `send()` only feeds the disconnect reaper. Read exclusively by the stall
+   * watchdog in the command-timeout branches. */
+  private lastEvidenceAt = 0;
   /** In-flight `send()` calls: the reaper must never dispose the child out from
    * under a command that is still awaiting its response. */
   private pendingCommands = 0;
@@ -547,6 +640,8 @@ export class AgentSessionWrapper {
     this.host = host;
     this.launchAdvisor = launchAdvisor;
     this.fellBack = fellBack;
+    this.lastFrameAt = Date.now();
+    this.lastEvidenceAt = this.lastFrameAt;
   }
 
   get sessionId(): string {
@@ -574,6 +669,11 @@ export class AgentSessionWrapper {
     // closes stdin and OMP records "Request was aborted", even without a Stop.
     return this.isAlive() && (this.promptRunning || this.streaming || this.compacting || this.bashRunning
       || this.pendingUiRequests.size > 0 || this.pendingHostTools.size > 0 || this.pendingHostUris.size > 0);
+  }
+
+  /** Time since the child's last frame (epoch-ms clock started at spawn). */
+  silentForMs(): number {
+    return Math.max(0, Date.now() - this.lastFrameAt);
   }
 
   /** Local history navigation is busy control work, not an interruptible model turn. */
@@ -1160,6 +1260,10 @@ export class AgentSessionWrapper {
     // even when they arrive after a failed/timed-out edit.
     if (isSessionEditReply(frame)) return;
     this.resetIdleTimer();
+    // Any frame proves the child's event loop is running (a `ready` frame is
+    // consumed by waitReady, so this covers runtime frames only).
+    this.lastFrameAt = Date.now();
+    this.lastEvidenceAt = this.lastFrameAt;
     const event = frame.type === "available_commands_update" && Array.isArray(frame.commands)
       ? { ...frame, commands: (frame.commands as RpcAvailableSlashCommand[]).filter((command) => command.name !== SESSION_EDIT_COMMAND) }
       : frame;
@@ -1439,13 +1543,52 @@ export class AgentSessionWrapper {
       clearTimeout(timer);
       this.uiExpiryTimers.delete(id);
     }
+    // Every settle path (answer, cancel, expiry, restart, destroy, new run)
+    // forgets the dialog; the repeat must stop with it.
+  }
+
+  /**
+   * A pending dialog is settled (answered, cancelled, expired or its child is
+   * gone): forget it and retract the `input` notification it produced.
+   */
+  private settlePendingUiRequest(id: string): boolean {
+    if (!this.pendingUiRequests.has(id)) return false;
+    this.forgetPendingUiRequest(id);
+    return true;
   }
 
   private clearPendingUiRequests(): void {
     this.dropServerUiRequests();
     for (const timer of this.uiExpiryTimers.values()) clearTimeout(timer);
     this.uiExpiryTimers.clear();
-    this.pendingUiRequests.clear();
+    for (const id of [...this.pendingUiRequests.keys()]) this.settlePendingUiRequest(id);
+  }
+
+  /**
+   * Answer a blocking dialog from a notification action. Uses the same
+   * validation and frame as the agent route's `extension_ui_response` command,
+   * and returns whether the request was still pending.
+   */
+  answerExtensionUiRequest(id: string, response: ExtensionUiResponse): "answered" | "alreadySettled" {
+    const pending = this.pendingUiRequests.get(id);
+    if (!pending) return "alreadySettled";
+    const pendingAsk = pending.method === "ask";
+    // A pending ask accepts only its answers or a cancel; any other pending
+    // dialog accepts no answers. Anything else would drop it from reconnect
+    // replay while omp rejects the payload.
+    if (pendingAsk) {
+      if (!("cancelled" in response) && !isAskAnswers("answers" in response ? response.answers : undefined)) {
+        throw new WebRpcError("Invalid ask dialog answers", "invalid_ask_answers");
+      }
+    } else if ("answers" in response) {
+      throw new WebRpcError("This dialog does not take answers", "invalid_ask_answers");
+    }
+    const wasPending = this.settlePendingUiRequest(id);
+    this.proc.sendFrame({ type: "extension_ui_response", id, ...response });
+    // omp sends no cancel for an answered dialog; other tabs on this session
+    // would keep showing it, so settle it for them here.
+    if (wasPending) this.emit({ type: "extension_ui_request", id: `cancel:${id}`, method: "cancel", targetId: id });
+    return "answered";
   }
 
   /** Settle every server dialog as declined and close it in attached tabs. */
@@ -1476,7 +1619,8 @@ export class AgentSessionWrapper {
     const method = event.method as string;
     const id = event.id as string;
     if (method === "cancel") {
-      this.forgetPendingUiRequest(event.targetId as string);
+      const targetId = typeof event.targetId === "string" ? event.targetId : "";
+      if (targetId) this.settlePendingUiRequest(targetId);
       return false;
     }
     // Only the “Allow tool: <name>” confirmation is covered. Other extension
@@ -1493,7 +1637,7 @@ export class AgentSessionWrapper {
       const timeout = typeof event.timeout === "number" ? event.timeout : undefined;
       if (timeout && timeout > 0) {
         event.expiresAt = Date.now() + timeout;
-        const timer = setTimeout(() => this.forgetPendingUiRequest(id), timeout);
+        const timer = setTimeout(() => this.settlePendingUiRequest(id), timeout);
         timer.unref?.();
         this.uiExpiryTimers.set(id, timer);
       }
@@ -2006,7 +2150,9 @@ export class AgentSessionWrapper {
       // acks it would otherwise suspend this call forever — the `finally` below
       // would never run and the wrapper would keep reporting itself as busy
       // (later calls fail with session_busy) until unrelated traffic cleared
-      // the wedge. The 15s output wait above stays a separate concern.
+      // the wedge. The 15s output wait above stays a separate concern. An
+      // expired ack leaves the child alone: it is busy, and the run it may be
+      // executing keeps reporting through frames.
       await this.sendNativeMessageCommand({ type: "prompt", message: action === "list" ? "/mcp list" : `/mcp ${action}${name ? ` ${name}` : ""}` }, PROMPT_ACK_TIMEOUT_MS);
       const result = await output;
       if (action !== "list" && /^(?:Failed|Usage:|Server .* not found|Unknown)/m.test(result)) {
@@ -2024,7 +2170,7 @@ export class AgentSessionWrapper {
         this.mcpListWaiter = null;
         waiter.reject(
           expired
-            ? new WebRpcError("The OMP session stopped responding and was reset.", "session_unresponsive")
+            ? slowSessionError()
             : error instanceof Error
               ? error
               : new Error(String(error)),
@@ -2032,10 +2178,13 @@ export class AgentSessionWrapper {
       }
       if (expired) {
         if (error instanceof RpcCommandTimeoutError && this.linkLostDuring(error)) throw this.hostOfflineError("unknown");
-        // Nothing on this child will ever resolve the waiter; recycle it like
-        // the prompt-ack timeout path so the next request gets a fresh child.
-        await this.destroyAndWait("session-unresponsive", true);
-        throw new WebRpcError("The OMP session stopped responding and was reset.", "session_unresponsive");
+        // Nothing on this child will ever resolve the waiter; the `finally`
+        // releases the in-flight flag so the next attempt is not reported as
+        // busy. The child itself stays unless it has been silent past
+        // STALL_DESTROY_MS — then the liveness watchdog disposes it; otherwise
+        // a later `/mcp list` simply retries.
+        await this.destroyIfStalled();
+        throw slowSessionError();
       }
       throw error;
     } finally {
@@ -2141,7 +2290,94 @@ export class AgentSessionWrapper {
   }
 
   private async getStateWithTimeout(): Promise<RpcSessionState> {
-    return this.proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS);
+    return this.sendRpc<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS);
+  }
+
+  /**
+   * Single command choke point for the wrapper. Every successful answer — and
+   * every `RpcCommandError`, because omp answered — is positive evidence that
+   * the child's event loop is alive, which is exactly what the stall watchdog
+   * needs. Timeouts are not evidence and deliberately do not touch the clock.
+   */
+  private async sendRpc<T = unknown>(
+    command: { type: string; [key: string]: unknown },
+    timeoutMs?: number,
+    onReply?: (success: boolean) => void,
+  ): Promise<T> {
+    try {
+      const result = await this.proc.sendCommand<T>(command, timeoutMs, onReply);
+      this.lastEvidenceAt = Date.now();
+      return result;
+    } catch (error) {
+      if (error instanceof RpcCommandError) this.lastEvidenceAt = Date.now();
+      throw error;
+    }
+  }
+
+  /**
+   * Bounded command for the control paths: a timeout answers `session_slow`
+   * instead of pinning the request forever, and only the liveness watchdog may
+   * dispose the child. A child the watchdog *did* dispose never ran the frame,
+   * so the error then carries no `details` and clients fall back to their
+   * normal rollback (the text stays recoverable).
+   */
+  private async sendControl<T = unknown>(
+    command: { type: string; [key: string]: unknown },
+    timeoutMs: number,
+    timeoutDetails?: Record<string, unknown>,
+    onReply?: (success: boolean) => void,
+  ): Promise<T> {
+    try {
+      return await this.sendRpc<T>(command, timeoutMs, onReply);
+    } catch (error) {
+      if (!(error instanceof RpcCommandTimeoutError)) throw error;
+      if (this.destroyIfStalled()) throw slowSessionError();
+      throw slowSessionError(timeoutDetails);
+    }
+  }
+
+  /**
+   * Liveness watchdog, called only from a command-timeout branch. A timeout
+   * normally means "busy" (omp blocks its loop for tens of seconds); it means
+   * "wedged" only when the child has produced no frame and answered no command
+   * for `STALL_DESTROY_MS`. That child is disposed through the regular exit
+   * path: the exited-session map gets a `detail: "stalled"` record which
+   * `GET /api/sessions/[id]/state` serves, while `GET /api/agent/[id]` only
+   * sees `{running:false}` — exactly like a process crash.
+   *
+   * Returns whether the child was disposed.
+   */
+  private destroyIfStalled(): boolean {
+    if (STALL_DESTROY_MS <= 0 || !this.isAlive()) return false;
+    if (Date.now() - this.lastEvidenceAt < STALL_DESTROY_MS) return false;
+    const minutes = Math.round(STALL_DESTROY_MS / 60_000);
+    const idleFor = Math.round((Date.now() - this.lastEvidenceAt) / 1000);
+    console.warn(`[omp-web] omp child for session ${this._sessionId || "(new)"} produced no evidence of life for ${idleFor}s (>= ${minutes} min); disposing the stalled child.`);
+    if (this._sessionId) {
+      // Same record shape as handleProcessExit so every exited-session consumer
+      // (badges, resume prompts) treats it as the child being gone.
+      getExitedMap().set(this._sessionId, {
+        id: this._sessionId,
+        cwd: this.cwd,
+        ...(this.host.id === LOCAL_HOST_ID ? {} : { hostId: this.host.id }),
+        at: Date.now(),
+        code: null,
+        signal: null,
+        detail: "stalled",
+      });
+    }
+    this.emit({
+      type: "notice",
+      level: "error",
+      message: "The omp process for this session stopped responding and was stopped; the next message starts it again. The run may have been interrupted.",
+    });
+    // Let a client mid-stream stop spinning now, like a process exit would.
+    if (this.streaming || this.promptRunning) this.emit({ type: "agent_end", isTerminal: true, messages: [] });
+    if (this.streaming || this.promptRunning || this.unsettled) {
+      this.publishNotifications({ type: "process_exit", detail: "stalled" });
+    }
+    this.destroy();
+    return true;
   }
 
   /** After branch/new_session/switch_session the child is on a different
@@ -2391,6 +2627,9 @@ export class AgentSessionWrapper {
       }
     } finally {
       this.restarting = false;
+      // The replacement answered its handshake: the stall clock starts here, so
+      // the disposed old child's silence never counts against the new one.
+      this.lastEvidenceAt = Date.now();
     }
     notifyRunningChange();
   }
@@ -2466,8 +2705,15 @@ export class AgentSessionWrapper {
     };
   }
 
-  /** `origin`: the command a caller submitted through `send`; marked once its native message write begins. */
-  private async sendNativeMessageCommand<T = unknown>(command: { type: string; [key: string]: unknown }, timeoutMs?: number, origin?: object): Promise<T> {
+  /** `origin`: the command a caller submitted through `send`; marked once its native message write begins.
+   *  `timeoutDetails`: a timeout means the frame may already be in omp's stdin, so the error names what may
+   *  already have happened instead of leaving clients to roll back and resend. */
+  private async sendNativeMessageCommand<T = unknown>(
+    command: { type: string; [key: string]: unknown },
+    timeoutMs?: number,
+    origin?: object,
+    timeoutDetails?: Record<string, unknown>,
+  ): Promise<T> {
     const message = IMAGE_BEARING_COMMANDS.has(command.type);
     const proof = message && !this.messageReplacement && !this.hasPendingMessageCommands()
       ? watchReplacement(this, command, this.nativeQueuedMessages, this.messageCommandGeneration, false,
@@ -2481,7 +2727,7 @@ export class AgentSessionWrapper {
     const generation = this.messageCommandGeneration;
     try {
       const replacement = proof ?? this.messageReplacement;
-      const result = await this.proc.sendCommand<T>(command, timeoutMs, message && replacement
+      const result = await this.sendRpc<T>(command, timeoutMs, message && replacement
         ? (_ok, id) => replacement.replied(proof ? command : origin ?? command, id)
         : undefined);
       if (message && isRecord(result) && result.agentInvoked === false) {
@@ -2496,6 +2742,15 @@ export class AgentSessionWrapper {
     } catch (error) {
       proof?.stop();
       if (message && error instanceof RpcCommandError) this.confirmMessageCommandGeneration(generation);
+      // Only callers that name the uncertainty translate the timeout here; the
+      // prompt path keeps the raw error because its own catch owns the run flags.
+      if (timeoutDetails && error instanceof RpcCommandTimeoutError) {
+        if (this.linkLostDuring(error)) throw this.hostOfflineError("unknown");
+        // A child the watchdog disposed never ran the frame: report a definite
+        // failure so the client recovers the text. Otherwise the frame sits in
+        // omp's stdin and the message may still be delivered.
+        throw this.destroyIfStalled() ? slowSessionError() : slowSessionError(timeoutDetails);
+      }
       throw error;
     } finally {
       if (message) this.pendingMessageCommands -= 1;
@@ -2507,6 +2762,9 @@ export class AgentSessionWrapper {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     if (this.mcpListInFlight) throw new WebRpcError("MCP management is in progress. Try again when it finishes.", "session_busy");
     if (!this.isAlive()) throw new Error("Session is no longer running");
+    if (this.pendingCommands >= MAX_PENDING_COMMANDS) {
+      throw new WebRpcError("Too many commands are in flight for this session", "session_busy");
+    }
     if (this.hostDown() || this.oldChildExiting) throw this.hostOfflineError("refused");
     if (typeof command.type === "string" && command.type.startsWith("abort")) {
       console.info("[omp-web] cancellation-command", JSON.stringify({ sessionId: this._sessionId, type: command.type, at: new Date().toISOString() }));
@@ -2583,20 +2841,36 @@ export class AgentSessionWrapper {
           }
           if (ack?.agentInvoked === false) return ack;
         } catch (error) {
+          if (error instanceof RpcCommandTimeoutError) {
+            if (this.linkLostDuring(error)) throw this.hostOfflineError("unknown");
+            // Busy, not dead: omp may simply be blocked inside the run this
+            // frame started, and the frame may already sit in its stdin. Never
+            // recycle the child (that killed the run and made omp record a
+            // `dispose`) and never declare the prompt "not started": keep the
+            // optimistic run state and let agent_start/agent_end — or the
+            // deadline checked in buildWebState — settle it. The client gets
+            // `maybeStarted` and keeps its send lock until a frame or a
+            // successful get_state arrives. A child with no evidence of life
+            // for STALL_DESTROY_MS is the one exception (see watchdog).
+            const stalled = this.destroyIfStalled();
+            if (!stalled) {
+              this.awaitingAgentStart = true;
+              this.awaitingAgentStartDeadline = Date.now() + AWAITING_AGENT_START_TIMEOUT_MS;
+            }
+            if (!streamingBehavior) notifyRunningChange();
+            // A child the watchdog disposed never ran the frame: report a
+            // definite failure so the client rolls back and recovers the text
+            // instead of waiting for a run that cannot exist. Otherwise the
+            // frame sits in omp's stdin and the message may still run.
+            throw stalled ? slowSessionError() : slowSessionError({ maybeStarted: true });
+          }
           this.promptRunning = false;
           this.awaitingAgentStart = false;
           this.awaitingAgentStartDeadline = 0;
           this.streaming = false;
           this.clearLiveSnapshots();
           notifyRunningChange();
-          if (error instanceof RpcCommandTimeoutError) {
-            if (this.linkLostDuring(error)) throw this.hostOfflineError("unknown");
-            // The child took the frame but never acked it, so nothing will ever
-            // report this run: recycle the unacknowledged prompt. A read-only
-            // get_state timeout deliberately does not take this destructive path.
-            await this.destroyAndWait("session-unresponsive", true);
-            throw new WebRpcError("The OMP session stopped responding and was reset.", "session_unresponsive");
-          }
+
           throw error;
         } finally {
           if (!streamingBehavior) {
@@ -2612,11 +2886,14 @@ export class AgentSessionWrapper {
         // there is no live turn to steer anyway, so it joins the follow-up
         // queue like a prompt would.
         if (type === "steer" && this.bashRunning && !this.streaming) return await this.queueWhileShellRunning(command);
+        // The frame is written before the ack is awaited: a timeout means it
+        // may already be in omp's stdin, so the message may still be delivered.
+        // Reporting "not sent" made clients roll back and resend it twice.
         await this.sendNativeMessageCommand({
           type,
           message: command.message as string,
           ...(toImageContents(command.images) ? { images: toImageContents(command.images) } : {}),
-        }, undefined, command);
+        }, PROMPT_ACK_TIMEOUT_MS, command, { maybeStarted: true });
         return null;
       }
 
@@ -2624,7 +2901,7 @@ export class AgentSessionWrapper {
       case "promote_queued_message": {
         // Queue mutations are synchronous control operations, like get_state.
         // Expiry must not abort unrelated work or replay a possibly applied mutation.
-        const result = await this.proc.sendCommand(command as { type: string }, GET_STATE_TIMEOUT_MS);
+        const result = await this.sendControl(command as { type: string }, GET_STATE_TIMEOUT_MS);
         return result ?? null;
       }
 
@@ -2635,7 +2912,10 @@ export class AgentSessionWrapper {
         this.responseObserved = false;
         this.responseRunActive = false;
         const result = await this.withFinalRunningNotification(async () => {
-          const response: unknown = await this.proc.sendCommand({ type });
+          // The abort frame may already have reached omp without omp managing
+          // to confirm it: never report this as done, and keep the run flags
+          // (the run may still be live and reporting frames).
+          const response = await this.sendControl({ type }, PROMPT_ACK_TIMEOUT_MS, { abortUnconfirmed: true });
           // If the prompt was aborted before the agent loop started, no
           // agent_end will arrive to clear the flag; the streaming flag still
           // tracks a live turn that ends with its own agent_end.
@@ -2654,22 +2934,24 @@ export class AgentSessionWrapper {
       }
 
       case "get_state": {
+        // The 5 s bound belongs to this request only. A busy child (omp blocks
+        // its loop for tens of seconds on big sessions) must keep running and
+        // keep the run it is executing; clients get `session_slow` and retry
+        // the poll. Only the liveness watchdog may dispose a child that has
+        // been silent past STALL_DESTROY_MS.
         try {
-          const state = await this.proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS);
+          const state = await this.sendControl<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS);
           return this.buildWebState(state);
         } catch (error) {
-          if (error instanceof RpcCommandTimeoutError) {
-            // This is only an observer poll. A busy event loop or delayed RPC
-            // response is not authority to stop generation or a pending tool.
+          if (error instanceof WebRpcError && error.code === SESSION_SLOW_CODE) {
             console.warn("[omp-web] status-query-timeout", JSON.stringify({ sessionId: this._sessionId, timeoutMs: GET_STATE_TIMEOUT_MS, running: this.isRunning(), action: "preserved", at: new Date().toISOString() }));
-            throw new WebRpcError("The OMP status query timed out. The session was left running; retry shortly.", "session_state_timeout");
           }
           throw error;
         }
       }
 
       case "get_skill_diagnostics": {
-        const result = await this.proc.sendCommand<unknown>({ type: "get_skill_diagnostics" }, GET_STATE_TIMEOUT_MS);
+        const result = await this.sendControl<unknown>({ type: "get_skill_diagnostics" }, GET_STATE_TIMEOUT_MS);
         return this.requireSkillDiagnostics(result);
       }
 
@@ -2677,7 +2959,7 @@ export class AgentSessionWrapper {
         if (typeof command.enabled !== "boolean") {
           throw new WebRpcError("enabled must be a boolean", "invalid_skill_startup_diagnostics");
         }
-        const result = await this.proc.sendCommand<unknown>({
+        const result = await this.sendControl<unknown>({
           type: "set_skill_startup_diagnostics",
           enabled: command.enabled,
         }, GET_STATE_TIMEOUT_MS);
@@ -2686,7 +2968,7 @@ export class AgentSessionWrapper {
 
       case "set_model": {
         const { provider, modelId } = command as { provider: string; modelId: string };
-        const model = await this.proc.sendCommand<OmpModel>({ type: "set_model", provider, modelId });
+        const model = await this.sendControl<OmpModel>({ type: "set_model", provider, modelId }, GET_STATE_TIMEOUT_MS);
         invalidateModelsCache();
         this.invalidateSessionLists();
         return { id: model.id, provider: model.provider };
@@ -2694,14 +2976,14 @@ export class AgentSessionWrapper {
 
       case "set_fast_mode": {
         const enabled = command.enabled === true;
-        const result = await this.proc.sendCommand<{ enabled?: boolean; active?: boolean }>({ type: "set_fast_mode", enabled });
+        const result = await this.sendControl<{ enabled?: boolean; active?: boolean }>({ type: "set_fast_mode", enabled }, GET_STATE_TIMEOUT_MS);
         this.fastModeEnabled = result?.enabled ?? enabled;
         return { enabled: this.fastModeEnabled, active: result?.active ?? false };
       }
 
       case "set_slow_mode": {
         const enabled = command.enabled === true;
-        const result = await this.proc.sendCommand<{ enabled?: boolean }>({ type: "set_slow_mode", enabled });
+        const result = await this.sendControl<{ enabled?: boolean }>({ type: "set_slow_mode", enabled }, GET_STATE_TIMEOUT_MS);
         return { enabled: result?.enabled ?? enabled };
       }
 
@@ -2715,7 +2997,7 @@ export class AgentSessionWrapper {
         if (this.bashRunning) {
           throw new Error("Cannot fork while a shell command is running");
         }
-        const result = await this.proc.sendCommand<{ text: string; cancelled: boolean }>({
+        const result = await this.sendRpc<{ text: string; cancelled: boolean }>({
           type: "branch",
           entryId: command.entryId as string,
         });
@@ -2727,7 +3009,10 @@ export class AgentSessionWrapper {
 
       case "new_session":
       case "switch_session": {
-        const result = await this.proc.sendCommand<{ cancelled: boolean }>(command as { type: string });
+        // Switching writes a session file before answering, so it gets the
+        // generous prompt-ack bound instead of the 5 s poll bound — but it is
+        // still bounded: a wedged child must not pin the request forever.
+        const result = await this.sendControl<{ cancelled: boolean }>(command as { type: string }, PROMPT_ACK_TIMEOUT_MS);
         if (!result.cancelled) {
           const newSessionId = await this.refreshIdentityAfterSessionChange();
           return { cancelled: false, newSessionId };
@@ -2742,7 +3027,7 @@ export class AgentSessionWrapper {
             this.streamSequence += 1;
             notifyRunningChange();
             try {
-              const result = await this.proc.sendCommand<CompactionResultLike>({
+              const result = await this.sendRpc<CompactionResultLike>({
                 type: "compact",
                 ...(command.customInstructions ? { customInstructions: command.customInstructions } : {}),
               });
@@ -2761,32 +3046,32 @@ export class AgentSessionWrapper {
       case "abort_compaction":
         // No dedicated RPC command; a plain abort cancels the in-flight turn
         // including compaction work.
-        await this.withFinalRunningNotification(() => this.proc.sendCommand({ type: "abort" }));
+        await this.withFinalRunningNotification(() => this.sendControl({ type: "abort" }, PROMPT_ACK_TIMEOUT_MS, { abortUnconfirmed: true }));
         return null;
 
       case "set_session_name": {
         const name = (command.name as string | undefined)?.trim();
         if (!name) throw new Error("Session name cannot be empty");
-        await this.proc.sendCommand({ type: "set_session_name", name });
+        await this.sendControl({ type: "set_session_name", name }, GET_STATE_TIMEOUT_MS);
         this._sessionName = name;
         this.invalidateSessionLists();
         return null;
       }
 
       case "get_session_stats": {
-        const stats = await this.proc.sendCommand<Omit<SessionStatsInfo, "sessionName">>({ type: "get_session_stats" });
+        const stats = await this.sendControl<Omit<SessionStatsInfo, "sessionName">>({ type: "get_session_stats" }, GET_STATE_TIMEOUT_MS);
         return { ...stats, sessionName: this._sessionName };
       }
 
       case "get_last_assistant_text": {
-        const data = await this.proc.sendCommand<{ text: string | null }>({ type: "get_last_assistant_text" });
+        const data = await this.sendControl<{ text: string | null }>({ type: "get_last_assistant_text" }, GET_STATE_TIMEOUT_MS);
         return { text: data.text ?? "" };
       }
 
       case "get_commands": {
-        const data = await this.proc.sendCommand<{ commands: RpcAvailableSlashCommand[] }>({
+        const data = await this.sendControl<{ commands: RpcAvailableSlashCommand[] }>({
           type: "get_available_commands",
-        });
+        }, GET_STATE_TIMEOUT_MS);
         return { ...data, commands: data.commands.filter((command) => command.name !== SESSION_EDIT_COMMAND) };
       }
 
@@ -2803,8 +3088,9 @@ export class AgentSessionWrapper {
         if (("answers" in rest || pendingAsk) && !isAskAnswers(rest.answers) && !(pendingAsk && rest.cancelled === true)) {
           throw new WebRpcError("Invalid ask dialog answers", "invalid_ask_answers");
         }
-        const wasPending = this.pendingUiRequests.has(id);
-        this.forgetPendingUiRequest(id);
+        // Forgets the pending dialog and retracts its notification for other
+        // tabs/devices; the cancel frame below settles it in other tabs.
+        const wasPending = this.settlePendingUiRequest(id);
         const serverRequest = this.serverUiRequests.get(id);
         if (serverRequest) {
           this.serverUiRequests.delete(id);
@@ -2839,7 +3125,7 @@ export class AgentSessionWrapper {
           // `isStreaming`. Read it then: an agent_end in the same batch is
           // applied before this await resumes.
           let deferred = this.streaming;
-          const result = await this.proc.sendCommand<BashResultInfo>({ type: "bash", command: command.command as string }, undefined, () => { deferred = this.streaming; });
+          const result = await this.sendRpc<BashResultInfo>({ type: "bash", command: command.command as string }, undefined, () => { deferred = this.streaming; });
           return { ...result, deferred };
         } finally {
           this.bashRunning = false;
@@ -2873,7 +3159,7 @@ export class AgentSessionWrapper {
           return null;
         }
         // Applied as the successful reply is read, before a call in the same host-link batch is routed.
-        await this.proc.sendCommand({ type: "set_host_tools", tools: merged }, undefined, (success) => {
+        await this.sendControl({ type: "set_host_tools", tools: merged }, GET_STATE_TIMEOUT_MS, undefined, (success) => {
           if (!success) return;
           this.hostToolNames = new Set(merged.map((t) => t.name as string));
           this.registeredHostTools = valid.filter((tool) => !AGENT_TOOL_NAMES.has(tool.name as string));
@@ -2910,7 +3196,7 @@ export class AgentSessionWrapper {
           this.registeredHostUriSchemes = schemes;
           return null;
         }
-        await this.proc.sendCommand({ type: "set_host_uri_schemes", schemes }, undefined, (success) => {
+        await this.sendControl({ type: "set_host_uri_schemes", schemes }, GET_STATE_TIMEOUT_MS, undefined, (success) => {
           if (!success) return;
           this.registeredHostUriSchemes = schemes;
           this.hostUriSchemes = new Map();
@@ -2936,11 +3222,24 @@ export class AgentSessionWrapper {
             this.responseRunActive = false;
             this.streamSequence += 1;
           }
-          const result: unknown = await this.sendNativeMessageCommand(
-            command as { type: string },
-            type === "predict_word" ? PREDICT_WORD_TIMEOUT_MS : undefined,
-            command,
-          );
+          const timeoutMs = type === "predict_word"
+            ? PREDICT_WORD_TIMEOUT_MS
+            : UNBOUNDED_PASSTHROUGH_COMMANDS.has(type)
+              ? undefined
+              : type.startsWith("abort")
+                ? PROMPT_ACK_TIMEOUT_MS
+                : GET_STATE_TIMEOUT_MS;
+          // `abort_and_prompt` writes the frame before the ack: a timeout means
+          // the abort may already have landed and the new prompt may already be
+          // running, so it must not be reported as "not sent".
+          const timeoutDetails = type === "abort_and_prompt" ? { maybeStarted: true } : undefined;
+          const result: unknown = timeoutMs === undefined
+            ? await this.sendRpc(command as { type: string })
+            // A message-bearing passthrough (`abort_and_prompt`) keeps the native
+            // write bookkeeping the replacement watcher depends on.
+            : IMAGE_BEARING_COMMANDS.has(type)
+              ? await this.sendNativeMessageCommand(command as { type: string }, timeoutMs, command, timeoutDetails)
+              : await this.sendControl(command as { type: string }, timeoutMs, timeoutDetails);
           if (type === "set_thinking_level") this.invalidateSessionLists();
           return result ?? null;
         }
@@ -2962,11 +3261,13 @@ export class AgentSessionWrapper {
    */
   private async queueWhileShellRunning(command: Record<string, unknown>): Promise<unknown> {
     const images = toImageContents(command.images);
+    // Same rule as `steer`: the follow_up frame reaches omp's stdin before the
+    // ack does, so a timeout may mean the message is already queued.
     await this.sendNativeMessageCommand({
       type: "follow_up",
       message: command.message as string,
       ...(images ? { images } : {}),
-    }, undefined, command);
+    }, PROMPT_ACK_TIMEOUT_MS, command, { maybeStarted: true });
     return { queued: true, queue: "followUp", reason: "shellRunning" };
   }
 
@@ -3121,6 +3422,18 @@ function getRegistry(): Map<string, AgentSessionWrapper> {
 function getLocks(): Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> {
   if (!globalThis.__ompStartLocks) globalThis.__ompStartLocks = new Map();
   return globalThis.__ompStartLocks;
+}
+
+/**
+ * Whether this server is currently spawning or adopting a child for
+ * `sessionId`. Between the host's spawn and `registerSession` the wrapper
+ * registry knows nothing about the child while its `--resume` line already
+ * names the file, so ownership detection must count the in-flight start as
+ * ours — otherwise a cold start reports its own child as a foreign writer
+ * (409 on the next command, an `elsewhere` badge in the list).
+ */
+export function isSessionStarting(sessionId: string): boolean {
+  return getLocks().has(sessionId);
 }
 
 export function getRpcSession(sessionId: string): AgentSessionWrapper | undefined {
