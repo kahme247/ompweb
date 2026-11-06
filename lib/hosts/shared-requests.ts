@@ -30,7 +30,8 @@ export class SharedRequests {
   private readonly completed = new Set<string>();
   private readonly registrations = new Map<string, Registration>();
   private lastPrompt: string | null = null;
-  /** Name -> the advertised definition (JSON): a call goes only to a server registering exactly that definition. */
+  /** Name -> the definition (JSON) last advertised to omp, kept after a removal: a call omp made just before it was
+   * withdrawn still names that definition. A call goes only to a server registering exactly the one it pinned. */
   private toolDefs = new Map<string, string>();
   private toolUnion = "[]";
   private schemeUnion = "[]";
@@ -110,7 +111,7 @@ export class SharedRequests {
       for (const tool of registration?.tools ?? []) if (!tools.has(tool.name as string)) tools.set(tool.name as string, tool);
       for (const { scheme, writable } of registration?.schemes ?? []) schemes.set(scheme, (schemes.get(scheme) ?? false) || writable);
     }
-    this.toolDefs = new Map([...tools].map(([name, tool]) => [name, JSON.stringify(tool)]));
+    for (const [name, tool] of tools) this.toolDefs.set(name, JSON.stringify(tool));
     const mergedTools = [...tools.values()].sort((a, b) => String(a.name).localeCompare(String(b.name)));
     const mergedSchemes = [...schemes].sort(([a], [b]) => a.localeCompare(b)).map(([scheme, writable]) => ({ scheme, writable }));
     const toolUnion = JSON.stringify(mergedTools), schemeUnion = JSON.stringify(mergedSchemes);
@@ -122,8 +123,6 @@ export class SharedRequests {
     if (!this.deps.isUp(id) || !this.deps.members().includes(id)) return false;
     const registration = this.registrations.get(id);
     if (call.frame.type === "host_tool_call") {
-      // Registration was briefly missing when the call arrived: pin the definition advertised again once it returns.
-      call.def ??= this.toolDefs.get(call.frame.toolName as string);
       return registration?.tools.some(tool => tool.name === call.frame.toolName && JSON.stringify(tool) === call.def) ?? false;
     }
     const scheme = typeof call.frame.url === "string" ? call.frame.url.split(":", 1)[0] : "";
