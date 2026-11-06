@@ -36,7 +36,9 @@ export function commandErrorResponse(error: unknown): Response {
   }
   // host_offline falls through to apiErrorResponse: 503 {hostOffline: true}.
   if (error instanceof WebRpcError && error.code !== "host_offline") {
-    return Response.json({ error: error.message, code: error.code }, { status: 400 });
+    // `maybeStarted`/`abortUnconfirmed` must reach the client: without them a
+    // timeout looks like "not sent".
+    return Response.json({ error: error.message, code: error.code, ...error.details }, { status: 400 });
   }
   if (error instanceof RpcCommandError) {
     return Response.json({ error: error.message, code: error.code ?? "rpc_command_failed" }, { status: 400 });
@@ -53,11 +55,17 @@ function sendFences(): Map<string, Promise<void>> {
   return (globalThis.__ompSendFences ??= new Map());
 }
 
+export interface RunAgentCommandOptions {
+  /** Upload receipts the outbox already proved, so its own retry is not re-checked. */
+  trustedUploads?: OutboxUploadReceipt[];
+}
+
 /** Everything POST /api/agent/[id] does once the body is parsed; shared with
  * the browser socket. `owner`: the caller's web session (lib/web-auth.ts
  * `requestOwner`), whose uploads a prompt may attach. Never throws: failures
  * become `commandErrorResponse`. */
-export async function runAgentCommand(id: string, body: unknown, advisor: boolean, owner: string, trustedUploads?: OutboxUploadReceipt[]): Promise<Response> {
+export async function runAgentCommand(id: string, body: unknown, advisor: boolean, owner: string, options: RunAgentCommandOptions = {}): Promise<Response> {
+  const trustedUploads = options.trustedUploads;
   let release = () => {}; // frees this command's send fence; idempotent
   try {
     const command = body as { type?: unknown; [key: string]: unknown } | null;
