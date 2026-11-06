@@ -664,8 +664,9 @@ async function deliver(entry: Row): Promise<Outcome> {
     const body = await response.json() as { data?: { agentInvoked?: boolean } };
     if (row(current.id)?.state === "failed") return "next";
     const handOff = body.data?.agentInvoked === false ? {} : await replacement.handOff();
+    // Proven dropped (spec O6) leaves the child untainted, like a delivery: no renewal before the next message.
+    if (!handOff.error || handOff.mayHaveBeenSent === false) wrapper.confirmMessageCommandGeneration((priorWrapper === wrapper ? generation : 0) + 1);
     if (handOff.error) return fail(current, handOff.error, handOff.mayHaveBeenSent === true);
-    wrapper.confirmMessageCommandGeneration((priorWrapper === wrapper ? generation : 0) + 1);
     retire(current.id);
     publish(sessionId);
     return "next";

@@ -244,6 +244,8 @@ export const HANDOFF_FALLBACK_MS = 2 * 60_000;
 type HandOff = { error?: string; mayHaveBeenSent?: boolean };
 export interface MessageReplacementWatch {
   handOff(): Promise<HandOff>;
+  /** omp answered `command` under wire `id`: its `prompt_result` can settle the hand-off. */
+  replied(command: object, id: string): void;
   stop(): void;
 }
 const CHILD_EXITED: HandOff = { error: "omp exited before it showed the message", mayHaveBeenSent: true };
@@ -288,7 +290,9 @@ function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, 
   let checkingExpansion = false;
   const boundary = previousEntryIds ? new Set(previousEntryIds) : null;
   const openedUserMessages = new Set<string>();
+  let userMessageSeen = false;
   let timer: NodeJS.Timeout | undefined;
+  let commandId: string | undefined;
   let expansionRetry: NodeJS.Timeout | undefined;
   const expectedText = () => typeof command.message === "string" && command.message ? command.message : Array.isArray(command.images) && command.images.length ? "[Image]" : "";
   const finish = (outcome: HandOff) => {
@@ -336,6 +340,8 @@ function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, 
     if (!ownsWindow() && event.type !== "process_exit") return;
     const text = expectedText();
     if (echoDebt === undefined) echoDebt = initialQueue.filter((item) => item === text).length;
+    if ((event.type === "message_start" || event.type === "message_end") && isRecord(event.message)
+      && (event.message.role === "user" || (event.message.role === "custom" && event.message.attribution === "user"))) userMessageSeen = true;
     if (event.type === "message_start" && typeof event.messageId === "string" && isRecord(event.message) && event.message.role === "user") {
       openedUserMessages.add(event.messageId);
     } else if (event.type === "queue_update") {
@@ -359,7 +365,16 @@ function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, 
         void checkExpandedUser(event.message);
       }
     } else if (event.type === "process_exit") finish(CHILD_EXITED);
-    else if (event.type === "agent_end" && event.isTerminal !== false && !wrapper.isAlive()) finish(CHILD_EXITED);
+    else if (event.type === "prompt_result" && commandId !== undefined && event.id === commandId && !(userMessageSeen && text.trimStart().startsWith("/"))) {
+      // omp finished this prompt with no echo, so none will come (an expanded slash template is left to its context check).
+      // It reached no transcript when omp showed no user message (an input hook may rewrite the text) and ran no turn
+      // for it: Stop or a refusal during setup, an aborted or failed run. A slash command may have acted on its own.
+      const dropped = !userMessageSeen && !text.trimStart().startsWith("/")
+        && (event.agentInvoked === false || event.status === "aborted" || event.status === "error");
+      const reason = isRecord(event.error) && typeof event.error.message === "string" ? event.error.message
+        : dropped ? "Stopped before omp showed it" : "omp finished this message without showing it";
+      finish({ error: reason, mayHaveBeenSent: !dropped });
+    } else if (event.type === "agent_end" && event.isTerminal !== false && !wrapper.isAlive()) finish(CHILD_EXITED);
     // Session-wide prompt failures may belong to an older run; only this command's reply can prove rejection.
   }, { internal: true });
   return {
@@ -370,6 +385,7 @@ function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, 
       const outcome = await promise;
       return ownsWindow() ? outcome : ambiguous;
     },
+    replied(watched, id) { if (watched === command) commandId = id; },
     stop() { stopped = true; clearTimeout(timer); clearTimeout(expansionRetry); detach(); },
   };
 }
@@ -2299,6 +2315,7 @@ export class AgentSessionWrapper {
     this.messageReplacement = proof;
     return {
       handOff: proof.handOff,
+      replied: proof.replied,
       stop: () => {
         proof.stop();
         if (this.messageReplacement === proof) this.messageReplacement = null;
@@ -2320,13 +2337,16 @@ export class AgentSessionWrapper {
     }
     const generation = this.messageCommandGeneration;
     try {
-      const result = await this.proc.sendCommand<T>(command, timeoutMs);
+      const replacement = proof ?? this.messageReplacement;
+      const result = await this.proc.sendCommand<T>(command, timeoutMs, message && replacement
+        ? (_ok, id) => replacement.replied(proof ? command : origin ?? command, id)
+        : undefined);
       if (message && isRecord(result) && result.agentInvoked === false) {
         this.confirmMessageCommandGeneration(generation);
         proof?.stop();
       } else if (proof) {
         void proof.handOff().then((outcome) => {
-          if (!outcome.error) this.confirmMessageCommandGeneration(generation);
+          if (!outcome.error || outcome.mayHaveBeenSent === false) this.confirmMessageCommandGeneration(generation);
         }).finally(proof.stop);
       }
       return result;
