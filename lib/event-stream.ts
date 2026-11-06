@@ -1,6 +1,8 @@
 "use client";
 
 import type { BrowserTransport, ConnectionDiagnostics, EventStreamChannel } from "./event-stream-protocol";
+import { registerNotificationWorker } from "./notification-client";
+import type { OutboxEntry, OutboxMode } from "./types";
 
 export type { EventStreamChannel } from "./event-stream-protocol";
 
@@ -57,12 +59,39 @@ export interface CommandReply {
 type CommandMessage = { cmd: number; http: true } | ({ cmd: number } & Omit<CommandReply, "via">);
 
 /** The worker about an upload: progress (the bytes the host has), its failure, or `http` (SSE mode: the tab uploads it). */
-type UploadMessage = { up: string; received: number; done: boolean } | { up: string; error: { status: number; code: string; message: string } } | { up: string; http: true };
+type UploadMessage = { up: string; received: number; done: boolean; proof?: string } | { up: string; error: { status: number; code: string; message: string } } | { up: string; http: true };
 
 type DiagnosticsMessage = { diag: number; data: ConnectionDiagnostics };
 
 /** A diagnostics poll the worker has not answered by then resolves null. */
 const DIAGNOSTICS_TIMEOUT_MS = 2000;
+
+/** A message in this browser's outbox (the worker's, in IndexedDB): its first leg, until the web server has stored it. */
+export interface LocalOutboxEntry {
+  id: string;
+  sessionId: string;
+  /** Captured at submission: never rebound to a later installation or sign-in. */
+  scope: string;
+  mode: OutboxMode;
+  advisor?: boolean;
+  message: string;
+  images?: { type: "image"; data: string; mimeType: string }[];
+  uploads?: string[];
+  uploadProofs?: Record<string, string>;
+  createdAt: number;
+  /** Allocated atomically by IndexedDB acceptance; absent only on preexisting rows. */
+  enqueueOrder?: number;
+  /** failed: the server refused outbox_add for good (spec O6). */
+  state: "sending" | "failed";
+  /** The server's error text for "failed". */
+  error?: string;
+}
+
+/** Every local entry (on subscribe once known, then on every change), or one the server answered 200 for. */
+export type OutboxEvent = { entries: LocalOutboxEntry[] } | { stored: OutboxEntry };
+
+/** The worker about the outbox: an add committed, the whole list, or one the server stored. */
+type OutboxMessage = { outboxAdded: number; error?: string } | { outboxDropped: number; error?: string } | { outbox: LocalOutboxEntry[]; partial?: true } | { outboxStored: OutboxEntry };
 
 type WakeReason = "init" | "visible" | "hidden" | "online" | "network";
 
@@ -96,18 +125,31 @@ class Transport {
   private nextId = 1;
   private readonly streams = new Map<number, MultiplexedEventStream>();
   private readonly commands = new Map<number, (reply: CommandReply | null) => void>();
+  private readonly outboxWrites = new Map<number, { resolve: () => void; reject: (error: Error) => void }>();
   private readonly uploads = new Map<string, (message: UploadMessage) => void>();
   private readonly diagnostics = new Map<number, (data: ConnectionDiagnostics | null) => void>();
   mode: BrowserTransport = "sse";
 
   constructor(private readonly port: WorkerPort) {
     port.onmessage = (event) => {
-      const message = event.data as WorkerMessage | TransportMessage | CommandMessage | UploadMessage | DiagnosticsMessage;
+      const message = event.data as WorkerMessage | TransportMessage | CommandMessage | UploadMessage | DiagnosticsMessage | OutboxMessage;
       if ("transport" in message) this.mode = message.transport;
       else if ("cmd" in message) this.answer(message);
       else if ("up" in message) this.uploads.get(message.up)?.(message);
       else if ("diag" in message) this.diagnostics.get(message.diag)?.(message.data);
-      else this.streams.get(message.id)?.receive(message);
+      else if ("outboxAdded" in message || "outboxDropped" in message) {
+        const n = "outboxAdded" in message ? message.outboxAdded : message.outboxDropped;
+        const pending = this.outboxWrites.get(n);
+        if (message.error !== undefined) pending?.reject(new Error(message.error));
+        else pending?.resolve();
+        this.outboxWrites.delete(n);
+      } else if ("outbox" in message) {
+        outboxEntries = message.outbox;
+        outboxPartial = message.partial === true;
+        for (const listener of outboxListeners) listener({ entries: message.outbox });
+      } else if ("outboxStored" in message) {
+        for (const listener of outboxListeners) listener({ stored: message.outboxStored });
+      } else this.streams.get(message.id)?.receive(message);
     };
     this.holdLifetimeLock();
     window.addEventListener("pagehide", () => {
@@ -116,6 +158,7 @@ class Transport {
       for (const [id, listener] of [...this.uploads]) {
         listener({ up: id, error: { status: 410, code: "upload_failed", message: "The upload failed. Retry it." } });
       }
+      postOutboxOnExit();
       this.port.postMessage({ op: "bye" });
     });
     window.addEventListener("pageshow", (event) => {
@@ -131,6 +174,7 @@ class Transport {
 
   private wake(reason: WakeReason): void {
     this.port.postMessage({ op: "wake", reason, visible: document.visibilityState === "visible", clientId: transportClientId() });
+    if (reason === "online") void registerOutboxSync();
   }
 
   open(channel: EventStreamChannel): MultiplexedEventStream {
@@ -153,6 +197,22 @@ class Transport {
       const n = this.nextId++;
       this.commands.set(n, resolve);
       this.port.postMessage({ op: "cmd", n, req, sessionId, advisor, body, type });
+    });
+  }
+
+  addToOutbox(entry: Omit<LocalOutboxEntry, "state" | "error">): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const n = this.nextId++;
+      this.outboxWrites.set(n, { resolve, reject });
+      this.port.postMessage({ op: "outbox_add", n, entry });
+    });
+  }
+
+  dropFromOutbox(id: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const n = this.nextId++;
+      this.outboxWrites.set(n, { resolve, reject });
+      this.port.postMessage({ op: "outbox_drop", n, id });
     });
   }
 
@@ -227,6 +287,9 @@ class Transport {
       });
     }
     this.commands.clear();
+    // It may have died before committing the change: the caller keeps the draft or held bubble.
+    for (const { reject } of this.outboxWrites.values()) reject(new Error("The message change was not saved. Try again."));
+    this.outboxWrites.clear();
   }
 
   /** Workers cannot see a tab close; a Web Lock held for the tab's lifetime
@@ -289,6 +352,36 @@ class MultiplexedEventStream implements EventStream {
 
 let transport: Transport | null = null;
 
+const outboxListeners = new Set<(event: OutboxEvent) => void>();
+/** The worker's latest list; null until it has told this tab. */
+let outboxEntries: LocalOutboxEntry[] | null = null;
+/** The worker's list may miss another worker's earlier entry: a keepalive from it could overtake that entry. */
+let outboxPartial = false;
+/** Ids this tab added: only these go out on its pagehide (every tab covers its own). */
+const addedHere = new Set<string>();
+/** keepalive request bodies share 64 KiB per page. */
+const KEEPALIVE_BYTES = 64 * 1024;
+
+/** The page is going (spec O2 "Send, then close the tab at once"): each session's oldest unconfirmed entry, if this
+ * tab added it and it fits, goes as a keepalive POST the browser finishes after the page is gone. Only the head, so a
+ * later entry never overtakes it (the server queues by arrival), and none from a partial list, whose head may not be the
+ * real one; the worker or the service worker sends the rest. */
+function postOutboxOnExit(): void {
+  if (outboxPartial) return;
+  let left = KEEPALIVE_BYTES;
+  const sessions = new Set<string>();
+  for (const { id, sessionId, scope, advisor, mode, message, images, uploads, uploadProofs, state, createdAt } of outboxEntries ?? []) {
+    if (state !== "sending" || typeof scope !== "string" || !scope || Date.now() - createdAt > 7 * 24 * 60 * 60 * 1000 || sessions.has(sessionId)) continue;
+    sessions.add(sessionId);
+    if (!addedHere.has(id)) continue;
+    const body = JSON.stringify({ type: "outbox_add", id, scope, mode, message, images, uploads, uploadProofs });
+    const bytes = new Blob([body]).size;
+    if (bytes > left) continue;
+    left -= bytes;
+    fetch(`/api/agent/${encodeURIComponent(sessionId)}${advisor === true ? "?advisor=1" : ""}`, { method: "POST", keepalive: true, headers: { "Content-Type": "application/json" }, body }).catch(() => {});
+  }
+}
+
 function connectTransport(): Transport {
   if (typeof SharedWorker === "function") {
     const worker = new SharedWorker(WORKER_URL, { name: "omp-web-event-stream" });
@@ -328,6 +421,112 @@ export function sendSessionCommand(sessionId: string, req: string, body: string,
   return transport?.mode === "ws" ? transport.command(sessionId, req, body, advisor, type) : null;
 }
 
+/** Same generator as the worker's ids (spec O2). */
+export function newOutboxId(): string {
+  return Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
+}
+
+/** Resolves once the worker has committed the entry to IndexedDB: the composer clears only then. Rejects when storage
+ * is unavailable or fails, or if the worker dies first; the composer keeps its draft. Starts the transport if none. */
+export async function addToOutbox(entry: Omit<LocalOutboxEntry, "state" | "error">): Promise<void> {
+  transport ??= connectTransport();
+  addedHere.add(entry.id);
+  await transport.addToOutbox(entry);
+  void registerOutboxSync();
+}
+
+function supportsOutboxSync(worker: ServiceWorker | null): Promise<boolean> {
+  if (!worker) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const channel = new MessageChannel();
+    const finish = (supported: boolean) => {
+      clearTimeout(timer);
+      channel.port1.close();
+      channel.port2.close();
+      resolve(supported);
+    };
+    const timer = setTimeout(() => finish(false), 1_000);
+    channel.port1.onmessage = ({ data }) => finish(data?.type === "omp-outbox-capability" && data.version === 1);
+    try {
+      worker.postMessage({ type: "omp-outbox-capability" }, [channel.port2]);
+    } catch {
+      finish(false);
+    }
+  });
+}
+
+/** ready may still mean the old push-only worker while its replacement installs. */
+function waitForOutboxWorker(registration: ServiceWorkerRegistration): Promise<boolean> {
+  return new Promise((resolve) => {
+    const checked = new Set<ServiceWorker>();
+    const observed = new Set<ServiceWorker>();
+    const finish = (supported: boolean) => {
+      clearTimeout(timer);
+      registration.removeEventListener("updatefound", check);
+      navigator.serviceWorker.removeEventListener("controllerchange", check);
+      for (const worker of observed) worker.removeEventListener("statechange", check);
+      resolve(supported);
+    };
+    const check = () => {
+      for (const worker of [registration.installing, registration.waiting]) {
+        if (!worker || observed.has(worker)) continue;
+        observed.add(worker);
+        worker.addEventListener("statechange", check);
+      }
+      const worker = registration.active;
+      if (!worker || checked.has(worker)) return;
+      checked.add(worker);
+      void supportsOutboxSync(worker).then((supported) => {
+        if (supported && registration.active === worker) finish(true);
+      });
+    };
+    const timer = setTimeout(() => finish(false), 5_000);
+    registration.addEventListener("updatefound", check);
+    navigator.serviceWorker.addEventListener("controllerchange", check);
+    check();
+  });
+}
+
+/** Background Sync (Chromium only): the service worker sends what IndexedDB still holds once online, with no tab open. */
+async function registerOutboxSync(): Promise<void> {
+  if (!("serviceWorker" in navigator) || !window.isSecureContext) return;
+  try {
+    // A proven active worker works offline; a pre-outbox registration must go through the normal update flow.
+    const existing = await navigator.serviceWorker.getRegistration();
+    if (existing?.active && await supportsOutboxSync(existing.active)) {
+      await (existing as ServiceWorkerRegistration & { sync?: { register(tag: string): Promise<void> } }).sync?.register("omp-outbox");
+      return;
+    }
+    const registration = await registerNotificationWorker() as (ServiceWorkerRegistration & { sync?: { register(tag: string): Promise<void> } }) | null;
+    // Re-registering a recently checked URL can return the old worker without fetching changed script bytes.
+    if (registration?.sync && registration.active === existing?.active) await registration.update();
+    if (registration?.sync && await waitForOutboxWorker(registration)) {
+      await registration.sync.register("omp-outbox");
+    }
+  } catch {
+    // Refused (no permission, private window): the next page that opens sends it.
+  }
+}
+
+/** Resolves only once a browser-held entry is durably removed; Edit/Delete must keep it until this succeeds. */
+export function dropFromOutbox(id: string): Promise<void> {
+  transport ??= connectTransport();
+  return transport.dropFromOutbox(id);
+}
+
+/** Every local entry of every session in submission order: at once if the worker already told this tab, then on every
+ * change; `{ stored }` when the server answered 200 for one (its entry leaves `entries` in the same or next event).
+ * Starts the transport if none, so a chat view alone starts the worker that resends IndexedDB's entries. */
+export function subscribeOutbox(listener: (event: OutboxEvent) => void): () => void {
+  transport ??= connectTransport();
+  void registerOutboxSync();
+  outboxListeners.add(listener);
+  if (outboxEntries) listener({ entries: outboxEntries });
+  return () => {
+    outboxListeners.delete(listener);
+  };
+}
+
 /** A failed upload: the server's (or host's) status and code, or status 0 when the file could not be read. */
 export class UploadFailedError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) {
@@ -338,7 +537,7 @@ export class UploadFailedError extends Error {
 export interface UploadHandle {
   id: string;
   /** Resolves once the host has every byte (synced); rejects with UploadFailedError, or a network error over HTTP. */
-  promise: Promise<void>;
+  promise: Promise<{ proof?: string }>;
   /** Stops it, requests deletion of the staged file, and rejects a pending upload. */
   abort(): void;
 }
@@ -396,17 +595,17 @@ export function uploadFile(
     onProgress(received);
   };
   // One start: the transport is chosen anew each time (it may have changed while the upload waited).
-  const attempt = () => new Promise<void>((resolve, reject) => {
+  const attempt = () => new Promise<{ proof?: string }>((resolve, reject) => {
     const request = new AbortController();
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let deadline = outageAt === null ? null : outageAt + RESUME_GIVE_UP_MS;
-    const finish = (error?: unknown) => {
+    const finish = (error?: unknown, result?: { proof?: string }) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       controller.signal.removeEventListener("abort", cancel);
-      if (error === undefined) resolve();
+      if (error === undefined) resolve(result ?? {});
       else reject(error);
     };
     const cancel = () => {
@@ -447,7 +646,7 @@ export function uploadFile(
     const overHttp = () => {
       if (settled) return;
       viaLink = false;
-      uploadOverHttp(id, file, hostId, report, request.signal).then(() => finish(), finish);
+      uploadOverHttp(id, file, hostId, report, request.signal).then((result) => finish(undefined, result), finish);
     };
     viaLink = link !== null;
     if (!link) return overHttp();
@@ -455,7 +654,7 @@ export function uploadFile(
       if (settled) return;
       if ("http" in message) overHttp();
       else if ("error" in message) finish(new UploadFailedError(message.error.status, message.error.code, message.error.message));
-      else if (report(message.received) && message.done) finish();
+      else if (report(message.received) && message.done) finish(undefined, typeof message.proof === "string" ? { proof: message.proof } : {});
     });
   });
   const promise = (async () => {
@@ -500,12 +699,13 @@ export function discardUpload(id: string, hostId: string): void {
 
 /** POST opens or resumes it at the host's offset; each PUT carries up to HTTP_UPLOAD_BYTES from the offset the server
  * last reported (a 409 `upload_offset` says where to go on from). */
-async function uploadOverHttp(id: string, file: File, hostId: string, onProgress: (received: number) => void, signal: AbortSignal): Promise<void> {
+async function uploadOverHttp(id: string, file: File, hostId: string, onProgress: (received: number) => void, signal: AbortSignal): Promise<{ proof?: string }> {
+  let proof: string | undefined;
   const answer = async (response: Response, from: number): Promise<number> => {
     const body = await response.json().catch((error: unknown) => {
       if (!(error instanceof SyntaxError)) throw error;
       return {};
-    }) as { received?: unknown; error?: string; code?: string };
+    }) as { received?: unknown; proof?: unknown; error?: string; code?: string };
     if (!response.ok && !(response.status === 409 && body.code === "upload_offset")) {
       throw new UploadFailedError(response.status, body.code ?? "upload_failed", body.error ?? `HTTP ${response.status}`);
     }
@@ -514,6 +714,7 @@ async function uploadOverHttp(id: string, file: File, hostId: string, onProgress
     if (!Number.isSafeInteger(received) || received < 0 || received > file.size || (from >= 0 && received === from)) {
       throw new UploadFailedError(response.status, "upload_failed", "The server reported no progress");
     }
+    if (response.ok && received === file.size && typeof body.proof === "string") proof = body.proof;
     onProgress(received);
     return received;
   };
@@ -527,4 +728,5 @@ async function uploadOverHttp(id: string, file: File, hostId: string, onProgress
     const body = file.slice(received, received + HTTP_UPLOAD_BYTES);
     received = await answer(await fetch(`/api/uploads/${id}?offset=${received}`, { method: "PUT", body, signal }), received);
   }
+  return proof === undefined ? {} : { proof };
 }

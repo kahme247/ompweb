@@ -1,6 +1,12 @@
 // Pure helpers for cloning a repository into a new workspace. Shared by the
 // clone route (validation) and the directory picker (target preview, progress).
 
+export type CloneFrame =
+  | { type: "output"; text: string }
+  | { type: "done"; path: string }
+  | { type: "cancelled"; path: string }
+  | { type: "error"; error: string; code: string };
+export interface CloneProgress { cursor: number; reset: boolean; frames: CloneFrame[]; terminal: boolean }
 const HTTPS_URL = /^https:\/\/[^\s/@]+(?:@[^\s/]+)?\/\S+$/;
 const SSH_URL = /^ssh:\/\/(?:[^\s/@]+@)?[^\s/]+\/\S+$/;
 // scp-like `user@host:path` / `alias:path`. A 2+ char host and no backslashes
@@ -20,6 +26,7 @@ export function cloneDirectoryName(url: string): string | null {
 }
 
 const MAX_PROGRESS_LINES = 200;
+const MAX_PROGRESS_CHARS = 256 * 1024;
 
 /** Appends git output to the progress log, applying carriage returns (git
  *  rewrites its progress line with `\r`) so the log keeps only each line's
@@ -30,5 +37,7 @@ export function appendProgress(log: string, chunk: string): string {
     const latest = segments[segments.length - 1] ?? "";
     return line.endsWith("\r") && latest ? `${latest}\r` : latest;
   });
-  return lines.slice(-MAX_PROGRESS_LINES).join("\n");
+  const bounded = lines.slice(-MAX_PROGRESS_LINES).join("\n").slice(-MAX_PROGRESS_CHARS);
+  const first = bounded.charCodeAt(0);
+  return first >= 0xdc00 && first <= 0xdfff ? bounded.slice(1) : bounded;
 }

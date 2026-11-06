@@ -8,7 +8,7 @@ import { translate, useI18n } from "@/lib/i18n";
 import { collectToolResults, isGroupAnchor, planTranscriptRows, type ActivityPiece, type TranscriptRow } from "@/lib/chat-transcript-plan";
 import { isReplyBlock } from "@/lib/message-display";
 import { resolveForkTargets } from "@/lib/chat-fork";
-import { MessageView } from "./MessageView";
+import { HeldMessageView, MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ExtensionDialog } from "./ExtensionDialog";
 import { SubagentTranscriptDialog } from "./SubagentTranscriptDialog";
@@ -42,7 +42,10 @@ import {
 } from "@/lib/chat-lazy-load";
 import { getDraftSummary, type ChatDraft } from "@/lib/draft-store";
 import { isLinkUp, type HostStatus } from "@/lib/hosts/host";
-import { newChatDraftKey, remoteHostId } from "@/lib/project-ordering";
+import { newChatDraftKey } from "@/lib/project-ordering";
+import { WorkspaceFileContext } from "@/lib/workspace-file-context";
+import type { WorkspaceFileSource } from "@/lib/workspace-types";
+import { getFileName } from "@/lib/file-paths";
 
 interface Props {
   session: SessionInfo | null;
@@ -78,7 +81,7 @@ interface Props {
   onSessionStatsChange?: (stats: SessionStatsInfo | null) => void;
   onSessionStatsPanelOpen?: () => void;
   onProviderUsageContextChange?: (context: ProviderUsageContext | null) => void;
-  onOpenFile?: (filePath: string) => void;
+  onOpenFile?: (filePath: string, name: string, source: WorkspaceFileSource) => void;
   /** Handles the open_url host tool; returns the result text for the agent. */
   onOpenUrl?: (url: string) => string;
   onGenerationSpeedChange?: (speed: GenerationSpeedInfo | null) => void;
@@ -504,8 +507,15 @@ const CommittedTranscript = memo(function CommittedTranscript({
   );
 });
 
-export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatus: channelHostStatus, hostLabel, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, neverFoldActivity = false, showToolCallsUnfolded = false, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders, searchQuery = "", searchTarget = null, onSearchTargetHandled }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatus: channelHostStatus, hostLabel, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, neverFoldActivity = false, showToolCallsUnfolded = false, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile: onOpenWorkspaceFile, onOpenUrl, onOpenProviders, searchQuery = "", searchTarget = null, onSearchTargetHandled }: Props) {
   const { t, tn } = useI18n();
+  const fileSource = useMemo<WorkspaceFileSource>(() => ({
+    hostId: session?.hostId ?? newSessionHostId ?? "local",
+    cwd: session?.cwd ?? newSessionCwd, sessionId: session?.id ?? null,
+  }), [session?.hostId, session?.cwd, session?.id, newSessionHostId, newSessionCwd]);
+  const onOpenFile = useMemo(() => onOpenWorkspaceFile
+    ? (filePath: string) => onOpenWorkspaceFile(filePath, getFileName(filePath), fileSource)
+    : undefined, [onOpenWorkspaceFile, fileSource]);
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
   const internalChatInputRef = useRef<ChatInputHandle | null>(null);
@@ -562,7 +572,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
     isNew, hostStatus: frameHostStatus,
     sessionIdRef, messagesEndRef, scrollContainerRef, holdScrollPosition,
     handleSend, handleAbort, handleFork, handleEdit, handleModelChange, retrySession,
-    handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction, handleCompact,
+    handleSteer, handleFollowUp, handleAbortCompaction, handleCompact,
+    heldMessages, deleteHeldMessage,
     removeQueuedMessage, promoteQueuedToSteer,
     handleBuiltinSlashCommand, togglePreCompactionHistory,
     handleThinkingLevelChange, handleFastModeChange, handleSlowModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
@@ -571,7 +582,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
   } = useAgentSession({
     session, newSessionCwd, newSessionHostId, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked, onSessionMoved: handleSessionMoved,
     modelsRefreshKey, chatInputRef: composerRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsPanelOpen,
-    onOpenFile, onOpenUrl,
+    onOpenFile: onOpenWorkspaceFile, onOpenUrl,
   });
   useEffect(() => {
     if (!autoplayPendingRef.current) return;
@@ -745,7 +756,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
     holdScrollPosition,
     onTargetHandled: onSearchTargetHandled,
   });
-  const remoteWorkspace = session ? remoteHostId(session.hostId) !== undefined : newSessionHostId !== undefined;
   // The hosts channel is the source of truth; a frame only speaks before its first snapshot.
   const currentHostStatus = channelHostStatus ?? frameHostStatus;
   const hostBanner = currentHostStatus && !isLinkUp(currentHostStatus) ? <HostOfflineBanner host={hostLabel ?? ""} /> : null;
@@ -1028,18 +1038,17 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
   }, [advisorEnabled]);
 
   // GitHub repo of the session checkout, so bare `#123` in messages links to it.
-  // A remote session's cwd is a path on its host, which this server cannot inspect.
   const [githubRepo, setGithubRepo] = useState<string | null>(null);
   useEffect(() => {
     setGithubRepo(null);
-    if (!messageCwd || remoteWorkspace) return;
+    if (!messageCwd) return;
     const controller = new AbortController();
-    fetch(`/api/github-repo?cwd=${encodeURIComponent(messageCwd)}`, { signal: controller.signal })
+    fetch(`/api/github-repo?${new URLSearchParams({ cwd: messageCwd, hostId: fileSource.hostId })}`, { signal: controller.signal })
       .then((response) => response.ok ? response.json() as Promise<{ repo?: string | null }> : null)
-      .then((data) => setGithubRepo(data?.repo ?? null))
+      .then((data) => { if (!controller.signal.aborted) setGithubRepo(data?.repo ?? null); })
       .catch(() => {});
     return () => controller.abort();
-  }, [messageCwd, remoteWorkspace]);
+  }, [messageCwd, fileSource.hostId]);
 
   const advisorModelMeta = useMemo(() => {
     if (!advisorRoleSelector) return null;
@@ -1124,7 +1133,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
       onAbort={handleAbort}
       onSteer={agentRunning ? handleSteer : undefined}
       onFollowUp={agentRunning ? handleFollowUp : undefined}
-      onPromptWithStreamingBehavior={agentRunning ? handlePromptWithStreamingBehavior : undefined}
+      outbox={!isNew}
       isStreaming={sessionBusy}
       submissionBlocked={editingEntryId !== null}
       model={displayModelValue}
@@ -1177,8 +1186,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
       onAudioUnlock={unlockAudio}
       draftKey={draftKey}
       uploadHostId={session ? session.hostId : newSessionHostId}
-      // @-mentions and skill lookups read this machine's disk: not for a remote workspace yet.
-      cwd={remoteWorkspace ? null : session?.cwd ?? newSessionCwd}
+      cwd={session?.cwd ?? newSessionCwd}
       /* The pill bar and chevron only render in the non-empty layout; don't
          accept Escape-to-minimize in the fresh-chat branch where there is
          nothing to collapse. */
@@ -1195,7 +1203,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
     return <WorkspaceState kind="loading" title={t("chatWindow.loadingSession")} />;
   }
 
-  if (error) {
+  if (error && heldMessages.length === 0 && !(currentHostStatus && !isLinkUp(currentHostStatus))) {
     return (
       <WorkspaceState
         kind="error"
@@ -1217,6 +1225,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
     <SpeechSynthesisProvider value={tts}>
     <GithubRepoContext.Provider value={githubRepo}>
     <AgentLinkContext.Provider value={openAgentLink}>
+    <WorkspaceFileContext.Provider value={fileSource}>
     <div
       className="relative flex h-full flex-col overflow-hidden"
       onDragEnter={handleDragEnter}
@@ -1349,6 +1358,14 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
             <div style={{ maxWidth: isMobile ? CHAT_COLUMN_MAX_WIDTH : CHAT_COLUMN_MAX_WIDTH_DESKTOP, margin: "0 auto" }}>
               <ExtensionStatusBar statuses={extensionStatuses} />
               <ExtensionWidgets widgets={aboveEditorWidgets} />
+              {error && (
+                <div role="alert" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 12, padding: "8px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", color: "var(--status-error)" }}>
+                  <span>{error}</span>
+                  <button type="button" className="load-retry-button" onClick={retrySession} style={{ flexShrink: 0, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer" }}>
+                    {t("chatWindow.retry")}
+                  </button>
+                </div>
+              )}
 
             {conversationMeta.hasCompaction && (
               <div
@@ -1460,6 +1477,11 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
               />
             )}
 
+            {/* After the live turn, in submission order: what omp does not have yet. */}
+            {heldMessages.map((held) => (
+              <HeldMessageView key={held.id} held={held} hostLabel={hostLabel} onDelete={deleteHeldMessage} />
+            ))}
+
             <div ref={messagesEndRef} />
             </div>
           </div>
@@ -1568,6 +1590,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
       </>
       )}
       </div>
+    </WorkspaceFileContext.Provider>
     </AgentLinkContext.Provider>
     </GithubRepoContext.Provider>
     </SpeechSynthesisProvider>

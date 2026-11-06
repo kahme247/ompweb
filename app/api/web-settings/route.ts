@@ -2,8 +2,10 @@ import { broadcastBrowserTransport } from "@/lib/event-stream-hub";
 import { BROWSER_TRANSPORTS } from "@/lib/event-stream-protocol";
 import { syncInterruptibleSessions } from "@/lib/rpc-manager";
 import { parseAgentEnvText, sanitizeAgentEnvValues, type AgentEnvParseResult } from "@/lib/omp/agent-env";
+import { pushUploadRetention } from "@/lib/hosts/upload-retention-sync";
 import { browserTransportState, loadWebServerSettings, saveWebServerSettings, type WebServerSettings } from "@/lib/web-settings";
 import { isRecord } from "@/lib/type-guards";
+import { isUploadRetentionDays } from "@/lib/upload-limits";
 
 /** GET/PUT /api/web-settings - omp-web's own server-side settings. */
 export async function GET() {
@@ -55,6 +57,13 @@ export async function PUT(req: Request) {
     patch.browserTransport = transport;
   }
 
+  if (payload.uploadRetentionDays !== undefined) {
+    if (!isUploadRetentionDays(payload.uploadRetentionDays)) {
+      return Response.json({ error: "uploadRetentionDays must be a whole number of days from 1 to 3650, or null", code: "invalid_settings" }, { status: 400 });
+    }
+    patch.uploadRetentionDays = payload.uploadRetentionDays;
+  }
+
   if (payload.agentEnv !== undefined) {
     // Either raw KEY=VALUE text (what the settings textarea holds) or a record.
     let parsed: AgentEnvParseResult;
@@ -78,6 +87,7 @@ export async function PUT(req: Request) {
   }
 
   const previousTransport = JSON.stringify(browserTransportState());
+  const previousRetention = loadWebServerSettings().uploadRetentionDays;
   const settings = saveWebServerSettings(patch);
   // Apply to sessions that are already running, not only the next run. Only when the
   // flag was part of this save — an agentEnv-only write must not touch live sessions.
@@ -85,5 +95,7 @@ export async function PUT(req: Request) {
   // Every open browser converges on the new state; an unchanged one is not sent (the worker ignores it anyway).
   const transport = browserTransportState(settings);
   if (JSON.stringify(transport) !== previousTransport) broadcastBrowserTransport(transport);
+  // Every host daemon deletes sent uploads by this value: the ones linked now are told at once, the others when they link.
+  if (settings.uploadRetentionDays !== previousRetention) pushUploadRetention(settings.uploadRetentionDays);
   return Response.json({ ...settings, agentEnv: sanitizeAgentEnvValues(settings.agentEnv).values });
 }

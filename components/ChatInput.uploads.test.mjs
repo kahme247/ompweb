@@ -17,6 +17,7 @@ const previousFetch = globalThis.fetch;
 const requests = [];
 let gate = Promise.resolve();
 let failNextPut = null;
+let completionProof;
 globalThis.fetch = async (url, init = {}) => {
   const method = init.method ?? "GET";
   requests.push({ url: String(url), method, body: init.body, signal: init.signal });
@@ -32,7 +33,7 @@ globalThis.fetch = async (url, init = {}) => {
       return json({ error: code, code }, status);
     }
     const offset = Number(new URL(String(url), "https://omp.test/").searchParams.get("offset"));
-    return json({ received: offset + init.body.size, done: true });
+    return json({ received: offset + init.body.size, done: true, ...(completionProof ? { proof: completionProof } : {}) });
   }
   return json({});
 };
@@ -72,6 +73,7 @@ afterEach(() => {
   requests.length = 0;
   gate = Promise.resolve();
   failNextPut = null;
+  completionProof = undefined;
 });
 
 const SEND = /^(Send|chatInput\.send)$/;
@@ -214,7 +216,6 @@ test("a queued steer or follow-up during a run waits for uploads too", async () 
     isStreaming: true,
     onSteer: record("onSteer"),
     onFollowUp: record("onFollowUp"),
-    onPromptWithStreamingBehavior: record("onPromptWithStreamingBehavior"),
   });
   await act(async () => { ref.current.addFiles([binaryFile("data.zip")]); });
   await putOf((await opened("data.zip")).id);
@@ -366,6 +367,23 @@ test("a draft keeps finished uploads only, and restores them as done chips", asy
   assert.deepEqual(sent[0][2], [done.id]);
 });
 
+test("upload continuity: completed proof survives a refused send and composer remount", async () => {
+  const key = "uploads-proof-recovery";
+  completionProof = "completed-upload-proof";
+  const ref = renderComposer(key, [], { onSend: async () => ({ status: "rejected" }) });
+  await act(async () => { ref.current.addFiles([binaryFile("authorized.zip")]); });
+  const upload = await opened("authorized.zip");
+  await waitFor(() => assert.equal(screen.getByRole("button", { name: SEND }).disabled, false));
+  const expected = { id: upload.id, name: upload.name, size: upload.size, hostId: "local", proof: "completed-upload-proof" };
+  assert.deepEqual(getDraft(key)?.uploads, [expected], "completion authority is persisted before Send becomes available");
+  await act(async () => { screen.getByRole("button", { name: SEND }).click(); });
+  await waitFor(() => assert.deepEqual(getDraft(key)?.uploads, [expected], "refusal recovers the same authorized attachment"));
+  cleanup();
+  renderComposer(key, []);
+  assert.ok(screen.getByText("authorized.zip"));
+  assert.deepEqual(getDraft(key)?.uploads, [expected], "hydration must not strip authority while rewriting the draft");
+});
+
 /** The tab's one shared-worker transport (a module singleton), faked once and switched to `ws` by each test. */
 let fakePort;
 function wsPort() {
@@ -433,5 +451,36 @@ test("Retry after the page left the back/forward cache starts a new upload id: t
     await waitFor(() => assert.equal(screen.getByRole("button", { name: SEND }).disabled, false));
   } finally {
     fakePort.onmessage({ data: { transport: "sse" } });
+  }
+});
+
+test("upload continuity: an old completion cannot give a replacement upload its proof", async () => {
+  const port = wsPort();
+  const key = "uploads-proof-new-id";
+  try {
+    const ref = renderComposer(key, []);
+    await act(async () => { ref.current.addFiles([binaryFile("replacement.zip")]); });
+    const first = await waitFor(() => {
+      const message = port.posted.find((each) => each.op === "upload" && each.name === "replacement.zip");
+      assert.ok(message);
+      return message;
+    });
+    await act(async () => { port.onmessage({ data: { up: first.id, error: { status: 410, code: "upload_failed", message: "Retry it." } } }); });
+    const retry = await waitFor(() => within(chipOf("replacement.zip")).getByRole("button", { name: RETRY }));
+    await act(async () => { retry.click(); });
+    const second = await waitFor(() => {
+      const starts = port.posted.filter((each) => each.op === "upload" && each.name === "replacement.zip");
+      assert.equal(starts.length, 2);
+      return starts[1];
+    });
+    assert.notEqual(second.id, first.id);
+    await act(async () => {
+      port.onmessage({ data: { up: first.id, received: 8, done: true, proof: "old-upload-proof" } });
+      port.onmessage({ data: { up: second.id, received: 8, done: true } });
+    });
+    await waitFor(() => assert.equal(screen.getByRole("button", { name: SEND }).disabled, false));
+    assert.deepEqual(getDraft(key)?.uploads, [{ id: second.id, name: "replacement.zip", size: 8, hostId: "local" }]);
+  } finally {
+    port.onmessage({ data: { transport: "sse" } });
   }
 });

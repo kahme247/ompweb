@@ -1,9 +1,9 @@
 "use client";
 
-import { memo, useCallback, useId, useRef, useState, type ReactNode } from "react";
+import { memo, useCallback, useId, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { AgentMessage, ExitedRpcSession, ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
 import { formatExitedSessionNotice, useI18n } from "@/lib/i18n";
-import { ChevronDown, ChevronRight, Folder, GitBranch, MoreHorizontal, Pin, Plus } from "lucide-react";
+import { ChevronDown, ChevronRight, Folder, GitBranch, MoreHorizontal, Pencil, Pin, Plus } from "lucide-react";
 import { Tooltip } from "./ui/primitives";
 import { ConfirmDialog } from "./ui/field";
 import { copyText } from "@/lib/clipboard";
@@ -11,6 +11,7 @@ import { transcriptToMarkdown } from "@/lib/transcript";
 import { toast } from "./ui/toast";
 import { SessionSearchMatches, type SearchMatchTarget } from "./SessionSearchMatches";
 import { remoteHostId } from "@/lib/project-ordering";
+import { hasDraft, subscribeDrafts } from "@/lib/draft-store";
 import {
   MAX_PROJECT_SESSIONS,
   formatRelativeTime,
@@ -710,6 +711,8 @@ const SessionItem = memo(function SessionItem({
   const contentButtonRef = useRef<HTMLButtonElement>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const title = session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
+  // A session's composer draft is keyed by its id (ChatWindow's `draftKey`).
+  const hasUnsentDraft = useSyncExternalStore(subscribeDrafts, () => hasDraft(session.id), () => false);
   const relativeTime = formatRelativeTime(session.modified, locale, relativeTimeNow);
   const rowBackground = isSelected
     ? "color-mix(in srgb, var(--bg-selected) 70%, transparent)"
@@ -861,6 +864,11 @@ const SessionItem = memo(function SessionItem({
             <span title={title} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 12.5, fontWeight: isSelected ? 600 : 500, lineHeight: 1.35, letterSpacing: "-0.005em" }}>
               {title}
             </span>
+            {hasUnsentDraft && (
+              <span role="img" title={t("sessionSidebar.unsentDraft")} aria-label={t("sessionSidebar.unsentDraft")} style={{ display: "inline-flex", flexShrink: 0, marginLeft: 5, color: "var(--accent)" }}>
+                <Pencil size={11} strokeWidth={2.2} aria-hidden="true" />
+              </span>
+            )}
           </button>
           {session.worktreeBranch && <span title={t("sessionSidebar.worktreeTitle", { path: session.cwd })} style={{ display: "flex", alignItems: "center", gap: 3, maxWidth: 56, minWidth: 0, overflow: "hidden", color: "var(--text-dim)", fontSize: 10, flexShrink: 1 }}><GitBranch size={10} strokeWidth={2.4} aria-hidden="true" /><span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.worktreeBranch}</span></span>}
           {hasChildren && <button className="session-item-icon-button" onClick={(event) => { event.stopPropagation(); onToggleCollapse?.(); }} title={collapsed ? t("sessionSidebar.expandForks") : t("sessionSidebar.collapseForks")} aria-label={collapsed ? t("sessionSidebar.expandForks") : t("sessionSidebar.collapseForks")} aria-expanded={!collapsed} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 24, height: 24, padding: 0, flexShrink: 0, border: "none", background: "none", color: "var(--text-dim)", cursor: "pointer", transform: collapsed ? "rotate(-90deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }}><ChevronDown size={12} strokeWidth={1.8} aria-hidden="true" /></button>}

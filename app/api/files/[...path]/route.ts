@@ -1,345 +1,78 @@
-import { apiErrorResponse } from "@/lib/api-utils";
-import { getContentDisposition } from "@/lib/content-disposition";
-import fs from "fs";
-import path from "path";
-import { getAllowedFileRoots, isFilePathAllowed } from "@/lib/file-access";
-import { authorizeFileAccess, filePathFromSegments } from "@/lib/file-authorization";
+import { apiErrorResponse, opErrorResponse, resolveWorkspaceHost } from "@/lib/api-utils";
+import { readWorkspaceBytes, streamWorkspaceFile } from "@/lib/workspace-http";
+import * as mammoth from "mammoth";
+import { filePathFromSegments } from "@/lib/file-authorization";
 import {
   DOCX_PREVIEW_MAX_BYTES,
   IMAGE_PREVIEW_MAX_BYTES,
-  TEXT_PREVIEW_MAX_BYTES,
-  documentPreviewKind,
   getAudioMime,
   getDocumentMime,
-  getFileExt,
   getImageMime,
-  getStreamSecurityHeaders,
 } from "@/lib/file-types";
-import { resolveDirentIsDirectory } from "@/lib/file-dirent";
-import {
-  inspectUploadTargets,
-  parseUploadConflictStrategy,
-  validateUploadFileNames,
-} from "@/lib/file-upload";
-import { parseFormDataWithinLimit, parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
+import { parseUploadConflictStrategy } from "@/lib/file-upload";
+import { parseJsonWithinLimit } from "@/lib/bounded-form-data";
+import { publishWorkspaceUpload, uploadErrorResponse } from "@/lib/uploads";
+import { requestOwner } from "@/lib/web-auth";
+import { isRecord } from "@/lib/type-guards";
 
-const IGNORED_NAMES = new Set([
-  "node_modules", ".git", ".next", "dist", "build", "__pycache__",
-  ".turbo", ".cache", "coverage", ".pytest_cache", ".mypy_cache",
-  "target", "vendor", ".DS_Store",
-]);
-
-const IGNORED_SUFFIXES = [".pyc"];
 
 const FILE_REQUEST_TYPES = ["list", "read", "download", "meta", "preview"] as const;
 type FileRequestType = typeof FILE_REQUEST_TYPES[number];
 const FILE_REQUEST_TYPE_SET = new Set<string>(FILE_REQUEST_TYPES);
-const MAX_UPLOAD_FILE_BYTES = 25 * 1024 * 1024;
-const MAX_UPLOAD_TOTAL_BYTES = 100 * 1024 * 1024;
-// Multipart boundaries and headers are not file bytes, but must be bounded too.
-const MAX_UPLOAD_REQUEST_BYTES = MAX_UPLOAD_TOTAL_BYTES + 1024 * 1024;
 const MAX_UPLOAD_CHECK_REQUEST_BYTES = 1024 * 1024;
 
-const EXT_TO_LANGUAGE: Record<string, string> = {
-  ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript",
-  mjs: "javascript", cjs: "javascript", py: "python", rb: "ruby",
-  go: "go", rs: "rust", java: "java", kt: "kotlin", swift: "swift",
-  c: "c", cpp: "cpp", h: "c", hpp: "cpp", cs: "csharp",
-  html: "html", htm: "html", css: "css", scss: "css", less: "css",
-  json: "json", jsonl: "json", yaml: "yaml", yml: "yaml",
-  toml: "toml", xml: "xml", md: "markdown", mdx: "markdown",
-  sh: "bash", bash: "bash", zsh: "bash", fish: "bash",
-  sql: "sql", graphql: "graphql", gql: "graphql",
-  dockerfile: "dockerfile", tf: "hcl", hcl: "hcl",
-  env: "bash", gitignore: "bash", txt: "text",
-  pdf: "pdf", docx: "word",
-};
-
-function getLanguage(filePath: string): string {
-  const base = path.basename(filePath).toLowerCase();
-  // Special full-name matches
-  if (base === "dockerfile" || base.startsWith("dockerfile.")) return "dockerfile";
-  if (base === ".env" || base.startsWith(".env.")) return "bash";
-  if (base === "makefile" || base === "gnumakefile") return "makefile";
-  const ext = base.split(".").pop() ?? "";
-  return EXT_TO_LANGUAGE[ext] ?? "text";
-}
 
 function parseFileRequestType(value: string): FileRequestType | null {
   return FILE_REQUEST_TYPE_SET.has(value) ? (value as FileRequestType) : null;
 }
 
-async function getUploadDirectory(segments: string[]): Promise<
-  { directory: string } | { response: Response }
-> {
-  // Strictly absolute: unlike the read path this never fans a relative request
-  // out over the allowed roots, which would turn "pick me a directory" into
-  // "write anywhere any allowed root points at" (#135).
-  const directory = filePathFromSegments(segments);
-  const allowedRoots = await getAllowedFileRoots();
-  if (!isFilePathAllowed(directory, allowedRoots)) {
-    return { response: Response.json({ error: "Access denied", code: "access_denied" }, { status: 403 }) };
-  }
-
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(directory);
-  } catch {
-    return { response: Response.json({ error: "Upload directory not found", code: "upload_directory_not_found" }, { status: 404 }) };
-  }
-  if (!stat.isDirectory()) {
-    return { response: Response.json({ error: "Upload target is not a directory", code: "upload_target_not_directory" }, { status: 400 }) };
-  }
-
-  // A browsable directory can be a symlink. Resolve both sides before writes
-  // so a symlink inside an allowed root cannot redirect uploads outside it.
-  const realDirectory = fs.realpathSync(directory);
-  const realRoots = new Set<string>();
-  for (const root of allowedRoots) {
-    try {
-      realRoots.add(fs.realpathSync(root));
-    } catch {
-      // Ignore stale session roots that no longer exist.
-    }
-  }
-  if (!isFilePathAllowed(realDirectory, realRoots)) {
-    return { response: Response.json({ error: "Access denied", code: "access_denied" }, { status: 403 }) };
-  }
-
-  return { directory: realDirectory };
-}
-
-function parseUploadFileNames(value: unknown): string[] | null {
-  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) return null;
-  return value;
-}
-
-export async function POST(
-  request: Request,
-  { params }: { params: Promise<{ path: string[] }> }
-) {
+export async function POST(request: Request, { params }: { params: Promise<{ path: string[] }> }) {
   try {
     const { path: segments } = await params;
-    const uploadDirectory = await getUploadDirectory(segments);
-    if ("response" in uploadDirectory) return uploadDirectory.response;
-    const { directory } = uploadDirectory;
+    const directory = filePathFromSegments(segments);
     const { searchParams } = new URL(request.url);
     const type = searchParams.get("type") ?? "upload";
-
+    if (type !== "upload" && type !== "upload-check") return Response.json({ error: "Invalid upload request type", code: "invalid_upload_type" }, { status: 400 });
+    const body: unknown = await parseJsonWithinLimit(request, MAX_UPLOAD_CHECK_REQUEST_BYTES);
+    if (!isRecord(body) || (body.hostId !== undefined && typeof body.hostId !== "string")) return Response.json({ error: "Invalid upload request", code: "invalid_request" }, { status: 400 });
+    const queryHost = searchParams.get("hostId");
+    if (queryHost && body.hostId && queryHost !== body.hostId) return Response.json({ error: "Host mismatch", code: "workspace_host_mismatch" }, { status: 409 });
+    const resolved = await resolveWorkspaceHost(queryHost ?? body.hostId as string | undefined, searchParams.get("sessionId"));
+    if ("response" in resolved) return resolved.response;
+    const { host } = resolved;
+    let names: string[];
+    const files = body.uploads;
     if (type === "upload-check") {
-      let body: { fileNames?: unknown } | null;
-      try {
-        body = await parseJsonWithinLimit<{ fileNames?: unknown }>(request, MAX_UPLOAD_CHECK_REQUEST_BYTES);
-      } catch (error) {
-        if (error instanceof RequestBodyTooLargeError) return Response.json({ error: "Upload check request is too large", code: "upload_check_too_large" }, { status: 413 });
-        body = null;
-      }
-      const fileNames = parseUploadFileNames(body?.fileNames);
-      if (!fileNames) {
-        return Response.json({ error: "fileNames must be an array of strings", code: "invalid_file_names" }, { status: 400 });
-      }
-      const validationError = validateUploadFileNames(fileNames);
-      if (validationError) {
-        return Response.json({ error: validationError }, { status: 400 });
-      }
-      return Response.json(inspectUploadTargets(directory, fileNames));
+      if (!Array.isArray(body.fileNames) || !body.fileNames.every((name) => typeof name === "string")) return Response.json({ error: "Invalid file names", code: "invalid_file_names" }, { status: 400 });
+      names = body.fileNames;
+    } else {
+      if (!Array.isArray(files) || files.length === 0 || files.length > 1000 || !files.every((file) => isRecord(file) && typeof file.id === "string" && typeof file.name === "string")) return Response.json({ error: "Invalid uploads", code: "invalid_uploads" }, { status: 400 });
+      names = files.map((file) => file.name as string);
     }
-
-    if (type !== "upload") {
-      return Response.json({ error: "Invalid upload request type", code: "invalid_upload_type" }, { status: 400 });
-    }
-
+    const inspection = await host.workspaceOps.inspectUploads(directory, names);
+    if (!inspection.ok) return opErrorResponse(inspection);
+    if (type === "upload-check") return Response.json(inspection.value);
     const strategy = parseUploadConflictStrategy(searchParams.get("conflict"));
-    if (!strategy) {
-      return Response.json({ error: "Invalid conflict strategy", code: "invalid_conflict_strategy" }, { status: 400 });
-    }
-
-    let formData: FormData;
-    try {
-      formData = await parseFormDataWithinLimit(request, MAX_UPLOAD_REQUEST_BYTES);
-    } catch (error) {
-      if (error instanceof RequestBodyTooLargeError) {
-        return Response.json({ error: "Uploads must total 100MB or less", code: "upload_total_too_large" }, { status: 413 });
-      }
-      throw error;
-    }
-    const files = formData.getAll("files").filter((entry): entry is File => typeof entry !== "string");
-    if (files.some((file) => file.size > MAX_UPLOAD_FILE_BYTES)) {
-      return Response.json({ error: "Each upload must be 25MB or smaller", code: "upload_file_too_large" }, { status: 413 });
-    }
-    if (files.reduce((total, file) => total + file.size, 0) > MAX_UPLOAD_TOTAL_BYTES) {
-      return Response.json({ error: "Uploads must total 100MB or less", code: "upload_total_too_large" }, { status: 413 });
-    }
-    const fileNames = files.map((file) => file.name);
-    const validationError = validateUploadFileNames(fileNames);
-    if (validationError) {
-      return Response.json({ error: validationError }, { status: 400 });
-    }
-
-    const inspection = inspectUploadTargets(directory, fileNames);
-    if (strategy === "error" && inspection.conflicts.length > 0) {
-      return Response.json({
-        error: "One or more files already exist",
-        code: "upload_conflict",
-        conflicts: inspection.conflicts,
-        nonReplaceable: inspection.nonReplaceable,
-      }, { status: 409 });
-    }
-
-    const conflictSet = new Set(inspection.conflicts);
-    const nonReplaceableSet = new Set(inspection.nonReplaceable);
-    const uploaded: string[] = [];
-    const skipped: string[] = [];
-    const errors: Array<{ name: string; error: string }> = [];
-    const recordError = (file: File, error: unknown) => {
-      errors.push({ name: file.name, error: error instanceof Error ? error.message : String(error) });
-    };
-
-    for (const file of files) {
-      const destination = path.join(directory, file.name);
-      if (conflictSet.has(file.name) && strategy === "skip") {
-        skipped.push(file.name);
-        continue;
-      }
-      if (conflictSet.has(file.name) && nonReplaceableSet.has(file.name)) {
-        errors.push({ name: file.name, error: "Cannot replace a directory or symbolic link" });
-        continue;
-      }
-
-      let bytes: Buffer;
+    if (!strategy) return Response.json({ error: "Invalid conflict strategy", code: "invalid_conflict_strategy" }, { status: 400 });
+    const uploaded: string[] = [], skipped: string[] = [];
+    const errors: Array<{ name: string; error: string; code?: string }> = [];
+    let failureStatus = 200;
+    for (const file of files as Array<{ id: string; name: string }>) {
       try {
-        bytes = Buffer.from(await file.arrayBuffer());
+        const result = await publishWorkspaceUpload(file.id, requestOwner(request), host.id, directory, file.name, strategy);
+        (result.skipped ? skipped : uploaded).push(result.name);
       } catch (error) {
-        recordError(file, error);
-        continue;
-      }
-
-      if (conflictSet.has(file.name)) {
-        try {
-          fs.unlinkSync(destination);
-        } catch (error) {
-          recordError(file, error);
-          continue;
-        }
-      }
-
-      try {
-        fs.writeFileSync(destination, bytes, { flag: "wx" });
-        uploaded.push(file.name);
-      } catch (error) {
-        recordError(file, error);
+        const response = uploadErrorResponse(error);
+        if (errors.length === 0) failureStatus = response.status;
+        errors.push({ name: file.name, ...await response.json() });
       }
     }
-
-    return Response.json(
-      { uploaded, skipped, errors },
-      { status: errors.length > 0 ? 207 : 200 },
-    );
-  } catch (error) {
-    return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
-  }
+    const allFailed = errors.length > 0 && uploaded.length === 0 && skipped.length === 0;
+    return Response.json({ uploaded, skipped, errors, ...(allFailed ? { error: errors[0].error, code: errors[0].code } : {}) },
+      { status: allFailed ? failureStatus : errors.length ? 207 : 200 });
+  } catch (error) { return uploadErrorResponse(error); }
 }
 
-function createFileBodyStream(filePath: string, range?: { start: number; end: number }): ReadableStream<Uint8Array> {
-  const fileStream = fs.createReadStream(filePath, range);
-  let closed = false;
-
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      fileStream.on("data", (chunk: Buffer) => {
-        if (closed) return;
-        try {
-          controller.enqueue(new Uint8Array(chunk));
-        } catch {
-          closed = true;
-          fileStream.destroy();
-        }
-      });
-      fileStream.once("end", () => {
-        if (closed) return;
-        closed = true;
-        try {
-          controller.close();
-        } catch {
-          // The browser may cancel media probes before the file stream ends.
-        }
-      });
-      fileStream.once("error", (error) => {
-        if (closed) return;
-        closed = true;
-        try {
-          controller.error(error);
-        } catch {
-          // The response was already abandoned by the client.
-        }
-      });
-    },
-    cancel() {
-      closed = true;
-      fileStream.destroy();
-    },
-  });
-}
-
-function streamFile(filePath: string, stat: fs.Stats, contentType: string, rangeHeader: string | null, asDownload = false): Response {
-  const headers = {
-    "Content-Type": contentType,
-    "Cache-Control": "no-cache",
-    "Accept-Ranges": "bytes",
-    "Content-Disposition": getContentDisposition(path.basename(filePath), !asDownload, "download"),
-    // Shared by the full-body, 206, and 416 paths below.
-    ...getStreamSecurityHeaders(contentType),
-  };
-
-  if (!rangeHeader) {
-    return new Response(createFileBodyStream(filePath), {
-      headers: {
-        ...headers,
-        "Content-Length": String(stat.size),
-      },
-    });
-  }
-
-  const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
-  if (!match) {
-    return new Response(null, {
-      status: 416,
-      headers: {
-        ...headers,
-        "Content-Range": `bytes */${stat.size}`,
-      },
-    });
-  }
-
-  let start = match[1] ? Number(match[1]) : 0;
-  let end = match[2] ? Number(match[2]) : stat.size - 1;
-  if (!match[1] && match[2]) {
-    const suffixLength = Number(match[2]);
-    start = Math.max(stat.size - suffixLength, 0);
-    end = stat.size - 1;
-  }
-
-  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= stat.size) {
-    return new Response(null, {
-      status: 416,
-      headers: {
-        ...headers,
-        "Content-Range": `bytes */${stat.size}`,
-      },
-    });
-  }
-
-  end = Math.min(end, stat.size - 1);
-  const chunkSize = end - start + 1;
-  return new Response(createFileBodyStream(filePath, { start, end }), {
-    status: 206,
-    headers: {
-      ...headers,
-      "Content-Length": String(chunkSize),
-      "Content-Range": `bytes ${start}-${end}/${stat.size}`,
-    },
-  });
-}
 
 function escapeHtml(text: string): string {
   return text
@@ -406,134 +139,49 @@ export async function GET(
   try {
     const { path: segments } = await params;
     const { searchParams } = new URL(request.url);
-    const rawType = searchParams.get("type") ?? "list";
-    const type = parseFileRequestType(rawType);
-    if (!type) {
-      return Response.json({ error: "Invalid file request type", code: "invalid_request_type" }, { status: 400 });
+    const type = parseFileRequestType(searchParams.get("type") ?? "list");
+    if (!type) return Response.json({ error: "Invalid file request type", code: "invalid_request_type" }, { status: 400 });
+    const input = { segments, sessionId: searchParams.get("sessionId") };
+    const resolved = await resolveWorkspaceHost(searchParams.get("hostId") ?? undefined, input.sessionId);
+    if ("response" in resolved) return resolved.response;
+    const { host } = resolved;
+    if (type === "list") {
+      const result = await host.workspaceOps.listFilesInRoot(input, searchParams.get("root"));
+      return result.ok ? Response.json(result.value) : opErrorResponse(result);
     }
-    const sessionId = searchParams.get("sessionId");
-    // The explorer's "Show hidden items" toggle: for `type=list` only, skip the
-    // IGNORED_NAMES/IGNORED_SUFFIXES skip-list so build/ and friends can be
-    // browsed. Everything else (reads, downloads) never applied it anyway.
-    const showHidden = searchParams.get("hidden") === "1";
-
-    const access = await authorizeFileAccess(segments, sessionId, type !== "list");
-    if (!access.ok) {
-      return Response.json({ error: access.error, code: access.code }, { status: access.status });
+    const checked = await host.workspaceOps.fileInfo(input);
+    if (!checked.ok) return opErrorResponse(checked);
+    const info = checked.value;
+    if (info.isDirectory) return Response.json({ error: "Not a file", code: "not_a_file" }, { status: 400 });
+    if (type === "meta") return Response.json({ size: info.size, language: info.language, mime: info.mime, previewKind: info.previewKind });
+    const image = getImageMime(info.path);
+    const audio = getAudioMime(info.path);
+    const document = getDocumentMime(info.path);
+    if (type === "read" && !image && !audio && !document) {
+      const result = await host.workspaceOps.readTextFile(input);
+      return result.ok ? Response.json(result.value) : opErrorResponse(result);
     }
-    const { filePath, stat } = access;
-    // A paused media element stops reading its stream, which Bun's idle timeout would cut. Lifted once the stream exists.
-    const stream = (contentType: string, asDownload = false) => {
-      const response = streamFile(filePath, stat, contentType, request.headers.get("range"), asDownload);
-      disableIdleTimeout();
-      return response;
-    };
-
-    if (type === "read") {
-      if (!stat.isFile()) {
-        return Response.json({ error: "Not a file", code: "not_a_file" }, { status: 400 });
-      }
-      const imageMime = getImageMime(filePath);
-      if (imageMime) {
-        if (stat.size > IMAGE_PREVIEW_MAX_BYTES) {
-          return Response.json({ error: "Image too large (>10MB)", code: "image_too_large" }, { status: 413 });
-        }
-        return stream(imageMime);
-      }
-      const audioMime = getAudioMime(filePath);
-      if (audioMime) {
-        return stream(audioMime);
-      }
-      const documentMime = getDocumentMime(filePath);
-      if (documentMime) {
-        return stream(documentMime);
-      }
-      if (stat.size > TEXT_PREVIEW_MAX_BYTES) {
-        return Response.json({ error: "File too large for preview (>256KB)", code: "file_too_large_preview" }, { status: 413 });
-      }
-      const content = fs.readFileSync(filePath, "utf-8");
-      const language = getLanguage(filePath);
-      return Response.json({ content, language, size: stat.size });
+    if (type === "preview" && info.previewKind !== "docx") {
+      return Response.json({ error: "Preview not available for this file type", code: "preview_unavailable" }, { status: 400 });
     }
-
-    if (type === "download") {
-      if (!stat.isFile()) {
-        return Response.json({ error: "Not a file", code: "not_a_file" }, { status: 400 });
-      }
-      const mime = getImageMime(filePath) || getAudioMime(filePath) || getDocumentMime(filePath) || "application/octet-stream";
-      return stream(mime, true);
+    const opened = await host.workspaceOps.openFile(input);
+    if (!opened.ok) return opErrorResponse(opened);
+    if ((type === "read" && image && opened.value.info.size > IMAGE_PREVIEW_MAX_BYTES)
+      || (type === "preview" && opened.value.info.size > DOCX_PREVIEW_MAX_BYTES)) {
+      await host.workspaceOps.closeFile(opened.value.id);
+      return Response.json({ error: "File too large for preview (>10MB)", code: type === "preview" ? "docx_too_large" : "image_too_large" }, { status: 413 });
     }
-
-    if (type === "meta") {
-      if (!stat.isFile()) {
-        return Response.json({ error: "Not a file", code: "not_a_file" }, { status: 400 });
-      }
-      const imageMime = getImageMime(filePath);
-      const audioMime = getAudioMime(filePath);
-      const documentMime = getDocumentMime(filePath);
-      return Response.json({
-        size: stat.size,
-        language: getLanguage(filePath),
-        mime: imageMime || audioMime || documentMime || "text/plain",
-        previewKind: documentPreviewKind(filePath),
-      });
-    }
-
+    disableIdleTimeout();
     if (type === "preview") {
-      if (!stat.isFile()) {
-        return Response.json({ error: "Not a file", code: "not_a_file" }, { status: 400 });
-      }
-      if (getFileExt(filePath) !== "docx") {
-        return Response.json({ error: "Preview not available for this file type", code: "preview_unavailable" }, { status: 400 });
-      }
-      if (stat.size > DOCX_PREVIEW_MAX_BYTES) {
-        return Response.json({ error: "DOCX too large for preview (>10MB)", code: "docx_too_large" }, { status: 413 });
-      }
-
-      const mammoth = await import("mammoth");
-      const result = await mammoth.convertToHtml(
-        { path: filePath },
-        {
-          externalFileAccess: false,
-          convertImage: mammoth.images.dataUri,
-        }
-      );
-      const html = wrapDocxPreviewHtml(result.value, path.basename(filePath));
-      return new Response(html, {
-        headers: {
-          "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "no-cache",
-          "Content-Security-Policy": "default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
-          "Referrer-Policy": "no-referrer",
-          "X-Content-Type-Options": "nosniff",
-        },
-      });
+      const buffer = await readWorkspaceBytes(host, opened.value, DOCX_PREVIEW_MAX_BYTES);
+      const result = await mammoth.convertToHtml({ buffer }, { externalFileAccess: false, convertImage: mammoth.images.dataUri });
+      return new Response(wrapDocxPreviewHtml(result.value, info.name), { headers: {
+        "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache",
+        "Content-Security-Policy": "default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+        "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff",
+      } });
     }
-
-    // type === "list"
-    if (!stat.isDirectory()) {
-      return Response.json({ error: "Not a directory", code: "not_a_directory" }, { status: 400 });
-    }
-
-    // Avoid per-entry stat calls for normal files and directories. Symlinks and
-    // filesystems without directory type information use the stat fallback.
-    const readDirectorySync = Reflect.get(fs, "readdirSync") as typeof fs.readdirSync;
-    const dirents = readDirectorySync(filePath, { withFileTypes: true });
-    const entries = dirents
-      .filter((d) => showHidden || (!IGNORED_NAMES.has(d.name) && !IGNORED_SUFFIXES.some((s) => d.name.endsWith(s))))
-      .flatMap((d) => {
-        const isDir = resolveDirentIsDirectory(d, path.join(filePath, d.name));
-        return isDir === null
-          ? []
-          : [{ name: d.name, isDir, size: 0, modified: "" }];
-      })
-      .sort((a, b) => {
-        // Dirs first, then files, both alphabetically
-        if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
-        return a.name.localeCompare(b.name);
-      });
-
-    return Response.json({ entries, path: filePath });
+    return streamWorkspaceFile(host, opened.value, image ?? audio ?? document ?? "application/octet-stream", request.headers.get("range"), type === "download");
   } catch (error) {
     return apiErrorResponse(error);
   }
