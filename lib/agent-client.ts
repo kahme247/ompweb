@@ -11,6 +11,31 @@
 import { recordTransportSample, sendSessionCommand, type CommandReply } from "@/lib/event-stream";
 import { formatApiError } from "@/lib/i18n/api-error";
 
+/** A failed `POST /api/agent/[id]` carrying the route's stable code. Callers
+ * that must react differently from a plain error (a `session_slow` ack timeout
+ * with `maybeStarted` is not a rolled-back prompt; `abortUnconfirmed` is not a
+ * completed stop; `session_running_elsewhere` means another omp holds the
+ * session and the user must decide) branch on these fields. */
+export class AgentCommandError extends Error {
+  readonly code: string | undefined;
+  readonly maybeStarted: boolean;
+  /** The abort frame may have reached omp, but nothing confirmed it: the run
+   * may still be executing. */
+  readonly abortUnconfirmed: boolean;
+  constructor(
+    message: string,
+    code: string | undefined,
+    maybeStarted: boolean,
+    abortUnconfirmed: boolean,
+  ) {
+    super(message);
+    this.name = "AgentCommandError";
+    this.code = code;
+    this.maybeStarted = maybeStarted;
+    this.abortUnconfirmed = abortUnconfirmed;
+  }
+}
+
 // Sessions whose per-chat advisor toggle is on: their lazily spawned omp
 // process must start with --advisor. Keyed by session id because the spawn
 // decision happens inside the route, which only sees id + query string.
@@ -99,6 +124,8 @@ export async function sendAgentCommand<T = unknown>(
     code?: string;
     hostOffline?: boolean;
     delivery?: string;
+    maybeStarted?: boolean;
+    abortUnconfirmed?: boolean;
   };
   const failed = reply.status < 200 || reply.status >= 300 || Boolean(body.error);
   let outcome = failed ? "error" : "ok";
@@ -126,7 +153,12 @@ export async function sendAgentCommand<T = unknown>(
     const message = body.error || body.code ? formatApiError(body) : `HTTP ${reply.status}`;
     if (reply.status === 503 && body.hostOffline) throw new HostOfflineError(message, body.delivery === "unknown");
     if (reply.status === 503 && body.code === "transport_lost") throw new TransportLostError(message);
-    throw new Error(message);
+    throw new AgentCommandError(
+      message,
+      body.code,
+      body.maybeStarted === true,
+      body.abortUnconfirmed === true,
+    );
   }
   return body.data as T;
 }

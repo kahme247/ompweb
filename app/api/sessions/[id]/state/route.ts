@@ -27,22 +27,40 @@ async function sessionState(id: string): Promise<Response> {
     if (rpc?.isAlive()) {
       try {
         const state = await rpc.send({ type: "get_state" });
-        return Response.json({ running: true, state });
+        return Response.json({ running: rpc.isRunning(), alive: true, state });
       } catch (error) {
+        // omp being slow is not the run ending: answer 503 so clients retry
+        // instead of treating the session as idle/recovered. Both the code
+        // this tree raises (`session_slow`) and 0.6.0's own
+        // `session_state_timeout` mean the same thing to a client.
+        if (error instanceof WebRpcError && (error.code === "session_slow" || error.code === "session_state_timeout")) {
+          return Response.json(
+            {
+              error: error.message,
+              code: "session_slow",
+              ...error.details,
+              running: rpc.isRunning(),
+              alive: true,
+              silentForMs: rpc.silentForMs(),
+            },
+            { status: 503 },
+          );
+        }
         if (error instanceof WebRpcError && error.code === "session_unresponsive") {
-          return Response.json({ running: false, recovered: true });
+          return Response.json({ running: false, alive: false, recovered: true });
         }
         throw error;
       }
     }
 
     const exited = getExitedRpcSession(id);
-    if (exited) return Response.json({ running: false, exited });
+    if (exited) return Response.json({ running: false, alive: false, exited });
 
     const resolved = await resolveSessionHostOr404(id);
     if ("response" in resolved) return resolved.response;
     const result = await resolved.host.sessionOps.readSessionState(id);
-    return result.ok ? Response.json(result.value) : opErrorResponse(result);
+    if (!result.ok) return opErrorResponse(result);
+    return Response.json({ ...(result.value as Record<string, unknown>), alive: false });
   } catch (error) {
     return apiErrorResponse(error);
   }
