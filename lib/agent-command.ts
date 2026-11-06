@@ -1,6 +1,8 @@
 import { apiErrorResponse, hostOfflineResponse, resolveSessionHostOr404 } from "@/lib/api-utils";
 import { startRpcSession, getRpcSession, getRpcSessionKeys, WebRpcError, type AgentSessionWrapper } from "@/lib/rpc-manager";
 import { sessionSpawnTarget } from "@/lib/hosts/session-index";
+import { LOCAL_HOST_ID } from "@/lib/hosts/registry";
+import { detectSessionOwner } from "@/lib/session-owner";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { attachUploads, forgetUploads, takeUploads, type OutboxUploadReceipt } from "@/lib/uploads";
@@ -36,7 +38,9 @@ export function commandErrorResponse(error: unknown): Response {
   }
   // host_offline falls through to apiErrorResponse: 503 {hostOffline: true}.
   if (error instanceof WebRpcError && error.code !== "host_offline") {
-    return Response.json({ error: error.message, code: error.code }, { status: 400 });
+    // `maybeStarted`/`abortUnconfirmed` must reach the client: without them a
+    // timeout looks like "not sent".
+    return Response.json({ error: error.message, code: error.code, ...error.details }, { status: 400 });
   }
   if (error instanceof RpcCommandError) {
     return Response.json({ error: error.message, code: error.code ?? "rpc_command_failed" }, { status: 400 });
@@ -53,11 +57,20 @@ function sendFences(): Map<string, Promise<void>> {
   return (globalThis.__ompSendFences ??= new Map());
 }
 
+export interface RunAgentCommandOptions {
+  /** Send into a copy even though another omp process owns the session. Only
+   *  from an explicit user confirmation (`?force=1`), never automatic. */
+  force?: boolean;
+  /** Upload receipts the outbox already proved, so its own retry is not re-checked. */
+  trustedUploads?: OutboxUploadReceipt[];
+}
+
 /** Everything POST /api/agent/[id] does once the body is parsed; shared with
  * the browser socket. `owner`: the caller's web session (lib/web-auth.ts
  * `requestOwner`), whose uploads a prompt may attach. Never throws: failures
  * become `commandErrorResponse`. */
-export async function runAgentCommand(id: string, body: unknown, advisor: boolean, owner: string, trustedUploads?: OutboxUploadReceipt[]): Promise<Response> {
+export async function runAgentCommand(id: string, body: unknown, advisor: boolean, owner: string, options: RunAgentCommandOptions = {}): Promise<Response> {
+  const trustedUploads = options.trustedUploads;
   let release = () => {}; // frees this command's send fence; idempotent
   try {
     const command = body as { type?: unknown; [key: string]: unknown } | null;
@@ -135,6 +148,26 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
     if (offline) return offline;
     const target = await sessionSpawnTarget(resumeId, host);
     if (!target) return Response.json({ error: "Session not found", code: "session_not_found" }, { status: 404 });
+
+    // omp ≥ 18.5 grants one writer per session. A second `--resume` does not
+    // fail: it silently moves the conversation to a copy on its first write,
+    // which is exactly the "new chat appeared from nowhere" bug. Refuse the
+    // spawn (409) unless the client explicitly asked for the copy. Ownership
+    // detection is this machine's process/file scan: a remote host's session
+    // is out of scope.
+    if (!options.force && host.id === LOCAL_HOST_ID) {
+      const elsewhere = await detectSessionOwner(resumeId, target.sessionFile);
+      if (elsewhere) {
+        return Response.json(
+          {
+            error: "This session is being run by another omp process",
+            code: "session_running_elsewhere",
+            elsewhere,
+          },
+          { status: 409 },
+        );
+      }
+    }
 
     // A cold set_model must reach omp before the saved model is restored:
     // spawning with only --resume lets omp exit on an unrestorable saved
