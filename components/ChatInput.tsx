@@ -2403,10 +2403,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
                 <path d="M3 3v5h5" />
               </svg>
-              {remainingSec !== undefined
-                ? t("chatInput.retryingWithCountdown", { attempt: retryInfo.attempt, maxAttempts: retryInfo.maxAttempts, seconds: remainingSec })
-                : t("chatInput.retrying", { attempt: retryInfo.attempt, maxAttempts: retryInfo.maxAttempts })}
-              {retryInfo.errorMessage && <span style={{ opacity: 0.7, marginLeft: 4 }}>— {retryInfo.errorMessage}</span>}
+              <span style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>
+                {remainingSec !== undefined
+                  ? t("chatInput.retryingWithCountdown", { attempt: retryInfo.attempt, maxAttempts: retryInfo.maxAttempts, seconds: remainingSec })
+                  : t("chatInput.retrying", { attempt: retryInfo.attempt, maxAttempts: retryInfo.maxAttempts })}
+                {retryInfo.errorMessage && <span style={{ opacity: 0.7, marginLeft: 4 }}>— {retryInfo.errorMessage}</span>}
+              </span>
               {onAbortRetry && (
                 <button
                   type="button"
@@ -2414,6 +2416,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   title={t("chatInput.abortRetryTitle")}
                   style={{
                     marginLeft: "auto",
+                    flexShrink: 0,
                     padding: "3px 9px",
                     fontSize: 11,
                     color: "var(--status-warning)",
