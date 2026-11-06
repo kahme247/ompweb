@@ -7,9 +7,9 @@ import { constants as fsConstants, createReadStream, realpathSync } from "node:f
 import { appendFile, link, lstat, mkdir, open, readdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, extname, join, resolve } from "node:path";
+import { basename, extname, join, resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
-import { getAgentDir } from "../omp/paths";
+import { getAgentDir, sessionLocalRoot } from "../omp/paths";
 import { inspectUploadTargets, parseUploadConflictStrategy, validateUploadFileNames, type UploadConflictStrategy } from "../file-upload";
 import type { WorkspaceUploadResult } from "../workspace-types";
 import { authorizeWorkspaceDirectory } from "./workspace-roots";
@@ -32,8 +32,6 @@ export function uploadOwnerNamespace(agentDir = getAgentDir()): string {
 // Leaves room for ` (n)` under the usual 255-byte file name limit.
 const MAX_NAME_BYTES = 200;
 const MAX_EXT_BYTES = 20;
-// omp's own rule (internal-urls/local-protocol.ts): long artifact paths move to the temp dir on Windows.
-const WINDOWS_LOCAL_ROOT_MAX_CHARS = 180;
 /** Staged files untouched this long, and open uploads idle this long, are deleted (at start, on every uploadStart and
  * every UPLOAD_SWEEP_INTERVAL_MS). */
 export const STAGED_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -86,15 +84,6 @@ export function sanitizeUploadName(name: string): string {
     clean = (clipUtf8(clean.slice(0, clean.length - ext.length), MAX_NAME_BYTES - Buffer.byteLength(keptExt)) + keptExt).replace(/[. ]+$/, "");
   }
   return clean || "file";
-}
-
-/** omp's `local://` root for a session (`resolveLocalRoot` in omp's local-protocol.ts). */
-export function sessionLocalRoot(sessionFile: string, sessionId: string, platform: NodeJS.Platform = process.platform): string {
-  const candidate = resolve(dirname(sessionFile), basename(sessionFile, ".jsonl"), "local");
-  if (platform === "win32" && candidate.length >= WINDOWS_LOCAL_ROOT_MAX_CHARS) {
-    return join(tmpdir(), "omp-local", sessionId.replace(/[^a-zA-Z0-9_.-]/g, "_"));
-  }
-  return candidate;
 }
 
 /** What the daemon sends up as `upload_ack`. */

@@ -312,8 +312,9 @@ export function isPathWithinRoots(target: string, roots: Set<string>): boolean {
     const useWindowsRules = isWindowsAbsolutePath(target) || isWindowsAbsolutePath(root);
     const resolver = useWindowsRules ? path.win32 : path;
     const sep = useWindowsRules ? "\\" : path.sep;
-    const n = resolver.resolve(target);
-    const nr = resolver.resolve(root);
+    // `\\?\C:\x` and `C:\x` name the same file: compare without the namespace prefix on either side.
+    const n = resolver.resolve(useWindowsRules ? stripLongPathPrefix(target) : target);
+    const nr = resolver.resolve(useWindowsRules ? stripLongPathPrefix(root) : root);
     const c = useWindowsRules ? n.toLowerCase() : n;
     const cr = useWindowsRules ? nr.toLowerCase() : nr;
     const withSep = cr.endsWith(sep) ? cr : cr + sep;
