@@ -94,7 +94,7 @@ export const SESSION_OP_PARAMS: { readonly [K in keyof SessionOps]: readonly str
 
 /** Every op a daemon answers. Older daemons refuse newer ops with unknown_op; upload ops require v6, `setUploadRetention`
  * (docs/specs/2026-11-02-file-uploads-design.md, U6) is a compatible addition that older daemons answer 501. */
-export const HOST_OP_NAMES = [...(Object.keys(SESSION_OP_PARAMS) as (keyof SessionOps)[]), ...Object.keys(WORKSPACE_OP_PARAMS) as (keyof typeof WORKSPACE_OP_PARAMS)[], "spawn", "open", "close", "sessionFileExists", "invalidateSessionLists", "checkUpdates", "updateSoftware", "uploadStart", "uploadAbort", "uploadAttach", "setUploadRetention"] as const;
+export const HOST_OP_NAMES = [...(Object.keys(SESSION_OP_PARAMS) as (keyof SessionOps)[]), ...Object.keys(WORKSPACE_OP_PARAMS) as (keyof typeof WORKSPACE_OP_PARAMS)[], "spawn", "open", "close", "editLease", "sessionFileExists", "invalidateSessionLists", "checkUpdates", "updateSoftware", "uploadStart", "uploadAbort", "uploadAttach", "setUploadRetention"] as const;
 
 export type HostOpName = (typeof HOST_OP_NAMES)[number];
 
@@ -122,8 +122,7 @@ export type DownMessage =
   | { type: "welcome"; v: number; hostId: string }
   | { type: "stdin"; seq: number; ch: string; line: string }
   | { type: "kill"; seq: number; ch: string; force: boolean }
-  /** `editing`: this link holds the channel's history-edit lease; other links' history mutations are refused. */
-  | { type: "interest"; seq: number; ch: string; on: boolean; preparing: boolean; editing: boolean }
+  | { type: "interest"; seq: number; ch: string; on: boolean; preparing: boolean }
   | { type: "host_tools"; seq: number; ch: string; tools: unknown[]; schemes: HostUriScheme[] }
   /** `op` is whatever the sender named: the daemon answers one it does not know with 501 `unknown_op`. */
   | { type: "req"; seq: number; id: string; op: string; args: unknown }
@@ -347,7 +346,7 @@ export function decodeDown(line: string): DownMessage | UnknownMessage {
     case "kill":
       return { type: "kill", seq: seqNum(o, "seq"), ch: str(o, "ch"), force: bool(o, "force") };
     case "interest":
-      return { type: "interest", seq: seqNum(o, "seq"), ch: str(o, "ch"), on: bool(o, "on"), preparing: bool(o, "preparing"), editing: o.editing === undefined ? false : bool(o, "editing") };
+      return { type: "interest", seq: seqNum(o, "seq"), ch: str(o, "ch"), on: bool(o, "on"), preparing: bool(o, "preparing") };
     case "host_tools": {
       const schemes = o.schemes;
       if (!Array.isArray(schemes) || !schemes.every((entry) => isObj(entry) && typeof entry.scheme === "string" && typeof entry.writable === "boolean")) fail("schemes must be an array of {scheme, writable}");

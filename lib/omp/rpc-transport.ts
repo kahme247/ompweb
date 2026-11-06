@@ -28,8 +28,8 @@ export interface RpcTransport {
   readonly hostOwnedLifecycle?: boolean;
   setInterest?(on: boolean): void;
   setPreparing?(on: boolean, takeOver?: boolean): void;
-  /** Hold or release the channel's history-edit lease on the host. */
-  setEditing?(on: boolean): void;
+  /** Acquire (rejects while another server edits) or release the host's history-edit lease. */
+  setEditing?(on: boolean): Promise<void>;
   setHostTools?(tools: unknown[], schemes: { scheme: string; writable: boolean }[]): Promise<void>;
   /** Leave the shared channel without terminating its process. */
   close?(): void;

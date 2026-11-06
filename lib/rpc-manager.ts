@@ -36,7 +36,7 @@ import type {
 import type { AgentMessage, CrossSessionHostToolCall, CrossSessionHostToolEvent, ExitedRpcSession, ExtensionWidgetItem } from "./types";
 import { isLinkUp, type Host, type HostStatus, type SpawnRequest, type SpawnResult } from "./hosts/host";
 import { freezeHostLinks, getHost, hostOwnsLifecycle, isNotifier, lastUplinkAt, listHosts, orphanExit } from "./hosts/hub";
-import { HISTORY_MUTATING_COMMANDS, PEER_MESSAGE_FRAME } from "./hosts/link-protocol";
+import { HISTORY_MUTATING_COMMANDS, HostOpError, PEER_MESSAGE_FRAME } from "./hosts/link-protocol";
 import { LOCAL_HOST_ID } from "./hosts/registry";
 import type { OpResult } from "./hosts/session-ops";
 import { hostForSessionId, invalidateHostSessionList, listSessionsAllHosts, sessionSpawnTarget } from "./hosts/session-index";
@@ -2162,8 +2162,8 @@ export class AgentSessionWrapper {
     // send a prompt, fork, or switch the process during either preflight await.
     this.historyEditInFlight = true;
     const proc = this.proc;
-    // Other web apps sharing the child are fenced by the host's lease, held through postflight.
-    proc.transport?.setEditing?.(true);
+    // Other web apps sharing the child are fenced by the host's lease, acquired before preflight and held through postflight.
+    let leased = false;
     const sessionId = this._sessionId;
     const sessionFile = this._sessionFile;
     let persistenceError: Error | null = null;
@@ -2177,6 +2177,13 @@ export class AgentSessionWrapper {
     });
     notifyRunningChange();
     try {
+      if (proc.transport?.setEditing) {
+        await proc.transport.setEditing(true).catch((error: unknown) => {
+          if (error instanceof HostOpError && error.code === "session_busy") throw new WebRpcError(error.message, "session_busy");
+          throw error;
+        });
+        leased = true;
+      }
       const before = await this.getStateWithTimeout();
       if (persistenceError) throw persistenceError;
       if (before.sessionId !== sessionId || before.sessionFile !== sessionFile
@@ -2234,7 +2241,7 @@ export class AgentSessionWrapper {
     } finally {
       unsubscribe();
       this.historyEditInFlight = false;
-      proc.transport?.setEditing?.(false);
+      if (leased) void proc.transport?.setEditing?.(false).catch(() => {}); // A lost release ends when this link drops.
       notifyRunningChange();
     }
   }

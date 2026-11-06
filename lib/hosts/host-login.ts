@@ -1,7 +1,7 @@
 // The daemon's saved links, shared by `ompweb host` and local-bootstrap.
 // Pure Node: no daemon/spawn code, `next/*` or `@/` imports.
 import { randomUUID } from "node:crypto";
-import { closeSync, fstatSync, lstatSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
+import { linkSync, lstatSync, readFileSync, type Stats, unlinkSync, writeFileSync } from "node:fs";
 import { type FileHandle, mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -87,26 +87,30 @@ function recoverLock(lock: string): void {
     if (!before.isFile()) return;
     const text = readFileSync(lock, "utf8");
     if (!ownerExited(text)) return;
-    let fd: number;
+    // Published by link(): the mutex never exists without its owner's pid, so a crash cannot leave an unreadable one.
+    const temp = `${mutex}.${process.pid}.${randomUUID()}`;
+    writeFileSync(temp, JSON.stringify({ pid: process.pid }), { mode: 0o600, flag: "wx" });
+    let ours: Stats;
     try {
-      fd = openSync(mutex, "wx", 0o600);
+      ours = lstatSync(temp);
+      linkSync(temp, mutex);
     } catch (error) {
       // Another recoverer holds the mutex; only a proven-dead one is displaced.
       if ((error as NodeJS.ErrnoException).code === "EEXIST" && ownerExited(readFileSync(mutex, "utf8"))) unlinkSync(mutex);
       return;
+    } finally {
+      unlinkSync(temp);
     }
     try {
-      writeSync(fd, JSON.stringify({ pid: process.pid }));
       const current = lstatSync(lock);
       if (current.dev === before.dev && current.ino === before.ino && readFileSync(lock, "utf8") === text) unlinkSync(lock);
     } finally {
       try {
-        const ours = fstatSync(fd), now = lstatSync(mutex);
+        const now = lstatSync(mutex);
         if (now.dev === ours.dev && now.ino === ours.ino) unlinkSync(mutex);
       } catch {
         // Already gone.
       }
-      closeSync(fd);
     }
   } catch {
     // Another writer may have released/recovered it; unreadable ownership is never a stale lock.

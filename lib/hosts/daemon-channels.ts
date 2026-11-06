@@ -463,11 +463,15 @@ export class ChannelTable {
       if (member) this.deliver(channel, member, { type: "stdout", ch, line: JSON.stringify({ type: "response", id: frame.id, command: frame.type, success: false, error: error.message }) }, true);
     });
   }
-  setInterest(link: DaemonLink, ch: string, on: boolean, preparing: boolean, editing = false): void {
+  setInterest(link: DaemonLink, ch: string, on: boolean, preparing: boolean): void {
     const channel = this.member(link, ch); channel.lifecycle?.setInterest(link.id, on); channel.lifecycle?.setPreparing(link.id, preparing);
-    // First holder wins; a second editor's native edit is then refused like any other mutation.
-    if (editing) channel.editor ??= link.id;
-    else if (channel.editor === link.id) channel.editor = undefined;
+  }
+  /** The history-edit lease, acknowledged so a competing editor fails before its preflight. */
+  editLease(link: DaemonLink, ch: string, on: boolean): void {
+    const channel = this.member(link, ch);
+    if (!on) { if (channel.editor === link.id) channel.editor = undefined; return; }
+    if (channel.editor !== undefined && channel.editor !== link.id) throw new HostOpError(409, "session_busy", "Another web app is editing this session's history; retry once it finishes");
+    channel.editor = link.id;
   }
   setTools(link: DaemonLink, ch: string, tools: unknown[], schemes: HostUriScheme[]): void { this.member(link, ch).shared?.setTools(link.id, tools, schemes); }
   kill(link: DaemonLink, ch: string, force: boolean): void { const channel = this.member(link, ch); if (force) channel.transport.killTree(true); else this.stopChannel(channel); }
@@ -477,7 +481,13 @@ export class ChannelTable {
     link.discard(ch);
     for (const [id, owner] of channel.commands) if (owner?.id === link.id) channel.commands.set(id, null);
   }
-  linkDown(link: DaemonLink): void { for (const channel of this.channels.values()) { channel.lifecycle?.linkDown(link.id); channel.shared?.linkChanged(); } }
+  linkDown(link: DaemonLink): void {
+    for (const channel of this.channels.values()) {
+      channel.lifecycle?.linkDown(link.id); channel.shared?.linkChanged();
+      // A restarted server forgets its edit; a dropped holder's edit fails as host_offline anyway.
+      if (channel.editor === link.id) channel.editor = undefined;
+    }
+  }
   linkUp(link: DaemonLink): void { for (const channel of this.channels.values()) { channel.lifecycle?.linkUp(link.id); channel.shared?.linkChanged(); } }
   linkGone(link: DaemonLink): void {
     this.goneLinks.add(link.id);
@@ -500,8 +510,9 @@ export class ChannelTable {
     return [...this.channels.values()].filter(channel => channel.lifecycle?.isRunning && channel.pending.sessionId && channel.launch.sessionFile && !channel.sessionMovePending)
       .map(channel => ({ sessionId: channel.pending.sessionId!, launch: channel.launch }));
   }
-  async recover(entries: HostResumeEntry[]): Promise<void> {
-    await Promise.all(entries.map(async entry => {
+  /** Resumes each entry once; returns the entries whose resume failed. */
+  async recover(entries: HostResumeEntry[]): Promise<HostResumeEntry[]> {
+    const results = await Promise.allSettled(entries.map(async entry => {
       const lease = "d:resume";
       const channel = await this.ensure(entry.sessionId, entry.launch, null, undefined, lease);
       channel.lifecycle?.setPreparing(lease, true);
@@ -513,6 +524,11 @@ export class ChannelTable {
         channel.lifecycle?.setPreparing(lease, false);
       }
     }));
+    return results.flatMap((result, index) => {
+      if (result.status === "fulfilled") return [];
+      this.deps.log(`could not resume session ${entries[index].sessionId}: ${String(result.reason)}`);
+      return [entries[index]];
+    });
   }
   async mutateSession<T>(id: string, action: (canonicalId: string, liveIds: string[]) => Promise<T>): Promise<T> {
     if (!isValidSessionId(id)) throw invalid("Invalid session id");

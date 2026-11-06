@@ -203,7 +203,7 @@ export function runHostDaemon(options: DaemonOptions): { stop(): Promise<void>; 
       switch (message.type) {
         case "stdin": channels.stdin(link, message.ch, message.line); return;
         case "kill": channels.kill(link, message.ch, message.force); return;
-        case "interest": channels.setInterest(link, message.ch, message.on, message.preparing, message.editing); return;
+        case "interest": channels.setInterest(link, message.ch, message.on, message.preparing); return;
         case "host_tools": channels.setTools(link, message.ch, message.tools, message.schemes); return;
         case "req": void answer(link, message.id, message.op, message.args); return;
       }
@@ -244,6 +244,7 @@ export function runHostDaemon(options: DaemonOptions): { stop(): Promise<void>; 
       case "spawn": return channels.spawnLegacy(link, args as unknown as SpawnRequest & { ch: string });
       case "open": return channels.open(link, args as unknown as OpenChannelRequest);
       case "close": if (typeof args.ch !== "string") throw new HostOpError(400, "invalid_request", "Invalid channel id"); channels.close(link, args.ch); return {};
+      case "editLease": if (typeof args.ch !== "string" || typeof args.on !== "boolean") throw new HostOpError(400, "invalid_request", "Invalid edit lease"); channels.editLease(link, args.ch, args.on); return {};
       case "deleteSession":
       case "archiveSession": {
         if (typeof args.id !== "string") throw new HostOpError(400, "invalid_request", "Invalid session id");
@@ -299,8 +300,9 @@ export function runHostDaemon(options: DaemonOptions): { stop(): Promise<void>; 
   }
   let interrupted: HostResumeEntry[] = [];
   try { interrupted = resume.takeRunning(); } catch (error) { log("could not recover interrupted sessions: " + reason(error)); }
-  void channels.recover(interrupted).catch(error => log("could not resume interrupted sessions: " + reason(error)))
-    .finally(() => { try { resume.retireClaim(channels.running()); } catch (error) { log("could not retire recovered sessions: " + reason(error)); } });
+  // Retire only once every resume settled; failed ones stay claimed for the next daemon start.
+  void channels.recover(interrupted).then(failed => resume.retireClaim(channels.running(), failed))
+    .catch(error => log("could not retire recovered sessions: " + reason(error)));
   for (const saved of initial) makeLink({ ...saved, url: saved.url.replace(/\/+$/, "") }, saved.url.replace(/\/+$/, "") === primaryUrl);
   void getOmpVersion().then(version => { ompVersion = version; }).catch(error => log("could not read omp version: " + reason(error)))
     .finally(() => { if (!stopped) for (const link of links.values()) link.start(); });

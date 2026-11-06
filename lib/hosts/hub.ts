@@ -1112,7 +1112,6 @@ export class RemoteRpcTransport implements RpcTransport {
   private interested = false;
   private preparing = 0;
   private preparationHandoff = false;
-  private editing = false;
   private opening: OpenChannelRequest | null = null;
   private refreshing = false;
 
@@ -1191,14 +1190,14 @@ export class RemoteRpcTransport implements RpcTransport {
     if (wasPreparing !== (this.preparing > 0)) this.sendInterest();
   }
 
-  setEditing(on: boolean): void {
-    if (!this.hostOwnedLifecycle || this.closed || this.exitInfo || this.editing === on) return;
-    this.editing = on;
-    this.sendInterest();
+  /** Acquire (rejects 409 `session_busy` while another web app edits) or release the host's history-edit lease. */
+  async setEditing(on: boolean): Promise<void> {
+    if (!this.hostOwnedLifecycle || this.closed || this.exitInfo) return;
+    await request(this.hostId, "editLease", { ch: this.ch, on });
   }
 
   private sendInterest(): void {
-    sendDown(linkFor(this.hostId), { type: "interest", ch: this.ch, on: this.interested, preparing: this.preparing > 0, editing: this.editing }, this.ch);
+    sendDown(linkFor(this.hostId), { type: "interest", ch: this.ch, on: this.interested, preparing: this.preparing > 0 }, this.ch);
   }
 
   async setHostTools(tools: unknown[], schemes: HostUriScheme[]): Promise<void> {

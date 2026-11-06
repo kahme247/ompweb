@@ -86,11 +86,18 @@ export class HostResumeTracker {
     }
   }
 
-  /** The recovered sessions are running again: persist them, then drop the claims. A frozen tracker keeps them for the next start. */
-  retireClaim(entries: HostResumeEntry[]): void {
+  /** Recovery settled: persist what runs again, then drop the claims. `unrecovered` stay in one claim so the next
+   * daemon start retries them (this daemon's claims count as dead once it exits). A frozen tracker keeps all claims. */
+  retireClaim(entries: HostResumeEntry[], unrecovered: HostResumeEntry[] = []): void {
     if (this.invalid || this.frozen) return;
     this.entries = entries; this.flush();
-    for (const claim of this.claims.splice(0)) rmSync(claim, { force: true });
+    const [keep, ...rest] = this.claims.splice(0);
+    if (keep && unrecovered.length > 0) {
+      const temp = `${keep}.${randomUUID()}.tmp`;
+      try { writeFileSync(temp, JSON.stringify(unrecovered), { mode: 0o600, flag: "wx" }); renameSync(temp, keep); this.claims = [keep]; }
+      finally { rmSync(temp, { force: true }); }
+    } else if (keep) rmSync(keep, { force: true });
+    for (const claim of rest) rmSync(claim, { force: true });
   }
 
   /** Claim files whose owning pid is gone; EPERM or success never means dead. */

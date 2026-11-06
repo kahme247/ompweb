@@ -122,6 +122,8 @@ export class SharedRequests {
     if (!this.deps.isUp(id) || !this.deps.members().includes(id)) return false;
     const registration = this.registrations.get(id);
     if (call.frame.type === "host_tool_call") {
+      // Registration was briefly missing when the call arrived: pin the definition advertised again once it returns.
+      call.def ??= this.toolDefs.get(call.frame.toolName as string);
       return registration?.tools.some(tool => tool.name === call.frame.toolName && JSON.stringify(tool) === call.def) ?? false;
     }
     const scheme = typeof call.frame.url === "string" ? call.frame.url.split(":", 1)[0] : "";
