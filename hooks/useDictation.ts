@@ -730,17 +730,27 @@ export function useDictation({ onTranscript, onError, scope, identityMove }: Use
       onError?.("Microphone not supported in this browser or context");
       return;
     }
+    // Create and resume the meter's context before awaiting the microphone:
+    // by then the click's user activation may have expired, and a context the
+    // browser keeps suspended feeds the analyser silence (flat bars while the
+    // recording itself is fine).
+    let ctx: AudioContext | null = null;
+    if (typeof window.AudioContext === "function") {
+      try {
+        ctx = new AudioContext();
+        audioContextRef.current = ctx;
+        void ctx.resume().catch(() => {});
+      } catch {}
+    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
 
       captureRef.current = { analyser: null, startedAt: performance.now(), pausedAccum: 0, pausedAt: null };
-      if (typeof window.AudioContext === "function") {
-        let ctx: AudioContext | null = null;
+      if (ctx) {
         try {
-          ctx = new AudioContext();
-          audioContextRef.current = ctx;
-          if (ctx.state === "suspended") void ctx.resume();
+          // Safari can interrupt the context when the mic session starts.
+          if (ctx.state !== "running") void ctx.resume().catch(() => {});
           const source = ctx.createMediaStreamSource(stream);
           const analyser = ctx.createAnalyser();
           analyser.fftSize = 256;
@@ -748,7 +758,7 @@ export function useDictation({ onTranscript, onError, scope, identityMove }: Use
           captureRef.current.analyser = analyser;
         } catch {
           // Own the failure: never leave a live context behind untracked.
-          void ctx?.close().catch(() => {});
+          void ctx.close().catch(() => {});
           audioContextRef.current = null;
         }
       }

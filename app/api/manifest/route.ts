@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+
 import { getInstallName } from "@/lib/install-name";
+import { parseThemeColor } from "@/lib/manifest-theme";
 
 // Packaged public assets are read/encoded once per server module, from the
 // package directory the launcher names (the working directory is wherever
@@ -25,7 +27,12 @@ const manifest = {
 // Authentication is enforced by the existing /api/ web-password proxy guard.
 export function GET(request: Request) {
   const name = getInstallName(request.headers);
-  return Response.json({ ...manifest, name, short_name: name }, {
+  // ?theme= comes from the page's manifest link (lib/manifest-theme.ts).
+  // theme_color colors the installed app's system bars; background_color is
+  // its window background, which shows through the navigation bar on
+  // edge-to-edge Android (and on the splash screen).
+  const color = parseThemeColor(new URL(request.url).searchParams.get("theme")) ?? manifest.theme_color;
+  return Response.json({ ...manifest, theme_color: color, background_color: color, name, short_name: name }, {
     headers: {
       "Content-Type": "application/manifest+json",
       "Cache-Control": "private, no-cache, max-age=0, must-revalidate",

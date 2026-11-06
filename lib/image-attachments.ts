@@ -54,6 +54,16 @@ export function getBase64DecodedByteLength(data: string): number | null {
   return (data.length / 4) * 3 - padding;
 }
 
+const attachedSizes = new WeakMap<object, number>();
+
+/** Decoded bytes of a composer image (0 when invalid), scanned once per image object: the composer re-checks
+ *  the inline budget on every render, and rescanning megabytes of base64 per upload chip stalls typing. */
+export function attachedImageBytes(image: { readonly data: string }): number {
+  let bytes = attachedSizes.get(image);
+  if (bytes === undefined) attachedSizes.set(image, (bytes = getBase64DecodedByteLength(image.data) ?? 0));
+  return bytes;
+}
+
 function getImageByteLengthWithinLimits(value: unknown): number | null {
   if (!value || typeof value !== "object") return null;
   const image = value as Partial<Base64ImageAttachment>;

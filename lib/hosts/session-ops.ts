@@ -25,7 +25,7 @@ import {
   setSessionTitle,
   writeSessionFileAtomicSync,
 } from "../omp/session-files";
-import { sessionPathKey } from "../paths";
+import { projectIdentityKey, sessionPathKey } from "../paths";
 import {
   hideProject,
   loadProjectRegistry,
@@ -113,7 +113,7 @@ export interface SessionOps {
   /** Applied in one registry load/save. `newRoots` were registered by this call. */
   updateProject(updates: ProjectUpdate[]): Promise<OpResult<{ projects: ProjectRegistryEntry[]; newRoots: string[] }>>;
   hideProject(path: string): Promise<OpResult<null>>;
-  validateCwd(path: string): Promise<OpResult<{ cwd: string; projectRoot: string }>>;
+  validateCwd(path: string): Promise<OpResult<{ cwd: string; projectRoot: string; projectKey?: string }>>;
 }
 
 const execFileAsync = promisify(execFile);
@@ -717,6 +717,6 @@ export const sessionOps: SessionOps = {
       return fail(400, "not_a_directory", `Path is not a directory: ${cwd}`);
     }
     const project = await resolveProject(normalizedCwd);
-    return ok({ cwd: normalizedCwd, projectRoot: project.projectRoot });
+    return ok({ cwd: normalizedCwd, projectRoot: project.projectRoot, projectKey: projectIdentityKey(project.projectRoot) });
   },
 };

@@ -6,8 +6,9 @@ import { ArrowDown, ChevronDown, ChevronUp, Layers, Paperclip, Square } from "lu
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
 import { collectToolResults, isGroupAnchor, planTranscriptRows, type ActivityPiece, type TranscriptRow } from "@/lib/chat-transcript-plan";
+import { isReplyBlock } from "@/lib/message-display";
 import { resolveForkTargets } from "@/lib/chat-fork";
-import { MessageView } from "./MessageView";
+import { HeldMessageView, MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ExtensionDialog } from "./ExtensionDialog";
 import { SubagentTranscriptDialog } from "./SubagentTranscriptDialog";
@@ -20,6 +21,8 @@ import { CHAT_COLUMN_MAX_WIDTH, MINIMAP_WIDTH } from "@/lib/chat-layout";
 import { WorkspaceState } from "./AppShell-layout";
 import { useAgentSession, type AgentPhase, type NoticeItem, type SubagentInfo } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
+import { useChatSearchHighlights } from "@/hooks/useChatSearchHighlights";
+import type { SearchMatchTarget } from "./SessionSearchMatches";
 import { useSpeechSynthesis, SpeechSynthesisProvider } from "@/hooks/useSpeechSynthesis";
 import { GithubRepoContext } from "@/lib/github-refs";
 import { useDragDrop } from "@/hooks/useDragDrop";
@@ -39,7 +42,10 @@ import {
 } from "@/lib/chat-lazy-load";
 import { getDraftSummary, type ChatDraft } from "@/lib/draft-store";
 import { isLinkUp, type HostStatus } from "@/lib/hosts/host";
-import { newChatDraftKey, remoteHostId } from "@/lib/project-ordering";
+import { newChatDraftKey } from "@/lib/project-ordering";
+import { WorkspaceFileContext } from "@/lib/workspace-file-context";
+import type { WorkspaceFileSource } from "@/lib/workspace-types";
+import { getFileName } from "@/lib/file-paths";
 
 interface Props {
   session: SessionInfo | null;
@@ -54,6 +60,10 @@ interface Props {
   toolCallsDefaultCollapsed?: boolean;
   /** UI `hideToolActivity`: fold a running turn's tool calls into one row. */
   hideToolActivity?: boolean;
+  /** UI `neverFoldActivity`: render every turn flat, no Process details rows. */
+  neverFoldActivity?: boolean;
+  /** UI `showToolCallsUnfolded`: tool call rows stay out of Process details. */
+  showToolCallsUnfolded?: boolean;
   /** "Expand thinking blocks by default": open each thinking block on mount. */
   expandThinkingByDefault?: boolean;
   /** omp `hideThinkingBlock`: omit thinking from the transcript. */
@@ -71,12 +81,18 @@ interface Props {
   onSessionStatsChange?: (stats: SessionStatsInfo | null) => void;
   onSessionStatsPanelOpen?: () => void;
   onProviderUsageContextChange?: (context: ProviderUsageContext | null) => void;
-  onOpenFile?: (filePath: string) => void;
+  onOpenFile?: (filePath: string, name: string, source: WorkspaceFileSource) => void;
   /** Handles the open_url host tool; returns the result text for the agent. */
   onOpenUrl?: (url: string) => string;
   onGenerationSpeedChange?: (speed: GenerationSpeedInfo | null) => void;
   /** Open Settings → API Keys & Providers (from the model picker). */
   onOpenProviders?: () => void;
+  /** The sidebar search query: its hits are highlighted ("" for none). */
+  searchQuery?: string;
+  /** A hit picked in the sidebar for this session: scrolled to and marked current. */
+  searchTarget?: SearchMatchTarget | null;
+  /** The target was used; the owner drops it so a later remount does not jump again. */
+  onSearchTargetHandled?: () => void;
 }
 
 function phaseLabel(phase: AgentPhase): string {
@@ -286,6 +302,8 @@ interface CommittedTranscriptProps {
   toolCallsDefaultCollapsed: boolean;
   /** Fold a running turn's tool calls; off restores the flat live tail. */
   hideToolActivity: boolean;
+  neverFoldActivity: boolean;
+  showToolCallsUnfolded: boolean;
   expandThinkingByDefault: boolean;
   hideThinkingBlock: boolean;
   visibleCount: number;
@@ -307,7 +325,7 @@ interface CommittedTranscriptProps {
 const CommittedTranscript = memo(function CommittedTranscript({
   messages, entryIds, conversationMeta, messageRefs, isStreaming, sessionBusy, isCompacting, externalRunActive, isNew, forkingEntryId, editingEntryId,
   handleFork, handleEdit, modelNames, messageCwd, onOpenFile, sessionId,
-  toolCallsDefaultCollapsed, hideToolActivity, expandThinkingByDefault, hideThinkingBlock, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
+  toolCallsDefaultCollapsed, hideToolActivity, neverFoldActivity, showToolCallsUnfolded, expandThinkingByDefault, hideThinkingBlock, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
 }: CommittedTranscriptProps) {
   const { t } = useI18n();
   const { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage } = conversationMeta;
@@ -318,7 +336,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
     messageRefs.current[refIndex] = el;
   };
 
-  const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[] } = {}): ReactNode => {
+  const renderMessage: RenderMessage = (idx, options = {}) => {
     const msg = options.messageOverride ?? messages[idx];
     const isVisible = msg.role === "user" || msg.role === "assistant";
     const currentRefIdx = visibleRefIndexByMessage.get(idx);
@@ -338,7 +356,10 @@ const CommittedTranscript = memo(function CommittedTranscript({
     }
     if (options.showTimestamp !== undefined) showTimestamp = options.showTimestamp;
     const forkTarget = forkTargets[idx];
-    const canOfferFork = !sessionBusy && !isNew && !!forkTarget;
+    // Assistant rows fork from reply text or a visible error, not from each thinking/tool step:
+    // every row of a turn forks at the same prompt, so the extra buttons were only clutter.
+    const forkableRow = msg.role !== "assistant" || !!msg.errorMessage?.trim() || (Array.isArray(msg.content) && msg.content.some(isReplyBlock));
+    const canOfferFork = !sessionBusy && !isNew && !!forkTarget && forkableRow;
     const canOfferEdit = !sessionBusy && !isCompacting && !isNew && msg.role === "user" && !msg.branchSummary && !!entryIds[idx];
     const historyMutationPending = forkingEntryId !== null || editingEntryId !== null;
     const view = (
@@ -379,12 +400,17 @@ const CommittedTranscript = memo(function CommittedTranscript({
   // visible window. Invisible history never allocates React elements, so long
   // sessions pay element cost proportional to the visible window instead of
   // the whole transcript.
-  const rows = useMemo<TranscriptRow[]>(() => planTranscriptRows(messages, { hideThinking: hideThinkingBlock }), [messages, hideThinkingBlock]);
-  const isLiveTail = (row: TranscriptRow): boolean => {
+  // Expanded-by-default thinking, and tool calls when asked, stay out of the
+  // fold: folding on commit would hide the block the preference just opened.
+  const rows = useMemo<TranscriptRow[]>(
+    () => planTranscriptRows(messages, { hideThinking: hideThinkingBlock, showThinking: expandThinkingByDefault, showToolCalls: showToolCallsUnfolded, neverFold: neverFoldActivity }),
+    [messages, hideThinkingBlock, expandThinkingByDefault, showToolCallsUnfolded, neverFoldActivity],
+  );
+  const rendersFlat = (row: TranscriptRow): boolean => {
+    if (row.kind !== "group") return false;
     // With "Hide tool activity while working" on (the default) the running turn
     // folds like a finished one; off restores the flat tail.
     if (hideToolActivity) return false;
-    if (row.kind !== "group") return false;
     // `sessionBusy` only goes true for a run omp-web owns, so a session driven
     // by another `omp` process would never get a live tail; the transcript-tail
     // heuristic supplies that missing case.
@@ -419,9 +445,9 @@ const CommittedTranscript = memo(function CommittedTranscript({
     }
     const { userIndex: userIdx, endIndex: endIdx, segments } = row;
 
-    if (isLiveTail(row)) {
-      // Live tail: render the running turn flat so streaming updates and tool
-      // progress stay in view; it folds once the run ends.
+    if (rendersFlat(row)) {
+      // Live tail: stays flat so streaming updates and tool progress stay in
+      // view, and folds once the run ends.
       for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
         rendered.push(renderMessage(renderIdx));
       }
@@ -441,6 +467,8 @@ const CommittedTranscript = memo(function CommittedTranscript({
           keyPrefix: `text-${segmentIdx}`,
           messageOverride: override,
           ...(segment.last ? {} : { showTimestamp: false }),
+          // Thinking can ride in a text segment; deferred text loads by source index.
+          sourceBlockIndices: segment.blocks.map((block) => msg.content.indexOf(block)),
         }));
         attached.add(segment.index);
         return;
@@ -479,8 +507,15 @@ const CommittedTranscript = memo(function CommittedTranscript({
   );
 });
 
-export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatus: channelHostStatus, hostLabel, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatus: channelHostStatus, hostLabel, newSessionWorkspace, toolCallsDefaultCollapsed = true, hideToolActivity = true, neverFoldActivity = false, showToolCallsUnfolded = false, expandThinkingByDefault = false, hideThinkingBlock = false, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved, modelsRefreshKey, chatInputRef, sessionInfoContainer, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile: onOpenWorkspaceFile, onOpenUrl, onOpenProviders, searchQuery = "", searchTarget = null, onSearchTargetHandled }: Props) {
   const { t, tn } = useI18n();
+  const fileSource = useMemo<WorkspaceFileSource>(() => ({
+    hostId: session?.hostId ?? newSessionHostId ?? "local",
+    cwd: session?.cwd ?? newSessionCwd, sessionId: session?.id ?? null,
+  }), [session?.hostId, session?.cwd, session?.id, newSessionHostId, newSessionCwd]);
+  const onOpenFile = useMemo(() => onOpenWorkspaceFile
+    ? (filePath: string) => onOpenWorkspaceFile(filePath, getFileName(filePath), fileSource)
+    : undefined, [onOpenWorkspaceFile, fileSource]);
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
   const internalChatInputRef = useRef<ChatInputHandle | null>(null);
@@ -521,7 +556,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
 
   const {
     loading, error, messages, entryIds, showPreCompactionHistory, streamState,
-    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, fastModeEnabled, fastModeActive, slowModeSupported, slowModeEnabled, slowModeScope, usageLimit,
+    agentRunning, bashRunning, pendingBash, deferredBash, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, fastModeEnabled, fastModeActive, slowModeSupported, slowModeEnabled, slowModeScope, usageLimit,
     externalRunActive,
     toolPreset,
     liveModelMeta,
@@ -535,9 +570,10 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
     liveToolResults,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
     isNew, hostStatus: frameHostStatus,
-    sessionIdRef, messagesEndRef, scrollContainerRef,
+    sessionIdRef, messagesEndRef, scrollContainerRef, holdScrollPosition,
     handleSend, handleAbort, handleFork, handleEdit, handleModelChange, retrySession,
-    handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction, handleCompact,
+    handleSteer, handleFollowUp, handleAbortCompaction, handleCompact,
+    heldMessages, deleteHeldMessage,
     removeQueuedMessage, promoteQueuedToSteer,
     handleBuiltinSlashCommand, togglePreCompactionHistory,
     handleThinkingLevelChange, handleFastModeChange, handleSlowModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
@@ -546,7 +582,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
   } = useAgentSession({
     session, newSessionCwd, newSessionHostId, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked, onSessionMoved: handleSessionMoved,
     modelsRefreshKey, chatInputRef: composerRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsPanelOpen,
-    onOpenFile, onOpenUrl,
+    onOpenFile: onOpenWorkspaceFile, onOpenUrl,
   });
   useEffect(() => {
     if (!autoplayPendingRef.current) return;
@@ -701,7 +737,25 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
   // The empty new-session screen has its own scroller, so the conversation's
   // scroller mounts after the first send without a remount or a load.
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
-  const remoteWorkspace = session ? remoteHostId(session.hostId) !== undefined : newSessionHostId !== undefined;
+  // Widen the lazy render window until it includes the message's transcript row.
+  const revealMessage = useCallback((messageIndex: number) => {
+    const rows = planTranscriptRows(messages, { hideThinking: hideThinkingBlock, showThinking: expandThinkingByDefault, showToolCalls: showToolCallsUnfolded, neverFold: neverFoldActivity });
+    const rowIndex = rows.findIndex((row) => (row.kind === "message" ? row.index === messageIndex : messageIndex >= row.userIndex && messageIndex < row.endIndex));
+    const needed = rows.length - Math.max(0, rowIndex);
+    if (needed <= visibleCount) return true;
+    setVisibleCount(needed);
+    return false;
+  }, [messages, hideThinkingBlock, expandThinkingByDefault, showToolCallsUnfolded, neverFoldActivity, visibleCount]);
+  useChatSearchHighlights({
+    container: scrollContainerRef,
+    query: searchQuery,
+    target: searchTarget,
+    ready: !loading && !isEmptyNew,
+    entryIds,
+    revealMessage,
+    holdScrollPosition,
+    onTargetHandled: onSearchTargetHandled,
+  });
   // The hosts channel is the source of truth; a frame only speaks before its first snapshot.
   const currentHostStatus = channelHostStatus ?? frameHostStatus;
   const hostBanner = currentHostStatus && !isLinkUp(currentHostStatus) ? <HostOfflineBanner host={hostLabel ?? ""} /> : null;
@@ -984,18 +1038,17 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
   }, [advisorEnabled]);
 
   // GitHub repo of the session checkout, so bare `#123` in messages links to it.
-  // A remote session's cwd is a path on its host, which this server cannot inspect.
   const [githubRepo, setGithubRepo] = useState<string | null>(null);
   useEffect(() => {
     setGithubRepo(null);
-    if (!messageCwd || remoteWorkspace) return;
+    if (!messageCwd) return;
     const controller = new AbortController();
-    fetch(`/api/github-repo?cwd=${encodeURIComponent(messageCwd)}`, { signal: controller.signal })
+    fetch(`/api/github-repo?${new URLSearchParams({ cwd: messageCwd, hostId: fileSource.hostId })}`, { signal: controller.signal })
       .then((response) => response.ok ? response.json() as Promise<{ repo?: string | null }> : null)
-      .then((data) => setGithubRepo(data?.repo ?? null))
+      .then((data) => { if (!controller.signal.aborted) setGithubRepo(data?.repo ?? null); })
       .catch(() => {});
     return () => controller.abort();
-  }, [messageCwd, remoteWorkspace]);
+  }, [messageCwd, fileSource.hostId]);
 
   const advisorModelMeta = useMemo(() => {
     if (!advisorRoleSelector) return null;
@@ -1080,7 +1133,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
       onAbort={handleAbort}
       onSteer={agentRunning ? handleSteer : undefined}
       onFollowUp={agentRunning ? handleFollowUp : undefined}
-      onPromptWithStreamingBehavior={agentRunning ? handlePromptWithStreamingBehavior : undefined}
+      outbox={!isNew}
       isStreaming={sessionBusy}
       submissionBlocked={editingEntryId !== null}
       model={displayModelValue}
@@ -1132,8 +1185,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
       onBuiltinCommand={handleBuiltinSlashCommand}
       onAudioUnlock={unlockAudio}
       draftKey={draftKey}
-      // @-mentions and skill lookups read this machine's disk: not for a remote workspace yet.
-      cwd={remoteWorkspace ? null : session?.cwd ?? newSessionCwd}
+      uploadHostId={session ? session.hostId : newSessionHostId}
+      cwd={session?.cwd ?? newSessionCwd}
       /* The pill bar and chevron only render in the non-empty layout; don't
          accept Escape-to-minimize in the fresh-chat branch where there is
          nothing to collapse. */
@@ -1150,7 +1203,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
     return <WorkspaceState kind="loading" title={t("chatWindow.loadingSession")} />;
   }
 
-  if (error) {
+  if (error && heldMessages.length === 0 && !(currentHostStatus && !isLinkUp(currentHostStatus))) {
     return (
       <WorkspaceState
         kind="error"
@@ -1172,6 +1225,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
     <SpeechSynthesisProvider value={tts}>
     <GithubRepoContext.Provider value={githubRepo}>
     <AgentLinkContext.Provider value={openAgentLink}>
+    <WorkspaceFileContext.Provider value={fileSource}>
     <div
       className="relative flex h-full flex-col overflow-hidden"
       onDragEnter={handleDragEnter}
@@ -1304,6 +1358,14 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
             <div style={{ maxWidth: isMobile ? CHAT_COLUMN_MAX_WIDTH : CHAT_COLUMN_MAX_WIDTH_DESKTOP, margin: "0 auto" }}>
               <ExtensionStatusBar statuses={extensionStatuses} />
               <ExtensionWidgets widgets={aboveEditorWidgets} />
+              {error && (
+                <div role="alert" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 12, padding: "8px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", color: "var(--status-error)" }}>
+                  <span>{error}</span>
+                  <button type="button" className="load-retry-button" onClick={retrySession} style={{ flexShrink: 0, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer" }}>
+                    {t("chatWindow.retry")}
+                  </button>
+                </div>
+              )}
 
             {conversationMeta.hasCompaction && (
               <div
@@ -1349,6 +1411,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
               sessionId={session?.id ?? sessionIdRef.current ?? undefined}
               toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
               hideToolActivity={hideToolActivity}
+              neverFoldActivity={neverFoldActivity}
+              showToolCallsUnfolded={showToolCallsUnfolded}
               expandThinkingByDefault={expandThinkingByDefault}
               hideThinkingBlock={hideThinkingBlock}
               visibleCount={visibleCount}
@@ -1393,6 +1457,14 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
             ))}
 
 
+            {deferredBash.map((message, index) => (
+              <MessageView
+                key={index}
+                message={message}
+                sessionId={session?.id ?? sessionIdRef.current ?? undefined}
+              />
+            ))}
+
             {pendingBash && (
               <MessageView
                 message={{
@@ -1404,6 +1476,11 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
                 sessionId={session?.id ?? sessionIdRef.current ?? undefined}
               />
             )}
+
+            {/* After the live turn, in submission order: what omp does not have yet. */}
+            {heldMessages.map((held) => (
+              <HeldMessageView key={held.id} held={held} hostLabel={hostLabel} onDelete={deleteHeldMessage} />
+            ))}
 
             <div ref={messagesEndRef} />
             </div>
@@ -1487,6 +1564,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
             {extensionDialog && (
               <div style={{ marginBottom: 8 }}>
                 <ExtensionDialog
+                  key={extensionDialog.id}
                   request={extensionDialog}
                   onRespond={respondToExtensionUi}
                   attached
@@ -1512,6 +1590,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
       </>
       )}
       </div>
+    </WorkspaceFileContext.Provider>
     </AgentLinkContext.Provider>
     </GithubRepoContext.Provider>
     </SpeechSynthesisProvider>

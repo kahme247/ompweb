@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useSyncExternalStore, type RefObject } from "react";
+import { Eye, EyeOff } from "lucide-react";
 import type { ExtensionUiRequest } from "@/lib/types";
 import type { RpcAskDialogAnswer } from "@/lib/pi-types";
 import { useI18n } from "@/lib/i18n";
@@ -195,6 +196,20 @@ function touchPointer(): boolean {
   return !window.matchMedia("(pointer: fine)").matches;
 }
 
+const SENSITIVE_PATTERN = /\b(passwords?|passphrases?|secrets?|tokens?|api[_\s-]?keys?|access[_\s-]?tokens?|private[_\s-]?keys?|auth[_\s-]?tokens?|credentials?)\b/i;
+const NON_SECRET_METADATA_PATTERN = /\b(token\s+(?:name|count|limit|budget|usage)|max\s+tokens)\b/i;
+
+export function isSensitivePrompt(title?: string, placeholder?: string): boolean {
+  const titleText = (title ?? "").trim();
+  const placeholderText = (placeholder ?? "").trim();
+  const fullText = `${titleText} ${placeholderText}`.trim();
+  if (!fullText) return false;
+  const strippedTitle = titleText.replace(NON_SECRET_METADATA_PATTERN, "");
+  if (SENSITIVE_PATTERN.test(strippedTitle)) return true;
+  const strippedFull = fullText.replace(NON_SECRET_METADATA_PATTERN, "");
+  return SENSITIVE_PATTERN.test(strippedFull);
+}
+
 /** Single-select questions start on their recommended option. */
 function initialAskDrafts(request: ExtensionDialogRequest): AskDraft[] {
   if (request.method !== "ask") return [];
@@ -226,6 +241,7 @@ export function ExtensionDialog({
 }) {
   const { t } = useI18n();
   const [value, setValue] = useState(request.method === "editor" ? request.prefill ?? "" : "");
+  const [showPassword, setShowPassword] = useState(false);
   const [selectedOption, setSelectedOption] = useState<string | null>(null);
   const requestIdRef = useRef(request.id);
   // `pointerType` of the latest press: the pointer media query only describes
@@ -240,6 +256,7 @@ export function ExtensionDialog({
     if (requestIdRef.current === request.id) return;
     requestIdRef.current = request.id;
     setValue(request.method === "editor" ? request.prefill ?? "" : "");
+    setShowPassword(false);
     setSelectedOption(null);
     setAskDrafts(initialAskDrafts(request));
   }, [request]);
@@ -427,29 +444,68 @@ export function ExtensionDialog({
               })}
             </div>
           )}
-          {request.method === "input" && (
-            <input
-              autoFocus
-              aria-label={request.title || request.placeholder || "Input value"}
-              value={value}
-              placeholder={request.placeholder}
-              onChange={(e) => setValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") submitValue();
-              }}
-              style={{
-                width: "100%",
-                padding: "7px 10px",
-                borderRadius: 6,
-                border: "1px solid var(--border)",
-                background: "var(--bg-panel)",
-                color: "var(--text)",
-                outline: "none",
-                fontSize: 12,
-                fontFamily: "inherit",
-              }}
-            />
-          )}
+          {request.method === "input" && (() => {
+            const isSensitive = Boolean(request.secret || request.password) ||
+              (request.secret !== false && request.password !== false && isSensitivePrompt(request.title, request.placeholder));
+            return (
+              <div style={{ position: "relative", width: "100%" }}>
+                <input
+                  autoFocus
+                  type={isSensitive && !showPassword ? "password" : "text"}
+                  autoComplete={isSensitive ? "off" : undefined}
+                  autoCorrect={isSensitive ? "off" : undefined}
+                  autoCapitalize={isSensitive ? "off" : undefined}
+                  spellCheck={isSensitive ? false : undefined}
+                  data-1p-ignore={isSensitive ? "true" : undefined}
+                  aria-label={request.title || request.placeholder || "Input value"}
+                  value={value}
+                  placeholder={request.placeholder}
+                  onChange={(e) => setValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") submitValue();
+                  }}
+                  style={{
+                    width: "100%",
+                    padding: isSensitive ? "7px 34px 7px 10px" : "7px 10px",
+                    borderRadius: 6,
+                    border: "1px solid var(--border)",
+                    background: "var(--bg-panel)",
+                    color: "var(--text)",
+                    outline: "none",
+                    fontSize: 12,
+                    fontFamily: "inherit",
+                  }}
+                />
+                {isSensitive && (
+                  <button
+                    type="button"
+                    aria-label={showPassword ? t("chatWindow.hidePassword") : t("chatWindow.showPassword")}
+                    title={showPassword ? t("chatWindow.hidePassword") : t("chatWindow.showPassword")}
+                    onClick={() => setShowPassword((prev) => !prev)}
+                    style={{
+                      position: "absolute",
+                      right: 6,
+                      top: "50%",
+                      transform: "translateY(-50%)",
+                      width: 24,
+                      height: 24,
+                      padding: 0,
+                      background: "none",
+                      border: "none",
+                      cursor: "pointer",
+                      color: "var(--text-muted)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      borderRadius: 4,
+                    }}
+                  >
+                    {showPassword ? <EyeOff size={14} aria-hidden="true" /> : <Eye size={14} aria-hidden="true" />}
+                  </button>
+                )}
+              </div>
+            );
+          })()}
           {request.method === "editor" && (
             <textarea
               autoFocus

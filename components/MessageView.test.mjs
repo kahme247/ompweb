@@ -5,11 +5,47 @@ import React from "react";
 const { act, cleanup, fireEvent, render, waitFor } = await import("@testing-library/react/pure.js");
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { MessageView, SafeMarkdownBody, TaskResultPanel, isInterruptedMessage, areMessageViewPropsEqual, haveSameRelevantToolResults } = await import("./MessageView.tsx");
+const { HeldMessageView, MessageView, SafeMarkdownBody, TaskResultPanel, isInterruptedMessage, areMessageViewPropsEqual, haveSameRelevantToolResults } = await import("./MessageView.tsx");
 const { CodeBlock } = await import("./MermaidBlock.tsx");
 const { buildSessionContext } = await import("../lib/session-reader.ts");
 const { collectToolResults, planTranscriptRows } = await import("../lib/chat-transcript-plan.ts");
 afterEach(cleanup);
+
+test("held messages name every delivery leg and only offer Delete before dispatch", () => {
+  const base = { id: "held", mode: "prompt", message: "Keep this safe.", createdAt: Date.now(), local: false };
+  for (const [state, label, actions, spinner] of [
+    ["sending", "Sending…", false, true],
+    ["waiting_host", "Waiting for Build box", true, false],
+    ["delivering", "Delivering…", false, true],
+    ["failed", "Not sent", true, false],
+  ]) {
+    const html = renderToStaticMarkup(React.createElement(HeldMessageView, { held: { ...base, state }, hostLabel: "Build box", onDelete() {} }));
+    assert.ok(html.includes(label), state);
+    assert.equal(html.includes("Delete this held message"), actions, state);
+    assert.equal(html.includes("<select"), false, state);
+    assert.equal(html.includes("activity-row-spinner"), spinner, state);
+  }
+});
+
+test("Delete confirmation never claims omp has not seen a message that may have been sent, nor cancellation", async () => {
+  const base = { id: "held", mode: "prompt", message: "Keep this safe.", createdAt: Date.now(), local: false, state: "failed" };
+  const dialogText = async (held) => {
+    const view = render(React.createElement(HeldMessageView, { held, onDelete() {} }));
+    await act(async () => { fireEvent.click(view.getByRole("button", { name: "Delete this held message" })); });
+    const text = (await waitFor(() => view.getByRole("dialog"))).textContent;
+    view.unmount();
+    return text;
+  };
+  const uncertain = await dialogText({ ...base, mayHaveBeenSent: true });
+  assert.match(uncertain, /may already have reached omp/);
+  assert.match(uncertain, /cannot cancel or undo/);
+  assert.doesNotMatch(uncertain, /has not reached|will not be sent/);
+  for (const state of ["held", "failed"]) {
+    const ordinary = await dialogText({ ...base, state });
+    assert.match(ordinary, /Remove this held message from the outbox list\?/, state);
+    assert.doesNotMatch(ordinary, /has not reached|never reached|will not send|will not be sent|cancel/, state);
+  }
+});
 
 test("sent messages without timestamps or branch metadata still offer copy", () => {
   const html = renderToStaticMarkup(React.createElement(MessageView, {
@@ -234,6 +270,29 @@ test("read paths with an internal URL scheme are not file links", () => {
     assert.doesNotMatch(render(path), /activity-file-link|role="link"/, path);
   }
   assert.match(render("src/foo.ts:10"), /activity-file-link/);
+});
+
+test("tool-row file links keep Windows drive paths and colon filenames intact", () => {
+  const cases = [
+    // Drive-letter colon is not a line suffix: splitting on ":" opened "C".
+    ["C:\\Users\\me\\proj\\src\\file.ts", "C:\\Users\\me\\proj\\src\\file.ts"],
+    ["C:/Users/me/proj/src/file.ts:42", "C:/Users/me/proj/src/file.ts"],
+    ["src/my:file.txt", "src/my:file.txt"],
+  ];
+  for (const [path, expected] of cases) {
+    const openedFiles = [];
+    const { container } = render(React.createElement(MessageView, {
+      onOpenFile(file) { openedFiles.push(file); },
+      message: {
+        role: "assistant",
+        content: [{ type: "toolCall", toolCallId: "call-1", toolName: "read", input: { path } }],
+      },
+    }));
+    // File links render as a clickable span (role="button"), unlike web URLs.
+    fireEvent.click(container.querySelector(".activity-file-link"));
+    assert.deepEqual(openedFiles, [expected], path);
+    cleanup();
+  }
 });
 
 test("read paths with a web URL open the fetched page in a new tab without toggling the row", () => {
@@ -634,6 +693,18 @@ test("thinking blocks stay collapsed by default and open with the expand prefere
   // The same initial state covers a streaming block on purpose (see ThinkingBlock):
   // the reasoning the preference is meant to expose is the one being written.
   assert.match(html({ expandThinkingByDefault: true, isStreaming: true }), /weighing the options/);
+});
+
+test("the model label hides on activity-only rows but stays on a row that also carries reply text", () => {
+  const html = (content) => renderToStaticMarkup(React.createElement(MessageView, {
+    message: { role: "assistant", provider: "t", model: "label-model", content },
+    modelNames: { "t:label-model": "Label Model" },
+  }));
+  const labelShown = (markup) => /display:flex[^>]*><span>Label Model<\/span>/.test(markup);
+  assert.equal(labelShown(html([{ type: "thinking", thinking: "plan" }])), false);
+  // Unfolded thinking rides in the reply's segment; the reply keeps its attribution.
+  assert.equal(labelShown(html([{ type: "thinking", thinking: "plan" }, { type: "text", text: "Answer" }])), true);
+  assert.equal(labelShown(html([{ type: "text", text: "Answer" }])), true);
 });
 
 test("an expanded thinking block collapses and re-expands by hand", async () => {
@@ -1073,4 +1144,74 @@ test("an open confirmation closes when the row starts showing another message", 
   assert.equal(view.queryByRole("button", { name: "Edit" }), null, "Edit returning does not reopen its dialog");
   assert.deepEqual(calls, []);
   view.unmount();
+});
+
+test("a `!` run renders as a shell card with its command, status and output", () => {
+  const shell = (message) => {
+    const view = render(React.createElement(MessageView, { message: { role: "bashExecution", ...message } }));
+    return { view, header: view.container.querySelector(".shell-run-header") };
+  };
+
+  const ok = shell({ command: "git status", output: "clean\n", exitCode: 0 });
+  assert.equal(ok.header.querySelector(".shell-run-command").textContent, "git status");
+  assert.equal(ok.view.container.querySelector(".shell-run-output"), null, "collapsed until opened");
+  fireEvent.click(ok.header);
+  assert.equal(ok.view.container.querySelector(".shell-run-output").textContent, "clean\n");
+  assert.equal(ok.view.container.querySelector(".shell-run-failed"), null);
+  assert.equal(ok.header.querySelector(".shell-run-tag"), null, "only `!!` runs are tagged local");
+  fireEvent.click(ok.header);
+  assert.equal(ok.view.container.querySelector(".shell-run-output"), null, "the header closes it again");
+  cleanup();
+
+  const failed = shell({ command: "false", output: "", exitCode: 1 });
+  assert.match(failed.header.querySelector(".shell-run-status").textContent, /exit 1/);
+  assert.ok(failed.view.container.querySelector(".shell-run-failed"));
+  fireEvent.click(failed.header);
+  assert.equal(failed.view.container.querySelector(".shell-run-output").textContent, "(no output)");
+  cleanup();
+
+  const cancelled = shell({ command: "sleep 9", output: "", cancelled: true });
+  assert.match(cancelled.header.querySelector(".shell-run-status").textContent, /cancelled/);
+  cleanup();
+
+  const local = shell({ command: "env", output: "A=1", exitCode: 0, excludeFromContext: true });
+  assert.equal(local.header.querySelector(".shell-run-tag").textContent, "local");
+  cleanup();
+
+  const pending = shell({ command: "make", output: "" });
+  assert.ok(pending.header.querySelector(".activity-row-spinner"), "a running command shows a spinner");
+  assert.equal(pending.header.getAttribute("aria-disabled"), "true", "the header cannot be toggled while it runs");
+  fireEvent.click(pending.header);
+  assert.equal(pending.header.getAttribute("aria-expanded"), "false");
+  assert.equal(pending.view.container.querySelector(".shell-run-output"), null, "no empty output while it runs");
+});
+
+test("shell card expansion resets for a different run but survives output updates", () => {
+  const message = { role: "bashExecution", command: "printf hello", output: "hello", exitCode: 0, timestamp: 10 };
+  const view = render(React.createElement(MessageView, { message }));
+  const header = () => view.container.querySelector(".shell-run-header");
+  fireEvent.click(header());
+  assert.equal(header().getAttribute("aria-expanded"), "true");
+  view.rerender(React.createElement(MessageView, { message: { ...message, output: "hello\n" } }));
+  assert.equal(header().getAttribute("aria-expanded"), "true", "refreshing the same run keeps the reader's expansion");
+  view.rerender(React.createElement(MessageView, { message: { ...message, timestamp: 20 } }));
+  assert.equal(header().getAttribute("aria-expanded"), "false", "a different run of the same command starts collapsed");
+});
+
+test("a branch switch that reuses the card for another untimed run of the same command starts it collapsed", () => {
+  const message = { role: "bashExecution", command: "ls", output: "a", exitCode: 0 };
+  const view = render(React.createElement(MessageView, { message, entryId: "e1" }));
+  const header = () => view.container.querySelector(".shell-run-header");
+  fireEvent.click(header());
+  view.rerender(React.createElement(MessageView, { message: { ...message }, entryId: "e1" }));
+  assert.equal(header().getAttribute("aria-expanded"), "true", "a reload of the same entry keeps it open");
+  view.rerender(React.createElement(MessageView, { message: { ...message, output: "b" }, entryId: "e2" }));
+  assert.equal(header().getAttribute("aria-expanded"), "false");
+});
+
+test("a successful shell card exposes its outcome in its accessible name", () => {
+  const view = render(React.createElement(MessageView, {
+    message: { role: "bashExecution", command: "true", output: "", exitCode: 0 },
+  }));
+  assert.ok(view.getByRole("button", { name: /true.*succeeded/i }));
 });

@@ -15,15 +15,16 @@ import * as cwdBrowse from "@/app/api/cwd/browse/route";
 import * as cwdValidate from "@/app/api/cwd/validate/route";
 import * as defaultCwd from "@/app/api/default-cwd/route";
 import * as events from "@/app/api/events/route";
+import * as eventsLink from "@/app/api/events/link/route";
 import * as fileIndex from "@/app/api/file-index/route";
 import * as filesPath from "@/app/api/files/[...path]/route";
 import * as gitDiff from "@/app/api/git/diff/route";
 import * as gitStatus from "@/app/api/git/status/route";
 import * as githubRepo from "@/app/api/github-repo/route";
 import * as home from "@/app/api/home/route";
-import * as hostsLinkBlobReqId from "@/app/api/hosts/link/blob/[reqId]/route";
 import * as hostsLink from "@/app/api/hosts/link/route";
 import * as hosts from "@/app/api/hosts/route";
+import * as hostsIdUpdates from "@/app/api/hosts/[id]/updates/route";
 import * as manifest from "@/app/api/manifest/route";
 import * as mcp from "@/app/api/mcp/route";
 import * as mediaHash from "@/app/api/media/[hash]/route";
@@ -49,6 +50,7 @@ import * as sessionsIdAutoName from "@/app/api/sessions/[id]/auto-name/route";
 import * as sessionsIdContext from "@/app/api/sessions/[id]/context/route";
 import * as sessionsIdEntriesEntryIdThinking from "@/app/api/sessions/[id]/entries/[entryId]/thinking/route";
 import * as sessionsIdExport from "@/app/api/sessions/[id]/export/route";
+import * as sessionsIdMatches from "@/app/api/sessions/[id]/matches/route";
 import * as sessionsId from "@/app/api/sessions/[id]/route";
 import * as sessionsIdState from "@/app/api/sessions/[id]/state/route";
 import * as sessionsIdSubagentsSubagentId from "@/app/api/sessions/[id]/subagents/[subagentId]/route";
@@ -65,20 +67,30 @@ import * as skillsUpdate from "@/app/api/skills/update/route";
 import * as sttJobIdAudio from "@/app/api/stt/[jobId]/audio/route";
 import * as sttJobId from "@/app/api/stt/[jobId]/route";
 import * as stt from "@/app/api/stt/route";
+import * as transportMetrics from "@/app/api/transport-metrics/route";
+import * as uploadsId from "@/app/api/uploads/[id]/route";
+import * as uploads from "@/app/api/uploads/route";
 import * as usage from "@/app/api/usage/route";
 import * as webAuthSession from "@/app/api/web-auth/session/route";
 import * as webSettings from "@/app/api/web-settings/route";
 import * as windowsService from "@/app/api/windows-service/route";
 import * as worktrees from "@/app/api/worktrees/route";
+import type { BrowserLinkData } from "@/lib/browser-link";
+import type { LinkSocketData } from "@/lib/hosts/hub";
+
+/** What Bun keeps on an upgraded socket (`ws.data`): a host link's or a browser link's. */
+export type ServerSocketData = LinkSocketData | BrowserLinkData;
 
 type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 // never: each handler narrows its own params; the router passes Record<string, string | string[]>.
 // disableIdleTimeout: a handler whose response stays open without traffic (a stream) keeps Bun's idle timeout off for
 // its socket; see handle() in server/app.ts.
+// upgrade: makes the request a WebSocket (server.upgrade), a host link or a browser link; a handler that upgraded
+// returns undefined.
 export type RouteHandler = (
   request: Request,
-  context: { params: Promise<never>; disableIdleTimeout: () => void },
-) => Response | Promise<Response>;
+  context: { params: Promise<never>; disableIdleTimeout: () => void; upgrade: (data: ServerSocketData) => boolean },
+) => Response | undefined | Promise<Response | undefined>;
 export type RouteModule = Partial<Record<Method, RouteHandler>>;
 
 // Key: the route's directory under app/api.
@@ -98,15 +110,16 @@ export const ROUTE_MODULES: Record<string, RouteModule> = {
   "cwd/validate": cwdValidate,
   "default-cwd": defaultCwd,
   "events": events,
+  "events/link": eventsLink,
   "file-index": fileIndex,
   "files/[...path]": filesPath,
   "git/diff": gitDiff,
   "git/status": gitStatus,
   "github-repo": githubRepo,
   "home": home,
-  "hosts/link/blob/[reqId]": hostsLinkBlobReqId,
   "hosts/link": hostsLink,
   "hosts": hosts,
+  "hosts/[id]/updates": hostsIdUpdates,
   "manifest": manifest,
   "mcp": mcp,
   "media/[hash]": mediaHash,
@@ -132,6 +145,7 @@ export const ROUTE_MODULES: Record<string, RouteModule> = {
   "sessions/[id]/context": sessionsIdContext,
   "sessions/[id]/entries/[entryId]/thinking": sessionsIdEntriesEntryIdThinking,
   "sessions/[id]/export": sessionsIdExport,
+  "sessions/[id]/matches": sessionsIdMatches,
   "sessions/[id]": sessionsId,
   "sessions/[id]/state": sessionsIdState,
   "sessions/[id]/subagents/[subagentId]": sessionsIdSubagentsSubagentId,
@@ -148,6 +162,9 @@ export const ROUTE_MODULES: Record<string, RouteModule> = {
   "stt/[jobId]/audio": sttJobIdAudio,
   "stt/[jobId]": sttJobId,
   "stt": stt,
+  "transport-metrics": transportMetrics,
+  "uploads/[id]": uploadsId,
+  "uploads": uploads,
   "usage": usage,
   "web-auth/session": webAuthSession,
   "web-settings": webSettings,
@@ -172,7 +189,8 @@ export async function dispatch(
   request: Request,
   params: Record<string, string | string[]>,
   disableIdleTimeout: () => void = () => {},
-): Promise<Response> {
+  upgrade: (data: ServerSocketData) => boolean = () => false,
+): Promise<Response | undefined> {
   const handler = mod[request.method as Method] ?? (request.method === "HEAD" ? mod.GET : undefined);
   if (!handler) {
     const methods = METHODS.filter((method) => mod[method]);
@@ -181,7 +199,7 @@ export async function dispatch(
     return new Response(null, { status: 204, headers: { allow } });
   }
   try {
-    return await handler(request, { params: Promise.resolve(params) as Promise<never>, disableIdleTimeout });
+    return await handler(request, { params: Promise.resolve(params) as Promise<never>, disableIdleTimeout, upgrade });
   } catch (error) {
     console.error(error);
     return Response.json({ error: "Internal Server Error" }, { status: 500 });

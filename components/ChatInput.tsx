@@ -15,7 +15,7 @@ import type { SttAfter } from "@/lib/stt";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { ContextDetailPanel } from "./ComposerPanels";
 import { RecordingDeck } from "./RecordingDeck";
-import { clearDraft, getDraft, mergeRecoveredText, recoverDraft, setDraft, subscribeDraftRecovery, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
+import { beginDraftSubmission, clearDraft, consumeDraft, endDraftSubmission, getDraft, getDraftRevision, markDraftEdited, mergeRecoveredText, moveDraftSubmissions, recoverDraft, setDraft, subscribeDraftConsumption, subscribeDraftRecovery, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import type { AttachedImage, AttachedTextFile } from "./ChatInput-draft-attachments";
 import {
@@ -25,6 +25,19 @@ import {
   revokeImagePreview,
   textFileToDraftFile,
 } from "./ChatInput-draft-attachments";
+import {
+  attachedUploadsToDraftUploads,
+  draftUploadsToAttachedUploads,
+  ImageChip,
+  UploadChip,
+  uploadArgs,
+  uploadErrorMessage,
+  uploadRecovery,
+  type AttachedUpload,
+} from "./ChatInput-uploads";
+import { discardUpload, newUploadId, uploadFile, UploadFailedError, type UploadHandle } from "@/lib/event-stream";
+import { MAX_UPLOAD_BYTES, MAX_UPLOADS_PER_MESSAGE } from "@/lib/upload-limits";
+import { hostProjectKey, LOCAL_HOST_ID } from "@/lib/project-ordering";
 import {
   BUILTIN_SLASH_COMMAND_DEFS,
   CLIENT_BUILTIN_COMMAND_NAMES,
@@ -49,14 +62,13 @@ import { ComposerModeStatus, ModelErrorBanner, QueuedActionButton } from "./Chat
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
 import {
   composeMessageWithTextAttachments,
-  describeTextAttachmentSkip,
-  formatAttachmentBytes,
   MAX_ATTACHED_TEXT_FILES,
   selectTextAttachments,
 } from "@/lib/chat-attachments";
 import {
-  MAX_ATTACHED_IMAGE_BYTES,
+  attachedImageBytes,
   MAX_ATTACHED_IMAGES,
+  MAX_TOTAL_ATTACHED_IMAGE_BYTES,
   validateOutgoingPrompt,
 } from "@/lib/image-attachments";
 import {
@@ -139,6 +151,17 @@ function formatUsageLimitLabel(
   return t("chatInput.slowMode.wrapUpReset", { time });
 }
 
+/** A file's bytes as base64, without the data URL's prefix. */
+function readBase64(file: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    // result is "data:<mime>;base64,<data>"
+    reader.onload = () => resolve((reader.result as string).split(",")[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
 export type { AttachedImage, AttachedTextFile } from "./ChatInput-draft-attachments";
 export { filterModelOptions } from "./ChatInput-model-options";
 export { ModelErrorBanner } from "./ChatInput-banners";
@@ -150,16 +173,19 @@ const TOOL_PRESET_OPTIONS: Array<{ value: ToolPreset; descriptionKey: string }> 
 ];
 
 interface Props {
-  /** Only a rejected submission is restored; completed/superseded runs must not be replayed. */
-  onSend: (message: string, images?: AttachedImage[]) => Promise<PromptSubmissionResult>;
+  /** Without `outbox`, only a rejected submission is restored; completed/superseded runs must not be replayed.
+   *  `uploads`: the ids of files sent As file, passed only when there are some. */
+  onSend: (message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>) => Promise<PromptSubmissionResult>;
+  /** Sends go through the message outbox (an existing session): the composer clears once `onSend` (or a queue
+   *  callback) reports the message stored, and keeps it otherwise. */
+  outbox?: boolean;
   /** Ghost-text word completion for the draft (omp `predict_word`); absent = no ghost text. */
   onPredictWord?: PredictWord;
   onPredictWordFeedback?: PredictWordFeedback;
   onAbort: () => void;
-  /** Steer/follow-up callbacks resolve false when omp refused the message. */
-  onSteer?: (message: string, images?: AttachedImage[]) => Promise<boolean>;
-  onFollowUp?: (message: string, images?: AttachedImage[]) => Promise<boolean>;
-  onPromptWithStreamingBehavior?: (message: string, behavior: "steer" | "followUp", images?: AttachedImage[]) => Promise<boolean>;
+  /** Steer/follow-up during a run (slash commands too): resolve true once the outbox has the message. */
+  onSteer?: (message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>) => Promise<boolean>;
+  onFollowUp?: (message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>) => Promise<boolean>;
   isStreaming: boolean;
   /** Refuse submission without treating a pending history edit as a model run. */
   submissionBlocked?: boolean;
@@ -194,7 +220,7 @@ interface Props {
   onToolPresetChange?: (preset: ToolPreset) => void;
   /** Display name for the current model when the catalog does not know it. */
   modelNameOverride?: string | null;
-  retryInfo?: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
+  retryInfo?: { attempt: number; maxAttempts: number; delayMs?: number; startedAt?: number; errorMessage?: string } | null;
   onAbortRetry?: () => void;
   queuedMessages?: QueuedMessages | null;
   inputHistory?: string[];
@@ -225,6 +251,8 @@ interface Props {
   onBuiltinCommand?: (message: string) => Promise<BuiltinSlashCommandResult>;
   onAudioUnlock?: () => void;
   draftKey?: string;
+  /** Owning host for file uploads and the @ file index (this machine when absent). */
+  uploadHostId?: string;
   /** Backend-confirmed ownership relocation, distinct from navigating to a draft. */
   draftIdentityMove?: { from: string; to: string; sourceDraft?: ChatDraft };
   /** Session working directory — enables the @ file autocomplete menu */
@@ -338,7 +366,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
   onAudioUnlock,
-  onPromptWithStreamingBehavior,
+  outbox = false,
   submissionBlocked = false,
   advisorActive,
   advisorModel,
@@ -351,6 +379,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   onRemoveQueuedMessage,
   onPromoteQueuedToSteer,
   draftKey = "new:unassigned",
+  uploadHostId = LOCAL_HOST_ID,
   draftIdentityMove,
   cwd,
   activeGoal,
@@ -399,7 +428,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     () => new Intl.Collator(locale, { numeric: true, sensitivity: "base" }),
     [locale],
   );
-  const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
+  const [value, setRawValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
   const [queuedDeleteTarget, setQueuedDeleteTarget] = useState<{
     text: string;
     kind: "follow-up" | "steer";
@@ -423,9 +452,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [attachedTextFiles, setAttachedTextFiles] = useState<AttachedTextFile[]>(() => (
     draftKey ? draftFilesToAttachedFiles(getDraft(draftKey)?.files) : []
   ));
+  const [attachedUploads, setAttachedUploads] = useState<AttachedUpload[]>(() => (
+    draftKey ? draftUploadsToAttachedUploads(getDraft(draftKey)?.uploads) : []
+  ));
   const [attachError, setAttachError] = useState<string | null>(null);
+  /** An informational note about the last batch (images that went As file). */
+  const [attachNotice, setAttachNotice] = useState<string | null>(null);
   const trimmedValue = value.trimStart();
-  const bashMode = attachedImages.length === 0 && attachedTextFiles.length === 0 && trimmedValue.startsWith("!");
+  const bashMode = attachedImages.length === 0 && attachedTextFiles.length === 0 && attachedUploads.length === 0 && trimmedValue.startsWith("!");
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
@@ -439,9 +473,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [atActiveIndex, setAtActiveIndex] = useState(0);
   const [historyMenuOpen, setHistoryMenuOpen] = useState(false);
   const [historyActiveIndex, setHistoryActiveIndex] = useState(0);
-  const [fileIndex, setFileIndex] = useState<{ cwd: string; entries: FileIndexEntry[]; truncated: boolean } | null>(null);
+  const [fileIndex, setFileIndex] = useState<{ workspaceKey: string; entries: FileIndexEntry[]; truncated: boolean } | null>(null);
   const [fileIndexLoading, setFileIndexLoading] = useState(false);
-  const [atServerResult, setAtServerResult] = useState<{ cwd: string; query: string; matches: FileIndexEntry[] } | null>(null);
+  const [atServerResult, setAtServerResult] = useState<{ workspaceKey: string; query: string; matches: FileIndexEntry[] } | null>(null);
+  const [retryNow, setRetryNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!retryInfo?.delayMs || !retryInfo?.startedAt) return;
+    setRetryNow(Date.now());
+    const interval = setInterval(() => {
+      setRetryNow(Date.now());
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [retryInfo?.delayMs, retryInfo?.startedAt]);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -463,9 +506,25 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const slashItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const atItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const historyItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const fileIndexMetaRef = useRef<{ cwd: string; fetchedAt: number } | null>(null);
-  const fileIndexFetchingRef = useRef<string | null>(null);
+  const fileIndexMetaRef = useRef<{ workspaceKey: string; fetchedAt: number } | null>(null);
+  const fileIndexFetchingRef = useRef<{ workspaceKey: string; controller: AbortController } | null>(null);
+  const fileIndexOwner = hostProjectKey(uploadHostId, cwd ?? "");
+  const fileIndexOwnerRef = useRef(fileIndexOwner);
+  fileIndexOwnerRef.current = fileIndexOwner;
   const draftKeyRef = useRef(draftKey);
+  /** Every user/programmatic text input goes through here; only draft hydration and identity transfer use `setRawValue`.
+   *  The edit is recorded at admission, before React batches state or flushes the persist effect, so an equal final
+   *  value (clear then retype in one batch) still invalidates an older outbox commit. */
+  const markInputEdited = useCallback(() => {
+    // A confirmed move can hand off the identity before React commits the draftKey prop. Edits in that window belong
+    // to the new owner, just like pending queue recovery; marking the old display key would miss its pending commit.
+    const key = draftRecoveryIdentityRef.current.key;
+    if (key) markDraftEdited(key);
+  }, []);
+  const setValue: React.Dispatch<React.SetStateAction<string>> = useCallback((next) => {
+    markInputEdited();
+    setRawValue(next);
+  }, [markInputEdited]);
   const consumedIdentityMoveRef = useRef<typeof draftIdentityMove>(undefined);
   // Pending queue edits retain this identity across confirmed moves only.
   // Navigation starts a new identity, even when a draft key is later reused.
@@ -474,6 +533,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   // Async dictation and slash-command completions must see the latest edit gate.
   const submissionBlockedRef = useRef(submissionBlocked);
   const valueRef = useRef(value);
+  // An outbox send waiting to be stored: a second Enter must not send the same text again.
+  const holdingRef = useRef(false);
+  const composerAliveRef = useRef(true);
+  useLayoutEffect(() => {
+    composerAliveRef.current = true;
+    return () => { composerAliveRef.current = false; };
+  }, []);
   const attachedImagesRef = useRef(attachedImages);
   const attachedTextFilesRef = useRef(attachedTextFiles);
   // Bumped whenever the user clears/sends the composer: in-flight FileReader
@@ -483,14 +549,23 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const pendingImageCountRef = useRef(0);
   const pendingTextFileCountRef = useRef(0);
   const pendingTextFileBytesRef = useRef(0);
+  const pendingImageBytesRef = useRef(0);
+  const attachedUploadsRef = useRef(attachedUploads);
+  /** Uploads in flight, by id: a chip's removal aborts its handle. */
+  const uploadHandlesRef = useRef(new Map<string, UploadHandle>());
+  const uploadHostIdRef = useRef(uploadHostId);
   submissionBlockedRef.current = submissionBlocked;
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
   attachedTextFilesRef.current = attachedTextFiles;
+  attachedUploadsRef.current = attachedUploads;
+  uploadHostIdRef.current = uploadHostId;
 
   const insertTextAtCursor = useCallback((text: string) => {
     const ta = textareaRef.current;
     if (!ta) {
+      const current = valueRef.current;
+      valueRef.current = current + (current ? " " : "") + text;
       setValue((v) => v + (v ? " " : "") + text);
       return;
     }
@@ -500,6 +575,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const after = ta.value.slice(end);
     const sep = before.length > 0 && !before.endsWith(" ") ? " " : "";
     const newVal = before + sep + text + after;
+    valueRef.current = newVal;
     setValue(newVal);
     setAtQuery(null);
     setSlashMatch(null);
@@ -511,7 +587,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       ta.style.height = "auto";
       ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
     });
-  }, []);
+  }, [setValue]);
 
 
   useImperativeHandle(ref, () => ({
@@ -559,50 +635,115 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     },
     retargetPendingRecovery(from, to) {
       const identity = draftRecoveryIdentityRef.current;
-      if (identity.key === from) identity.key = to;
+      if (identity.key === from) {
+        // The hook has transferred the stored draft, but React may not have committed the new key yet. Retarget active
+        // submissions here too: an ACK in that gap must find its draft, including one sent by an earlier mount.
+        moveDraftSubmissions(from, to);
+        identity.key = to;
+      }
     },
   }));
 
-  const processImageFiles = useCallback(async (files: File[]) => {
-    const remaining = Math.max(
-      0,
-      MAX_ATTACHED_IMAGES - attachedImagesRef.current.length - pendingImageCountRef.current,
+  const patchUpload = useCallback((id: string, patch: Partial<AttachedUpload>) => {
+    setAttachedUploads((prev) => prev.map((upload) => (upload.id === id ? { ...upload, ...patch } : upload)));
+  }, []);
+
+  /** Uploads the chip's file to its host; a retry resumes at the host's offset (same id). While a transient failure
+   *  waits to resume by itself, the chip keeps `uploading` and shows the failure in `error`. */
+  const runUpload = useCallback((upload: AttachedUpload) => {
+    if (!upload.file) return;
+    const { id, size } = upload;
+    let shownPercent = -1;
+    const handle = uploadFile(upload.file, upload.hostId, (received) => {
+      // One render per whole percent: the host acks up to every 16 ms.
+      const percent = Math.floor((received * 100) / Math.max(1, size));
+      if (percent === shownPercent) return;
+      shownPercent = percent;
+      patchUpload(id, { received });
+    }, id, (error) => patchUpload(id, { error: error === null ? null : uploadErrorMessage(error) }));
+    uploadHandlesRef.current.set(id, handle);
+    const settle = (patch: Partial<AttachedUpload>) => {
+      // Removed or switched meanwhile: its abort ended it.
+      if (uploadHandlesRef.current.get(id) !== handle) return;
+      uploadHandlesRef.current.delete(id);
+      patchUpload(id, patch);
+    };
+    handle.promise.then(
+      ({ proof }) => settle({ status: "done", received: size, error: null, proof }),
+      // 410: the worker already cancelled it on its host (the page went into the back/forward cache). A Retry under a
+      // new id starts over, so the cancel still pending for this one can never reach it.
+      (error: unknown) => settle({ status: "error", error: uploadErrorMessage(error), ...(error instanceof UploadFailedError && error.status === 410 ? { id: newUploadId(), proof: undefined } : {}) }),
     );
-    const imageFiles = files
-      .filter((file) => file.type.startsWith("image/") && file.size <= MAX_ATTACHED_IMAGE_BYTES)
-      .slice(0, remaining);
-    if (!imageFiles.length) {
-      if (files.length > 0) {
-        setAttachError(
-          remaining === 0
-            ? t("chatInput.attachmentImageLimit", { count: MAX_ATTACHED_IMAGES })
-            : t("chatInput.attachmentImagesSkipped", { count: files.length, size: formatAttachmentBytes(MAX_ATTACHED_IMAGE_BYTES) }),
-        );
-      }
-      return;
+  }, [patchUpload]);
+
+  /** Attaches files As file and starts their uploads: up to MAX_UPLOAD_BYTES each, MAX_UPLOADS_PER_MESSAGE in all
+   *  (the only refusals left, spec U2). `previewUrls[i]`: an image's thumbnail, made here when missing. Returns how
+   *  many were attached. */
+  const attachAsFiles = useCallback((files: File[], previewUrls: string[] = []): number => {
+    const room = Math.max(0, MAX_UPLOADS_PER_MESSAGE - attachedUploadsRef.current.length);
+    const fitting = files.flatMap((file, i) => (file.size <= MAX_UPLOAD_BYTES ? [{ file, previewUrl: previewUrls[i] }] : []));
+    const added = fitting.slice(0, room).map(({ file, previewUrl }): AttachedUpload => ({
+      id: newUploadId(),
+      name: file.name,
+      size: file.size,
+      hostId: uploadHostIdRef.current,
+      file,
+      received: 0,
+      status: "uploading",
+      error: null,
+      previewUrl: previewUrl ?? (file.type.startsWith("image/") ? URL.createObjectURL(file) : null),
+    }));
+    if (fitting.length < files.length) {
+      setAttachError(t("chatInput.attachmentUploadTooLarge", { count: files.length - fitting.length, size: `${MAX_UPLOAD_BYTES / 1024 ** 3} GB` }));
+    } else if (added.length < fitting.length) {
+      setAttachError(t("chatInput.attachmentUploadLimit", { count: MAX_UPLOADS_PER_MESSAGE }));
     }
+    if (added.length === 0) return 0;
+    markInputEdited();
+    // Counted at once: another batch in the same tick sees these.
+    attachedUploadsRef.current = [...attachedUploadsRef.current, ...added];
+    setAttachedUploads((prev) => [...prev, ...added]);
+    added.forEach(runUpload);
+    return added.length;
+  }, [markInputEdited, runUpload, t]);
+
+  /** Whether `bytes` more of images (`extra` more of them) still fit the inline budget the send checks. */
+  const fitsInline = useCallback((bytes: number, extra = 0): boolean => {
+    const images = attachedImagesRef.current;
+    const used = images.reduce((total, image) => total + attachedImageBytes(image), 0) + pendingImageBytesRef.current;
+    return images.length + pendingImageCountRef.current + extra < MAX_ATTACHED_IMAGES && used + bytes <= MAX_TOTAL_ATTACHED_IMAGE_BYTES;
+  }, []);
+
+  /** Images go Inline while the message's inline budget has room; the rest go As file, with a notice. */
+  const processImageFiles = useCallback(async (files: File[]) => {
+    const imageFiles: File[] = [];
+    const asFiles: File[] = [];
+    let inlineBytes = 0;
+    for (const file of files) {
+      if (fitsInline(inlineBytes + file.size, imageFiles.length)) {
+        imageFiles.push(file);
+        inlineBytes += file.size;
+      } else {
+        asFiles.push(file);
+      }
+    }
+    const switched = attachAsFiles(asFiles);
+    if (switched > 0) setAttachNotice(t("chatInput.imagesAsFile", { count: switched }));
+    if (!imageFiles.length) return;
+    // Admission is a new composer edit now, not only when FileReader finishes: an older ACK must not invalidate it.
+    markInputEdited();
     const revision = attachmentRevisionRef.current;
     const identityRevision = attachmentIdentityRevisionRef.current;
     pendingImageCountRef.current += imageFiles.length;
+    pendingImageBytesRef.current += inlineBytes;
     const created: AttachedImage[] = [];
     try {
       const newImages = await Promise.all(
-        imageFiles.map(
-          (file) =>
-            new Promise<AttachedImage>((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onload = () => {
-                const result = reader.result as string;
-                // result is "data:<mime>;base64,<data>"
-                const base64 = result.split(",")[1];
-                const image = { data: base64, mimeType: file.type, previewUrl: URL.createObjectURL(file) };
-                created.push(image);
-                resolve(image);
-              };
-              reader.onerror = reject;
-              reader.readAsDataURL(file);
-            })
-        )
+        imageFiles.map(async (file) => {
+          const image: AttachedImage = { data: await readBase64(file), mimeType: file.type, previewUrl: URL.createObjectURL(file), file };
+          created.push(image);
+          return image;
+        }),
       );
       // The composer was cleared/sent while the reads were in flight —
       // drop the batch instead of re-appending stale attachments.
@@ -626,29 +767,22 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       setAttachError(t("chatInput.attachmentImageReadFailed"));
     } finally {
       pendingImageCountRef.current -= imageFiles.length;
+      pendingImageBytesRef.current -= inlineBytes;
     }
-  }, []);
+  }, [attachAsFiles, fitsInline, markInputEdited, t]);
 
+  /** Text is inlined while it fits the text budget; past it, when it turns out binary, and always for a PDF (omp reads
+   *  it as a document; its decoded bytes are not text), it goes As file. */
   const processTextFiles = useCallback(async (files: File[]) => {
-    const remaining = Math.max(
-      0,
-      MAX_ATTACHED_TEXT_FILES - attachedTextFilesRef.current.length - pendingTextFileCountRef.current,
-    );
     // In-flight batches reserve their bytes too, so two overlapping drops
     // cannot each fit under the aggregate budget on their own.
-    const { accepted: textFiles, tooLarge, overBudget } = selectTextAttachments(files, {
+    const { accepted: textFiles } = selectTextAttachments(files.filter((file) => file.type !== "application/pdf" && !/\.pdf$/i.test(file.name)), {
       usedBytes: attachedTextFilesRef.current.reduce((total, file) => total + file.size, 0) + pendingTextFileBytesRef.current,
       usedSlots: attachedTextFilesRef.current.length + pendingTextFileCountRef.current,
     });
-    // Report every dropped candidate, not just an entirely rejected batch: a
-    // drop of several files can lose some to the budget while accepting others.
-    const limitMessage = remaining === 0 && files.length > 0
-      ? t("chatInput.attachmentTextFilesLimit", { count: MAX_ATTACHED_TEXT_FILES })
-      : describeTextAttachmentSkip({ tooLarge, overBudget });
-    if (!textFiles.length) {
-      if (files.length > 0) setAttachError(limitMessage ?? t("chatInput.attachmentFilesSkipped", { count: files.length }));
-      return;
-    }
+    attachAsFiles(files.filter((file) => !textFiles.includes(file)));
+    if (!textFiles.length) return;
+    markInputEdited();
     const revision = attachmentRevisionRef.current;
     const identityRevision = attachmentIdentityRevisionRef.current;
     pendingTextFileCountRef.current += textFiles.length;
@@ -668,27 +802,22 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       // Binary content cannot be inlined into the prompt: NUL bytes, or
       // U+FFFD replacement characters left by mis-decoded binary (e.g.
       // UTF-16 text read as UTF-8).
-      const newFiles = readFiles.filter(
-        (file) => !file.content.includes("\u0000") && !file.content.includes("\uFFFD"),
-      );
-      const skipped = textFiles.length - newFiles.length;
+      const binary = readFiles.map((file) => file.content.includes("\u0000") || file.content.includes("\uFFFD"));
+      const newFiles = readFiles.filter((_, index) => !binary[index]);
+      attachAsFiles(textFiles.filter((_, index) => binary[index]));
       setAttachedTextFiles((prev) => [
         ...prev,
         ...(identityRevision !== attachmentIdentityRevisionRef.current
           ? newFiles
           : newFiles.slice(0, Math.max(0, MAX_ATTACHED_TEXT_FILES - prev.length))),
       ]);
-      setAttachError(
-        limitMessage
-          ?? (skipped > 0 ? t("chatInput.attachmentBinarySkipped", { count: skipped }) : null),
-      );
     } catch {
       setAttachError(t("chatInput.attachmentTextReadFailed"));
     } finally {
       pendingTextFileCountRef.current -= textFiles.length;
       pendingTextFileBytesRef.current -= textFiles.reduce((total, file) => total + file.size, 0);
     }
-  }, []);
+  }, [attachAsFiles, markInputEdited, t]);
 
   const processFiles = useCallback((files: File[]) => {
     const imageFiles = files.filter((file) => file.type.startsWith("image/"));
@@ -700,27 +829,19 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const processFilesRef = useRef(processFiles);
   processFilesRef.current = processFiles;
   const pasteClipboardImage = useCallback(async () => {
+    markInputEdited();
     setPlusMenuOpen(false);
     const revision = attachmentRevisionRef.current;
     try {
       // Start the read in the click gesture: Safari requires user activation.
       const items = await navigator.clipboard.read();
       const files: File[] = [];
-      let oversized = 0;
       for (const item of items) {
         const type = item.types.find((type) => type.startsWith("image/"));
         if (!type) continue;
         try {
-          const blob = await item.getType(type);
-          // Drop an oversized clipboard image here rather than handing it on.
-          // The picker's Files are lazy and disk-backed; a clipboard entry is
-          // already whole in RAM, so keeping several alive at once would hold
-          // the entire clipboard before any cap had run.
-          if (blob.size > MAX_ATTACHED_IMAGE_BYTES) {
-            oversized += 1;
-            continue;
-          }
-          files.push(new File([blob], "clipboard-image", { type }));
+          // One past the inline budget goes As file, as from the picker.
+          files.push(new File([await item.getType(type)], "clipboard-image", { type }));
         } catch {
           // One entry can disappear between the `types` snapshot and the read
           // (NotFoundError). Keep whatever the other items yielded.
@@ -728,18 +849,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       }
       if (revision !== attachmentRevisionRef.current) return;
       if (files.length) processFilesRef.current(files);
-      else if (oversized) {
-        setAttachError(
-          t("chatInput.attachmentImagesSkipped", {
-            count: oversized,
-            size: formatAttachmentBytes(MAX_ATTACHED_IMAGE_BYTES),
-          }),
-        );
-      } else setAttachError(t("chatInput.clipboardImageFailed"));
+      else setAttachError(t("chatInput.clipboardImageFailed"));
     } catch {
       if (revision === attachmentRevisionRef.current) setAttachError(t("chatInput.clipboardImageFailed"));
     }
-  }, [t]);
+  }, [markInputEdited, t]);
 
   // The clipboard read API exists only in a secure context, so a plain-http LAN
   // session (`npm run dev:lan` on http://192.168.x.x) cannot use this at all.
@@ -749,6 +863,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     typeof navigator !== "undefined" && typeof navigator.clipboard?.read === "function";
 
   const removeImage = useCallback((index: number) => {
+    markInputEdited();
     setAttachedImages((prev) => {
       const next = [...prev];
       const [removed] = next.splice(index, 1);
@@ -756,12 +871,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       return next;
     });
     setAttachError(null);
-  }, []);
+    setAttachNotice(null);
+  }, [markInputEdited]);
 
   const removeTextFile = useCallback((index: number) => {
+    markInputEdited();
     setAttachedTextFiles((prev) => prev.filter((_, fileIndex) => fileIndex !== index));
     setAttachError(null);
-  }, []);
+  }, [markInputEdited]);
 
   const clearImages = useCallback(() => {
     setAttachedImages((prev) => {
@@ -774,6 +891,78 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     setAttachedTextFiles([]);
   }, []);
 
+  /** Removing a chip aborts its upload, or has the host delete what it staged. */
+  const removeUpload = useCallback((id: string) => {
+    markInputEdited();
+    const handle = uploadHandlesRef.current.get(id);
+    uploadHandlesRef.current.delete(id);
+    const hostId = attachedUploadsRef.current.find((upload) => upload.id === id)?.hostId;
+    if (handle) handle.abort();
+    else if (hostId !== undefined) discardUpload(id, hostId);
+    setAttachedUploads((prev) => {
+      const removed = prev.find((upload) => upload.id === id);
+      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+      return prev.filter((upload) => upload.id !== id);
+    });
+    setAttachError(null);
+    setAttachNotice(null);
+  }, [markInputEdited]);
+
+  const retryUpload = useCallback((id: string) => {
+    const upload = attachedUploadsRef.current.find((each) => each.id === id);
+    if (!upload?.file || upload.status !== "error") return;
+    markInputEdited();
+    patchUpload(id, { status: "uploading", error: null });
+    runUpload(upload);
+  }, [markInputEdited, patchUpload, runUpload]);
+
+  /** Inline -> As file: the image's file (rebuilt from its bytes for one restored from a draft) is uploaded instead. */
+  const switchImageToFile = useCallback((image: AttachedImage) => {
+    const file = image.file ?? new File(
+      [Uint8Array.from(atob(image.data), (char) => char.charCodeAt(0))],
+      `image.${image.mimeType.slice("image/".length)}`,
+      { type: image.mimeType },
+    );
+    if (!attachAsFiles([file], [image.previewUrl])) return;
+    setAttachedImages((prev) => prev.filter((each) => each !== image));
+  }, [attachAsFiles]);
+
+  /** As file -> Inline, while it fits the inline budget: its upload is dropped. */
+  const switchUploadToInline = useCallback(async (upload: AttachedUpload) => {
+    const { id, file, previewUrl } = upload;
+    if (!file || !previewUrl || !fitsInline(file.size)) return;
+    markInputEdited();
+    const revision = attachmentRevisionRef.current;
+    pendingImageCountRef.current += 1;
+    pendingImageBytesRef.current += file.size;
+    try {
+      const data = await readBase64(file);
+      if (attachmentRevisionRef.current !== revision || !attachedUploadsRef.current.some((each) => each.id === id)) return;
+      const handle = uploadHandlesRef.current.get(id);
+      uploadHandlesRef.current.delete(id);
+      if (handle) handle.abort();
+      else discardUpload(id, upload.hostId);
+      setAttachedUploads((prev) => prev.filter((each) => each.id !== id));
+      setAttachedImages((prev) => [...prev, { data, mimeType: file.type, previewUrl, file }]);
+    } catch {
+      setAttachError(t("chatInput.attachmentImageReadFailed"));
+    } finally {
+      pendingImageCountRef.current -= 1;
+      pendingImageBytesRef.current -= file.size;
+    }
+  }, [fitsInline, markInputEdited, t]);
+
+  /** After a send the uploads belong to the prompt: the chips go, what the host staged stays. Any still in flight
+   *  (a cleared composer) is aborted. */
+  const clearUploads = useCallback(() => {
+    for (const handle of uploadHandlesRef.current.values()) handle.abort();
+    uploadHandlesRef.current.clear();
+    setAttachedUploads((prev) => {
+      for (const upload of prev) if (upload.previewUrl) URL.revokeObjectURL(upload.previewUrl);
+      return [];
+    });
+  }, []);
+
   const clearInput = useCallback(() => {
     setValue("");
     setAtQuery(null);
@@ -783,23 +972,74 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (draftKeyRef.current && draftKeyRef.current !== draftKey) clearDraft(draftKeyRef.current);
     clearImages();
     clearTextFiles();
+    clearUploads();
+    setAttachNotice(null);
     // Invalidate any attachment reads still in flight.
     attachmentRevisionRef.current += 1;
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
-  }, [clearImages, clearTextFiles, draftKey]);
+  }, [clearImages, clearTextFiles, clearUploads, draftKey, setValue]);
+
+  /** A stored submission may finish after navigation/remount: clear only the draft revision it was sent from, never a
+   * new composer's text or attachments, nor an equal-text retype made while the commit was pending. Capture before the
+   * asynchronous IndexedDB commit. */
+  const clearOnceStored = useCallback((raw: string) => {
+    const images = attachedImagesRef.current;
+    const files = attachedTextFilesRef.current;
+    const uploads = attachedUploadsRef.current;
+    const key = draftKeyRef.current;
+    // Dictation can submit before the layout persistence effect sees its inserted text.
+    if (key && draftRecoveryIdentityRef.current.key === key) {
+      setDraft(key, {
+        value: valueRef.current,
+        images: images.map(imageToDraftImage),
+        files: files.map(textFileToDraftFile),
+        uploads: attachedUploadsToDraftUploads(uploads),
+      });
+    }
+    const pending = beginDraftSubmission(draftKeyRef.current);
+    const commit = () => {
+      endDraftSubmission(pending);
+      // `pending.key` follows a confirmed identity move of an unchanged draft and is cleared if the move merged or the
+      // draft was edited first, so only the sent draft itself is ever consumed.
+      if (pending.edited) return;
+      if (composerAliveRef.current && draftKeyRef.current === pending.key
+        && (!pending.key || getDraftRevision(pending.key) === pending.revision)
+        && valueRef.current === raw
+        && attachedImagesRef.current === images && attachedTextFilesRef.current === files && attachedUploadsRef.current === uploads) clearInput();
+      else if (pending.key && pending.snapshot) consumeDraft(pending.key, pending.snapshot, pending.revision);
+    };
+    /** The submission settled without a commit (refused or failed): stop tracking it. */
+    commit.release = () => endDraftSubmission(pending);
+    return commit;
+  }, [clearInput]);
+
+  useLayoutEffect(() => subscribeDraftConsumption((key, snapshot) => {
+    if (draftKeyRef.current !== key) return;
+    const uploads = attachedUploadsToDraftUploads(attachedUploadsRef.current);
+    const current: ChatDraft = {
+      value: valueRef.current,
+      images: attachedImagesRef.current.map(imageToDraftImage),
+      files: attachedTextFilesRef.current.map(textFileToDraftFile),
+      ...(uploads.length ? { uploads } : {}),
+    };
+    if (JSON.stringify(current) === JSON.stringify(snapshot)) clearInput();
+  }), [clearInput]);
 
   useLayoutEffect(() => {
-    if (!draftKey || draftKeyRef.current !== draftKey) return;
+    // The synchronous ref handoff can precede the prop commit. Keep live deltas in React for the existing move merge,
+    // rather than recreating the obsolete key (which could evict an unrelated draft at capacity).
+    if (!draftKey || draftKeyRef.current !== draftKey || draftRecoveryIdentityRef.current.key !== draftKey) return;
     const draft = {
       value,
       images: attachedImages.map(imageToDraftImage),
       files: attachedTextFiles.map(textFileToDraftFile),
+      uploads: attachedUploadsToDraftUploads(attachedUploads),
     };
     persistedDraftRef.current = draft;
     setDraft(draftKey, draft);
-  }, [attachedImages, attachedTextFiles, draftKey, value]);
+  }, [attachedImages, attachedTextFiles, attachedUploads, draftKey, value]);
 
   useLayoutEffect(() => {
     const previousDraftKey = draftKeyRef.current;
@@ -815,7 +1055,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       const source = draftIdentityMove.sourceDraft ?? persistedDraftRef.current;
       const draft = getDraft(draftKey);
       draftKeyRef.current = draftKey;
-      setValue((current) => {
+      // A pending outbox commit (possibly from an earlier mount) follows only its own unchanged draft to the new key.
+      moveDraftSubmissions(previousDraftKey, draftKey);
+      setRawValue((current) => {
         const transferred = draft?.value ?? "";
         if (!source || current === source.value) return transferred;
         const destination = source.value && transferred.startsWith(source.value)
@@ -847,6 +1089,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         });
         return [...draftFilesToAttachedFiles(draft?.files), ...added];
       });
+      // The same composer's uploads stay; the transferred draft's finished ones join them once.
+      setAttachedUploads((current) => [
+        ...draftUploadsToAttachedUploads(draft?.uploads).filter((upload) => !current.some((each) => each.id === upload.id)),
+        ...current,
+      ]);
       setQueuedDeleteTarget(null);
       return;
     }
@@ -857,6 +1104,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     attachmentRevisionRef.current += 1;
     draftRecoveryIdentityRef.current = { key: draftKey };
     setAttachError(null);
+    setAttachNotice(null);
     setQueuedDeleteTarget(null);
 
     if (previousDraftKey) {
@@ -864,12 +1112,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         value: valueRef.current,
         images: attachedImagesRef.current.map(imageToDraftImage),
         files: attachedTextFilesRef.current.map(textFileToDraftFile),
+        uploads: attachedUploadsToDraftUploads(attachedUploadsRef.current),
       });
     }
 
     const draft = draftKey ? getDraft(draftKey) : null;
     draftKeyRef.current = draftKey;
-    setValue(draft?.value ?? "");
+    setRawValue(draft?.value ?? "");
     setAtQuery(null);
     setSlashMatch(null);
     setHistoryMenuOpen(false);
@@ -878,6 +1127,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       return draftImagesToAttachedImages(draft?.images);
     });
     setAttachedTextFiles(draftFilesToAttachedFiles(draft?.files));
+    // shortcut: an upload still in flight is lost on a switch, as on a reload; keep its handle across drafts if users
+    // switch chats mid-upload often.
+    for (const handle of uploadHandlesRef.current.values()) handle.abort();
+    uploadHandlesRef.current.clear();
+    setAttachedUploads((prev) => {
+      for (const upload of prev) if (upload.previewUrl) URL.revokeObjectURL(upload.previewUrl);
+      return draftUploadsToAttachedUploads(draft?.uploads);
+    });
   }, [draftKey, draftIdentityMove]);
 
   useLayoutEffect(() => subscribeDraftRecovery((key, recovery) => {
@@ -888,6 +1145,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const images = recovery.images ?? [];
     if (images.length) {
       setAttachedImages((prev) => [...prev, ...draftImagesToAttachedImages(images)]);
+    }
+    const uploads = draftUploadsToAttachedUploads(recovery.uploads);
+    if (uploads.length) {
+      setAttachedUploads((prev) => [...prev, ...uploads.filter((upload) => !prev.some((each) => each.id === upload.id))]);
     }
     setAtQuery(null);
     setSlashMatch(null);
@@ -901,7 +1162,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       ta.style.height = "auto";
       ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
     });
-  }), []);
+  }), [setValue]);
 
   useLayoutEffect(() => {
     const ta = textareaRef.current;
@@ -918,8 +1179,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   }, []);
 
   useEffect(() => {
+    const uploadHandles = uploadHandlesRef.current;
     return () => {
       attachedImagesRef.current.forEach(revokeImagePreview);
+      for (const handle of uploadHandles.values()) handle.abort();
+      for (const upload of attachedUploadsRef.current) if (upload.previewUrl) URL.revokeObjectURL(upload.previewUrl);
     };
   }, []);
 
@@ -936,24 +1200,40 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     return error !== null;
   }, []);
 
+  /** Send waits for every upload (spec U2): refused with a banner while one is in flight or failed. */
+  const rejectsPendingUploads = useCallback((): boolean => {
+    const uploads = attachedUploadsRef.current;
+    const failed = uploads.filter((upload) => upload.status === "error").length;
+    const uploading = uploads.filter((upload) => upload.status === "uploading").length;
+    if (failed) setAttachError(t("chatInput.uploadsFailedBlock", { count: failed }));
+    else if (uploading) setAttachError(t("chatInput.uploadsWaiting", { count: uploading }));
+    return failed + uploading > 0;
+  }, [t]);
+
   /** Run a client builtin. True once handled; the composer is cleared only on
    * success and only if it still holds what was sent (the user may have
    * started typing while the command ran). */
   const runBuiltinCommand = useCallback(async (msg: string, overrideText?: string): Promise<boolean> => {
-    if (submissionBlockedRef.current || !onBuiltinCommand) return false;
-    const sentValue = overrideText ?? valueRef.current;
-    const result = await onBuiltinCommand(msg);
-    if (!result.handled) return false;
-    if (!submissionBlockedRef.current && !result.error && !result.retainInput && (overrideText !== undefined || valueRef.current === sentValue)) clearInput();
-    return true;
-  }, [onBuiltinCommand, clearInput]);
+    if (submissionBlockedRef.current || holdingRef.current || !onBuiltinCommand) return false;
+    const stored = clearOnceStored(overrideText ?? valueRef.current);
+    holdingRef.current = true;
+    try {
+      const result = await onBuiltinCommand(msg);
+      if (!result.handled) return false;
+      if (!submissionBlockedRef.current && !result.error && !result.retainInput) stored();
+      return true;
+    } finally {
+      stored.release();
+      holdingRef.current = false;
+    }
+  }, [onBuiltinCommand, clearOnceStored]);
 
   /** `/btw` asks a side question beside any run: never a prompt, never
    * queued. Attachments cannot ride along, so refuse and keep the draft
    * rather than drop them. False when `msg` is not `/btw`. */
   const sendSideQuestion = useCallback((msg: string, overrideText?: string): boolean => {
     if (!/^\/btw(\s|$)/.test(msg) || !onBuiltinCommand) return false;
-    if (attachedImagesRef.current.length || attachedTextFilesRef.current.length) {
+    if (attachedImagesRef.current.length || attachedTextFilesRef.current.length || attachedUploadsRef.current.length) {
       toast.error(t("btw.attachmentsUnsupported"));
       return true;
     }
@@ -964,12 +1244,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const handleSend = useCallback(async (overrideText?: string) => {
     const raw = overrideText ?? value;
     const msg = raw.trim();
-    if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length) return;
-    if (submissionBlockedRef.current || isStreaming) return;
+    if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length) return;
+    // `!cmd` runs right away during a run too, as in omp's terminal; it is never queued as text.
+    const shellCommand = msg.startsWith("!") && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length;
+    if (submissionBlockedRef.current || holdingRef.current || (isStreaming && !shellCommand)) return;
     onAudioUnlock?.();
     if (sendSideQuestion(msg, overrideText)) return;
+    if (rejectsPendingUploads()) return;
     const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFilesRef.current);
-    if (!attachedImagesRef.current.length && !attachedTextFilesRef.current.length && msg.startsWith("/") && onBuiltinCommand) {
+    if (!attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length && msg.startsWith("/") && onBuiltinCommand) {
       const expansion = expandWebSlashCommand(msg);
       if (expansion.kind === "expand" && rejectsOversizedPrompt(expansion.prompt, attachedImagesRef.current)) return;
       if (await runBuiltinCommand(msg, overrideText)) return;
@@ -978,8 +1261,27 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (rejectsOversizedPrompt(composedMessage, attachedImagesRef.current)) return;
     const key = draftKeyRef.current;
     const images = attachedImagesRef.current.length ? attachedImagesRef.current : undefined;
-    const recovery = { text: composedMessage, images: images?.map(imageToDraftImage) };
-    const pending = onSend(composedMessage, images);
+    const recovery = { text: composedMessage, images: images?.map(imageToDraftImage), ...uploadRecovery(attachedUploadsRef.current) };
+    const stored = outbox && !shellCommand ? clearOnceStored(raw) : undefined;
+    let pending: Promise<PromptSubmissionResult>;
+    try {
+      pending = onSend(composedMessage, images, ...uploadArgs(attachedUploadsRef.current));
+    } catch (error) {
+      stored?.release();
+      throw error;
+    }
+    if (stored) {
+      // Stored in this browser once accepted: clear only then (a reload in between keeps the draft), and only if the
+      // composer still holds what was sent. A refused one stays where it is.
+      holdingRef.current = true;
+      try {
+        if ((await pending).status === "accepted") stored();
+      } finally {
+        stored.release();
+        holdingRef.current = false;
+      }
+      return;
+    }
     clearInput();
     try {
       const result = await pending;
@@ -991,7 +1293,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (key) recoverDraft(key, recovery);
       throw error;
     }
-  }, [value, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, rejectsOversizedPrompt, runBuiltinCommand, sendSideQuestion]);
+  }, [value, isStreaming, onBuiltinCommand, onSend, outbox, clearInput, clearOnceStored, onAudioUnlock, rejectsOversizedPrompt, rejectsPendingUploads, runBuiltinCommand, sendSideQuestion]);
   const {
     isRecording,
     isPaused,
@@ -1093,17 +1395,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const slashMenuOpenActive = slashQuery !== null;
   useEffect(() => {
+    if (uploadHostId !== LOCAL_HOST_ID) { setDormantSkillNames(new Set()); return; }
     if (!slashMenuOpenActive || !cwd) return;
     const controller = new AbortController();
     void fetch(`/api/skills?cwd=${encodeURIComponent(cwd)}`, { signal: controller.signal })
       .then((response) => response.ok ? response.json() as Promise<{ skills?: Array<{ name?: string; disableModelInvocation?: boolean }> }> : null)
       .then((data) => {
-        if (!data) return;
+        if (!data || controller.signal.aborted) return;
         setDormantSkillNames(new Set((data.skills ?? []).flatMap((skill) => skill.disableModelInvocation && skill.name ? [skill.name] : [])));
       })
       .catch(() => {});
     return () => controller.abort();
-  }, [cwd, slashMenuOpenActive]);
+  }, [cwd, uploadHostId, slashMenuOpenActive]);
 
   const builtinSlashCommands: SlashCommandPaletteItem[] = React.useMemo(
     () => BUILTIN_SLASH_COMMAND_DEFS
@@ -1207,38 +1510,41 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const atQueryText = atQuery?.query ?? null;
   const atLocalMatches: FileIndexEntry[] = React.useMemo(() => (
-    atQueryText !== null && fileIndex && fileIndex.cwd === cwd
+    atQueryText !== null && fileIndex && fileIndex.workspaceKey === fileIndexOwner
       ? filterFileEntries(fileIndex.entries, atQueryText)
       : []
-  ), [atQueryText, fileIndex, cwd]);
+  ), [atQueryText, fileIndex, fileIndexOwner]);
 
   // When the client index is truncated (repo larger than the index cap),
   // local filtering cannot see deep files, so queries are also ranked
   // server-side against the full listing. Local matches render immediately
   // and are replaced when the (debounced) server result for the current
   // query arrives; stale responses are ignored via the query/cwd tag.
-  const needsServerSearch = Boolean(atQueryText && fileIndex?.truncated && fileIndex.cwd === cwd);
+  const needsServerSearch = Boolean(atQueryText && fileIndex?.truncated && fileIndex.workspaceKey === fileIndexOwner);
   useEffect(() => {
     if (!needsServerSearch || !cwd || !atQueryText) return;
-    const fetchCwd = cwd;
+    const workspaceKey = fileIndexOwner;
+    const controller = new AbortController();
     const query = atQueryText;
     const timer = setTimeout(() => {
-      fetch(`/api/file-index?cwd=${encodeURIComponent(fetchCwd)}&q=${encodeURIComponent(query)}`)
+      fetch(`/api/file-index?cwd=${encodeURIComponent(cwd)}&hostId=${encodeURIComponent(uploadHostId)}&q=${encodeURIComponent(query)}`, { signal: controller.signal })
         .then((res) => {
           if (!res.ok) throw new Error(`file search failed: ${res.status}`);
           return res.json() as Promise<{ matches?: FileIndexEntry[] }>;
         })
-        .then((data) => setAtServerResult({ cwd: fetchCwd, query, matches: data.matches ?? [] }))
-        .catch(() => {
-          // Keep showing local matches; the next keystroke retries.
-        });
+        .then((data) => {
+          if (!controller.signal.aborted && fileIndexOwnerRef.current === workspaceKey) {
+            setAtServerResult({ workspaceKey, query, matches: data.matches ?? [] });
+          }
+        })
+        .catch(() => {});
     }, 150);
-    return () => clearTimeout(timer);
-  }, [needsServerSearch, atQueryText, cwd]);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [needsServerSearch, atQueryText, cwd, uploadHostId, fileIndexOwner]);
 
   const serverResultInUse = needsServerSearch
     && atServerResult !== null
-    && atServerResult.cwd === cwd
+    && atServerResult.workspaceKey === fileIndexOwner
     && atServerResult.query === atQueryText;
   const atMatches: FileIndexEntry[] = serverResultInUse ? atServerResult.matches : atLocalMatches;
   const historyMenuVisible = historyMenuOpen && inputHistory.length > 0;
@@ -1277,38 +1583,38 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const atTokenActive = atQuery !== null;
   useEffect(() => {
     if (!atTokenActive || !cwd) return;
+    const workspaceKey = fileIndexOwner;
     const meta = fileIndexMetaRef.current;
-    if (meta && meta.cwd === cwd && Date.now() - meta.fetchedAt < 10_000) return;
-    if (fileIndexFetchingRef.current === cwd) return;
-    fileIndexFetchingRef.current = cwd;
-    const fetchCwd = cwd;
-    // Abort the previous fetch when the cwd changes or the menu closes, so a
-    // slow response for an old directory cannot flip the loading state after
-    // a newer one has taken over.
+    if (meta?.workspaceKey === workspaceKey && Date.now() - meta.fetchedAt < 10_000) return;
+    if (fileIndexFetchingRef.current?.workspaceKey === workspaceKey) return;
     const controller = new AbortController();
+    const request = { workspaceKey, controller };
+    fileIndexFetchingRef.current = request;
     setFileIndexLoading(true);
-    fetch(`/api/file-index?cwd=${encodeURIComponent(fetchCwd)}`, { signal: controller.signal })
+    fetch(`/api/file-index?cwd=${encodeURIComponent(cwd)}&hostId=${encodeURIComponent(uploadHostId)}`, { signal: controller.signal })
       .then((res) => {
         if (!res.ok) throw new Error(`file index failed: ${res.status}`);
         return res.json() as Promise<{ files?: string[]; truncated?: boolean }>;
       })
       .then((data) => {
-        setFileIndex({ cwd: fetchCwd, entries: buildEntriesFromFiles(data.files ?? []), truncated: !!data.truncated });
-        fileIndexMetaRef.current = { cwd: fetchCwd, fetchedAt: Date.now() };
+        if (controller.signal.aborted || fileIndexOwnerRef.current !== workspaceKey) return;
+        setFileIndex({ workspaceKey, entries: buildEntriesFromFiles(data.files ?? []), truncated: !!data.truncated });
+        fileIndexMetaRef.current = { workspaceKey, fetchedAt: Date.now() };
       })
       .catch(() => {
-        // Leave any previous index in place; next open retries. Aborts land
-        // here too, which is exactly the desired no-op.
-        fileIndexMetaRef.current = null;
+        if (fileIndexFetchingRef.current === request && !controller.signal.aborted) fileIndexMetaRef.current = null;
       })
       .finally(() => {
-        if (fileIndexFetchingRef.current === fetchCwd) {
+        if (fileIndexFetchingRef.current === request) {
           fileIndexFetchingRef.current = null;
           setFileIndexLoading(false);
         }
       });
-    return () => controller.abort();
-  }, [atTokenActive, cwd]);
+    return () => {
+      controller.abort();
+      if (fileIndexFetchingRef.current === request) fileIndexFetchingRef.current = null;
+    };
+  }, [atTokenActive, cwd, uploadHostId, fileIndexOwner]);
 
   const applyAtCompletion = useCallback((entry: FileIndexEntry) => {
     if (!atQuery) return;
@@ -1338,7 +1644,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       el.style.height = "auto";
       el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
     });
-  }, [atQuery, value]);
+  }, [atQuery, value, setValue]);
 
   useEffect(() => {
     if (atActiveIndex >= atMatches.length) {
@@ -1383,7 +1689,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       ta.style.height = "auto";
       ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
     });
-  }, []);
+  }, [setValue]);
 
   const applySlashCommand = useCallback((command: SlashCommandPaletteItem) => {
     const ta = textareaRef.current;
@@ -1425,29 +1731,48 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       el.style.height = "auto";
       el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
     });
-  }, [slashMatch, value]);
+  }, [slashMatch, value, setValue]);
 
   const sendQueued = useCallback((mode: "steer" | "followup", overrideText?: string) => {
-    if (submissionBlockedRef.current) return;
+    if (submissionBlockedRef.current || holdingRef.current) return;
     const raw = overrideText ?? value;
     const msg = raw.trim();
-    if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length) return;
+    if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length) return;
     if (sendSideQuestion(msg, overrideText)) return;
+    if (rejectsPendingUploads()) return;
+    if (msg.startsWith("!") && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length) {
+      void handleSend(overrideText);
+      return;
+    }
+    const queue = mode === "steer" ? onSteer : onFollowUp;
+    if (!queue) return;
     const images = attachedImagesRef.current.length ? attachedImagesRef.current : undefined;
-    // The queue callbacks resolve false when omp refused the message: it goes
-    // back, text and images together, to the draft it was sent from, even if
-    // the user has typed or switched sessions since.
-    const key = draftKeyRef.current;
-    const keptImages = images?.map(imageToDraftImage);
-    const recoverOnFailure = (queued: Promise<boolean>, text: string) => {
-      void Promise.resolve(queued).then((ok) => {
-        if (ok === false && key) recoverDraft(key, { text, images: keptImages });
-      });
+    const uploads = uploadArgs(attachedUploadsRef.current);
+    // The outbox has it once the callback resolves true: clear only then, and only if the composer still holds what
+    // was sent. A refused one stays where it is.
+    const hold = (text: string) => {
+      const stored = clearOnceStored(raw);
+      holdingRef.current = true;
+      let queued: boolean | Promise<boolean>;
+      try {
+        queued = queue(text, images, ...uploads);
+      } catch (error) {
+        stored.release();
+        holdingRef.current = false;
+        throw error;
+      }
+      void Promise.resolve(queued)
+        .then((ok) => {
+          if (ok) stored();
+        })
+        .finally(() => {
+          stored.release();
+          holdingRef.current = false;
+        });
     };
     const files = attachedTextFilesRef.current;
     onAudioUnlock?.();
-    const streamingBehavior = mode === "steer" ? "steer" : "followUp";
-    if (msg.startsWith("/") && onPromptWithStreamingBehavior) {
+    if (msg.startsWith("/")) {
       const commandName = msg.slice(1).split(/\s+/)[0];
       // Same gate as the direct path (useAgentSession refuses /advisor while
       // disabled): queueing must not become a bypass around the toggle.
@@ -1463,8 +1788,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (expansion.kind === "expand") {
         const prompt = composeMessageWithTextAttachments(expansion.prompt, files);
         if (rejectsOversizedPrompt(prompt, attachedImagesRef.current)) return;
-        recoverOnFailure(onPromptWithStreamingBehavior(prompt, streamingBehavior, images), prompt);
-        clearInput();
+        hold(prompt);
         return;
       }
       if (expansion.kind === "usage-error") {
@@ -1474,29 +1798,25 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }));
         return;
       }
-      const prompt = composeMessageWithTextAttachments(msg, files);
-      if (rejectsOversizedPrompt(prompt, attachedImagesRef.current)) return;
-      recoverOnFailure(onPromptWithStreamingBehavior(prompt, streamingBehavior, images), prompt);
-      clearInput();
-      return;
     }
     const composedMessage = composeMessageWithTextAttachments(msg, files);
     if (rejectsOversizedPrompt(composedMessage, attachedImagesRef.current)) return;
-    if (mode === "steer" && onSteer) {
-      recoverOnFailure(onSteer(composedMessage, images), composedMessage);
-    } else if (mode === "followup" && onFollowUp) {
-      recoverOnFailure(onFollowUp(composedMessage, images), composedMessage);
-    }
-    clearInput();
-  }, [value, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, t, advisorEnabled, rejectsOversizedPrompt, sendSideQuestion]);
+    hold(composedMessage);
+  }, [value, handleSend, onSteer, onFollowUp, clearOnceStored, onAudioUnlock, t, advisorEnabled, rejectsOversizedPrompt, rejectsPendingUploads, sendSideQuestion]);
   // A typed message or attachment during a run is a queued follow-up — and so
   // is a dictation in progress: the primary button must take the same state it
   // would have if the composer already held text. Keep Stop as the action
   // while the composer is empty and nothing is being recorded.
   const dictationCapturing = isRecording || isPaused || isReviewing;
+  const hasAttachments = attachedImages.length > 0 || attachedTextFiles.length > 0 || attachedUploads.length > 0;
+  const uploadingCount = attachedUploads.filter((upload) => upload.status === "uploading").length;
+  const failedUploadCount = attachedUploads.filter((upload) => upload.status === "error").length;
+  const uploadsBlockSend = uploadingCount + failedUploadCount > 0;
+  const imageUploads = attachedUploads.filter((upload) => upload.previewUrl !== null);
+  const fileUploads = attachedUploads.filter((upload) => upload.previewUrl === null);
   const primaryActionQueuesMessage =
     isStreaming
-    && (Boolean(value.trim()) || attachedImages.length > 0 || attachedTextFiles.length > 0 || dictationCapturing)
+    && (Boolean(value.trim()) || hasAttachments || dictationCapturing)
     && Boolean(onFollowUp);
   // The button follows the same Settings choice as Enter: soft keyboards have no
   // Enter to submit with, so this button is how touch devices steer.
@@ -1773,7 +2093,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }
       }
     },
-    [isMobile, isStreaming, onSteer, onFollowUp, onAbort, onMinimize, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, toggleDictation, wordPrediction]
+    [isMobile, isStreaming, onSteer, onFollowUp, onAbort, onMinimize, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, toggleDictation, wordPrediction, setValue]
   );
 
 
@@ -2064,43 +2384,55 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         <ModelErrorBanner error={modelError} />
         <ComposerModeStatus goal={activeGoal} plan={activePlan} />
         {/* Retry banner */}
-        {retryInfo && (
-          <div style={{
-            marginBottom: 8, padding: "5px 10px",
-            background: "color-mix(in srgb, var(--status-warning) 8%, transparent)", border: "1px solid color-mix(in srgb, var(--status-warning) 25%, transparent)",
-            borderRadius: 6, fontSize: 12, color: "var(--status-warning)",
-            display: "flex", alignItems: "center", gap: 6,
-          }}>
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-              <path d="M3 3v5h5" />
-            </svg>
-            {t("chatInput.retrying", { attempt: retryInfo.attempt, maxAttempts: retryInfo.maxAttempts })}{retryInfo.errorMessage && <span style={{ opacity: 0.7, marginLeft: 4 }}>— {retryInfo.errorMessage}</span>}
-            {onAbortRetry && (
-              <button
-                type="button"
-                onClick={onAbortRetry}
-                title={t("chatInput.abortRetryTitle")}
-                style={{
-                  marginLeft: "auto",
-                  padding: "3px 9px",
-                  fontSize: 11,
-                  color: "var(--status-warning)",
-                  background: "transparent",
-                  border: "1px solid color-mix(in srgb, var(--status-warning) 45%, transparent)",
-                  borderRadius: 6,
-                  cursor: "pointer",
-                  whiteSpace: "nowrap",
-                  transition: "background var(--dur-fast) var(--ease-out-warm)",
-                }}
-                onMouseEnter={(e) => { e.currentTarget.style.background = "color-mix(in srgb, var(--status-warning) 12%, transparent)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
-              >
-                {t("chatInput.abortRetry")}
-              </button>
-            )}
-          </div>
-        )}
+        {retryInfo && (() => {
+          const remainingSec = (retryInfo.delayMs !== undefined && retryInfo.startedAt !== undefined)
+            ? (() => {
+                const effectiveNow = Math.max(retryNow, retryInfo.startedAt);
+                const maxSec = Math.ceil(retryInfo.delayMs / 1000);
+                return Math.max(0, Math.min(maxSec, Math.ceil((retryInfo.startedAt + retryInfo.delayMs - effectiveNow) / 1000)));
+              })()
+            : undefined;
+          return (
+            <div style={{
+              marginBottom: 8, padding: "5px 10px",
+              background: "color-mix(in srgb, var(--status-warning) 8%, transparent)", border: "1px solid color-mix(in srgb, var(--status-warning) 25%, transparent)",
+              borderRadius: 6, fontSize: 12, color: "var(--status-warning)",
+              display: "flex", alignItems: "center", gap: 6,
+            }}>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                <path d="M3 3v5h5" />
+              </svg>
+              {remainingSec !== undefined
+                ? t("chatInput.retryingWithCountdown", { attempt: retryInfo.attempt, maxAttempts: retryInfo.maxAttempts, seconds: remainingSec })
+                : t("chatInput.retrying", { attempt: retryInfo.attempt, maxAttempts: retryInfo.maxAttempts })}
+              {retryInfo.errorMessage && <span style={{ opacity: 0.7, marginLeft: 4 }}>— {retryInfo.errorMessage}</span>}
+              {onAbortRetry && (
+                <button
+                  type="button"
+                  onClick={onAbortRetry}
+                  title={t("chatInput.abortRetryTitle")}
+                  style={{
+                    marginLeft: "auto",
+                    padding: "3px 9px",
+                    fontSize: 11,
+                    color: "var(--status-warning)",
+                    background: "transparent",
+                    border: "1px solid color-mix(in srgb, var(--status-warning) 45%, transparent)",
+                    borderRadius: 6,
+                    cursor: "pointer",
+                    whiteSpace: "nowrap",
+                    transition: "background var(--dur-fast) var(--ease-out-warm)",
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "color-mix(in srgb, var(--status-warning) 12%, transparent)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+                >
+                  {t("chatInput.abortRetry")}
+                </button>
+              )}
+            </div>
+          );
+        })()}
         {compactResultText && (
           <div style={{
             marginBottom: 8, padding: "5px 10px",
@@ -2114,7 +2446,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             {compactResultText}
           </div>
         )}
-        {/* Image previews */}
+        {/* Attachment notices and previews */}
         {attachError && (
           <div role="alert" style={{
             marginBottom: 8, padding: "5px 10px",
@@ -2124,40 +2456,41 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             {attachError}
           </div>
         )}
-        {attachedImages.length > 0 && (
+        {attachNotice && !attachError && (
+          <div role="status" style={{
+            marginBottom: 8, padding: "5px 10px",
+            background: "var(--bg-subtle)", border: "1px solid var(--border)",
+            borderRadius: 6, fontSize: 12, color: "var(--text-muted)",
+          }}>
+            {attachNotice}
+          </div>
+        )}
+        {(attachedImages.length > 0 || imageUploads.length > 0) && (
           <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
             {attachedImages.map((img, i) => (
-              <div key={i} style={{ position: "relative", flexShrink: 0 }}>
-                <img
-                  src={img.previewUrl}
-                  alt=""
-                  style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 6, border: "1px solid var(--border)", display: "block" }}
-                />
-                <button
-                  className="attachment-remove-button"
-                  onClick={() => removeImage(i)}
-                  title={t("chatInput.removeImage")}
-                  aria-label={t("chatInput.removeImage")}
-                  style={{
-                    position: "absolute", top: -5, right: -5,
-                    width: 24, height: 24, borderRadius: "50%",
-                    background: "var(--bg-panel)", border: "1px solid var(--border)",
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    cursor: "pointer", padding: 0, color: "var(--text-muted)",
-                    transition: "color var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm)",
-                  }}
-                  onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "var(--bg-panel)"; }}
-                >
-                  <svg width="9" height="9" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-                    <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
-                  </svg>
-                </button>
-              </div>
+              <ImageChip
+                key={i}
+                previewUrl={img.previewUrl}
+                upload={null}
+                canSwitch
+                onSwitch={() => switchImageToFile(img)}
+                onRemove={() => removeImage(i)}
+              />
+            ))}
+            {imageUploads.map((upload) => (
+              <ImageChip
+                key={upload.id}
+                previewUrl={upload.previewUrl}
+                upload={upload}
+                canSwitch={upload.file !== null && fitsInline(upload.size)}
+                onSwitch={() => void switchUploadToInline(upload)}
+                onRemove={() => removeUpload(upload.id)}
+                onRetry={() => retryUpload(upload.id)}
+              />
             ))}
           </div>
         )}
-        {attachedTextFiles.length > 0 && (
+        {(attachedTextFiles.length > 0 || fileUploads.length > 0) && (
           <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
             {attachedTextFiles.map((file, i) => (
               <div
@@ -2212,6 +2545,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   </svg>
                 </button>
               </div>
+            ))}
+            {fileUploads.map((upload) => (
+              <UploadChip key={upload.id} upload={upload} onRemove={() => removeUpload(upload.id)} onRetry={() => retryUpload(upload.id)} />
             ))}
           </div>
         )}
@@ -2469,11 +2805,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             </div>
           )}
           {atMenuVisible && (() => {
-            const indexLoading = fileIndexLoading && (!fileIndex || fileIndex.cwd !== cwd);
+            const indexLoading = fileIndexLoading && (!fileIndex || fileIndex.workspaceKey !== fileIndexOwner);
             const matchCountLabel = tn("chatInput.matchCount", atMatches.length);
             // With a truncated index, local results are provisional — the
             // debounced server search over the full listing replaces them.
-            const truncatedHint = fileIndex?.truncated && !serverResultInUse
+            const truncatedHint = fileIndex?.workspaceKey === fileIndexOwner && fileIndex.truncated && !serverResultInUse
               ? ` · ${atQuery.query ? t("chatInput.searchingAllFiles") : t("chatInput.indexTruncated")}`
               : "";
             return (
@@ -3596,22 +3932,24 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 type="button"
                 className="composer-primary-action"
                 onClick={isRecording || isPaused || isReviewing ? () => stopAndFinishDictation("send") : () => void handleSend()}
-                disabled={submissionBlocked || isTranscribing || !(isRecording || isPaused || isReviewing || value.trim() || attachedImages.length || attachedTextFiles.length)}
-                title={isRecording || isPaused || isReviewing ? t("chatInput.sendDictation") : t("chatInput.send")}
+                disabled={submissionBlocked || isTranscribing || uploadsBlockSend || !(isRecording || isPaused || isReviewing || value.trim() || hasAttachments)}
+                title={uploadsBlockSend
+                  ? (failedUploadCount > 0 ? t("chatInput.uploadsFailedBlock", { count: failedUploadCount }) : t("chatInput.uploadsWaiting", { count: uploadingCount }))
+                  : isRecording || isPaused || isReviewing ? t("chatInput.sendDictation") : t("chatInput.send")}
                 style={{
                   display: "flex", alignItems: "center", gap: 6,
-                  background: (isRecording || isPaused || isReviewing || isTranscribing || value.trim() || attachedImages.length || attachedTextFiles.length) ? "var(--accent-strong)" : "var(--bg-panel)",
+                  background: (isRecording || isPaused || isReviewing || isTranscribing || value.trim() || hasAttachments) ? "var(--accent-strong)" : "var(--bg-panel)",
                   border: "none",
                   borderRadius: 8,
-                  color: (isRecording || isPaused || isReviewing || isTranscribing || value.trim() || attachedImages.length || attachedTextFiles.length) ? "var(--on-accent)" : "var(--text-dim)",
-                  cursor: submissionBlocked ? "not-allowed" : isTranscribing ? "wait" : (isRecording || isPaused || isReviewing || value.trim() || attachedImages.length || attachedTextFiles.length) ? "pointer" : "not-allowed",
+                  color: (isRecording || isPaused || isReviewing || isTranscribing || value.trim() || hasAttachments) ? "var(--on-accent)" : "var(--text-dim)",
+                  cursor: submissionBlocked || uploadsBlockSend ? "not-allowed" : isTranscribing ? "wait" : (isRecording || isPaused || isReviewing || value.trim() || hasAttachments) ? "pointer" : "not-allowed",
                   fontSize: 12,
                   fontWeight: 600,
-                  boxShadow: (isRecording || isPaused || isReviewing || isTranscribing || value.trim() || attachedImages.length || attachedTextFiles.length) ? "var(--shadow-card)" : "none",
+                  boxShadow: (isRecording || isPaused || isReviewing || isTranscribing || value.trim() || hasAttachments) ? "var(--shadow-card)" : "none",
                   transition: "background var(--dur-fast) var(--ease-out-warm), box-shadow var(--dur-fast) var(--ease-out-warm)",
                 }}
               >
-                {isTranscribing ? (
+                {isTranscribing || uploadingCount > 0 ? (
                   <Loader2 size={12} strokeWidth={2} className="animate-spin" aria-hidden="true" />
                 ) : (
                   <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -3619,7 +3957,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     <polyline points="7.5 3 12 7 7.5 11" />
                   </svg>
                 )}
-                {t("chatInput.send")}
+                {uploadingCount > 0 ? t("chatInput.uploadsPending", { count: uploadingCount }) : t("chatInput.send")}
               </button>
             )}
           </div>

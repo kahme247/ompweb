@@ -1,10 +1,12 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
+import { browserLink, type BrowserLinkData } from "@/lib/browser-link";
+import { hostLinkSocket, type LinkSocketData } from "@/lib/hosts/hub";
 import { proxy } from "@/proxy";
 import { register } from "../instrumentation.node";
 import { finalizeResponse, INDEX_CACHE, renderIndex, serveFile, stylesheetFirst } from "./http";
-import { dispatch, ROUTE_MODULES, routePattern } from "./routes";
+import { dispatch, ROUTE_MODULES, routePattern, type ServerSocketData } from "./routes";
 
 export function parseListenArgs(argv: string[], defaultPort: number): { port: number; hostname: string } {
   const { values } = parseArgs({
@@ -17,6 +19,14 @@ export function parseListenArgs(argv: string[], defaultPort: number): { port: nu
 const text = (body: string, status: number) => new Response(body, { status, headers: { "content-type": "text/plain; charset=utf-8" } });
 // Seconds; Bun's default, passed explicitly because handle() puts it back.
 const IDLE_TIMEOUT = 10;
+
+type ServerSocket = Bun.ServerWebSocket<ServerSocketData>;
+/** Browser links and host links share Bun's one `websocket` handler; `ws.data` tells them apart. */
+function isBrowserSocket(ws: ServerSocket): ws is Bun.ServerWebSocket<BrowserLinkData> {
+  return "kind" in ws.data && ws.data.kind === "browser";
+}
+// Not a browser link: a host link (the only other upgrade).
+const asLink = (ws: ServerSocket) => ws as Bun.ServerWebSocket<LinkSocketData>;
 
 function decodable(pathname: string): boolean {
   try {
@@ -32,15 +42,16 @@ function decodable(pathname: string): boolean {
  * through finalizeResponse. Bun's idle timeout also cuts a handler that is still working, so an authenticated API
  * request runs without it. The setting outlives the response on a keep-alive socket, so it is put back once the
  * handler returns or throws, or, when the handler keeps its response open (a stream) with `disableIdleTimeout`, once
- * that stream ends or is cancelled. Public requests keep it unless their handler lifts it (the host link, once its
- * bearer token checks out), so no unauthenticated caller can hold a socket open. No test reaches the throw: `dispatch`
- * (routes.ts) already turns a handler's throw into a 500, so the `finally` only guards a `respond` that throws later.
+ * that stream ends or is cancelled. Public requests keep it, so no unauthenticated caller can hold a socket open. A
+ * handler that upgraded the request to a WebSocket answers undefined, returned as is: Bun has answered. No test reaches
+ * the throw: `dispatch` (routes.ts) already turns a handler's throw into a 500, so the `finally` only guards a
+ * `respond` that throws later.
  */
 async function handle(
   request: Request,
-  server: Bun.Server<undefined>,
-  respond: (context: { gate: "public" | "authenticated"; disableIdleTimeout: () => void }) => Response | Promise<Response>,
-): Promise<Response> {
+  server: Bun.Server<ServerSocketData>,
+  respond: (context: { gate: "public" | "authenticated"; disableIdleTimeout: () => void }) => Response | undefined | Promise<Response | undefined>,
+): Promise<Response | undefined> {
   let pathname: string;
   try {
     pathname = new URL(request.url).pathname;
@@ -68,7 +79,7 @@ async function handle(
     if (keepOpen && response?.body) response = new Response(untilEnd(response.body, restore), response);
     else if (lifted || keepOpen) restore();
   }
-  return finalizeResponse(request, response);
+  return response && finalizeResponse(request, response);
 }
 
 /** `body`, calling `end` once it is done, fails or is cancelled. */
@@ -97,7 +108,7 @@ function untilEnd(body: ReadableStream<Uint8Array>, end: () => void): ReadableSt
 // It is the same public shell that /login serves without a session.
 const DEV_INDEX = "/__omp_dev_index";
 
-async function devIndex(server: Bun.Server<undefined>): Promise<string> {
+async function devIndex(server: Bun.Server<ServerSocketData>): Promise<string> {
   const url = new URL(DEV_INDEX, server.url);
   // A wildcard bind answers on loopback.
   if (url.hostname === "0.0.0.0") url.hostname = "127.0.0.1";
@@ -106,12 +117,13 @@ async function devIndex(server: Bun.Server<undefined>): Promise<string> {
   return stylesheetFirst(await (await fetch(url, { proxy: false })).text());
 }
 
-export function startServer(options: { port: number; hostname: string; dev: boolean; root: string; html?: Bun.HTMLBundle }): Bun.Server<undefined> {
-  const { dev, root, html } = options;
+/** `worker`: the event-stream worker bundle (server/client-env.ts) dev serves from memory; prod serves dist/'s copy. */
+export function startServer(options: { port: number; hostname: string; dev: boolean; root: string; html?: Bun.HTMLBundle; worker?: string }): Bun.Server<ServerSocketData> {
+  const { dev, root, html, worker } = options;
   // Dev serves the SPA from the HTML import (`html`) and never reads dist/.
   const index = dev ? null : readFileSync(path.join(root, "dist", "index.html"), "utf8");
 
-  const routes: Record<string, Bun.HTMLBundle | ((request: Bun.BunRequest, server: Bun.Server<undefined>) => Promise<Response>)> = {};
+  const routes: Record<string, Bun.HTMLBundle | ((request: Bun.BunRequest, server: Bun.Server<ServerSocketData>) => Promise<Response | undefined>)> = {};
   for (const [key, mod] of Object.entries(ROUTE_MODULES)) {
     const { pattern, rest } = routePattern(key);
     const matcher = new URLPattern({ pathname: pattern });
@@ -126,7 +138,7 @@ export function startServer(options: { port: number; hostname: string; dev: bool
         if (name !== "0" && value !== undefined) params[name] = decodeURIComponent(value);
       }
       if (rest) params[rest.name] = pathname.split("/").slice(rest.index).filter(Boolean).map(decodeURIComponent);
-      return dispatch(mod, request, params, disableIdleTimeout);
+      return dispatch(mod, request, params, disableIdleTimeout, (data) => server.upgrade(request, { data }));
     });
   }
   if (html) routes[DEV_INDEX] = html;
@@ -139,12 +151,25 @@ export function startServer(options: { port: number; hostname: string; dev: bool
     reusePort: false,
     idleTimeout: IDLE_TIMEOUT,
     routes,
+    // Bun's limits are per server: browser links inherit the host link's (lib/browser-link.ts caps its own frames).
+    websocket: {
+      ...hostLinkSocket,
+      open: (ws: ServerSocket) => {
+        if (isBrowserSocket(ws)) browserLink.open(ws);
+      },
+      message: (ws: ServerSocket, data: string | Uint8Array) => (isBrowserSocket(ws) ? browserLink.message(ws, data) : hostLinkSocket.message(asLink(ws), data)),
+      drain: (ws: ServerSocket) => (isBrowserSocket(ws) ? browserLink.drain(ws) : hostLinkSocket.drain(asLink(ws))),
+      close: (ws: ServerSocket, code: number) => (isBrowserSocket(ws) ? browserLink.close(ws, code) : hostLinkSocket.close(asLink(ws))),
+    },
     fetch: async (request, server) => {
       const response = await handle(request, server, async ({ gate }) => {
         const { pathname, search } = new URL(request.url);
         // No route matched: /x/ goes to /x as Next did. Leading slashes collapse, so //host/ never becomes //host.
         if (pathname.length > 1 && pathname.endsWith("/")) {
           return new Response(null, { status: 308, headers: { location: `/${pathname.replace(/^\/+|\/+$/g, "")}${search}` } });
+        }
+        if (worker !== undefined && pathname === "/event-stream-worker.js") {
+          return new Response(worker, { headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache" } });
         }
         const file = await serveFile(request, root, dev);
         if (file) return file;
@@ -161,8 +186,8 @@ export function startServer(options: { port: number; hostname: string; dev: bool
         return new Response(renderIndex(shell, request), { headers: { "content-type": "text/html; charset=utf-8", "cache-control": INDEX_CACHE } });
       });
       // Bun's HMR client runs each update as a blob: script; without it every edit in dev is a full reload.
-      const csp = response.headers.get("content-security-policy");
-      if (dev && csp && response.headers.get("content-type")?.startsWith("text/html")) {
+      const csp = response?.headers.get("content-security-policy");
+      if (dev && csp && response?.headers.get("content-type")?.startsWith("text/html")) {
         response.headers.set("content-security-policy", csp.replace("script-src ", "script-src blob: "));
       }
       return response;
@@ -175,8 +200,8 @@ export function startServer(options: { port: number; hostname: string; dev: bool
  * Run by server/main.ts and by the compiled binary (server/binary.ts) once NODE_ENV is "production". A taken port
  * prints why and exits 1.
  */
-export async function startProduction(listen: { port: number; hostname: string }): Promise<Bun.Server<undefined>> {
-  let server: Bun.Server<undefined>;
+export async function startProduction(listen: { port: number; hostname: string }): Promise<Bun.Server<ServerSocketData>> {
+  let server: Bun.Server<ServerSocketData>;
   try {
     server = startServer({ ...listen, dev: false, root: process.env.OMP_WEB_PACKAGE_DIR ?? process.cwd() });
   } catch (error) {

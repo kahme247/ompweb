@@ -44,6 +44,14 @@ export function isTrustedProxyRequest(
   return timingSafeEqual(createHash("sha256").update(value, "utf8").digest(), Buffer.from(digest, "hex"));
 }
 
+/** The web session a request belongs to (browser link spec B5): browser-link resumes and composer uploads are honored
+ * only for the same one. */
+export function requestOwner(request: Request): string {
+  const cookie = new Bun.CookieMap(request.headers.get("cookie") ?? "").get(OMP_WEB_SESSION_COOKIE);
+  if (cookie) return `session:${createHash("sha256").update(cookie).digest("base64url")}`;
+  return isTrustedProxyRequest(request.headers.get(OMP_WEB_TRUSTED_HEADER)) ? "trusted" : "open";
+}
+
 /** Check a sign-in attempt against the configured hash. */
 export function isValidWebPassword(candidate: string, env: NodeJS.ProcessEnv = process.env): boolean {
   const stored = configuredHash(env);

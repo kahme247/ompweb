@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import { validateAgentImages } from "./image-attachments";
 import { hasVisibleAssistantContent } from "./assistant-response";
+import { applyMessageDelta, isDeltaUpdate, withStreamedArguments } from "./message-delta";
 import { invalidateModelsCache } from "./models-cache";
 import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame } from "./omp/rpc-process";
 import type { RpcTransport } from "./omp/rpc-transport";
@@ -238,6 +239,140 @@ interface IdentityChangeOptions {
   keepOldId?: boolean;
 }
 
+/** No replacing frame after a successful prompt reply: expose uncertainty rather than leave it delivering. */
+export const HANDOFF_FALLBACK_MS = 2 * 60_000;
+type HandOff = { error?: string; mayHaveBeenSent?: boolean };
+export interface MessageReplacementWatch {
+  handOff(): Promise<HandOff>;
+  stop(): void;
+}
+const CHILD_EXITED: HandOff = { error: "omp exited before it showed the message", mayHaveBeenSent: true };
+
+function queueTexts(value: unknown): string[] {
+  if (!isRecord(value)) return [];
+  return [value.steering, value.followUp].flatMap((list) => Array.isArray(list) ? list.filter((text): text is string => typeof text === "string") : []);
+}
+
+function messageText(message: Record<string, unknown>): string {
+  if (typeof message.content === "string") return message.content;
+  return Array.isArray(message.content) ? message.content.flatMap((part) => isRecord(part) && part.type === "text" && typeof part.text === "string" ? [part.text] : []).join("") : "";
+}
+
+/** Current native skill echoes carry the original draft in details.prompt; older echoes retain native skill name and
+ * argument metadata. Only used by the active command watcher, never to settle an uncertain stored row. */
+function matchesNativeSkill(message: Record<string, unknown>, submitted: string): boolean {
+  if (message.role !== "custom" || message.customType !== "skill-prompt" || message.attribution !== "user") return false;
+  const details = isRecord(message.details) ? message.details : {};
+  if (typeof details.prompt === "string") return details.prompt.trim() === submitted.trim();
+  const invocation = /^\/skill:([^\s]+)(?:\s+([\s\S]*))?$/.exec(submitted.trim());
+  if (!invocation) return false;
+  const content = messageText(message);
+  const name = typeof details.name === "string" ? details.name : /User invoked the "([^"]+)" skill/.exec(content)?.[1];
+  const parts = content.split(/\nUser:\s*/);
+  const args = typeof details.args === "string" ? details.args : parts.length > 1 ? parts[parts.length - 1] : "";
+  return name === invocation[1] && args.trim() === (invocation[2] ?? "").trim();
+}
+
+/** Every mode requires both its command reply and a replacing frame. Baseline occurrence counts distinguish a new
+ * identical queue chip from a stale one; pre-existing identical messages must echo before this one can claim an echo.
+ * The command is shared with attachment preparation, so comparison uses the final text, never an empty prefix. */
+function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, unknown>, baseline: unknown, generation: number, competingPending: boolean, previousEntryIds?: string[]): MessageReplacementWatch {
+  const { promise, resolve } = Promise.withResolvers<HandOff>();
+  const ambiguous: HandOff = { error: "Another message was dispatched while this message's native replacement was being confirmed", mayHaveBeenSent: true };
+  const ownsWindow = () => !competingPending && wrapper.getMessageCommandGeneration() === generation + 1;
+  const initialQueue = queueTexts(baseline);
+  let priorQueue = initialQueue;
+  let echoDebt: number | undefined;
+  let seen = false;
+  let stopped = false;
+  let checkingExpansion = false;
+  const boundary = previousEntryIds ? new Set(previousEntryIds) : null;
+  const openedUserMessages = new Set<string>();
+  let timer: NodeJS.Timeout | undefined;
+  let expansionRetry: NodeJS.Timeout | undefined;
+  const expectedText = () => typeof command.message === "string" && command.message ? command.message : Array.isArray(command.images) && command.images.length ? "[Image]" : "";
+  const finish = (outcome: HandOff) => {
+    if (seen || stopped) return;
+    seen = true;
+    clearTimeout(expansionRetry);
+    // Every channel receives the replacement before the removal, even if this listener was registered first.
+    queueMicrotask(() => resolve(!outcome.error && !ownsWindow() ? ambiguous : outcome));
+  };
+  // Ordinary native templates don't echo their original slash token. While this idle claim is active, correlate its
+  // new native user lifecycle to the sole new persisted user entry beyond the pre-dispatch boundary; the caller still
+  // waits for THIS command's successful reply. Ambiguous/missing persisted context proves nothing.
+  const checkExpandedUser = async (message: Record<string, unknown>) => {
+    if (checkingExpansion || stopped || seen || !boundary || initialQueue.length || command.type !== "prompt"
+      || command.streamingBehavior || !expectedText().trimStart().startsWith("/")) return;
+    checkingExpansion = true;
+    clearTimeout(expansionRetry);
+    let retry = false;
+    try {
+      const context = await wrapper.withPendingCommand(() => wrapper.host.sessionOps.readContext(wrapper.sessionId, undefined, {
+        boundary: false, deferThinking: true, deferMedia: true, includePreCompaction: false, sync: null,
+      }));
+      if (!context.ok || !isRecord(context.value)) { retry = !context.ok && context.status >= 500; return; }
+      const { entryIds, messages } = context.value;
+      if (!Array.isArray(entryIds) || !Array.isArray(messages)) return;
+      const added = messages.filter((item, index) => typeof entryIds[index] === "string" && !boundary.has(entryIds[index])
+        && isRecord(item) && item.role === "user");
+      if (added.length === 1 && isRecord(added[0]) && messageText(added[0]) === messageText(message)) finish({});
+      // Native echo can precede the file flush. Re-read only this active candidate, never infer a missing entry.
+      retry = added.length === 0;
+    } catch {
+      // No post-dispatch state is guessed from a failed read; keep waiting for a proven replacement.
+      retry = true;
+    } finally {
+      checkingExpansion = false;
+      if (retry && !stopped && !seen) {
+        expansionRetry = setTimeout(() => { void checkExpandedUser(message); }, 100);
+        expansionRetry.unref?.();
+      }
+    }
+  };
+  const detach = wrapper.onEvent((event) => {
+    if (seen) return;
+    if (competingPending || wrapper.getMessageCommandGeneration() > generation + 1) { finish(ambiguous); return; }
+    if (!ownsWindow() && event.type !== "process_exit") return;
+    const text = expectedText();
+    if (echoDebt === undefined) echoDebt = initialQueue.filter((item) => item === text).length;
+    if (event.type === "message_start" && typeof event.messageId === "string" && isRecord(event.message) && event.message.role === "user") {
+      openedUserMessages.add(event.messageId);
+    } else if (event.type === "queue_update") {
+      const next = queueTexts(event);
+      const counts = new Map<string, number>();
+      for (const item of priorQueue) counts.set(item, (counts.get(item) ?? 0) + 1);
+      const added: string[] = [];
+      for (const item of next) {
+        const remaining = counts.get(item) ?? 0;
+        if (remaining) counts.set(item, remaining - 1);
+        else added.push(item);
+      }
+      if (text && (added.includes(text) || (command.type === "prompt" && text.trimStart().startsWith("/") && added.length === 1))) finish({});
+      priorQueue = next;
+    } else if (event.type === "message_end" && isRecord(event.message)
+      && (event.message.role === "user" || (event.message.role === "custom" && event.message.attribution === "user"))) {
+      if (text && (messageText(event.message) === text || matchesNativeSkill(event.message, text))) {
+        if (echoDebt > 0) echoDebt -= 1;
+        else finish({});
+      } else if (event.message.role === "user" && (typeof event.messageId !== "string" || openedUserMessages.has(event.messageId))) {
+        void checkExpandedUser(event.message);
+      }
+    } else if (event.type === "process_exit") finish(CHILD_EXITED);
+    else if (event.type === "agent_end" && event.isTerminal !== false && !wrapper.isAlive()) finish(CHILD_EXITED);
+    // Session-wide prompt failures may belong to an older run; only this command's reply can prove rejection.
+  }, { internal: true });
+  return {
+    async handOff() {
+      if (!ownsWindow()) return ambiguous;
+      timer = setTimeout(() => finish({ error: "omp acknowledged this message but has not shown it yet", mayHaveBeenSent: true }), HANDOFF_FALLBACK_MS);
+      timer.unref?.();
+      const outcome = await promise;
+      return ownsWindow() ? outcome : ambiguous;
+    },
+    stop() { stopped = true; clearTimeout(timer); clearTimeout(expansionRetry); detach(); },
+  };
+}
 export class AgentSessionWrapper {
   private listeners: EventListener[] = [];
   private pendingUiRequests = new Map<string, UnsequencedAgentEvent>();
@@ -249,6 +384,12 @@ export class AgentSessionWrapper {
   private promptRunning = false;
   private promptDispatchPendingCount = 0;
   private historyMutationPendingCount = 0;
+  private messageCommandGeneration = 0;
+  private confirmedMessageCommandGeneration = 0;
+  private pendingMessageCommands = 0;
+  private nativeQueuedMessages: unknown = { steering: [], followUp: [] };
+  private readonly startedEmpty: boolean;
+  private messageReplacement: MessageReplacementWatch | null = null;
   private historyEditInFlight = false;
   private awaitingAgentStart = false;
   private awaitingAgentStartDeadline = 0;
@@ -259,7 +400,16 @@ export class AgentSessionWrapper {
   private streamId = randomUUID();
   private streamSequence = 0;
   private streamingMessage: Partial<AgentMessage> | null = null;
+  private streamingMessageId: string | null = null;
+  /** Assistant messages omp is streaming, by messageId: what its delta updates apply to (lib/message-delta.ts). */
+  private openMessages = new Map<string, Partial<AgentMessage>>();
+  /** False once omp's deltas did not fit a message it started, or switching updates failed: full updates for good. */
+  private deltasFit = true;
+  /** A delta found no message to apply to: omp sends full updates until the message ends. */
+  private recoveringUpdates = false;
   private liveToolEvents = new Map<string, SessionLiveToolEvent>();
+  /** Calls that returned: omp keeps sending `tool_execution_update` for a backgrounded job with no later end. */
+  private endedToolCalls = new Set<string>();
   /** Positive evidence for this run, retained after native completion but before disk append. */
   private responseObserved = false;
   private responseRunActive = false;
@@ -296,6 +446,8 @@ export class AgentSessionWrapper {
   private _alive = true;
   /** Host tools the web UI registered via set_host_tools (agent-callable). */
   private hostToolNames: Set<string> = new Set();
+  /** Accepted browser definitions only: server tools follow the current enablement policy when a child is renewed. */
+  private registeredHostTools: Array<{ name?: unknown; [key: string]: unknown }> | null = null;
   /** Feeding an adopted child's open requests (see adopt): server agent tools there may already have run. */
   private replaying = false;
   /** Adopted, and no tab has registered host tools since: omp may call tools the
@@ -310,6 +462,7 @@ export class AgentSessionWrapper {
   private readonly internalListeners = new WeakSet<EventListener>();
   /** URI schemes the web UI registered via set_host_uri_schemes. */
   private hostUriSchemes: Map<string, { writable?: boolean }> = new Map();
+  private registeredHostUriSchemes: Array<{ scheme?: unknown; writable?: unknown; [key: string]: unknown }> | null = null;
   /** host_uri_request ids awaiting a host_uri_result from the browser. */
   private pendingHostUris: Map<string, UnsequencedAgentEvent> = new Map();
   /** Resolves once an in-flight destroyAndWait finishes; null when idle. Read
@@ -361,6 +514,7 @@ export class AgentSessionWrapper {
     this.recordedCwd = recordedCwd ?? null;
     this.advisorSpawned = advisorSpawned;
     this._sessionId = expectedSessionId;
+    this.startedEmpty = expectedSessionId === "";
     this.disconnectDestroyMs = disconnectDestroyMs;
     this.host = host;
     this.launchAdvisor = launchAdvisor;
@@ -391,9 +545,13 @@ export class AgentSessionWrapper {
     return this.historyEditInFlight;
   }
 
-  /** A web UI (SSE stream) is currently attached to this session. */
+  /** Any event observer is attached, including internal work that protects the session lifetime. */
   hasSubscribers(): boolean {
     return this.listeners.length > 0;
+  }
+
+  private hasBrowserSubscribers(): boolean {
+    return this.listeners.some((listener) => !this.internalListeners.has(listener));
   }
 
   /**
@@ -432,8 +590,8 @@ export class AgentSessionWrapper {
    *    vanish silently and the tab would only notice via a later 409;
    *  - isRunning() covers an in-flight turn that no listener is watching;
    *  - handshaking covers a spawn that has not finished its startup handshake;
-   *  - pendingCommands covers a route command (predict_word, mcp list, export)
-   *    whose response the child still owes us;
+   *  - pendingCommands covers command preparation and dispatch, including a
+   *    response the child still owes us;
    *  - the deadline check absorbs activity that landed while this fired.
    * Anything else keeps the session and re-arms for the remaining window.
    */
@@ -463,13 +621,16 @@ export class AgentSessionWrapper {
       isPromptRunning: this.promptRunning,
       isCompacting: this.compacting,
       responseObserved: this.responseObserved,
-      streamingMessage: this.streamingMessage ? { ...this.streamingMessage } : null,
+      streamingMessage: this.streamingMessage ? { ...withStreamedArguments(this.streamingMessage) } : null,
+      streamingMessageId: this.streamingMessageId,
       toolEvents: Array.from(this.liveToolEvents.values(), (event) => ({ ...event })),
     };
   }
 
   private clearLiveSnapshots(): void {
     this.streamingMessage = null;
+    this.streamingMessageId = null;
+    this.openMessages.clear();
     this.liveToolEvents.clear();
     this.streamSequence += 1;
   }
@@ -478,8 +639,14 @@ export class AgentSessionWrapper {
     this.clearLiveSnapshots();
     this.responseObserved = false;
     this.responseRunActive = false;
+    this.endedToolCalls.clear();
     this.streamId = randomUUID();
     this.streamSequence = 0;
+  }
+
+  private endTool(toolCallId: string): void {
+    this.liveToolEvents.delete(toolCallId);
+    this.endedToolCalls.add(toolCallId);
   }
 
   start(): void {
@@ -528,6 +695,8 @@ export class AgentSessionWrapper {
 
   /** Frames may have been lost (link down, `resync`): re-read omp's state, as the client's get_state reconcile does. */
   private async reconcileAfterGap(): Promise<void> {
+    // A lost delta would corrupt its message silently: rebuild from the next full update instead.
+    this.openMessages.clear();
     try {
       const state = await this.getStateWithTimeout();
       if (!this._alive) return;
@@ -566,6 +735,7 @@ export class AgentSessionWrapper {
       // and keeps the per-question select/editor fallback.
       // Bounded like get_state so a child that never answers cannot stall startup.
       await this.proc.sendCommand({ type: "set_ask_dialog", enabled: true }, GET_STATE_TIMEOUT_MS).catch(() => {});
+      await this.enableDeltaUpdates(this.proc);
       const state = await this.getStateWithTimeout();
       this.applyIdentity(state);
       // Warn when the spawn cwd differs from the session's recorded directory.
@@ -590,6 +760,44 @@ export class AgentSessionWrapper {
   }
 
   /**
+   * omp >= 18.4.5 accepts `messageUpdates: "delta"`; from 18.13.2 its deltas carry the block shells that make them
+   * rebuildable (an omp in between is caught at its first block, see loseDeltaBase). An older omp rejects or
+   * ignores the option and keeps full updates.
+   */
+  private async enableDeltaUpdates(proc: RpcProcess): Promise<void> {
+    this.recoveringUpdates = false;
+    this.deltasFit = true;
+    await proc.sendCommand({ type: "set_event_filter", events: null, messageUpdates: "delta" }, GET_STATE_TIMEOUT_MS).catch(() => {});
+  }
+
+  private setMessageUpdates(messageUpdates: "full" | "delta"): void {
+    void this.proc.sendCommand({ type: "set_event_filter", events: null, messageUpdates }, GET_STATE_TIMEOUT_MS).catch(() => {
+      // The next delta that finds no base asks again; nothing switches back to deltas.
+      this.recoveringUpdates = false;
+      this.deltasFit = false;
+    });
+  }
+
+  /**
+   * A delta found no message to apply to (attached mid-message, adopted child,
+   * frames lost on the link): full updates until the message ends rebuild it.
+   * `incompatible`: the message was there, so this omp's deltas do not fit
+   * what it started (one before 18.13.2 sends no block shells): full updates for good.
+   */
+  private loseDeltaBase(incompatible: boolean): void {
+    if (incompatible) this.deltasFit = false;
+    if (this.recoveringUpdates) return;
+    this.recoveringUpdates = true;
+    this.setMessageUpdates("full");
+  }
+
+  private resumeDeltaUpdates(): void {
+    if (!this.recoveringUpdates) return;
+    this.recoveringUpdates = false;
+    if (this.deltasFit) this.setMessageUpdates("delta");
+  }
+
+  /**
    * Re-sync a child that outlived the server that spawned it (adoptRpcSession):
    * the startup handshake minus the ready wait, every command bounded so a
    * wedged child fails the adoption, then the daemon's lines of its open requests.
@@ -606,6 +814,7 @@ export class AgentSessionWrapper {
       await this.proc.negotiateProtocol(await this.proc.waitReady(), GET_STATE_TIMEOUT_MS);
       await optional({ type: "set_subagent_subscription", level: "events" });
       await optional({ type: "set_ask_dialog", enabled: true });
+      await this.enableDeltaUpdates(this.proc);
       // omp's state has no shell-command flag: a `!!` command the lost server started
       // leaves bashRunning false, and its result arrives as an unsolicited response.
       this.applyIdentity(await this.getStateWithTimeout());
@@ -632,6 +841,7 @@ export class AgentSessionWrapper {
   }
 
   private applyIdentity(state: RpcSessionState): void {
+    if (state.queuedMessages !== undefined) this.nativeQueuedMessages = state.queuedMessages;
     const oldId = this._sessionId;
     const identityChanged = Boolean(oldId) && (state.sessionId !== oldId || (state.sessionFile && state.sessionFile !== this._sessionFile));
     // omp >= 18.5 moves a session it does not own onto a new file on its first
@@ -719,7 +929,7 @@ export class AgentSessionWrapper {
       // omp saves the title before it prints the result, so the poll below can
       // finish first: the window closes on that output or on expiry instead.
       this.quietRenameUntil = Date.now() + GENERATE_TITLE_TIMEOUT_MS;
-      await this.proc.sendCommand({ type: "prompt", message: "/rename" }, PROMPT_ACK_TIMEOUT_MS);
+      await this.sendNativeMessageCommand({ type: "prompt", message: "/rename" }, PROMPT_ACK_TIMEOUT_MS);
     } else {
       await this.send({ type: "prompt", message: "/rename" });
     }
@@ -898,6 +1108,9 @@ export class AgentSessionWrapper {
           this.continuationGraceUntil = Date.now() + NON_TERMINAL_CONTINUATION_GRACE_MS;
         }
         break;
+      case "queue_update":
+        this.nativeQueuedMessages = event;
+        break;
       case "session_settled":
         this.unsettled = false;
         break;
@@ -995,7 +1208,7 @@ export class AgentSessionWrapper {
               result: {
                 content: [{
                   type: "text",
-                  text: "Agent tools are disabled. Enable \"Agent tools\" in omp-web Settings (System & Updates) first.",
+                  text: "Agent tools are disabled. Enable \"Agent tools\" in omp-web Settings (System) first.",
                 }],
               },
             });
@@ -1009,10 +1222,7 @@ export class AgentSessionWrapper {
         // reject immediately so the agent never hangs on a tool nobody will
         // answer.
         if (id && toolName && (this.hostToolNames.has(toolName) || this.hostToolsUnknown)) {
-          // An adopted session's calls wait for a tab: an internal listener alone cannot answer them.
-          const ownTab = this.hostToolsUnknown
-            ? this.listeners.some((listener) => !this.internalListeners.has(listener))
-            : this.listeners.length > 0;
+          const ownTab = this.hasBrowserSubscribers();
           if (ownTab) {
             this.pendingHostTools.set(id, event);
             this.emit(event);
@@ -1023,7 +1233,7 @@ export class AgentSessionWrapper {
           if (otherTabs.size > 0) {
             this.pendingHostTools.set(id, { ...event, webCrossSession: true });
             const args = event.arguments && typeof event.arguments === "object" ? event.arguments as Record<string, unknown> : {};
-            const call: CrossSessionHostToolCall = { sessionId: this.sessionId, id, toolName, arguments: args };
+            const call: CrossSessionHostToolCall = { sessionId: this.sessionId, hostId: this.host.id, cwd: this.cwd, id, toolName, arguments: args };
             for (const listener of otherTabs) {
               try { listener(call); } catch { /* ignore listener errors */ }
             }
@@ -1061,7 +1271,7 @@ export class AgentSessionWrapper {
         const scheme = url.split(":")[0] ?? "";
         const operation = event.operation === "write" ? "write" : "read";
         const registered = this.hostUriSchemes.get(scheme);
-        if (id && scheme && registered && (operation !== "write" || registered.writable) && this.listeners.length > 0) {
+        if (id && scheme && registered && (operation !== "write" || registered.writable) && this.hasBrowserSubscribers()) {
           this.pendingHostUris.set(id, event);
           this.emit(event);
           notifyRunningChange();
@@ -1293,6 +1503,7 @@ export class AgentSessionWrapper {
         this.promptRunning = false;
         this.compacting = false;
         this.clearLiveSnapshots();
+        this.resumeDeltaUpdates();
         break;
       case "prompt_error":
       case "prompt_result":
@@ -1301,34 +1512,64 @@ export class AgentSessionWrapper {
         this.compacting = false;
         this.promptRunning = false;
         this.clearLiveSnapshots();
+        this.resumeDeltaUpdates();
         break;
       case "message_start":
       case "message_update": {
-        const message = event.message as Partial<AgentMessage> | undefined;
-        if (message && message.role !== "user") this.streamingMessage = message;
+        let message = event.message as Partial<AgentMessage> | undefined;
+        const messageId = typeof event.messageId === "string" ? event.messageId : null;
+        if (isDeltaUpdate(event)) {
+          const base = messageId === null ? undefined : this.openMessages.get(messageId);
+          const rebuilt = applyMessageDelta(base, event.assistantMessageEvent);
+          // Never forward a delta nobody can apply: tabs get the message again from omp's full updates.
+          if (!rebuilt) {
+            this.loseDeltaBase(base !== undefined);
+            return;
+          }
+          message = rebuilt;
+        }
+        // Only a start or a rebuilt delta is a base: a full update's tool calls have no streamed JSON, and its
+        // snapshot can be ahead of the deltas that follow it, so a delta after one recovers instead.
+        if (messageId !== null && message?.role === "assistant") {
+          if (event.type === "message_start" || isDeltaUpdate(event)) this.openMessages.set(messageId, message);
+          else this.openMessages.delete(messageId);
+        }
+        if (message && message.role !== "user") {
+          this.streamingMessage = message;
+          this.streamingMessageId = messageId;
+        }
         if (this.responseRunActive && hasVisibleAssistantContent(message)) this.responseObserved = true;
         break;
       }
       case "message_end": {
         const message = event.message as Partial<AgentMessage> | undefined;
         if (this.responseRunActive && hasVisibleAssistantContent(message)) this.responseObserved = true;
-        if (message?.role && message.role === this.streamingMessage?.role) this.streamingMessage = null;
-        if (message?.role === "toolResult" && message.toolCallId) this.liveToolEvents.delete(message.toolCallId);
+        if (typeof event.messageId === "string") this.openMessages.delete(event.messageId);
+        if (message?.role && message.role === this.streamingMessage?.role) {
+          this.streamingMessage = null;
+          this.streamingMessageId = null;
+        }
+        if (message?.role === "toolResult" && message.toolCallId) this.endTool(message.toolCallId);
+        if (message?.role === "assistant") this.resumeDeltaUpdates();
         break;
       }
       case "tool_execution_start":
       case "tool_execution_update":
-        if (typeof event.toolCallId === "string") {
-          this.liveToolEvents.set(event.toolCallId, {
-            ...this.liveToolEvents.get(event.toolCallId),
-            ...event,
-            type: event.type,
-            toolCallId: event.toolCallId,
-          });
-        }
+        if (typeof event.toolCallId !== "string") break;
+        // A start is always a new execution, even of a reused id. A returned call's updates are stale: its row
+        // shows the committed result, so tabs and the snapshot both drop them (a tab would show it running again).
+        // shortcut: a wrapper adopted after a server restart never saw the ends and still passes those updates; filter against committed results if adopted chats show them.
+        if (event.type === "tool_execution_start") this.endedToolCalls.delete(event.toolCallId);
+        else if (this.endedToolCalls.has(event.toolCallId)) return;
+        this.liveToolEvents.set(event.toolCallId, {
+          ...this.liveToolEvents.get(event.toolCallId),
+          ...event,
+          type: event.type,
+          toolCallId: event.toolCallId,
+        });
         break;
       case "tool_execution_end":
-        if (typeof event.toolCallId === "string") this.liveToolEvents.delete(event.toolCallId);
+        if (typeof event.toolCallId === "string") this.endTool(event.toolCallId);
         break;
     }
     event.web = { streamId: this.streamId, sequence: ++this.streamSequence };
@@ -1339,6 +1580,13 @@ export class AgentSessionWrapper {
         // A throwing subscriber (SSE encode failure, UI handler bug) must not
         // starve the remaining subscribers — same isolation RpcProcess and
         // notifyRunningChange apply to their listener sets.
+      }
+    }
+    for (const tap of globalThis.__ompFrameTaps ?? []) {
+      try {
+        tap(this, event as AgentEvent);
+      } catch {
+        // Same isolation as the listeners above.
       }
     }
   }
@@ -1422,6 +1670,15 @@ export class AgentSessionWrapper {
     this.listeners.push(listener);
     this.noteActivity();
     const now = Date.now();
+    // A tab attaching mid-message needs the whole message before omp's next delta.
+    if (!internal && this.streamingMessage?.role === "assistant" && this.streamingMessageId !== null) {
+      listener({
+        type: "message_update",
+        messageId: this.streamingMessageId,
+        message: withStreamedArguments(this.streamingMessage),
+        web: { streamId: this.streamId, sequence: this.streamSequence },
+      });
+    }
     for (const [id, event] of this.pendingUiRequests) {
       const expiresAt = event.expiresAt as number | undefined;
       if (expiresAt !== undefined && expiresAt <= now) {
@@ -1441,7 +1698,7 @@ export class AgentSessionWrapper {
       if (i !== -1) this.listeners.splice(i, 1);
       // No UI attached anymore: reject outstanding host tool calls so the
       // agent never waits forever on a tool nobody will answer.
-      if (this.listeners.length === 0) {
+      if (!this.hasBrowserSubscribers()) {
         this.rejectPendingHostTools("The web UI disconnected while the agent was waiting for this host tool", "own");
         this.rejectPendingHostUris("The web UI disconnected while the agent was waiting for this URI request");
         // The last tab left. Start (not extend) the reap clock, so a session
@@ -1455,6 +1712,11 @@ export class AgentSessionWrapper {
 
   onDestroy(cb: () => void): void {
     this.onDestroyCallback = cb;
+  }
+
+  /** Record an id this conversation was reached by before omp moved it; tabs still on it are still viewing it. */
+  keepMovedFromId(id: string): void {
+    if (!this.movedFromIds.includes(id)) this.movedFromIds.push(id);
   }
 
   /**
@@ -1598,7 +1860,7 @@ export class AgentSessionWrapper {
       // would never run and the wrapper would keep reporting itself as busy
       // (later calls fail with session_busy) until unrelated traffic cleared
       // the wedge. The 15s output wait above stays a separate concern.
-      await this.proc.sendCommand({ type: "prompt", message: action === "list" ? "/mcp list" : `/mcp ${action}${name ? ` ${name}` : ""}` }, PROMPT_ACK_TIMEOUT_MS);
+      await this.sendNativeMessageCommand({ type: "prompt", message: action === "list" ? "/mcp list" : `/mcp ${action}${name ? ` ${name}` : ""}` }, PROMPT_ACK_TIMEOUT_MS);
       const result = await output;
       if (action !== "list" && /^(?:Failed|Usage:|Server .* not found|Unknown)/m.test(result)) {
         throw new WebRpcError("OMP could not update this MCP server. Check its source configuration.", "mcp_change_failed");
@@ -1837,18 +2099,27 @@ export class AgentSessionWrapper {
   /** Full restart of the child process against the same session file. This is
    * omp-web's `reload`: extensions, skills, prompts, and tools are rediscovered
    * on boot, matching a fresh CLI launch. */
-  private async restart(): Promise<void> {
+  private async restart(requireIdle = false): Promise<void> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     const sessionFile = this._sessionFile;
     const old = this.proc;
+    const generation = this.messageCommandGeneration;
     // Stays true for the whole restart so send() rejects commands that would
     // otherwise hit the disposed or half-built child.
     this.restarting = true;
     let resumable: boolean;
     try {
+      if (requireIdle && this.hostDown()) throw this.hostOfflineError("refused");
       // Asked before touching the live child: a remote host can be offline,
       // and the child must then keep running with its frames still read.
       resumable = !!sessionFile && await this.host.sessionFileExists(sessionFile);
+      if (requireIdle) {
+        if (this.hostDown()) throw this.hostOfflineError("refused");
+        if (!resumable) throw new WebRpcError("The saved session is not available for an idle restart", "session_busy");
+        if (!this.isAlive() || this.proc !== old || this.messageCommandGeneration !== generation || this.messageBoundaryBusy(1)) {
+          throw new WebRpcError("Wait for the current operation to finish", "session_busy");
+        }
+      }
     } catch (error) {
       this.restarting = false;
       throw error;
@@ -1911,6 +2182,8 @@ export class AgentSessionWrapper {
         return;
       }
       this.proc = proc;
+      this.messageCommandGeneration += 1;
+      this.confirmedMessageCommandGeneration = this.messageCommandGeneration;
       this.unsubscribeFrames = proc.onFrame((frame) => this.handleFrame(frame));
       this.watchResync(proc);
       try {
@@ -1920,6 +2193,7 @@ export class AgentSessionWrapper {
         // the live roster/transcript event stream before reading its state.
         await proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
         await proc.sendCommand({ type: "set_ask_dialog", enabled: true }, GET_STATE_TIMEOUT_MS).catch(() => {});
+        await this.enableDeltaUpdates(proc);
         const state = await proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS);
         this.applyIdentity(state);
         // Same fresh-spawn guard as startRpcSession: a sessionless wrapper
@@ -1929,6 +2203,17 @@ export class AgentSessionWrapper {
         if (!resumable && this._sessionFile && await this.host.sessionFileExists(this._sessionFile)) {
           await proc.sendCommand({ type: "new_session" });
           this.applyIdentity(await proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS));
+        }
+        if (requireIdle) {
+          if (this.registeredHostTools !== null) {
+            await this.dispatchCommand({ type: "set_host_tools", tools: this.registeredHostTools });
+          } else if (loadWebServerSettings().agentToolsEnabled) {
+            // Like initial startup, a runtime that never accepted host tools may reject this optional registration.
+            await this.dispatchCommand({ type: "set_host_tools", tools: [] }).catch(() => {});
+          }
+          if (this.registeredHostUriSchemes !== null) {
+            await this.dispatchCommand({ type: "set_host_uri_schemes", schemes: this.registeredHostUriSchemes });
+          }
         }
       } catch (error) {
         // Never leave the replacement running with nobody reading its frames.
@@ -1946,6 +2231,102 @@ export class AgentSessionWrapper {
     notifyRunningChange();
   }
 
+  /** Protect submitted command work, including route preparation, from both idle reapers. */
+  async withPendingCommand<T>(callback: () => Promise<T>): Promise<T> {
+    this.resetIdleTimer();
+    this.pendingCommands += 1;
+    try {
+      return await callback();
+    } finally {
+      this.pendingCommands -= 1;
+    }
+  }
+  /** Process-local admission only, not a native message id: overlapping writes make echo inference uncertain. */
+  getMessageCommandGeneration(): number { return this.messageCommandGeneration; }
+  /** ACKs/settlement aren't command-specific echo receipts: earlier writes need an uncontended replacement proof. */
+  hasPendingMessageCommands(): boolean {
+    return this.pendingMessageCommands > 0 || this.confirmedMessageCommandGeneration !== this.messageCommandGeneration;
+  }
+
+  /** Only advance a contiguous, uncontended admission after its replacing frame (or a no-agent builtin receipt). */
+  confirmMessageCommandGeneration(generation: number): void {
+    if (generation === this.messageCommandGeneration && generation === this.confirmedMessageCommandGeneration + 1) {
+      this.confirmedMessageCommandGeneration = generation;
+    }
+  }
+
+  private messageBoundaryBusy(ownedPendingCommands = 0): boolean {
+    return this.isRunning() || this.historyEditInFlight || this.historyMutationPendingCount > 0
+      || this.pendingCommands > ownedPendingCommands
+      || this.pendingMessageCommands > 0 || this.pendingUiRequests.size > 0
+      || this.pendingHostTools.size > 0 || this.pendingHostUris.size > 0;
+  }
+
+  /** A settled idle child may be replaced to stop OLD uncertain effects; this never confirms or replays them. */
+  async renewMessageProofBoundaryIfIdle(): Promise<boolean> {
+    if (!this.hasPendingMessageCommands() || this.restarting || this.hostDown() || this.messageBoundaryBusy()) return false;
+    return this.withPendingCommand(async () => {
+      const proc = this.proc;
+      const generation = this.messageCommandGeneration;
+      const before = await this.getStateWithTimeout();
+      if (before.isSettled !== true || before.hasPendingAsyncWork === true
+        || before.isStreaming !== false || before.isCompacting !== false
+        || before.queuedMessageCount > 0 || queueTexts(before.queuedMessages).length > 0
+        || before.sessionId !== this._sessionId || before.sessionFile !== this._sessionFile
+        || this.proc !== proc || this.messageCommandGeneration !== generation
+        || this.restarting || this.messageBoundaryBusy(1) || !this.hasPendingMessageCommands()) return false;
+      await this.restart(true);
+      return this.proc !== proc;
+    });
+  }
+
+  /** The outbox supplies its persisted pre-dispatch boundary; direct writes reuse this same proof below. */
+  watchMessageReplacement(command: Record<string, unknown>, baseline: unknown, generation: number, competingPending: boolean, previousEntryIds?: string[]): MessageReplacementWatch {
+    const proof = watchReplacement(this, command, baseline, generation, competingPending, previousEntryIds);
+    this.messageReplacement = proof;
+    return {
+      handOff: proof.handOff,
+      stop: () => {
+        proof.stop();
+        if (this.messageReplacement === proof) this.messageReplacement = null;
+      },
+    };
+  }
+
+  /** `origin`: the command a caller submitted through `send`; marked once its native message write begins. */
+  private async sendNativeMessageCommand<T = unknown>(command: { type: string; [key: string]: unknown }, timeoutMs?: number, origin?: object): Promise<T> {
+    const message = IMAGE_BEARING_COMMANDS.has(command.type);
+    const proof = message && !this.messageReplacement && !this.hasPendingMessageCommands()
+      ? watchReplacement(this, command, this.nativeQueuedMessages, this.messageCommandGeneration, false,
+        this.startedEmpty && !this.adopted && this.messageCommandGeneration === 0 ? [] : undefined)
+      : null;
+    if (message) {
+      this.messageCommandGeneration += 1;
+      this.pendingMessageCommands += 1;
+      if (origin) nativeWrites().add(origin);
+    }
+    const generation = this.messageCommandGeneration;
+    try {
+      const result = await this.proc.sendCommand<T>(command, timeoutMs);
+      if (message && isRecord(result) && result.agentInvoked === false) {
+        this.confirmMessageCommandGeneration(generation);
+        proof?.stop();
+      } else if (proof) {
+        void proof.handOff().then((outcome) => {
+          if (!outcome.error) this.confirmMessageCommandGeneration(generation);
+        }).finally(proof.stop);
+      }
+      return result;
+    } catch (error) {
+      proof?.stop();
+      if (message && error instanceof RpcCommandError) this.confirmMessageCommandGeneration(generation);
+      throw error;
+    } finally {
+      if (message) this.pendingMessageCommands -= 1;
+    }
+  }
+
+
   async send(command: Record<string, unknown>): Promise<unknown> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     if (this.mcpListInFlight) throw new WebRpcError("MCP management is in progress. Try again when it finishes.", "session_busy");
@@ -1959,15 +2340,9 @@ export class AgentSessionWrapper {
       throw new WebRpcError("Wait for the history edit to finish", "session_busy");
     }
     if (mutatesHistory) this.historyMutationPendingCount += 1;
-    this.resetIdleTimer();
-    // Covers the whole command, including the awaits inside it: a route that
-    // has an unwatched session in mid-command (predict_word on a keystroke, an
-    // export, a follow-up) must never have its child reaped underneath it.
-    this.pendingCommands += 1;
     try {
-      return await this.dispatchCommand(command);
+      return await this.withPendingCommand(() => this.dispatchCommand(command));
     } finally {
-      this.pendingCommands = Math.max(0, this.pendingCommands - 1);
       if (mutatesHistory) this.historyMutationPendingCount -= 1;
     }
   }
@@ -1990,7 +2365,7 @@ export class AgentSessionWrapper {
         // optimistic turn and lost the message). Degrade into omp's own
         // follow-up queue instead: omp keeps owning the chips and delivers the
         // message once the shell command releases the session.
-        if (this.bashRunning) return await this.queueWhileShellRunning(command);
+        if (this.bashRunning && !this.streaming) return await this.queueWhileShellRunning(command);
         const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
         if (!streamingBehavior) {
           this.responseObserved = false;
@@ -2007,12 +2382,12 @@ export class AgentSessionWrapper {
         try {
           // omp acks immediately; agent output streams as events, completion is
           // agent_end (agent runs) or prompt_result (local-only slash commands).
-          const ack = await this.proc.sendCommand<{ agentInvoked?: boolean } | undefined>({
+          const ack = await this.sendNativeMessageCommand<{ agentInvoked?: boolean } | undefined>({
             type: "prompt",
             message: command.message as string,
             ...(toImageContents(command.images) ? { images: toImageContents(command.images) } : {}),
             ...(streamingBehavior ? { streamingBehavior } : {}),
-          }, PROMPT_ACK_TIMEOUT_MS);
+          }, PROMPT_ACK_TIMEOUT_MS, command);
           // Slash commands fully consumed by a builtin report agentInvoked:false
           // in the ack itself — no prompt_result frame follows.
           if (ack?.agentInvoked === false && !streamingBehavior) {
@@ -2027,6 +2402,7 @@ export class AgentSessionWrapper {
             this.awaitingAgentStart = true;
             this.awaitingAgentStartDeadline = Date.now() + AWAITING_AGENT_START_TIMEOUT_MS;
           }
+          if (ack?.agentInvoked === false) return ack;
         } catch (error) {
           this.promptRunning = false;
           this.awaitingAgentStart = false;
@@ -2056,12 +2432,12 @@ export class AgentSessionWrapper {
         // `steer` has the same collision while a `!!` shell command runs — and
         // there is no live turn to steer anyway, so it joins the follow-up
         // queue like a prompt would.
-        if (type === "steer" && this.bashRunning) return await this.queueWhileShellRunning(command);
-        await this.proc.sendCommand({
+        if (type === "steer" && this.bashRunning && !this.streaming) return await this.queueWhileShellRunning(command);
+        await this.sendNativeMessageCommand({
           type,
           message: command.message as string,
           ...(toImageContents(command.images) ? { images: toImageContents(command.images) } : {}),
-        });
+        }, undefined, command);
         return null;
       }
 
@@ -2271,13 +2647,21 @@ export class AgentSessionWrapper {
         if (command.excludeFromContext === true) {
           throw new WebRpcError(BASH_EXCLUDE_MESSAGE, "bash_exclude_unsupported");
         }
-        if (this.isRunning()) {
-          throw new Error("Cannot run a shell command while the session is busy");
+        // A turn may be running: omp runs the command beside it and, as its
+        // terminal does, records the result only when the next prompt starts.
+        if (this.bashRunning) {
+          throw new Error("A shell command is already running");
         }
         this.bashRunning = true;
         notifyRunningChange();
         try {
-          return await this.proc.sendCommand<BashResultInfo>({ type: "bash", command: command.command as string });
+          // omp holds the result back while it streams; frames and the reply
+          // share stdout, so `streaming` when the reply is read is omp's own
+          // `isStreaming`. Read it then: an agent_end in the same batch is
+          // applied before this await resumes.
+          let deferred = this.streaming;
+          const result = await this.proc.sendCommand<BashResultInfo>({ type: "bash", command: command.command as string }, undefined, () => { deferred = this.streaming; });
+          return { ...result, deferred };
         } finally {
           this.bashRunning = false;
           this.invalidateSessionLists();
@@ -2296,10 +2680,14 @@ export class AgentSessionWrapper {
         const merged = loadWebServerSettings().agentToolsEnabled
           ? [...valid, ...AGENT_TOOL_DEFINITIONS.filter((t) => !valid.some((v) => v.name === t.name))]
           : valid;
-        this.hostToolNames = new Set(merged.map((t) => t.name as string));
-        await this.proc.sendCommand({ type: "set_host_tools", tools: merged });
-        // omp now knows exactly these: an adopted child's lost registration is replaced.
-        this.hostToolsUnknown = false;
+        // Applied as the successful reply is read, before a call in the same host-link batch is routed.
+        await this.proc.sendCommand({ type: "set_host_tools", tools: merged }, undefined, (success) => {
+          if (!success) return;
+          this.hostToolNames = new Set(merged.map((t) => t.name as string));
+          this.registeredHostTools = valid.filter((tool) => !AGENT_TOOL_NAMES.has(tool.name as string));
+          // omp now knows exactly these: an adopted child's lost registration is replaced.
+          this.hostToolsUnknown = false;
+        });
         return null;
       }
 
@@ -2314,13 +2702,16 @@ export class AgentSessionWrapper {
 
       case "set_host_uri_schemes": {
         const schemes = Array.isArray(command.schemes) ? command.schemes as Array<{ scheme?: unknown; writable?: unknown; [key: string]: unknown }> : [];
-        this.hostUriSchemes = new Map();
-        for (const entry of schemes) {
-          if (typeof entry.scheme === "string" && entry.scheme) {
-            this.hostUriSchemes.set(entry.scheme, { writable: entry.writable === true });
+        await this.proc.sendCommand({ type: "set_host_uri_schemes", schemes }, undefined, (success) => {
+          if (!success) return;
+          this.registeredHostUriSchemes = schemes;
+          this.hostUriSchemes = new Map();
+          for (const entry of schemes) {
+            if (typeof entry.scheme === "string" && entry.scheme) {
+              this.hostUriSchemes.set(entry.scheme, { writable: entry.writable === true });
+            }
           }
-        }
-        await this.proc.sendCommand({ type: "set_host_uri_schemes", schemes });
+        });
         return null;
       }
 
@@ -2337,9 +2728,10 @@ export class AgentSessionWrapper {
             this.responseRunActive = false;
             this.streamSequence += 1;
           }
-          const result: unknown = await this.proc.sendCommand(
+          const result: unknown = await this.sendNativeMessageCommand(
             command as { type: string },
             type === "predict_word" ? PREDICT_WORD_TIMEOUT_MS : undefined,
+            command,
           );
           if (type === "set_thinking_level") this.invalidateSessionLists();
           return result ?? null;
@@ -2362,11 +2754,11 @@ export class AgentSessionWrapper {
    */
   private async queueWhileShellRunning(command: Record<string, unknown>): Promise<unknown> {
     const images = toImageContents(command.images);
-    await this.proc.sendCommand({
+    await this.sendNativeMessageCommand({
       type: "follow_up",
       message: command.message as string,
       ...(images ? { images } : {}),
-    });
+    }, undefined, command);
     return { queued: true, queue: "followUp", reason: "shellRunning" };
   }
 
@@ -2384,6 +2776,7 @@ export class AgentSessionWrapper {
     if (!this._alive) return;
     console.info("[omp-web] session-dispose", JSON.stringify({ sessionId: this._sessionId, reason, running: this.isRunning(), pendingDialogs: this.pendingUiRequests.size, at: new Date().toISOString(), caller: new Error().stack?.split("\n").slice(2, 5).map((line) => line.trim()) }));
     this._alive = false;
+    this.emit({ type: "process_exit", reason });
     this.streaming = false;
     this.promptRunning = false;
     this.compacting = false;
@@ -2419,8 +2812,10 @@ export class AgentSessionWrapper {
     for (const timer of this.parkedHostTools.values()) clearTimeout(timer);
     this.parkedHostTools.clear();
     this.hostToolNames.clear();
+    this.registeredHostTools = null;
     this.pendingHostUris.clear();
     this.hostUriSchemes.clear();
+    this.registeredHostUriSchemes = null;
     notifyRunningChange();
     await untilHostDown(this.host, disposed);
   }
@@ -2462,6 +2857,18 @@ declare global {
   var __ompRunningListeners: Set<(update: RunningSessionUpdate) => void> | undefined;
   var __ompHostToolListeners: Set<(call: CrossSessionHostToolCall) => void> | undefined;
   var __ompExitedSessions: Map<string, ExitedRpcSession> | undefined;
+  var __ompFrameTaps: Set<(wrapper: AgentSessionWrapper, event: AgentEvent) => void> | undefined;
+  var __ompSessionMoveListeners: Set<(from: string, to: string) => void> | undefined;
+  var __ompNativeWrites: WeakSet<object> | undefined;
+}
+
+function nativeWrites(): WeakSet<object> {
+  return (globalThis.__ompNativeWrites ??= new WeakSet());
+}
+
+/** True once some wrapper began writing this submitted command to omp's stdin; never before. */
+export function nativeWriteStarted(command: object): boolean {
+  return nativeWrites().has(command);
 }
 
 function getExitedMap(): Map<string, ExitedRpcSession> {
@@ -2508,6 +2915,13 @@ function getLocks(): Map<string, Promise<{ session: AgentSessionWrapper; realSes
 
 export function getRpcSession(sessionId: string): AgentSessionWrapper | undefined {
   return getRegistry().get(sessionId);
+}
+
+/** Every registry key of the wrapper under `sessionId` (its id and the aliases omp's moves left), else `[sessionId]`. */
+export function getRpcSessionKeys(sessionId: string): string[] {
+  const wrapper = getRegistry().get(sessionId);
+  if (!wrapper) return [sessionId];
+  return [...getRegistry()].flatMap(([key, live]) => (live === wrapper ? [key] : []));
 }
 
 export function getRunningRpcSessions(): RunningRpcSession[] {
@@ -2557,6 +2971,21 @@ function getRunningListeners(): Set<(update: RunningSessionUpdate) => void> {
 /** Subscribe to running-session-id changes and session-list refreshes. */
 export function subscribeRunningSessions(listener: (update: RunningSessionUpdate) => void): () => void {
   const listeners = getRunningListeners();
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
+}
+
+/** See every wrapper's frames after its listeners, without counting as a subscriber (the reapers ignore it):
+ * server bookkeeping such as the message outbox's late hand-off. */
+export function tapSessionFrames(tap: (wrapper: AgentSessionWrapper, event: AgentEvent) => void): () => void {
+  const taps = (globalThis.__ompFrameTaps ??= new Set());
+  taps.add(tap);
+  return () => { taps.delete(tap); };
+}
+
+/** Confirmed ownership moves only, after registry aliases exist and before observers see the new identity. */
+export function onSessionMove(listener: (from: string, to: string) => void): () => void {
+  const listeners = (globalThis.__ompSessionMoveListeners ??= new Set());
   listeners.add(listener);
   return () => { listeners.delete(listener); };
 }
@@ -2840,6 +3269,7 @@ export async function startRpcSession(
     for (const candidate of new Set(registry.values())) {
       if (candidate.isAlive() && candidate.sessionFile && samePath(candidate.sessionFile, sessionFile)) {
         registry.set(sessionId, candidate);
+        notifyRunningChange({ refreshSessionList: true });
         return { session: candidate, realSessionId: candidate.sessionId };
       }
     }
@@ -2915,6 +3345,12 @@ export async function startRpcSession(
 
     const realSessionId = created.sessionId;
     registerSession(created);
+    // omp can move a resumed session during startup, before identity is known; keep the requested id routable.
+    if (sessionFile && realSessionId !== sessionId) {
+      registry.set(sessionId, created);
+      created.keepMovedFromId(sessionId);
+      for (const listener of globalThis.__ompSessionMoveListeners ?? []) listener(sessionId, realSessionId);
+    }
     // A successful respawn supersedes the crash record.
     clearExitedRpcSession(sessionId);
     if (realSessionId !== sessionId) clearExitedRpcSession(realSessionId);
@@ -2931,12 +3367,17 @@ function registerSession(created: AgentSessionWrapper): void {
   created.onDestroy(() => {
     // Drop every key (current id, original id, moved-from aliases).
     for (const [key, wrapper] of registry) if (wrapper === created) registry.delete(key);
+    notifyRunningChange({ refreshSessionList: true });
   });
   created.onIdentityChange((oldId, newId, options) => {
-    if (!options?.keepOldId && registry.get(oldId) === created) registry.delete(oldId);
+    // A move keeps the old ids routable; a branch/new/switch serves another conversation, so every old key goes.
+    if (!options?.keepOldId) for (const [key, wrapper] of registry) if (wrapper === created) registry.delete(key);
     registry.set(newId, created);
+    if (options?.keepOldId) for (const listener of globalThis.__ompSessionMoveListeners ?? []) listener(oldId, newId);
+    notifyRunningChange({ refreshSessionList: true });
   });
   registry.set(created.sessionId, created);
+  notifyRunningChange({ refreshSessionList: true });
 }
 
 /**

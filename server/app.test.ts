@@ -24,7 +24,11 @@ for (const name of UNSET) delete process.env[name];
 Object.assign(process.env, ENV);
 // Imported after the environment is set, so no module sees the real home or agent dir.
 const { startServer } = await import("./app");
+const { browserLinkTimings } = await import("@/lib/browser-link");
 const server = startServer({ port: 0, hostname: "127.0.0.1", dev: false, root });
+const { linkLocalDaemon } = await import("../lib/hosts/link-driver.test-helper.mjs");
+const { flushLinkSamples } = await import("../lib/hosts/hub");
+const daemon = await linkLocalDaemon();
 const url = (pathname: string) => new URL(pathname, server.url);
 
 /**
@@ -57,6 +61,9 @@ function rawRequest(
 }
 
 after(async () => {
+  daemon.drop();
+  await daemon.workspace.stop();
+  flushLinkSamples();
   await server.stop(true);
   for (const [name, value] of Object.entries(saved)) {
     if (value === undefined) delete process.env[name];
@@ -223,7 +230,7 @@ test("dev pages put the stylesheet before the pre-paint scripts, even when HTTP_
   );
   // A file written at run time, so no static import; Bun turns it into an HTML bundle as dev.ts's import does.
   const { default: html } = await import(path.join(root, "dev.html"));
-  const dev = startServer({ port: 0, hostname: "127.0.0.1", dev: true, root, html });
+  const dev = startServer({ port: 0, hostname: "127.0.0.1", dev: true, root, html, worker: "(()=>{})();\n" });
   Object.assign(process.env, { HTTP_PROXY: "http://127.0.0.1:9", http_proxy: "http://127.0.0.1:9" });
   delete process.env.NO_PROXY;
   delete process.env.no_proxy;
@@ -238,8 +245,13 @@ test("dev pages put the stylesheet before the pre-paint scripts, even when HTTP_
   assert.equal(page.status, 200);
   const body = await page.text();
   assert.match(body, /<link rel="manifest" href="\/api\/manifest"/);
-  // Bun moves the stylesheet after the inline scripts; the theme script reads --bg from it.
+  // Bun moves the stylesheet after the inline scripts; the theme script reads --bg-panel from it.
   assert.ok(body.indexOf('<link rel="stylesheet"') < body.indexOf("<script>void 0</script>"), body);
+  // The worker bundle from memory (prod serves dist/event-stream-worker.js), revalidated like the service worker.
+  const worker = await fetch(new URL("/event-stream-worker.js?v=abc", dev.url), { proxy: false });
+  assert.equal(await worker.text(), "(()=>{})();\n");
+  assert.match(worker.headers.get("content-type") ?? "", /^text\/javascript/);
+  assert.equal(worker.headers.get("cache-control"), "no-cache");
 });
 
 /** Sends `head` (request line and headers) and nothing more; resolves once the server hangs up. */
@@ -252,7 +264,7 @@ function stall(head: string): Promise<void> {
   return promise;
 }
 
-test("Bun's idle timeout spares the event stream and the host link, and only them", { timeout: 30_000 }, async (t) => {
+test("Bun's idle timeout spares the event stream, the browser link and the host link, and only them", { timeout: 30_000 }, async (t) => {
   process.env.OMP_WEB_PASSWORD_HASH = hashPassword("pw", { logN: 12 });
   process.env.OMP_WEB_TRUSTED_HEADER_SHA256 = new Bun.CryptoHasher("sha256").update("trusted").digest("hex");
   t.after(() => {
@@ -270,16 +282,38 @@ test("Bun's idle timeout spares the event stream and the host link, and only the
     const connectionId = /"connectionId":"([^"]+)"/.exec(hello)?.[1];
     assert.ok(connectionId, hello);
 
-    // A host daemon's link: a hello, then the downlink, which pings 15 s after it opens.
+    // A host daemon's link: a WebSocket whose hello gets a welcome, and which the hub pings 15 s after it opens.
     const created = await fetch(url("/api/hosts"), { method: "POST", headers: signedIn, body: JSON.stringify({ label: "box" }) });
     const bearer = { authorization: `Bearer ${(await created.json()).token}` };
-    const hostHello = { type: "hello", v: 3, ompVersion: "14.0.0", platform: "linux", home: "/home/u", autoApproveExtension: false, ack: 0, channels: [] };
-    const offered = await fetch(url("/api/hosts/link"), { method: "POST", headers: { ...bearer, "x-omp-web-hello": "1" }, body: JSON.stringify(hostHello) });
-    assert.equal(offered.status, 200);
-    const link = await fetch(url("/api/hosts/link"), { headers: { ...bearer, "x-omp-web-hello": (await offered.json()).helloId }, signal: controller.signal });
-    assert.equal(link.status, 200);
-    const linkReader = link.body!.getReader();
-    assert.match(decoder.decode((await linkReader.read()).value), /"type":"welcome"/);
+    const hostHello = { type: "hello", v: 4, ompVersion: "14.0.0", platform: "linux", home: "/home/u", autoApproveExtension: false, ack: 0, channels: [] };
+    // This repo's DOM typing has no init argument; Bun's WebSocket takes `{ headers }`.
+    const link = new WebSocket(url("/api/hosts/link").href.replace(/^http/, "ws"), { headers: bearer } as unknown as string[]);
+    t.after(() => link.close());
+    const welcome = Promise.withResolvers<string>();
+    link.addEventListener("message", ({ data }) => welcome.resolve(String(data)), { once: true });
+    link.onopen = () => link.send(JSON.stringify(hostHello));
+    assert.match(await welcome.promise, /"type":"welcome"/);
+    const ping = Promise.withResolvers<void>();
+    link.addEventListener("message", ({ data }) => String(data).includes('"type":"ping"') && ping.resolve());
+    link.addEventListener("close", ({ code }) => ping.reject(new Error(`the host link was closed while idle (${code})`)));
+
+    // The browser link: its hello gets a welcome, and the server pings it every 15 s, like the host link.
+    const browser = new WebSocket(url("/api/events/link").href.replace(/^http/, "ws"), { headers: signedIn } as unknown as string[]);
+    browser.onopen = () => browser.send(JSON.stringify({ type: "hello", v: 1, token: null, ack: 0 }));
+    t.after(() => browser.close());
+    const browserFrames: string[] = [];
+    let browserFrame = Promise.withResolvers<void>();
+    browser.addEventListener("message", ({ data }) => {
+      browserFrames.push(String(data));
+      browserFrame.resolve();
+    });
+    const browserFrameMatching = async (pattern: RegExp) => {
+      while (!browserFrames.some((frame) => pattern.test(frame))) {
+        browserFrame = Promise.withResolvers<void>();
+        await browserFrame.promise;
+      }
+    };
+    await browserFrameMatching(/^\{"type":"welcome","v":1,/);
 
     // No caller without a session or a host token holds a socket open, wherever it stalls, and a signed-in
     // keep-alive socket is closed once its JSON answer, or a stream that lifted the timeout, went out.
@@ -300,12 +334,14 @@ test("Bun's idle timeout spares the event stream and the host link, and only the
     ]);
     assert.deepEqual([...open], []);
 
-    // The ping proves the downlink outlived the idle timeout; so has the event stream, opened before it.
-    for (let lines = ""; !lines.includes('"type":"ping"');) {
-      const { done, value } = await linkReader.read();
-      assert.equal(done, false, "the host link was closed while idle");
-      lines += decoder.decode(value);
-    }
+    // The ping proves the socket outlived the idle timeout; so has the event stream, opened before it. The browser
+    // link's comes 15 s after it opened too, just after the host link's.
+    await ping.promise;
+    await browserFrameMatching(/^\{"type":"ping","at":\d+\}$/);
+    assert.equal(link.readyState, WebSocket.OPEN);
+    assert.equal(browser.readyState, WebSocket.OPEN, "the browser link was closed while idle");
+    browser.send(JSON.stringify({ type: "sub", id: "s1", channel: { kind: "hosts" }, seq: 1 }));
+    await browserFrameMatching(/^\{"type":"e","name":"mux","at":\d+,"data":\{"type":"open","sub":"s1"\},"seq":\d+\}\n$/);
     const subscribe = await fetch(url("/api/events"), {
       method: "POST",
       headers: { ...signedIn, "content-type": "application/json" },
@@ -318,4 +354,56 @@ test("Bun's idle timeout spares the event stream and the host link, and only the
   } finally {
     controller.abort();
   }
+});
+
+test("the real server closes a browser link socket without a hello within helloMs (1008) and welcomes one in time", async (t) => {
+  const saved = browserLinkTimings.helloMs;
+  browserLinkTimings.helloMs = 300;
+  t.after(() => (browserLinkTimings.helloMs = saved));
+  const dial = () => new WebSocket(url("/api/events/link").href.replace(/^http/, "ws"));
+  const silent = dial();
+  const closed = Promise.withResolvers<{ code: number; reason: string }>();
+  silent.onclose = ({ code, reason }) => closed.resolve({ code, reason });
+  const greeted = dial();
+  t.after(() => greeted.close());
+  const welcome = Promise.withResolvers<string>();
+  greeted.onopen = () => greeted.send(JSON.stringify({ type: "hello", v: 1, token: null, ack: 0 }));
+  greeted.onmessage = ({ data }) => welcome.resolve(String(data));
+  assert.deepEqual(await closed.promise, { code: 1008, reason: "No hello" });
+  assert.match(await welcome.promise, /^\{"type":"welcome","v":1,/);
+  await Bun.sleep(400);
+  assert.equal(greeted.readyState, WebSocket.OPEN, "a socket that said hello is not closed by the deadline");
+});
+
+test("the host link and the browser link refuse an unauthenticated upgrade with 401 and answer 426 to a request that does not upgrade", async (t) => {
+  const created = await fetch(url("/api/hosts"), { method: "POST", body: JSON.stringify({ label: "refusing" }) });
+  const bearer = { authorization: `Bearer ${(await created.json()).token}` };
+  process.env.OMP_WEB_PASSWORD_HASH = hashPassword("pw", { logN: 12 });
+  process.env.OMP_WEB_TRUSTED_HEADER_SHA256 = new Bun.CryptoHasher("sha256").update("trusted").digest("hex");
+  t.after(() => {
+    delete process.env.OMP_WEB_PASSWORD_HASH;
+    delete process.env.OMP_WEB_TRUSTED_HEADER_SHA256;
+  });
+
+  // The gate runs before the upgrade route: no session, or a foreign origin, never reaches the 426.
+  const signedIn = { "x-omp-web-auth": "trusted" };
+  assert.equal((await fetch(url("/api/events/link"))).status, 401);
+  assert.equal((await fetch(url("/api/events/link"), { headers: { ...signedIn, origin: "http://evil.example" } })).status, 403);
+  assert.equal((await fetch(url("/api/events/link"), { headers: signedIn })).status, 426);
+
+  const refused = new WebSocket(url("/api/hosts/link").href.replace(/^http/, "ws"));
+  const events: string[] = [];
+  refused.onopen = () => events.push("open");
+  refused.onerror = (event) => events.push(`error ${(event as ErrorEvent).message}`);
+  const closed = Promise.withResolvers<void>();
+  refused.onclose = () => closed.resolve();
+  await closed.promise;
+  assert.equal(events.length, 1, events.join(" | "));
+  assert.match(events[0], /^error .*\b401\b/);
+
+  assert.equal((await fetch(url("/api/hosts/link"), { headers: bearer })).status, 426);
+  const hostHello = { type: "hello", v: 3, ompVersion: "14.0.0", platform: "linux", home: "/home/u", autoApproveExtension: false, ack: 0, channels: [] };
+  const outdated = await fetch(url("/api/hosts/link"), { method: "POST", headers: bearer, body: JSON.stringify(hostHello) });
+  assert.equal(outdated.status, 426);
+  assert.equal((await outdated.json()).hostVersion, 3);
 });

@@ -1,7 +1,6 @@
 import type { AppUpdateInfo } from "./AppUpdateDialog";
 
 export const DISMISSED_APP_UPDATE_KEY = "omp-web:dismissed-app-update";
-export const DISMISSED_OMP_UPDATE_KEY = "omp-web:dismissed-omp-update";
 export const COMPLETED_APP_UPDATE_KEY = "omp-web:completed-app-update";
 export const APP_UPDATE_POLL_MS = 500;
 export const APP_UPDATE_STOPPING_POLL_MS = 200;

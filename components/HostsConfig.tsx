@@ -11,6 +11,7 @@ import type { HostRow } from "@/lib/hosts/hub";
 import { useI18n } from "@/lib/i18n";
 import { useHostRows } from "@/hooks/useHostRows";
 import { HOST_STATUS_COLOR, hostName, hostStatusText, isLocalRow, localInstallCommand } from "./host-status";
+import { HostUpdates } from "./HostUpdates";
 
 type Dialogs = { kind: "add" } | { kind: "rename"; host: HostRow } | null;
 
@@ -115,8 +116,8 @@ function HostCard({ host, onRename, onRevoke }: { host: HostRow; onRename: () =>
   const name = hostName(t, host);
   const linked = "allowAgentStart" in host ? host : null;
   const details = [
-    host.ompVersion,
     host.platform,
+    host.hostVersion !== null && host.status !== "needs-upgrade" && t("hostsConfig.protocol", { version: host.hostVersion }),
     linked && (host.lastSeenAt ? t("hostsConfig.lastSeen", { time: new Date(host.lastSeenAt).toLocaleString() }) : t("hostsConfig.neverSeen")),
   ].filter(Boolean).join(" · ");
 
@@ -138,16 +139,16 @@ function HostCard({ host, onRename, onRevoke }: { host: HostRow; onRename: () =>
           </div>
         )}
       </div>
-      <div className="settings-card-control" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <div className="settings-card-control" style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", flexShrink: 1, maxWidth: "100%" }}>
         {linked && (
-          <>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, maxWidth: "100%" }}>
             <span style={{ fontSize: 11, color: "var(--text-muted)", maxWidth: 200 }}>{t("hostsConfig.allowAgentStart")}</span>
             <ToggleSwitch
               checked={linked.allowAgentStart}
               aria-label={t("hostsConfig.allowAgentStartAria", { name })}
               onChange={(allowAgentStart) => void call("PATCH", "/api/hosts", { id: host.id, allowAgentStart }).catch(failure)}
             />
-          </>
+          </div>
         )}
         <button type="button" className="ui-focus-ring" aria-label={t("hostsConfig.renameAria", { name })} style={{ ...buttonStyle, display: "inline-flex", alignItems: "center", gap: 5 }} onClick={onRename}>
           <Pencil size={13} aria-hidden="true" />{t("hostsConfig.rename")}
@@ -158,6 +159,7 @@ function HostCard({ host, onRename, onRevoke }: { host: HostRow; onRename: () =>
           </button>
         )}
       </div>
+      <HostUpdates host={host} />
     </li>
   );
 }
@@ -186,7 +188,10 @@ export function HostsConfig() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, width: "100%" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-        <p style={{ margin: 0, fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("hostsConfig.subtitle")}</p>
+        <p style={{ margin: 0, fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>
+          {t("hostsConfig.subtitle")}
+          {hosts?.[0] && <span style={{ display: "block" }}>{t("hostsConfig.serverProtocol", { version: hosts[0].serverVersion })}</span>}
+        </p>
         <button type="button" className="ui-focus-ring" style={{ ...primaryStyle, display: "inline-flex", alignItems: "center", gap: 5, flexShrink: 0 }} onClick={() => setDialog({ kind: "add" })}>
           <Plus size={14} aria-hidden="true" />{t("hostsConfig.add")}
         </button>

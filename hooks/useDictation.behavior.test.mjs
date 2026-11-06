@@ -233,6 +233,43 @@ test("starting capture puts the hook in the recording state with a live analyser
   assert.ok(view.result.current.captureRef.current.startedAt > 0, "timer needs a start stamp");
 });
 
+test("the meter's audio context is resumed inside the click, and again if the mic session suspends it", async () => {
+  // After the await the click's activation may be gone; a context the browser
+  // then keeps suspended feeds the waveform silence while recording works.
+  const events = [];
+  const contexts = [];
+  class TrackingAudioContext extends FakeAudioContext {
+    constructor() {
+      super();
+      contexts.push(this);
+    }
+    resume() {
+      events.push("resume");
+      this.state = "running";
+      return super.resume();
+    }
+  }
+  override(window, "AudioContext", TrackingAudioContext);
+  override(globalThis, "AudioContext", TrackingAudioContext);
+  override(navigator, "mediaDevices", {
+    getUserMedia: async () => {
+      events.push("getUserMedia");
+      // Safari interrupts the context while the microphone session starts.
+      contexts[0].state = "suspended";
+      return { getTracks: () => [new FakeTrack()] };
+    },
+  });
+  const { view } = mountDictation();
+
+  await act(async () => {
+    view.result.current.toggle();
+  });
+  await settle();
+
+  assert.deepEqual(events, ["resume", "getUserMedia", "resume"]);
+  assert.notEqual(view.result.current.captureRef.current.analyser, null);
+});
+
 test("pause then resume keeps the timer base and analyser while accumulating paused time", async () => {
   const { view } = mountDictation();
 

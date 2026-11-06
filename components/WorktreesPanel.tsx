@@ -10,7 +10,7 @@ import { PathLabel } from "./SessionSidebar-chrome";
 /** File-panel Worktrees tab: the active Git workspace's worktrees — the only
  *  place to switch, create, and remove them. Switching moves the sidebar's
  *  effective cwd (where a new session starts); the open session is unchanged. */
-export function WorktreesPanel({ ctx, remoteHost = false }: { ctx: WorktreeContext | null; remoteHost?: boolean }) {
+export function WorktreesPanel({ ctx }: { ctx: WorktreeContext | null }) {
   const { t } = useI18n();
   const [homeDir, setHomeDir] = useState("");
   const [newOpen, setNewOpen] = useState(false);
@@ -19,19 +19,22 @@ export function WorktreesPanel({ ctx, remoteHost = false }: { ctx: WorktreeConte
   const [busy, setBusy] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const newInputRef = useRef<HTMLInputElement>(null);
+  const hostId = ctx?.error ? undefined : ctx?.hostId;
 
   useEffect(() => {
-    fetch("/api/home").then((r) => r.json()).then((d: { home?: string }) => {
-      if (d.home) setHomeDir(d.home);
-    }).catch(() => {});
-  }, []);
+    const controller = new AbortController();
+    setHomeDir("");
+    if (hostId) fetch(`/api/home?${new URLSearchParams({ hostId })}`, { signal: controller.signal })
+      .then((r) => r.json()).then((d: { home?: string }) => { if (!controller.signal.aborted && d.home) setHomeDir(d.home); }).catch(() => {});
+    return () => controller.abort();
+  }, [hostId]);
 
-  if (!ctx) {
+  if (!ctx || ctx.error) {
     return (
       <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: 24, textAlign: "center" }}>
         <GitFork size={26} strokeWidth={1.5} aria-hidden="true" style={{ color: "var(--text-dim)" }} />
         <div style={{ color: "var(--text)", fontSize: 13, fontWeight: 600 }}>{t("tabBar.worktrees")}</div>
-        <div style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.6, maxWidth: 260 }}>{t(remoteHost ? "hosts.notAvailableRemote" : "sessionSidebar.gitRepoRootOnlyTitle")}</div>
+        <div role={ctx?.error ? "alert" : undefined} style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.6, maxWidth: 260 }}>{ctx?.error ?? t("sessionSidebar.gitRepoRootOnlyTitle")}</div>
       </div>
     );
   }
