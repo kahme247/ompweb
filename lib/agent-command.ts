@@ -109,7 +109,7 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
     const noSpawn = Object.hasOwn(NO_SPAWN_REPLIES, type);
     const liveOnly = LIVE_SESSION_ONLY.has(type);
     if (existing?.isAlive()) {
-      if (noSpawn || liveOnly || existing.advisorSpawned === advisor || existing.isRunning() || existing.isEditingHistory()) {
+      if (existing.hostOwnedLifecycle || noSpawn || liveOnly || existing.advisorSpawned === advisor || existing.isRunning() || existing.isEditingHistory()) {
         const result = await send(existing);
         return Response.json({ success: true, data: result });
       }

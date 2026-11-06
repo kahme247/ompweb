@@ -26,6 +26,7 @@ Not a goal: two daemons on one agent dir, or two daemons sharing one omp process
 
 - One channel table for the daemon. Every line an omp process prints is queued on every link that has joined that channel (M3), in the order omp printed it. A link's backlog never delays another link.
 - The hello lists every channel to every link (`{ch, sessionId, cwd, pending}` as today). A v7 server joins the listed channels it has wrappers for, or adopts them as today; it no longer kills a listed channel it cannot adopt (M6 decides stops).
+- After a channel starts or acquires its authoritative session identity, `channels_changed {channels}` carries the same listing to every v7 link. This lets a server discover background runs after its initial hello, even without a tab opening that session.
 - The per-channel buffer cap (32 MB) is per link: past it, that link gets `resync {ch}` and the others are untouched.
 
 ### M3. Joining a session
@@ -86,7 +87,7 @@ The daemon decides when a process stops; the two web-server timers in `lib/rpc-m
 
 ### M10. Compatibility
 
-- `LINK_PROTOCOL_VERSION` 7, `MIN_LINK_PROTOCOL_VERSION` stays 4. v7 adds `hello.link`, the ops `open` and `close`, and the messages `interest`, `host_tools`, `notifier` and `sessions_changed`.
+- `LINK_PROTOCOL_VERSION` 7, `MIN_LINK_PROTOCOL_VERSION` stays 4. v7 adds `hello.link`, the ops `open` and `close`, and the messages `interest`, `host_tools`, `notifier`, `channels_changed` and `sessions_changed`.
 - A v6 link to a v7 daemon behaves exactly as today: `spawn`, its own timers and startup settings, kills of unadopted channels. It sees only the channels it spawned, and no other link joins them. Its replies go to it alone. A session never gets two processes: a v6 `spawn` for a session a v7 link's channel runs, or a v7 `open` for one a v6 channel runs, is refused with 409 `session_running_elsewhere`.
 - A v7 server keeps linking v4–v6 daemons with today's behaviour (one link, server-side lifecycle).
 - Shared files of the agent dir stay shared: `omp-web-settings.json`, `projects.json`, `hosts.json`, the notification store. A staging server's settings change applies to production too; that is accepted.

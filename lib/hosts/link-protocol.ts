@@ -5,16 +5,17 @@
 import { isValidSessionId } from "../session-file-references-core";
 import { UPLOAD_ID_RE } from "../upload-limits";
 import type { SessionOps } from "./session-ops";
+import type { SpawnRequest } from "./host";
 import { isWorkspaceOp, WORKSPACE_OP_PARAMS } from "../workspace-types";
 import type { WorkspaceFileEvent } from "../workspace-types";
 
-/** 6: composer uploads (docs/specs/2026-11-02-file-uploads-design.md, U5): binary down frames carry upload bytes, the
+/** 7: several server links share host-owned channels, lifecycle, dialogs and callbacks. 6: composer uploads
  * `upload_ack` up message, the `uploadStart`/`uploadAbort`/`uploadAttach` ops. 5: a line over `pieceBytes` goes as
  * `part` messages and a large result as several binary frames, both sent fair across channels
  * (docs/specs/2026-10-31-websocket-link-design.md, D7). 4: the link is one WebSocket: text frames carry the messages,
  * binary frames large results, `ack` messages replace the ack header and the POST answer.
  * Rules for changing it: docs/specs/2026-10-28-remote-hosts-design.md, "Protocol versions and compatibility". */
-export const LINK_PROTOCOL_VERSION = 6;
+export const LINK_PROTOCOL_VERSION = 7;
 /** The first daemon link version that takes uploads: main answers 426 below it (host_upgrade_required, or
  * host_restart_required on this machine, whose daemon an in-place upgrade leaves running). */
 export const UPLOADS_SINCE_VERSION = 6;
@@ -76,9 +77,12 @@ export const SESSION_OP_PARAMS: { readonly [K in keyof SessionOps]: readonly str
 
 /** Every op a daemon answers. Older daemons refuse newer ops with unknown_op; upload ops require v6, `setUploadRetention`
  * (docs/specs/2026-11-02-file-uploads-design.md, U6) is a compatible addition that older daemons answer 501. */
-export const HOST_OP_NAMES = [...(Object.keys(SESSION_OP_PARAMS) as (keyof SessionOps)[]), ...Object.keys(WORKSPACE_OP_PARAMS) as (keyof typeof WORKSPACE_OP_PARAMS)[], "spawn", "sessionFileExists", "invalidateSessionLists", "checkUpdates", "updateSoftware", "uploadStart", "uploadAbort", "uploadAttach", "setUploadRetention"] as const;
+export const HOST_OP_NAMES = [...(Object.keys(SESSION_OP_PARAMS) as (keyof SessionOps)[]), ...Object.keys(WORKSPACE_OP_PARAMS) as (keyof typeof WORKSPACE_OP_PARAMS)[], "spawn", "open", "close", "sessionFileExists", "invalidateSessionLists", "checkUpdates", "updateSoftware", "uploadStart", "uploadAbort", "uploadAttach", "setUploadRetention"] as const;
 
 export type HostOpName = (typeof HOST_OP_NAMES)[number];
+
+export type OpenChannelRequest = { sessionId: string | null; launch: SpawnRequest };
+export type OpenChannelResult = { ch: string; joined: boolean; pending: string[] | null; streaming: string | null; cwd: string; fellBack: boolean; launchAdvisor: boolean; autoApproveExtension: boolean };
 
 /** A failed host op, as carried by `res {ok: false, error}`. */
 export class HostOpError extends Error {
@@ -101,6 +105,8 @@ export type DownMessage =
   | { type: "welcome"; v: number; hostId: string }
   | { type: "stdin"; seq: number; ch: string; line: string }
   | { type: "kill"; seq: number; ch: string; force: boolean }
+  | { type: "interest"; seq: number; ch: string; on: boolean; preparing: boolean }
+  | { type: "host_tools"; seq: number; ch: string; tools: unknown[]; schemes: string[] }
   /** `op` is whatever the sender named: the daemon answers one it does not know with 501 `unknown_op`. */
   | { type: "req"; seq: number; id: string; op: string; args: unknown }
   | { type: "ping" }
@@ -125,6 +131,7 @@ export type UpMessage =
       ompVersion: string | null;
       /** Running daemon's application version; absent on older hosts. */
       ompwebVersion?: string;
+      link?: { id: string; notifier: boolean };
       workspaceOps?: string[];
       platform: string;
       home: string;
@@ -137,6 +144,9 @@ export type UpMessage =
   | { type: "stderr"; seq: number; ch: string; chunk: string }
   | { type: "exit"; seq: number; ch: string; code: number | null; signal: string | null }
   | { type: "resync"; seq: number; ch: string }
+  | { type: "notifier"; seq: number; on: boolean }
+  | { type: "sessions_changed"; seq: number }
+  | { type: "channels_changed"; seq: number; channels: HelloChannel[] }
   /** The daemon's link samples, at most LINK_LIMITS.statsSamples; a hub that predates it skips the type. Advisory: the
    * receiver keeps the valid ones and counts the rest in `invalid` (decodeUp only; a sender leaves it out). */
   | { type: "stats"; seq: number; samples: LinkStatSample[]; invalid?: number }
@@ -251,8 +261,8 @@ export function isHostOp(name: string): name is HostOpName {
   return (HOST_OP_NAMES as readonly string[]).includes(name);
 }
 
-const DOWN_TYPES: readonly string[] = ["welcome", "stdin", "kill", "req", "ping", "pong", "ack"];
-const UP_TYPES: readonly string[] = ["hello", "stdout", "stderr", "exit", "resync", "stats", "res", "upload_ack", "workspace_file", "ping", "pong", "ack"];
+const DOWN_TYPES: readonly string[] = ["welcome", "stdin", "kill", "interest", "host_tools", "req", "ping", "pong", "ack"];
+const UP_TYPES: readonly string[] = ["hello", "stdout", "stderr", "exit", "resync", "notifier", "sessions_changed", "channels_changed", "stats", "res", "upload_ack", "workspace_file", "ping", "pong", "ack"];
 
 /** `otherDirection`: the types only the other direction decodes; one of those arrived on the wrong way. */
 function unknownMessage(o: Obj, otherDirection: readonly string[]): UnknownMessage {
@@ -318,6 +328,10 @@ export function decodeDown(line: string): DownMessage | UnknownMessage {
       return { type: "stdin", seq: seqNum(o, "seq"), ch: str(o, "ch"), line: str(o, "line") };
     case "kill":
       return { type: "kill", seq: seqNum(o, "seq"), ch: str(o, "ch"), force: bool(o, "force") };
+    case "interest":
+      return { type: "interest", seq: seqNum(o, "seq"), ch: str(o, "ch"), on: bool(o, "on"), preparing: bool(o, "preparing") };
+    case "host_tools":
+      return { type: "host_tools", seq: seqNum(o, "seq"), ch: str(o, "ch"), tools: Array.isArray(o.tools) ? o.tools : fail("tools must be an array"), schemes: strings(o, "schemes") };
     case "req":
       return { type: "req", seq: seqNum(o, "seq"), id: str(o, "id"), op: str(o, "op"), args: "args" in o ? o.args : fail("args must be present") };
     case "ping":
@@ -391,6 +405,11 @@ function res(o: Obj): UpMessage {
   return fail("ok must be true or false");
 }
 
+function helloLink(value: unknown): { id: string; notifier: boolean } {
+  if (!isObj(value)) fail("link must be an object");
+  return { id: str(value, "id"), notifier: bool(value, "notifier") };
+}
+
 export function decodeUp(line: string): UpMessage | UnknownMessage {
   const o = parseLine(line);
   switch (o.type) {
@@ -401,6 +420,7 @@ export function decodeUp(line: string): UpMessage | UnknownMessage {
         ompVersion: nullable(o, "ompVersion", str),
         ...(o.ompwebVersion === undefined ? {} : { ompwebVersion: str(o, "ompwebVersion") }),
         ...(o.workspaceOps === undefined ? {} : { workspaceOps: strings(o, "workspaceOps").slice(0, Object.keys(WORKSPACE_OP_PARAMS).length).filter(isWorkspaceOp) }),
+        ...(o.link === undefined ? {} : { link: helloLink(o.link) }),
         platform: str(o, "platform"),
         home: str(o, "home"),
         autoApproveExtension: bool(o, "autoApproveExtension"),
@@ -421,6 +441,12 @@ export function decodeUp(line: string): UpMessage | UnknownMessage {
       };
     case "resync":
       return { type: "resync", seq: seqNum(o, "seq"), ch: str(o, "ch") };
+    case "notifier":
+      return { type: "notifier", seq: seqNum(o, "seq"), on: bool(o, "on") };
+    case "sessions_changed":
+      return { type: "sessions_changed", seq: seqNum(o, "seq") };
+    case "channels_changed":
+      return { type: "channels_changed", seq: seqNum(o, "seq"), channels: channels(o) };
     case "stats":
       return stats(o);
     case "upload_ack": {
@@ -585,6 +611,20 @@ export class LinkSender<T extends SendItem> {
     for (const { left } of this.queues.get(key) ?? []) this.queued -= left;
     this.queues.delete(key);
     if (this.active === key) this.active = null;
+  }
+
+  /** Drop unnumbered output without dropping an open result sharing its ordering key. */
+  dropWhere(key: string, predicate: (item: T) => boolean): void {
+    const queue = this.queues.get(key);
+    if (!queue) return;
+    const kept = queue.filter(entry => {
+      if (!predicate(entry.item)) return true;
+      this.queued -= entry.left;
+      if (this.active === key && entry === queue[0]) this.active = null;
+      return false;
+    });
+    if (kept.length === 0) this.queues.delete(key);
+    else this.queues.set(key, kept);
   }
 
   /** Forget every result's bytes not sent yet, a result part-way out included, but not the `res` behind them: after a

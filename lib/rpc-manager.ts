@@ -17,7 +17,8 @@ import {
   type AgentToolDeliverResult,
   type AgentToolSessionOps,
 } from "./agent-tools";
-import { markShuttingDown, recordRunningSessions, RESUME_PROMPT, resumeOnHostLink, takeInterruptedSessions, type InterruptibleSession } from "./session-resume";
+import { markShuttingDown, recordRunningSessions, resumeOnHostLink, takeInterruptedSessions, type InterruptibleSession } from "./session-resume";
+import { RESUME_PROMPT } from "./hosts/host-resume";
 import { samePath } from "./paths";
 import { isRecord } from "./type-guards";
 import { BLOCKING_UI_METHODS, createNotificationDetector } from "./notification-events";
@@ -34,7 +35,7 @@ import type {
 } from "./pi-types";
 import type { AgentMessage, CrossSessionHostToolCall, CrossSessionHostToolEvent, ExitedRpcSession, ExtensionWidgetItem } from "./types";
 import { isLinkUp, type Host, type HostStatus } from "./hosts/host";
-import { freezeHostLinks, getHost, lastUplinkAt, listHosts, orphanExit } from "./hosts/hub";
+import { freezeHostLinks, getHost, hostOwnsLifecycle, isNotifier, lastUplinkAt, listHosts, orphanExit } from "./hosts/hub";
 import { LOCAL_HOST_ID } from "./hosts/registry";
 import type { OpResult } from "./hosts/session-ops";
 import { hostForSessionId, invalidateHostSessionList, listSessionsAllHosts, sessionSpawnTarget } from "./hosts/session-index";
@@ -498,6 +499,8 @@ export class AgentSessionWrapper {
   private registeredHostUriSchemes: Array<{ scheme?: unknown; writable?: unknown; [key: string]: unknown }> | null = null;
   /** host_uri_request ids awaiting a host_uri_result from the browser. */
   private pendingHostUris: Map<string, UnsequencedAgentEvent> = new Map();
+  /** Callback delivery is not permission to repeat an action after a snapshot/reconnect. */
+  private deliveredCallbacks = new Set<string>();
   /** Resolves once an in-flight destroyAndWait finishes; null when idle. Read
    * by startRpcSession so a replacement spawn awaits the old child's exit. */
   destroyPromise: Promise<void> | null = null;
@@ -562,6 +565,14 @@ export class AgentSessionWrapper {
     return this._sessionFile;
   }
 
+  get hostOwnedLifecycle(): boolean {
+    return this.proc.transport?.hostOwnedLifecycle === true;
+  }
+
+  private reportInterest(): void {
+    this.proc.transport?.setInterest?.(this._alive && (this.hasSubscribers() || this.pendingCommands > 0 || this.handshaking));
+  }
+
   isAlive(): boolean {
     return this._alive && this.proc.isAlive;
   }
@@ -598,12 +609,14 @@ export class AgentSessionWrapper {
    * timestamp write instead of clearTimeout/setTimeout churn.
    */
   private noteActivity(): void {
+    if (this.hostOwnedLifecycle) return;
     this.lastActivityAt = Date.now();
     this.reapDeadline = this.lastActivityAt + this.disconnectDestroyMs;
     this.armReap();
   }
 
   private armReap(): void {
+    if (this.hostOwnedLifecycle) return;
     if (this.reapTimer || this.disconnectDestroyMs <= 0) return;
     if (this.hasSubscribers() || !this.isAlive()) return;
     this.reapTimer = setTimeout(() => {
@@ -629,6 +642,7 @@ export class AgentSessionWrapper {
    * Anything else keeps the session and re-arms for the remaining window.
    */
   private reapIfDisconnected(): void {
+    if (this.hostOwnedLifecycle) return;
     if (!this.isAlive() || this.hasSubscribers() || this.isRunning()
       || this.handshaking || this.pendingCommands > 0 || this.hostDown()) {
       // A paused human dialog produces no frames. Do not spin a zero-delay
@@ -686,6 +700,7 @@ export class AgentSessionWrapper {
     this.unsubscribeFrames = this.proc.onFrame((frame) => this.handleFrame(frame));
     this.watchResync(this.proc);
     this.unsubscribeHostStatus = this.host.onStatus((status) => this.handleHostStatus(status));
+    this.reportInterest();
     this.resetIdleTimer();
     notifyRunningChange();
   }
@@ -713,7 +728,17 @@ export class AgentSessionWrapper {
    * Duck-typed: a `bun --hot` re-evaluation can leave live transports on an older class. */
   private watchResync(proc: RpcProcess): void {
     proc.transport?.onResync?.(() => {
-      if (this.proc === proc) void this.reconcileAfterGap();
+      if (this.proc !== proc) return;
+      if (this.hostOwnedLifecycle) {
+        this.clearLiveSnapshots();
+        this.recoveringUpdates = false;
+        for (const id of [...this.pendingUiRequests.keys()]) {
+          if (this.serverUiRequests.has(id)) continue;
+          this.forgetPendingUiRequest(id);
+          this.emit({ type: "extension_ui_request", id: `cancel:${id}`, method: "cancel", targetId: id });
+        }
+      }
+      void this.reconcileAfterGap();
     });
   }
 
@@ -721,6 +746,7 @@ export class AgentSessionWrapper {
     if (!this._alive) return;
     this.emit({ type: "host_status", hostId: this.host.id, status });
     if (!isLinkUp(status)) return;
+    if (this.hostOwnedLifecycle) return; // The hub reopens at an ordered snapshot boundary.
     // The idle and disconnect timers held off while the link was down; give them a full window again.
     this.resetIdleTimer(true);
     void this.reconcileAfterGap();
@@ -758,18 +784,15 @@ export class AgentSessionWrapper {
     // announce itself must be torn down by its own startup timeout (which
     // reports a real error), never by the reaper.
     this.handshaking = true;
+    this.reportInterest();
     try {
-      const ready = await this.proc.waitReady(READY_TIMEOUT_MS);
-      await this.proc.negotiateProtocol(ready);
-      // Subscribe to subagent lifecycle/progress/event frames so the UI can show
-      // a live subagent roster. Older omp builds may not know the command —
-      // degrade silently (the UI falls back to no subagent info).
-      await this.proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
-      // Opt into omp's all-questions ask dialog; older omp rejects the command
-      // and keeps the per-question select/editor fallback.
-      // Bounded like get_state so a child that never answers cannot stall startup.
-      await this.proc.sendCommand({ type: "set_ask_dialog", enabled: true }, GET_STATE_TIMEOUT_MS).catch(() => {});
-      await this.enableDeltaUpdates(this.proc);
+      if (!this.hostOwnedLifecycle) {
+        const ready = await this.proc.waitReady(READY_TIMEOUT_MS);
+        await this.proc.negotiateProtocol(ready);
+        await this.proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
+        await this.proc.sendCommand({ type: "set_ask_dialog", enabled: true }, GET_STATE_TIMEOUT_MS).catch(() => {});
+        await this.enableDeltaUpdates(this.proc);
+      }
       const state = await this.getStateWithTimeout();
       this.applyIdentity(state);
       // Warn when the spawn cwd differs from the session's recorded directory.
@@ -787,6 +810,7 @@ export class AgentSessionWrapper {
       }
     } finally {
       this.handshaking = false;
+      this.reportInterest();
       // The handshake is real activity, so the reap clock restarts from here
       // rather than from spawn (a slow start must not eat the whole window).
       this.noteActivity();
@@ -799,12 +823,14 @@ export class AgentSessionWrapper {
    * ignores the option and keeps full updates.
    */
   private async enableDeltaUpdates(proc: RpcProcess): Promise<void> {
+    if (proc.transport?.hostOwnedLifecycle) return;
     this.recoveringUpdates = false;
     this.deltasFit = true;
     await proc.sendCommand({ type: "set_event_filter", events: null, messageUpdates: "delta" }, GET_STATE_TIMEOUT_MS).catch(() => {});
   }
 
   private setMessageUpdates(messageUpdates: "full" | "delta"): void {
+    if (this.hostOwnedLifecycle) return;
     void this.proc.sendCommand({ type: "set_event_filter", events: null, messageUpdates }, GET_STATE_TIMEOUT_MS).catch(() => {
       // The next delta that finds no base asks again; nothing switches back to deltas.
       this.recoveringUpdates = false;
@@ -819,6 +845,13 @@ export class AgentSessionWrapper {
    * what it started (one before 18.13.2 sends no block shells): full updates for good.
    */
   private loseDeltaBase(incompatible: boolean): void {
+    if (this.hostOwnedLifecycle) {
+      if (!this.recoveringUpdates) {
+        this.recoveringUpdates = true;
+        void this.proc.transport.resync?.();
+      }
+      return;
+    }
     if (incompatible) this.deltasFit = false;
     if (this.recoveringUpdates) return;
     this.recoveringUpdates = true;
@@ -838,6 +871,7 @@ export class AgentSessionWrapper {
    */
   async adopt(replay: string[]): Promise<void> {
     this.handshaking = true;
+    this.reportInterest();
     this._adopted = true;
     this.hostToolsUnknown = true;
     // Older omp rejects some of these, as at startup; a timeout or an exit fails the adoption.
@@ -845,10 +879,12 @@ export class AgentSessionWrapper {
       if (!(error instanceof RpcCommandError)) throw error;
     });
     try {
-      await this.proc.negotiateProtocol(await this.proc.waitReady(), GET_STATE_TIMEOUT_MS);
-      await optional({ type: "set_subagent_subscription", level: "events" });
-      await optional({ type: "set_ask_dialog", enabled: true });
-      await this.enableDeltaUpdates(this.proc);
+      if (!this.hostOwnedLifecycle) {
+        await this.proc.negotiateProtocol(await this.proc.waitReady(), GET_STATE_TIMEOUT_MS);
+        await optional({ type: "set_subagent_subscription", level: "events" });
+        await optional({ type: "set_ask_dialog", enabled: true });
+        await this.enableDeltaUpdates(this.proc);
+      }
       // omp's state has no shell-command flag: a `!!` command the lost server started
       // leaves bashRunning false, and its result arrives as an unsolicited response.
       this.applyIdentity(await this.getStateWithTimeout());
@@ -863,8 +899,12 @@ export class AgentSessionWrapper {
       }
       // Frames omp sent during the handshake are live: its agent tool calls there run normally.
       this.proc.release();
+      if (this.hostOwnedLifecycle && loadWebServerSettings().agentToolsEnabled) {
+        await this.dispatchCommand({ type: "set_host_tools", tools: this.registeredHostTools ?? [] });
+      }
     } finally {
       this.handshaking = false;
+      this.reportInterest();
       this.noteActivity();
     }
   }
@@ -1042,7 +1082,7 @@ export class AgentSessionWrapper {
     const status = signal ? `signal ${signal}` : `code ${code ?? "null"}`;
     // Spec Rules → Reattach: a run whose child vanished while its host link was
     // down starts again on that host, like a local run after a restart.
-    const resume: InterruptibleSession | null = sourceProc.transport?.lost === true && this._sessionId && (this.streaming || this.promptRunning)
+    const resume: InterruptibleSession | null = !this.hostOwnedLifecycle && sourceProc.transport?.lost === true && this._sessionId && (this.streaming || this.promptRunning)
       ? { id: this._sessionId, advisor: this.advisorSpawned, hostId: this.host.id }
       : null;
     // Recorded before destroy(): its running-change broadcast must carry the
@@ -1068,7 +1108,9 @@ export class AgentSessionWrapper {
       sessionId: this._sessionId,
       sessionName: this._sessionName || this.cwd.split(/[\\/]/).filter(Boolean).pop() || null,
     };
-    for (const notification of this.detectNotification(frame, session)) {
+    const notifications = this.detectNotification(frame, session);
+    if (this.hostOwnedLifecycle && !isNotifier(this.host.id)) return;
+    for (const notification of notifications) {
       publishNotification(this.movedFromIds.length ? { ...notification, aliases: this.movedFromIds } : notification);
     }
   }
@@ -1082,6 +1124,17 @@ export class AgentSessionWrapper {
     const event = frame.type === "available_commands_update" && Array.isArray(frame.commands)
       ? { ...frame, commands: (frame.commands as RpcAvailableSlashCommand[]).filter((command) => command.name !== SESSION_EDIT_COMMAND) }
       : frame;
+    if (this.hostOwnedLifecycle && (event.type === "host_tool_call" || event.type === "host_uri_request") && typeof event.id === "string") {
+      const key = `${event.type}:${event.id}`;
+      if (this.deliveredCallbacks.has(key)) return;
+      this.deliveredCallbacks.add(key);
+      if (this.replaying) {
+        this.proc.sendFrame(event.type === "host_tool_call"
+          ? { type: "host_tool_result", id: event.id, isError: true, result: { content: [{ type: "text", text: AGENT_TOOL_UNKNOWN_OUTCOME }] } }
+          : { type: "host_uri_result", id: event.id, isError: true, error: AGENT_TOOL_UNKNOWN_OUTCOME });
+        return;
+      }
+    }
     let refreshSessionList = false;
 
     switch (event.type) {
@@ -1147,6 +1200,7 @@ export class AgentSessionWrapper {
         break;
       case "session_settled":
         this.unsettled = false;
+        this.deliveredCallbacks.clear();
         break;
       case "prompt_result":
         // Local-only prompt (builtin/extension slash command) — no agent run.
@@ -1575,10 +1629,9 @@ export class AgentSessionWrapper {
           }
           message = rebuilt;
         }
-        // Only a start or a rebuilt delta is a base: a full update's tool calls have no streamed JSON, and its
-        // snapshot can be ahead of the deltas that follow it, so a delta after one recovers instead.
+        // Daemon snapshots are ordered delta bases (including partialJson); legacy full updates are not.
         if (messageId !== null && message?.role === "assistant") {
-          if (event.type === "message_start" || isDeltaUpdate(event)) this.openMessages.set(messageId, message);
+          if (this.hostOwnedLifecycle || event.type === "message_start" || isDeltaUpdate(event)) this.openMessages.set(messageId, message);
           else this.openMessages.delete(messageId);
         }
         if (message && message.role !== "user") {
@@ -1687,6 +1740,7 @@ export class AgentSessionWrapper {
   }
   private lastIdleReset = 0;
   private resetIdleTimer(force = false): void {
+    if (this.hostOwnedLifecycle) return;
     // The single activity choke point: start(), every child frame, and every
     // send() land here, so this is where "someone is using this session" is
     // observed. Tracked before the throttle below, which only limits timer
@@ -1715,6 +1769,7 @@ export class AgentSessionWrapper {
   onEvent(listener: EventListener, { internal = false }: { internal?: boolean } = {}): () => void {
     if (internal) this.internalListeners.add(listener);
     this.listeners.push(listener);
+    this.reportInterest();
     this.noteActivity();
     const now = Date.now();
     // A tab attaching mid-message needs the whole message before omp's next delta.
@@ -1743,6 +1798,7 @@ export class AgentSessionWrapper {
     return () => {
       const i = this.listeners.indexOf(listener);
       if (i !== -1) this.listeners.splice(i, 1);
+      this.reportInterest();
       // No UI attached anymore: reject outstanding host tool calls so the
       // agent never waits forever on a tool nobody will answer.
       if (!this.hasBrowserSubscribers()) {
@@ -2179,7 +2235,7 @@ export class AgentSessionWrapper {
     try {
       this.expectedExitProc = old;
       let exited = false;
-      const disposing = old.dispose().then(() => {
+      const disposing = old.dispose(5_000, true).then(() => {
         exited = true;
       });
       // Behind a dropped link the old child's exit arrives only when the link
@@ -2215,10 +2271,11 @@ export class AgentSessionWrapper {
         sessionFile: resumable ? sessionFile : "",
         toolNames: undefined,
         advisor: this.advisorSpawned,
-      });
+      }, resumable ? this._sessionId : null);
       const proc = new RpcProcess({
         cwd: spawned.cwd,
         transport: spawned.transport,
+        ...(spawned.transport.hostOwnedLifecycle ? { adopted: { protocolVersion: 2 as const } } : {}),
         onExit: (info) => {
           if (this.proc === proc) this.handleProcessExit(info, proc);
         },
@@ -2233,14 +2290,17 @@ export class AgentSessionWrapper {
       this.confirmedMessageCommandGeneration = this.messageCommandGeneration;
       this.unsubscribeFrames = proc.onFrame((frame) => this.handleFrame(frame));
       this.watchResync(proc);
+      this.reportInterest();
       try {
-        const ready = await proc.waitReady(READY_TIMEOUT_MS);
-        await proc.negotiateProtocol(ready);
-        // The replacement process starts with subscriptions disabled; restore
-        // the live roster/transcript event stream before reading its state.
-        await proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
-        await proc.sendCommand({ type: "set_ask_dialog", enabled: true }, GET_STATE_TIMEOUT_MS).catch(() => {});
-        await this.enableDeltaUpdates(proc);
+        if (this.hostOwnedLifecycle) {
+          await this.adopt([...(spawned.pending ?? []), ...(spawned.streaming ? [spawned.streaming] : [])]);
+        } else {
+          const ready = await proc.waitReady(READY_TIMEOUT_MS);
+          await proc.negotiateProtocol(ready);
+          await proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
+          await proc.sendCommand({ type: "set_ask_dialog", enabled: true }, GET_STATE_TIMEOUT_MS).catch(() => {});
+          await this.enableDeltaUpdates(proc);
+        }
         const state = await proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS);
         this.applyIdentity(state);
         // Same fresh-spawn guard as startRpcSession: a sessionless wrapper
@@ -2251,7 +2311,7 @@ export class AgentSessionWrapper {
           await proc.sendCommand({ type: "new_session" });
           this.applyIdentity(await proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS));
         }
-        if (requireIdle) {
+        if (requireIdle || this.hostOwnedLifecycle) {
           if (this.registeredHostTools !== null) {
             await this.dispatchCommand({ type: "set_host_tools", tools: this.registeredHostTools });
           } else if (loadWebServerSettings().agentToolsEnabled) {
@@ -2282,10 +2342,15 @@ export class AgentSessionWrapper {
   async withPendingCommand<T>(callback: () => Promise<T>): Promise<T> {
     this.resetIdleTimer();
     this.pendingCommands += 1;
+    this.reportInterest();
+    const preparing = this.proc.transport;
+    preparing?.setPreparing?.(true);
     try {
       return await callback();
     } finally {
       this.pendingCommands -= 1;
+      preparing?.setPreparing?.(false);
+      this.reportInterest();
     }
   }
   /** Process-local admission only, not a native message id: overlapping writes make echo inference uncertain. */
@@ -2313,7 +2378,7 @@ export class AgentSessionWrapper {
 
   /** A settled idle child may be replaced to stop OLD uncertain effects; this never confirms or replays them. */
   async renewMessageProofBoundaryIfIdle(): Promise<boolean> {
-    if (!this.hasPendingMessageCommands() || this.restarting || this.hostDown() || this.messageBoundaryBusy()) return false;
+    if (this.hostOwnedLifecycle || !this.hasPendingMessageCommands() || this.restarting || this.hostDown() || this.messageBoundaryBusy()) return false;
     return this.withPendingCommand(async () => {
       const proc = this.proc;
       const generation = this.messageCommandGeneration;
@@ -2412,6 +2477,9 @@ export class AgentSessionWrapper {
     if (unsupported) throw new RpcCommandError(type, unsupported, "unsupported");
 
     switch (type) {
+      case "set_subagent_subscription":
+        if (this.hostOwnedLifecycle) return null;
+        return this.proc.sendCommand(command as { type: string; [key: string]: unknown });
       case "prompt": {
         // A `!!` shell command owns the session until it exits (omp rejects a
         // prompt then, and treating that as a hard error tore down the client's
@@ -2733,6 +2801,19 @@ export class AgentSessionWrapper {
         const merged = loadWebServerSettings().agentToolsEnabled
           ? [...valid, ...AGENT_TOOL_DEFINITIONS.filter((t) => !valid.some((v) => v.name === t.name))]
           : valid;
+        if (this.hostOwnedLifecycle) {
+          const previousNames = this.hostToolNames;
+          this.hostToolNames = new Set(merged.map((t) => t.name as string));
+          try {
+            await this.proc.transport.setHostTools!(merged, [...this.hostUriSchemes.keys()]);
+          } catch (error) {
+            this.hostToolNames = previousNames;
+            throw error;
+          }
+          this.registeredHostTools = valid.filter((tool) => !AGENT_TOOL_NAMES.has(tool.name as string));
+          this.hostToolsUnknown = false;
+          return null;
+        }
         // Applied as the successful reply is read, before a call in the same host-link batch is routed.
         await this.proc.sendCommand({ type: "set_host_tools", tools: merged }, undefined, (success) => {
           if (!success) return;
@@ -2755,6 +2836,22 @@ export class AgentSessionWrapper {
 
       case "set_host_uri_schemes": {
         const schemes = Array.isArray(command.schemes) ? command.schemes as Array<{ scheme?: unknown; writable?: unknown; [key: string]: unknown }> : [];
+        if (this.hostOwnedLifecycle) {
+          const previous = this.hostUriSchemes;
+          this.hostUriSchemes = new Map(schemes.filter((entry) => typeof entry.scheme === "string" && entry.scheme).map((entry) => [entry.scheme as string, { writable: entry.writable === true }]));
+          try {
+            const tools = this.registeredHostTools ?? [];
+            const merged = loadWebServerSettings().agentToolsEnabled
+              ? [...tools, ...AGENT_TOOL_DEFINITIONS.filter((tool) => !tools.some((entry) => entry.name === tool.name))]
+              : tools;
+            await this.proc.transport.setHostTools!(merged, [...this.hostUriSchemes.keys()]);
+          } catch (error) {
+            this.hostUriSchemes = previous;
+            throw error;
+          }
+          this.registeredHostUriSchemes = schemes;
+          return null;
+        }
         await this.proc.sendCommand({ type: "set_host_uri_schemes", schemes }, undefined, (success) => {
           if (!success) return;
           this.registeredHostUriSchemes = schemes;
@@ -2822,13 +2919,15 @@ export class AgentSessionWrapper {
   /** Destroy and resolve only after the omp child has fully exited. Callers
    * that delete the session file afterwards must await this — omp flushes
    * session state on shutdown and would otherwise recreate the file. */
-  async destroyAndWait(reason = "unspecified"): Promise<void> {
+  async destroyAndWait(reason = "unspecified", stopShared = false): Promise<void> {
     // Re-entrant calls join the in-flight dispose; without this a new spawn
     // can overlap the old child's shutdown (see startRpcSession).
     if (this.destroyPromise) return untilHostDown(this.host, this.destroyPromise);
     if (!this._alive) return;
     console.info("[omp-web] session-dispose", JSON.stringify({ sessionId: this._sessionId, reason, running: this.isRunning(), pendingDialogs: this.pendingUiRequests.size, at: new Date().toISOString(), caller: new Error().stack?.split("\n").slice(2, 5).map((line) => line.trim()) }));
     this._alive = false;
+    this.reportInterest();
+    this.deliveredCallbacks.clear();
     this.emit({ type: "process_exit", reason });
     this.streaming = false;
     this.promptRunning = false;
@@ -2859,7 +2958,7 @@ export class AgentSessionWrapper {
       this.mcpListWaiter = null;
     }
     // The registry drops this wrapper only once the child has really exited.
-    const disposed = this.proc.dispose().catch(() => {}).then(() => this.onDestroyCallback?.());
+    const disposed = this.proc.dispose(5_000, stopShared).catch(() => {}).then(() => this.onDestroyCallback?.());
     this.destroyPromise = disposed;
     for (const id of this.pendingHostTools.keys()) this.cancelPendingHostTool(id);
     for (const timer of this.parkedHostTools.values()) clearTimeout(timer);
@@ -3002,7 +3101,7 @@ export function getLiveRpcSessionIds(): string[] {
 export async function restartAllRpcSessions(): Promise<number> {
   // An update changes this machine's omp only; remote runs keep going.
   const sessions = [...new Set(getRegistry().values())].filter((session) => session.host.id === LOCAL_HOST_ID);
-  await Promise.all(sessions.map((session) => session.destroyAndWait()));
+  await Promise.all(sessions.map((session) => session.destroyAndWait("runtime-update", true)));
   return sessions.length;
 }
 
@@ -3094,7 +3193,7 @@ export function syncInterruptibleSessions(): void {
   const registry = getRegistry();
   const running = new Map<string, InterruptibleSession>();
   for (const session of registry.values()) {
-    if (session.sessionId && session.isRunning()) running.set(session.sessionId, { id: session.sessionId, advisor: session.advisorSpawned, hostId: session.host.id });
+    if (!session.hostOwnedLifecycle && session.sessionId && session.isRunning()) running.set(session.sessionId, { id: session.sessionId, advisor: session.advisorSpawned, hostId: session.host.id });
   }
   recordRunningSessions([...running.values()], (id) => registry.get(id)?.isAlive() === true);
 }
@@ -3113,6 +3212,7 @@ export async function resumeInterruptedSessions(): Promise<void> {
 async function resumeSession({ id, advisor, hostId }: InterruptibleSession): Promise<void> {
   try {
     const host = getHost(hostId);
+    if (hostOwnsLifecycle(hostId)) return;
     const target = host && await sessionSpawnTarget(id, host);
     if (!host || !target) return;
     const { session } = await startRpcSession(id, target.sessionFile, target.cwd, undefined, advisor, target.recordedCwd, undefined, host);
@@ -3304,7 +3404,7 @@ export async function startRpcSession(
     // the new flag up at the next natural respawn; callers that pass no
     // advisor opinion (undefined) simply reuse whatever is running. An adopted
     // child's flag is unknown, so it is never replaced over it.
-    if (advisor === undefined || existing.adopted || existing.advisorSpawned === effectiveAdvisor || existing.isRunning() || existing.isEditingHistory()) {
+    if (existing.hostOwnedLifecycle || advisor === undefined || existing.adopted || existing.advisorSpawned === effectiveAdvisor || existing.isRunning() || existing.isEditingHistory()) {
       return { session: existing, realSessionId: sessionId };
     }
     await existing.destroyAndWait();
@@ -3334,10 +3434,11 @@ export async function startRpcSession(
     // The wrapper needs the process and the process's onExit needs the wrapper;
     // the holder breaks that cycle (onExit only fires once the child dies).
     const holder: { wrapper?: AgentSessionWrapper } = {};
-    const spawned = await host.spawnRpc({ cwd, recordedCwd: recordedCwd ?? null, sessionFile, toolNames, advisor: advisor === true, spawnModel });
+    const spawned = await host.spawnRpc({ cwd, recordedCwd: recordedCwd ?? null, sessionFile, toolNames, advisor: advisor === true, spawnModel }, sessionFile ? sessionId : null);
     const proc = new RpcProcess({
       cwd: spawned.cwd,
       transport: spawned.transport,
+      ...(spawned.transport.hostOwnedLifecycle ? { adopted: { protocolVersion: 2 as const } } : {}),
       onExit: (info) => holder.wrapper?.handleProcessExit(info, proc),
     });
     const created = new AgentSessionWrapper(
@@ -3354,7 +3455,11 @@ export async function startRpcSession(
     holder.wrapper = created;
     created.start();
     try {
-      await created.waitUntilReady();
+      if (spawned.transport.hostOwnedLifecycle) {
+        await created.adopt([...(spawned.pending ?? []), ...(spawned.streaming ? [spawned.streaming] : [])]);
+      } else {
+        await created.waitUntilReady();
+      }
       // A fresh spawn (no --resume) must never land in an existing conversation:
       // omp's startup resume handling can be config- or version-driven into
       // continuing the cwd's most recent session, which would silently send the
@@ -3371,7 +3476,7 @@ export async function startRpcSession(
       // later UI registration, so this never drops the UI tools. Older omp
       // builds without host tools simply reject the registration; ignore
       // that the way the UI registration does.
-      if (loadWebServerSettings().agentToolsEnabled) {
+      if (!created.hostOwnedLifecycle && loadWebServerSettings().agentToolsEnabled) {
         await created.send({ type: "set_host_tools", tools: AGENT_TOOL_DEFINITIONS }).catch(() => {});
       }
     } catch (error) {
@@ -3449,7 +3554,8 @@ export async function adoptRpcSession({ host, transport, sessionId, cwd, replay 
   const registry = getRegistry();
   const locks = getLocks();
   if (locks.has(sessionId) || registry.has(sessionId)) {
-    transport.killTree(false);
+    if (transport.hostOwnedLifecycle) transport.close?.();
+    else transport.killTree(false);
     throw new Error(`Session ${sessionId} is already started on this server`);
   }
   const holder: { wrapper?: AgentSessionWrapper } = {};

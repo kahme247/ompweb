@@ -1,6 +1,6 @@
 // The web server's side of the local daemon link: keep the `local` host record
 // and the daemon's host.json in step. Pure Node: no Next or `@/` imports.
-import { isLoopbackHost, loginHost, readHostLogin } from "./host-login";
+import { addHostLink, isLoopbackHost, readHostLinks, readHostLogin } from "./host-login";
 import { hostForToken, LOCAL_HOST_ID, rotateLocalHostToken } from "./registry";
 
 /** Where the daemon dials this server, or why it cannot: the daemon uses plain http only on loopback, so a bind address elsewhere gets no link. */
@@ -22,18 +22,23 @@ const linksElsewhere = (url: string) => {
   }
 };
 
-/** Make sure the `local` record exists and host.json holds its token and `url`.
- * A host.json whose token the registry still accepts is kept, so a restart does not make the daemon redial.
- * Throws instead of overwriting a host.json that links this machine's daemon to another server. */
-export function ensureLocalHostLink(input: { url: string }): { token: string; written: boolean } {
+/** Register this server's URL without moving the primary or changing another server's entry. */
+export async function ensureLocalHostLink(input: { url: string }): Promise<{ token: string; written: boolean }> {
   const url = input.url.replace(/\/+$/, "");
-  const saved = readHostLogin();
-  if (saved && linksElsewhere(saved.url)) {
-    throw new Error(`host.json links this machine's daemon to ${saved.url}, not to this server; remove it to use this server for "This machine"`);
-  }
-  const kept = saved && hostForToken(saved.token)?.id === LOCAL_HOST_ID ? saved : null;
-  if (kept && kept.url === url) return { token: kept.token, written: false };
-  const token = kept?.token ?? rotateLocalHostToken();
-  loginHost({ url, token });
-  return { token, written: true };
+  let token = "";
+  let written = false;
+  await addHostLink(() => {
+    const saved = readHostLogin();
+    if (saved && linksElsewhere(saved.url)) {
+      throw new Error(`host.json links this machine's daemon to ${saved.url}, not to this server; remove it to use this server for "This machine"`);
+    }
+    const links = readHostLinks();
+    // Token selection shares the configuration lock: simultaneous first boots must not rotate each other's token.
+    const candidates = [...links, ...(saved ? [saved] : [])];
+    const kept = candidates.find((link) => hostForToken(link.token)?.id === LOCAL_HOST_ID);
+    token = kept?.token ?? rotateLocalHostToken();
+    written = !links.some((link) => link.url === url && link.token === token);
+    return { url, token };
+  });
+  return { token, written };
 }
