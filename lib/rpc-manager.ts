@@ -36,6 +36,7 @@ import type {
 import type { AgentMessage, CrossSessionHostToolCall, CrossSessionHostToolEvent, ExitedRpcSession, ExtensionWidgetItem } from "./types";
 import { isLinkUp, type Host, type HostStatus, type SpawnRequest, type SpawnResult } from "./hosts/host";
 import { freezeHostLinks, getHost, hostOwnsLifecycle, isNotifier, lastUplinkAt, listHosts, orphanExit } from "./hosts/hub";
+import { HISTORY_MUTATING_COMMANDS, PEER_MESSAGE_FRAME } from "./hosts/link-protocol";
 import { LOCAL_HOST_ID } from "./hosts/registry";
 import type { OpResult } from "./hosts/session-ops";
 import { hostForSessionId, invalidateHostSessionList, listSessionsAllHosts, sessionSpawnTarget } from "./hosts/session-index";
@@ -180,19 +181,6 @@ const PREDICT_WORD_TIMEOUT_MS = 125_000;
 // payload reaches omp — a client is free to POST any of them directly.
 const IMAGE_BEARING_COMMANDS = new Set(["prompt", "steer", "follow_up", "abort_and_prompt"]);
 
-// These commands can append to, replace, or resume the active history. Edits
-// fence them across every attached client, including mutations already awaiting
-// a native acknowledgement when an edit arrives. Read-only queries and dialog
-// replies remain available while a navigation hook is running.
-const HISTORY_MUTATING_COMMANDS = new Set([
-  "edit_message", "prompt", "steer", "follow_up", "abort", "abort_and_prompt",
-  "abort_and_restore_queue", "remove_queued_message", "promote_queued_message",
-  "fork", "new_session", "switch_session", "compact", "abort_compaction",
-  "reload", "bash", "abort_bash", "handoff", "set_todos", "set_session_name",
-  "set_model", "cycle_model", "set_thinking_level", "cycle_thinking_level",
-  "set_fast_mode", "set_slow_mode", "set_auto_compaction", "set_auto_retry", "abort_retry",
-]);
-
 // pi-web commands with no omp RPC equivalent. The UI tolerates these failing.
 const UNSUPPORTED_COMMANDS: Record<string, string> = {
   navigate_tree: "Branch navigation is not supported over the omp RPC protocol",
@@ -282,7 +270,9 @@ function matchesNativeSkill(message: Record<string, unknown>, submitted: string)
 function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, unknown>, baseline: unknown, generation: number, competingPending: boolean, previousEntryIds?: string[]): MessageReplacementWatch {
   const { promise, resolve } = Promise.withResolvers<HandOff>();
   const ambiguous: HandOff = { error: "Another message was dispatched while this message's native replacement was being confirmed", mayHaveBeenSent: true };
-  const ownsWindow = () => !competingPending && wrapper.getMessageCommandGeneration() === generation + 1;
+  // A peer server's admission (the daemon's marker) also contends: its identical echo is not this command's proof.
+  const peers = wrapper.peerMessageCommands;
+  const ownsWindow = () => !competingPending && wrapper.getMessageCommandGeneration() === generation + 1 && wrapper.peerMessageCommands === peers;
   const initialQueue = queueTexts(baseline);
   let priorQueue = initialQueue;
   let echoDebt: number | undefined;
@@ -344,7 +334,7 @@ function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, 
   };
   const detach = wrapper.onEvent((event) => {
     if (seen) return;
-    if (competingPending || wrapper.getMessageCommandGeneration() > generation + 1) { finish(ambiguous); return; }
+    if (competingPending || wrapper.getMessageCommandGeneration() > generation + 1 || wrapper.peerMessageCommands !== peers) { finish(ambiguous); return; }
     if (!ownsWindow() && event.type !== "process_exit") return;
     const text = expectedText();
     if (echoDebt === undefined) echoDebt = initialQueue.filter((item) => item === text).length;
@@ -501,6 +491,8 @@ export class AgentSessionWrapper {
   private pendingHostUris: Map<string, UnsequencedAgentEvent> = new Map();
   /** Callback delivery is not permission to repeat an action after a snapshot/reconnect. */
   private deliveredCallbacks = new Set<string>();
+  /** Message commands other servers wrote to this shared child (PEER_MESSAGE_FRAME markers). */
+  peerMessageCommands = 0;
   /** Resolves once an in-flight destroyAndWait finishes; null when idle. Read
    * by startRpcSession so a replacement spawn awaits the old child's exit. */
   destroyPromise: Promise<void> | null = null;
@@ -604,6 +596,10 @@ export class AgentSessionWrapper {
       if (spawned.transport === old.transport) return null; // A peer became busy before the daemon's atomic check.
       await this.destroyAndWait("advisor");
       return spawned;
+    } catch (error) {
+      // The daemon stopped the old child before the replacement failed; its exit was ignored as expected.
+      if (!old.isAlive) await this.destroyAndWait("advisor-failed");
+      throw error;
     } finally {
       if (this.expectedExitProc === old) this.expectedExitProc = null;
       this.restarting = false;
@@ -784,8 +780,17 @@ export class AgentSessionWrapper {
       const wasRunning = this.streaming || this.promptRunning;
       const oldId = this._sessionId;
       const moved = this.sessionMovePending;
+      // A shared reopen can install the new identity's snapshot while this read is in flight (cleared when it started).
+      const live = this.hostOwnedLifecycle ? { open: new Map(this.openMessages), message: this.streamingMessage, id: this.streamingMessageId } : null;
       this.applyIdentity(state);
-      if (oldId && oldId !== this._sessionId && !moved) this.onIdentityChangeCallback?.(oldId, this._sessionId);
+      if (oldId && oldId !== this._sessionId && !moved) {
+        if (live) {
+          for (const [messageId, message] of live.open) this.openMessages.set(messageId, message);
+          this.streamingMessage = live.message;
+          this.streamingMessageId = live.id;
+        }
+        this.onIdentityChangeCallback?.(oldId, this._sessionId);
+      }
       // The run ended while its frames were lost: end it for clients, as on exit.
       if (wasRunning && !state.isStreaming && !state.isCompacting && !this.awaitingAgentStart && this.promptDispatchPendingCount === 0) {
         this.emit({ type: "agent_end", isTerminal: true, messages: [] });
@@ -892,11 +897,12 @@ export class AgentSessionWrapper {
    * Re-sync a child that outlived the server that spawned it (adoptRpcSession):
    * the startup handshake minus the ready wait, every command bounded so a
    * wedged child fails the adoption, then the daemon's lines of its open requests.
+   * `joined`: false when this open started the shared child, so no other server's history precedes it.
    */
-  async adopt(replay: string[]): Promise<void> {
+  async adopt(replay: string[], joined = true): Promise<void> {
     this.handshaking = true;
     this.reportInterest();
-    this._adopted = true;
+    this._adopted = joined;
     this.hostToolsUnknown = true;
     // Older omp rejects some of these, as at startup; a timeout or an exit fails the adoption.
     const optional = (command: { type: string; [key: string]: unknown }) => this.proc.sendCommand(command, GET_STATE_TIMEOUT_MS).then(() => {}, (error) => {
@@ -1049,6 +1055,8 @@ export class AgentSessionWrapper {
   private autoTitle(): void {
     const sessionId = this._sessionId;
     if (!sessionId || this._sessionName || this.autoTitleInFlight) return;
+    // Every server sharing the child sees the same turn end: only the elected notifier titles it.
+    if (this.hostOwnedLifecycle && !isNotifier(this.host.id)) return;
     const sessionFile = this._sessionFile;
     if (!sessionFile) return;
     // Held across the async file check so a second agent_end cannot start a parallel run.
@@ -1148,11 +1156,16 @@ export class AgentSessionWrapper {
     const event = frame.type === "available_commands_update" && Array.isArray(frame.commands)
       ? { ...frame, commands: (frame.commands as RpcAvailableSlashCommand[]).filter((command) => command.name !== SESSION_EDIT_COMMAND) }
       : frame;
+    if (event.type === PEER_MESSAGE_FRAME) {
+      this.peerMessageCommands += 1;
+      return;
+    }
     if (this.hostOwnedLifecycle && (event.type === "host_tool_call" || event.type === "host_uri_request") && typeof event.id === "string") {
       const key = `${event.type}:${event.id}`;
       if (this.deliveredCallbacks.has(key)) return;
       this.deliveredCallbacks.add(key);
-      if (this.replaying) {
+      // Only the read-only listing runs again (handled below); anything else may already have run.
+      if (this.replaying && !(event.type === "host_tool_call" && event.toolName === "list_sessions")) {
         this.proc.sendFrame(event.type === "host_tool_call"
           ? { type: "host_tool_result", id: event.id, isError: true, result: { content: [{ type: "text", text: AGENT_TOOL_UNKNOWN_OUTCOME }] } }
           : { type: "host_uri_result", id: event.id, isError: true, error: AGENT_TOOL_UNKNOWN_OUTCOME });
@@ -2014,7 +2027,7 @@ export class AgentSessionWrapper {
         if (error instanceof RpcCommandTimeoutError && this.linkLostDuring(error)) throw this.hostOfflineError("unknown");
         // Nothing on this child will ever resolve the waiter; recycle it like
         // the prompt-ack timeout path so the next request gets a fresh child.
-        await this.destroyAndWait();
+        await this.destroyAndWait("session-unresponsive", true);
         throw new WebRpcError("The OMP session stopped responding and was reset.", "session_unresponsive");
       }
       throw error;
@@ -2149,6 +2162,8 @@ export class AgentSessionWrapper {
     // send a prompt, fork, or switch the process during either preflight await.
     this.historyEditInFlight = true;
     const proc = this.proc;
+    // Other web apps sharing the child are fenced by the host's lease, held through postflight.
+    proc.transport?.setEditing?.(true);
     const sessionId = this._sessionId;
     const sessionFile = this._sessionFile;
     let persistenceError: Error | null = null;
@@ -2206,19 +2221,20 @@ export class AgentSessionWrapper {
         if (this.linkLostDuring(error)) throw this.hostOfflineError("unknown");
         // A timed-out navigation may still be running in a hook. Do not let a
         // later mutation race it once the web-side fence is released.
-        await this.destroyAndWait();
+        await this.destroyAndWait("session-unresponsive", true);
         if (persistenceError) throw persistenceError;
         throw new WebRpcError("The OMP session stopped responding and was reset.", "session_unresponsive");
       }
       if (error instanceof SessionEditAgentInvocationError && !error.agentStarted) {
         // Native /retry can acknowledge before its deferred agent_start. There
         // is no observed run to own that gap: stop it before releasing Edit.
-        await this.destroyAndWait();
+        await this.destroyAndWait("session-unresponsive", true);
       }
       throw persistenceError ?? error;
     } finally {
       unsubscribe();
       this.historyEditInFlight = false;
+      proc.transport?.setEditing?.(false);
       notifyRunningChange();
     }
   }
@@ -2310,6 +2326,8 @@ export class AgentSessionWrapper {
         return;
       }
       this.proc = proc;
+      // Callback ids belong to the old child; the replacement's must not be suppressed.
+      this.deliveredCallbacks.clear();
       this.messageCommandGeneration += 1;
       this.confirmedMessageCommandGeneration = this.messageCommandGeneration;
       this.unsubscribeFrames = proc.onFrame((frame) => this.handleFrame(frame));
@@ -2362,13 +2380,14 @@ export class AgentSessionWrapper {
     notifyRunningChange();
   }
 
-  /** Protect submitted command work, including route preparation, from both idle reapers. */
-  async withPendingCommand<T>(callback: () => Promise<T>): Promise<T> {
+  /** Protect submitted command work, including route preparation, from both idle reapers.
+   * `takeOverOpen`: this is the command its open requested a preparation lease for. */
+  async withPendingCommand<T>(callback: () => Promise<T>, takeOverOpen = false): Promise<T> {
     this.resetIdleTimer();
     this.pendingCommands += 1;
     this.reportInterest();
     const preparing = this.proc.transport;
-    preparing?.setPreparing?.(true);
+    preparing?.setPreparing?.(true, takeOverOpen);
     try {
       return await callback();
     } finally {
@@ -2560,7 +2579,7 @@ export class AgentSessionWrapper {
             // The child took the frame but never acked it, so nothing will ever
             // report this run: recycle the unacknowledged prompt. A read-only
             // get_state timeout deliberately does not take this destructive path.
-            await this.destroyAndWait();
+            await this.destroyAndWait("session-unresponsive", true);
             throw new WebRpcError("The OMP session stopped responding and was reset.", "session_unresponsive");
           }
           throw error;
@@ -2829,7 +2848,7 @@ export class AgentSessionWrapper {
           const previousNames = this.hostToolNames;
           this.hostToolNames = new Set(merged.map((t) => t.name as string));
           try {
-            await this.proc.transport.setHostTools!(merged, [...this.hostUriSchemes.keys()]);
+            await this.proc.transport.setHostTools!(merged, [...this.hostUriSchemes].map(([scheme, { writable }]) => ({ scheme, writable: writable === true })));
           } catch (error) {
             this.hostToolNames = previousNames;
             throw error;
@@ -2868,7 +2887,7 @@ export class AgentSessionWrapper {
             const merged = loadWebServerSettings().agentToolsEnabled
               ? [...tools, ...AGENT_TOOL_DEFINITIONS.filter((tool) => !tools.some((entry) => entry.name === tool.name))]
               : tools;
-            await this.proc.transport.setHostTools!(merged, [...this.hostUriSchemes.keys()]);
+            await this.proc.transport.setHostTools!(merged, [...this.hostUriSchemes].map(([scheme, { writable }]) => ({ scheme, writable: writable === true })));
           } catch (error) {
             this.hostUriSchemes = previous;
             throw error;
@@ -3306,7 +3325,7 @@ function createAgentToolOps(): AgentToolSessionOps {
           if (input.name) await session.send({ type: "set_session_name", name: input.name });
           if (input.prompt) await session.send({ type: "prompt", message: input.prompt });
         };
-        if (preparing) await session.withPendingCommand(run);
+        if (preparing) await session.withPendingCommand(run, true);
         else await run();
       } catch (error) {
         // As /api/agent/new: behind a dropped link the prompt may be running there, so the wrapper stays.
@@ -3319,23 +3338,31 @@ function createAgentToolOps(): AgentToolSessionOps {
     async deliver(input): Promise<AgentToolDeliverResult> {
       const live = getRpcSession(input.sessionId);
       let wrapper = live?.isAlive() ? live : undefined;
+      let cold = false;
       if (!wrapper) {
         const host = await hostForSessionId(input.sessionId);
         const target = host && await sessionSpawnTarget(input.sessionId, host);
         if (!host || !target) throw new Error(`Session not found: ${input.sessionId}`);
-        const started = await startRpcSession(input.sessionId, target.sessionFile, target.cwd, undefined, undefined, target.recordedCwd, undefined, host);
+        // The open's preparation lease keeps an idle shared child (and its advisor mode) until the message is sent.
+        const started = await startRpcSession(input.sessionId, target.sessionFile, target.cwd, undefined, undefined, target.recordedCwd, undefined, host, true);
         wrapper = started.session;
+        cold = true;
       }
-      const wasRunning = wrapper.isRunning();
-      if (input.delivery === "prompt" && wasRunning) {
-        throw new Error("Target session is running; use delivery \"steer\" or \"followUp\" for a running target.");
-      }
-      if (input.delivery === "steer" && !wasRunning) {
-        throw new Error("Target session is not running; use delivery \"prompt\" to start a turn.");
-      }
-      const terminalEndsNeeded = input.delivery === "followUp" && wasRunning ? 2 : 1;
-      const waiter = input.wait ? wrapper.waitForTurnEnd(input.waitTimeoutMs, terminalEndsNeeded) : null;
-      await wrapper.send({ type: input.delivery, message: input.message });
+      const target = wrapper;
+      const send = async () => {
+        const wasRunning = target.isRunning();
+        if (input.delivery === "prompt" && wasRunning) {
+          throw new Error("Target session is running; use delivery \"steer\" or \"followUp\" for a running target.");
+        }
+        if (input.delivery === "steer" && !wasRunning) {
+          throw new Error("Target session is not running; use delivery \"prompt\" to start a turn.");
+        }
+        const terminalEndsNeeded = input.delivery === "followUp" && wasRunning ? 2 : 1;
+        const waiter = input.wait ? target.waitForTurnEnd(input.waitTimeoutMs, terminalEndsNeeded) : null;
+        await target.send({ type: input.delivery, message: input.message });
+        return { waiter }; // Boxed: the lease ends at delivery, not at the turn's end.
+      };
+      const { waiter } = cold ? await wrapper.withPendingCommand(send, true) : await send();
       if (!input.wait || !waiter) {
         return { accepted: true, targetSessionId: input.sessionId, delivery: input.delivery, waited: false, responseText: null };
       }
@@ -3493,7 +3520,7 @@ export async function startRpcSession(
     created.start();
     try {
       if (spawned.transport.hostOwnedLifecycle) {
-        await created.adopt([...(spawned.pending ?? []), ...(spawned.streaming ? [spawned.streaming] : [])]);
+        await created.adopt([...(spawned.pending ?? []), ...(spawned.streaming ? [spawned.streaming] : [])], spawned.joined !== false);
       } else {
         await created.waitUntilReady();
       }

@@ -44,6 +44,8 @@ export const LINK_LIMITS = {
   maxLineBytes: 8 * 1024 * 1024,
   /** Per channel: open blocking requests past this are not replayed (the channel is not adoptable). */
   pendingBytes: 1024 * 1024,
+  /** A shared channel's `ready` wait (the legacy wrapper's allowance); an open waits for it plus opTimeoutMs. */
+  channelReadyMs: 120_000,
   /** Link head-of-line samples (metric "link"): each side writes or reports them at this count, else after statsFlushMs.
    * Also the most one `stats` message may carry, which bounds it to about 40 KB. */
   statsSamples: 256,
@@ -52,6 +54,21 @@ export const LINK_LIMITS = {
 
 /** WebSocket close codes the link uses. */
 export const LINK_CLOSE = { goingAway: 1001, invalidData: 1007, policy: 1008, tooBig: 1009, replaced: 4409, versionMismatch: 4426 } as const;
+
+/** Native commands that append to, replace or resume the active history: a history edit fences them on every link. */
+export const HISTORY_MUTATING_COMMANDS = new Set([
+  "edit_message", "prompt", "steer", "follow_up", "followUp", "abort", "abort_and_prompt",
+  "abort_and_restore_queue", "remove_queued_message", "promote_queued_message",
+  "fork", "branch", "new_session", "switch_session", "compact", "abort_compaction",
+  "reload", "bash", "abort_bash", "handoff", "set_todos", "set_session_name",
+  "set_model", "cycle_model", "set_thinking_level", "cycle_thinking_level",
+  "set_fast_mode", "set_slow_mode", "set_auto_compaction", "set_auto_retry", "abort_retry",
+]);
+/** Commands whose user message a peer's identical echo could be mistaken for. */
+export const MESSAGE_COMMANDS = new Set(["prompt", "steer", "follow_up", "followUp", "abort_and_prompt"]);
+/** Shared-channel marker a daemon puts in the other members' output when one link writes a message command. */
+export const PEER_MESSAGE_FRAME = "peer_message_command";
+export type HostUriScheme = { scheme: string; writable: boolean };
 
 /** Named `req.args` keys for each session op, in parameter order. Named, not
  * positional, so an omitted optional argument never turns into `null`. */
@@ -105,8 +122,9 @@ export type DownMessage =
   | { type: "welcome"; v: number; hostId: string }
   | { type: "stdin"; seq: number; ch: string; line: string }
   | { type: "kill"; seq: number; ch: string; force: boolean }
-  | { type: "interest"; seq: number; ch: string; on: boolean; preparing: boolean }
-  | { type: "host_tools"; seq: number; ch: string; tools: unknown[]; schemes: string[] }
+  /** `editing`: this link holds the channel's history-edit lease; other links' history mutations are refused. */
+  | { type: "interest"; seq: number; ch: string; on: boolean; preparing: boolean; editing: boolean }
+  | { type: "host_tools"; seq: number; ch: string; tools: unknown[]; schemes: HostUriScheme[] }
   /** `op` is whatever the sender named: the daemon answers one it does not know with 501 `unknown_op`. */
   | { type: "req"; seq: number; id: string; op: string; args: unknown }
   | { type: "ping" }
@@ -329,9 +347,13 @@ export function decodeDown(line: string): DownMessage | UnknownMessage {
     case "kill":
       return { type: "kill", seq: seqNum(o, "seq"), ch: str(o, "ch"), force: bool(o, "force") };
     case "interest":
-      return { type: "interest", seq: seqNum(o, "seq"), ch: str(o, "ch"), on: bool(o, "on"), preparing: bool(o, "preparing") };
-    case "host_tools":
-      return { type: "host_tools", seq: seqNum(o, "seq"), ch: str(o, "ch"), tools: Array.isArray(o.tools) ? o.tools : fail("tools must be an array"), schemes: strings(o, "schemes") };
+      return { type: "interest", seq: seqNum(o, "seq"), ch: str(o, "ch"), on: bool(o, "on"), preparing: bool(o, "preparing"), editing: o.editing === undefined ? false : bool(o, "editing") };
+    case "host_tools": {
+      const schemes = o.schemes;
+      if (!Array.isArray(schemes) || !schemes.every((entry) => isObj(entry) && typeof entry.scheme === "string" && typeof entry.writable === "boolean")) fail("schemes must be an array of {scheme, writable}");
+      return { type: "host_tools", seq: seqNum(o, "seq"), ch: str(o, "ch"), tools: Array.isArray(o.tools) ? o.tools : fail("tools must be an array"),
+        schemes: (schemes as Obj[]).map((entry) => ({ scheme: entry.scheme as string, writable: entry.writable as boolean })) };
+    }
     case "req":
       return { type: "req", seq: seqNum(o, "seq"), id: str(o, "id"), op: str(o, "op"), args: "args" in o ? o.args : fail("args must be present") };
     case "ping":

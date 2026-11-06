@@ -358,6 +358,11 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   `channels_changed` discovers background runs; `sessions_changed` invalidates lists;
   one link is the automatic notification publisher. v4–v6 links remain exclusive;
   cross-version attempts to share a session fail with `session_running_elsewhere`.
+  Cross-server fences live in the daemon: a history edit holds the `interest.editing`
+  lease, and a `peer_message_command` marker makes another server's identical echo
+  ambiguous (`watchReplacement`). An open's preparation lease passes only to the
+  command that asked for it (`withPendingCommand(run, true)`); a command timeout
+  that recycles the child stops the shared process (`destroyAndWait(reason, true)`).
 - **Host seam** (`lib/hosts/host.ts`). Every host, this machine included, is
   reached over the link: `getHost(id)` (`hub.ts`) returns a `RemoteHost` whose
   calls go to a daemon. `getHost("local")` is the link of this machine's own

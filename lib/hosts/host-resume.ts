@@ -1,5 +1,5 @@
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { getAgentDir, getSessionsDir } from "../omp/paths";
 import { readSessionHeaderSync } from "../omp/session-files";
@@ -22,6 +22,7 @@ export class HostResumeTracker {
   private invalid = false;
   private lastWrite = 0;
   private claimed = false;
+  private claims: string[] = [];
 
   constructor(options: { path?: string; sessionsRoot?: string; enabled?: boolean } = {}) {
     this.path = options.path ?? join(getAgentDir(), "omp-web", "host-running.json");
@@ -60,38 +61,74 @@ export class HostResumeTracker {
     this.frozen = true;
   }
 
+  /** Claims the manifest plus claims left by dead daemons; keeps them until `retireClaim` so a crash cannot lose the sessions. */
   takeRunning(): HostResumeEntry[] {
     if (this.claimed) return [];
     this.claimed = true;
-    const claim = `${this.path}.claimed-${process.pid}-${randomUUID()}`;
-    try { renameSync(this.path, claim); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+    const taken: { from: string; claim: string }[] = [];
+    for (const from of [this.path, ...this.deadClaims()]) {
+      const claim = `${this.path}.claimed-${process.pid}-${randomUUID()}`;
+      // Rename is the exclusive step: ENOENT means another process took it.
+      try { renameSync(from, claim); taken.push({ from, claim }); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    }
     try {
-      if (lstatSync(claim).isSymbolicLink()) throw new Error("Recovery manifest must not be a symlink");
-      const raw: unknown = JSON.parse(readFileSync(claim, "utf8"));
-      if (!Array.isArray(raw)) throw new Error("Invalid host-running manifest");
-      const seen = new Set<string>();
-      const entries = raw.map((entry): HostResumeEntry => {
-        if (!isRecord(entry) || typeof entry.sessionId !== "string" || !isValidSessionId(entry.sessionId) || !isRecord(entry.launch)) throw new Error("Invalid recovery session");
-        const launch = entry.launch;
-        if (typeof launch.cwd !== "string" || !isAbsolute(launch.cwd)
-          || !(launch.recordedCwd === null || typeof launch.recordedCwd === "string")
-          || typeof launch.sessionFile !== "string" || !isAbsolute(launch.sessionFile) || typeof launch.advisor !== "boolean"
-          || !(launch.toolNames === undefined || Array.isArray(launch.toolNames) && launch.toolNames.every(name => typeof name === "string"))
-          || !(launch.spawnModel === undefined || typeof launch.spawnModel === "string")) throw new Error("Invalid recovery launch");
-        const root = realpathSync(this.root), file = realpathSync(resolve(launch.sessionFile));
-        if (!file.startsWith(root + sep) || readSessionHeaderSync(file)?.id !== entry.sessionId || seen.has(entry.sessionId)) throw new Error("Recovery session is outside its owning session root or duplicated");
-        seen.add(entry.sessionId);
-        return { sessionId: entry.sessionId, launch: { cwd: launch.cwd, recordedCwd: launch.recordedCwd, sessionFile: file, advisor: launch.advisor, ...(launch.toolNames === undefined ? {} : { toolNames: launch.toolNames as string[] }), ...(launch.spawnModel === undefined ? {} : { spawnModel: launch.spawnModel }) } };
-      });
-      rmSync(claim);
-      return this.enabled ? entries : [];
+      const merged = new Map<string, HostResumeEntry>();
+      for (const { claim } of taken) for (const entry of this.validate(claim)) if (!merged.has(entry.sessionId)) merged.set(entry.sessionId, entry);
+      if (!this.enabled) { for (const { claim } of taken) rmSync(claim, { force: true }); return []; }
+      this.claims = taken.map(({ claim }) => claim);
+      return [...merged.values()];
     } catch (error) {
       this.invalid = true;
       // Preserve the original evidence, never replace a newer manifest.
-      if (!existsSync(this.path)) renameSync(claim, this.path);
+      for (const { from, claim } of taken) if (!existsSync(from)) renameSync(claim, from);
       throw error;
     }
+  }
+
+  /** The recovered sessions are running again: persist them, then drop the claims. A frozen tracker keeps them for the next start. */
+  retireClaim(entries: HostResumeEntry[]): void {
+    if (this.invalid || this.frozen) return;
+    this.entries = entries; this.flush();
+    for (const claim of this.claims.splice(0)) rmSync(claim, { force: true });
+  }
+
+  /** Claim files whose owning pid is gone; EPERM or success never means dead. */
+  private deadClaims(): string[] {
+    const prefix = `${basename(this.path)}.claimed-`;
+    let names: string[];
+    try { names = readdirSync(dirname(this.path)); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+    return names.filter(name => {
+      const pid = name.startsWith(prefix) ? /^(\d+)-./.exec(name.slice(prefix.length))?.[1] : undefined;
+      if (pid === undefined || !Number.isSafeInteger(+pid) || +pid <= 0) return false;
+      try { process.kill(+pid, 0); return false; }
+      catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+    }).map(name => join(dirname(this.path), name));
+  }
+
+  private validate(claim: string): HostResumeEntry[] {
+    if (lstatSync(claim).isSymbolicLink()) throw new Error("Recovery manifest must not be a symlink");
+    const raw: unknown = JSON.parse(readFileSync(claim, "utf8"));
+    if (!Array.isArray(raw)) throw new Error("Invalid host-running manifest");
+    const seen = new Set<string>(), entries: HostResumeEntry[] = [];
+    for (const entry of raw) {
+      if (!isRecord(entry) || typeof entry.sessionId !== "string" || !isValidSessionId(entry.sessionId) || !isRecord(entry.launch)) throw new Error("Invalid recovery session");
+      const launch = entry.launch;
+      if (typeof launch.cwd !== "string" || !isAbsolute(launch.cwd)
+        || !(launch.recordedCwd === null || typeof launch.recordedCwd === "string")
+        || typeof launch.sessionFile !== "string" || !isAbsolute(launch.sessionFile) || typeof launch.advisor !== "boolean"
+        || !(launch.toolNames === undefined || Array.isArray(launch.toolNames) && launch.toolNames.every(name => typeof name === "string"))
+        || !(launch.spawnModel === undefined || typeof launch.spawnModel === "string")) throw new Error("Invalid recovery launch");
+      const root = realpathSync(this.root);
+      let file: string;
+      try { file = realpathSync(resolve(launch.sessionFile)); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; } // A deleted session must not block the rest.
+      if (!file.startsWith(root + sep) || readSessionHeaderSync(file)?.id !== entry.sessionId || seen.has(entry.sessionId)) throw new Error("Recovery session is outside its owning session root or duplicated");
+      seen.add(entry.sessionId);
+      entries.push({ sessionId: entry.sessionId, launch: { cwd: launch.cwd, recordedCwd: launch.recordedCwd, sessionFile: file, advisor: launch.advisor, ...(launch.toolNames === undefined ? {} : { toolNames: launch.toolNames as string[] }), ...(launch.spawnModel === undefined ? {} : { spawnModel: launch.spawnModel }) } });
+    }
+    return entries;
   }
 
   dispose(): void { clearTimeout(this.timer); this.timer = undefined; }

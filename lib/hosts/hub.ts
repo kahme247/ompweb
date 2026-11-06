@@ -34,6 +34,7 @@ import {
   type UnknownMessage,
   type OpenChannelRequest,
   type OpenChannelResult,
+  type HostUriScheme,
   type Unsequenced,
   UnknownMessageLog,
   type UpMessage,
@@ -1111,6 +1112,7 @@ export class RemoteRpcTransport implements RpcTransport {
   private interested = false;
   private preparing = 0;
   private preparationHandoff = false;
+  private editing = false;
   private opening: OpenChannelRequest | null = null;
   private refreshing = false;
 
@@ -1177,22 +1179,29 @@ export class RemoteRpcTransport implements RpcTransport {
     this.sendInterest();
   }
 
-  setPreparing(on: boolean): void {
+  /** `takeOver`: only the command that asked its open for a preparation lease inherits it, never an unrelated one. */
+  setPreparing(on: boolean, takeOver = false): void {
     if (!this.hostOwnedLifecycle || this.closed || this.exitInfo) return;
     const wasPreparing = this.preparing > 0;
     this.preparing = Math.max(0, this.preparing + (on ? 1 : -1));
-    if (on && this.preparationHandoff) {
+    if (on && takeOver && this.preparationHandoff) {
       this.preparationHandoff = false;
       this.preparing -= 1; // The first real command takes over the open-to-send lease without a false gap.
     }
     if (wasPreparing !== (this.preparing > 0)) this.sendInterest();
   }
 
-  private sendInterest(): void {
-    sendDown(linkFor(this.hostId), { type: "interest", ch: this.ch, on: this.interested, preparing: this.preparing > 0 }, this.ch);
+  setEditing(on: boolean): void {
+    if (!this.hostOwnedLifecycle || this.closed || this.exitInfo || this.editing === on) return;
+    this.editing = on;
+    this.sendInterest();
   }
 
-  async setHostTools(tools: unknown[], schemes: string[]): Promise<void> {
+  private sendInterest(): void {
+    sendDown(linkFor(this.hostId), { type: "interest", ch: this.ch, on: this.interested, preparing: this.preparing > 0, editing: this.editing }, this.ch);
+  }
+
+  async setHostTools(tools: unknown[], schemes: HostUriScheme[]): Promise<void> {
     if (this.closed || this.exitInfo) throw new Error("RPC channel is closed");
     validateHostTools(tools, schemes);
     sendDown(linkFor(this.hostId), { type: "host_tools", ch: this.ch, tools, schemes }, this.ch);
@@ -1369,7 +1378,8 @@ export class RemoteHost implements Host {
     if (link.status === "omp-missing") throw new HostOpError(503, "host_omp_missing", `omp is not installed on ${this.label}`);
     if ((link.hostVersion ?? 0) >= 7) {
       const opening: OpenChannelRequest = { sessionId, launch: spawnRequest, ...options };
-      return await request(this.id, "open", opening, linkTimings.opTimeoutMs, (value) => {
+      // An open may wait for a cold child's `ready`, which sends nothing meanwhile.
+      return await request(this.id, "open", opening, LINK_LIMITS.channelReadyMs + linkTimings.opTimeoutMs, (value) => {
         if (!isOpenResult(value) || (options?.expectedChannel !== undefined && value.ch !== options.expectedChannel)) {
           throw new HostOpError(502, "host_bad_result", `${this.label} sent an invalid open result`);
         }

@@ -72,6 +72,7 @@ export function runHostDaemon(options: DaemonOptions): { stop(): Promise<void>; 
   const services = new Map<string, { ops: WorkspaceOps; onDisconnect(): void; stop(): Promise<void> }>();
   const uploadOwners = new Map<string, { link: DaemonLink; attempt: string }>();
   const uploadAttempts = new Map<string, DaemonLink>();
+  const stops = new Set<Promise<void>>();
   const { promise: done, resolve: finish } = Promise.withResolvers<number>();
   let stopped = false, linkId = 0, notifierId: string | null = null, ompVersion: string | null = null;
   let stopping: Promise<void> | undefined;
@@ -132,6 +133,13 @@ export function runHostDaemon(options: DaemonOptions): { stop(): Promise<void>; 
     const old = notifierId; notifierId = next;
     for (const link of links.values()) if (link.version >= 7 && (link.id === old || link.id === next)) link.queue({ type: "notifier", on: link.id === next }, "notifier");
   }
+  /** Stops a removed link's workspace service (tracked so shutdown awaits it) and frees its upload ownership so other servers can take those uploads. */
+  function dropLink(link: DaemonLink): void {
+    const service = services.get(link.id); services.delete(link.id);
+    if (service) { const stop: Promise<void> = service.stop().catch(error => log("could not stop a workspace service: " + reason(error))).finally(() => stops.delete(stop)); stops.add(stop); }
+    for (const [id, owner] of uploadOwners) if (owner.link === link) uploadOwners.delete(id);
+    for (const [key, owner] of uploadAttempts) if (owner === link) uploadAttempts.delete(key);
+  }
   function makeLink(login: HostLink, primary: boolean): DaemonLink {
     const link = new DaemonLink(login, "l" + ++linkId, { allowHttp: options.allowHttp, primary, log,
       hello: (link, replay) => encodeLine({ type: "hello", v: link.version, ompVersion, ompwebVersion: packageJson.version,
@@ -154,7 +162,7 @@ export function runHostDaemon(options: DaemonOptions): { stop(): Promise<void>; 
       onEnd: (link, why) => {
         if (links.get(login.url) !== link) return;
         links.delete(login.url); ended.set(login.url, login.token); channels.linkGone(link);
-        void services.get(link.id)?.stop(); services.delete(link.id); electNotifier();
+        dropLink(link); electNotifier();
         if (links.size === 0) { log(why === "revoked" ? "the server rejected this host's token (revoked?); stopping its omp sessions" : "the last host link ended"); void shutdown(why === "replaced" ? 0 : 1); }
       },
     });
@@ -180,7 +188,7 @@ export function runHostDaemon(options: DaemonOptions): { stop(): Promise<void>; 
       const login = wanted.get(url);
       if (login?.token === link.login.token) continue;
       if (login) { link.rekey(login.token); continue; }
-      links.delete(url); channels.linkGone(link); void services.get(link.id)?.stop(); services.delete(link.id); void link.stop();
+      links.delete(url); channels.linkGone(link); dropLink(link); void link.stop();
     }
     for (const login of wanted.values()) {
       if (links.has(login.url) || ended.get(login.url) === login.token) continue;
@@ -195,7 +203,7 @@ export function runHostDaemon(options: DaemonOptions): { stop(): Promise<void>; 
       switch (message.type) {
         case "stdin": channels.stdin(link, message.ch, message.line); return;
         case "kill": channels.kill(link, message.ch, message.force); return;
-        case "interest": channels.setInterest(link, message.ch, message.on, message.preparing); return;
+        case "interest": channels.setInterest(link, message.ch, message.on, message.preparing, message.editing); return;
         case "host_tools": channels.setTools(link, message.ch, message.tools, message.schemes); return;
         case "req": void answer(link, message.id, message.op, message.args); return;
       }
@@ -286,12 +294,13 @@ export function runHostDaemon(options: DaemonOptions): { stop(): Promise<void>; 
     stopped = true; watcher.close(); clearTimeout(reloadTimer); clearInterval(sweepTimer); uploadRetention.stop();
     // Freeze before exit handlers observe children stopping.
     resume.freeze();
-    stopping = (async () => { await Promise.all([...links.values()].map(link => link.stop())); await Promise.all([...services.values()].map(service => service.stop())); await channels.stop(); resume.dispose(); finish(code); })();
+    stopping = (async () => { await Promise.all([...links.values()].map(link => link.stop())); await Promise.all([...stops, ...[...services.values()].map(service => service.stop())]); await channels.stop(); resume.dispose(); finish(code); })();
     return stopping;
   }
   let interrupted: HostResumeEntry[] = [];
   try { interrupted = resume.takeRunning(); } catch (error) { log("could not recover interrupted sessions: " + reason(error)); }
-  void channels.recover(interrupted).catch(error => log("could not resume interrupted sessions: " + reason(error)));
+  void channels.recover(interrupted).catch(error => log("could not resume interrupted sessions: " + reason(error)))
+    .finally(() => { try { resume.retireClaim(channels.running()); } catch (error) { log("could not retire recovered sessions: " + reason(error)); } });
   for (const saved of initial) makeLink({ ...saved, url: saved.url.replace(/\/+$/, "") }, saved.url.replace(/\/+$/, "") === primaryUrl);
   void getOmpVersion().then(version => { ompVersion = version; }).catch(error => log("could not read omp version: " + reason(error)))
     .finally(() => { if (!stopped) for (const link of links.values()) link.start(); });

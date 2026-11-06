@@ -6,7 +6,7 @@ import { readSessionHeaderSync } from "../omp/session-files";
 import { isValidSessionId } from "../session-file-references-core";
 import { isRecord } from "../type-guards";
 import type { DaemonLink } from "./daemon-link";
-import { HostOpError, LINK_LIMITS, type HelloChannel, type OpenChannelRequest, type OpenChannelResult, type Unsequenced, type UpMessage } from "./link-protocol";
+import { HISTORY_MUTATING_COMMANDS, HostOpError, LINK_LIMITS, MESSAGE_COMMANDS, PEER_MESSAGE_FRAME, type HelloChannel, type HostUriScheme, type OpenChannelRequest, type OpenChannelResult, type Unsequenced, type UpMessage } from "./link-protocol";
 import { PendingRequests } from "./pending-requests";
 import { StreamSnapshot } from "./stream-snapshot";
 import { ChannelLifecycle } from "./channel-lifecycle";
@@ -14,7 +14,8 @@ import { SharedRequests } from "./shared-requests";
 import { RESUME_PROMPT, type HostResumeEntry } from "./host-resume";
 
 type Output = Unsequenced<Extract<UpMessage, { type: "stdout" | "stderr" | "exit" }>>;
-type Member = { link: DaemonLink; paused: boolean; opens: number; queued: Output[]; bytes: number; resync: boolean };
+/** `reply`: a response to this member's own command, which a reopen's snapshot never supersedes. */
+type Member = { link: DaemonLink; paused: boolean; opens: number; queued: { body: Output; reply: boolean }[]; bytes: number; resync: boolean };
 type Channel = {
   ch: string; transport: RpcTransport; launch: SpawnRequest; cwd: string; fellBack: boolean; launchAdvisor: boolean;
   legacy: string | null; pending: PendingRequests; snapshot: StreamSnapshot; lifecycle?: ChannelLifecycle; shared?: SharedRequests;
@@ -27,6 +28,8 @@ type Channel = {
   identityRefreshAgain?: boolean;
   sessionMovePending?: boolean;
   replacing?: boolean;
+  /** The link holding the history-edit lease: other links' history mutations are refused. */
+  editor?: string;
 };
 type ChannelDeps = {
   spawn(launch: SpawnRequest): Promise<SpawnResult>;
@@ -48,6 +51,8 @@ export class ChannelTable {
   private readonly reservedChannels = new Set<string>();
   private readonly mutating = new Map<string, Promise<void>>();
   private readonly goneLinks = new Set<string>();
+  /** Exited channels whose open result is still queued for a paused member. */
+  private readonly exitedHandoffs = new Map<string, Channel>();
   private spawningCount = 0;
   private commandId = 0;
   private stopped = false;
@@ -60,6 +65,9 @@ export class ChannelTable {
   }
   private find(id: string | null, file: string): Channel | undefined {
     return [...this.channels.values()].find(channel => (id !== null && channel.aliases.has(id)) || (file !== "" && channel.files.has(file)));
+  }
+  private refreshes(): Promise<void>[] {
+    return [...this.channels.values()].flatMap(channel => channel.identityRefresh ? [channel.identityRefresh] : []);
   }
 
   async open(link: DaemonLink, args: OpenChannelRequest): Promise<OpenChannelResult> {
@@ -190,7 +198,7 @@ export class ChannelTable {
       if (channel.exited) return this.ensure(id, requested, legacy, ch, preparingLinkId);
       return channel;
     }
-    const refreshing = [...this.channels.values()].flatMap(channel => channel.identityRefresh ? [channel.identityRefresh] : []);
+    const refreshing = this.refreshes();
     if (refreshing.length > 0) { await Promise.all(refreshing); return this.ensure(id, requested, legacy, ch, preparingLinkId); }
     if (id !== null && file === "") throw new HostOpError(404, "session_not_running", "The session listed by the host is no longer running");
     // The header and requested identity must agree; aliases are accepted only for a running channel.
@@ -218,7 +226,7 @@ export class ChannelTable {
       const spawned = await this.deps.spawn(launch);
       if (this.stopped) { spawned.transport.killTree(true); throw new HostOpError(503, "host_stopping", "ompweb host is stopping"); }
       const { promise: ready, resolve: noteReady } = Promise.withResolvers<RpcFrameRecord | null>();
-      const readyTimer = setTimeout(() => noteReady(null), 5000); readyTimer.unref?.();
+      const readyTimer = setTimeout(() => noteReady(null), LINK_LIMITS.channelReadyMs); readyTimer.unref?.();
       const ch = requestedCh ?? randomUUID();
       const channel: Channel = { ...spawned, ch, launch, legacy, pending: new PendingRequests(LINK_LIMITS.pendingBytes, identity), snapshot: new StreamSnapshot(),
         members: new Map(), aliases: new Set(identity ? [identity] : []), files: new Set(launch.sessionFile ? [launch.sessionFile] : []),
@@ -239,6 +247,8 @@ export class ChannelTable {
         channel.lifecycle?.dispose(); channel.snapshot.clear();
         for (const pending of channel.internal.values()) { clearTimeout(pending.timer); pending.reject(new Error("omp exited")); }
         channel.internal.clear(); channel.commands.clear(); this.channels.delete(ch);
+        // An open result still on its way must carry this exit after it (see release).
+        if ([...channel.members.values()].some(member => member.paused)) this.exitedHandoffs.set(ch, channel);
         this.broadcast(channel, { type: "exit", ch, code, signal }); this.deps.runningChanged?.();
         this.deps.channelsChanged?.(ch);
       });
@@ -345,7 +355,10 @@ export class ChannelTable {
       if (typeof frame.data.sessionFile === "string") { try { const launch = this.deps.prepareLaunch({ ...channel.launch, sessionFile: frame.data.sessionFile }); channel.launch = launch; channel.files.add(launch.sessionFile); } catch { /* Never trust an out-of-root native path. */ } }
       this.deps.runningChanged?.();
     }
-    if (frame.type === "notice" && frame.source === "session-persistence" && frame.level !== "error") channel.sessionMovePending = true;
+    if (frame.type === "notice" && frame.source === "session-persistence" && frame.level !== "error") {
+      // Until get_state names the moved session, recovery must not record the old id/file pair.
+      channel.sessionMovePending = true; this.deps.runningChanged?.();
+    }
     if (frame.type === "agent_start" || (frame.type === "notice" && frame.source === "session-persistence")) this.refreshIdentity(channel);
     if (frame.type === "agent_start" || frame.type === "agent_end" || frame.type === "session_info_update") this.deps.sessionsChanged?.();
     if (frame.type === "response" && typeof frame.id === "string") {
@@ -357,7 +370,7 @@ export class ChannelTable {
       if (channel.commands.has(frame.id)) {
         const owner = channel.commands.get(frame.id); channel.commands.delete(frame.id);
         const member = owner && channel.members.get(owner.id);
-        if (member) for (const line of physical) this.deliver(channel, member, { type: "stdout", ch: channel.ch, line });
+        if (member) for (const line of physical) this.deliver(channel, member, { type: "stdout", ch: channel.ch, line }, true);
         return;
       }
     }
@@ -367,9 +380,13 @@ export class ChannelTable {
 
   private join(channel: Channel, link: DaemonLink): void {
     const member = channel.members.get(link.id);
-    link.discard(channel.ch);
-    if (member) { member.paused = true; member.opens++; member.queued = []; member.bytes = 0; member.resync = false; }
-    else {
+    if (member) {
+      // The snapshot supersedes queued output, never this link's command replies (FIFO before the result in the sender).
+      member.paused = true; member.opens++; member.resync = false;
+      member.queued = member.queued.filter(item => item.reply);
+      member.bytes = member.queued.reduce((sum, item) => sum + Buffer.byteLength(JSON.stringify(item.body)), 0);
+    } else {
+      link.discard(channel.ch);
       channel.members.set(link.id, { link, paused: true, opens: 1, queued: [], bytes: 0, resync: false });
       channel.lifecycle?.setInterest(link.id, false);
     }
@@ -377,21 +394,22 @@ export class ChannelTable {
 
   /** Called only after the open result has been queued under this channel's key. */
   release(link: DaemonLink, ch: string): void {
-    const channel = this.channels.get(ch), member = channel?.members.get(link.id);
+    const channel = this.channels.get(ch) ?? this.exitedHandoffs.get(ch), member = channel?.members.get(link.id);
     if (!channel || !member) return;
     member.opens = Math.max(0, member.opens - 1);
     if (member.opens > 0) return;
     member.paused = false;
     if (member.resync) link.queue({ type: "resync", ch }, ch);
-    else for (const body of member.queued) this.deliver(channel, member, body);
+    else for (const item of member.queued) this.deliver(channel, member, item.body);
     member.queued = []; member.bytes = 0; member.resync = false;
+    if (channel.exited && ![...channel.members.values()].some(other => other.paused)) this.exitedHandoffs.delete(ch);
   }
 
-  private deliver(channel: Channel, member: Member, body: Output): void {
+  private deliver(channel: Channel, member: Member, body: Output, reply = false): void {
     if (member.paused) {
       member.bytes += Buffer.byteLength(JSON.stringify(body));
       if (member.bytes > LINK_LIMITS.channelBufferBytes) { member.queued = []; member.resync = true; }
-      else if (!member.resync) member.queued.push(body);
+      else if (!member.resync) member.queued.push({ body, reply });
     } else if (body.type === "exit") member.link.queue(body, channel.ch);
     else member.link.output(body, channel.pending.sessionId);
   }
@@ -412,7 +430,14 @@ export class ChannelTable {
       if (typeof frame.id === "string") {
         const member = channel.members.get(link.id)!;
         this.deliver(channel, member, { type: "stdout", ch, line: JSON.stringify({ type: "response", id: frame.id, command: frame.type,
-          success: false, code: "session_restarting", error: "This session is restarting to apply advisor mode; retry once it is ready" }) });
+          success: false, code: "session_restarting", error: "This session is restarting to apply advisor mode; retry once it is ready" }) }, true);
+      }
+      return;
+    }
+    if (channel.editor !== undefined && channel.editor !== link.id && HISTORY_MUTATING_COMMANDS.has(frame.type)) {
+      if (typeof frame.id === "string") {
+        this.deliver(channel, channel.members.get(link.id)!, { type: "stdout", ch, line: JSON.stringify({ type: "response", id: frame.id, command: frame.type,
+          success: false, code: "session_busy", error: "Another web app is editing this session's history; retry once it finishes" }) }, true);
       }
       return;
     }
@@ -424,22 +449,31 @@ export class ChannelTable {
       if (frame.id.startsWith("d:") || channel.commands.has(frame.id)) throw invalid("RPC command id is already outstanding or reserved");
       channel.commands.set(frame.id, link);
     }
-    if (["prompt", "steer", "follow_up", "followUp"].includes(frame.type)) channel.shared?.prompt(link.id);
+    if (MESSAGE_COMMANDS.has(frame.type)) {
+      channel.shared?.prompt(link.id);
+      // Ahead of omp's echo: an identical peer message must not confirm another server's own admission.
+      const marker = JSON.stringify({ type: PEER_MESSAGE_FRAME });
+      for (const [id, other] of channel.members) if (id !== link.id) this.deliver(channel, other, { type: "stdout", ch, line: marker });
+    }
     channel.lifecycle?.noteStdin(frame);
     channel.transport.write(line.endsWith("\n") ? line : line + "\n", error => {
       if (!error || typeof frame.id !== "string") return;
       channel.commands.delete(frame.id); channel.lifecycle?.forgetCommand(frame.id, true);
       const member = channel.members.get(link.id);
-      if (member) this.deliver(channel, member, { type: "stdout", ch, line: JSON.stringify({ type: "response", id: frame.id, command: frame.type, success: false, error: error.message }) });
+      if (member) this.deliver(channel, member, { type: "stdout", ch, line: JSON.stringify({ type: "response", id: frame.id, command: frame.type, success: false, error: error.message }) }, true);
     });
   }
-  setInterest(link: DaemonLink, ch: string, on: boolean, preparing: boolean): void {
+  setInterest(link: DaemonLink, ch: string, on: boolean, preparing: boolean, editing = false): void {
     const channel = this.member(link, ch); channel.lifecycle?.setInterest(link.id, on); channel.lifecycle?.setPreparing(link.id, preparing);
+    // First holder wins; a second editor's native edit is then refused like any other mutation.
+    if (editing) channel.editor ??= link.id;
+    else if (channel.editor === link.id) channel.editor = undefined;
   }
-  setTools(link: DaemonLink, ch: string, tools: unknown[], schemes: string[]): void { this.member(link, ch).shared?.setTools(link.id, tools, schemes); }
+  setTools(link: DaemonLink, ch: string, tools: unknown[], schemes: HostUriScheme[]): void { this.member(link, ch).shared?.setTools(link.id, tools, schemes); }
   kill(link: DaemonLink, ch: string, force: boolean): void { const channel = this.member(link, ch); if (force) channel.transport.killTree(true); else this.stopChannel(channel); }
   close(link: DaemonLink, ch: string): void {
     const channel = this.member(link, ch); channel.members.delete(link.id); channel.lifecycle?.setPreparing(link.id, false); channel.lifecycle?.linkGone(link.id); channel.shared?.remove(link.id);
+    if (channel.editor === link.id) channel.editor = undefined;
     link.discard(ch);
     for (const [id, owner] of channel.commands) if (owner?.id === link.id) channel.commands.set(id, null);
   }
@@ -447,6 +481,10 @@ export class ChannelTable {
   linkUp(link: DaemonLink): void { for (const channel of this.channels.values()) { channel.lifecycle?.linkUp(link.id); channel.shared?.linkChanged(); } }
   linkGone(link: DaemonLink): void {
     this.goneLinks.add(link.id);
+    for (const [ch, channel] of this.exitedHandoffs) {
+      channel.members.delete(link.id);
+      if (![...channel.members.values()].some(member => member.paused)) this.exitedHandoffs.delete(ch);
+    }
     for (const channel of this.channels.values()) {
       if (channel.members.has(link.id)) this.close(link, channel.ch);
       // Legacy servers own their timers; an exclusive channel has no owner after permanent removal.
@@ -459,7 +497,7 @@ export class ChannelTable {
       .map(channel => ({ ch: channel.ch, sessionId: channel.pending.sessionId, cwd: channel.cwd, pending: replay ? this.pendingFor(channel, link) : null }));
   }
   running(): HostResumeEntry[] {
-    return [...this.channels.values()].filter(channel => channel.lifecycle?.isRunning && channel.pending.sessionId && channel.launch.sessionFile)
+    return [...this.channels.values()].filter(channel => channel.lifecycle?.isRunning && channel.pending.sessionId && channel.launch.sessionFile && !channel.sessionMovePending)
       .map(channel => ({ sessionId: channel.pending.sessionId!, launch: channel.launch }));
   }
   async recover(entries: HostResumeEntry[]): Promise<void> {
@@ -494,7 +532,8 @@ export class ChannelTable {
     protect();
     try {
       if (!channel) await this.spawning.get(id)?.catch(() => undefined);
-      await Promise.all([...this.channels.values()].flatMap(live => live.identityRefresh ? [live.identityRefresh] : []));
+      // A refresh can queue a follow-up: wait until none is left, so the target reflects the newest identity.
+      for (let refreshing = this.refreshes(); refreshing.length > 0; refreshing = this.refreshes()) await Promise.all(refreshing);
       channel = findTarget();
       protect(channel);
       if (channel && !channel.exited) {

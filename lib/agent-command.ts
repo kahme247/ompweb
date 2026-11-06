@@ -157,31 +157,33 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
         : undefined;
 
     const { session } = await startRpcSession(id, target.sessionFile, target.cwd, undefined, advisor, target.recordedCwd, spawnModel, host, true);
-    if (spawnModel) {
-      // Try the normal RPC first: when it succeeds it also records the new
-      // model in the session, so later spawns restore it without an override.
-      // But in omp 18.12.6 set_model can fail spuriously with "Model not
-      // found" for a catalog model whose provider has no credentials
-      // configured, even though the spawn already bound it. In that case the
-      // switch itself succeeded — verify from live state and report success
-      // rather than a false failure. A mismatch (e.g. an omp without --model
-      // precedence) rethrows the RPC error, so a real failure still surfaces.
-      try {
-        const result = await session.send(command);
-        return Response.json({ success: true, data: result });
-      } catch (error) {
-        const state = (await session.send({ type: "get_state" })) as {
-          model?: { id?: unknown; provider?: unknown };
-        } | null;
-        if (state?.model?.provider === command.provider && state?.model?.id === command.modelId) {
-          return Response.json({ success: true, data: { id: command.modelId, provider: command.provider } });
+    // This command inherits the open's preparation lease, so the shared child cannot idle out before it is sent.
+    return await session.withPendingCommand(async () => {
+      if (spawnModel) {
+        // Try the normal RPC first: when it succeeds it also records the new
+        // model in the session, so later spawns restore it without an override.
+        // But in omp 18.12.6 set_model can fail spuriously with "Model not
+        // found" for a catalog model whose provider has no credentials
+        // configured, even though the spawn already bound it. In that case the
+        // switch itself succeeded — verify from live state and report success
+        // rather than a false failure. A mismatch (e.g. an omp without --model
+        // precedence) rethrows the RPC error, so a real failure still surfaces.
+        try {
+          const result = await session.send(command);
+          return Response.json({ success: true, data: result });
+        } catch (error) {
+          const state = (await session.send({ type: "get_state" })) as {
+            model?: { id?: unknown; provider?: unknown };
+          } | null;
+          if (state?.model?.provider === command.provider && state?.model?.id === command.modelId) {
+            return Response.json({ success: true, data: { id: command.modelId, provider: command.provider } });
+          }
+          throw error;
         }
-        throw error;
       }
-    }
-    const result = await send(session);
-
-    return Response.json({ success: true, data: result });
+      const result = await send(session);
+      return Response.json({ success: true, data: result });
+    }, true);
   } catch (error) {
     return commandErrorResponse(error);
   } finally {

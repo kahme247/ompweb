@@ -27,8 +27,10 @@ export interface RpcTransport {
   /** The daemon, rather than this web server, owns process-wide settings and stop timers. */
   readonly hostOwnedLifecycle?: boolean;
   setInterest?(on: boolean): void;
-  setPreparing?(on: boolean): void;
-  setHostTools?(tools: unknown[], schemes: string[]): Promise<void>;
+  setPreparing?(on: boolean, takeOver?: boolean): void;
+  /** Hold or release the channel's history-edit lease on the host. */
+  setEditing?(on: boolean): void;
+  setHostTools?(tools: unknown[], schemes: { scheme: string; writable: boolean }[]): Promise<void>;
   /** Leave the shared channel without terminating its process. */
   close?(): void;
   /** Correlates log lines: the child's pid here, the channel id on a linked host. */

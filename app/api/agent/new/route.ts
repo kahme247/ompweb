@@ -68,7 +68,7 @@ export async function POST(req: Request) {
         const result = await session.send(promptCommand);
         return Response.json({ success: true, sessionId: realSessionId, data: result });
       };
-      return await (preparing ? session.withPendingCommand(run) : run());
+      return await (preparing ? session.withPendingCommand(run, true) : run());
     } catch (error) {
       // The child was spawned but the prompt never ran: without this cleanup a
       // failed set_model/set_thinking_level/prompt leaves an orphaned omp
