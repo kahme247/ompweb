@@ -18,7 +18,7 @@ const settingsProps = {
   openUrlAutomatically: false, onOpenUrlAutomaticallyChange: noop,
   cwd: null, remoteHost: false, sessionId: null,
   onModelsSaved: noop, onPluginsReloaded: noop,
-  appUpdate: null, onRefreshAppUpdate: async () => null, onOmpUpdateAvailabilityChange: noop,
+  appUpdate: null, onRefreshAppUpdate: async () => null,
   onRequestAppUpdate: noop, onSelectTab: noop, onClose: noop,
 };
 

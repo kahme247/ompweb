@@ -42,7 +42,12 @@ The single manifest link requests `/api/manifest` with credentials; that endpoin
 uses the existing web-password guard and private, revalidating caching. Its
 192×192 and 512×512 PNG icons are embedded from the packaged assets because
 Android's native installer fetches ordinary icon URLs without authentication
-cookies. The app still launches at `/` with scope `/`.
+cookies. The app still launches at `/` with scope `/`. Its `theme_color` and
+`background_color` come from the manifest link's `?theme=` parameter: Chrome
+refreshes an installed app's manifest without cookies, so the server renders the
+selected theme's color (remembered in the `omp-theme-color` cookie) into the
+link. Chrome 153 and later color an installed app's Android navigation bar from
+it after Chrome next checks the app for manifest updates.
 
 Keep Cloudflare Access and application authentication enabled; no public
 manifest exception or Access bypass rule is needed. This does not add offline
@@ -298,7 +303,7 @@ Install ompweb as a Windows background service with a system tray icon and autos
 ompweb --install-tray
 ```
 
-Manage it from **Settings → System & Updates → Windows Background Service**, or via CLI:
+Manage it from **Settings → System → Windows Background Service**, or via CLI:
 
 ```bash
 ompweb --tray          # Start the tray manager
@@ -455,6 +460,33 @@ HTTP(S). It dials out, so it can sit behind NAT.
    The host shows **online** in Settings → Hosts, the sidebar gets a group for it,
    and the new-session screen gets a host picker.
 
+**Settings → Hosts** also shows each machine's ompweb daemon and OMP runtime
+versions, available updates and update actions, including **This machine**.
+Checks and installations run on the selected host, not on the web server. A host
+update whose link protocol is incompatible with the current web app stays visible
+but is blocked with a reason; update the web server first. An unverifiable target
+protocol is blocked too. OMP updates are independent of the link protocol.
+Before updating a daemon, close its session processes: the updater refuses to
+interrupt sessions or subagents. Updating OMP leaves existing processes on their
+loaded version until they restart. **Settings → System** keeps the web server's
+own application update and service settings.
+Hosts need a daemon build that supports these update operations; older builds
+show an unsupported message and need one manual update first. If the daemon
+shares its installation with the web server, update the server first, then use
+the host's restart-only update. Unsupported service wrappers and detected restart
+scripts show a manual-update reason. Stop external restart loops before updating
+a foreground daemon.
+
+A daemon update is carried out by a separate updater process on the host. It
+stops the daemon, swaps in the new release and starts it again, and on a failure
+it restores the previous release. If that updater is itself killed after stopping
+the daemon (a reboot, an out-of-memory kill), nothing restarts the host, which
+stays offline. Recover on the host: in the folder containing the installation,
+`.ompweb-backup-<id>` is the previous release. If it is there, move the
+installation aside and rename the backup back to the installation's name; then
+start `ompweb host` (or its service) again. Settings → Hosts reports the update
+as interrupted.
+
 `https://` is required. Plain `http://` is accepted only for loopback addresses, or
 with `--allow-http` (for example on a tailnet):
 
@@ -497,10 +529,26 @@ Notes:
 - **Trust:** a linked host runs omp with full tool access on that machine for
   whoever controls the ompweb server or the token. Keep the token private and
   revoke it when a machine is retired.
-- **Not available on remote hosts yet:** the file explorer, Git and worktree
-  panels, directory browsing, archiving sessions, and the Skills, Plugins, Agents
-  and MCP settings only work on the machine ompweb runs on. Chat, session history,
-  notifications and starting sessions work on every host.
+- **Workspace files on every host:** Explorer, previews, downloads, file search,
+  @-mentions and live file watching use the owning machine's daemon, including
+  This machine. Explorer uploads accept up to 2 GiB per file with no 100 MiB batch
+  cap; preview limits remain 256 KiB for text and 10 MiB for images/DOCX.
+  File tabs retain their source host when you switch chats. An unavailable or
+  older daemon reports offline or asks for an update; main never substitutes its
+  own filesystem.
+- **Git and worktrees on every host:** status, diffs, GitHub issue links, and
+  worktree creation, selection and removal run on the owning daemon. Dirty
+  worktrees still require explicit force confirmation. Switching a worktree
+  changes where new sessions start, not an open conversation.
+- **Directory browsing and cloning on every host:** the Add workspace picker
+  navigates that host's directories and clones HTTPS/SSH repositories there.
+  Cancelling waits for the clone process and safe cleanup; interrupted connections
+  report an unknown outcome rather than pretending the clone was cancelled.
+  If the destination changes during cleanup, captured data is preserved in a
+  private quarantine and the error gives its location; inspect it before removing
+  or restoring anything.
+- **Not available on remote hosts yet:** session archiving and the Skills,
+  Plugins, Agents and MCP settings. Transcript search still scans this machine.
 - **Agent-started sessions:** with agent tools enabled, an agent can pass a `host`
   to `new_session` (it defaults to the agent's own host). A remote host asks for
   confirmation each time unless **Agents can start sessions here without asking**
@@ -635,7 +683,7 @@ Stop it with `Stop-ScheduledTask ompweb-host`, then end the running host with
 - **macOS launchd Service**: LaunchAgent that starts at login, restarts on crash, and logs under `~/Library/Logs/ompweb`.
 - **Linux systemd Service & Tray**: User service that starts at login and restarts on crash, plus a StatusNotifierItem tray icon with service controls (KDE Plasma and compatible desktops).
 - **Notifications**: Desktop and mobile (PWA) notifications for finished tasks, questions waiting for an answer, failed runs, and automatic model switches, with Web Push when served over HTTPS. See [Notifications](#notifications).
-- **Web-based Settings** (11 tabs): Interface & Behavior, Safety & Approvals, AI Model Defaults, API Keys & Providers, Usage, Agent & Intelligence (advisor, memory, compaction), Agents, Extensions & Tools (MCP, skills, plugins), Hosts, Notifications, System & Updates.
+- **Web-based Settings** (11 tabs): Interface & Behavior, Safety & Approvals, AI Model Defaults, API Keys & Providers, Usage, Agent & Intelligence (advisor, memory, compaction), Agents, Extensions & Tools (MCP, skills, plugins), Hosts, Notifications, System.
 - **Slash Commands & Shortcuts**: Quick prompts (`/plan`, `/review`, `/fix`, `/test`, etc.), `⌘K` / `Ctrl+K` palette, and model/reasoning cycling.
 - **UI Themes & Localization**: Warm paper light/dark themes plus an omp.sh-inspired midnight (`omp`) theme, chat font size & interface scale, with full English, Chinese (简体中文), and Japanese (日本語) translations.
 

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type Ref, type RefObject } from "react";
 import { createPortal } from "react-dom";
+import { Popover } from "@base-ui/react/popover";
 import { useI18n } from "@/lib/i18n";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { AlertTriangle, Check } from "lucide-react";
@@ -317,6 +318,10 @@ function OmpWebTitle() {
   const revertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scrambleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reducedMotion = usePrefersReducedMotion();
+  const commitHash = process.env.OMP_WEB_PUBLIC_COMMIT_HASH;
+  const commitDate = process.env.OMP_WEB_PUBLIC_COMMIT_DATE;
+  const hasCommitDetails = Boolean(commitHash && commitDate);
+  const VersionTrigger = hasCommitDetails ? Popover.Trigger : "button";
 
   const target = showVersion ? `v${process.env.OMP_WEB_PUBLIC_APP_VERSION ?? "0.0.0"}` : "omp web";
   const display = useScramble(target, scrambling, reducedMotion);
@@ -329,16 +334,13 @@ function OmpWebTitle() {
     scrambleTimerRef.current = setTimeout(() => setScrambling(false), (toVersion ? 6 : 8) * 4 * (1000 / 60) + 100);
   }, [reducedMotion]);
 
-  const handleClick = useCallback(() => {
-    if (revertTimerRef.current) clearTimeout(revertTimerRef.current);
-
-    const next = !showVersion;
+  const handleVersionChange = useCallback((next: boolean) => {
+    clearTimeout(revertTimerRef.current ?? undefined);
     triggerScramble(next);
-
     if (next) {
       revertTimerRef.current = setTimeout(() => triggerScramble(false), 3000);
     }
-  }, [showVersion, triggerScramble]);
+  }, [triggerScramble]);
 
   useEffect(() => () => {
     if (revertTimerRef.current) clearTimeout(revertTimerRef.current);
@@ -346,30 +348,46 @@ function OmpWebTitle() {
   }, []);
 
   return (
-    <button
-      onClick={handleClick}
-      style={{
-        background: "none", border: "none", padding: 0, cursor: "pointer",
-        fontWeight: 700, fontSize: 14, letterSpacing: "-0.01em",
-        fontFamily: "var(--font-mono)",
-        minWidth: "6ch",
-        lineHeight: 1,
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 7,
-      }}
-      title={showVersion ? "Show ompweb name" : "Show ompweb version"}
-    >
-      <OmpWebLogo size={20} />
-      {!scrambling && !showVersion ? (
-        <span>
-          <span style={{ color: "var(--accent)" }}>omp</span>
-          <span style={{ color: "var(--text)" }}>web</span>
-        </span>
-      ) : (
-        <span style={{ color: showVersion ? "var(--accent)" : "var(--text)" }}>{display}</span>
+    <Popover.Root open={showVersion} onOpenChange={handleVersionChange}>
+      <VersionTrigger
+        type="button"
+        onClick={hasCommitDetails ? undefined : () => handleVersionChange(!showVersion)}
+        style={{
+          background: "none", border: "none", padding: 0, cursor: "pointer",
+          fontWeight: 700, fontSize: 14, letterSpacing: "-0.01em",
+          fontFamily: "var(--font-mono)",
+          minWidth: "6ch",
+          lineHeight: 1,
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 7,
+        }}
+        title={showVersion ? "Show ompweb name" : "Show ompweb version"}
+      >
+        <OmpWebLogo size={20} />
+        {!scrambling && !showVersion ? (
+          <span>
+            <span style={{ color: "var(--accent)" }}>omp</span>
+            <span style={{ color: "var(--text)" }}>web</span>
+          </span>
+        ) : (
+          <span style={{ color: showVersion ? "var(--accent)" : "var(--text)" }}>{display}</span>
+        )}
+      </VersionTrigger>
+      {hasCommitDetails && (
+        <Popover.Portal>
+          <Popover.Positioner side="bottom" align="start" sideOffset={8} collisionPadding={8} style={{ zIndex: 220 }}>
+            <Popover.Popup
+              className="picker-panel ui-focus-ring"
+              style={{ padding: 12, width: 280, maxWidth: "calc((100vw - 16px) / var(--ui-scale, 1))", fontFamily: "var(--font-mono)", fontSize: 12 }}
+            >
+              <Popover.Title style={{ margin: "0 0 6px", fontSize: 12, color: "var(--text-muted)" }}>{commitDate}</Popover.Title>
+              <Popover.Description style={{ margin: 0, overflowWrap: "anywhere", color: "var(--text)" }}>{commitHash}</Popover.Description>
+            </Popover.Popup>
+          </Popover.Positioner>
+        </Popover.Portal>
       )}
-    </button>
+    </Popover.Root>
   );
 }
 function RunningSessionIndicator({ size = 14 }: { size?: number }) {

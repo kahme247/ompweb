@@ -544,11 +544,11 @@ function apply(link: BrowserLink, ws: BrowserSocket, message: Record<string, unk
     case "up_start":
       return onUploadStart(link, ws, message);
     case "up_abort": {
-      const { id } = message;
+      const { id, host } = message;
       if (typeof id !== "string" || !UPLOAD_ID_RE.test(id)) return ws.close(CLOSE.invalidData, "Invalid upload id");
       // The worker sends nothing of it after this line, so no chunk of it can follow.
       link.uploads.delete(id);
-      abortUpload(id, link.owner).catch((error: unknown) => console.error(`[omp-web] upload abort failed: ${error instanceof Error ? error.message : String(error)}`));
+      abortUpload(id, link.owner, typeof host === "string" && host.length <= 128 ? host : undefined).catch((error: unknown) => console.error(`[omp-web] upload abort failed: ${error instanceof Error ? error.message : String(error)}`));
       return;
     }
     case "cmd":
@@ -565,15 +565,15 @@ function onUploadStart(link: BrowserLink, ws: BrowserSocket, message: Record<str
   if (typeof id !== "string" || !UPLOAD_ID_RE.test(id)) return ws.close(CLOSE.invalidData, "Invalid upload id");
   const key = `up:${id}`;
   const sink: UploadSink = {
-    ack: (received, done) => void queue(link, key, JSON.stringify({ type: "up_ack", id, received, done, start: n })),
+    ack: (received, done, proof) => void queue(link, key, JSON.stringify({ type: "up_ack", id, received, done, start: n, ...(done && proof ? { proof } : {}) })),
     error: (status, code, error) => void queue(link, key, JSON.stringify({ type: "up_error", id, status, code, message: error, start: n })),
   };
   if (!link.uploads.has(id)) link.uploads.set(id, sink);
   if (!isSafeCount(n) || typeof host !== "string" || typeof name !== "string" || !isSafeCount(size) || typeof mime !== "string") {
     return sink.error(400, "invalid_request", "Invalid upload");
   }
-  startUpload({ id, hostId: host, owner: link.owner, name, size, type: mime, sink, onRegistered: () => link.uploads.set(id, sink) }).then(({ received }) => {
-    queue(link, key, JSON.stringify({ type: "up_ack", id, received, done: received >= size, start: n }));
+  startUpload({ id, hostId: host, owner: link.owner, name, size, type: mime, sink, onRegistered: () => link.uploads.set(id, sink) }).then(({ received, proof }) => {
+    queue(link, key, JSON.stringify({ type: "up_ack", id, received, done: received >= size, start: n, ...(proof ? { proof } : {}) }));
   }, (error: unknown) => {
     if (error instanceof HostOpError) return sink.error(error.status, error.code, error.message);
     console.error(`[omp-web] upload start failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);

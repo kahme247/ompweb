@@ -10,10 +10,10 @@ const markdownSanitizeSchema = {
     ...defaultSchema.attributes,
     code: [["className", /^language-./, "math-inline", "math-display"]],
   },
-  // `agent://` subagent handles are opened in-app by MarkdownBody.
+  // `agent://` subagent handles are opened in-app by MarkdownBody; so are Windows drive paths (`C:\…`), which read as a one-letter scheme.
   protocols: {
     ...defaultSchema.protocols,
-    href: [...(defaultSchema.protocols?.href ?? []), "agent"],
+    href: [...(defaultSchema.protocols?.href ?? []), "agent", ..."ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"],
   },
   strip: [...(defaultSchema.strip || []), "iframe", "object", "style", "form"],
 };

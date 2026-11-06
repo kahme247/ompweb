@@ -39,6 +39,10 @@ import {
 } from "./link-protocol";
 import { customLocalLabel, DEFAULT_LOCAL_LABEL, HostRegistryUnreadableError, hostForToken, LOCAL_HOST_ID, loadHosts, touchHost, type HostRecord } from "./registry";
 import type { SessionOps } from "./session-ops";
+import type { HostSoftwareUpdate, HostUpdateInfo, HostUpdateOperation, HostUpdateTarget } from "./update-types";
+import { isUpdateDisabled } from "../update-policy";
+import { WORKSPACE_OP_PARAMS, type WorkspaceFileEvent, type WorkspaceOps } from "../workspace-types";
+import { validWorkspaceResult } from "./workspace-results";
 
 /** Liveness and op timeouts from LINK_LIMITS; tests shorten them. */
 export const linkTimings = {
@@ -110,6 +114,8 @@ interface Link {
   /** Link protocol version the daemon last presented (Settings shows it on a 426). */
   hostVersion: number | null;
   ompVersion: string | null;
+  ompwebVersion: string | null;
+  workspaceOps: Set<string>;
   platform: string | null;
   lastSeenAt: string | null;
   autoApprove: boolean;
@@ -163,6 +169,7 @@ interface HubState {
   linkSamples: LinkSampleBatch;
   /** lib/uploads.ts: each host's `upload_ack`, and null when its socket ended (upload bytes in flight are lost). */
   uploadListeners: Set<(hostId: string, ack: UploadAck | null) => void>;
+  fileListeners: Map<string, (event: WorkspaceFileEvent) => void>;
 }
 
 declare global {
@@ -178,11 +185,29 @@ function hub(): HubState {
     frozen: false,
     linkSamples: { samples: [], file: "", timer: undefined },
     uploadListeners: new Set(),
+    fileListeners: new Map(),
   };
   // A state kept from before a field existed (`bun --hot`) lacks it.
   globalThis.__ompHostHub.linkSamples ??= { samples: [], file: "", timer: undefined };
   globalThis.__ompHostHub.uploadListeners ??= new Set();
+  globalThis.__ompHostHub.fileListeners ??= new Map();
   return globalThis.__ompHostHub;
+}
+
+/** Only main-created watch identities route daemon events to their owning consumer. */
+export function onWorkspaceFile(hostId: string, id: string, epoch: string, listener: (event: WorkspaceFileEvent) => void): () => void {
+  const key = JSON.stringify([hostId, id, epoch]);
+  hub().fileListeners.set(key, listener);
+  return () => { if (hub().fileListeners.get(key) === listener) hub().fileListeners.delete(key); };
+}
+
+function endWorkspaceWatches(hostId: string): void {
+  const prefix = `${JSON.stringify([hostId]).slice(0, -1)},`;
+  for (const [key, listener] of hub().fileListeners) {
+    if (!key.startsWith(prefix)) continue;
+    hub().fileListeners.delete(key);
+    listener({ type: "error", message: "The file's host link disconnected" });
+  }
 }
 
 function linkFor(id: string): Link {
@@ -195,6 +220,8 @@ function linkFor(id: string): Link {
       status: "offline",
       hostVersion: null,
       ompVersion: null,
+      ompwebVersion: null,
+      workspaceOps: new Set(),
       platform: null,
       lastSeenAt: null,
       autoApprove: false,
@@ -431,6 +458,7 @@ function endSocket(link: Link): void {
   link.sender.dropBlobs();
   failAllOps(link, () => new HostOpError(503, "host_offline", `${labelOf(link.id)} is offline`));
   notify(hub().uploadListeners, link.id, null);
+  endWorkspaceWatches(link.id);
 }
 
 function stopTimers(link: Link): void {
@@ -660,6 +688,9 @@ function openLink(link: Link, ws: LinkSocket, hello: Hello): void {
   reattach(link, hello.channels);
 
   link.ompVersion = hello.ompVersion;
+  link.ompwebVersion = hello.ompwebVersion ?? null;
+  link.workspaceOps = new Set(hello.workspaceOps ?? []);
+  endWorkspaceWatches(link.id);
   link.platform = hello.platform;
   link.autoApprove = hello.autoApproveExtension;
   sawDaemon(link);
@@ -822,6 +853,8 @@ function applyUp(link: Link, message: UpMessage | UnknownMessage, whole?: UpMess
       return settle(link, message);
     case "upload_ack":
       return notify(hub().uploadListeners, link.id, message);
+    case "workspace_file":
+      return hub().fileListeners.get(JSON.stringify([link.id, message.id, message.epoch]))?.(message.event);
     case "stats":
       return applyStats(link, message);
   }
@@ -844,7 +877,7 @@ function settle(link: Link, message: Res): void {
     return pending.reject(new HostOpError(502, "host_blob_missing", `${label} did not deliver the ${pending.op} result`));
   }
   const blob = pending.blob.length === 1 ? pending.blob[0] : Buffer.concat(pending.blob);
-  if (pending.op === "readMedia") return pending.resolve({ ok: true, value: blob });
+  if (pending.op === "readMedia" || pending.op === "readFileChunk") return pending.resolve({ ok: true, value: blob });
   try {
     pending.resolve(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(blob)));
   } catch {
@@ -889,7 +922,7 @@ function validResult(op: keyof SessionOps, result: unknown, args: unknown[]): bo
       return value instanceof Uint8Array;
     // Main uses these paths (spawn cwd, project keys): they must be strings.
     case "validateCwd":
-      return isRecord(value) && typeof value.cwd === "string" && typeof value.projectRoot === "string";
+      return isRecord(value) && typeof value.cwd === "string" && typeof value.projectRoot === "string" && (value.projectKey === undefined || typeof value.projectKey === "string");
     case "exportSession":
       return isRecord(value) && typeof value.html === "string" && typeof value.fileName === "string";
     case "readSession":
@@ -967,6 +1000,22 @@ function remoteSessionOps(hostId: string): SessionOps {
     };
   }
   return ops as unknown as SessionOps;
+}
+
+function remoteWorkspaceOps(hostId: string): WorkspaceOps {
+  const ops: Record<string, (...args: unknown[]) => Promise<unknown>> = {};
+  for (const [op, params] of Object.entries(WORKSPACE_OP_PARAMS) as [keyof WorkspaceOps, readonly string[]][]) {
+    ops[op] = async (...args) => {
+      const link = linkFor(hostId);
+      if (link.socket && !link.workspaceOps?.has(op)) {
+        throw new HostOpError(501, "workspace_unsupported", `Update or restart the ompweb host daemon on ${labelOf(hostId)} to use workspace files`);
+      }
+      const result = await request(hostId, op, Object.fromEntries(params.map((name, i) => [name, args[i]])), op === "publishUpload" ? UPLOAD_ATTACH_TIMEOUT_MS : linkTimings.opTimeoutMs);
+      if (!validWorkspaceResult(op, result)) throw new HostOpError(502, "host_bad_result", `${labelOf(hostId)} sent an invalid ${op} result`);
+      return result;
+    };
+  }
+  return ops as unknown as WorkspaceOps;
 }
 
 /** An omp child on a linked host. Output that arrives before `RpcProcess`
@@ -1123,10 +1172,16 @@ function isSpawnResult(value: unknown): value is { cwd: string; fellBack: boolea
 export class RemoteHost implements Host {
   readonly id: string;
   readonly sessionOps: SessionOps;
+  readonly workspaceOps: WorkspaceOps;
 
   constructor(id: string) {
     this.id = id;
     this.sessionOps = remoteSessionOps(id);
+    this.workspaceOps = remoteWorkspaceOps(id);
+  }
+
+  supportsWorkspaceOp(name: keyof WorkspaceOps): boolean {
+    return linkFor(this.id).workspaceOps?.has(name) ?? false;
   }
 
   get label(): string {
@@ -1189,17 +1244,73 @@ export function getHost(id: string): Host | null {
   return id === LOCAL_HOST_ID || loadHosts().some((h) => h.id === id) ? linkFor(id).host : null;
 }
 
+const updateCompatibility = () => ({ min: MIN_LINK_PROTOCOL_VERSION, max: LINK_PROTOCOL_VERSION });
+
+function requireUpdateHost(id: string): void {
+  if (!getHost(id)) throw new HostOpError(404, "host_not_found", "Unknown host");
+  if (isUpdateDisabled()) throw new HostOpError(403, "updates_disabled", "Updates are disabled on this web server");
+}
+
+function softwareUpdate(value: unknown): value is HostSoftwareUpdate & Record<string, unknown> {
+  return isRecord(value) && nullableString(value.currentVersion) && nullableString(value.availableVersion)
+    && typeof value.updateAvailable === "boolean" && typeof value.canUpdate === "boolean"
+    && nullableString(value.blockedReason) && typeof value.updateCommand === "string";
+}
+
+function updateOperation(value: unknown): value is HostUpdateOperation {
+  return isRecord(value) && typeof value.id === "string" && value.id.length > 0 && value.id.length <= 128
+    && (value.target === "ompweb" || value.target === "omp") && typeof value.version === "string"
+    && ["running", "succeeded", "failed"].includes(String(value.state))
+    && (value.error === undefined || typeof value.error === "string");
+}
+
+/** Every machine, including this one, checks on its daemon. Never fall back to the web server's installation. */
+export async function getHostSoftwareUpdates(id: string, force = false): Promise<HostUpdateInfo> {
+  requireUpdateHost(id);
+  const result = await request(id, "checkUpdates", { compatibility: updateCompatibility(), force });
+  if (!isRecord(result) || !softwareUpdate(result.ompweb) || !softwareUpdate(result.omp)
+    || !["npm", "bun", "binary"].includes(String(result.ompweb.installMethod))
+    || !(result.ompweb.protocolVersion === null || (Number.isSafeInteger(result.ompweb.protocolVersion) && Number(result.ompweb.protocolVersion) > 0))
+    || !(result.operation === null || updateOperation(result.operation))) {
+    throw new HostOpError(502, "host_bad_result", "The host returned an invalid update status");
+  }
+  const info = result as unknown as HostUpdateInfo;
+  const protocol = info.ompweb.protocolVersion;
+  if (info.ompweb.updateAvailable && (protocol === null || protocol < MIN_LINK_PROTOCOL_VERSION || protocol > LINK_PROTOCOL_VERSION)) {
+    return { ...info, ompweb: { ...info.ompweb, canUpdate: false, blockedReason: protocol === null
+      ? "The target release's link protocol could not be verified. Update is blocked."
+      : `Update ompweb on this server first: this host update uses link protocol v${protocol}; the server supports v${MIN_LINK_PROTOCOL_VERSION}–v${LINK_PROTOCOL_VERSION}.` } };
+  }
+  return info;
+}
+
+export async function updateHostSoftware(id: string, target: HostUpdateTarget, version: string): Promise<{ accepted: true; operation: HostUpdateOperation }> {
+  const checked = await getHostSoftwareUpdates(id, true);
+  const candidate = checked[target];
+  if (!candidate.updateAvailable || !candidate.canUpdate || candidate.availableVersion !== version) {
+    throw new HostOpError(409, "host_update_blocked", candidate.blockedReason ?? "The available version changed; check for updates again");
+  }
+  const result = await request(id, "updateSoftware", { target, version, compatibility: updateCompatibility() });
+  if (!isRecord(result) || result.accepted !== true || !updateOperation(result.operation)
+    || result.operation.target !== target || result.operation.version !== version) {
+    throw new HostOpError(502, "host_bad_result", "The host returned an invalid update operation");
+  }
+  return { accepted: true, operation: result.operation };
+}
+
 export interface LinkedHostRow {
   id: string;
   label: string;
   status: HostStatus;
   ompVersion: string | null;
+  ompwebVersion?: string | null;
   platform: string | null;
   lastSeenAt: string | null;
   allowAgentStart: boolean;
   /** Link protocol version the daemon last presented; null before it ever dialed. */
   hostVersion: number | null;
   serverVersion: number;
+  workspaceOps: string[];
 }
 
 export function listHosts(): LinkedHostRow[] {
@@ -1210,11 +1321,13 @@ export function listHosts(): LinkedHostRow[] {
       label: record.label,
       status: link?.status ?? "offline",
       ompVersion: link?.ompVersion ?? null,
+      ompwebVersion: link?.ompwebVersion ?? null,
       platform: link?.platform ?? null,
       lastSeenAt: link?.lastSeenAt ?? record.lastSeenAt,
       allowAgentStart: record.allowAgentStart,
       hostVersion: link?.hostVersion ?? null,
       serverVersion: LINK_PROTOCOL_VERSION,
+      workspaceOps: [...(link?.workspaceOps ?? [])],
     };
   });
 }
@@ -1225,10 +1338,12 @@ export interface LocalHostRow {
   label: string;
   status: HostStatus;
   ompVersion: string | null;
+  ompwebVersion?: string | null;
   platform: string | null;
   lastSeenAt: null;
   hostVersion: number | null;
   serverVersion: number;
+  workspaceOps: string[];
   /** `process.platform` of this server: picks the daemon install command while no daemon has linked. */
   serverPlatform: string;
   /** False under the dev server (`NODE_ENV=development`), where this machine runs sessions in-process and is offline by design: no install hints. */
@@ -1245,10 +1360,12 @@ export function hostsSnapshot(): { hosts: HostRow[] } {
     label: customLocalLabel(),
     status: link?.status ?? "offline",
     ompVersion: link?.ompVersion ?? null,
+    ompwebVersion: link?.ompwebVersion ?? null,
     platform: link?.platform ?? null,
     lastSeenAt: null,
     hostVersion: link?.hostVersion ?? null,
     serverVersion: LINK_PROTOCOL_VERSION,
+    workspaceOps: [...(link?.workspaceOps ?? [])],
     serverPlatform: process.platform,
     daemonManaged: process.env.NODE_ENV !== "development",
   };
@@ -1330,6 +1447,11 @@ export function hostUploadOp(hostId: string, op: "uploadStart" | "uploadAbort" |
       : new HostOpError(426, "host_upgrade_required", `Update ompweb on ${labelOf(hostId)} to attach files`));
   }
   return request(hostId, op, args, op === "uploadAttach" ? UPLOAD_ATTACH_TIMEOUT_MS : linkTimings.opTimeoutMs);
+}
+
+/** Tell `hostId`'s daemon how many days to keep sent uploads (null: for ever). A daemon from before the op answers 501. */
+export function setHostUploadRetention(hostId: string, days: number | null): Promise<unknown> {
+  return request(hostId, "setUploadRetention", { days });
 }
 
 /** Queue upload bytes (at most pieceBytes) for `hostId`'s daemon, fair with its other traffic; false when it has no socket. */

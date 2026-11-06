@@ -13,7 +13,7 @@ function stripLineSuffix(filePath: string): string {
   return filePath.replace(/:\d+(?::\d+)?$/, "");
 }
 
-function normalizeLocalPath(filePath: string): string {
+export function normalizeLocalPath(filePath: string): string {
   const normalized = normalizeFilePathSlashes(filePath);
   const isWindowsDrive = /^[a-zA-Z]:\//.test(normalized);
   const isUnc = normalized.startsWith("//");

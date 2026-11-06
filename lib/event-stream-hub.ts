@@ -1,10 +1,13 @@
 import { randomUUID } from "crypto";
-import fs from "fs";
-import { authorizeFileAccess } from "./file-authorization";
 import { filePathApiSegments } from "./file-paths";
-import { hostsSnapshot, onHostsChange } from "./hosts/hub";
+import { hostsSnapshot, onHostsChange, onWorkspaceFile } from "./hosts/hub";
+import { resolveWorkspaceHost } from "./api-utils";
+import { isLinkUp } from "./hosts/host";
+import { HostOpError } from "./hosts/link-protocol";
+import type { WorkspaceFileEvent } from "./workspace-types";
 import { attachNotificationClient } from "./notification-hub";
-import { getExitedRpcSessions, getRpcSession, getRunningRpcSessions, subscribeHostToolCalls, subscribeRunningSessions } from "./rpc-manager";
+import { getExitedRpcSessions, getRpcSession, getRunningRpcSessions, subscribeHostToolCalls, subscribeRunningSessions, type AgentSessionWrapper } from "./rpc-manager";
+import { onOutboxChange, outboxEntries, outboxSettledIds } from "./message-outbox";
 import { subscribeSessionFileChanges } from "./session-watcher";
 import {
   MUX_CONTROL_EVENT,
@@ -35,10 +38,8 @@ const SUBSCRIBED: SubscribeResult = { ok: true };
 class Subscription {
   active = true;
   detach: (() => void) | null = null;
-  // Backpressure queue (session channels): while the socket is behind,
-  // `message_update` frames wait here and merge (see queueUpdate) instead of
-  // being written. Every other frame flushes it first, so per-subscription
-  // order is preserved.
+  // Session backpressure queue: message updates merge and consecutive outbox
+  // snapshots replace each other. Other frames flush it first to preserve order.
   pendingUpdates: QueuedUpdate[] = [];
 
   constructor(readonly id: string, readonly coalescesMessageUpdates: boolean) {}
@@ -263,10 +264,18 @@ export class EventStreamConnection {
     return this.write(subscription.id, text, at);
   }
 
-  private flush(subscription: Subscription): boolean {
+  private flush(subscription: Subscription, force = false): boolean {
+    if (!force && this.sink.backpressured()) return true;
     const queued = subscription.pendingUpdates;
     subscription.pendingUpdates = [];
-    for (const { data, at } of queued) if (!this.writeFrame(subscription, data, at)) return false;
+    for (let i = 0; i < queued.length; i++) {
+      if (!force && this.sink.backpressured()) {
+        subscription.pendingUpdates = queued.slice(i);
+        return true;
+      }
+      const { data, at } = queued[i];
+      if (!this.writeFrame(subscription, data, at)) return false;
+    }
     return true;
   }
 
@@ -285,13 +294,13 @@ export class EventStreamConnection {
     if (
       subscription.coalescesMessageUpdates
       && isRecord(data)
-      && data.type === "message_update"
-      && this.sink.backpressured()
+      && (data.type === "outbox_update" || (data.type === "message_update" && this.sink.backpressured()))
     ) {
       queueUpdate(subscription.pendingUpdates, data, Date.now());
+      if (data.type === "outbox_update") this.flush(subscription);
       return;
     }
-    if (this.flush(subscription)) this.writeFrame(subscription, data);
+    if (this.flush(subscription, true)) this.writeFrame(subscription, data);
   }
 }
 
@@ -308,8 +317,21 @@ type QueuedUpdate = { data: Record<string, unknown>; at: number };
  * and break the sequence fence the browser relies on.
  */
 function queueUpdate(queue: QueuedUpdate[], data: Record<string, unknown>, at: number): void {
+  if (data.type === "outbox_update") {
+    const last = queue.at(-1);
+    if (last?.data.type === "outbox_update") {
+      last.data = data;
+      last.at = at;
+    } else {
+      queue.push({ data, at });
+    }
+    return;
+  }
   if (!isDeltaUpdate(data)) {
-    for (let i = queue.length - 1; i >= 0; i--) if (queue[i].data.messageId === data.messageId) queue.splice(i, 1);
+    for (let i = queue.length - 1; i >= 0; i--) {
+      if (queue[i].data.type === "outbox_update") break;
+      if (queue[i].data.messageId === data.messageId) queue.splice(i, 1);
+    }
     queue.push({ data, at });
     return;
   }
@@ -332,7 +354,7 @@ async function openChannel(channel: EventStreamChannel, handle: SubscriptionHand
     case "session":
       return openSessionChannel(channel.sessionId, handle);
     case "file":
-      return openFileChannel(channel.path, channel.sessionId, handle);
+      return openFileChannel(channel.path, channel.sessionId, channel.hostId, handle);
     case "host-tools":
       return openHostToolsChannel(handle);
     case "hosts":
@@ -405,69 +427,89 @@ function openHostsChannel(handle: SubscriptionHandle): SubscribeResult {
   return SUBSCRIBED;
 }
 
-// Agent events of one live omp wrapper.
+// Agent events of one live omp wrapper, and the session's held messages (`outbox_update`, lib/message-outbox.ts).
 function openSessionChannel(sessionId: string, handle: SubscriptionHandle): SubscribeResult {
   // Observer-only: opening a saved session must not create another omp
   // process for a terminal-owned session. Explicit commands use
   // POST /api/agent/[id], which starts the wrapper before this attaches.
   const existing = getRpcSession(sessionId);
-  const session = existing?.isAlive() ? existing : undefined;
-  if (!session) return { ok: false, status: 409, error: "Session is not managed by omp-web", code: "session_not_managed" };
+  let session = existing?.isAlive() ? existing : undefined;
+  // Held messages show before omp runs (a host offline): the channel attaches to the wrapper the dispatcher starts.
+  if (!session && outboxEntries(sessionId).length === 0) {
+    return { ok: false, status: 409, error: "Session is not managed by omp-web", code: "session_not_managed" };
+  }
 
   handle.open();
-  // onEvent can synchronously replay pending UI requests. Subscribe before
-  // sampling the cursor/announcing readiness so catch-up has no event gap.
-  handle.setDetach(session.onEvent((event) => handle.send(event)));
-  handle.send({ type: "connected", sessionId, web: session.getStreamSnapshot().cursor });
+  let detachSession = () => {};
+  const attach = (live: AgentSessionWrapper) => {
+    // onEvent can synchronously replay pending UI requests. Subscribe before
+    // sampling the cursor/announcing readiness so catch-up has no event gap.
+    detachSession = live.onEvent((event) => handle.send(event));
+    handle.send({ type: "connected", sessionId, web: live.getStreamSnapshot().cursor });
+  };
+  if (session) attach(session);
+  const rebind = () => {
+    const existing = getRpcSession(sessionId);
+    const live = existing?.isAlive() ? existing : undefined;
+    if (live !== session) {
+      detachSession();
+      detachSession = () => {};
+      session = live;
+      if (live) attach(live);
+    }
+  };
+  const detachRunning = subscribeRunningSessions(rebind);
+  const detachOutbox = onOutboxChange(sessionId, (entries) => {
+    rebind();
+    handle.send({ type: "outbox_update", entries, settledIds: outboxSettledIds(sessionId) });
+  });
+  rebind();
+  handle.setDetach(() => {
+    detachOutbox();
+    detachRunning();
+    detachSession();
+  });
+  if (handle.active) handle.send({ type: "outbox_update", entries: outboxEntries(sessionId), settledIds: outboxSettledIds(sessionId) });
   return SUBSCRIBED;
 }
 
 // Change notifications for one file open in the viewer.
-async function openFileChannel(rawPath: string, sessionId: string | null, handle: SubscriptionHandle): Promise<SubscribeResult> {
-  const access = await authorizeFileAccess(filePathApiSegments(rawPath), sessionId, true);
-  if (!access.ok) return { ok: false, status: access.status, error: access.error, code: access.code };
-  const { filePath } = access;
-  if (!access.stat.isFile()) return { ok: false, status: 400, error: "Not a file", code: "not_a_file" };
-  if (!handle.active) return SUBSCRIBED;
-
-  handle.open();
-  handle.send({ type: "connected", filePath });
-  let lastMtimeMs = access.stat.mtimeMs;
-  let lastSize = access.stat.size;
-  const check = () => {
-    try {
-      const stat = fs.statSync(filePath);
-      // Some platforms emit watch events for file reads/attribute access.
-      // Ignore those or the client's refresh read loops.
-      if (stat.mtimeMs === lastMtimeMs && stat.size === lastSize) return;
-      lastMtimeMs = stat.mtimeMs;
-      lastSize = stat.size;
-      handle.send({ type: "change", mtime: stat.mtime.toISOString(), size: stat.size });
-    } catch {
-      if (lastSize === -1) return; // already reported gone
-      lastSize = -1;
-      handle.send({ type: "change", mtime: new Date().toISOString(), size: 0 });
-    }
-  };
-  let trailing: ReturnType<typeof setTimeout> | undefined;
-  let watcher: fs.FSWatcher;
-  try {
-    watcher = fs.watch(filePath, () => {
-      check();
-      // Bun's fs.watch drops an event within ~2 ms of the previous one; re-stat
-      // once the burst is quiet so a rapid second save still reports.
-      clearTimeout(trailing);
-      trailing = setTimeout(check, 50);
-    });
-  } catch {
-    handle.send({ type: "error", message: "Failed to watch file" });
-    handle.end();
-    return SUBSCRIBED;
+async function openFileChannel(rawPath: string, sessionId: string | null, hostId: string | undefined, handle: SubscriptionHandle): Promise<SubscribeResult> {
+  const resolved = await resolveWorkspaceHost(hostId, sessionId);
+  if ("response" in resolved) {
+    const body = await resolved.response.json();
+    return { ok: false, status: resolved.response.status, error: body.error, code: body.code };
   }
-  watcher.on("error", () => handle.end());
-  handle.setDetach(() => {
-    clearTimeout(trailing);
-    watcher.close();
+  const { host } = resolved;
+  const id = randomUUID(), epoch = randomUUID();
+  let opened = false;
+  const pending: WorkspaceFileEvent[] = [];
+  const detachEvent = onWorkspaceFile(host.id, id, epoch, (event) => {
+    if (!handle.active) return;
+    if (!opened) { pending.push(event); return; }
+    handle.send(event);
+    if (event.type === "error") handle.end();
   });
-  return SUBSCRIBED;
+  const detachStatus = host.onStatus((status) => { if (!isLinkUp(status)) handle.end(); });
+  handle.setDetach(() => {
+    detachEvent(); detachStatus();
+    void host.workspaceOps.unwatchFile(id, epoch).catch(() => {});
+  });
+  try {
+    const result = await host.workspaceOps.watchFile(id, epoch, { segments: filePathApiSegments(rawPath), sessionId });
+    if (!result.ok) { detachEvent(); detachStatus(); return result; }
+    if (!handle.active) { void host.workspaceOps.unwatchFile(id, epoch).catch(() => {}); return SUBSCRIBED; }
+    const info = result.value;
+    handle.open();
+    // A new watch epoch always refreshes bytes missed during the disconnected interval.
+    handle.send({ type: "change", mtime: new Date(info.mtimeMs).toISOString(), size: info.size });
+    handle.send({ type: "connected", filePath: info.path });
+    opened = true;
+    for (const event of pending) { handle.send(event); if (event.type === "error") handle.end(); }
+    return SUBSCRIBED;
+  } catch (error) {
+    detachEvent(); detachStatus();
+    if (error instanceof HostOpError) return { ok: false, status: error.status, code: error.code, error: error.message };
+    throw error;
+  }
 }

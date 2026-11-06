@@ -32,6 +32,10 @@ export async function POST(req: Request) {
   try {
     const body = await parseJsonWithinLimit<{ cwd?: string; hostId?: unknown; [key: string]: unknown }>(req, MAX_AGENT_COMMAND_REQUEST_BYTES);
     const { cwd: requestedCwd, hostId, ...command } = body;
+    // New-chat uploads have no session file to attach into; never forward bearer authority to native RPC.
+    if (Object.hasOwn(command, "uploadProofs") || Object.hasOwn(command, "uploads")) {
+      return Response.json({ error: "Files attach only to an existing session", code: "invalid_uploads" }, { status: 400 });
+    }
     const target = resolveHostOrError(hostId);
     if ("response" in target) return target.response;
     const { host } = target;

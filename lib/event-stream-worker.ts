@@ -12,6 +12,9 @@
 // Bundled by server/client-env.ts (buildEventStreamWorker) into a classic script; lib/event-stream-worker.test.mjs runs
 // it in node:vm with fake browser globals.
 //
+// It also owns the browser's message outbox (docs/specs/2026-11-04-message-outbox-design.md O2): IndexedDB
+// `omp-web-outbox`, sent as `outbox_add` agent commands until the server has stored each (public/sw.js reads it too).
+//
 // Tab -> worker:  { op: "open", id, channel } | { op: "close", id }
 //                 { op: "lock", name }  (tab holds this Web Lock while alive)
 //                 { op: "bye" }         (pagehide: drop this tab's streams)
@@ -19,7 +22,11 @@
 //                 { op: "cmd", n, req, sessionId, advisor, body, type }  (an agent command; body: its JSON text, type: its type)
 //                 { op: "metric", sample }  (a transport sample of the tab's: tagged, buffered and POSTed here)
 //                 { op: "upload", id, host, name, type, blob }  (a file to upload over the link; blob: the File)
-//                 { op: "up_abort", id }
+//                 { op: "up_pause", id }  (stop this tab's upload; keep the host's staged bytes for Retry)
+//                 { op: "up_abort", id, host }  (the tab removed it: the host deletes what it staged; kept until delivered)
+//                 { op: "diag", n }  (the connection diagnostics panel's poll)
+//                 { op: "outbox_add", n, entry }  (a message for the outbox: a LocalOutboxEntry without state/error)
+//                 { op: "outbox_drop", n, id }  (remove a "failed" entry; the tab waits for its committed deletion)
 // Worker -> tab:  { id, type: "open" }
 //                 { id, type: "message", data }   (raw JSON string)
 //                 { id, type: "error", readyState: 0 | 2 }  (EventSource semantics)
@@ -27,8 +34,15 @@
 //                 { cmd: n, http: true }  (SSE mode: the tab POSTs the command itself)
 //                 { cmd: n, status, body, recvAt, repliedAt, attempts, deduped, behindBytes,
 //                   socket, behindSameBytes, behindOtherBytes, replyBehindOtherBytes }
-//                 { up: id, received, done } | { up: id, error: { status, code, message } }  (an upload's progress, failure)
+//                 { up: id, received, done, proof? } | { up: id, error: { status, code, message } }  (an upload's progress, failure)
 //                 { up: id, http: true }  (SSE mode: the tab uploads it over HTTP itself)
+//                 { diag: n, data }  (ConnectionDiagnostics, lib/event-stream.ts)
+//                 { outboxAdded: n, error?: string }  (committed to IndexedDB, or refused with error: keep the draft)
+//                 { outboxDropped: n, error?: string }  (deletion committed, or refused: keep the bubble and draft)
+//                 { outbox: LocalOutboxEntry[], partial?: true }  (every entry, in submission order: on attach once loaded
+//                   if any, back from the bfcache, and on every change; partial: the last shared read failed, so earlier
+//                   entries of other workers may be missing and the tab must not keepalive from it)
+//                 { outboxStored: OutboxEntry }  (the server stored one; the list without it follows)
 import {
   BROWSER_LINK_PATH,
   BROWSER_LINK_VERSION,
@@ -39,10 +53,14 @@ import {
   UNKNOWN_CONNECTION_CODE,
   isIdempotentCommand,
   type BrowserTransport,
+  type ConnectionDiagnostics,
+  type FallbackReason,
   type EventStreamChannel,
 } from "./event-stream-protocol";
+import type { LocalOutboxEntry } from "./event-stream";
 import { LINK_LIMITS, LinkSender, Outbox, PartJoiner, queuedLine, SeqWindow, type Part } from "./hosts/link-protocol";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "./image-attachments";
+import { diagnosticStats } from "./transport-stats";
 import { UPLOAD_STALL_MS, UPLOAD_WINDOW_BYTES } from "./upload-limits";
 
 const CONNECTING = 0;
@@ -55,6 +73,9 @@ const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 const SILENCE_CHECK_MS = 1000;
 const VISIBLE_PROBE_MS = 3000;
+/** Redial after 5-6 s without command ack progress. Double up to offlineMs on each timeout so slow links can finish
+ * a downlink piece blocking the ack; an acked command resets it, a wake or new link does not. */
+const COMMAND_ACK_MS = 5000;
 // Every tab forwards the same network or visibility event: a dial younger than
 // this without a welcome is the one an earlier tab's wake just started.
 const WAKE_REDIAL_GAP_MS = 1000;
@@ -71,6 +92,14 @@ const SEND_DEADLINE_MS = 15000;
 const FALLBACK_MS = 300000;
 /** Refused dials in a row (each GET reaching the server, no open between, the browser online) before that fallback. */
 const FALLBACK_REFUSALS = 3;
+/** The most up_aborts kept until delivered: past it the oldest goes (the host daemon's sweep of old staged files covers it). */
+const ABORTS_MAX = 256;
+/** An abort's DELETE that failed goes again after these (the last repeats), and at once on a wake. */
+const ABORT_RETRY_MS = [5_000, 15_000, 60_000];
+/** An abort's DELETE not answered in this long is abandoned and retried. */
+const ABORT_DELETE_TIMEOUT_MS = 40_000;
+/** Marks an up_abort's line in the sender (a command's `rid` is the tab's request id). */
+const ABORT_RID = "abort:";
 const TRANSPORT_UNAVAILABLE = { error: "Not sent: no connection to omp-web.", code: "transport_unavailable" };
 const TRANSPORT_LOST = { error: "The connection to omp-web dropped before the answer arrived; the command may have run.", code: "transport_lost" };
 // Transport samples (spec D6 of the experiment): POSTed in batches to the metrics route, whose GET is the SSE clock probe.
@@ -95,6 +124,9 @@ const CLOCK_WINDOW_MS = 300000;
 const CLOCK_WINDOW_SAMPLES = 20;
 const LARGE_FRAME_BYTES = 64 * 1024;
 const LARGE_FRAME_LOG_MS = 30000;
+/** The diagnostics panel's stats cover this browser's samples of this long, at most DIAGNOSTICS_MAX of them. */
+const DIAGNOSTICS_WINDOW_MS = 30 * 60_000;
+const DIAGNOSTICS_MAX = 20_000;
 
 /** A tab's end of the worker: a SharedWorker's MessagePort, or the dedicated worker's own scope. */
 interface Port {
@@ -111,6 +143,8 @@ interface WorkerScope extends Port {
     onLine?: boolean;
   };
   location: { href: string };
+  /** Missing or refusing IndexedDB means an outbox add fails: the composer must keep the draft. */
+  indexedDB?: IDBFactory;
 }
 const scope = self as unknown as WorkerScope;
 
@@ -188,6 +222,8 @@ interface Conn {
   lastEventSampleAt: number;
   heldEvent: HeldEvent | null;
   reconnect: Reconnect | null;
+  /** First unanswered attempt or drop, until hello/welcome or the connection is no longer wanted. */
+  connectingSince: number | null;
   largeFrames: LoggedFrame[];
 }
 
@@ -199,7 +235,7 @@ interface Clock {
 
 /** A line the link's sender queues (`rid` marks an agent command's), or an upload's chunk (a binary unit). */
 type UpItem = { line: string; size: number; rid?: string } | { id: string; blob: Uint8Array };
-type Sent = { seq: number; line: string; bytes: number };
+type Sent = { seq: number; line: string; bytes: number; rid?: string };
 
 /** A server line's header: everything but `data`, which `decode` hands on as the raw text it is. */
 interface DownHead {
@@ -219,6 +255,7 @@ interface DownHead {
   id?: unknown;
   received?: unknown;
   done?: unknown;
+  proof?: unknown;
   start?: unknown;
   code?: unknown;
   message?: unknown;
@@ -229,6 +266,8 @@ interface ControlFrame {
   sub?: unknown;
   connectionId?: unknown;
   transport?: unknown;
+  status?: unknown;
+  code?: unknown;
 }
 
 const encoder = new TextEncoder();
@@ -245,10 +284,12 @@ let setting: BrowserTransport = "sse";
 /** The mode in effect: the setting, unless a refused upgrade put this worker on SSE for a while (fallbackTimer). */
 let mode: BrowserTransport = "sse";
 let fallbackTimer: Timer | undefined;
+/** Why the last fallback put this worker on SSE (shown while it lasts). */
+let fallbackReason: FallbackReason = "refused";
 /** Every attached tab, told the mode when it changes. */
 const clients = new Set<Client>();
-const sseConn: Conn = { key: "sse", lastEventSampleAt: -Infinity, heldEvent: null, reconnect: null, largeFrames: [] };
-const linkConn: Conn = { key: "link", lastEventSampleAt: -Infinity, heldEvent: null, reconnect: null, largeFrames: [] };
+const sseConn: Conn = { key: "sse", lastEventSampleAt: -Infinity, heldEvent: null, reconnect: null, connectingSince: null, largeFrames: [] };
+const linkConn: Conn = { key: "link", lastEventSampleAt: -Infinity, heldEvent: null, reconnect: null, connectingSince: null, largeFrames: [] };
 /** The browser link: its socket, the identity it resumes with, and both directions' delivery state. */
 const link = {
   ws: null as WebSocket | null,
@@ -277,6 +318,10 @@ const link = {
   appliedBytes: 0,
   ackTimer: undefined as Timer | undefined,
   flushTimer: undefined as Timer | undefined,
+  /** Command pieces on this socket: last ack progress, highest seq, and adaptive deadline. */
+  commandWaitSince: undefined as number | undefined,
+  commandSeq: 0,
+  commandAckMs: COMMAND_ACK_MS,
   lastFrameAt: 0,
   dialedAt: 0,
   reconnectDelayMs: RECONNECT_MIN_MS,
@@ -301,6 +346,9 @@ let knownEffectiveType: string | null = null;
 let lastWake: { at: number; effectiveType: string | null } | null = null;
 /** dropAt of the reconnects that a running one may still count in its `batch`. */
 let recentDrops: number[] = [];
+/** Every sample of the last DIAGNOSTICS_WINDOW_MS (stamped, as POSTed), with the worker's clock when recorded. */
+let diagnosticSamples: { t: number; sample: Sample }[] = [];
+let lastReconnect: ConnectionDiagnostics["lastReconnect"] = null;
 
 function post(client: Client, message: unknown): void {
   try {
@@ -350,6 +398,7 @@ function ensureSource(): void {
   if (mode !== "sse" || source || reconnectTimer !== undefined || subscriptions.size === 0) return;
   const current = new EventSource(EVENT_STREAM_PATH);
   source = current;
+  sseConn.connectingSince ??= Date.now();
   current.addEventListener(MUX_CONTROL_EVENT, (event: MessageEvent<string>) => {
     if (source !== current) return;
     let frame: ControlFrame;
@@ -397,6 +446,7 @@ function handleControl(frame: ControlFrame, conn: Conn): void {
     // Switched to the link: the switch moved every subscription off this EventSource.
     if (mode !== "sse" || typeof frame.connectionId !== "string") return;
     connectionId = frame.connectionId;
+    sseConn.connectingSince = null;
     if (sseConn.reconnect) {
       sseConn.reconnect.hello = true;
       // No stream, no frame to end its outage (and nothing was being delivered).
@@ -416,12 +466,10 @@ function handleControl(frame: ControlFrame, conn: Conn): void {
     subscription.state = OPEN;
     post(subscription.client, { id: subscription.streamId, type: "open" });
   } else if (frame.type === "end") {
-    // The server ended this subscription (watcher died, unserializable
-    // frame): reconnect it like EventSource would reconnect a closed stream.
-    notifyError(subscription, CONNECTING);
-    clearTimeout(subscription.retryTimer);
-    subscription.retryTimer = setTimeout(() => subscribe(subscription), RESUBSCRIBE_DELAY_MS);
+    // A server-ended channel keeps EventSource's reconnect semantics.
+    retrySubscription(subscription);
   } else if (frame.type === "refused") {
+    if (transientFileRefusal(subscription, frame.status, frame.code)) return retrySubscription(subscription);
     // The link's answer to a failed `sub`: fatal, like a refused POST below.
     release(subscription);
     notifyError(subscription, CLOSED);
@@ -448,6 +496,7 @@ function applyMode(): void {
     reconnectTimer = undefined;
     closeSource();
     sseConn.reconnect = null;
+    sseConn.connectingSince = null;
     for (const subscription of subscriptions.values()) subscribe(subscription);
     ensureLink();
     return;
@@ -462,6 +511,11 @@ function applyMode(): void {
   for (const upload of [...uploads.values()]) {
     dropUpload(upload);
     post(upload.client, { up: upload.id, http: true });
+  }
+  // Aborts go back too: the link no longer carries them, so each is a DELETE the worker repeats until the server answers.
+  for (const id of aborts.keys()) {
+    link.sender.drop(`up:${id}`);
+    sendAbort(id);
   }
   for (const command of [...pending.values()]) {
     if (command.sent) continue;
@@ -492,13 +546,24 @@ function subscribe(subscription: Subscription): void {
       scheduleReconnect();
       return;
     }
-    // Refused (409 unmanaged session, 403/404 file, ...): fatal, like an
-    // EventSource HTTP error. The tab decides whether to retry.
+    if (transientFileRefusal(subscription, response.status, body?.code)) return retrySubscription(subscription);
+    // Other refusals are terminal; the tab decides whether to reopen them.
     release(subscription);
     notifyError(subscription, CLOSED);
   }, () => {
     if (!stale()) scheduleReconnect();
   });
+}
+
+function transientFileRefusal(subscription: Subscription, status: unknown, code: unknown): boolean {
+  return subscription.channel.kind === "file"
+    && ((status === 503 && code === "host_offline") || (status === 504 && code === "host_timeout"));
+}
+
+function retrySubscription(subscription: Subscription): void {
+  notifyError(subscription, CONNECTING);
+  clearTimeout(subscription.retryTimer);
+  subscription.retryTimer = setTimeout(() => subscribe(subscription), RESUBSCRIBE_DELAY_MS);
 }
 
 function release(subscription: Subscription): void {
@@ -512,6 +577,7 @@ function release(subscription: Subscription): void {
     reconnectTimer = undefined;
     closeSource();
     sseConn.reconnect = null;
+    sseConn.connectingSince = null;
   }
   linkIdle();
 }
@@ -560,7 +626,7 @@ function dropClient(client: Client): void {
 // ---- The browser link (spec B3-B5) ----
 
 function linkWanted(): boolean {
-  if (mode === "ws") return subscriptions.size > 0 || pending.size > 0 || uploads.size > 0 || link.sender.hasKeyWith("up:");
+  if (mode === "ws") return subscriptions.size > 0 || pending.size > 0 || uploads.size > 0 || aborts.size > 0 || link.sender.hasKeyWith("up:");
   // On SSE the link stays only until the commands sent on it are answered.
   for (const command of pending.values()) if (command.sent) return true;
   return false;
@@ -586,6 +652,7 @@ function shutLink(): void {
   link.welcomed = false;
   resetLink();
   linkConn.reconnect = null;
+  linkConn.connectingSince = null;
   linkConn.heldEvent = null;
   stopSilenceCheck();
 }
@@ -601,6 +668,8 @@ function resetLink(): void {
   link.down = new SeqWindow();
   link.parts = new PartJoiner(Infinity);
   link.appliedBytes = 0;
+  link.commandWaitSince = undefined;
+  link.commandSeq = 0;
   clearTimeout(link.ackTimer);
   link.ackTimer = undefined;
   clearTimeout(link.flushTimer);
@@ -619,6 +688,8 @@ function dial(): void {
   link.opened = false;
   link.welcomed = false;
   link.dialedAt = link.lastFrameAt = Date.now();
+  linkConn.connectingSince ??= link.dialedAt;
+  link.commandWaitSince = undefined;
   silenceTimer ??= setInterval(checkSilence, SILENCE_CHECK_MS);
   // Events of a socket the link gave up (late frames, its close) are ignored.
   ws.onopen = () => {
@@ -635,7 +706,7 @@ function dial(): void {
   // `error` is always followed by `close`.
   ws.onclose = (event: CloseEvent) => {
     if (link.ws !== ws) return;
-    if (event.code === VERSION_MISMATCH_CODE) return fallBack();
+    if (event.code === VERSION_MISMATCH_CODE) return fallBack("version");
     if (!link.opened) return refused();
     redial(backoff(), "close");
   };
@@ -705,11 +776,12 @@ function refused(): void {
   withDeadline(METRICS_TIMEOUT_MS, (signal) => fetch(BROWSER_LINK_PATH, { cache: "no-store", signal })).then((response) => response.status, () => 0).then((status) => {
     link.diagnosing = false;
     if (offline || [0, 401, 502, 503, 504].includes(status) || ++link.refusals < FALLBACK_REFUSALS) scheduleDial(backoff());
-    else fallBack();
+    else fallBack("refused");
   });
 }
 
-function fallBack(): void {
+function fallBack(reason: FallbackReason): void {
+  fallbackReason = reason;
   link.refusals = 0;
   link.ws?.close(DONE_CODE);
   link.ws = null;
@@ -765,10 +837,15 @@ function flushLink(): void {
   const ws = link.ws;
   if (!ws || !link.welcomed) return;
   const room = () => ws.bufferedAmount < SEND_BUFFER_BYTES && link.unacked < LINK_LIMITS.unackedBytes;
+  const now = Date.now();
   const write = (item: Sent) => {
     ws.send(item.line);
     link.sentSeq = item.seq;
     link.unacked += item.bytes;
+    if (item.rid !== undefined) {
+      link.commandSeq = item.seq;
+      link.commandWaitSince ??= now;
+    }
   };
   // An up_abort still queued keeps the link wanted: closing it first would lose the abort and leave the host's copy staged.
   const hadUp = link.sender.hasKeyWith("up:");
@@ -789,16 +866,20 @@ function flushLink(): void {
       ws.send(unit.frame);
       continue;
     }
-    const item = { seq: unit.seq, line: unit.line, bytes: encoder.encode(unit.line).byteLength };
+    const rid = "rid" in unit.item ? unit.item.rid : undefined;
+    const item = { seq: unit.seq, line: unit.line, bytes: encoder.encode(unit.line).byteLength, rid };
     link.outbox.push(item);
     write(item);
-    const rid = "rid" in unit.item ? unit.item.rid : undefined;
+    if (unit.done && rid?.startsWith(ABORT_RID)) {
+      const abort = aborts.get(rid.slice(ABORT_RID.length));
+      if (abort) abort.seq = unit.seq;
+    }
     const command = unit.done && rid !== undefined ? pending.get(rid) : undefined;
     if (command) {
       command.sent = true;
       command.seq = unit.seq;
       // The first send's time: the server's dedupe forgets a command COMMAND_DEDUPE_MS after its first run.
-      if (command.attempts++ === 0) command.sentAt = Date.now();
+      if (command.attempts++ === 0) command.sentAt = now;
     }
   }
   if (ws.bufferedAmount >= SEND_BUFFER_BYTES) link.flushTimer = setTimeout(flushLink, LINK_LIMITS.flushMs);
@@ -888,9 +969,18 @@ function sendAck(): void {
 
 function onAck(ack: number): void {
   if (!Number.isSafeInteger(ack)) return;
+  if (link.commandWaitSince !== undefined && ack > link.ackedUp) {
+    // Progress proves the way up works: all commands acked ends the wait, a partial ack restarts it.
+    if (ack >= link.commandSeq) {
+      link.commandWaitSince = undefined;
+      link.commandAckMs = COMMAND_ACK_MS;
+    } else link.commandWaitSince = Date.now();
+  }
   link.ackedUp = Math.max(link.ackedUp, ack);
   for (const item of link.outbox.ack(ack)) if (item.seq <= link.sentSeq) link.unacked -= item.bytes;
+  settleAborts(ack);
   flushLink();
+  linkIdle();
 }
 
 /**
@@ -908,6 +998,7 @@ function onWelcome(welcome: DownHead): void {
   if (resumed) {
     link.ackedUp = Math.max(link.ackedUp, ack);
     link.outbox.ack(ack);
+    settleAborts(ack);
   } else {
     resetLink();
   }
@@ -916,9 +1007,12 @@ function onWelcome(welcome: DownHead): void {
   link.token = typeof welcome.token === "string" ? welcome.token : null;
   link.serverId = typeof welcome.serverId === "string" ? welcome.serverId : null;
   link.welcomed = true;
+  linkConn.connectingSince = null;
   if (!resumed && mode === "ws") {
     markConnecting(subscriptions.values());
     for (const subscription of subscriptions.values()) subscribe(subscription);
+    // The resync dropped what the sender held and what the server never acked: every pending abort goes again.
+    for (const id of aborts.keys()) sendAbort(id);
   }
   for (const command of [...pending.values()]) {
     clearTimeout(command.deadline);
@@ -942,7 +1036,14 @@ function onWelcome(welcome: DownHead): void {
 }
 
 function checkSilence(): void {
-  if (link.ws && Date.now() - link.lastFrameAt >= LINK_LIMITS.offlineMs) redial(backoff(), "silence");
+  if (!link.ws) return;
+  const now = Date.now();
+  if (now - link.lastFrameAt >= LINK_LIMITS.offlineMs) redial(backoff(), "silence");
+  else if (link.commandWaitSince !== undefined && now - link.commandWaitSince >= link.commandAckMs) {
+    // Frames still arriving prove only the way down: a command that is not acked means the way up is gone.
+    link.commandAckMs = Math.min(link.commandAckMs * 2, LINK_LIMITS.offlineMs);
+    redial(0, "command");
+  }
 }
 
 /**
@@ -950,6 +1051,10 @@ function checkSilence(): void {
  * Every wake but `hidden` and `init` may start a reconnect sample's outage (spec D6 `startAt`).
  */
 function wake(reason: string): void {
+  if (reason === "online" || reason === "network" || reason === "visible") {
+    retryAborts();
+    retryOutbox();
+  }
   const now = Date.now();
   const type = effectiveType();
   // Every tab forwards the same event: the first of a burst keeps the type from before it.
@@ -1099,6 +1204,9 @@ let upStartSeq = 0;
 
 function addUpload(client: Client, message: Record<string, unknown>): void {
   const id = String(message.id);
+  // A Retry under this id supersedes a cancel still pending for it (in any mode: on SSE the tab uploads over HTTP): it
+  // must not be resent or deleted again over the new upload. A line already on the wire is ordered before the up_start.
+  aborts.delete(id);
   if (mode !== "ws") return post(client, { up: id, http: true });
   const upload: Upload = {
     id,
@@ -1147,7 +1255,7 @@ function dropUpload(upload: Upload): void {
 }
 
 /** (Re)arms its stall deadline: whatever keeps it from moving (a link that stays down, a host that stopped acking)
- * fails it there. Nothing is aborted, so a Retry resumes it from the host's offset. */
+ * fails it there. Nothing is aborted, so the tab's automatic resume (`uploadFile`) continues it from the host's offset. */
 function watchUpload(upload: Upload): void {
   clearTimeout(upload.stallTimer);
   upload.stallTimer = setTimeout(() => {
@@ -1158,12 +1266,71 @@ function watchUpload(upload: Upload): void {
   }, UPLOAD_STALL_MS);
 }
 
+/** An abort not yet delivered: its up_abort line on the link (`seq`: where the sender numbered it, until the server acks it),
+ * or, off the link, its DELETE (`http`). */
+interface Abort {
+  host: string | undefined;
+  seq?: number;
+  http: boolean;
+  fetching: boolean;
+}
+
+/** By upload id: kept until the server has it, so a link that drops or a request that fails never leaves the host's copy staged. */
+const aborts = new Map<string, Abort>();
+let abortFailures = 0;
+let abortTimer: Timer | undefined;
+
 /** The tab removed it (or went away): the server deletes what the host staged. */
-function abortUpload(id: string): void {
+function abortUpload(id: string, host?: string): void {
   const upload = uploads.get(id);
   if (upload) dropUpload(upload);
-  if (link.token !== null) queueUp(`up:${id}`, JSON.stringify({ type: "up_abort", id }));
+  if (!aborts.has(id)) {
+    if (aborts.size >= ABORTS_MAX) aborts.delete(aborts.keys().next().value as string);
+    aborts.set(id, { host: host ?? upload?.host, http: false, fetching: false });
+    sendAbort(id);
+  }
   linkIdle();
+}
+
+/** On the link in `ws` mode (queued once the link has a token; until then it dials and the welcome sends it), else a DELETE. */
+function sendAbort(id: string): void {
+  const abort = aborts.get(id);
+  if (!abort) return;
+  abort.seq = undefined;
+  abort.http = mode !== "ws";
+  if (abort.http) return deleteUpload(id, abort);
+  if (link.token !== null) queueUp(`up:${id}`, JSON.stringify({ type: "up_abort", id, host: abort.host }), `${ABORT_RID}${id}`);
+  else ensureLink();
+}
+
+/** The server applied the up lines through `ack`: those aborts are delivered. */
+function settleAborts(ack: number): void {
+  for (const [id, abort] of aborts) if (!abort.http && abort.seq !== undefined && abort.seq <= ack) aborts.delete(id);
+}
+
+/** A 2xx or 4xx answer settles it (the server owns delivery from there), except 408 and 429; a network error, a timeout or a 5xx keeps it for a retry. */
+function deleteUpload(id: string, abort: Abort): void {
+  if (abort.fetching) return;
+  abort.fetching = true;
+  const query = abort.host === undefined ? "" : `?host=${encodeURIComponent(abort.host)}`;
+  // The deadline is above the server's 30 s host-op timeout: a request that hangs (half-open socket) would otherwise
+  // keep `fetching` set and block every retry. A timeout counts as not settled.
+  withDeadline(ABORT_DELETE_TIMEOUT_MS, (signal) => fetch(`/api/uploads/${encodeURIComponent(id)}${query}`, { method: "DELETE", signal })).then((response) => response.status < 500 && response.status !== 408 && response.status !== 429, () => false).then((settled) => {
+    abort.fetching = false;
+    if (aborts.get(id) !== abort) return;
+    if (settled) {
+      aborts.delete(id);
+      abortFailures = 0;
+    } else if (abort.http && abortTimer === undefined) {
+      abortTimer = setTimeout(retryAborts, ABORT_RETRY_MS[Math.min(abortFailures++, ABORT_RETRY_MS.length - 1)]);
+    }
+  });
+}
+
+function retryAborts(): void {
+  clearTimeout(abortTimer);
+  abortTimer = undefined;
+  for (const [id, abort] of aborts) if (abort.http) deleteUpload(id, abort);
 }
 
 /**
@@ -1220,7 +1387,7 @@ function onUploadLine(head: DownHead): void {
     return;
   }
   watchUpload(upload);
-  post(upload.client, { up: upload.id, received: upload.acked, done });
+  post(upload.client, { up: upload.id, received: upload.acked, done, ...(done && typeof head.proof === "string" ? { proof: head.proof } : {}) });
   if (!done) return pump(upload);
   dropUpload(upload);
   linkIdle();
@@ -1364,6 +1531,7 @@ function recordTabSample(sample: Sample): void {
 
 /** A connection dropped (`reconnect`): its outage runs from the first drop until a stream gets a frame after the next hello or welcome. */
 function dropped(conn: Conn, trigger: string): void {
+  conn.connectingSince ??= Date.now();
   if (conn.reconnect) return;
   const dropAt = Date.now();
   const woke = lastWake !== null && dropAt - lastWake.at <= WAKE_WINDOW_MS;
@@ -1380,6 +1548,7 @@ function endReconnect(conn: Conn, now: number): void {
   const reconnect = conn.reconnect;
   if (!reconnect?.hello) return;
   conn.reconnect = null;
+  lastReconnect = { at: now, trigger: reconnect.trigger, outageMs: now - reconnect.dropAt, resumed: reconnect.resumed };
   let batch = 0;
   for (const at of recentDrops) if (Math.abs(at - reconnect.dropAt) <= BATCH_WINDOW_MS) batch += 1;
   record({
@@ -1421,7 +1590,10 @@ function stamp(sample: Sample): Sample {
 }
 
 function record(sample: Sample): void {
-  samples.push(stamp(sample));
+  const stamped = stamp(sample);
+  samples.push(stamped);
+  diagnosticSamples.push({ t: Date.now(), sample: stamped });
+  if (diagnosticSamples.length > DIAGNOSTICS_MAX) diagnosticSamples.splice(0, diagnosticSamples.length - DIAGNOSTICS_MAX);
   trimSamples();
   // Reaching the count flushes right after this task, off the path that recorded it (a frame's delivery); a failed POST
   // leaves more than that, which then waits for the timer instead of retrying per sample.
@@ -1478,11 +1650,373 @@ function flushSamples(): void {
     });
 }
 
+/** The connection diagnostics panel's snapshot: the connection in use now and the last DIAGNOSTICS_WINDOW_MS of samples. */
+function diagnostics(): ConnectionDiagnostics {
+  const now = Date.now();
+  const from = diagnosticSamples.findIndex((entry) => now - entry.t <= DIAGNOSTICS_WINDOW_MS);
+  diagnosticSamples = from === -1 ? [] : diagnosticSamples.slice(from);
+  const conn = mode === "ws" ? linkConn : sseConn;
+  const wanted = mode === "ws" ? linkWanted() : subscriptions.size > 0;
+  const connected = mode === "ws" ? link.ws?.readyState === OPEN && link.welcomed : source !== null && connectionId !== null;
+  const since = !wanted || connected ? null : conn.connectingSince;
+  let reconnects = 0;
+  let resumes = 0;
+  let resyncs = 0;
+  for (const { sample } of diagnosticSamples) {
+    if (sample.metric !== "reconnect") continue;
+    reconnects++;
+    if (sample.resumed === true) resumes++;
+    else if (sample.resumed === false) resyncs++;
+  }
+  const clock = currentClock(now);
+  return {
+    setting,
+    mode,
+    fallback: setting === "ws" && mode === "sse" ? fallbackReason : null,
+    // Down once commands would fail for want of a connection (SEND_DEADLINE_MS).
+    status: !wanted ? "idle" : connected ? "connected" : since !== null && now - since >= SEND_DEADLINE_MS ? "down" : "connecting",
+    since,
+    lastReconnect,
+    reconnects,
+    resumes,
+    resyncs,
+    clockRttMs: clock ? clock.rtt : null,
+    effectiveType: effectiveType(),
+    windowMs: DIAGNOSTICS_WINDOW_MS,
+    stats: diagnosticStats(diagnosticSamples.map((entry) => entry.sample)),
+  };
+}
+
+// ---- The message outbox's first leg (docs/specs/2026-11-04-message-outbox-design.md O2): a message is committed to
+// IndexedDB before the tab's composer clears, then goes as `outbox_add` over the current transport until the server
+// has stored it. Each session's entries go one at a time, oldest first: the server queues them in arrival order. ----
+
+const OUTBOX_DB = "omp-web-outbox";
+const OUTBOX_STORE = "entries";
+/** The server keeps delivered ids 8 days: an older entry is never sent again, or a resend could deliver it twice. */
+const OUTBOX_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+interface OutboxItem {
+  entry: LocalOutboxEntry;
+  /** An attempt is out: its answer decides what comes next. */
+  inFlight: boolean;
+  retryTimer: Timer | undefined;
+  /** The next transient failure's delay: RECONNECT_MIN_MS doubling to RECONNECT_MAX_MS, reset by a wake. */
+  retryMs: number;
+}
+
+/** Every entry this browser holds, by id. */
+const outboxItems = new Map<string, OutboxItem>();
+/** One shared-store head read per session at a time, including while several local entries commit. */
+const outboxReading = new Set<string>();
+const outboxDropping = new Set<string>();
+/** A session whose shared-list read failed reads again after this delay (1 s doubling to 30 s): no send goes before it. */
+const outboxReadRetry = new Map<string, { timer: Timer | undefined; ms: number }>();
+/** The last read of the shared list failed: this worker's list may miss other workers' earlier entries. */
+let outboxPartial = false;
+const outboxDb = openOutboxDb();
+/** The stored entries are loaded (and sent): every tab's outbox op waits for it, so none races them. */
+let outboxReady = outboxDb.then(loadOutbox);
+
+/** Retry a failed load on the next operation; concurrent tabs share that attempt too. */
+async function ensureOutboxReady(): Promise<boolean> {
+  const pending = outboxReady;
+  if (await pending) return true;
+  if (outboxReady === pending) outboxReady = outboxDb.then(loadOutbox);
+  return outboxReady;
+}
+
+/** null where IndexedDB is missing or refuses: adds must fail without a durable store. */
+function openOutboxDb(): Promise<IDBDatabase | null> {
+  return new Promise((resolve) => {
+    const factory = scope.indexedDB;
+    if (!factory) return resolve(null);
+    try {
+      const request = factory.open(OUTBOX_DB, 1);
+      request.onupgradeneeded = () => request.result.createObjectStore(OUTBOX_STORE, { keyPath: "id" });
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/** A failed read must not let a private worker's incomplete snapshot choose which message goes first. */
+function readOutbox(db: IDBDatabase | null): Promise<LocalOutboxEntry[] | null> {
+  return new Promise((resolve) => {
+    if (!db) return resolve(null);
+    try {
+      const transaction = db.transaction(OUTBOX_STORE);
+      const request = transaction.objectStore(OUTBOX_STORE).getAll();
+      transaction.oncomplete = () => resolve(request.result);
+      transaction.onerror = transaction.onabort = request.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/** What an earlier worker (or tab) left: every unsent entry goes again. */
+async function loadOutbox(db: IDBDatabase | null): Promise<boolean> {
+  const stored = await readOutbox(db);
+  if (!stored) return false;
+  for (const entry of stored) outboxItems.set(entry.id, { entry, inFlight: false, retryTimer: undefined, retryMs: RECONNECT_MIN_MS });
+  await Promise.all([...new Set(stored.map((entry) => entry.sessionId))].map((sessionId) => sendOutbox(sessionId)));
+  return true;
+}
+
+/** True only once a write commits: a quota error or abort must not clear the composer's draft. */
+async function writeOutbox(change: (store: IDBObjectStore) => void): Promise<boolean> {
+  const db = await outboxDb;
+  if (!db) return false;
+  return await new Promise<boolean>((resolve) => {
+    try {
+      const transaction = db.transaction(OUTBOX_STORE, "readwrite");
+      transaction.oncomplete = () => resolve(true);
+      transaction.onerror = transaction.onabort = () => resolve(false);
+      change(transaction.objectStore(OUTBOX_STORE));
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+/** Unsequenced legacy rows precede new adds; their already-lost timestamp ties use a deterministic id fallback. */
+function compareOutbox(a: LocalOutboxEntry, b: LocalOutboxEntry): number {
+  return (a.enqueueOrder ?? 0) - (b.enqueueOrder ?? 0) || a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+
+/** Every entry, in submission order. */
+function outboxList(): LocalOutboxEntry[] {
+  return [...outboxItems.values()].map((item) => item.entry).sort(compareOutbox);
+}
+
+function broadcastOutbox(): void {
+  const list = outboxList();
+  for (const client of clients) post(client, outboxPartial ? { outbox: list, partial: true } : { outbox: list });
+}
+
+/** A tab's list once loaded. An empty one only when `always`: a tab back from the bfcache may still show gone entries. */
+function tellOutbox(client: Client, always: boolean): void {
+  void ensureOutboxReady().then((loaded) => {
+    if (loaded && (always || outboxItems.size > 0)) post(client, outboxPartial ? { outbox: outboxList(), partial: true } : { outbox: outboxList() });
+  });
+}
+
+function addOutbox(client: Client, n: number, entry: LocalOutboxEntry): void {
+  void ensureOutboxReady().then(async (loaded) => {
+    const item: OutboxItem = { entry: { ...entry, state: "sending" }, inFlight: false, retryTimer: undefined, retryMs: RECONNECT_MIN_MS };
+    const committed = loaded && await writeOutbox((store) => {
+      const request = store.getAll();
+      request.onsuccess = () => {
+        // The store's readwrite lock serializes allocation with every other worker's acceptance.
+        item.entry.enqueueOrder = (request.result as LocalOutboxEntry[]).reduce((max, row) => Math.max(max, row.enqueueOrder ?? 0), 0) + 1;
+        store.add(item.entry);
+      };
+    });
+    if (!committed) {
+      post(client, { outboxAdded: n, error: "The message could not be saved to this browser. Send it again." });
+      return;
+    }
+    // Committed: the entry is accepted whatever follows, or a resend from the composer would duplicate it under a new id.
+    outboxItems.set(item.entry.id, item);
+    // Include earlier entries from every worker before the tab can clear its composer or run pagehide keepalives; a failed
+    // read only delays the send (sendOutbox reads again before any network attempt).
+    await refreshOutbox();
+    broadcastOutbox();
+    post(client, { outboxAdded: n });
+    sendOutbox(item.entry.sessionId);
+  });
+}
+
+function dropOutbox(client: Client, n: number, id: string): void {
+  void ensureOutboxReady().then(async (loaded) => {
+    const item = outboxItems.get(id);
+    outboxDropping.add(id);
+    const removed = loaded && await writeOutbox((store) => store.delete(id));
+    outboxDropping.delete(id);
+    if (!removed) {
+      post(client, { outboxDropped: n, error: "The message could not be removed from this browser. Try again." });
+      return;
+    }
+    clearTimeout(item?.retryTimer);
+    outboxItems.delete(id);
+    post(client, { outboxDropped: n });
+    broadcastOutbox();
+    if (item) sendOutbox(item.entry.sessionId);
+  });
+}
+
+/** Refresh the whole shared list before exposing an add or choosing a session head; null means the read failed. */
+async function refreshOutbox(): Promise<boolean | null> {
+  const entries = await readOutbox(await outboxDb);
+  if (!entries) {
+    outboxPartial = true;
+    return null;
+  }
+  const ids = new Set(entries.map((entry) => entry.id));
+  // Back to a complete view: the tabs hear it even when no entry changed.
+  let changed = outboxPartial;
+  outboxPartial = false;
+  for (const [id, item] of outboxItems) {
+    if (ids.has(id)) continue;
+    clearTimeout(item.retryTimer);
+    outboxItems.delete(id);
+    changed = true;
+  }
+  for (const entry of entries) {
+    const item = outboxItems.get(entry.id);
+    if (!item) {
+      outboxItems.set(entry.id, { entry, inFlight: false, retryTimer: undefined, retryMs: RECONNECT_MIN_MS });
+      changed = true;
+    } else if (item.entry.state !== entry.state || item.entry.error !== entry.error) {
+      item.entry = entry;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/** Every attempt reads the shared store: dedicated workers and old/new SharedWorkers must agree on the session head. */
+async function sendOutbox(sessionId: string): Promise<void> {
+  if (outboxReading.has(sessionId)) return;
+  outboxReading.add(sessionId);
+  const changed = await refreshOutbox();
+  outboxReading.delete(sessionId);
+  if (changed === null) {
+    const retry = outboxReadRetry.get(sessionId) ?? { timer: undefined, ms: RECONNECT_MIN_MS };
+    outboxReadRetry.set(sessionId, retry);
+    if (retry.timer !== undefined) return;
+    retry.timer = setTimeout(() => {
+      retry.timer = undefined;
+      sendOutbox(sessionId);
+    }, retry.ms);
+    retry.ms = Math.min(retry.ms * 2, RECONNECT_MAX_MS);
+    return;
+  }
+  clearTimeout(outboxReadRetry.get(sessionId)?.timer);
+  outboxReadRetry.delete(sessionId);
+  if (changed) broadcastOutbox();
+  const head = outboxList().find((entry) => entry.sessionId === sessionId && entry.state === "sending");
+  const item = head && outboxItems.get(head.id);
+  if (!item || item.inFlight || item.retryTimer !== undefined || outboxDropping.has(item.entry.id)) return;
+  if (Date.now() - item.entry.createdAt > OUTBOX_MAX_AGE_MS) return failOutbox(item, "Not sent within 7 days.");
+  if (typeof item.entry.scope !== "string" || !item.entry.scope) return failOutbox(item, "This message has no saved installation or sign-in scope and cannot be sent.");
+  item.inFlight = true;
+  const { id, scope, advisor, mode, message, images, uploads, uploadProofs } = item.entry;
+  const body = JSON.stringify({ type: "outbox_add", id, scope, mode, message, images, uploads, uploadProofs });
+  // A tab of the worker's own (not in `clients`): the command takes the current transport as a tab's would.
+  const port: Port = {
+    onmessage: null,
+    postMessage(answer) {
+      const { http, status, body: reply } = answer as { http?: true; status: number; body: unknown };
+      if (!http) return outboxAnswer(item, status, reply);
+      // A half-open POST must not block this session forever; include the body read and allow 2 KB/s for its uplink.
+      withDeadline(40_000 + Math.ceil(body.length / 2), async (signal) => {
+        const response = await fetch(`/api/agent/${encodeURIComponent(sessionId)}${advisor === true ? "?advisor=1" : ""}`, { method: "POST", headers: { "Content-Type": "application/json" }, body, signal });
+        const reply = await response.json().catch((error) => {
+          if (signal.aborted) throw error;
+          return null;
+        });
+        return { status: response.status, body: reply };
+      }).then(
+        ({ status, body }) => outboxAnswer(item, status, body),
+        () => outboxAnswer(item, 0, null),
+      );
+    },
+  };
+  // A fresh request id per attempt; the server dedupes outbox_add by the entry's id.
+  const req = Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
+  queueCommand({ port, streams: new Map(), visible: false }, { n: 0, req, sessionId, advisor: advisor === true, body, type: "outbox_add" });
+}
+
+/** A transport success is not a storage receipt (a sign-in page can also answer 200). */
+function acceptedOutboxEntry(body: unknown, id: string): unknown {
+  const reply = body as { success?: unknown; data?: { entry?: Record<string, unknown> } } | null;
+  const entry = reply?.data?.entry;
+  return reply?.success === true && entry?.id === id &&
+    typeof entry.sessionId === "string" && entry.sessionId.length > 0 &&
+    ["prompt", "followUp", "steer"].includes(entry.mode as string) &&
+    ["held", "waiting_host", "delivering", "failed", "delivered"].includes(entry.state as string) &&
+    (entry.images === undefined || Array.isArray(entry.images) && entry.images.every((image) => image?.type === "image" && typeof image.data === "string" && typeof image.mimeType === "string")) &&
+    (entry.uploads === undefined || Array.isArray(entry.uploads) && entry.uploads.every((upload) => typeof upload === "string")) &&
+    (entry.error === undefined || typeof entry.error === "string") &&
+    (entry.mayHaveBeenSent === undefined || typeof entry.mayHaveBeenSent === "boolean") &&
+    typeof entry.message === "string" && typeof entry.createdAt === "number" && Number.isFinite(entry.createdAt) && entry.createdAt >= 0
+    ? entry : null;
+}
+
+/**
+ * Valid 2xx acceptance: stored, gone from here. Unconfirmed success, no answer, 401, 408, 429 or a 5xx: again after the entry's
+ * delay. Any other refusal is final (O6): "failed" until a tab drops it, and the session's next entry goes.
+ */
+async function outboxAnswer(item: OutboxItem, status: number, body: unknown): Promise<void> {
+  const { id, sessionId } = item.entry;
+  if (outboxItems.get(id) !== item) return;
+  const reply = (body ?? {}) as { error?: unknown };
+  const accepted = acceptedOutboxEntry(body, id);
+  if (status >= 200 && status < 300 && !accepted) status = 0;
+  if (status >= 200 && status < 300) {
+    if (!(await writeOutbox((store) => store.delete(id)))) return outboxAnswer(item, 0, null);
+    outboxItems.delete(id);
+    for (const client of clients) post(client, { outboxStored: accepted });
+  } else if (status === 0 || status === 401 || status === 408 || status === 429 || status >= 500) {
+    item.inFlight = false;
+    item.retryTimer = setTimeout(() => {
+      item.retryTimer = undefined;
+      sendOutbox(sessionId);
+    }, item.retryMs);
+    item.retryMs = Math.min(item.retryMs * 2, RECONNECT_MAX_MS);
+    return;
+  } else {
+    return failOutbox(item, typeof reply.error === "string" ? reply.error : `HTTP ${status}`);
+  }
+  broadcastOutbox();
+  sendOutbox(sessionId);
+}
+
+/** Final: "failed" until a tab drops it, and the session's next entry goes. Written only over a row still "sending" in
+ * the same transaction: another worker (or the service worker) may have had a 200 and deleted it meanwhile. */
+async function failOutbox(item: OutboxItem, error: string): Promise<void> {
+  item.inFlight = true;
+  const { id, sessionId } = item.entry;
+  const failed: LocalOutboxEntry = { ...item.entry, state: "failed", error };
+  const read: { stored?: LocalOutboxEntry } = {};
+  const committed = await writeOutbox((store) => {
+    const request = store.get(id);
+    request.onsuccess = () => {
+      read.stored = request.result as LocalOutboxEntry | undefined;
+      if (read.stored?.state === "sending") store.put(failed);
+    };
+  });
+  if (!committed) return outboxAnswer(item, 0, null);
+  item.inFlight = false;
+  if (outboxItems.get(id) !== item) return;
+  if (!read.stored) {
+    clearTimeout(item.retryTimer);
+    outboxItems.delete(id);
+  } else item.entry = read.stored.state === "sending" ? failed : read.stored;
+  broadcastOutbox();
+  sendOutbox(sessionId);
+}
+
+/** The network or the page is back: every waiting entry goes again now, from the shortest delay. */
+function retryOutbox(): void {
+  for (const item of outboxItems.values()) {
+    clearTimeout(item.retryTimer);
+    item.retryTimer = undefined;
+    item.retryMs = RECONNECT_MIN_MS;
+  }
+  for (const item of [...outboxItems.values()]) sendOutbox(item.entry.sessionId);
+}
+
 function attach(port: Port): void {
   const client: Client = { port, streams: new Map(), visible: false };
   clients.add(client);
   // Tabs assume SSE until told otherwise.
   if (mode !== "sse") post(client, { transport: mode });
+  tellOutbox(client, false);
   port.onmessage = (event) => {
     const message = event.data;
     if (!message || typeof message !== "object") return;
@@ -1492,6 +2026,7 @@ function attach(port: Port): void {
     if (data.op !== "bye" && !clients.has(client)) {
       clients.add(client);
       post(client, { transport: mode });
+      tellOutbox(client, true);
     }
     switch (data.op) {
       case "open":
@@ -1508,6 +2043,9 @@ function attach(port: Port): void {
         if (typeof data.clientId === "string") clientId = data.clientId;
         wake(String(data.reason));
         break;
+      case "diag":
+        post(client, { diag: data.n, data: diagnostics() });
+        break;
       case "metric":
         if (data.sample && typeof data.sample === "object") recordTabSample(data.sample as Sample);
         break;
@@ -1517,8 +2055,22 @@ function attach(port: Port): void {
       case "upload":
         addUpload(client, data);
         break;
+      case "up_pause": {
+        const upload = uploads.get(String(data.id));
+        if (upload?.client === client) {
+          dropUpload(upload);
+          linkIdle();
+        }
+        break;
+      }
       case "up_abort":
-        abortUpload(String(data.id));
+        abortUpload(String(data.id), typeof data.host === "string" ? data.host : undefined);
+        break;
+      case "outbox_add":
+        addOutbox(client, Number(data.n), data.entry as LocalOutboxEntry);
+        break;
+      case "outbox_drop":
+        dropOutbox(client, Number(data.n), String(data.id));
         break;
       case "lock":
         // MessagePort has no close event. The tab holds this lock for its

@@ -1,8 +1,9 @@
 "use client";
 
 import { memo, useState, useId, useRef, useEffect, useLayoutEffect, useMemo, useCallback, useContext, type ComponentProps } from "react";
-import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, ChevronDown, Brain, EyeOff, CircleAlert, CircleSlash, LoaderCircle, FileText, Search, FileEdit, Terminal, CheckSquare, Bot, Code2, Globe, MessagesSquare, Wrench, Volume2, Square } from "lucide-react";
+import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, ChevronDown, Brain, EyeOff, CircleAlert, CircleSlash, Clock, LoaderCircle, FileText, Search, FileEdit, Terminal, CheckSquare, Bot, Code2, Globe, MessagesSquare, Wrench, Volume2, Square, Trash2, Paperclip } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
+import { WorkspaceFileContext } from "@/lib/workspace-file-context";
 import { AgentLinkContext, agentLinkIds } from "../lib/agent-links";
 import { MessageCopyActions } from "./MessageCopyActions";
 import { useSpeechContext } from "@/hooks/useSpeechSynthesis";
@@ -46,6 +47,7 @@ import type {
   ToolCallContent,
   ThinkingContent,
 } from "@/lib/types";
+import type { HeldMessage } from "@/hooks/useAgentSession-queue";
 
 function ToolCategoryIcon({
   category,
@@ -236,7 +238,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     return <CustomMessageView message={custom} cwd={cwd} onOpenFile={onOpenFile} />;
   }
   if (message.role === "bashExecution") {
-    return <BashExecutionView message={message as BashExecutionMessage} sessionId={sessionId} />;
+    return <BashExecutionView message={message as BashExecutionMessage} sessionId={sessionId} entryId={entryId} />;
   }
   return null;
 }, (prev, next) => {
@@ -508,6 +510,88 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, f
           )}
           {time && <span style={{ fontSize: 10, color: "var(--text-dim)" }}>{time}</span>}
           </div>
+      </div>
+    </div>
+  );
+}
+
+const heldActionStyle = {
+  display: "flex", alignItems: "center", gap: 4, padding: "3px 8px", height: 24, minHeight: 24,
+  background: "none", border: "none", borderRadius: 5, color: "var(--text-dim)", cursor: "pointer",
+  fontSize: 11, whiteSpace: "nowrap",
+} as const;
+
+/** A message omp-web holds until omp has it (docs/specs/2026-11-04-message-outbox-design.md O1): dimmed, after the
+ * live turn, naming the leg it waits on. Delete only while nothing of it can have reached omp. */
+export function HeldMessageView({ held, hostLabel, onDelete }: {
+  held: HeldMessage;
+  hostLabel?: string;
+  onDelete?: (id: string) => void;
+}) {
+  const { t, locale } = useI18n();
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const failed = held.state === "failed";
+  const status = failed
+    ? held.mayHaveBeenSent ? t("heldMessage.mayHaveBeenSent") : held.error ? t("heldMessage.notSentReason", { reason: held.error }) : t("heldMessage.notSent")
+    : held.state === "waiting_host" ? t("heldMessage.waitingForHost", { host: hostLabel || t("heldMessage.theHost") })
+    : held.state === "held" ? t("heldMessage.waiting")
+    : held.state === "delivering" ? t("heldMessage.delivering")
+    : t("heldMessage.sending");
+  const waits = held.state === "waiting_host" || held.state === "held";
+  const StatusIcon = failed ? CircleAlert : waits ? Clock : LoaderCircle;
+  const canDelete = !!onDelete && (failed || waits);
+  const mode = held.mode === "steer" ? t("heldMessage.modeSteer") : held.mode === "followUp" ? t("heldMessage.modeFollowUp") : t("heldMessage.modePrompt");
+  const time = formatTime(held.createdAt, locale);
+  return (
+    <div data-held-message={held.state} style={{ marginBottom: 18, display: "flex", flexDirection: "column", alignItems: "flex-end", paddingRight: 6 }}>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", maxWidth: "85%", minWidth: 0 }}>
+        <div
+          className="chat-message-card"
+          style={{
+            maxWidth: "100%", minWidth: 0, background: "var(--user-bg)", border: "none", borderLeft: "3px solid var(--accent)",
+            borderRadius: "var(--radius-card)", padding: "8px 12px", fontSize: "var(--chat-user-font-size)",
+            lineHeight: "var(--chat-line-height)", color: "var(--text-muted)", opacity: 0.7, wordBreak: "break-word",
+            maxHeight: USER_BUBBLE_MAX_HEIGHT, overflowY: "auto",
+          }}
+        >
+          {held.images?.length ? (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: held.message ? 8 : 0 }}>
+              {held.images.map((image, i) => (
+                <img key={i} src={`data:${image.mimeType};base64,${image.data}`} alt="" style={{ maxWidth: 120, maxHeight: 120, borderRadius: 6, objectFit: "contain", display: "block" }} />
+              ))}
+            </div>
+          ) : null}
+          {held.message && <SafeMarkdownBody className="markdown-user-message">{held.message}</SafeMarkdownBody>}
+          {held.uploads?.length ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4, fontSize: 11 }}>
+              <Paperclip size={11} strokeWidth={1.8} aria-hidden />
+              {t("heldMessage.files", { count: held.uploads.length })}
+            </div>
+          ) : null}
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "flex-end", gap: 6, marginTop: 3, width: "100%", fontSize: 11 }}>
+          <span style={{ padding: "1px 6px", border: "1px solid var(--border)", borderRadius: 999, color: "var(--text-dim)" }}>{mode}</span>
+          <span style={{ display: "flex", alignItems: "center", gap: 4, color: failed ? "var(--status-error)" : "var(--text-dim)" }}>
+            <StatusIcon size={12} strokeWidth={1.8} className={failed || waits ? undefined : "activity-row-spinner"} aria-hidden />
+            {status}
+          </span>
+          {canDelete && <>
+            <button type="button" className="ui-focus-ring" style={heldActionStyle} onClick={() => setConfirmingDelete(true)} aria-label={t("heldMessage.deleteTitle")}>
+              <Trash2 size={11} strokeWidth={1.8} aria-hidden />
+              {t("heldMessage.delete")}
+            </button>
+            <ConfirmDialog
+              open={confirmingDelete}
+              onOpenChange={setConfirmingDelete}
+              title={t("heldMessage.deleteTitle")}
+              description={t(failed && held.mayHaveBeenSent ? "heldMessage.deleteConfirmMayHaveBeenSent" : "heldMessage.deleteConfirmBody")}
+              confirmLabel={t("heldMessage.delete")}
+              cancelLabel={t("chatInput.cancel")}
+              onConfirm={() => { setConfirmingDelete(false); onDelete!(held.id); }}
+            />
+          </>}
+          {time && <span style={{ fontSize: 10, color: "var(--text-dim)" }}>{time}</span>}
+        </div>
       </div>
     </div>
   );
@@ -1057,7 +1141,10 @@ const ToolCallBlock = memo(function ToolCallBlock({
   // `history://`, `proc://`, `local://`, ... are resolved by omp, not files the viewer can open.
   const hasUrlScheme = rawFilePath !== null && /^[a-z][a-z0-9+.-]*:\/\//i.test(rawFilePath);
   const webUrl = hasUrlScheme && /^https?:\/\//i.test(rawFilePath) ? readTargetWebUrl(rawFilePath) : null;
-  const cleanFilePath = rawFilePath && !hasUrlScheme ? rawFilePath.split(":")[0] : null;
+  // Strip only a trailing :<line> suffix. Splitting on the first ":" broke
+  // every Windows absolute path (C:\... -> "C") and POSIX filenames
+  // containing a colon; a drive-letter colon is never a line suffix.
+  const cleanFilePath = rawFilePath && !hasUrlScheme ? rawFilePath.replace(/:\d+$/, "") : null;
 
   return (
     <div className="activity-row" data-activity-operation="true">
@@ -1854,8 +1941,10 @@ function previewText(text: string): string {
   return normalized.length > 140 ? `${normalized.slice(0, 140)}...` : normalized;
 }
 
-function BashExecutionView({ message, sessionId }: { message: BashExecutionMessage; sessionId?: string }) {
+function BashExecutionView({ message, sessionId, entryId }: { message: BashExecutionMessage; sessionId?: string; entryId?: string }) {
   const { t } = useI18n();
+  const fileSource = useContext(WorkspaceFileContext);
+  const hostQuery = fileSource ? `&hostId=${encodeURIComponent(fileSource.hostId)}` : "";
   const [fullOutput, setFullOutput] = useState<{ phase: "loading" } | { phase: "error"; message: string } | { phase: "ready"; output: string } | null>(null);
   // Bumped on every message change; an in-flight fetch from the previous
   // message must not write into the reused component instance.
@@ -1866,30 +1955,14 @@ function BashExecutionView({ message, sessionId }: { message: BashExecutionMessa
   useEffect(() => {
     fullOutputGenRef.current += 1;
     setFullOutput(null);
-  }, [message.command, message.fullOutputPath, message.output, message.timestamp]);
+  }, [message.command, message.fullOutputPath, message.output, message.timestamp, sessionId, hostQuery]);
   const isPending = !message.output && message.exitCode === undefined && !message.cancelled;
-  const isError = message.cancelled || (message.exitCode !== undefined && message.exitCode !== 0);
-
-  // Reuse the existing ToolCallBlock so user-run bash looks identical to an
-  // agent-run bash tool call: same header, collapse behavior, result pane.
-  // Synthesize an equivalent ToolCallContent + ToolResultMessage pair.
-  const toolName = message.excludeFromContext ? "bash (local)" : "bash";
-  const block: ToolCallContent = {
-    type: "toolCall",
-    toolCallId: `bash-${message.timestamp ?? ""}`,
-    toolName,
-    input: { command: message.command },
-  };
-  const result: ToolResultMessage | undefined = isPending
-    ? undefined
-    : {
-        role: "toolResult",
-        toolCallId: block.toolCallId,
-        toolName,
-        content: message.output ? [{ type: "text", text: message.output }] : [],
-        isError,
-        timestamp: message.timestamp,
-      };
+  const failed = message.cancelled || (message.exitCode !== undefined && message.exitCode !== 0);
+  // Starts collapsed, as user-run bash always has; the header toggles it.
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    setExpanded(false);
+  }, [message.command, message.timestamp, entryId]);
 
   // Large executions record their full output to a temp file (fullOutputPath);
   // fetch it through the guarded bash-output route instead of re-reading the
@@ -1899,7 +1972,7 @@ function BashExecutionView({ message, sessionId }: { message: BashExecutionMessa
     const gen = fullOutputGenRef.current;
     setFullOutput({ phase: "loading" });
     try {
-      const res = await fetch(`/api/agent/${encodeURIComponent(sessionId)}/bash-output?path=${encodeURIComponent(message.fullOutputPath)}`);
+      const res = await fetch(`/api/agent/${encodeURIComponent(sessionId)}/bash-output?path=${encodeURIComponent(message.fullOutputPath)}${hostQuery}`);
       const data = await res.json() as { success?: boolean; data?: { output?: string }; error?: string };
       if (fullOutputGenRef.current !== gen) return;
       if (!res.ok || !data.success) throw new Error(data.error ?? `HTTP ${res.status}`);
@@ -1908,15 +1981,42 @@ function BashExecutionView({ message, sessionId }: { message: BashExecutionMessa
       if (fullOutputGenRef.current !== gen) return;
       setFullOutput({ phase: "error", message: e instanceof Error ? e.message : String(e) });
     }
-  }, [message.fullOutputPath, sessionId, fullOutput?.phase]);
+  }, [message.fullOutputPath, sessionId, fullOutput?.phase, hostQuery]);
 
   const downloadUrl = message.fullOutputPath && sessionId
-    ? `/api/agent/${encodeURIComponent(sessionId)}/bash-output?path=${encodeURIComponent(message.fullOutputPath)}&download=1`
+    ? `/api/agent/${encodeURIComponent(sessionId)}/bash-output?path=${encodeURIComponent(message.fullOutputPath)}&download=1${hostQuery}`
     : null;
 
   return (
-    <div data-selection-scope="message" tabIndex={-1} style={{ margin: "6px 0" }}>
-      <ToolCallBlock block={block} result={result} />
+    <div data-selection-scope="message" tabIndex={-1} className={`shell-run${failed ? " shell-run-failed" : ""}${expanded ? " shell-run-open" : ""}`}>
+      <Collapsible open={expanded} onOpenChange={setExpanded}>
+        <CollapsibleTrigger className="shell-run-header" disabled={isPending}>
+          <span className="shell-run-prompt" aria-hidden>$</span>
+          <code className="shell-run-command">{message.command}</code>
+          {message.excludeFromContext && (
+            <span className="shell-run-tag" title={t("messageView.shellLocalTitle")}>{t("messageView.shellLocal")}</span>
+          )}
+          <span className="shell-run-status">
+            {isPending ? (
+              <LoaderCircle size={13} strokeWidth={1.8} className="activity-row-spinner" aria-hidden />
+            ) : failed ? (
+              <>
+                <CircleAlert size={13} strokeWidth={1.8} aria-hidden />
+                {message.cancelled ? t("messageView.shellCancelled") : t("messageView.shellExit", { code: String(message.exitCode) })}
+              </>
+            ) : (
+              <>
+                <Check size={13} strokeWidth={2} aria-hidden />
+                <span className="sr-only">{t("messageView.shellSucceeded")}</span>
+              </>
+            )}
+          </span>
+          <ChevronDown size={13} strokeWidth={1.8} aria-hidden className="shell-run-chevron" style={{ transform: expanded ? "rotate(180deg)" : undefined }} />
+        </CollapsibleTrigger>
+        {expanded && (
+          <pre className="shell-run-output">{message.output || t("messageView.noOutput")}</pre>
+        )}
+      </Collapsible>
       {downloadUrl && (
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 6 }}>
           {fullOutput?.phase !== "ready" && (

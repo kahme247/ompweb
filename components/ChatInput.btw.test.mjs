@@ -33,7 +33,6 @@ function renderComposer(props) {
     onSend: record("onSend"),
     onSteer: record("onSteer"),
     onFollowUp: record("onFollowUp"),
-    onPromptWithStreamingBehavior: record("onPromptWithStreamingBehavior"),
     onBuiltinCommand: async (text) => { calls.push(["onBuiltinCommand", text]); return { handled: true }; },
     ...props,
   }));

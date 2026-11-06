@@ -21,7 +21,7 @@ interface HostLists {
   loading: { generation: number; promise: Promise<SessionInfo[]> } | null;
   /** Last registry the host returned, shown while it is unreachable. */
   projects: ProjectRegistryEntry[];
-  /** The host answered a list at least once; until then a missing id may still be there. */
+  /** The latest requested list in this invalidation generation succeeded; cached entries survive failures. */
   loaded: boolean;
 }
 
@@ -55,18 +55,24 @@ export async function hostSessions(hostId: string, refresh = false): Promise<Ses
   const lists = hostLists(hostId);
   if (!refresh && Date.now() - lists.fetchedAt < LIST_TTL_MS) return lists.sessions;
   const host = getHost(hostId);
-  if (!host || !isLinkUp(host.status())) return lists.sessions;
+  if (!host || !isLinkUp(host.status())) {
+    lists.loaded = false;
+    return lists.sessions;
+  }
   if (lists.loading?.generation !== lists.generation) {
     const generation = lists.generation;
     const promise: Promise<SessionInfo[]> = host.sessionOps.listSessions().then((sessions) => {
       const tagged = sessions.map((session) => ({ ...session, hostId }));
-      lists.loaded = true;
       if (lists.generation === generation) {
+        lists.loaded = true;
         lists.sessions = tagged;
         lists.fetchedAt = Date.now();
       }
       return tagged;
-    }, () => lists.sessions).finally(() => {
+    }, () => {
+      if (lists.generation === generation) lists.loaded = false;
+      return lists.sessions;
+    }).finally(() => {
       if (lists.loading?.promise === promise) lists.loading = null;
     });
     lists.loading = { generation, promise };
@@ -97,16 +103,19 @@ async function hostWithSession(id: string, refresh: boolean): Promise<Host | nul
   return index === -1 ? null : getHost(ids[index]);
 }
 
-/** The host holding a session: this machine first, then the linked hosts by label; the lists are refreshed once on a miss.
- * Rejects 503 while this machine's daemon is offline or has never listed its sessions: its sessions are unknown then, not gone. */
+/** The host holding a session: this machine first, then linked hosts; refresh all lists once on a miss.
+ * A negative result is authoritative only when every registered host has a successful current list. */
 export async function hostForSessionId(id: string): Promise<Host | null> {
   // Host lists only hold valid ids: a malformed one never costs a round trip.
   if (!isValidSessionId(id)) return null;
   // shortcut: every miss re-asks each linked host; throttle per host if polling for gone sessions shows up.
   const host = (await hostWithSession(id, false)) ?? (await hostWithSession(id, true));
   if (host) return host;
-  const local = getHost(LOCAL_HOST_ID);
-  if (!isLinkUp(local.status()) || !hostLists(LOCAL_HOST_ID).loaded) throw new HostOpError(503, "host_offline", `${local.label} is offline`);
+  for (const hostId of hostIds()) {
+    const candidate = getHost(hostId);
+    if (!candidate || !isLinkUp(candidate.status())) throw new HostOpError(503, "host_offline", `${candidate?.label ?? "A host"} is offline`);
+    if (!hostLists(hostId).loaded) throw new HostOpError(503, "host_sessions_unavailable", `${candidate.label}'s sessions are unavailable`);
+  }
   return null;
 }
 
@@ -128,6 +137,7 @@ export function invalidateHostSessionList(hostId: string): void {
   if (!lists) return;
   lists.fetchedAt = 0;
   lists.generation += 1;
+  lists.loaded = false;
 }
 
 /** This machine's session files changed outside any host op (a terminal omp, an import, an archive restore): its daemon and main drop their lists. */

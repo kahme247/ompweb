@@ -17,6 +17,7 @@ const previousFetch = globalThis.fetch;
 const requests = [];
 let gate = Promise.resolve();
 let failNextPut = null;
+let completionProof;
 globalThis.fetch = async (url, init = {}) => {
   const method = init.method ?? "GET";
   requests.push({ url: String(url), method, body: init.body, signal: init.signal });
@@ -25,12 +26,14 @@ globalThis.fetch = async (url, init = {}) => {
   if (String(url).startsWith("/api/uploads/") && method === "PUT") {
     await gate;
     if (failNextPut) {
-      const { status, code } = failNextPut;
+      const failure = failNextPut;
       failNextPut = null;
+      if (failure instanceof Error) throw failure;
+      const { status, code } = failure;
       return json({ error: code, code }, status);
     }
     const offset = Number(new URL(String(url), "https://omp.test/").searchParams.get("offset"));
-    return json({ received: offset + init.body.size, done: true });
+    return json({ received: offset + init.body.size, done: true, ...(completionProof ? { proof: completionProof } : {}) });
   }
   return json({});
 };
@@ -70,6 +73,7 @@ afterEach(() => {
   requests.length = 0;
   gate = Promise.resolve();
   failNextPut = null;
+  completionProof = undefined;
 });
 
 const SEND = /^(Send|chatInput\.send)$/;
@@ -81,6 +85,7 @@ const WAITING = /Waiting for 1 upload|chatInput\.uploadsWaiting/;
 const FAILED_BLOCK = /1 upload\(s\) failed|chatInput\.uploadsFailedBlock/;
 const UPLOAD_FAILED = /Upload failed|chatInput\.uploadFailed/;
 const RETRY = /^(Retry upload|chatInput\.uploadRetry)$/;
+const RECONNECTING = /Reconnecting…|chatInput\.uploadReconnecting/;
 const REMOVE_FILE = /^(Remove file|chatInput\.removeFile)$/;
 const TOO_LARGE = /skipped: files up to 2 GB|chatInput\.attachmentUploadTooLarge/;
 const UPLOAD_LIMIT = /at most 20 files|chatInput\.attachmentUploadLimit/;
@@ -133,7 +138,7 @@ function putOf(id) {
   });
 }
 
-const deleted = (id) => requests.some((each) => each.method === "DELETE" && each.url === `/api/uploads/${id}`);
+const deleted = (id) => requests.some((each) => each.method === "DELETE" && each.url === `/api/uploads/${id}?host=local`);
 const chipOf = (name) => screen.getByText(name).parentElement;
 const pressEnter = () => act(async () => { fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" }); });
 
@@ -194,7 +199,8 @@ test("Enter refuses to send while an upload is in flight, and while one failed",
   assert.match(screen.getByRole("alert").textContent, WAITING);
   assert.equal(sent.length, 0, "no send while it uploads");
 
-  failNextPut = { status: 503, code: "host_offline" };
+  // A full disk: waiting cannot fix it, so the chip fails instead of resuming by itself.
+  failNextPut = { status: 507, code: "upload_write_failed" };
   await release();
   await waitFor(() => assert.match(chipOf("data.zip").textContent, UPLOAD_FAILED));
   await pressEnter();
@@ -210,7 +216,6 @@ test("a queued steer or follow-up during a run waits for uploads too", async () 
     isStreaming: true,
     onSteer: record("onSteer"),
     onFollowUp: record("onFollowUp"),
-    onPromptWithStreamingBehavior: record("onPromptWithStreamingBehavior"),
   });
   await act(async () => { ref.current.addFiles([binaryFile("data.zip")]); });
   await putOf((await opened("data.zip")).id);
@@ -242,7 +247,7 @@ test("removing a chip aborts its upload in flight, or discards a finished one", 
 });
 
 test("Retry on a failed chip resumes the same upload, then the chip finishes", async () => {
-  failNextPut = { status: 503, code: "host_offline" };
+  failNextPut = { status: 507, code: "upload_write_failed" };
   const sent = [];
   const ref = renderComposer("uploads-retry", sent);
   await act(async () => { ref.current.addFiles([binaryFile("data.zip")]); });
@@ -259,6 +264,16 @@ test("Retry on a failed chip resumes the same upload, then the chip finishes", a
   assert.equal(within(chipOf("data.zip")).queryByRole("button", { name: RETRY }), null);
   await act(async () => { screen.getByRole("button", { name: SEND }).click(); });
   assert.deepEqual(sent[0][2], [id]);
+});
+
+test("a reconnecting chip identifies a network failure instead of a generic upload failure", async () => {
+  failNextPut = new TypeError("Failed to fetch");
+  const ref = renderComposer("uploads-network-error", []);
+  await act(async () => { ref.current.addFiles([binaryFile("network.zip")]); });
+  await waitFor(() => assert.match(chipOf("network.zip").textContent, RECONNECTING));
+  assert.match(chipOf("network.zip").title, /network error/i);
+  assert.equal(within(chipOf("network.zip")).queryByRole("button", { name: RETRY }), null);
+  await act(async () => { within(chipOf("network.zip")).getByRole("button", { name: REMOVE_FILE }).click(); });
 });
 
 test("an image switches Inline -> As file -> Inline, and switching back aborts its upload", async () => {
@@ -279,6 +294,16 @@ test("an image switches Inline -> As file -> Inline, and switching back aborts i
   assert.ok(deleted(id), "the host drops what it staged");
   assert.equal(screen.getByRole("button", { name: SEND }).disabled, false, "nothing left to wait for");
   await release();
+});
+
+test("an image sent As file shows that it is reconnecting, without hovering", async () => {
+  const { ImageChip } = await import("./ChatInput-uploads.tsx");
+  const upload = { id: "u", name: "dot.png", size: 8, hostId: "local", file: null, received: 4, status: "uploading", error: "This machine is offline", previewUrl: null };
+  const props = { previewUrl: null, canSwitch: true, onSwitch() {}, onRemove() {} };
+  const { rerender } = render(React.createElement(ImageChip, { ...props, upload }));
+  assert.ok(screen.getByRole("img", { name: RECONNECTING }));
+  rerender(React.createElement(ImageChip, { ...props, upload: { ...upload, error: null } }));
+  assert.equal(screen.queryByRole("img", { name: RECONNECTING }), null, "gone once the host answers");
 });
 
 test(`only ${MAX_UPLOADS_PER_MESSAGE} files attach to one message`, async () => {
@@ -342,17 +367,42 @@ test("a draft keeps finished uploads only, and restores them as done chips", asy
   assert.deepEqual(sent[0][2], [done.id]);
 });
 
-test("a stall the worker reports fails the chip with a Retry", async () => {
-  // The browser-link path: a fake shared worker, switched to `ws`, answers the upload with the worker's stall error.
-  let port;
-  globalThis.SharedWorker = class {
-    constructor() {
-      port = this.port = { posted: [], postMessage(message) { this.posted.push(message); }, onmessage: null, start() {} };
-    }
-  };
-  openEventStream({ kind: "running" });
-  delete globalThis.SharedWorker;
-  port.onmessage({ data: { transport: "ws" } });
+test("upload continuity: completed proof survives a refused send and composer remount", async () => {
+  const key = "uploads-proof-recovery";
+  completionProof = "completed-upload-proof";
+  const ref = renderComposer(key, [], { onSend: async () => ({ status: "rejected" }) });
+  await act(async () => { ref.current.addFiles([binaryFile("authorized.zip")]); });
+  const upload = await opened("authorized.zip");
+  await waitFor(() => assert.equal(screen.getByRole("button", { name: SEND }).disabled, false));
+  const expected = { id: upload.id, name: upload.name, size: upload.size, hostId: "local", proof: "completed-upload-proof" };
+  assert.deepEqual(getDraft(key)?.uploads, [expected], "completion authority is persisted before Send becomes available");
+  await act(async () => { screen.getByRole("button", { name: SEND }).click(); });
+  await waitFor(() => assert.deepEqual(getDraft(key)?.uploads, [expected], "refusal recovers the same authorized attachment"));
+  cleanup();
+  renderComposer(key, []);
+  assert.ok(screen.getByText("authorized.zip"));
+  assert.deepEqual(getDraft(key)?.uploads, [expected], "hydration must not strip authority while rewriting the draft");
+});
+
+/** The tab's one shared-worker transport (a module singleton), faked once and switched to `ws` by each test. */
+let fakePort;
+function wsPort() {
+  if (!fakePort) {
+    globalThis.SharedWorker = class {
+      constructor() {
+        fakePort = this.port = { posted: [], postMessage(message) { this.posted.push(message); }, onmessage: null, start() {} };
+      }
+    };
+    openEventStream({ kind: "running" });
+    delete globalThis.SharedWorker;
+  }
+  fakePort.onmessage({ data: { transport: "ws" } });
+  return fakePort;
+}
+
+test("a stall the worker reports shows Reconnecting… and resumes by itself under the same id", async () => {
+  // The browser-link path: the fake shared worker answers the upload with the worker's stall error.
+  const port = wsPort();
   try {
     const ref = renderComposer("uploads-stall", []);
     await act(async () => { ref.current.addFiles([binaryFile("data.zip")]); });
@@ -362,7 +412,74 @@ test("a stall the worker reports fails the chip with a Retry", async () => {
       return message;
     });
     await act(async () => { port.onmessage({ data: { up: upload.id, error: { status: 504, code: "upload_stalled", message: "The upload stalled" } } }); });
-    await waitFor(() => assert.ok(within(chipOf("data.zip")).getByRole("button", { name: RETRY })));
+    await waitFor(() => assert.match(chipOf("data.zip").textContent, RECONNECTING));
+    assert.equal(within(chipOf("data.zip")).queryByRole("button", { name: RETRY }), null, "no Retry while it waits");
+    const again = await waitFor(() => {
+      const starts = port.posted.filter((each) => each.op === "upload" && each.id === upload.id);
+      assert.equal(starts.length, 2, "started again after the back-off");
+      return starts[1];
+    }, { timeout: 3_000 });
+    await act(async () => { port.onmessage({ data: { up: again.id, received: 8, done: true } }); });
+    await waitFor(() => assert.equal(screen.getByRole("button", { name: SEND }).disabled, false));
+    assert.doesNotMatch(chipOf("data.zip").textContent, RECONNECTING);
+  } finally {
+    port.onmessage({ data: { transport: "sse" } });
+  }
+});
+
+test("Retry after the page left the back/forward cache starts a new upload id: the old one's cancel can never delete it", async () => {
+  const port = wsPort();
+  try {
+    const ref = renderComposer("uploads-bfcache-retry", []);
+    await act(async () => { ref.current.addFiles([binaryFile("cached.zip")]); });
+    const first = await waitFor(() => {
+      const message = port.posted.find((each) => each.op === "upload" && each.name === "cached.zip");
+      assert.ok(message);
+      return message;
+    });
+    // pagehide: the worker cancelled it on the host (410, not resumable).
+    await act(async () => { port.onmessage({ data: { up: first.id, error: { status: 410, code: "upload_failed", message: "The upload failed. Retry it." } } }); });
+    const retry = await waitFor(() => within(chipOf("cached.zip")).getByRole("button", { name: RETRY }));
+    await act(async () => { retry.click(); });
+    const second = await waitFor(() => {
+      const starts = port.posted.filter((each) => each.op === "upload" && each.name === "cached.zip");
+      assert.equal(starts.length, 2);
+      return starts[1];
+    });
+    assert.notEqual(second.id, first.id, "a new id: the cancel still pending for the old one cannot reach it");
+    await act(async () => { port.onmessage({ data: { up: second.id, received: 8, done: true } }); });
+    await waitFor(() => assert.equal(screen.getByRole("button", { name: SEND }).disabled, false));
+  } finally {
+    fakePort.onmessage({ data: { transport: "sse" } });
+  }
+});
+
+test("upload continuity: an old completion cannot give a replacement upload its proof", async () => {
+  const port = wsPort();
+  const key = "uploads-proof-new-id";
+  try {
+    const ref = renderComposer(key, []);
+    await act(async () => { ref.current.addFiles([binaryFile("replacement.zip")]); });
+    const first = await waitFor(() => {
+      const message = port.posted.find((each) => each.op === "upload" && each.name === "replacement.zip");
+      assert.ok(message);
+      return message;
+    });
+    await act(async () => { port.onmessage({ data: { up: first.id, error: { status: 410, code: "upload_failed", message: "Retry it." } } }); });
+    const retry = await waitFor(() => within(chipOf("replacement.zip")).getByRole("button", { name: RETRY }));
+    await act(async () => { retry.click(); });
+    const second = await waitFor(() => {
+      const starts = port.posted.filter((each) => each.op === "upload" && each.name === "replacement.zip");
+      assert.equal(starts.length, 2);
+      return starts[1];
+    });
+    assert.notEqual(second.id, first.id);
+    await act(async () => {
+      port.onmessage({ data: { up: first.id, received: 8, done: true, proof: "old-upload-proof" } });
+      port.onmessage({ data: { up: second.id, received: 8, done: true } });
+    });
+    await waitFor(() => assert.equal(screen.getByRole("button", { name: SEND }).disabled, false));
+    assert.deepEqual(getDraft(key)?.uploads, [{ id: second.id, name: "replacement.zip", size: 8, hostId: "local" }]);
   } finally {
     port.onmessage({ data: { transport: "sse" } });
   }

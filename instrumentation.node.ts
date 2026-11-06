@@ -72,6 +72,14 @@ export async function register(): Promise<void> {
     }
   }
 
+  // Each host daemon deletes sent uploads after the configured number of days: tell it the setting whenever it links.
+  try {
+    const { startUploadRetentionSync } = await import("@/lib/hosts/upload-retention-sync");
+    startUploadRetentionSync();
+  } catch (error) {
+    console.warn(`[omp-web] upload retention sync not started: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   // Resume sessions that were mid-run when omp-web last stopped (opt-in
   // setting). Fire-and-forget: resuming must not block boot.
   void (async () => {
@@ -82,6 +90,14 @@ export async function register(): Promise<void> {
       console.warn(`[omp-web] session auto-resume failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   })();
+
+  // Messages the outbox held when omp-web last stopped go once their hosts link (lib/message-outbox.ts).
+  try {
+    const { startOutbox } = await import("@/lib/message-outbox");
+    startOutbox();
+  } catch (error) {
+    console.warn(`[omp-web] message outbox not started: ${error instanceof Error ? error.message : String(error)}`);
+  }
 
   // Crash/stall journal: a long-running server that dies or wedges while the
   // user is away leaves no trace in a terminal that no longer exists (CLI runs

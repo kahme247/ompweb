@@ -5,7 +5,7 @@ import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useTransition, cloneElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { getSubmitDuringRunBehavior, getWordCompletionMode, setSubmitDuringRunBehavior, setWordCompletionMode, type SubmitDuringRunBehavior, type WordCompletionMode } from "@/lib/composer-prefs";
 import dynamic from "@/lib/dynamic";
-import { ArrowDown, ArrowLeft, ArrowUp, Copy, Download, ExternalLink, RefreshCw, RotateCcw, Search, Monitor, Play, Square, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowUp, Copy, Download, RefreshCw, RotateCcw, Search, Monitor, Play, Square, Trash2, X } from "lucide-react";
 import { COMPACTION_METHODS, DEFAULT_COMPACTION_METHOD_ORDER, type CompactionMethod } from "@/lib/compaction-methods";
 import { formatAgentEnvText, parseAgentEnvText, type AgentEnvErrorLabels } from "@/lib/omp/agent-env-policy";
 import { isRecord } from "@/lib/type-guards";
@@ -33,6 +33,7 @@ import {
   type NotificationSupport,
 } from "@/lib/notification-client";
 import { BROWSER_TRANSPORTS, type BrowserTransport } from "@/lib/event-stream-protocol";
+import { setConnectionDiagnosticsEnabled, useConnectionDiagnosticsEnabled } from "@/lib/connection-diagnostics-prefs";
 const SettingsTabLoading = () => {
   const { t } = useI18n();
   return <div role="status" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>{t("settingsConfig.loadingSettings")}</div>;
@@ -45,7 +46,6 @@ const AgentsConfig = dynamic(() => import("./AgentsConfig").then((module) => mod
 const HostsConfig = dynamic(() => import("./HostsConfig").then((module) => module.HostsConfig), { loading: SettingsTabLoading });
 const UsageConfig = dynamic(() => import("./UsageConfig").then((module) => module.UsageConfig), { loading: SettingsTabLoading });
 
-type UpdateState = AppUpdateInfo;
 type WindowsServiceStatus = {
   isWindows: boolean;
   isInstalled: boolean;
@@ -176,6 +176,7 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { id: "message-during-active-run", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.messageDuringActiveRun", descKey: "settingsConfig.messageDuringActiveRunDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Message during active run", fallbackDesc: "What composer does on submit while agent runs. Steer interrupts; Queue follow-up delivers after finish.", scope: "UI" },
   { id: "word-completion", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.wordCompletion", descKey: "settingsConfig.wordCompletionDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Word completion", fallbackDesc: "Ghost text from omp's word prediction; Tab or → accepts. Auto enables it only with a mouse or trackpad (not on touch keyboards).", scope: "UI" },
   { id: "browser-transport", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.browserTransport", descKey: "settingsConfig.browserTransportDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Browser connection", fallbackDesc: "How browsers receive live updates and send chat commands: one WebSocket that picks up where it left off after a dropped connection (the default), or server-sent events + HTTP. A browser whose proxy blocks WebSockets falls back to server-sent events on its own. Every open browser switches within a few seconds.", scope: "UI" },
+  { id: "connection-diagnostics", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.connectionDiagnostics", descKey: "settingsConfig.connectionDiagnosticsDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Show connection diagnostics", fallbackDesc: "Adds a Connection tab to the right panel showing the connection this browser uses (WebSocket or server-sent events), its status and delivery latency statistics. Applies to this browser only.", scope: "UI" },
   // Tool Safety & Approvals
   { id: "approval-mode", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.approvalMode", descKey: "settingsConfig.approvalModeDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Approval Mode", fallbackDesc: "Choose when OMP asks before tool calls.", scope: "Native OMP" },
   { id: "bash-override", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.bashOverride", descKey: "settingsConfig.bashOverrideDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Bash Override", fallbackDesc: "Override default approval policy specifically for terminal commands.", scope: "Native OMP" },
@@ -217,9 +218,10 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { id: "cache-savings", tab: "usage", sectionKey: "settingsTabs.usage.label", labelKey: "usageConfig.cacheSavings", descKey: "usageConfig.costQuality", fallbackSection: "Usage", fallbackLabel: "Cache Savings", fallbackDesc: "Prompt caching savings and cost quality breakdown", scope: "UI" },
   { id: "model-breakdown", tab: "usage", sectionKey: "settingsTabs.usage.label", labelKey: "usageConfig.breakdown", descKey: "usageConfig.model", fallbackSection: "Usage", fallbackLabel: "Model Breakdown", fallbackDesc: "Historical token usage and cost per model, day, and project", scope: "UI" },
   // Windows Background Service & System Tray
-  { id: "auto-resume-sessions", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.autoResumeSessions", descKey: "settingsConfig.autoResumeSessionsDesc", fallbackSection: "System & Updates", fallbackLabel: "Resume running sessions after a restart", fallbackDesc: "When omp-web restarts while agents are working, restart those sessions and tell each agent: \"Session interrupted and resumed. Continue as you would have done without the interruption.\" Work in progress at the moment of the restart, such as a running command, is lost." },
-  { id: "agent-tools-cross-session", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.agentTools", descKey: "settingsConfig.agentToolsDesc", fallbackSection: "System & Updates", fallbackLabel: "Agent tools (cross-session)", fallbackDesc: "Allow agents to call list_sessions, new_session and send_to_session to reach other omp-web sessions, even with no browser tab open. Delivered messages are prefixed with the sending session's ID." },
-  { id: "agent-env", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.agentEnv", descKey: "settingsConfig.agentEnvDesc", fallbackSection: "System & Updates", fallbackLabel: "Agent environment variables", fallbackDesc: "Extra environment variables passed to the omp process, one KEY=VALUE per line. Applied to sessions started after saving.", scope: "UI" },
+  { id: "auto-resume-sessions", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.autoResumeSessions", descKey: "settingsConfig.autoResumeSessionsDesc", fallbackSection: "System", fallbackLabel: "Resume running sessions after a restart", fallbackDesc: "When omp-web restarts while agents are working, restart those sessions and tell each agent: \"Session interrupted and resumed. Continue as you would have done without the interruption.\" Work in progress at the moment of the restart, such as a running command, is lost." },
+  { id: "agent-tools-cross-session", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.agentTools", descKey: "settingsConfig.agentToolsDesc", fallbackSection: "System", fallbackLabel: "Agent tools (cross-session)", fallbackDesc: "Allow agents to call list_sessions, new_session and send_to_session to reach other omp-web sessions, even with no browser tab open. Delivered messages are prefixed with the sending session's ID." },
+  { id: "upload-retention", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.uploadRetention", descKey: "settingsConfig.uploadRetentionDesc", fallbackSection: "System", fallbackLabel: "Delete sent uploads after", fallbackDesc: "Files attached As file are deleted from each session's local://uploads folder on every host, archived sessions included, once they are this old. Never keeps them for ever." },
+  { id: "agent-env", tab: "system", sectionKey: "settingsConfig.systemUpdates", labelKey: "settingsConfig.agentEnv", descKey: "settingsConfig.agentEnvDesc", fallbackSection: "System", fallbackLabel: "Agent environment variables", fallbackDesc: "Extra environment variables passed to the omp process, one KEY=VALUE per line. Applied to sessions started after saving.", scope: "UI" },
   { id: "windows-service-autostart", tab: "system", sectionKey: "settingsConfig.windowsServiceTitle", labelKey: "settingsConfig.windowsServiceAutostart", descKey: "settingsConfig.windowsServiceAutostartDesc", fallbackSection: "Windows Background Service & System Tray", fallbackLabel: "Start with Windows", fallbackDesc: "Launch background service quietly in system tray when logging into Windows.", scope: "UI" },
   { id: "windows-service-shortcuts", tab: "system", sectionKey: "settingsConfig.windowsServiceTitle", labelKey: "settingsConfig.windowsServiceInstallBtn", descKey: "settingsConfig.windowsServiceDesc", fallbackSection: "Windows Background Service & System Tray", fallbackLabel: "Install Service & Shortcuts", fallbackDesc: "Manage background service execution, system tray monitor, Windows logon autostart, and Desktop shortcuts.", scope: "UI" },
   // Notifications
@@ -350,6 +352,61 @@ function AgentToolsSetting() {
   return (
     <NativeSetting searchId="agent-tools-cross-session" label={t("settingsConfig.agentTools")} description={t("settingsConfig.agentToolsDesc")}>
       <ToggleSwitch checked={enabled === true} disabled={enabled === null} onChange={(next) => void change(next)} />
+    </NativeSetting>
+  );
+}
+
+const UPLOAD_RETENTION_CHOICES: readonly (number | null)[] = [null, 7, 30, 90];
+
+/** Server-side omp-web setting (lib/web-settings.ts): every host's daemon applies it to its own sessions' uploads. */
+function UploadRetentionSetting() {
+  const { t, tn } = useI18n();
+  // undefined until loaded; null is "Never".
+  const [days, setDays] = useState<number | null | undefined>(undefined);
+  // Blocks a second change until the save lands: two PUTs in flight could finish out of order and leave the older one saved.
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/web-settings")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { uploadRetentionDays?: number | null } | null) => { if (alive && data && data.uploadRetentionDays !== undefined) setDays(data.uploadRetentionDays); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
+  const change = async (next: number | null) => {
+    const previous = days;
+    setDays(next);
+    setSaving(true);
+    try {
+      const res = await fetch("/api/web-settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uploadRetentionDays: next }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch (error) {
+      setDays(previous);
+      toast.error(t("settingsConfig.uploadRetentionSaveFailed"), error instanceof Error ? error.message : String(error));
+    } finally {
+      setSaving(false);
+    }
+  };
+  // A value set through the API (14 days) stays visible as its own choice.
+  const choices = days === undefined || UPLOAD_RETENTION_CHOICES.includes(days) ? UPLOAD_RETENTION_CHOICES : [...UPLOAD_RETENTION_CHOICES, days];
+  return (
+    <NativeSetting searchId="upload-retention" label={t("settingsConfig.uploadRetention")} description={t("settingsConfig.uploadRetentionDesc")}>
+      <select
+        style={nativeSelectStyle}
+        value={days === undefined ? "30" : String(days)}
+        disabled={days === undefined || saving}
+        onChange={(event) => void change(event.target.value === "null" ? null : Number(event.target.value))}
+      >
+        {choices.map((choice) => (
+          <option key={String(choice)} value={String(choice)} style={nativeOptionStyle}>
+            {choice === null ? t("settingsConfig.uploadRetentionNever") : tn("settingsConfig.uploadRetentionDays", choice, { count: choice })}
+          </option>
+        ))}
+      </select>
     </NativeSetting>
   );
 }
@@ -804,7 +861,7 @@ function CompactionMethodOrder({ value, onChange, ...aria }: { value: readonly C
   );
 }
 
-export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, hideToolActivity, onHideToolActivityChange, neverFoldActivity, onNeverFoldActivityChange, showToolCallsUnfolded, onShowToolCallsUnfoldedChange, expandThinkingByDefault, onExpandThinkingByDefaultChange, onHideThinkingBlockChange, providerUsageVisible, onProviderUsageVisibleChange, scopeNativeSelectAll, onScopeNativeSelectAllChange, openUrlAutomatically, onOpenUrlAutomaticallyChange, cwd, remoteHost, sessionId, onModelsSaved, onPluginsReloaded, appUpdate, ompUpdateAvailable, ompUpdatesDisabled, onRefreshAppUpdate, onOmpUpdateAvailabilityChange, onRequestAppUpdate, onSelectTab, onClose }: {
+export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, hideToolActivity, onHideToolActivityChange, neverFoldActivity, onNeverFoldActivityChange, showToolCallsUnfolded, onShowToolCallsUnfoldedChange, expandThinkingByDefault, onExpandThinkingByDefaultChange, onHideThinkingBlockChange, providerUsageVisible, onProviderUsageVisibleChange, scopeNativeSelectAll, onScopeNativeSelectAllChange, openUrlAutomatically, onOpenUrlAutomaticallyChange, cwd, remoteHost, sessionId, onModelsSaved, onPluginsReloaded, appUpdate, onRefreshAppUpdate, onRequestAppUpdate, onSelectTab, onClose }: {
   activeTab: SettingsTab;
   toolCallsDefaultCollapsed: boolean;
   onToolCallsDefaultCollapsedChange: (collapsed: boolean) => void;
@@ -830,10 +887,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   onModelsSaved: () => void;
   onPluginsReloaded: () => void;
   appUpdate: AppUpdateInfo | null;
-  ompUpdateAvailable?: boolean;
-  ompUpdatesDisabled?: boolean;
   onRefreshAppUpdate: (force?: boolean) => Promise<AppUpdateInfo | null>;
-  onOmpUpdateAvailabilityChange: (available: boolean) => void;
   onRequestAppUpdate: () => void;
   onSelectTab: (tab: SettingsTab) => void;
   onClose: () => void;
@@ -864,6 +918,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const [submitBehavior, setSubmitBehavior] = useState<SubmitDuringRunBehavior>(() => getSubmitDuringRunBehavior());
   const [wordCompletion, setWordCompletion] = useState<WordCompletionMode>(() => getWordCompletionMode());
+  const connectionDiagnostics = useConnectionDiagnosticsEnabled();
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
     try {
@@ -873,23 +928,16 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
       return true;
     }
   });
-  const [update, setUpdate] = useState<UpdateState | null>(null);
-  const [checking, setChecking] = useState(false);
   const [checkingAppUpdate, setCheckingAppUpdate] = useState(false);
   const [appUpdateMessage, setAppUpdateMessage] = useState<string | null>(null);
-  const [hasCheckedUpdates, setHasCheckedUpdates] = useState(false);
-  const [ompUpdating, setOmpUpdating] = useState(false);
-  const [restarting, setRestarting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [windowsService, setWindowsService] = useState<WindowsServiceStatus | null>(null);
   const [loadingWindowsService, setLoadingWindowsService] = useState(false);
   const [windowsServiceActionPending, setWindowsServiceActionPending] = useState(false);
 
-  const ompUpdateIsAvailable = Boolean(ompUpdateAvailable || update?.updateAvailable);
   const appUpdateIsAvailable = Boolean(appUpdate?.updateAvailable);
   const appUpdatesDisabled = Boolean(appUpdate?.updatesDisabled);
-  const ompUpdateDisabled = ompUpdatesDisabled || Boolean(update?.updatesDisabled);
-  const systemNeedsAttention = appUpdateIsAvailable || ompUpdateIsAvailable;
+  const systemNeedsAttention = appUpdateIsAvailable;
 
   const attentionTabs = useMemo<Partial<Record<SettingsTab, boolean | string>>>(() => {
     const tabs: Partial<Record<SettingsTab, boolean | string>> = {};
@@ -1018,23 +1066,6 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
     void saveNativeSettings({ ...base, tools: { ...tools, approval: { ...(tools.approval ?? {}), ...patch } } });
   }, [nativeSettings, saveNativeSettings]);
 
-  const checkForUpdate = useCallback(async (force = false) => {
-    if (ompUpdateDisabled) return;
-    setChecking(true);
-    setMessage(null);
-    try {
-      const response = await fetch("/api/omp-update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "check", ...(force ? { force: true } : {}) }) });
-      const data = (await response.json()) as UpdateState & { error?: string };
-      if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-      setUpdate(data);
-      onOmpUpdateAvailabilityChange(data.updateAvailable);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setChecking(false);
-    }
-  }, [ompUpdateDisabled, onOmpUpdateAvailabilityChange]);
-
   const checkForAppUpdate = useCallback(async (force = false) => {
     if (appUpdatesDisabled) return;
     setCheckingAppUpdate(true);
@@ -1048,53 +1079,6 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
     }
   }, [appUpdatesDisabled, onRefreshAppUpdate]);
 
-  const restartSessions = useCallback(async () => {
-    setRestarting(true);
-    try {
-      const response = await fetch("/api/omp-update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "restart" }) });
-      const data = (await response.json()) as { error?: string; sessionsRestarted?: number };
-      if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-      setMessage(t("settingsConfig.restartSuccess", { count: data.sessionsRestarted ?? 0 }));
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setRestarting(false);
-    }
-  }, [t]);
-  const handleOmpUpdateNow = useCallback(async () => {
-    if (ompUpdating) return;
-    setOmpUpdating(true);
-    setMessage(null);
-    try {
-      const prepRes = await fetch("/api/omp-update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "update" }) });
-      const prepData = (await prepRes.json()) as { attemptId?: string; error?: string; code?: string };
-      if (!prepRes.ok || !prepData.attemptId) throw new Error(prepData.error || `HTTP ${prepRes.status}`);
-      const commitRes = await fetch("/api/omp-update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "commit", attemptId: prepData.attemptId }) });
-      const commitData = (await commitRes.json()) as { error?: string };
-      if (!commitRes.ok) throw new Error(commitData.error || `HTTP ${commitRes.status}`);
-      const deadline = Date.now() + 5 * 60 * 1000;
-      while (true) {
-        if (Date.now() > deadline) throw new Error(t("settingsConfig.ompUpdateFailed"));
-        await new Promise((r) => setTimeout(r, 500));
-        const statusRes = await fetch("/api/omp-update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "status" }) });
-        const status = (await statusRes.json()) as { state?: string; error?: string } | null;
-        if (!status) break;
-        if (status.state === "succeeded") {
-          setMessage(t("settingsConfig.ompUpdateSuccess"));
-          await checkForUpdate(true);
-          try { await restartSessions(); } catch {}
-          break;
-        }
-        if (status.state === "failed") throw new Error(status.error || t("settingsConfig.ompUpdateFailed"));
-      }
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setOmpUpdating(false);
-    }
-  }, [ompUpdating, t, checkForUpdate, restartSessions]);
-
-
   const currentTab = activeTab === "skills" ? activeTab : getNormalizedActive(activeTab);
   const nativeSettingsRequired = currentTab === "general" || currentTab === "safety" || currentTab === "models" || currentTab === "intelligence" || currentTab === "mcp";
   useEffect(() => {
@@ -1103,11 +1087,6 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
     }
   }, [currentTab, fetchWindowsServiceStatus]);
 
-  useEffect(() => {
-    if (currentTab !== "system" || hasCheckedUpdates || ompUpdateDisabled) return;
-    setHasCheckedUpdates(true);
-    void checkForUpdate();
-  }, [currentTab, hasCheckedUpdates, ompUpdateDisabled, checkForUpdate]);
 
   const trimmedQuery = searchQuery.trim().toLowerCase();
   const searchActive = trimmedQuery.length > 0;
@@ -1465,6 +1444,9 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                     </select>
                   </NativeSetting>
                   <BrowserTransportSetting />
+                  <NativeSetting searchId="connection-diagnostics" label={t("settingsConfig.connectionDiagnostics")} description={t("settingsConfig.connectionDiagnosticsDesc")} scope="UI">
+                    <ToggleSwitch checked={connectionDiagnostics} onChange={setConnectionDiagnosticsEnabled} />
+                  </NativeSetting>
                 </div>
               </div>
             )}
@@ -1845,7 +1827,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
               </div>
             )}
 
-            {/* SYSTEM & UPDATES TAB */}
+            {/* SYSTEM TAB */}
             {currentTab === "system" && (
               <div role="tabpanel" id="settings-panel-system" aria-labelledby="settings-tab-system" className="settings-panel-inner" style={{ padding: isMobile ? "16px 14px 32px" : "32px 24px 64px", display: "flex", flexDirection: "column", gap: 18 }}>
                 <div style={{ marginBottom: 4 }}>
@@ -1856,6 +1838,8 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                 <AutoResumeSessionsSetting />
 
                 <AgentToolsSetting />
+
+                <UploadRetentionSetting />
 
                 <AgentEnvSetting />
 
@@ -1921,79 +1905,6 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                     </div>
                   )}
                   {appUpdateMessage && <Alert variant={appUpdateMessage.toLowerCase().includes("fail") || appUpdateMessage.toLowerCase().includes("error") ? "error" : "info"} description={appUpdateMessage} onDismiss={() => setAppUpdateMessage(null)} />}
-                </section>
-
-                {/* OMP runtime update card */}
-                <section style={{ padding: 14, border: ompUpdateIsAvailable ? "1px solid color-mix(in srgb, var(--accent) 45%, var(--border))" : "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", display: "flex", flexDirection: "column", gap: 10 }}>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-                    <div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                        <span style={{ fontSize: 13, fontWeight: 600 }}>{t("settingsConfig.ompLabel")}</span>
-                        {ompUpdateIsAvailable && (
-                          <span
-                            role="status"
-                            aria-label={t("settingsTabs.updateAvailable")}
-                            title={t("settingsTabs.updateAvailable")}
-                            style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--accent)", flexShrink: 0 }}
-                          />
-                        )}
-                      </div>
-                      <div style={{ marginTop: 4, color: ompUpdateIsAvailable ? "var(--accent)" : "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 12 }}>
-                        {ompUpdateDisabled ? t("settingsConfig.updatesDisabled") : checking || (!hasCheckedUpdates && !update) ? t("settingsConfig.checkingUpdates") : update?.updateAvailable ? t("appShell.updateVersion", { current: update.currentVersion ?? "?", available: update.availableVersion ?? "?" }) : update?.currentVersion ? t("settingsConfig.upToDate", { version: update.currentVersion }) : t("settingsConfig.versionUnavailable")}
-                      </div>
-                    </div>
-                    <button type="button" onClick={() => void checkForUpdate(true)} disabled={checking || ompUpdateDisabled} aria-label={t("settingsConfig.checkOmpUpdates")} style={{ padding: "6px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", cursor: checking || ompUpdateDisabled ? "not-allowed" : "pointer", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 5 }}>
-                      <RefreshCw size={13} aria-hidden="true" /> {t("settingsConfig.refresh")}
-                    </button>
-                  </div>
-                  {update?.updateAvailable && (
-                    <div style={{ marginTop: 6, padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", display: "flex", flexDirection: "column", gap: 6 }}>
-                      <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{t("settingsConfig.runOmpUpdateCommand")}</div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                        <code style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent)", wordBreak: "break-all" }}>{update.updateCommand || "omp update"}</code>
-                        {update.selfUpdateSupported === true && (
-                          <button
-                            type="button"
-                            onClick={() => void handleOmpUpdateNow()}
-                            disabled={ompUpdating}
-                            style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 8px", border: "1px solid var(--accent-strong)", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "var(--on-accent)", cursor: ompUpdating ? "wait" : "pointer", fontSize: 11, fontWeight: 600 }}
-                          >
-                            <Download size={12} aria-hidden="true" /> {ompUpdating ? t("settingsConfig.updating") : t("settingsConfig.ompUpdateAction")}
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => {
-                            void copyText(update.updateCommand || "omp update")
-                              .then(() => toast.success(t("appShell.commandCopied")))
-                              .catch(() => toast.error(t("appShell.commandCopyFailed")));
-                          }}
-                          style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}
-                        >
-                          <Copy size={12} aria-hidden="true" /> {t("appShell.copyCommand")}
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 6 }}>
-                    <button
-                      type="button"
-                      onClick={() => void restartSessions()}
-                      disabled={restarting}
-                      style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text)", cursor: restarting ? "wait" : "pointer", fontSize: 12 }}
-                    >
-                      <RotateCcw size={13} aria-hidden="true" /> {restarting ? t("settingsConfig.restarting") : t("settingsConfig.restartSessions")}
-                    </button>
-                    <a
-                      href="https://github.com/can1357/oh-my-pi/releases"
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", color: "var(--text-muted)", textDecoration: "none", fontSize: 12 }}
-                    >
-                      <ExternalLink size={13} aria-hidden="true" /> {t("settingsConfig.changelog")}
-                    </a>
-                  </div>
-                  {message && <Alert variant={message.toLowerCase().includes("fail") || message.toLowerCase().includes("error") ? "error" : "info"} description={message} onDismiss={() => setMessage(null)} />}
                 </section>
 
                 {/* Windows Background Service & System Tray card (Windows only) */}
@@ -2109,6 +2020,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                         </button>
                       )}
                     </div>
+                    {message && <Alert variant={message.toLowerCase().includes("fail") || message.toLowerCase().includes("error") ? "error" : "info"} description={message} onDismiss={() => setMessage(null)} />}
                   </section>
                 )}
               </div>

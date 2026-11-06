@@ -1,7 +1,7 @@
 import { apiErrorResponse, opErrorResponse, resolveHostOrError } from "@/lib/api-utils";
 import { allowFileRoot } from "@/lib/file-access";
 import { LOCAL_HOST_ID } from "@/lib/hosts/registry";
-import { projectIdentityKey } from "@/lib/paths";
+import { comparableProjectPath } from "@/lib/comparable-path";
 
 // POST /api/cwd/validate  body: { cwd: string; hostId?: string }
 // Validates a candidate workspace on `hostId` (this machine when absent) before the UI selects it.
@@ -24,7 +24,7 @@ export async function POST(req: Request) {
       success: true,
       cwd: result.value.cwd,
       projectRoot: result.value.projectRoot,
-      projectKey: projectIdentityKey(result.value.projectRoot),
+      projectKey: result.value.projectKey ?? comparableProjectPath(result.value.projectRoot),
     });
   } catch (error) {
     return apiErrorResponse(error);
