@@ -20,8 +20,8 @@ import {
 import { markShuttingDown, recordRunningSessions, RESUME_PROMPT, resumeOnHostLink, takeInterruptedSessions, type InterruptibleSession } from "./session-resume";
 import { samePath } from "./paths";
 import { isRecord } from "./type-guards";
-import { BLOCKING_UI_METHODS, createNotificationDetector } from "./notification-events";
-import { publishNotification } from "./notification-hub";
+import { BLOCKING_UI_METHODS, createNotificationDetector, type NotificationEvent } from "./notification-events";
+import { MAX_INPUT_REMINDERS, inputReminderIntervalMs, publishNotification } from "./notification-hub";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./skill-diagnostics";
 import { eventWithToolResultImageUrls } from "./media-cache";
 import type {
@@ -377,6 +377,15 @@ export class AgentSessionWrapper {
   private listeners: EventListener[] = [];
   private pendingUiRequests = new Map<string, UnsequencedAgentEvent>();
   private uiExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Session id each input notification was published under, keyed by request id. */
+  private inputNotificationSessions = new Map<string, string>();
+  /** Repeats of a still-pending dialog, keyed by request id; the timer lives with this wrapper. */
+  private inputReminders = new Map<string, {
+    event: NotificationEvent;
+    pendingSince: string;
+    count: number;
+    timer: ReturnType<typeof setTimeout> | null;
+  }>();
   /** Dialogs omp-web itself raised (confirmFromServer): answered here, never forwarded to omp. */
   private serverUiRequests = new Map<string, (confirmed: boolean) => void>();
   private extensionStatuses = new Map<string, string>();
@@ -1035,8 +1044,75 @@ export class AgentSessionWrapper {
       sessionName: this._sessionName || this.cwd.split(/[\\/]/).filter(Boolean).pop() || null,
     };
     for (const notification of this.detectNotification(frame, session)) {
-      publishNotification(this.movedFromIds.length ? { ...notification, aliases: this.movedFromIds } : notification);
+      let requestId = "";
+      if (notification.type === "input") {
+        // Dismiss uses the id the notification was published under, even after
+        // omp moved the conversation to a new file. Remember it even when the
+        // dialog did not fit a notification (`open_url`, oversized payload):
+        // the retraction still has to reach the published tag.
+        requestId = notification.requestId ?? notification.dialog?.requestId ?? (typeof frame.id === "string" ? frame.id : "");
+        if (requestId) this.inputNotificationSessions.set(requestId, notification.sessionId);
+      }
+      const published = this.movedFromIds.length ? { ...notification, aliases: this.movedFromIds } : notification;
+      publishNotification(published);
+      // Only a dialog still waiting on the user is repeated; the timer is cleared by every settle path.
+      if (notification.type === "input" && requestId) this.armInputReminder(requestId, published);
     }
+  }
+
+  /** Start (or restart) the repeat timer for one published `input` notification. */
+  private armInputReminder(requestId: string, event: NotificationEvent): void {
+    const previous = this.inputReminders.get(requestId);
+    clearTimeout(previous?.timer ?? undefined);
+    const delay = inputReminderIntervalMs();
+    if (delay === null) {
+      this.inputReminders.delete(requestId);
+      return;
+    }
+    const timer = setTimeout(() => this.fireInputReminder(requestId), delay);
+    timer.unref?.();
+    // A surviving entry keeps its count and opening time; the normal path
+    // starts a fresh dialog with none.
+    this.inputReminders.set(requestId, {
+      event,
+      pendingSince: previous?.pendingSince ?? new Date().toISOString(),
+      count: previous?.count ?? 0,
+      timer,
+    });
+  }
+
+  /** Publish one repeat and schedule the next, until the cap or a settle ends it. */
+  private fireInputReminder(requestId: string): void {
+    const reminder = this.inputReminders.get(requestId);
+    if (!reminder) return;
+    if (!this.pendingUiRequests.has(requestId)) {
+      this.clearInputReminder(requestId);
+      return;
+    }
+    reminder.timer = null;
+    reminder.count += 1;
+    publishNotification({
+      ...reminder.event,
+      ...(this.movedFromIds.length ? { aliases: this.movedFromIds } : {}),
+      reminder: true,
+      pendingSince: reminder.pendingSince,
+    });
+    const delay = inputReminderIntervalMs();
+    if (reminder.count >= MAX_INPUT_REMINDERS || delay === null) {
+      this.inputReminders.delete(requestId);
+      return;
+    }
+    const timer = setTimeout(() => this.fireInputReminder(requestId), delay);
+    timer.unref?.();
+    reminder.timer = timer;
+  }
+
+  /** Stop repeating a dialog that settled or that this wrapper no longer tracks. */
+  private clearInputReminder(requestId: string): void {
+    const reminder = this.inputReminders.get(requestId);
+    if (!reminder) return;
+    clearTimeout(reminder.timer ?? undefined);
+    this.inputReminders.delete(requestId);
   }
 
   private handleFrame(frame: RpcFrame): void {
@@ -1309,6 +1385,10 @@ export class AgentSessionWrapper {
       clearTimeout(timer);
       this.uiExpiryTimers.delete(id);
     }
+    // Every settle path (answer, cancel, expiry, restart, destroy, new run)
+    // forgets the dialog; the repeat must stop with it.
+    this.clearInputReminder(id);
+    this.inputNotificationSessions.delete(id);
   }
 
   private clearPendingUiRequests(): void {

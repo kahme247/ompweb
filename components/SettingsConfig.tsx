@@ -228,6 +228,7 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { id: "notifications-enable", tab: "notifications", sectionKey: "notifications.title", labelKey: "notifications.enable", descKey: "notifications.enableDesc", fallbackSection: "Notifications", fallbackLabel: "Enable notifications", fallbackDesc: "Asks the browser for permission to show notifications.", scope: "UI" },
   { id: "notifications-completed", tab: "notifications", sectionKey: "notifications.title", labelKey: "notifications.typeCompleted", descKey: "notifications.typeCompletedDesc", fallbackSection: "Notifications", fallbackLabel: "Task finished", fallbackDesc: "A prompt and the background work it started are done. Subagents never notify.", scope: "UI" },
   { id: "notifications-input", tab: "notifications", sectionKey: "notifications.title", labelKey: "notifications.typeInput", descKey: "notifications.typeInputDesc", fallbackSection: "Notifications", fallbackLabel: "Waiting for input", fallbackDesc: "The agent asks a question or needs an approval.", scope: "UI" },
+  { id: "notifications-input-reminder", tab: "notifications", sectionKey: "notifications.title", labelKey: "notifications.inputReminder", descKey: "notifications.inputReminderDesc", fallbackSection: "Notifications", fallbackLabel: "Remind me about unanswered questions", fallbackDesc: "The notification repeats while a question stays unanswered, until it is answered or cancelled.", scope: "UI" },
   { id: "notifications-error", tab: "notifications", sectionKey: "notifications.title", labelKey: "notifications.typeError", descKey: "notifications.typeErrorDesc", fallbackSection: "Notifications", fallbackLabel: "Run failed", fallbackDesc: "A run stops with an error after retries and fallbacks, or the omp process exits.", scope: "UI" },
   { id: "notifications-modelSwitch", tab: "notifications", sectionKey: "notifications.title", labelKey: "notifications.typeModelSwitch", descKey: "notifications.typeModelSwitchDesc", fallbackSection: "Notifications", fallbackLabel: "Model switched automatically", fallbackDesc: "omp switches models on its own: a fallback after a refusal, rate limit, or usage limit, or a prewalk / plan hand-off.", scope: "UI" },
   { id: "notifications-when-active", tab: "notifications", sectionKey: "notifications.title", labelKey: "notifications.whenActive", descKey: "notifications.whenActiveDesc", fallbackSection: "Notifications", fallbackLabel: "When I'm using omp-web in another tab", fallbackDesc: "Nothing is shown for the session you are viewing.", scope: "UI" },
@@ -699,6 +700,9 @@ function NotificationSettingsPanel() {
           <ToggleSwitch checked={prefs.types[type]} disabled={!prefs.enabled} onChange={(next) => save({ types: { ...prefs.types, [type]: next } })} />
         </NativeSetting>
       ))}
+      <NativeSetting searchId="notifications-input-reminder" scope="UI" disabled={!prefs.enabled || !prefs.types.input} label={t("notifications.inputReminder")} description={t("notifications.inputReminderDesc")}>
+        <ToggleSwitch checked={prefs.inputReminder} disabled={!prefs.enabled || !prefs.types.input} onChange={(next) => save({ inputReminder: next })} />
+      </NativeSetting>
       <NativeSetting searchId="notifications-when-active" scope="UI" disabled={!prefs.enabled} label={t("notifications.whenActive")} description={t("notifications.whenActiveDesc")}>
         <select
           style={nativeSelectStyle}

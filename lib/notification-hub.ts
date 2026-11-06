@@ -7,7 +7,7 @@ import {
   type NotificationEvent,
   type RenderedNotification,
 } from "./notification-events";
-import { dropDeviceSubscription, getDevice, getVapidKeys, listDevices, recordHistory, type NotificationDevice } from "./notification-store";
+import { dropDeviceSubscription, getDevice, getVapidKeys, listDevices, markHistoryRead, recordHistory, type NotificationDevice } from "./notification-store";
 
 /**
  * Server side of notifications: presence of open tabs, per-device preferences
@@ -21,6 +21,31 @@ const PUSH_TTL_SECONDS = 3600;
 const PUSH_TIMEOUT_MS = 10_000;
 /** Waits before each retry of a push the push service never answered or answered 429/5xx. Well inside the TTL. */
 export const PUSH_RETRY_DELAYS_MS = [2_000, 10_000, 30_000];
+/**
+ * How long a retraction keeps suppressing further delivery attempts of the
+ * same `input` push: one retry cycle is its backoff waits plus the time a
+ * single attempt may hang, and no retry can outlive that.
+ */
+export const PUSH_RETRACTION_TTL_MS = PUSH_RETRY_DELAYS_MS.reduce((total, delay) => total + delay, 0)
+  + (PUSH_RETRY_DELAYS_MS.length + 1) * PUSH_TIMEOUT_MS;
+/** Default spacing of the repeats of an unanswered `input` notification. */
+export const INPUT_REMINDER_MS = 2 * 60 * 60 * 1000;
+/** A dialog is repeated at most this often before it stays quiet until it settles. */
+export const MAX_INPUT_REMINDERS = 12;
+
+/**
+ * Reminder spacing for this process, read on every dialog so tests and a
+ * changed environment need no restart. `OMP_WEB_INPUT_REMINDER_MS=0` disables
+ * reminders; unset or malformed values keep the default.
+ */
+export function inputReminderIntervalMs(): number | null {
+  const raw = process.env.OMP_WEB_INPUT_REMINDER_MS;
+  if (raw === undefined || raw.trim() === "") return INPUT_REMINDER_MS;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) return INPUT_REMINDER_MS;
+  return value === 0 ? null : value;
+}
+
 // Apple's push service rejects VAPID subjects it cannot resolve (e.g. localhost mail).
 const VAPID_SUBJECT = "https://github.com/kahme247/ompweb";
 
@@ -35,7 +60,13 @@ export interface NotificationPresence {
   lastSeen: number;
 }
 
-export type NotificationMessage = { kind: "toast" | "os"; event: NotificationEvent };
+/**
+ * A toast/system notification, or the retraction of a session's `input`
+ * notification once its dialog was answered, cancelled, expired or destroyed.
+ */
+export type NotificationMessage =
+  | { kind: "toast" | "os"; event: NotificationEvent }
+  | { kind: "dismiss"; tag: string; sessionId: string; requestId: string };
 
 type Send = (message: NotificationMessage) => void;
 
@@ -47,6 +78,10 @@ interface HubState {
   presence: Map<string, NotificationPresence>;
   /** Open SSE streams per tab. Independent of presence: streams reconnect, overlap, and close while the tab stays put. */
   streams: Map<string, Set<Send>>;
+  /** The notification device each tab declared with its stream. Absent for tabs that predate the field: those keep the pre-device behaviour (no stream-only delivery). */
+  streamDevices: Map<string, string>;
+  /** `<sessionId>:<requestId>` → when it was retracted. A push retry of a settled dialog must deliver nothing (see `publishNotificationDismiss`). */
+  retractions: Map<string, number>;
 }
 
 declare global {
@@ -54,7 +89,12 @@ declare global {
 }
 
 function hub(): HubState {
-  return (globalThis.__ompNotificationHub ??= { presence: new Map(), streams: new Map() });
+  const state = (globalThis.__ompNotificationHub ??= { presence: new Map(), streams: new Map(), streamDevices: new Map(), retractions: new Map() });
+  // `bun --hot` keeps this object across a re-evaluation: a state created by
+  // the previous module instance may predate a field added here.
+  state.streamDevices ??= new Map();
+  state.retractions ??= new Map();
+  return state;
 }
 
 export function getVapidPublicKey(): string {
@@ -78,16 +118,33 @@ export function reportPresence(report: Omit<NotificationPresence, "lastSeen">): 
   presence.set(report.clientId, { ...report, lastSeen: Date.now() });
 }
 
-/** Attach a tab's SSE stream. Returns the detach callback. */
-export function attachNotificationClient(clientId: string, send: Send): () => void {
-  const { streams } = hub();
-  const own = streams.get(clientId) ?? new Set();
+/** Attach a tab's SSE stream. `deviceId` is the notification device this tab
+ *  belongs to (the app's NotificationCenter id / the web tab's stored device
+ *  id); a stream without one is reachable but never receives stream-only
+ *  deliveries, exactly like before device routing existed. Returns the detach
+ *  callback. */
+export function attachNotificationClient(clientId: string, send: Send, deviceId?: string): () => void {
+  const state = hub();
+  const own = state.streams.get(clientId) ?? new Set();
   own.add(send);
-  streams.set(clientId, own);
+  state.streams.set(clientId, own);
+  if (deviceId) state.streamDevices.set(clientId, deviceId);
   return () => {
     own.delete(send);
-    if (own.size === 0 && streams.get(clientId) === own) streams.delete(clientId);
+    if (own.size === 0 && state.streams.get(clientId) === own) {
+      state.streams.delete(clientId);
+      state.streamDevices.delete(clientId);
+    }
   };
+}
+
+/** Reachable tabs with the device each one declared (`undefined` when it did
+ *  not declare one). The map doubles as the reachability set. */
+function reachableTabs(): Map<string, string | undefined> {
+  const state = hub();
+  const reachable = new Map<string, string | undefined>();
+  for (const clientId of state.streams.keys()) reachable.set(clientId, state.streamDevices.get(clientId));
+  return reachable;
 }
 
 // ---------------------------------------------------------------- routing
@@ -99,39 +156,92 @@ function isOnScreen(event: NotificationEvent, presence: NotificationPresence[]):
 }
 
 /**
- * Decide where one event goes. `reachable` holds the tabs with an open stream.
+ * Decide where one event goes. `reachable` maps each tab with an open stream
+ * to the notification device it declared (`undefined` when it declared none).
  * 1. A visible tab is showing the session: nothing, for every device.
  * 2. The user is active in some reachable tab and the device prefers toasts:
  *    toast to that device's active tabs only (other devices stay quiet).
  * 3. Otherwise a system notification: push when the device has a
  *    subscription, else in-page on each of its reachable tabs.
+ *
+ * A stream without a live presence entry is reachable but **not visible**.
+ * Native clients (no push subscription) keep their `notifications` stream open
+ * without presence reports, so rule 3 also delivers to stream-only tabs — but
+ * only through the device the tab declared: that device's own preferences
+ * decide, and a device a push already covers gets no frame. A stream that
+ * declared no device keeps the pre-device behaviour (no stream-only delivery).
+ * Presence keeps its kill-switch: rule 1 still suppresses everything while a
+ * visible tab shows the session.
  */
-export function routeNotification(event: NotificationEvent, presence: NotificationPresence[], reachable: ReadonlySet<string>, devices: NotificationDevice[]): Delivery[] {
+export function routeNotification(event: NotificationEvent, presence: NotificationPresence[], reachable: ReadonlyMap<string, string | undefined>, devices: NotificationDevice[]): Delivery[] {
   if (event.type === "test") return [];
   if (isOnScreen(event, presence)) return [];
+  const presenceById = new Map(presence.map((tab) => [tab.clientId, tab]));
+  // Stream-only tabs grouped by the device that owns them.
+  const streamOnlyByDevice = new Map<string, string[]>();
+  for (const [clientId, deviceId] of reachable) {
+    if (!deviceId || presenceById.has(clientId)) continue;
+    const owned = streamOnlyByDevice.get(deviceId) ?? [];
+    owned.push(clientId);
+    streamOnlyByDevice.set(deviceId, owned);
+  }
   const active = presence.filter((tab) => tab.visible && reachable.has(tab.clientId));
   const deliveries: Delivery[] = [];
+  const seen = new Set<string>();
+  const deliver = (delivery: Delivery) => {
+    const key = delivery.kind === "push" ? `push:${delivery.deviceId}` : `${delivery.kind}:${delivery.clientId}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    deliveries.push(delivery);
+  };
   for (const device of devices) {
     if (!device.prefs.enabled || !device.prefs.types[event.type]) continue;
+    // The first `input` notification is unaffected; only its repeats are optional.
+    if (event.reminder && device.prefs.inputReminder === false) continue;
     if (active.length > 0 && device.prefs.whenActive === "toast") {
-      for (const tab of active) if (tab.deviceId === device.deviceId) deliveries.push({ kind: "toast", clientId: tab.clientId });
+      for (const tab of active) if (tab.deviceId === device.deviceId) deliver({ kind: "toast", clientId: tab.clientId });
     } else if (device.subscription) {
-      deliveries.push({ kind: "push", deviceId: device.deviceId });
+      deliver({ kind: "push", deviceId: device.deviceId });
     } else {
-      for (const tab of presence) if (tab.deviceId === device.deviceId && reachable.has(tab.clientId)) deliveries.push({ kind: "os", clientId: tab.clientId });
+      for (const tab of presence) if (tab.deviceId === device.deviceId && reachable.has(tab.clientId)) deliver({ kind: "os", clientId: tab.clientId });
+      for (const clientId of streamOnlyByDevice.get(device.deviceId) ?? []) deliver({ kind: "os", clientId });
     }
   }
   return deliveries;
 }
 
-const dictionaries: Record<string, Record<string, string>> = { en, ja, "zh-CN": zhCN };
+/**
+ * German notification text. The web UI ships no German locale, but a native
+ * client may report a German device locale; the server renders only these
+ * strings, so a small overlay is enough and unknown keys fall back to English.
+ */
+const de: Record<string, string> = {
+  "notifications.completedBody": "Aufgabe abgeschlossen.",
+  "notifications.inputBody": "Warte auf deine Antwort: {detail}",
+  "notifications.inputBodyNoDetail": "Warte auf deine Antwort.",
+  "notifications.reminderTitle": "Erinnerung: {title}",
+  "notifications.reminderBody": "Warte seit {since} auf deine Antwort: {detail}",
+  "notifications.reminderBodyNoDetail": "Warte seit {since} auf deine Antwort.",
+  "notifications.errorBody": "Lauf fehlgeschlagen: {detail}",
+  "notifications.errorBodyNoDetail": "Lauf fehlgeschlagen.",
+  "notifications.modelSwitchBody": "Gewechselt {from} → {to}: {detail}",
+  "notifications.modelSwitchBodyNoDetail": "Gewechselt {from} → {to}.",
+  "notifications.testBody": "Benachrichtigungen funktionieren.",
+  "notifications.untitledSession": "omp-Sitzung",
+};
+
+const dictionaries: Record<string, Record<string, string>> = { en, ja, "zh-CN": zhCN, de };
 
 function renderFor(event: NotificationEvent, locale: string): RenderedNotification {
-  const dictionary = Object.hasOwn(dictionaries, locale) ? dictionaries[locale] : dictionaries.en;
+  // "de-DE" uses the German text, "en-US" English, and an exact ship locale wins.
+  const base = locale.split("-")[0];
+  const dictionary = Object.hasOwn(dictionaries, locale)
+    ? dictionaries[locale]
+    : Object.hasOwn(dictionaries, base) ? dictionaries[base] : dictionaries.en;
   return renderNotification(event, (key, vars) => {
     const template = dictionary[key] ?? dictionaries.en[key] ?? key;
     return vars ? template.replace(/\{(\w+)\}/g, (match, name: string) => (name in vars ? String(vars[name]) : match)) : template;
-  });
+  }, locale);
 }
 
 /** `String()` of Node's multi-address connect failure is just "AggregateError"; name each address's cause instead. */
@@ -152,14 +262,74 @@ function stillSubscribed(deviceId: string, endpoint: string): boolean {
 }
 
 /** Never throws: a failed push must not break delivery to anyone else. */
+async function sendPushPayload(
+  device: NotificationDevice,
+  payload: unknown,
+  urgency: "high" | "normal",
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const subscription = device.subscription;
+  if (!subscription) return { ok: false, error: "no push subscription" };
+  try {
+    const { publicKey, privateKey } = getVapidKeys(webpush.generateVAPIDKeys);
+    await webpush.sendNotification(subscription, JSON.stringify(payload), {
+      TTL: PUSH_TTL_SECONDS,
+      urgency,
+      timeout: PUSH_TIMEOUT_MS,
+      vapidDetails: { subject: VAPID_SUBJECT, publicKey, privateKey },
+    });
+    return { ok: true };
+  } catch (error) {
+    const status = error instanceof webpush.WebPushError ? error.statusCode : undefined;
+    try {
+      // 404/410: the browser unsubscribed or the subscription expired.
+      if (status === 404 || status === 410) dropDeviceSubscription(device.deviceId, subscription.endpoint);
+    } catch {
+      // A store write failure only delays the cleanup to the next push.
+    }
+    const message = status ? `push service answered ${status}` : describePushError(error);
+    console.warn("[notifications] push failed:", message);
+    return { ok: false, error: message };
+  }
+}
+
+/** The dialog a retraction is about. */
+function retractionKey(sessionId: string, requestId: string): string {
+  return `${sessionId}:${requestId}`;
+}
+
+/**
+ * True while this dialog's retraction still covers a push retry. Every path
+ * that settles a dialog (answer, cancel, expiry, process exit) records one,
+ * and `sendPush` asks before every attempt: a retry that wakes up after
+ * another client answered must never re-deliver a question nobody can answer.
+ */
+function isRetracted(sessionId: string, requestId: string, now: number): boolean {
+  const at = hub().retractions.get(retractionKey(sessionId, requestId));
+  return at !== undefined && now - at <= PUSH_RETRACTION_TTL_MS;
+}
+
 async function sendPush(device: NotificationDevice, event: NotificationEvent, retryDelaysMs: readonly number[] = []): Promise<{ ok: true } | { ok: false; error: string }> {
   const subscription = device.subscription;
   if (!subscription) return { ok: false, error: "no push subscription" };
   for (let attempt = 0; ; attempt++) {
+    // A retry can wake long after the dialog was answered, cancelled, expired
+    // or its omp child died: delivering now would show a dead question.
+    if (event.type === "input" && event.requestId && isRetracted(event.sessionId, event.requestId, Date.now())) {
+      return { ok: false, error: "dialog settled" };
+    }
     try {
       const { publicKey, privateKey } = getVapidKeys(webpush.generateVAPIDKeys);
-      // `type` lets the service worker tell open tabs which kind of entry to list.
-      await webpush.sendNotification(subscription, JSON.stringify({ ...renderFor(event, device.prefs.locale), type: event.type }), {
+      // `type` lets the service worker tell open tabs which kind of entry to list;
+      // `dialog` lets the native app answer without opening the session.
+      // `reminder`/`pendingSince` let it alert again and say how long the question waits.
+      await webpush.sendNotification(subscription, JSON.stringify({
+        ...renderFor(event, device.prefs.locale),
+        type: event.type,
+        ...(event.requestId ? { requestId: event.requestId } : {}),
+        ...(event.dialog ? { dialog: event.dialog } : {}),
+        ...(event.reminder ? { reminder: true } : {}),
+        ...(event.pendingSince ? { pendingSince: event.pendingSince } : {}),
+      }), {
         TTL: PUSH_TTL_SECONDS,
         urgency: event.type === "input" || event.type === "error" ? "high" : "normal",
         timeout: PUSH_TIMEOUT_MS,
@@ -188,6 +358,22 @@ async function sendPush(device: NotificationDevice, event: NotificationEvent, re
   }
 }
 
+/**
+ * Apple's push service is the one endpoint where a push that displays nothing
+ * costs the permission itself: iOS revokes Web Push for the site. Dismiss
+ * pushes therefore never go there; the app clears the notification when its
+ * own answer reaches the server, or the stale one is replaced by the next
+ * `input` push of the same tag.
+ */
+export function isApplePushEndpoint(endpoint: string): boolean {
+  try {
+    const host = new URL(endpoint).hostname.toLowerCase();
+    return host === "web.push.apple.com" || host.endsWith(".push.apple.com");
+  } catch {
+    return false;
+  }
+}
+
 /** Never throws: callers publish from the RPC frame path, and a store failure must not cost them the frame. */
 export function publishNotification(event: NotificationEvent): void {
   const state = hub();
@@ -200,14 +386,15 @@ export function publishNotification(event: NotificationEvent): void {
   const presence = livePresence(Date.now());
   // The Notifications tab lists what a device asked for, received or not; one the user watched happen is already read.
   const { type } = event;
-  if (type !== "test" && devices.some((device) => device.prefs.enabled && device.prefs.types[type])) {
+  if (type !== "test" && devices.some((device) =>
+    device.prefs.enabled && device.prefs.types[type] && !(event.reminder && device.prefs.inputReminder === false))) {
     try {
       recordHistory(event, { read: isOnScreen(event, presence) });
     } catch (error) {
       console.warn("[notifications] history write failed:", error);
     }
   }
-  const reachable = new Set(state.streams.keys());
+  const reachable = reachableTabs();
   for (const delivery of routeNotification(event, presence, reachable, devices)) {
     if (delivery.kind === "push") {
       const device = devices.find((entry) => entry.deviceId === delivery.deviceId);
@@ -220,6 +407,78 @@ export function publishNotification(event: NotificationEvent): void {
       } catch {
         // A closing stream must not break delivery to the others.
       }
+    }
+  }
+}
+
+/**
+ * Retract a session's `input` notification: its dialog was answered by any
+ * client, cancelled, expired, or its omp child went away. Reachable tabs of
+ * devices that enabled `input` get an SSE frame; subscribed devices get a
+ * dismiss push unless the endpoint is Apple's (see `isApplePushEndpoint`). The
+ * history entry becomes read because the question is settled.
+ *
+ * Never throws: callers run on the RPC frame path.
+ */
+export function publishNotificationDismiss(sessionId: string, requestId: string): void {
+  const tag = `${sessionId}:input`;
+  // Recorded first: a retry of that `input` push may be sleeping right now.
+  const state = hub();
+  const now = Date.now();
+  for (const [key, at] of state.retractions) {
+    if (now - at > PUSH_RETRACTION_TTL_MS) state.retractions.delete(key);
+  }
+  state.retractions.set(retractionKey(sessionId, requestId), now);
+  try {
+    markHistoryRead([tag]);
+  } catch (error) {
+    console.warn("[notifications] history read mark failed:", error);
+  }
+  let devices: NotificationDevice[] = [];
+  try {
+    devices = listDevices();
+  } catch (error) {
+    console.warn("[notifications] store unavailable:", error);
+  }
+  if (devices.length === 0) return;
+  const presence = livePresence(Date.now());
+  const reachable = reachableTabs();
+  const presenceById = new Map(presence.map((tab) => [tab.clientId, tab]));
+  const streamOnlyByDevice = new Map<string, string[]>();
+  for (const [clientId, deviceId] of reachable) {
+    if (!deviceId || presenceById.has(clientId)) continue;
+    const owned = streamOnlyByDevice.get(deviceId) ?? [];
+    owned.push(clientId);
+    streamOnlyByDevice.set(deviceId, owned);
+  }
+  const dismissed = new Set<string>();
+  const sendDismiss = (clientId: string) => {
+    if (dismissed.has(clientId)) return;
+    dismissed.add(clientId);
+    for (const send of state.streams.get(clientId) ?? []) {
+      try {
+        send({ kind: "dismiss", tag, sessionId, requestId });
+      } catch {
+        // A closing stream must not break delivery to the others.
+      }
+    }
+  };
+  for (const device of devices) {
+    if (!device.prefs.enabled || !device.prefs.types.input) continue;
+    for (const tab of presence) {
+      if (tab.deviceId !== device.deviceId || !reachable.has(tab.clientId)) continue;
+      sendDismiss(tab.clientId);
+    }
+    // A native tab without presence must still clear its notification; a
+    // subscribed device without presence is covered by the dismiss push below.
+    // Only tabs that declared this device qualify — an undeclared stream keeps
+    // the pre-device behaviour.
+    if (!device.subscription) {
+      for (const clientId of streamOnlyByDevice.get(device.deviceId) ?? []) sendDismiss(clientId);
+    }
+    if (device.subscription && !isApplePushEndpoint(device.subscription.endpoint)) {
+      // urgency "normal": a retraction must not wake a phone like a question.
+      void sendPushPayload(device, { type: "dismiss", tag, sessionId, requestId }, "normal");
     }
   }
 }
