@@ -1373,7 +1373,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         toast.success(t("chatInput.dictationSuccess"));
         return;
       }
-      if (after && onFollowUp) {
+      if (after && sendSideQuestion(finalText.trim(), finalText)) {
+        return;
+      } else if (after && onFollowUp) {
         sendQueued(after === "send" ? "followup" : after, finalText);
       } else if (after && !isStreaming) {
         void handleSend(finalText);
@@ -1505,7 +1507,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           return modelCollator.compare(a.name, b.name);
         });
     }
-    const commands = [...(isStreaming ? [] : builtinSlashCommands), ...externalSlashCommands];
+    const commands = [...(isStreaming ? builtinSlashCommands.filter((command) => command.name === "btw") : builtinSlashCommands), ...externalSlashCommands];
     return [...commands]
       .filter((command) => {
         const name = command.name.toLowerCase();
@@ -3991,8 +3993,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 type="button"
                 className="composer-primary-action"
                 onClick={isRecording || isPaused || isReviewing ? () => stopAndFinishDictation("send") : () => void handleSend()}
-                disabled={submissionBlocked || isTranscribing || uploadsBlockSend || !(isRecording || isPaused || isReviewing || value.trim() || hasAttachments)}
-                title={uploadsBlockSend
+                disabled={submissionBlocked || isTranscribing || (!btwMode && uploadsBlockSend) || !(isRecording || isPaused || isReviewing || value.trim() || hasAttachments)}
+                title={!btwMode && uploadsBlockSend
                   ? (failedUploadCount > 0 ? t("chatInput.uploadsFailedBlock", { count: failedUploadCount }) : t("chatInput.uploadsWaiting", { count: uploadingCount }))
                   : isRecording || isPaused || isReviewing ? t("chatInput.sendDictation") : t("chatInput.send")}
                 style={{
@@ -4001,14 +4003,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   border: "none",
                   borderRadius: 8,
                   color: (isRecording || isPaused || isReviewing || isTranscribing || value.trim() || hasAttachments) ? "var(--on-accent)" : "var(--text-dim)",
-                  cursor: submissionBlocked || uploadsBlockSend ? "not-allowed" : isTranscribing ? "wait" : (isRecording || isPaused || isReviewing || value.trim() || hasAttachments) ? "pointer" : "not-allowed",
+                  cursor: submissionBlocked || (!btwMode && uploadsBlockSend) ? "not-allowed" : isTranscribing ? "wait" : (isRecording || isPaused || isReviewing || value.trim() || hasAttachments) ? "pointer" : "not-allowed",
                   fontSize: 12,
                   fontWeight: 600,
                   boxShadow: (isRecording || isPaused || isReviewing || isTranscribing || value.trim() || hasAttachments) ? "var(--shadow-card)" : "none",
                   transition: "background var(--dur-fast) var(--ease-out-warm), box-shadow var(--dur-fast) var(--ease-out-warm)",
                 }}
               >
-                {isTranscribing || uploadingCount > 0 ? (
+                {isTranscribing || (!btwMode && uploadingCount > 0) ? (
                   <Loader2 size={12} strokeWidth={2} className="animate-spin" aria-hidden="true" />
                 ) : (
                   <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -4016,7 +4018,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     <polyline points="7.5 3 12 7 7.5 11" />
                   </svg>
                 )}
-                {uploadingCount > 0 ? t("chatInput.uploadsPending", { count: uploadingCount }) : t("chatInput.send")}
+                {!btwMode && uploadingCount > 0 ? t("chatInput.uploadsPending", { count: uploadingCount }) : t("chatInput.send")}
               </button>
             )}
           </div>

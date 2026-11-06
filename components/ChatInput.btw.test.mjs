@@ -76,3 +76,25 @@ test("/btw with an attachment is refused and keeps the draft and the attachment"
   assert.equal(screen.getByRole("textbox").value, "/btw what is this");
   assert.equal(getDraft("btw-draft")?.files.length, 1);
 });
+
+test("slash palette keeps /btw available during a streaming run", async () => {
+  const user = userEvent.setup();
+  renderComposer({ isStreaming: true });
+  await user.type(screen.getByRole("textbox"), "/bt");
+  await waitFor(() => assert.ok(screen.getByText("/btw")));
+});
+
+test("/btw Send button refuses pending uploads immediately with the attachment error", async () => {
+  const user = userEvent.setup();
+  const { calls, ref } = renderComposer({ isStreaming: true });
+  // Attach an uploading file (20 MB exceeds inline text limit -> staged upload).
+  await act(async () => {
+    ref.current.addFiles([new File([new Uint8Array(6 * 1024 * 1024)], "big.bin", { type: "application/octet-stream" })]);
+  });
+  await user.type(screen.getByRole("textbox"), "/btw what is this");
+  const sendBtn = screen.getByRole("button", { name: "Send", exact: true });
+  assert.equal(sendBtn.disabled, false);
+  await user.click(sendBtn);
+  assert.deepEqual(calls, []);
+  assert.equal(screen.getByRole("textbox").value, "/btw what is this");
+});
