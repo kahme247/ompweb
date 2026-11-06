@@ -300,9 +300,10 @@ function ForkSessionButton({ entryId, editPrompt = false, isLeaf = false, onFork
 }) {
   const { t } = useI18n();
   // Rows are keyed by index, so bind the dialog to the entry it was opened for.
+  const targetKey = isLeaf ? "__LEAF__" : (entryId ?? null);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
-  if (confirmingId !== null && confirmingId !== entryId) setConfirmingId(null);
-  const confirming = confirmingId === entryId;
+  if (confirmingId !== null && confirmingId !== targetKey) setConfirmingId(null);
+  const confirming = targetKey !== null && confirmingId === targetKey;
   const blocked = forkDisabled || forking;
   const tooltipContent = forking
     ? t("messageView.creatingSession")
