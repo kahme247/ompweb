@@ -4,12 +4,18 @@ import { invalidateHostSessionList } from "@/lib/hosts/session-index";
 import { invalidateSessionCaches } from "@/lib/session-reader";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { clearExitedRpcSession, getLiveRpcSessionIds, getRpcSession, WebRpcError } from "@/lib/rpc-manager";
+import { RpcCommandError } from "@/lib/omp/rpc-process";
 
 /** Stable, client-safe error body for catch-all handlers: details go to the
  *  server log only, never to the browser. */
 function sessionsErrorResponse(error: unknown): Response {
   if (error instanceof WebRpcError && error.code === "session_busy") {
     return Response.json({ error: error.message, code: error.code }, { status: 409 });
+  }
+  // omp is busy, not gone: the session keeps running, so a client retries
+  // instead of treating the rename as applied (docs/android/protocol.md §3.5).
+  if (error instanceof WebRpcError && (error.code === "session_slow" || error.code === "session_state_timeout")) {
+    return Response.json({ error: error.message, code: "session_slow" }, { status: 503 });
   }
   if (error instanceof RequestBodyTooLargeError) {
     return Response.json({ error: "Request body is too large", code: "request_too_large" }, { status: 413 });
@@ -33,10 +39,12 @@ export async function GET(
     if ("response" in resolved) return resolved.response;
 
     const searchParams = new URL(req.url).searchParams;
+    const meta = searchParams.get("meta") === "1";
     const includeState = searchParams.has("includeState");
     const read = await resolved.host.sessionOps.readSession(id, {
       deferThinking: searchParams.has("deferThinking"),
       deferMedia: searchParams.has("deferMedia"),
+      meta,
     });
     if (!read.ok) return opErrorResponse(read);
 
@@ -44,23 +52,32 @@ export async function GET(
     // GET /api/agent/[id]) so the client's post-turn refresh is one request
     // instead of two. On a get_state failure the field is omitted entirely —
     // callers treat a missing `agent` as "fetch it separately".
-    let agent: { running: boolean; state?: unknown } | undefined;
+    let agent: { running: boolean; alive: boolean; state?: unknown } | undefined;
     if (includeState) {
       const rpc = getRpcSession(id);
       if (rpc?.isAlive()) {
         try {
-          agent = { running: true, state: await rpc.send({ type: "get_state" }) };
+          // Sample `running` after the state read, like the state route: the
+          // reply (and frames it flushed) is what makes the answer authoritative.
+          const state = await rpc.send({ type: "get_state" });
+          agent = { running: rpc.isRunning(), alive: true, state };
         } catch {
           // Leave agent unset; the session payload is still valid without it.
         }
       } else {
-        agent = { running: false };
+        agent = { running: false, alive: false };
       }
     }
 
+    // ?meta=1 is the navigation shape: the tree and leaf the native client
+    // reads from this route, without a second transcript copy. `context` is
+    // omitted entirely (not null) so clients keyed on its presence keep their
+    // historical shape; the transcript comes from /api/sessions/[id]/context.
+    const { context, ...navigation } = read.value;
     return Response.json({
       sessionId: id,
-      ...read.value,
+      ...navigation,
+      ...(context ? { context } : {}),
       ...(agent ? { agent } : {}),
     });
   } catch (error) {
@@ -90,8 +107,13 @@ export async function PATCH(
         await rpc.send({ type: "set_session_name", name: name.trim() });
         renamed = true;
       } catch (error) {
-        if (error instanceof WebRpcError && error.code === "session_busy") throw error;
-        // Fall back to the on-disk title slot below.
+        // The file fallback is only for "nothing was applied": omp rejected the
+        // command outright, or the child died before answering. A timeout means
+        // omp is busy and still writes the file itself, so a slot write here
+        // would race its next flush — answer 503 and write nothing
+        // (docs/android/protocol.md §3.5).
+        if (error instanceof WebRpcError) throw error;
+        if (!(error instanceof RpcCommandError) && rpc.isAlive?.()) throw error;
       }
     }
     if (!renamed) {

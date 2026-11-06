@@ -1,7 +1,26 @@
 import { buildSessionContext } from "@/lib/session-reader";
-import { apiErrorResponse, opErrorResponse, resolveSessionHostOr404 } from "@/lib/api-utils";
+import { apiErrorResponse, ifNoneMatchSatisfied, opErrorResponse, resolveSessionHostOr404, strongEtag } from "@/lib/api-utils";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { MAX_SYNC_MESSAGES, parseHistoryCursor, selectSessionHistory, type SessionHistoryCursor, type SessionHistoryPage, type SessionSyncResponse } from "@/lib/session-sync";
+
+/**
+ * Serialize once, key the validator on those exact bytes: the ETag cannot
+ * disagree with the body, and it covers everything that shapes it (branch,
+ * options, live stream snapshot) without this route needing the file's
+ * identity — which a remote host would not expose to this process.
+ */
+function jsonBodyResponse(req: Request, body: unknown, cacheControl: "no-store" | null = null): Response {
+  const text = JSON.stringify(body);
+  const etag = strongEtag(text);
+  const headers: Record<string, string> = { ETag: etag };
+  if (cacheControl) headers["Cache-Control"] = cacheControl;
+  if (ifNoneMatchSatisfied(req.headers.get("if-none-match"), etag)) {
+    return new Response(null, { status: 304, headers });
+  }
+  return new Response(text, {
+    headers: { "Content-Type": "application/json", "Content-Length": String(Buffer.byteLength(text)), ...headers },
+  });
+}
 
 export async function GET(
   req: Request,
@@ -63,7 +82,7 @@ export async function GET(
       const session = notFound && (boundary === "1" || (sync === "1" && !cursor?.lastEntryId && leafId === undefined)) ? getRpcSession(id) : undefined;
       if (session?.isAlive() && !(await session.host.sessionFileExists(session.sessionFile))) {
         if (boundary === "1") {
-          return Response.json({ entryIds: [] }, { headers: { "Cache-Control": "no-store" } });
+          return jsonBodyResponse(req, { entryIds: [] }, "no-store");
         }
         const response: SessionSyncResponse = {
           ...selectSessionHistory(buildSessionContext([]), cursor, limit),
@@ -71,12 +90,12 @@ export async function GET(
           leafId: null,
           live: session.getStreamSnapshot(),
         };
-        return Response.json(response, { headers: { "Cache-Control": "no-store" } });
+        return jsonBodyResponse(req, response, "no-store");
       }
       return "response" in result ? result.response : opErrorResponse(result);
     }
     if (boundary === "1") {
-      return Response.json(result.value, { headers: { "Cache-Control": "no-store" } });
+      return jsonBodyResponse(req, result.value, "no-store");
     }
     if (sync === "1") {
       const page = result.value as { history: SessionHistoryPage; leafId: string | null; tipId: string | null };
@@ -87,9 +106,9 @@ export async function GET(
         ? session.getStreamSnapshot()
         : null;
       const response: SessionSyncResponse = { ...page.history, sessionId: id, leafId: page.leafId, live };
-      return Response.json(response, { headers: { "Cache-Control": "no-store" } });
+      return jsonBodyResponse(req, response, "no-store");
     }
-    return Response.json(result.value);
+    return jsonBodyResponse(req, result.value);
   } catch (error) {
     return apiErrorResponse(error);
   }
