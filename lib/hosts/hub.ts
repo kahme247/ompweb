@@ -38,6 +38,8 @@ import {
   withSeq,
 } from "./link-protocol";
 import { customLocalLabel, DEFAULT_LOCAL_LABEL, HostRegistryUnreadableError, hostForToken, LOCAL_HOST_ID, loadHosts, touchHost, type HostRecord } from "./registry";
+import { readHostPid } from "./host-pid";
+import { localLinkUrl } from "./local-bootstrap";
 import type { SessionOps } from "./session-ops";
 import type { HostSoftwareUpdate, HostUpdateInfo, HostUpdateOperation, HostUpdateTarget } from "./update-types";
 import { isUpdateDisabled } from "../update-policy";
@@ -925,8 +927,12 @@ function validResult(op: keyof SessionOps, result: unknown, args: unknown[]): bo
       return isRecord(value) && typeof value.cwd === "string" && typeof value.projectRoot === "string" && (value.projectKey === undefined || typeof value.projectKey === "string");
     case "exportSession":
       return isRecord(value) && typeof value.html === "string" && typeof value.fileName === "string";
-    case "readSession":
-      return isRecord(value) && isRecord(value.info) && isRecord(value.context);
+    case "readSession": {
+      // `?meta=1` is the navigation shape: no transcript, so `context` is null.
+      const options = isRecord(args[1]) ? args[1] : {};
+      return isRecord(value) && isRecord(value.info)
+        && (isRecord(value.context) || (options.meta === true && value.context === null));
+    }
     case "readContext": {
       // The context route reads a different shape per mode.
       const options = isRecord(args[2]) ? args[2] : {};
@@ -1383,6 +1389,24 @@ export function lastUplinkAt(hostId: string): number | null {
   return lastSeenAt ? Date.parse(lastSeenAt) : null;
 }
 
+/**
+ * The pid of this machine's host daemon while its link is down, or null.
+ *
+ * The daemon records its pid before it dials (host-pid.ts), so a process it
+ * started is this server's own child even before its `hello` arrives: after a
+ * restart of this server the daemon is still running the children of the
+ * previous run, while the wrapper registry and the channel list are both empty.
+ * Once the link is up, the hello's channel list is the authority and this
+ * answers null, so a genuinely foreign `omp --resume` is never hidden by it.
+ * Null without a local link (the dev server) or with a record of another server.
+ */
+export function localDaemonPid(): number | null {
+  const link = hub().links.get(LOCAL_HOST_ID);
+  if (link && isLinkUp(link.status)) return null;
+  const target = localLinkUrl();
+  return "url" in target ? readHostPid(target.url) : null;
+}
+
 export function onHostsChange(listener: () => void): () => void {
   const listeners = hub().changeListeners;
   listeners.add(listener);
@@ -1399,6 +1423,24 @@ export function onHostHello(listener: (hostId: string, channels: HelloChannel[])
   return () => {
     listeners.delete(listener);
   };
+}
+
+/**
+ * Session ids of children a host currently lists as running: a run of a
+ * previous server, from its `hello` until the child is adopted or exits. Such a
+ * child is this server's run, not a foreign writer — `lib/session-owner.ts`
+ * counts it as local, because during adoption the wrapper registry does not
+ * know the session yet while the child's `--resume` line already does.
+ */
+export function listedChildSessionIds(hostId?: string): string[] {
+  const links = hostId === undefined ? [...hub().links.values()] : [...hub().links.values()].filter((link) => link.id === hostId);
+  const ids: string[] = [];
+  for (const link of links) {
+    for (const child of link.channels.values()) {
+      if (child.sessionId && !child.lost && !child.orphaned) ids.push(child.sessionId);
+    }
+  }
+  return ids;
 }
 
 /** Whether this server adopted a child of `sessionId` the host listed in a hello; waits for an adoption still running. */

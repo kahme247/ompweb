@@ -1,8 +1,10 @@
 import { deriveSessionTitleFromFirstMessage, sanitizeSessionTitle } from "@/lib/session-title";
 import { getRpcSession, startRpcSession, WebRpcError } from "@/lib/rpc-manager";
 import { invalidateHostSessionList, sessionSpawnTarget } from "@/lib/hosts/session-index";
+import { LOCAL_HOST_ID } from "@/lib/hosts/registry";
 import { HostOpError } from "@/lib/hosts/link-protocol";
 import { invalidateSessionCaches } from "@/lib/session-reader";
+import { detectSessionOwner } from "@/lib/session-owner";
 import { apiErrorResponse, opErrorResponse, resolveSessionHostOr404 } from "@/lib/api-utils";
 
 /**
@@ -31,6 +33,18 @@ export async function POST(
       if ("response" in resolved) return resolved.response;
       try {
         const target = await sessionSpawnTarget(id, resolved.host);
+        // A title is cosmetic: never spawn a second omp for a session another
+        // process owns (that spawn would fork the conversation on its dispose).
+        // Report the stored title instead, and write nothing to a foreign file.
+        if (target && resolved.host.id === LOCAL_HOST_ID) {
+          const elsewhere = await detectSessionOwner(id, target.sessionFile);
+          if (elsewhere) {
+            // No title yet is a valid answer here, not an error: the caller
+            // treats a 200 without a title as a silent no-op.
+            const info = (await resolved.host.sessionOps.listSessions()).find((session) => session.id === id);
+            return Response.json({ title: sanitizeSessionTitle(info?.name) || null, generated: false, usage: null });
+          }
+        }
         if (target) {
           rpc = (await startRpcSession(id, target.sessionFile, target.cwd, undefined, undefined, target.recordedCwd, undefined, resolved.host)).session;
         }

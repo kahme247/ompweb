@@ -3,6 +3,8 @@ import { commandErrorResponse, runAgentCommand } from "@/lib/agent-command";
 import { parseJsonWithinLimit } from "@/lib/bounded-form-data";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "@/lib/image-attachments";
 import { requestOwner } from "@/lib/web-auth";
+import { resolveSessionPath } from "@/lib/session-reader";
+import { detectSessionOwner } from "@/lib/session-owner";
 
 /** Stamp when the handler had the request and when it answered, so the browser
  * can split network time from server time. */
@@ -29,7 +31,10 @@ export async function POST(
     // body, which is forwarded to omp verbatim) and only matters when this
     // request spawns or replaces the session's omp process.
     const advisor = new URL(req.url).searchParams.get("advisor") === "1";
-    return timed(receivedAt, await runAgentCommand(id, body, advisor, requestOwner(req)));
+    // Explicit user confirmation only: a copy may be started even though
+    // another omp process owns the session.
+    const force = new URL(req.url).searchParams.get("force") === "1";
+    return timed(receivedAt, await runAgentCommand(id, body, advisor, requestOwner(req), { force }));
   } catch (error) {
     return timed(receivedAt ?? Date.now(), commandErrorResponse(error));
   }
@@ -37,22 +42,51 @@ export async function POST(
 
 // GET /api/agent/[id] - Get current agent state
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  // Default stays the full shape; `?systemPrompt=0` drops the ~13 KB prompt
+  // from the 15 s state poll. Any other value (including "1") keeps it.
+  const includeSystemPrompt = new URL(req.url).searchParams.get("systemPrompt") !== "0";
 
   try {
     const session = getRpcSession(id);
     if (!session || !session.isAlive()) {
-      return Response.json({ running: false });
+      // Not ours: tell the client who is running it, if anyone. Never spawns.
+      const filePath = await resolveSessionPath(id).catch(() => null);
+      const elsewhere = filePath ? await detectSessionOwner(id, filePath) : null;
+      return Response.json({ running: false, alive: false, elsewhere });
     }
     try {
-      const state = await session.send({ type: "get_state" });
-      return Response.json({ running: true, state });
+      // Through the wrapper's command path, not a dedicated method: that is
+      // the contract every wrapper fake implements, and `dispatchCommand`
+      // already honors `systemPrompt: false`.
+      const state = await session.send({
+        type: "get_state",
+        ...(includeSystemPrompt ? {} : { systemPrompt: false }),
+      });
+      return Response.json({ running: session.isRunning(), alive: true, state, elsewhere: null });
     } catch (error) {
+      // omp being slow is not the run ending: answer 503 so clients retry the
+      // poll instead of treating the session as idle/recovered. Both the code
+      // this tree raises (`session_slow`) and 0.6.0's own
+      // `session_state_timeout` mean the same thing to a client.
+      if (error instanceof WebRpcError && (error.code === "session_slow" || error.code === "session_state_timeout")) {
+        return Response.json(
+          {
+            error: error.message,
+            code: "session_slow",
+            ...error.details,
+            running: session.isRunning(),
+            alive: true,
+            silentForMs: session.silentForMs(),
+          },
+          { status: 503 },
+        );
+      }
       if (error instanceof WebRpcError && error.code === "session_unresponsive") {
-        return Response.json({ running: false, recovered: true });
+        return Response.json({ running: false, alive: false, recovered: true });
       }
       throw error;
     }

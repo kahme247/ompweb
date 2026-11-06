@@ -118,11 +118,15 @@ export class WebRpcError extends Error {
    * link dropped after the command left, so it may still run on the host. */
   readonly delivery?: "refused" | "unknown";
 
-  constructor(message: string, code: string, delivery?: "refused" | "unknown") {
+  /** Extra machine-readable facts the agent route forwards next to `code`. */
+  readonly details: Record<string, unknown> | undefined;
+
+  constructor(message: string, code: string, delivery?: "refused" | "unknown", details?: Record<string, unknown>) {
     super(message);
     this.name = "WebRpcError";
     this.code = code;
     if (delivery) this.delivery = delivery;
+    this.details = details;
   }
 }
 
@@ -493,6 +497,9 @@ export class AgentSessionWrapper {
    * one (spawn fallback): a notice warns the user once it is ready. */
   private readonly fellBack: boolean;
   private unsubscribeHostStatus: (() => void) | null = null;
+  /** Last frame the child sent. `silentForMs` reports from here: a command
+   * answer is not a frame, so polls never move this clock. */
+  private lastFrameAt = 0;
 
   // Plain field assignments (not TS parameter properties) keep this module
   // runnable under Node's strip-only TypeScript mode for probes/tests.
@@ -538,6 +545,11 @@ export class AgentSessionWrapper {
     // closes stdin and OMP records "Request was aborted", even without a Stop.
     return this.isAlive() && (this.promptRunning || this.streaming || this.compacting || this.bashRunning
       || this.pendingUiRequests.size > 0 || this.pendingHostTools.size > 0 || this.pendingHostUris.size > 0);
+  }
+
+  /** Time since the child's last frame (epoch-ms clock started at spawn). */
+  silentForMs(): number {
+    return Math.max(0, Date.now() - this.lastFrameAt);
   }
 
   /** Local history navigation is busy control work, not an interruptible model turn. */
@@ -1045,6 +1057,9 @@ export class AgentSessionWrapper {
     // even when they arrive after a failed/timed-out edit.
     if (isSessionEditReply(frame)) return;
     this.resetIdleTimer();
+    // Any frame proves the child's event loop is running (a `ready` frame is
+    // consumed by waitReady, so this covers runtime frames only).
+    this.lastFrameAt = Date.now();
     const event = frame.type === "available_commands_update" && Array.isArray(frame.commands)
       ? { ...frame, commands: (frame.commands as RpcAvailableSlashCommand[]).filter((command) => command.name !== SESSION_EDIT_COMMAND) }
       : frame;
@@ -2911,6 +2926,16 @@ function getRegistry(): Map<string, AgentSessionWrapper> {
 function getLocks(): Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> {
   if (!globalThis.__ompStartLocks) globalThis.__ompStartLocks = new Map();
   return globalThis.__ompStartLocks;
+}
+
+/**
+ * Whether this server is currently spawning or adopting a child for
+ * `sessionId`. Between the host's spawn and `registerSession` the registry is
+ * empty while the child's `--resume` line already names the session file, so
+ * ownership detection must not read that gap as "nobody runs it".
+ */
+export function isSessionStarting(sessionId: string): boolean {
+  return getLocks().has(sessionId);
 }
 
 export function getRpcSession(sessionId: string): AgentSessionWrapper | undefined {

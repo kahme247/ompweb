@@ -13,6 +13,7 @@ import { ProjectPathError } from "../project-registry";
 import { isValidSessionId } from "../session-file-references-core";
 import { isRecord } from "../type-guards";
 import { isLoopbackHost, readHostLogin } from "./host-login";
+import { clearHostPid, writeHostPid } from "./host-pid";
 import {
   decodeBlobFrame,
   decodeDown,
@@ -653,6 +654,9 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       linked = null;
       inFlight = [];
       inFlightBytes = 0;
+      // The link is down from here until the next welcome: keep the pid record
+      // fresh so the server can still tell our children from a foreign `omp`.
+      writeHostPid(process.pid, serverUrl);
       resolve(closed);
     };
     const giveUp = (why: string) => {
@@ -703,6 +707,9 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
   async function keepLinked(): Promise<void> {
     while (!stopped) {
       const sent = authorization;
+      // Before the dial, so a server that just restarted can tell this daemon's
+      // children from a terminal `omp` while the link is still down (host-pid.ts).
+      writeHostPid(process.pid, serverUrl);
       try {
         const ompVersion = await getOmpVersion();
         const encodeHello = (replay: boolean) => encodeLine({
@@ -799,6 +806,7 @@ export function runHostDaemon(options: { url: string; token: string; allowHttp: 
       }, KILL_GRACE_MS);
       await Promise.all(exits);
       clearTimeout(force);
+      clearHostPid(process.pid);
       finish(code);
     })();
     return stopping;

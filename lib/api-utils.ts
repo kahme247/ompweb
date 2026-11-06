@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import { isLinkUp, type Host } from "./hosts/host";
 import { getHost } from "./hosts/hub";
 import { HostOpError } from "./hosts/link-protocol";
@@ -54,6 +55,23 @@ export async function resolveWorkspaceHost(hostId: unknown, sessionId: string | 
 /** The JSON error response for a failed host op. */
 export function opErrorResponse(result: Extract<OpResult<unknown>, { ok: false }>): Response {
   return Response.json({ error: result.error, code: result.code }, { status: result.status });
+}
+
+/** Strong, quoted ETag from the inputs that identify one response body. */
+export function strongEtag(identity: string): string {
+  return `"${createHash("sha256").update(identity).digest("hex").slice(0, 32)}"`;
+}
+
+/** Whether an `If-None-Match` header covers `etag` (`*` always does). Uses the
+ *  weak comparison RFC 9110 §13.1.2 requires, so a proxy that weakens our
+ *  strong tag (`W/"…"`) still gets its 304. */
+export function ifNoneMatchSatisfied(header: string | null, etag: string): boolean {
+  if (!header) return false;
+  const expected = etag.replace(/^W\//, "");
+  return header.split(",").some((candidate) => {
+    const value = candidate.trim();
+    return value === "*" || value.replace(/^W\//, "") === expected;
+  });
 }
 
 /** Uniform JSON error body used by most API routes. A host link failure keeps
