@@ -1334,7 +1334,10 @@ export function ChatWindow({ session, newSessionCwd, newSessionHostId, hostStatu
       ) : (
       <>
       {hostBanner}
-      <div className="relative flex flex-1 overflow-hidden" style={{ minHeight: 0 }}>
+      {/* clip, not just hidden: scrollIntoView (scroll to bottom, search jumps) also
+          scrolls a hidden-overflow box, which shifted the transcript up and left a blank
+          band above the composer. The class stays as the fallback where clip is unknown. */}
+      <div className="relative flex flex-1 overflow-hidden" style={{ minHeight: 0, overflow: "clip" }}>
         <div
           style={{
             position: "absolute",
