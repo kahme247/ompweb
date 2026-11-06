@@ -10,7 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
 
-const { values } = parseArgs({ args: Bun.argv.slice(2), options: { package: { type: "string" }, binary: { type: "string" } } });
+const { values } = parseArgs({ args: Bun.argv.slice(2), options: { package: { type: "string" }, binary: { type: "string" }, "second-server": { type: "boolean" } } });
 const binary = values.binary && path.resolve(values.binary);
 const dir = binary ? path.dirname(binary) : path.resolve(values.package ?? path.join(import.meta.dir, ".."));
 const ompweb = binary ? [binary] : ["node", path.join(dir, "bin", "omp-web.js")];
@@ -100,12 +100,15 @@ const env: Record<string, string | undefined> = {
   USERPROFILE: home,
   PI_CODING_AGENT_DIR: agentDir,
   OMP_WEB_OMP_BIN: fakeOmp,
+  // A smoke launched from an installed agent inherits its package root; test this install instead.
+  OMP_WEB_PACKAGE_DIR: dir,
 };
 for (const name of ["OMP_WEB_PASSWORD", "OMP_WEB_PASSWORD_HASH"]) delete env[name];
 
 let log = "";
 let launcher: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined;
 let daemon: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined;
+let secondLauncher: Bun.Subprocess<"ignore", "pipe", "pipe"> | undefined;
 const stop = (child: Bun.Subprocess) => {
   if (process.platform === "win32") Bun.spawnSync(["taskkill", "/pid", String(child.pid), "/t", "/f"]);
   else child.kill("SIGTERM");
@@ -186,6 +189,40 @@ try {
       assert(sessions.some((session) => session.id === SESSION_ID), `listed: ${sessions.map((session) => session.id).join(", ") || "none"}`);
     });
 
+    if (values["second-server"]) {
+      await step("two web servers list the same session through one host daemon", async () => {
+        const probe = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+        const secondPort = probe.port;
+        probe.stop(true);
+        const secondBase = `http://127.0.0.1:${secondPort}`;
+        const child = Bun.spawn([...ompweb, "-p", String(secondPort), "-H", "127.0.0.1", "--no-open"], {
+          env, stdin: "ignore", stdout: "pipe", stderr: "pipe",
+        });
+        secondLauncher = child;
+        void readText(child.stdout, (text) => { log += text; });
+        void readText(child.stderr, (text) => { log += text; });
+        const deadline = Date.now() + 30_000;
+        for (;;) {
+          assert(child.exitCode === null, `second server exited with ${child.exitCode}`);
+          try {
+            const views = await Promise.all([base, secondBase].map(async (url) => {
+              const hosts = await (await fetch(`${url}/api/hosts`)).json() as { hosts: { id: string; status: string }[] };
+              const list = await (await fetch(`${url}/api/sessions`)).json() as { sessions: { id: string }[] };
+              return hosts.hosts.some((h) => h.id === "local" && h.status === "online") &&
+                list.sessions.some((s) => s.id === SESSION_ID);
+            }));
+            if (views.every(Boolean)) break;
+          } catch {
+            // The second listener or its daemon link is not ready yet.
+          }
+          assert(Date.now() < deadline, "both servers did not show the shared session within 30 s");
+          await Bun.sleep(200);
+        }
+        const saved = JSON.parse(readFileSync(path.join(agentDir, "omp-web", "host.json"), "utf8")) as { url: string };
+        assert.equal(saved.url, base, "starting staging changed the primary daemon URL");
+      });
+    }
+
     // In the binary the daemon's modules live in Bun's virtual filesystem, which omp cannot read: the extension it
     // hands omp must be the install's own file.
     await step("omp starts with the session-edit extension this install ships", async () => {
@@ -236,6 +273,14 @@ try {
     });
   }
 } finally {
+  if (secondLauncher) {
+    const child = secondLauncher;
+    await step("second launcher stops", async () => {
+      stop(child);
+      const outcome = await Promise.race([child.exited, Bun.sleep(15_000).then(() => "running")]);
+      assert(outcome !== "running", "second launcher still runs after SIGTERM");
+    });
+  }
   if (daemon) {
     const child = daemon;
     await step("`ompweb host` stops", async () => {

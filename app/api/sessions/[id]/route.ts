@@ -128,7 +128,8 @@ export async function DELETE(
     // Disposing a child behind a down link would wait for the link to return.
     const offline = hostOfflineResponse(resolved.host);
     if (offline) return offline;
-    await getRpcSession(id)?.destroyAndWait?.();
+    const live = getRpcSession(id);
+    if (!live?.hostOwnedLifecycle) await live?.destroyAndWait?.("delete", true);
     // Live children are skipped by the re-parent rewrite: their omp process
     // owns the file and would clobber it on its next flush.
     const result = await resolved.host.sessionOps.deleteSession(id, getLiveRpcSessionIds());

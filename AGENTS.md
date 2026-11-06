@@ -306,9 +306,12 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
 ### RPC session lifecycle (`lib/rpc-manager.ts`)
 - One wrapper per session id, keyed in a `globalThis` registry.
 - `globalThis` survives `bun --hot` re-evaluation; a plain module-level Map does not.
-- Idle sessions are disposed after a timeout; concurrent `startRpcSession()`
-  calls must share a single start promise.
-- Two cleanup backstops, both unref'd so they never hold the event loop:
+- For v7 hosts, the daemon owns idle/disconnect cleanup and startup settings.
+  Wrappers report tab/command interest and protected preparation through transport
+  capabilities; disposal closes membership, while explicit delete/reload can kill.
+  Reconciliation failure never kills a process another server uses.
+- For legacy hosts, concurrent `startRpcSession()` calls share one start promise.
+  Two cleanup backstops remain on the server, both unref'd:
   `IDLE_DESTROY_MS` (10 min) and `DISCONNECT_DESTROY_MS`
   (`OMP_WEB_DISCONNECT_DESTROY_MS`, 2 min, `0` disables). The shorter one only
   fires once a session has been genuinely abandoned — no `onEvent` listener, no
@@ -319,6 +322,11 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   child frame: adding a new call path must route activity through it.
 
 ### Auto-resume after a restart (`lib/session-resume.ts`)
+- **v7 hosts:** `lib/hosts/host-resume.ts` records unsettled sessions and launch
+  parameters in `omp-web/host-running.json`; the daemon resumes them once after
+  its restart. Web-server restarts just rejoin. The first v6 → v7 daemon upgrade
+  requires a quiescent host: the old daemon has no recovery manifest.
+- **Legacy hosts only:** the per-web-server recovery mechanism below remains.
 - Off by default (`autoResumeSessions` in `omp-web-settings.json`). When on,
   `notifyRunningChange()` keeps `omp-web-interrupted-sessions-<pid>.json` in
   the agent dir listing sessions that are mid-run; startup
@@ -342,6 +350,19 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   on the same session while omp-web was down; both would write the file.
 
 ### Remote hosts (`lib/hosts/`, `app/api/hosts/`, `bin/omp-web-host.js`)
+- **Shared v7 hosts** (`docs/specs/2026-11-06-multi-server-host-design.md`):
+  one daemon links every configured server in `host.json.links`. `open` joins
+  one session process; events fan out, command replies return only to their sender.
+  The daemon owns lifecycle, streaming snapshots and first-answer dialog settlement.
+  Web callbacks choose the last-active eligible server and are not blindly retried.
+  `channels_changed` discovers background runs; `sessions_changed` invalidates lists;
+  one link is the automatic notification publisher. v4–v6 links remain exclusive;
+  cross-version attempts to share a session fail with `session_running_elsewhere`.
+  Cross-server fences live in the daemon: a history edit takes the acknowledged
+  `editLease` op before preflight, and a `peer_message_command` marker makes another server's identical echo
+  ambiguous (`watchReplacement`). An open's preparation lease passes only to the
+  command that asked for it (`withPendingCommand(run, true)`); a command timeout
+  that recycles the child stops the shared process (`destroyAndWait(reason, true)`).
 - **Host seam** (`lib/hosts/host.ts`). Every host, this machine included, is
   reached over the link: `getHost(id)` (`hub.ts`) returns a `RemoteHost` whose
   calls go to a daemon. `getHost("local")` is the link of this machine's own
@@ -356,7 +377,7 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   must not open a session file on main for a session that may be remote or local.
   `SessionInfo.hostId` and `ManagedProject.hostId` carry the host; sidebar and
   project state key on `hostProjectKey` (bare path on this machine, `<hostId>:<path>`).
-- **Link = one WebSocket per host, dialled by the daemon** (`/api/hosts/link`;
+- **Link = one WebSocket per host per web server, dialled by the daemon** (`/api/hosts/link`;
   design `docs/specs/2026-10-31-websocket-link-design.md`). **Text frames**
   carry the messages (hub → daemon one per frame; daemon → hub newline-separated
   batches flushed every 16 ms or at one 256 KiB piece), **binary frames** carry large op
@@ -425,8 +446,9 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   types (acking their `seq`) and answer unknown ops 501 `unknown_op`, from v3 on.
   v4 (the WebSocket link) dropped v3 before any release. v5 (pieces) keeps v4;
   v6 (uploads: hub → daemon binary frames, `upload_ack`, `uploadStart`/
-  `uploadAbort`/`uploadAttach`) keeps v4 and v5:
-  `MIN_LINK_PROTOCOL_VERSION` is 4 and `LINK_PROTOCOL_VERSION` 6 (literal
+  `uploadAbort`/`uploadAttach`) keeps v4 and v5. v7 adds multi-server joins,
+  host-owned lifecycle, callback routing and channel/list discovery:
+  `MIN_LINK_PROTOCOL_VERSION` is 4 and `LINK_PROTOCOL_VERSION` 7 (literal
   one-liners: the deploy script parses them with `sed`); a v4 daemon gets no
   `part`, whole lines and no unacked window (`link.sender.parts`); a v4/v5
   daemon gets 426 for uploads. Main keeps at least N-1, and
@@ -439,8 +461,9 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   first, then hosts; a daemon need not support a newer main (a v5 daemon gets
   4426 from a v4 server and exits 1). A daemon dialing a pre-WebSocket server
   keeps redialing with a hint.
-- **One socket per host.** A new hello on a new socket of the same token closes
-  the old socket 4409 (the old daemon exits 0); two daemons must never run
+- **One socket per host per web server.** A new hello on the same server with
+  the same token closes its previous socket 4409; on v7 only that link ends.
+  One daemon may link multiple servers; two daemons must never run
   competing `omp --resume` children on one agent dir. A frame belongs to the
   socket it arrived on: the hub ignores frames from a socket that is no longer
   the host's link, so no nonce is needed. A revoked host is refused at the
@@ -542,12 +565,12 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
 
 #### Local daemon (`docs/specs/2026-10-29-local-daemon-design.md`)
 - **Two services.** `ompweb` (web) and `ompweb-host` (`ompweb host`, the daemon) are installed together by `ompweb systemd install`, `ompweb launchd install` and the Windows tray install; uninstall removes both, `ompweb systemd restart` restarts the web unit only. The daemon owns this machine's omp children, so a web restart, update or redeploy leaves runs going; restarting the daemon ends them (auto-resume then resumes the sessions that were running). An upgrade restarts the daemon only when the running daemon's link version is outside the new release's `[MIN_LINK_PROTOCOL_VERSION, LINK_PROTOCOL_VERSION]` range (it would get 4426 or 426 and exit); a daemon inside the range keeps running.
-- **Local link bootstrap** (`lib/hosts/local-bootstrap.ts`, called from `instrumentation.node.ts`). `localLinkUrl()` builds the daemon's URL from `OMP_WEB_PORT`/`OMP_WEB_HOSTNAME` (set by `startProduction` from its listen address, so the launcher, the binary and `npm start` all link; wildcard binds map to `127.0.0.1`, a non-loopback bind gets no link and a console warning). `ensureLocalHostLink()` makes sure the `local` record exists (`registry.ts`, `rotateLocalHostToken`) and writes `<agent dir>/omp-web/host.json` (`{url, token}`, 0600). A `host.json` whose token the registry still accepts and whose url matches is left alone, so a web restart does not make the daemon redial. It throws, and startup only logs, when `host.json` points to a non-loopback server (a remote-host login on this machine): it is never overwritten. The daemon re-reads `host.json` when its link gets 401 and exits only if the file still holds the rejected token.
+- **Local link bootstrap** (`lib/hosts/local-bootstrap.ts`, `instrumentation.node.ts`): async `ensureLocalHostLink()` atomically upserts this server's `{url, token}` in `host.json.links` under the same lock as token selection, preserving the primary pair and other links. Files stay 0600. The directory watch reconciles added/removed links without restarting the daemon; malformed configuration is not overwritten. `ompweb host login --add --url <url>` adds a remote server (token from stdin); `host logout --url <url>` removes its link. A remote primary remains protected from local bootstrap replacement.
 - **Dev mode does not take the daemon.** With `NODE_ENV=development` `ensureLocalHostLink` is skipped, so the daemon stays linked to production and the dev server shows "This machine" offline. The local row of `GET /api/hosts` carries `daemonManaged: false` there, which hides the install banner.
 - **`local` is a registry record like any host**, with three exceptions: it is listed first, `PATCH` takes `label` only (`allowAgentStart` is fixed), and it cannot be revoked. Renaming "This machine" is a `PATCH /api/hosts {id: "local", label}`; an empty label resets it (`registry.ts` stores `""`; `customLocalLabel()` / `DEFAULT_LOCAL_LABEL` map it). `getHost("local")` works without the record: it is the daemon link, offline while none is linked, and "needs upgrade" on a protocol mismatch (`hostVersion` in the row is the daemon's).
-- **Adoption on hello** (`reattach`/`adopt` in `hub.ts`, `adoptRpcSession` in `rpc-manager.ts`). Each listed `{ch, sessionId, cwd, pending}` channel that has no transport on this server is a child of a previous server and is taken over by a new `AgentSessionWrapper` (`adopted: true`, `RpcProcess` option `adopted`). There is no session-list lookup: the spawn `cwd` comes from the hello, and the session identity from the child's own `get_state` (`applyIdentity`), so a new session whose file is not written yet is adoptable. The daemon names each child's current session in the hello (`PendingRequests.sessionId`: the file's header id at spawn, then the last successful `get_state`). Re-sync (`AgentSessionWrapper.adopt`): `negotiate_protocol`, `set_subagent_subscription`, `set_ask_dialog`, `set_event_filter` (delta message updates, see "Streaming message updates"), `get_state`, `get_subagents`, `get_btw_history`, then `replay` of the `pending` lines and `release` of the frames held meanwhile. Every command is bounded by `GET_STATE_TIMEOUT_MS`.
+- **Joining on hello** (`reattach`/`adopt` in `hub.ts`): v7 servers call `open` to join each listed channel, restore pending requests and the current whole streaming message, then request state/subagents/side-question snapshots before releasing held frames. They also join `channels_changed` announcements with no tab open, preserving background badges/notifications. The daemon has already negotiated and set process-global subscriptions; servers do not change those settings. Legacy hosts retain the previous adoption handshake, including startup settings.
 - **The daemon replays open blocking requests** (`pending-requests.ts`): `host_tool_call`, `host_uri_request` and blocking `extension_ui_request` lines, until answered or cancelled, capped at `LINK_LIMITS.pendingBytes` per channel. An adopted wrapper feeds them through `handleFrame` (`replaying`; agent tools are not re-run), so dialogs reappear and browser tool calls wait for the next tab (`hostToolsUnknown`, `parkHostTool`). A request opened while the old server stopped is also resent unacked: `RpcProcess.release` skips held requests the replay already delivered, so it is handled once. The hello also carries `autoApproveExtension`, which an adopted run has no spawn result for.
-- **A child is killed only when it cannot be adopted:** its hello entry has no session id or lost its `pending` lines to the cap (`killOrphan`), or a re-sync command times out or the child exits, its held output overflows, or its real session (after `get_state`) is already started on this server (`adoptRpcSession` kills it: its wrapper's dispose). Auto-resume (`resumeOnHostLink`) first awaits `adoptedChild()` and resumes a session only if it was not adopted.
+- **Legacy orphan cleanup:** only v4–v6 channels use `killOrphan` when adoption is impossible. v7 adoption failure/disposal closes the server's membership; the host decides abandonment and continues any peer's run. Explicit delete/archive is fenced on the host against a concurrent open, even before this server has a wrapper.
 - **Shutdown freezes the links and never kills daemon children.** The `cleanup` in `rpc-manager.ts` runs `markShuttingDown()` and `freezeHostLinks()`: link sockets are closed 1001 and from then on a link neither sends nor applies anything (no kill, no rejection of open host tool calls as tabs close); new upgrades get 503 "omp-web is shutting down". A real SIGTERM exits in the same tick (`process.exit` in `instrumentation.node.ts`), before Bun writes the close frame, so daemons usually see 1006 or ECONNREFUSED rather than 1001 and redial the same way. The daemon keeps the output unacked and redials for the next server. An adoption that fails after the freeze leaves its child to the next server instead of killing it.
 - **Install banner** (`components/LocalDaemonBanner.tsx`). In production, when the local row stays offline with `hostVersion === null` (no daemon has linked since this server started) for 90 s of a page view (well past the daemon's redial wait, at most 3 s on loopback, so a restarting daemon does not trip it), it shows the platform's install command and, for a foreground `ompweb` (terminal or npx, no service), `ompweb host` to keep running in another terminal; Settings → Hosts shows both for an offline local row. Dismissal is kept in `localStorage`. Main never installs services or starts the daemon.
 - **No direct local path.** `local-host.ts` is the daemon's; `lib/hosts/no-direct-local.test.mjs` fails when anything outside its allow-list spawns omp or imports it. The utility omp (`rpc-utility.ts`, login) is the one deliberate exception: it is not a session.
