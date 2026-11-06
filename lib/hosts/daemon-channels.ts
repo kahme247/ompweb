@@ -32,6 +32,8 @@ type Channel = {
   editor?: string;
   /** Why the daemon stopped it (lifecycle reason or "asked"); unset for a crash. */
   stopReason?: string;
+  /** omp accepted the resume prompt but has not started (or ended) that run yet: still recorded as running. */
+  resuming?: boolean;
 };
 type ChannelDeps = {
   spawn(launch: SpawnRequest): Promise<SpawnResult>;
@@ -364,6 +366,7 @@ export class ChannelTable {
     }
     if (frame.type === "agent_start" || (frame.type === "notice" && frame.source === "session-persistence")) this.refreshIdentity(channel);
     if (frame.type === "agent_start" || frame.type === "agent_end" || frame.type === "session_info_update") this.deps.sessionsChanged?.();
+    if (channel.resuming && (frame.type === "agent_start" || frame.type === "agent_end")) { channel.resuming = false; this.deps.runningChanged?.(); }
     if (frame.type === "response" && typeof frame.id === "string") {
       if (frame.id.startsWith("d:")) {
         const pending = channel.internal.get(frame.id);
@@ -510,7 +513,7 @@ export class ChannelTable {
       .map(channel => ({ ch: channel.ch, sessionId: channel.pending.sessionId, cwd: channel.cwd, pending: replay ? this.pendingFor(channel, link) : null }));
   }
   running(): HostResumeEntry[] {
-    return [...this.channels.values()].filter(channel => channel.lifecycle?.isRunning && channel.pending.sessionId && channel.launch.sessionFile && !channel.sessionMovePending)
+    return [...this.channels.values()].filter(channel => (channel.lifecycle?.isRunning || channel.resuming) && channel.pending.sessionId && channel.launch.sessionFile && !channel.sessionMovePending)
       .map(channel => ({ sessionId: channel.pending.sessionId!, launch: channel.launch }));
   }
   /** Resumes each entry once; returns the entries whose resume failed. */
@@ -522,7 +525,10 @@ export class ChannelTable {
       try {
         channel.opened = true;
         this.deps.channelsChanged?.(channel.ch);
-        await this.command(channel, { type: "prompt", message: RESUME_PROMPT });
+        // Recorded until the run starts or ends; omp's reply can come before agent_start.
+        channel.resuming = true;
+        try { await this.command(channel, { type: "prompt", message: RESUME_PROMPT }); }
+        catch (error) { channel.resuming = false; throw error; }
       } finally {
         channel.lifecycle?.setPreparing(lease, false);
       }
