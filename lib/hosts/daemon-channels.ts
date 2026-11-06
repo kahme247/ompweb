@@ -21,7 +21,8 @@ type Channel = {
   legacy: string | null; pending: PendingRequests; snapshot: StreamSnapshot; lifecycle?: ChannelLifecycle; shared?: SharedRequests;
   members: Map<string, Member>; aliases: Set<string>; files: Set<string>;
   decoder: RpcFrameDecoder; physical: string[]; commands: Map<string, DaemonLink | null>;
-  internal: Map<string, { resolve(frame: RpcFrameRecord): void; reject(error: Error): void; timer: NodeJS.Timeout }>;
+  /** `onReply`: runs as omp's successful reply is read, before the next stdout line. */
+  internal: Map<string, { resolve(frame: RpcFrameRecord): void; reject(error: Error): void; timer: NodeJS.Timeout; onReply?(): void }>;
   ready: Promise<RpcFrameRecord | null>; noteReady(frame: RpcFrameRecord | null): void; readyTimer: NodeJS.Timeout;
   startup: Promise<void>; exited: boolean; opened: boolean; fullFallback: boolean; forceTimer?: NodeJS.Timeout;
   identityRefresh?: Promise<void>;
@@ -242,7 +243,7 @@ export class ChannelTable {
         if (preparingLinkId) channel.lifecycle.setPreparing(preparingLinkId, true);
         channel.shared = new SharedRequests({ members: () => [...channel.members.keys()], isUp: id => channel.members.get(id)?.link.isUp() ?? false,
           deliver: (id, lines) => { const member = channel.members.get(id); if (member) for (const line of lines) this.deliver(channel, member, { type: "stdout", ch, line }); },
-          write: frame => { void this.command(channel, frame).catch(error => this.deps.log(`channel ${ch}: ${String(error)}`)); } });
+          write: (frame, onReply) => { void this.command(channel, frame, onReply).catch(error => this.deps.log(`channel ${ch}: ${String(error)}`)); } });
       }
       spawned.transport.onLine(line => this.stdout(channel, line));
       spawned.transport.onStderr(chunk => this.broadcast(channel, { type: "stderr", ch, chunk }));
@@ -283,14 +284,14 @@ export class ChannelTable {
     await this.command(channel, { type: "get_state" }).catch(() => {});
   }
 
-  private command(channel: Channel, frame: RpcFrameRecord): Promise<RpcFrameRecord> {
+  private command(channel: Channel, frame: RpcFrameRecord, onReply?: () => void): Promise<RpcFrameRecord> {
     if (channel.exited) return Promise.reject(new Error("omp exited"));
     const id = `d:${++this.commandId}`, command = { ...frame, id };
     let line: string;
     try { line = encodeRpcCommand(command); } catch (error) { return Promise.reject(error); }
     const { promise, resolve, reject } = Promise.withResolvers<RpcFrameRecord>();
     const timer = setTimeout(() => { channel.internal.delete(id); channel.lifecycle?.forgetCommand(id); reject(new Error(`omp ${frame.type} timed out`)); }, 5000); timer.unref?.();
-    channel.internal.set(id, { resolve, reject, timer }); channel.lifecycle?.noteStdin(command);
+    channel.internal.set(id, { resolve, reject, timer, onReply }); channel.lifecycle?.noteStdin(command);
     channel.transport.write(line, error => {
       if (error) { const pending = channel.internal.get(id); if (!pending) return; clearTimeout(pending.timer); channel.internal.delete(id); channel.lifecycle?.forgetCommand(id, true); reject(error); }
     });
@@ -370,7 +371,7 @@ export class ChannelTable {
     if (frame.type === "response" && typeof frame.id === "string") {
       if (frame.id.startsWith("d:")) {
         const pending = channel.internal.get(frame.id);
-        if (pending) { clearTimeout(pending.timer); channel.internal.delete(frame.id); if (frame.success === false) pending.reject(new Error(String(frame.error ?? "omp command failed"))); else pending.resolve(frame); }
+        if (pending) { clearTimeout(pending.timer); channel.internal.delete(frame.id); if (frame.success === false) pending.reject(new Error(String(frame.error ?? "omp command failed"))); else { pending.onReply?.(); pending.resolve(frame); } }
         return;
       }
       if (channel.commands.has(frame.id)) {

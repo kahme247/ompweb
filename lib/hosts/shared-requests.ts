@@ -10,7 +10,8 @@ type SharedRequestDeps = {
   members(): string[];
   isUp(id: string): boolean;
   deliver(id: string, lines: string[]): void;
-  write(frame: RpcFrameRecord): void;
+  /** `onReply`: omp read the frame (its successful reply arrived); called before any later output is handled. */
+  write(frame: RpcFrameRecord, onReply?: () => void): void;
 };
 
 export function validateHostTools(tools: unknown[], schemes: HostUriScheme[]): void {
@@ -111,11 +112,13 @@ export class SharedRequests {
       for (const tool of registration?.tools ?? []) if (!tools.has(tool.name as string)) tools.set(tool.name as string, tool);
       for (const { scheme, writable } of registration?.schemes ?? []) schemes.set(scheme, (schemes.get(scheme) ?? false) || writable);
     }
-    for (const [name, tool] of tools) this.toolDefs.set(name, JSON.stringify(tool));
+    // omp's output is ordered: a call read before its reply to this union was made under the previous definitions.
+    const advertised = [...tools].map(([name, tool]) => [name, JSON.stringify(tool)] as const);
+    const confirm = () => { for (const [name, def] of advertised) this.toolDefs.set(name, def); };
     const mergedTools = [...tools.values()].sort((a, b) => String(a.name).localeCompare(String(b.name)));
     const mergedSchemes = [...schemes].sort(([a], [b]) => a.localeCompare(b)).map(([scheme, writable]) => ({ scheme, writable }));
     const toolUnion = JSON.stringify(mergedTools), schemeUnion = JSON.stringify(mergedSchemes);
-    if (toolUnion !== this.toolUnion) { this.toolUnion = toolUnion; this.deps.write({ type: "set_host_tools", tools: mergedTools }); }
+    if (toolUnion !== this.toolUnion) { this.toolUnion = toolUnion; this.deps.write({ type: "set_host_tools", tools: mergedTools }, confirm); }
     if (schemeUnion !== this.schemeUnion) { this.schemeUnion = schemeUnion; this.deps.write({ type: "set_host_uri_schemes", schemes: mergedSchemes }); }
   }
 
