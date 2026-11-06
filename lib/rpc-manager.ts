@@ -21,11 +21,12 @@ import { markShuttingDown, recordRunningSessions, RESUME_PROMPT, resumeOnHostLin
 import { samePath } from "./paths";
 import { isRecord } from "./type-guards";
 import { BLOCKING_UI_METHODS, createNotificationDetector } from "./notification-events";
-import { publishNotification } from "./notification-hub";
+import { publishNotification, publishNotificationDismiss } from "./notification-hub";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./skill-diagnostics";
 import { eventWithToolResultImageUrls } from "./media-cache";
 import type {
   BashResultInfo,
+  ExtensionUiResponse,
   OmpModel,
   RpcAvailableSlashCommand,
   RpcSessionState,
@@ -127,7 +128,7 @@ export class WebRpcError extends Error {
 }
 
 /** Shape check for an ask-dialog `answers` payload; omp validates the content. */
-function isAskAnswers(value: unknown): boolean {
+export function isAskAnswers(value: unknown): boolean {
   return Array.isArray(value) && value.every((answer: unknown) =>
     isRecord(answer)
     && typeof answer.id === "string"
@@ -1309,6 +1310,45 @@ export class AgentSessionWrapper {
       clearTimeout(timer);
       this.uiExpiryTimers.delete(id);
     }
+  }
+
+  /**
+   * A pending dialog is settled (answered, cancelled, expired or its child is
+   * gone): forget it and retract the `input` notification it produced, so no
+   * other tab or device keeps offering an answer to a question that is gone.
+   */
+  private settlePendingUiRequest(id: string): boolean {
+    if (!this.pendingUiRequests.has(id)) return false;
+    this.forgetPendingUiRequest(id);
+    if (this._sessionId) publishNotificationDismiss(this._sessionId, id);
+    return true;
+  }
+
+  /**
+   * Answer a blocking dialog from a notification action. Uses the same
+   * validation and frame as the agent route's `extension_ui_response` command,
+   * and returns whether the request was still pending.
+   */
+  answerExtensionUiRequest(id: string, response: ExtensionUiResponse): "answered" | "alreadySettled" {
+    const pending = this.pendingUiRequests.get(id);
+    if (!pending) return "alreadySettled";
+    const pendingAsk = pending.method === "ask";
+    // A pending ask accepts only its answers or a cancel; any other pending
+    // dialog accepts no answers. Anything else would drop it from reconnect
+    // replay while omp rejects the payload.
+    if (pendingAsk) {
+      if (!("cancelled" in response) && !isAskAnswers("answers" in response ? response.answers : undefined)) {
+        throw new WebRpcError("Invalid ask dialog answers", "invalid_ask_answers");
+      }
+    } else if ("answers" in response) {
+      throw new WebRpcError("This dialog does not take answers", "invalid_ask_answers");
+    }
+    const wasPending = this.settlePendingUiRequest(id);
+    this.proc.sendFrame({ type: "extension_ui_response", id, ...response });
+    // omp sends no cancel for an answered dialog; other tabs on this session
+    // would keep showing it, so settle it for them here.
+    if (wasPending) this.emit({ type: "extension_ui_request", id: `cancel:${id}`, method: "cancel", targetId: id });
+    return "answered";
   }
 
   private clearPendingUiRequests(): void {

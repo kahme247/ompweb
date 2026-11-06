@@ -33,6 +33,7 @@ import * as modelsConfigCatalog from "@/app/api/models-config/catalog/route";
 import * as modelsConfig from "@/app/api/models-config/route";
 import * as modelsConfigTest from "@/app/api/models-config/test/route";
 import * as models from "@/app/api/models/route";
+import * as notificationsAnswer from "@/app/api/notifications/answer/route";
 import * as notificationsDevices from "@/app/api/notifications/devices/route";
 import * as notificationsHistory from "@/app/api/notifications/history/route";
 import * as notificationsPresence from "@/app/api/notifications/presence/route";
@@ -128,6 +129,7 @@ export const ROUTE_MODULES: Record<string, RouteModule> = {
   "models-config": modelsConfig,
   "models-config/test": modelsConfigTest,
   "models": models,
+  "notifications/answer": notificationsAnswer,
   "notifications/devices": notificationsDevices,
   "notifications/history": notificationsHistory,
   "notifications/presence": notificationsPresence,
