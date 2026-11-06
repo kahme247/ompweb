@@ -295,6 +295,10 @@ function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, 
   let timer: NodeJS.Timeout | undefined;
   let commandId: string | undefined;
   let expansionRetry: NodeJS.Timeout | undefined;
+  let retryPending = false;
+  /** This command's `prompt_result` came while a slash template's context check still had to decide. */
+  let resultArrived = false;
+  const unshown: HandOff = { error: "omp finished this message without showing it", mayHaveBeenSent: true };
   const expectedText = () => typeof command.message === "string" && command.message ? command.message : Array.isArray(command.images) && command.images.length ? "[Image]" : "";
   const finish = (outcome: HandOff) => {
     if (seen || stopped) return;
@@ -311,6 +315,7 @@ function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, 
       || command.streamingBehavior || !expectedText().trimStart().startsWith("/")) return;
     checkingExpansion = true;
     clearTimeout(expansionRetry);
+    retryPending = false;
     let retry = false;
     try {
       const context = await wrapper.withPendingCommand(() => wrapper.host.sessionOps.readContext(wrapper.sessionId, undefined, {
@@ -330,9 +335,10 @@ function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, 
     } finally {
       checkingExpansion = false;
       if (retry && !stopped && !seen) {
+        retryPending = true;
         expansionRetry = setTimeout(() => { void checkExpandedUser(message); }, 100);
         expansionRetry.unref?.();
-      }
+      } else if (resultArrived) finish(unshown);
     }
   };
   const detach = wrapper.onEvent((event) => {
@@ -366,15 +372,21 @@ function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, 
         void checkExpandedUser(event.message);
       }
     } else if (event.type === "process_exit") finish(CHILD_EXITED);
-    else if (event.type === "prompt_result" && commandId !== undefined && event.id === commandId && !(userMessageSeen && text.trimStart().startsWith("/"))) {
-      // omp finished this prompt with no echo, so none will come (an expanded slash template is left to its context check).
+    else if (event.type === "prompt_result" && commandId !== undefined && event.id === commandId) {
+      // omp finished this prompt with no echo, so none will come. An expanded slash template's context check decides
+      // first; once it has nothing left to try, the message may still be in the transcript.
+      if (userMessageSeen && text.trimStart().startsWith("/")) {
+        resultArrived = true;
+        if (!checkingExpansion && !retryPending) finish(unshown);
+        return;
+      }
       // It reached no transcript when omp showed no user message (an input hook may rewrite the text) and ran no turn
       // for it: Stop or a refusal during setup, an aborted or failed run. A slash command may have acted on its own, and
       // frames lost meanwhile (a link drop, a daemon `resync`) may have carried the echo.
       const dropped = !userMessageSeen && !text.trimStart().startsWith("/") && wrapper.getFrameGaps() === gapsAtStart
         && (event.agentInvoked === false || event.status === "aborted" || event.status === "error");
       const reason = isRecord(event.error) && typeof event.error.message === "string" ? event.error.message
-        : dropped ? "Stopped before omp showed it" : "omp finished this message without showing it";
+        : dropped ? "Stopped before omp showed it" : unshown.error;
       finish({ error: reason, mayHaveBeenSent: !dropped });
     } else if (event.type === "agent_end" && event.isTerminal !== false && !wrapper.isAlive()) finish(CHILD_EXITED);
     // Session-wide prompt failures may belong to an older run; only this command's reply can prove rejection.
