@@ -55,6 +55,7 @@ import * as sessionsId from "@/app/api/sessions/[id]/route";
 import * as sessionsIdState from "@/app/api/sessions/[id]/state/route";
 import * as sessionsIdSubagentsSubagentId from "@/app/api/sessions/[id]/subagents/[subagentId]/route";
 import * as sessionsIdSubagents from "@/app/api/sessions/[id]/subagents/route";
+import * as sessionsMessagesSearch from "@/app/api/sessions/messages/search/route";
 import * as sessionsArchive from "@/app/api/sessions/archive/route";
 import * as sessionsImport from "@/app/api/sessions/import/route";
 import * as sessions from "@/app/api/sessions/route";
@@ -150,6 +151,7 @@ export const ROUTE_MODULES: Record<string, RouteModule> = {
   "sessions/[id]/state": sessionsIdState,
   "sessions/[id]/subagents/[subagentId]": sessionsIdSubagentsSubagentId,
   "sessions/[id]/subagents": sessionsIdSubagents,
+  "sessions/messages/search": sessionsMessagesSearch,
   "sessions/archive": sessionsArchive,
   "sessions/import": sessionsImport,
   "sessions": sessions,
