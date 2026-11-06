@@ -479,6 +479,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
   // "!" shares output with the model (riskier, root-style warning); "!!" stays local (plain terminal).
   const shellMode = bashMode ? (bashExcluded ? "local" : "model") : undefined;
+  // Side questions stay separate from the main run's queue and Stop action.
+  const btwMode = /^\/btw(\s|$)/.test(trimmedValue);
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [slashMatch, setSlashMatch] = useState<SlashQueryMatch | null>(null);
@@ -1283,9 +1285,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length) return;
     // `!cmd` runs right away during a run too, as in omp's terminal; it is never queued as text.
     const shellCommand = !promptOnlyRef.current && msg.startsWith("!") && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length;
-    if (submissionBlockedRef.current || holdingRef.current || (isStreaming && !shellCommand)) return;
+    if (submissionBlockedRef.current || holdingRef.current) return;
     onAudioUnlock?.();
     if (sendSideQuestion(msg, overrideText)) return;
+    if (isStreaming && !shellCommand) return;
     if (rejectsPendingUploads()) return;
     const files = attachedTextFilesRef.current;
     const composedMessage = composeMessageWithTextAttachments(msg, files);
@@ -1859,7 +1862,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const imageUploads = attachedUploads.filter((upload) => upload.previewUrl !== null);
   const fileUploads = attachedUploads.filter((upload) => upload.previewUrl === null);
   const primaryActionQueuesMessage =
-    isStreaming
+    isStreaming && !btwMode
     && (Boolean(value.trim()) || hasAttachments || dictationCapturing)
     && Boolean(onFollowUp);
   // The button follows the same Settings choice as Enter: soft keyboards have no
@@ -3180,7 +3183,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             aria-live="polite"
             data-shell={shellMode}
             style={{
-              border: "1px solid var(--shell-border, color-mix(in srgb, var(--border) 70%, transparent))",
+              border: btwMode ? "1px solid var(--accent)" : "1px solid var(--shell-border, color-mix(in srgb, var(--border) 70%, transparent))",
               borderBottom: "none",
               borderRadius: queuedCount > 0 ? 0 : "var(--radius-card) var(--radius-card) 0 0",
               background: "var(--bg-panel)",
@@ -3205,8 +3208,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             style={{
               display: "flex",
               flexDirection: "column",
-              background: "var(--shell-bg, var(--bg))",
-              border: "1px solid var(--shell-border, color-mix(in srgb, var(--border) 70%, transparent))",
+              background: btwMode ? "color-mix(in srgb, var(--accent) 8%, var(--bg))" : "var(--shell-bg, var(--bg))",
+              border: btwMode ? "1px solid var(--accent)" : "1px solid var(--shell-border, color-mix(in srgb, var(--border) 70%, transparent))",
               borderRadius: (queuedCount > 0 || Boolean(statusText)) ? "0 0 var(--radius-card) var(--radius-card)" : "var(--radius-card)",
               padding: "12px 12px 10px",
               boxShadow: "var(--shadow-card)",
@@ -3960,7 +3963,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   : <ListChecks size={13} strokeWidth={2} aria-hidden="true" />}
                 {t(primaryActionRunsShell ? "chatInput.runShell" : primaryActionMode === "steer" ? "chatInput.steer" : "chatInput.queue")}
               </button>
-            ) : isStreaming ? (
+            ) : isStreaming && !btwMode ? (
               <button
                 type="button"
                 className="composer-primary-action"
