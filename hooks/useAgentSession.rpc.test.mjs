@@ -2031,6 +2031,29 @@ test("an idle chat reconciles auto-compaction when its completion event is lost"
   assert.equal(w.latest.isCompacting, false, "the ref and rendered state share the same compaction lifecycle");
 });
 
+/** A catch-up snapshot of `sid` at `sequence` with no prompt running, only (maybe) a compaction. */
+function compactionSnapshot(sid, sequence, isCompacting) {
+  return { cursor: { streamId: `stream-${sid}`, sequence }, isStreaming: false, isPromptRunning: false, isCompacting, streamingMessage: null, toolEvents: [] };
+}
+
+test("a compaction-only catch-up snapshot is not a prompt run and does not fail when it ends", async () => {
+  resetWorld();
+  toastCalls.length = 0;
+  const sid = "snapshot-compaction";
+  primeSession(sid, [userMsg("u0", "q")]);
+  world.agents.set(sid, { running: true, state: { isCompacting: true } });
+  world.live.set(sid, compactionSnapshot(sid, 0, true));
+  const w = await mountSession(sid);
+  await act(async () => { lastEs().open(); await settle(); });
+  assert.equal(w.latest.isCompacting, true);
+  assert.equal(w.latest.agentRunning, false, "a compaction runs no prompt");
+  world.agents.set(sid, { running: true, state: { isCompacting: false } });
+  world.live.set(sid, compactionSnapshot(sid, 1, false));
+  await act(async () => { window.dispatchEvent(new Event("online")); await settle(); });
+  assert.equal(w.latest.isCompacting, false);
+  assert.deepEqual(w.latest.notices.filter((notice) => notice.type === "error"), [], "a finished compaction is not an empty prompt reply");
+});
+
 test("matching running frames received during an idle lookup trigger one fresh lookup", async () => {
   resetWorld();
   primeSession("late-start", [userMsg("u0", "q")]);
