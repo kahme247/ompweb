@@ -1060,7 +1060,7 @@ export function invalidateAllSessionScanCaches(): void {
 
 /** scanSessionInfo memoized on (path, size, mtimeMs). Callers must treat the
  * returned info as immutable — cache hits share one object. */
-function scanSessionInfoCached(filePath: string): OmpSessionInfo | undefined {
+export function scanSessionInfoCached(filePath: string): OmpSessionInfo | undefined {
   let stat: { size: number; mtime: Date; mtimeMs: number };
   try {
     stat = statSync(filePath);

@@ -993,8 +993,12 @@ function validResult(op: keyof SessionOps, result: unknown, args: unknown[]): bo
       return isRecord(value) && typeof value.cwd === "string" && typeof value.projectRoot === "string" && (value.projectKey === undefined || typeof value.projectKey === "string");
     case "exportSession":
       return isRecord(value) && typeof value.html === "string" && typeof value.fileName === "string";
-    case "readSession":
-      return isRecord(value) && isRecord(value.info) && isRecord(value.context);
+    case "readSession": {
+      // `?meta=1` is the navigation shape: no transcript, so `context` is null.
+      const options = isRecord(args[1]) ? args[1] : {};
+      return isRecord(value) && isRecord(value.info)
+        && (isRecord(value.context) || (options.meta === true && value.context === null));
+    }
     case "readContext": {
       // The context route reads a different shape per mode.
       const options = isRecord(args[2]) ? args[2] : {};

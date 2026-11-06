@@ -37,10 +37,13 @@ export async function POST(
 
 // GET /api/agent/[id] - Get current agent state
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  // Default stays the full shape; `?systemPrompt=0` drops the ~13 KB prompt
+  // from the 15 s state poll. Any other value (including "1") keeps it.
+  const includeSystemPrompt = new URL(req.url).searchParams.get("systemPrompt") !== "0";
 
   try {
     const session = getRpcSession(id);
@@ -48,7 +51,13 @@ export async function GET(
       return Response.json({ running: false });
     }
     try {
-      const state = await session.send({ type: "get_state" });
+      // Through the wrapper's command path, not a dedicated method: that is
+      // the contract every wrapper fake implements, and `dispatchCommand`
+      // already honors `systemPrompt: false`.
+      const state = await session.send({
+        type: "get_state",
+        ...(includeSystemPrompt ? {} : { systemPrompt: false }),
+      });
       return Response.json({ running: true, state });
     } catch (error) {
       if (error instanceof WebRpcError && error.code === "session_unresponsive") {

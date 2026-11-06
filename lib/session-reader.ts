@@ -837,6 +837,47 @@ export function buildSessionContext(
   };
 }
 
+/** First `{type:"text"}` block's text in a message content array ("" when none). */
+function textBlockText(content: readonly unknown[]): string {
+  for (const block of content) {
+    if (block && typeof block === "object" && "type" in block && block.type === "text" && "text" in block && typeof block.text === "string") {
+      return block.text;
+    }
+  }
+  return "";
+}
+
+/**
+ * The two `info` fields derived from the active context — `messageCount` and
+ * `firstMessage` — without converting a whole transcript into UI messages,
+ * plus the branch's `model`/`thinkingLevel` (the meta shape carries them in
+ * `info` because it has no `context`). `GET /api/sessions/[id]?meta=1` needs
+ * them for a navigation-only response, where building (and then dropping) a
+ * multi-megabyte context would defeat the point of the meta shape.
+ */
+export function buildSessionContextSummary(
+  entries: SessionEntry[],
+  leafId?: string | null,
+  options: { deferThinking?: boolean; deferToolResultImages?: boolean; includePreCompaction?: boolean } = {},
+): { messageCount: number; firstMessage: string; model: SessionContext["model"]; thinkingLevel: string } {
+  const { selected, model, thinkingLevel } = selectSessionContext(entries, leafId, options);
+  let firstMessage = "(no messages)";
+  for (const entry of selected) {
+    const userMessage = entry.type === "branch_summary"
+      ? Boolean(entry.summary)
+      : entry.type === "message" && isRecord(entry.message) && entry.message.role === "user";
+    if (!userMessage) continue;
+    const message = entryToUiMessage(entry, options);
+    const content = message && "content" in message ? message.content : undefined;
+    const text = typeof content === "string"
+      ? content
+      : Array.isArray(content) ? textBlockText(content) : "";
+    firstMessage = text || "(no messages)";
+    break;
+  }
+  return { messageCount: selected.length, firstMessage, model, thinkingLevel };
+}
+
 /** Select ordering and branch metadata without converting message bodies. */
 function selectSessionContext(
   entries: SessionEntry[],
