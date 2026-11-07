@@ -35,6 +35,8 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Fixes & Improvements
 
+- **The model picker shows the new model at once.** Picking a model in an existing chat updates the composer immediately, as the effort picker already did, instead of waiting until omp has restarted with it. A switch omp refuses goes back to the previous model and explains why in a notice.
+- **The dictation waveform recovers when the browser suspends its audio.** If the browser suspends or interrupts the meter's audio context mid-recording or during a pause, the recording resumes it, so the bars follow your voice again instead of staying flat while the recording itself works.
 - **Provider cards no longer look clickable.** Hovering or tapping a provider's non-interactive card no longer accents its border. Configure and Manage keep the neutral secondary-button styling used elsewhere in Settings; the clickable Browse all providers card keeps its hover feedback.
 - **The retry banner keeps its cancel button on-screen on mobile.** Retry details wrap within the composer, including long provider errors, instead of pushing the Abort retry button past the side of the screen. Long details scroll within a bounded area, and the controls reflow in narrow chat columns.
 - **Windows host updates allow more time for safety checks.** The process inventory gets up to 20 seconds to start and finish on a busy machine, instead of five. Shared installations and failed or unreadable inventories still block the update before the daemon is stopped.

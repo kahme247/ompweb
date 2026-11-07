@@ -5300,24 +5300,53 @@ test("a held file snapshot cannot roll back a newer RPC model choice", async () 
   assert.equal(w.latest.thinkingLevel, "high");
 });
 
-test("a failed model switch is shown as a notice instead of failing silently (#277)", async () => {
+test("a model switch shows at once and rolls back with a notice when it fails (#277)", async () => {
   resetWorld();
   primeSession("s1", [userMsg("u0", "q")]);
   Object.assign(world.sessions.get("s1"), { model: { provider: "test", modelId: "old-model" }, thinkingLevel: "low" });
   const w = await mountSession("s1");
   assert.equal(w.latest.displayModel.modelId, "old-model");
+  let fail;
   world.holds.push({
     match: (method, _url, body) => method === "POST" && body?.type === "set_model",
-    produce: async () => ({
+    produce: () => new Promise((resolve) => { fail = () => resolve({
       status: 500,
       value: { error: "omp exited (code 1, signal none): error: Could not restore model test/old-model" },
-    }),
+    }); }),
   });
-  await act(async () => { await w.latest.handleModelChange("test", "chosen-model"); });
+  let command;
+  await act(async () => { command = w.latest.handleModelChange("test", "chosen-model"); await sleep(20); });
+  assert.equal(w.latest.displayModel.modelId, "chosen-model", "the pick shows while omp starts");
+  await act(async () => { fail(); await command; });
   await settle();
   assert.equal(w.latest.displayModel.modelId, "old-model", "a failed switch must not claim the new model");
   assert.equal(w.latest.notices.at(-1)?.type, "error");
   assert.match(w.latest.notices.at(-1)?.message ?? "", /Could not restore model/);
+});
+
+test("an earlier model pick that fails does not undo a newer pick", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  Object.assign(world.sessions.get("s1"), { model: { provider: "test", modelId: "old-model" }, thinkingLevel: "low" });
+  const w = await mountSession("s1");
+  const replies = [];
+  for (let i = 0; i < 2; i++) {
+    world.holds.push({
+      match: (method, _url, body) => method === "POST" && body?.type === "set_model",
+      produce: () => new Promise((resolve) => { replies.push(resolve); }),
+    });
+  }
+  const failure = { status: 500, value: { error: "set_model failed" } };
+  let first;
+  let second;
+  await act(async () => { first = w.latest.handleModelChange("test", "model-a"); await sleep(20); });
+  await act(async () => { second = w.latest.handleModelChange("test", "model-b"); await sleep(20); });
+  assert.equal(w.latest.displayModel.modelId, "model-b");
+  await act(async () => { replies[0](failure); await first; });
+  assert.equal(w.latest.displayModel.modelId, "model-b", "the older failure keeps the newer pick");
+  await act(async () => { replies[1](failure); await second; });
+  await settle();
+  assert.equal(w.latest.displayModel.modelId, "old-model", "with both failed, the running model shows again");
 });
 
 test("idle catch-up cannot overwrite a pending thinking command", async () => {
