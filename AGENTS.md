@@ -644,6 +644,14 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   **Discovery during capture:** `collectArchives` also recognizes strictly named
   `.jsonl.gz.<UUID>.restore-consume` basenames (including valid POSIX stems/parents
   containing newlines) and parses their actual compressed header.
+  Artifact trees are not archive-entry trees: in each enumerated directory,
+  `<name>.jsonl.gz` (or its valid capture name) identifies the sibling
+  `<name>.jsonl/` as that session's artifacts, and discovery never recurses into it.
+  Uploaded files inside may have arbitrary names, including non-gzip `.jsonl.gz`
+  attachments or capture lookalikes; they must not become archive evidence or
+  fail the host's archive scan. Unpaired `.jsonl` project directories, hidden
+  directories and genuine nested archives are still traversed. Actual archive
+  entries outside paired artifact trees retain the fail-closed read/error policy.
   Each capture keeps its unique physical key and carries `restorePending: true`;
   it is exact-session archive evidence, never an alias of the original `.gz` key.
   The browser disables Restore for capture evidence, and the API independently

@@ -47,9 +47,9 @@ function normalizeArchiveKey(key: string): string {
 
 /** Only names emitted by commitRestore: arbitrary similarly named files are not archive evidence. Captures retain a unique
  * physical key and are explicitly discovery-only, never aliases of an ordinary archive's actionable key. */
-function isCapturedArchive(filePath: string): boolean {
-  // Match only the basename suffix: parent directories and valid POSIX filename stems may contain line terminators.
-  return /\.jsonl\.gz\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.restore-consume$/i.test(path.basename(filePath));
+function capturedArchiveOriginalName(filePath: string): string | null {
+  // Basename only, with a newline-safe stem: this parser serves both discovery evidence and artifact-directory pairing.
+  return /^([\s\S]*\.jsonl\.gz)\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.restore-consume$/i.exec(path.basename(filePath))?.[1] ?? null;
 }
 
 function collectArchives(directory: string, files: string[] = []): string[] {
@@ -61,10 +61,20 @@ function collectArchives(directory: string, files: string[] = []): string[] {
     // An unreadable root/subtree can contain any session's archive. Never turn access or I/O failures into proven absence.
     throw error;
   }
+  // OMP archives <session>.jsonl.gz beside its artifacts directory <session>.jsonl. Never recurse into that paired tree:
+  // arbitrary uploads there may themselves end in .jsonl.gz or look like captures, without being archive entries.
+  // Pair from this same enumeration, including captures whose ordinary .gz name is temporarily absent. Do not blanket-skip
+  // .jsonl or hidden directories: those are also valid project path components.
+  const artifacts = new Set<string>();
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const original = entry.name.endsWith(".jsonl.gz") ? entry.name : capturedArchiveOriginalName(entry.name);
+    if (original) artifacts.add(original.slice(0, -".gz".length));
+  }
   for (const entry of entries) {
     const fullPath = path.join(directory, entry.name);
-    if (entry.isDirectory()) collectArchives(fullPath, files);
-    else if (entry.isFile() && (entry.name.endsWith(".jsonl.gz") || isCapturedArchive(entry.name))) files.push(fullPath);
+    if (entry.isDirectory() && !artifacts.has(entry.name)) collectArchives(fullPath, files);
+    else if (entry.isFile() && (entry.name.endsWith(".jsonl.gz") || capturedArchiveOriginalName(entry.name))) files.push(fullPath);
   }
   return files;
 }
@@ -176,7 +186,7 @@ export async function listArchivedSessions(archiveRoot = getArchivedSessionsDir(
       const records = await Promise.all([...before.keys()].map(async (filePath) => {
         if (statSync(filePath).size > MAX_ARCHIVE_COMPRESSED_BYTES) return undefined;
         const record = parseArchivePrefix(await readGzipPrefix(filePath, ARCHIVE_PREFIX_BYTES), filePath, root);
-        if (record && isCapturedArchive(filePath)) record.restorePending = true;
+        if (record && capturedArchiveOriginalName(filePath)) record.restorePending = true;
         return record;
       }));
       const after = snapshot();
