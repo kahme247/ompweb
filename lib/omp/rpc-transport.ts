@@ -20,8 +20,21 @@ export interface RpcTransport {
   killTree(force: boolean): void;
   /** A linked host dropped buffered output for this child; the session must reconcile. Remote transports only. */
   onResync?(listener: () => void): void;
+  /** Request an ordered daemon snapshot without changing shared process settings. */
+  resync?(): Promise<void>;
   /** The child died while its host link was down. Remote transports only. */
   readonly lost?: boolean;
+  /** The daemon, rather than this web server, owns process-wide settings and stop timers. */
+  readonly hostOwnedLifecycle?: boolean;
+  /** The host stopped the child on purpose (lifecycle or a server's request): not a crash. */
+  readonly stopReason?: string;
+  setInterest?(on: boolean): void;
+  setPreparing?(on: boolean, takeOver?: boolean): void;
+  /** Acquire (rejects while another server edits) or release the host's history-edit lease. */
+  setEditing?(on: boolean): Promise<void>;
+  setHostTools?(tools: unknown[], schemes: { scheme: string; writable: boolean }[]): Promise<void>;
+  /** Leave the shared channel without terminating its process. */
+  close?(): void;
   /** Correlates log lines: the child's pid here, the channel id on a linked host. */
   readonly id?: string;
 }

@@ -75,3 +75,40 @@ test("`ompweb host login` refuses a token line over 4096 bytes without waiting f
   assert.match(stderr, /4096 bytes/);
   assert.equal(saved, null);
 });
+
+test("`ompweb host login --add` and logout change only the selected URL without argv tokens", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "omp-web-host-multi-login-"));
+  const agentDir = join(scratch, "agent");
+  const file = join(agentDir, "omp-web", "host.json");
+  mkdirSync(join(agentDir, "omp-web"), { recursive: true });
+  const primary = { url: "https://production.example", token: "production-secret" };
+  const staging = { url: "http://127.0.0.1:40000", token: "staging-secret" };
+  writeFileSync(file, JSON.stringify(primary));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const run = async (args, input = "") => {
+    assert.ok(!args.includes(staging.token));
+    const child = spawn("node", [bin, "host", ...args], {
+      env: { ...process.env, HOME: scratch, USERPROFILE: scratch, PI_CODING_AGENT_DIR: agentDir },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    t.after(() => child.kill("SIGKILL"));
+    let log = "";
+    child.stdout.on("data", (chunk) => { log += chunk; });
+    child.stderr.on("data", (chunk) => { log += chunk; });
+    const closed = new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", resolve);
+    });
+    child.stdin.end(input);
+    const code = await Promise.race([closed, sleep(10_000, "timeout", { ref: false })]);
+    assert.equal(code, 0, log);
+    assert.ok(!log.includes(staging.token));
+    assert.ok(!log.includes(primary.token));
+  };
+  await run(["login", "--add", "--url", staging.url], `${staging.token}\n`);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { ...primary, links: [primary, staging] });
+  await run(["logout", "--url", `${staging.url}/`]);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { ...primary, links: [primary] });
+  await run(["logout", "--url", primary.url]);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { ...primary, links: [] });
+});

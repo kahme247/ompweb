@@ -539,7 +539,7 @@ function onChildExit(wrapper: AgentSessionWrapper, event: AgentEvent): void {
   if (event.type !== "process_exit") return;
   const preparing = outbox().preparing;
   for (const key of sessionKeys(wrapper.sessionId)) {
-    const inFlight = db().prepare(`SELECT ${COLUMNS} FROM entries WHERE session_id = ? AND state = 'delivering'`).all(key) as Row[];
+    const inFlight = db().prepare(`SELECT ${COLUMNS} FROM entries WHERE session_id = ? AND state = 'delivering' AND dispatch_pid = ?`).all(key, process.pid) as Row[];
     for (const entry of inFlight) {
       const command = preparing?.get(entry.id);
       if (!command || nativeWriteStarted(command)) fail(entry, "omp exited while this message was being delivered", true);
@@ -664,8 +664,9 @@ async function deliver(entry: Row): Promise<Outcome> {
     const body = await response.json() as { data?: { agentInvoked?: boolean } };
     if (row(current.id)?.state === "failed") return "next";
     const handOff = body.data?.agentInvoked === false ? {} : await replacement.handOff();
+    // Proven dropped (spec O6) leaves the child untainted, like a delivery: no renewal before the next message.
+    if (!handOff.error || handOff.mayHaveBeenSent === false) wrapper.confirmMessageCommandGeneration((priorWrapper === wrapper ? generation : 0) + 1);
     if (handOff.error) return fail(current, handOff.error, handOff.mayHaveBeenSent === true);
-    wrapper.confirmMessageCommandGeneration((priorWrapper === wrapper ? generation : 0) + 1);
     retire(current.id);
     publish(sessionId);
     return "next";

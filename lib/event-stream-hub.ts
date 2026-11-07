@@ -496,7 +496,7 @@ async function openFileChannel(rawPath: string, sessionId: string | null, hostId
     void host.workspaceOps.unwatchFile(id, epoch).catch(() => {});
   });
   try {
-    const result = await host.workspaceOps.watchFile(id, epoch, { segments: filePathApiSegments(rawPath), sessionId });
+    const result = await host.workspaceOps.watchFile(id, epoch, { segments: filePathApiSegments(rawPath), sessionId: resolved.sessionId, sessionFile: resolved.sessionFile });
     if (!result.ok) { detachEvent(); detachStatus(); return result; }
     if (!handle.active) { void host.workspaceOps.unwatchFile(id, epoch).catch(() => {}); return SUBSCRIBED; }
     const info = result.value;
