@@ -622,6 +622,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const eventCoalescer = eventCoalescerRef.current;
   const authoritativeModelSeqRef = useRef(0);
   const modelCommandPendingRef = useRef(0);
+  const modelPickSeqRef = useRef(0);
   const syncActionsRef = useRef<{
     live: (snapshot: SessionLiveSnapshot, fields: SessionLiveFields) => void;
     subscribe: (force: boolean) => boolean;
@@ -3606,6 +3607,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     authoritativeModelSeqRef.current += 1;
     modelCommandPendingRef.current += 1;
     const choice = { provider, modelId };
+    const pick = ++modelPickSeqRef.current;
     try {
       if (isNew) {
         setNewSessionModel({ provider, modelId });
@@ -3628,11 +3630,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       // A cold-start failure (e.g. an unrestorable saved model, #277) must not
       // keep claiming the new model: drop the optimistic pick unless a newer
-      // one replaced it (live state or the file then names the running model),
-      // and explain why in a notice.
+      // one replaced it, and explain why in a notice.
       setCurrentModelOverride((cur) => (cur === choice ? null : cur));
       console.error("Failed to set model:", e);
       addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      // The cached live model can predate an earlier successful pick whose
+      // refresh this pick superseded: re-read what omp runs. Only for the
+      // latest pick; a newer one's optimistic display would be cleared.
+      const sid = sessionIdRef.current;
+      if (!isNew && sid && pick === modelPickSeqRef.current) await refreshLiveModelState(sid);
     } finally {
       modelCommandPendingRef.current -= 1;
     }

@@ -5349,6 +5349,39 @@ test("an earlier model pick that fails does not undo a newer pick", async () => 
   assert.equal(w.latest.displayModel.modelId, "old-model", "with both failed, the running model shows again");
 });
 
+test("a refused pick after a successful one shows the model omp now runs", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  Object.assign(world.sessions.get("s1"), { model: { provider: "test", modelId: "old-model" }, thinkingLevel: "low" });
+  world.agents.set("s1", { running: true, state: { model: { provider: "test", id: "old-model" } } });
+  const w = await mountSession("s1");
+  await act(async () => { lastEs().open(); });
+  await settle();
+  assert.equal(w.latest.displayModel.modelId, "old-model");
+  // A succeeds, but its state refresh is still out when B is picked.
+  let releaseStaleRefresh;
+  world.holds.push({
+    match: (method, url) => method === "GET" && /\/api\/sessions\/s1\/state/.test(url),
+    produce: () => new Promise((resolve) => { releaseStaleRefresh = resolve; }),
+  });
+  let failB;
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "set_model" && body.modelId === "model-b",
+    produce: () => new Promise((resolve) => { failB = () => resolve({ status: 500, value: { error: "refused" } }); }),
+  });
+  world.agents.get("s1").state = { model: { provider: "test", id: "model-a" } };
+  let first;
+  let second;
+  await act(async () => { first = w.latest.handleModelChange("test", "model-a"); await sleep(20); });
+  await act(async () => { second = w.latest.handleModelChange("test", "model-b"); await sleep(20); });
+  await act(async () => { failB(); await second; });
+  await settle();
+  assert.equal(w.latest.displayModel.modelId, "model-a", "omp runs A after B was refused");
+  await act(async () => { releaseStaleRefresh({ value: { running: true, state: { model: { provider: "test", id: "old-model" } } } }); await first; });
+  await settle();
+  assert.equal(w.latest.displayModel.modelId, "model-a", "the superseded refresh cannot roll it back");
+});
+
 test("idle catch-up cannot overwrite a pending thinking command", async () => {
   resetWorld();
   primeSession("s1", [userMsg("u0", "q")]);
