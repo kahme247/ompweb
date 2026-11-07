@@ -565,9 +565,15 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   offline or older host is reported in `unavailableHosts`. Restore sends `hostId`
   and runs on that host (`restoreArchive` op). Restore requires fresh successful
   session discovery from all registered hosts and blocks any already-active ID,
-  including a same-host session at a different path. A per-session claim is shared
-  across web-server processes. Async restore streams archives with fixed 256 MiB
-  compressed and expanded limits, rejecting unsupported IDs before archive consumption.
+  including a same-host session at a different path. So every registered host must
+  be online, deliberately: an offline laptop blocks even a local restore (503
+  `host_offline` with the blocking host's `host` label; the browser names it).
+  `withArchiveRestoreLock` (`lib/archive-restore-lock.ts`) is a per-session SQLite
+  lease in `<agent dir>/omp-web/`, renewed every 10 s and reclaimable 30 s after its
+  last renewal (never by PID, which can be reused). It only coordinates web
+  processes that share one agent directory, not separate web servers sharing a
+  daemon. Async restore streams archives with fixed 256 MiB compressed and expanded
+  limits, rejecting unsupported IDs before archive consumption.
 - **Not yet remote:** Skills/Plugins/Agents/MCP settings; transcript search reads
   this machine's files.
 

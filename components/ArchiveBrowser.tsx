@@ -330,8 +330,10 @@ export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProp
         });
 
         if (!res.ok) {
-          const payload = await res.json().catch(() => ({})) as { error?: string; code?: string };
-          throw new Error(formatApiError(payload, `errors.http${res.status}`));
+          const payload = await res.json().catch(() => ({})) as { error?: string; code?: string; host?: string };
+          throw new Error(payload.code === "host_offline" && payload.host
+            ? t("archiveBrowser.restoreHostOffline", { host: payload.host })
+            : formatApiError(payload, `errors.http${res.status}`));
         }
 
         const data = (await res.json()) as { ok?: boolean; sessionId?: string };
