@@ -355,7 +355,12 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
   // Unavailable host lists cannot prove absence: retain the entry until discovery can resolve its owner. An archived
   // session (on this machine or a linked host) is not gone either: its entries wait until it is restored (spec O6),
   // and so do those whose archive no host could be asked about.
-  if ("response" in resolved && resolved.response.status === 404 && (await archiveState(sessionId)) === "absent") return resolved.response;
+  if ("response" in resolved && resolved.response.status === 404 && (await archiveState(sessionId)) === "absent") {
+    // A restore can move the session from archive to active between these independent reads. Only a fresh active
+    // lookup may confirm deletion; an owner discovered now, or uncertain discovery, keeps this intent durable.
+    const current = await resolveSessionHostOr404(sessionId);
+    if ("response" in current && current.response.status === 404) return current.response;
+  }
 
   const now = Date.now();
   const database = db();
