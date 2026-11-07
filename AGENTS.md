@@ -641,6 +641,21 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   rejected with 409 `generation changed` and returned by exclusive link, and a
   replacement installed after capture is left untouched. If exclusive return is
   blocked, the captured generation is retained at the reported recovery name.
+  **Discovery during capture:** `collectArchives` also recognizes strictly named
+  `.jsonl.gz.<UUID>.restore-consume` files, parses their actual compressed header,
+  and lists their exact session ID under the original `.jsonl.gz` key. This is
+  archive evidence for that session only, while the source pathname is absent and
+  the transcript not yet published, and after the capture owner is killed.
+  `restore-pin` files and malformed capture lookalikes are not listed. An ordinary
+  entry wins if its key/ID duplicates a capture. If a file disappears between
+  enumeration and reading, discovery rescans once to find the renamed capture;
+  repeated churn throws rather than falsely proving absence. Outbox archive
+  discovery therefore keeps the captured session's messages held without marking
+  unrelated IDs archived. Restoring a listed capture whose source name is absent
+  checks for the destination's orphaned `.restore-lock` before returning 404, and
+  reports 409 with its path and manual-recovery requirement instead. Once the owner
+  is verified dead, return the captured entry to its original name and inspect any
+  artifact moves before removing the orphan claim and retrying.
   Normal cleanup removes the pin; process death may leave a pin or captured entry
   requiring inspection alongside an orphaned commit claim. The pin requires hard
   links on the archive filesystem, independently of the sessions filesystem.
