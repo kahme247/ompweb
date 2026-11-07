@@ -107,13 +107,16 @@ export interface SessionOps {
   archiveSession(id: string): Promise<OpResult<{ archivedPath: string }>>;
   /** This host's archive, newest first (browser entries; no hostId). */
   listArchives(): Promise<ArchivedSessionInfo[]>;
-  /** Admit one restore: `restoreArchive` starts only under a claim token reserved here and not fenced since. */
-  restoreReserve(claim: string): Promise<OpResult<null>>;
+  /** Admit one restore: `restoreArchive` starts only under a claim token reserved here and not fenced since. `instance`
+   * names this daemon process; main keeps it with the claim, since only this process can revoke the token. */
+  restoreReserve(claim: string): Promise<OpResult<{ instance: string }>>;
   /** Restore one archived session on this host under a reserved `claim`; `sessionId` is the restored session's id. */
   restoreArchive(key: string, claim: string): Promise<OpResult<{ sessionId: string }>>;
-  /** Forbid any restore under `claim` from starting here, now or whenever its request arrives, and say whether one is running.
-   * Main takes over a restore claim whose outcome it never learned only on `running: false`. */
-  restoreFence(claim: string): Promise<OpResult<{ running: boolean }>>;
+  /** Forbid any restore under `claim` from starting in this process, now or whenever its request arrives, and say whether one
+   * is running here. `instance` names the answering process: a restore reserved in another process (a replaced or restarted
+   * daemon, which may still be running it) was not fenced by this, so main takes a claim over only when `instance` is the
+   * one that reserved it and `running` is false. */
+  restoreFence(claim: string): Promise<OpResult<{ instance: string; running: boolean }>>;
   exportSession(id: string): Promise<OpResult<{ html: string; fileName: string }>>;
   readMedia(hash: string): Promise<OpResult<Uint8Array>>;
   /** Raw registry entries, hidden ones included (main merges session-discovered projects). */
@@ -131,6 +134,9 @@ const fail = (status: number, code: string, error: string): OpResult<never> => (
 const sessionNotFound = () => fail(404, "session_not_found", "Session not found");
 const sessionTooLarge = () => fail(413, "session_file_too_large", "Session file is too large to open in omp-web");
 
+/** This daemon process, as restore claims see it. Fresh per process, never stored: the token sets below die with the process,
+ * so a claim reserved under another value was reserved by a process this one cannot speak for. */
+const RESTORE_INSTANCE = randomUUID();
 /** Restore claim tokens main reserved that no restore has spent and no fence has revoked, oldest first. The cap drops the
  * oldest, whose restore is then refused, never run. */
 const reservedRestores = new Set<string>();
@@ -567,7 +573,7 @@ export const sessionOps: SessionOps = {
     if (typeof claim !== "string" || !claim) return fail(400, "archive_claim_required", "Restore claim is required");
     reservedRestores.add(claim);
     if (reservedRestores.size > MAX_RESERVED_RESTORES) reservedRestores.delete(reservedRestores.values().next().value as string);
-    return ok(null);
+    return ok({ instance: RESTORE_INSTANCE });
   },
 
   async restoreArchive(key, claim) {
@@ -593,7 +599,7 @@ export const sessionOps: SessionOps = {
   async restoreFence(claim) {
     if (typeof claim !== "string" || !claim) return fail(400, "archive_claim_required", "Restore claim is required");
     reservedRestores.delete(claim);
-    return ok({ running: runningRestores.has(claim) });
+    return ok({ instance: RESTORE_INSTANCE, running: runningRestores.has(claim) });
   },
 
   async exportSession(id) {

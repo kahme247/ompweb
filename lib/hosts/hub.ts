@@ -1000,9 +1000,12 @@ function validResult(op: keyof SessionOps, result: unknown, args: unknown[]): bo
         && Array.isArray(value.newRoots) && value.newRoots.every((root) => typeof root === "string");
     case "restoreArchive":
       return isRecord(value) && typeof value.sessionId === "string" && isValidSessionId(value.sessionId);
+    // An answer without the daemon process's identity cannot be matched to the claim: the route would otherwise trust it.
+    case "restoreReserve":
+      return isRecord(value) && typeof value.instance === "string" && value.instance !== "";
     // An unknown answer must not read as "fenced and stopped": the route drops its claim on `running: false`.
     case "restoreFence":
-      return isRecord(value) && typeof value.running === "boolean";
+      return isRecord(value) && typeof value.instance === "string" && value.instance !== "" && typeof value.running === "boolean";
     default:
       return true;
   }

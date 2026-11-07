@@ -18,24 +18,29 @@ class RestoreHostOfflineError extends HostOpError {
   }
 }
 
-/** Resolves only once the host has fenced an earlier restore of this session (it can no longer start, whenever its request
- * arrives) and reports none running: until then it may still publish the session. */
+/** Resolves only once the daemon process that reserved an earlier restore of this session has fenced it (it can no longer
+ * start, whenever its request arrives) and reports none running: until then it may still publish the session. A different
+ * process answering (the daemon was replaced or restarted) proves nothing about the first, which may be alive, shared with
+ * another server, and still running the restore; the claim then stays held. */
 async function confirmRestoreStopped(held: HeldRestore): Promise<void> {
   const host = getHost(held.hostId);
   const sent = `sent to ${host?.label ?? `host ${held.hostId}`} (last seen alive ${new Date(held.since).toISOString()})`;
+  const blocked = (why: string) => new HostOpError(409, "archive_restore_unconfirmed", `Session ${held.sessionId} cannot be restored yet: an earlier restore of it was ${sent}, and its outcome was never learned. ${why} There is no automatic recovery; see AGENTS.md, "Session archive is per host".`);
   // Fails closed, with no timeout and no clearing: unregistering a host does not stop its daemon, which may still run or be sent
   // the restore, and nothing here can ask it. The claim stays until an operator who verified the daemon is stopped removes its row.
-  if (!host) {
-    throw new HostOpError(409, "archive_restore_unconfirmed", `Session ${held.sessionId} cannot be restored: an earlier restore of it was ${sent}, and its outcome was never learned. That host is no longer registered, and unregistering does not stop its daemon, so the session stays blocked. There is no automatic recovery; see AGENTS.md, "Session archive is per host".`);
-  }
+  if (!host) throw blocked("That host is no longer registered, and unregistering does not stop its daemon, so the session stays blocked.");
+  // A row an earlier build wrote names no process, so no answer can be matched to it.
+  if (held.instance === null) throw blocked("The claim was recorded without the daemon process that took it, so nothing can confirm that process stopped.");
   let reason: string | null;
   try {
     const fence = await host.sessionOps.restoreFence(held.claim);
-    reason = !fence.ok ? fence.error : fence.value.running ? "it is still running" : null;
+    if (!fence.ok) reason = fence.error;
+    else if (fence.value.instance !== held.instance) reason = "The daemon linked now is not the process that took the restore (it was replaced or restarted), so it cannot revoke that restore, which may still be running there.";
+    else reason = fence.value.running ? "The restore is still running." : null;
   } catch (error) {
-    reason = error instanceof Error ? error.message : String(error);
+    reason = `The host could not confirm it: ${error instanceof Error ? error.message : String(error)}.`;
   }
-  if (reason) throw new HostOpError(409, "archive_restore_unconfirmed", `Session ${held.sessionId} cannot be restored yet: an earlier restore of it was ${sent} and may still be running or arrive (${reason})`);
+  if (reason) throw blocked(reason);
 }
 
 async function activeSessionHosts(sessionId: string): Promise<string[]> {
@@ -134,15 +139,21 @@ export async function POST(req: Request) {
         const reserved = await host.sessionOps.restoreReserve(claim.token);
         if (!reserved.ok) return opErrorResponse(reserved);
         // Held before the restore leaves: the claim must outlive a timeout, a lost link and this process, as the daemon keeps restoring.
-        claim.hold(hostId);
+        claim.hold(hostId, reserved.value.instance);
         let result;
         try {
           result = await host.sessionOps.restoreArchive(body.key as string, claim.token);
         } catch (error) {
-          // An answer, even a refusal, or an op that never left ends the claim. A silent host or a lost link leaves it held.
-          if (error instanceof HostOpError && error.code !== "host_timeout" && error.code !== "host_offline") claim.release();
-          else if (error instanceof HostOpError) throw new HostOpError(error.status, "archive_restore_unconfirmed", `${error.message}; the restore may still be running there, so this session stays blocked until ${host.label} confirms it stopped`);
-          throw error;
+          // No answer, or one that is not a result: the restore may be running or still arrive, whatever the error says (it
+          // cannot tell an op that never left from one that did), so the claim stays held.
+          const cause = error instanceof Error ? error.message : String(error);
+          throw new HostOpError(error instanceof HostOpError ? error.status : 502, "archive_restore_unconfirmed", `${cause}; the restore may still be running there, so this session stays blocked until ${host.label} confirms it stopped`);
+        }
+        // Only the process that took this claim's token answers with a result: it ran (or finished) the restore, so it is over.
+        // A refusal to admit it (not `archive_restore_failed`) may come from another process, e.g. a replacement daemon asked to
+        // run a request the original never saw: the original may be running it still, so the claim stays held.
+        if (!result.ok && result.code !== "archive_restore_failed") {
+          throw new HostOpError(409, "archive_restore_unconfirmed", `${result.error}; ${host.label} did not run this restore, but nothing proves the daemon that reserved it is not still running it, so this session stays blocked until ${host.label} confirms it stopped`);
         }
         claim.release();
         if (!result.ok) return opErrorResponse(result);
