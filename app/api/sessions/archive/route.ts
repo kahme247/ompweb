@@ -3,11 +3,35 @@ import { listArchivedSessionInfos, restoreArchivedSession, restoreFailureStatus 
 import { HostOpError } from "@/lib/hosts/link-protocol";
 import { getHost, listHosts } from "@/lib/hosts/hub";
 import { isLinkUp } from "@/lib/hosts/host";
-import { invalidateHostSessionList, invalidateLocalSessionLists, listSessionsAllHosts } from "@/lib/hosts/session-index";
+import { invalidateHostSessionList, invalidateLocalSessionLists } from "@/lib/hosts/session-index";
 import { LOCAL_HOST_ID } from "@/lib/hosts/registry";
 import { pumpOutbox } from "@/lib/message-outbox";
 import { invalidateSessionListCache } from "@/lib/session-reader";
 import type { ArchivedSessionInfo } from "@/lib/types";
+import { isValidSessionId } from "@/lib/session-file-references-core";
+import { withArchiveRestoreLock } from "@/lib/archive-restore-lock";
+
+async function activeSessionHosts(sessionId: string): Promise<string[]> {
+  const hosts = [getHost(LOCAL_HOST_ID), ...listHosts().map((row) => getHost(row.id))];
+  const ensureLinked = () => {
+    if (hosts.some((host) => !host || !isLinkUp(host.status()))) {
+      throw new HostOpError(503, "host_offline", "Every host must be linked before restoring an archive");
+    }
+  };
+  ensureLinked();
+  const lists = await Promise.all(hosts.map(async (host) => {
+    try {
+      // Ordered link requests invalidate the daemon's own cache before its list runs.
+      host!.invalidateSessionLists();
+      return { hostId: host!.id, sessions: await host!.sessionOps.listSessions() };
+    } catch {
+      ensureLinked();
+      throw new HostOpError(503, "host_sessions_unavailable", "Could not read every host's active sessions; the archive was not restored");
+    }
+  }));
+  ensureLinked();
+  return lists.filter(({ sessions }) => sessions.some((session) => session.id === sessionId)).map(({ hostId }) => hostId);
+}
 
 /** Each linked host's archive; a host that is offline or cannot answer (an older daemon) is listed in `unavailableHosts`. */
 async function linkedHostArchives(): Promise<{ archives: ArchivedSessionInfo[]; unavailableHosts: { id: string; label: string }[] }> {
@@ -57,26 +81,38 @@ export async function POST(req: Request) {
     const archives = host ? await host.sessionOps.listArchives() : await listArchivedSessionInfos();
     const archive = archives.find((entry) => entry.key === body.key);
     if (!archive) return Response.json({ error: "Archive not found", code: "archive_not_found" }, { status: 404 });
-    const conflict = (await listSessionsAllHosts()).find((session) => session.id === archive.id && session.hostId !== hostId);
-    if (conflict) {
-      return Response.json({
-        error: `Session ${archive.id} is already active on another host (${conflict.hostId}); the archive was not restored`,
-        code: "session_host_conflict",
-      }, { status: 409 });
+    if (!isValidSessionId(archive.id)) {
+      return Response.json({ error: "Invalid archived session ID", code: "archive_session_invalid" }, { status: 400 });
     }
-    if (host) {
-      const result = await host.sessionOps.restoreArchive(body.key);
-      if (!result.ok) return opErrorResponse(result);
-      invalidateHostSessionList(hostId);
-      pumpOutbox(result.value.sessionId);
-      return Response.json({ ok: true, sessionId: result.value.sessionId });
-    }
-    const sessionId = restoreArchivedSession(body.key);
-    invalidateSessionListCache();
-    invalidateLocalSessionLists();
-    // Messages held while it was archived go now (spec O6).
-    pumpOutbox(sessionId);
-    return Response.json({ ok: true, sessionId });
+    return await withArchiveRestoreLock(archive.id, async () => {
+      const conflicts = await activeSessionHosts(archive.id);
+      const foreign = conflicts.find((id) => id !== hostId);
+      if (foreign) {
+        return Response.json({
+          error: `Session ${archive.id} is already active on another host (${foreign}); the archive was not restored`,
+          code: "session_host_conflict",
+        }, { status: 409 });
+      }
+      if (conflicts.length) {
+        return Response.json({
+          error: `Session ${archive.id} is already active on this host; the archive was not restored`,
+          code: "archive_restore_failed",
+        }, { status: 409 });
+      }
+      if (host) {
+        const result = await host.sessionOps.restoreArchive(body.key as string);
+        if (!result.ok) return opErrorResponse(result);
+        invalidateHostSessionList(hostId);
+        pumpOutbox(result.value.sessionId);
+        return Response.json({ ok: true, sessionId: result.value.sessionId });
+      }
+      const sessionId = await restoreArchivedSession(body.key as string);
+      invalidateSessionListCache();
+      invalidateLocalSessionLists();
+      // Messages held while it was archived go now (spec O6).
+      pumpOutbox(sessionId);
+      return Response.json({ ok: true, sessionId });
+    });
   } catch (error) {
     if (error instanceof HostOpError) return apiErrorResponse(error);
     const message = error instanceof Error ? error.message : String(error);
