@@ -1110,7 +1110,6 @@ async function extractDocx(entries: Map<string, () => Promise<Uint8Array>>): Pro
     const buf = await fn();
     const xml = new TextDecoder("utf-8").decode(buf);
 
-    let inTable = false;
     let tableRows: string[][] = [];
     let currentRow: string[] = [];
     let inCell = false;
@@ -1126,11 +1125,9 @@ async function extractDocx(entries: Map<string, () => Promise<Uint8Array>>): Pro
       (tagName, isClose, selfClosing) => {
         if (tagName === "w:tbl") {
           if (!isClose) {
-            inTable = true;
             tableRows = [];
             totalCellsInTable = 0;
           } else {
-            inTable = false;
             const tableMd = formatMarkdownTable(tableRows);
             if (tableMd === null) return false;
             if (tableMd) parts.push(tableMd);
@@ -1307,7 +1304,6 @@ async function extractXlsx(entries: Map<string, () => Promise<Uint8Array>>): Pro
 
     const rows: string[][] = [];
     let rawCellBytes = 0;
-    let inRow = false;
     let rowCells = new Map<number, string>();
     let rowMaxCol = 0;
     let sheetMaxCol = 0;
@@ -1327,14 +1323,9 @@ async function extractXlsx(entries: Map<string, () => Promise<Uint8Array>>): Pro
           if (!isClose) {
             rowCount++;
             if (rowCount > MAX_TABLE_ROWS) return false;
-            inRow = true;
             rowCells = new Map<number, string>();
             rowMaxCol = 0;
-            if (selfClosing) {
-              inRow = false;
-            }
           } else {
-            inRow = false;
             if (rowCount > MAX_TABLE_ROWS || sheetMaxCol > MAX_TABLE_COLS || rowCount * sheetMaxCol > MAX_TABLE_CELLS) {
               return false;
             }
@@ -1690,7 +1681,7 @@ async function extractEpub(entries: Map<string, () => Promise<Uint8Array>>): Pro
     const ok = walkXml(
       strippedHtml,
       tagBudget,
-      (tagName, isClose, selfClosing) => {
+      (tagName, isClose) => {
         const lowerName = tagName.toLowerCase();
         if (lowerName === "br") {
           chapterText += "\n";
