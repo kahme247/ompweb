@@ -31,8 +31,9 @@ export const UNKNOWN_CONNECTION_CODE = "unknown_connection";
 
 export type EventStreamChannel =
   | { kind: "running" }
-  /** Notifications the server routes to the tab with this notification client id. */
-  | { kind: "notifications"; clientId: string }
+  /** Notifications the server routes to the tab with this notification client id. `deviceId` is the tab's
+   * notification device: stream-only deliveries are routed by that device's own preferences. */
+  | { kind: "notifications"; clientId: string; deviceId?: string }
   | { kind: "session"; sessionId: string }
   | { kind: "file"; path: string; hostId?: string; sessionId: string | null }
   /** Host tool calls (open_url, notify, open_file) from sessions no tab is watching. */
@@ -128,8 +129,13 @@ export function parseEventStreamChannel(value: unknown): EventStreamChannel | nu
   switch (channel.kind) {
     case "running":
       return { kind: "running" };
-    case "notifications":
-      return isValidNotificationId(channel.clientId) ? { kind: "notifications", clientId: channel.clientId } : null;
+    case "notifications": {
+      if (!isValidNotificationId(channel.clientId)) return null;
+      if (channel.deviceId === undefined) return { kind: "notifications", clientId: channel.clientId };
+      return isValidNotificationId(channel.deviceId)
+        ? { kind: "notifications", clientId: channel.clientId, deviceId: channel.deviceId }
+        : null;
+    }
     case "host-tools":
       return { kind: "host-tools" };
     case "hosts":
