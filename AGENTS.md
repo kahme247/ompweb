@@ -572,8 +572,49 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   lease in `<agent dir>/omp-web/`, renewed every 10 s and reclaimable once its
   renewal time is over 30 s away from now, past or future (never by PID, which can be reused). It only coordinates web
   processes that share one agent directory, not separate web servers sharing a
-  daemon. Async restore streams archives with fixed 256 MiB compressed and expanded
-  limits, rejecting unsupported IDs before archive consumption.
+  daemon. A remote restore outlives its request: the daemon keeps restoring after the
+  30 s op deadline, a lost link or a web restart, and a sender suspended after its
+  claim may send its restore long after another request took the ID over. No lease
+  clock or "status false" may free the ID meanwhile, so the claim is fenced at the
+  daemon, which is the only authority on whether a restore can still start. The
+  daemon starts `restoreArchive` only under a claim token (the lock row's owner)
+  that main reserved with `restoreReserve` and nothing has since spent or revoked
+  (`session-ops.ts`, a set capped at 256: an evicted token's restore is refused,
+  never run). The route reserves (an op answer or error ends a restore that never
+  left: no claim kept), then `hold`s the claim (the row gains the host; a held row
+  never lapses by time), then sends `restoreArchive`, and `release`s only on the
+  host's answer, a refusal included. `host_timeout` or `host_offline` leaves it
+  held and answers `archive_restore_unconfirmed` (504/503). A held claim whose
+  request still renews it is `archive_restore_busy`; one that stopped renewing is
+  resolved by the next restore of that ID, on any host: main sends the holding
+  host `restoreFence {claim}`, which revokes the token (a request still in a
+  suspended sender, or resent to a restarted daemon, is then refused) and reports
+  whether that restore is running; main takes the claim over only on `running:
+  false`. Still running, offline, a daemon that answers 501 (no restore is sent to a
+  daemon that cannot reserve either) or a host unregistered since all keep it
+  blocked (409 `archive_restore_unconfirmed`, naming the session, the host and when
+  the claim was last seen alive). **Recovery limitation:** unregistering a host
+  does not stop its daemon, so a claim held for an unregistered host stays blocked
+  for good: there is deliberately no timeout and no automatic or blind clearing,
+  and registering the machine again gives it a new id, which does not help. Only an
+  operator who has verified on that machine that no `ompweb host` daemon holding the
+  old registration is running may delete that session's row from `restore_claims`
+  in `<agent dir>/omp-web/archive-restore-locks.sqlite`; deleting it while that
+  daemon could still run lets a duplicate publish. A local restore (in this
+  process) is fenced at its publish: the claim's `publish` runs the hard link
+  (`linkSync`, never awaited) inside `BEGIN IMMEDIATE`, refusing unless the row is
+  still this request's, so a web process suspended past its lease cannot publish
+  over a request that took the session over, and one that takes over after sees the
+  published session. The step must stay synchronous: SQLite waits for a lock by
+  blocking the whole process, so a lock held across an await would freeze the
+  event loop for the 5 s busy timeout. The store is `restore_claims`, written with
+  `synchronous = FULL` so a power loss cannot forget a held claim; the first open
+  after an upgrade renames an earlier build's `restore_leases` table into it
+  (keeping its claims), adds `host_id`, and leaves `restore_leases` as a read-only
+  view, so a build that still uses the old name reads but fails every claim,
+  delete and update instead of lapsing a held row by its clock (later opens only
+  read to check). Async restore streams archives with fixed 256 MiB compressed and
+  expanded limits, rejecting unsupported IDs before archive consumption.
 - **Not yet remote:** Skills/Plugins/Agents/MCP settings; transcript search reads
   this machine's files.
 

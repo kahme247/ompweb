@@ -1,6 +1,6 @@
 import { createReadStream, createWriteStream } from "fs";
-import { readdirSync, statSync } from "fs";
-import { link, lstat, mkdir, mkdtemp, open, realpath, rename, rm, unlink } from "fs/promises";
+import { linkSync, readdirSync, statSync } from "fs";
+import { lstat, mkdir, mkdtemp, open, realpath, rename, rm, unlink } from "fs/promises";
 import { Transform } from "stream";
 import { pipeline } from "stream/promises";
 import { createGunzip } from "zlib";
@@ -262,7 +262,9 @@ async function readArchivedSessionId(filePath: string): Promise<string> {
   return header.id;
 }
 
-export async function restoreArchivedSession(key: string, sessionsRoot = getSessionsDir(), archiveRoot = getArchivedSessionsDir()): Promise<string> {
+/** `publish` wraps the one step that makes the transcript visible, a synchronous hard link (a caller holding a lock across it
+ * must never await there); a caller whose claim may have lapsed refuses in it. */
+export async function restoreArchivedSession(key: string, sessionsRoot = getSessionsDir(), archiveRoot = getArchivedSessionsDir(), publish: <T>(run: () => T) => T = (run) => run()): Promise<string> {
   const activeRoot = archiveRootPath(sessionsRoot);
   const archiveBase = archiveRootPath(archiveRoot);
   const relative = normalizeArchiveKey(key);
@@ -300,7 +302,7 @@ export async function restoreArchivedSession(key: string, sessionsRoot = getSess
     await validateRestorePath(activeRoot, destinationArtifacts);
     // A hard link publishes atomically without overwriting a concurrently created transcript.
     try {
-      await link(tempFile, destination);
+      publish(() => linkSync(tempFile, destination));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("Active session destination already exists");
       throw error;
