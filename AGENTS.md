@@ -616,13 +616,43 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   in `<agent dir>/omp-web/archive-restore-locks.sqlite`; deleting it while that
   daemon could still run lets a duplicate publish. A daemon-side proof of death (a
   machine-wide token registry, a PID with its start identity) would remove this
-  limit for a restart; it is not built. A local restore (in this
-  process) is fenced at its publish: the claim's `publish` runs the hard link
-  (`linkSync`, never awaited) inside `BEGIN IMMEDIATE`, refusing unless the row is
-  still this request's, so a web process suspended past its lease cannot publish
-  over a request that took the session over, and one that takes over after sees the
-  published session. The step must stay synchronous: SQLite waits for a lock by
-  blocking the whole process, so a lock held across an await would freeze the
+  limit for a restart; it is not built. **Restore commit order**
+  (`commitRestore`, `lib/omp/archive.ts`, used by every restore, daemon and local):
+  the archived artifacts directory moves into place first, then the transcript is
+  hard-linked, then the `.gz` is removed, all with synchronous calls, so the session
+  is never visible without its artifacts. The reverse order let another tab's upload
+  attach (`StagedUploads.attach` creates `<session>/local/uploads/` the moment the
+  session is visible) take the artifacts path between the steps; the restore then
+  rolled the transcript back and left that directory behind, refusing every retry.
+  No `await` between the steps covers only this process; another process can act at
+  any instant, so no step is a check followed by an act. Directories move with
+  `moveDirectoryNoReplace`: POSIX `rename(2)` replaces an *empty* directory at its
+  target, so the target is first taken with `mkdir` (exclusive) and the rename then
+  replaces only that empty directory of its own, failing ENOTEMPTY, and removing
+  nothing, if anything was put into it; Windows' rename never replaces a directory.
+  The same helper undoes the move, so an archive path retaken meanwhile is not
+  replaced either (the artifacts then stay at the destination and the error says the
+  undo failed). The transcript is published by an exclusive hard link, and undone by
+  `takeBackTranscript`, which renames whatever is at the destination to a name of its
+  own first and deletes it only if it is still this restore's link (device and inode),
+  linking any other file back. The commit starts with a synchronous
+  `validateRestorePathSync` of every path it touches, as the async checks before it
+  can be a thread-pool turn stale; a path that vanishes while `validateRestorePath`
+  checks it (a concurrent restore moved it) counts as absent, and a source consumed
+  between the existence check and the read is "not found". A transcript or artifacts
+  directory found at the destination fails the restore with 409 and is never merged
+  into or removed. **Crash limitation:** a process killed inside the commit (a crash
+  or power loss; no fsync or journal is added on purpose) can leave the artifacts at
+  the destination with no transcript, or an empty destination directory. The archive
+  entry stays listed and restoring it is refused as "already exists" until the
+  leftover is moved back to `<name>.jsonl` beside the archive, or removed if empty.
+  Nothing is lost.
+  A local restore (in this process) is fenced at the same step: the claim's `publish`
+  runs the whole commit inside `BEGIN IMMEDIATE`, refusing unless the row is still
+  this request's, so a web process suspended past its lease cannot move artifacts or
+  publish over a request that took the session over, and one that takes over after
+  sees the published session. The step must stay synchronous: SQLite waits for a
+  lock by blocking the whole process, so a lock held across an await would freeze the
   event loop for the 5 s busy timeout. The store is `restore_claims`, written with
   `synchronous = FULL` so a power loss cannot forget a held claim. A migration gated
   by `PRAGMA user_version` (2) runs once: it renames an earlier build's
