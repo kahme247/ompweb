@@ -499,10 +499,18 @@ export function startOutbox(): void {
   let attached = true;
   const checking = new Set<string>();
   const dirty = new Set<string>();
+  const hostRetries = new Map<string, NodeJS.Timeout>();
   const wakeHost = async (hostId: string): Promise<void> => {
     if (!attached || !state.started) return;
     dirty.add(hostId);
     if (checking.has(hostId)) return;
+    // A fresh event supersedes this host's timer. Success must not leave an older failed attempt polling it.
+    const scheduled = hostRetries.get(hostId);
+    if (scheduled) {
+      clearTimeout(scheduled);
+      state.retries?.delete(scheduled);
+      hostRetries.delete(hostId);
+    }
     checking.add(hostId);
     try {
       while (dirty.delete(hostId) && attached && state.started) {
@@ -524,9 +532,11 @@ export function startOutbox(): void {
         const retries = (state.retries ??= new Set());
         const timer = setTimeout(() => {
           retries.delete(timer);
+          hostRetries.delete(hostId);
           if (attached) void wakeHost(hostId);
         }, RETRY_MS);
         retries.add(timer);
+        hostRetries.set(hostId, timer);
         timer.unref?.();
       }
     } finally {
@@ -543,6 +553,11 @@ export function startOutbox(): void {
   });
   state.detach = () => {
     attached = false;
+    for (const timer of hostRetries.values()) {
+      clearTimeout(timer);
+      state.retries?.delete(timer);
+    }
+    hostRetries.clear();
     wakes.clear();
     detachSessionChanges();
     process.removeListener("exit", closeOutboxStore);
