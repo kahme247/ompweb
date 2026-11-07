@@ -3605,6 +3605,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleModelChange = useCallback(async (provider: string, modelId: string) => {
     authoritativeModelSeqRef.current += 1;
     modelCommandPendingRef.current += 1;
+    const choice = { provider, modelId };
     try {
       if (isNew) {
         setNewSessionModel({ provider, modelId });
@@ -3618,14 +3619,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       const sid = sessionIdRef.current;
       if (!sid) return;
+      // Show the pick at once: set_model may wait for omp to start.
+      setCurrentModelOverride(choice);
       await sendAgentCommand(sid, { type: "set_model", provider, modelId });
-      setCurrentModelOverride({ provider, modelId });
+      // A runtime event during the wait may have cleared the optimistic pick.
+      setCurrentModelOverride((cur) => cur ?? choice);
       await refreshLiveModelState(sid);
     } catch (e) {
-      // Previously this was console-only, so a cold-start failure (e.g. an
-      // unrestorable saved model, #277) left the composer showing the old
-      // model with no explanation. The override above is only set on success,
-      // so the displayed model stays honest; the notice explains why.
+      // A cold-start failure (e.g. an unrestorable saved model, #277) must not
+      // keep claiming the new model: drop the optimistic pick unless a newer
+      // one replaced it (live state or the file then names the running model),
+      // and explain why in a notice.
+      setCurrentModelOverride((cur) => (cur === choice ? null : cur));
       console.error("Failed to set model:", e);
       addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
     } finally {
