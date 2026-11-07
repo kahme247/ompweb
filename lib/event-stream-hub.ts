@@ -26,7 +26,19 @@ import { isRecord } from "./type-guards";
 // the browser's shared worker.
 
 // Heartbeat keeps the socket alive through reverse proxies that drop silent connections.
+// A native client may ask for a longer one per connection (`/api/events?heartbeat=`).
 const HEARTBEAT_MS = 30_000;
+export const MIN_HEARTBEAT_SECONDS = 15;
+export const MAX_HEARTBEAT_SECONDS = 110;
+
+/** `?heartbeat=<seconds>` in [15, 110]; anything else keeps the 30 s default. */
+export function parseHeartbeatSeconds(value: string | null | undefined): number {
+  if (typeof value !== "string" || !/^\d{1,4}$/.test(value.trim())) return HEARTBEAT_MS / 1000;
+  const seconds = Number(value.trim());
+  if (seconds < MIN_HEARTBEAT_SECONDS || seconds > MAX_HEARTBEAT_SECONDS) return HEARTBEAT_MS / 1000;
+  return seconds;
+}
+
 const encoder = new TextEncoder();
 
 export type SubscribeResult =
@@ -85,11 +97,12 @@ export interface FrameSink {
 }
 
 class SseSink implements FrameSink {
-  readonly heartbeatMs = HEARTBEAT_MS;
+  readonly heartbeatMs: number;
   readonly stream: ReadableStream<Uint8Array>;
   private controller!: ReadableStreamDefaultController<Uint8Array>;
 
-  constructor(onPull: () => void, onCancel: () => void) {
+  constructor(onPull: () => void, onCancel: () => void, heartbeatMs = HEARTBEAT_MS) {
+    this.heartbeatMs = heartbeatMs;
     this.stream = new ReadableStream<Uint8Array>({
       start: (controller) => { this.controller = controller; },
       // A slow consumer resumed reading: deliver coalesced updates now rather
@@ -149,13 +162,14 @@ export class EventStreamConnection {
   private readonly subscriptions = new Map<string, Subscription>();
   private readonly signal: AbortSignal | undefined;
 
-  constructor(signal?: AbortSignal, sink?: FrameSink) {
+  /** `options.heartbeatMs` overrides the keep-alive for this connection's SSE sink. */
+  constructor(signal?: AbortSignal, sink?: FrameSink | { heartbeatMs?: number }) {
     this.signal = signal;
-    if (sink) {
+    if (sink && "write" in sink) {
       this.sink = sink;
       this.stream = null;
     } else {
-      const sse = new SseSink(() => this.resume(), () => this.close());
+      const sse = new SseSink(() => this.resume(), () => this.close(), sink?.heartbeatMs ?? HEARTBEAT_MS);
       this.sink = sse;
       this.stream = sse.stream;
     }
@@ -184,6 +198,11 @@ export class EventStreamConnection {
 
   get isClosed(): boolean {
     return this.closed;
+  }
+
+  /** The keep-alive interval this connection's sink actually uses. */
+  get heartbeatMs(): number {
+    return this.sink.heartbeatMs;
   }
 
   get subscriptionCount(): number {
