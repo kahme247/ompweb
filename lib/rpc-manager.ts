@@ -2049,7 +2049,7 @@ export class AgentSessionWrapper {
       notifyRunningChange();
     }
   }
-  private buildWebState(state: RpcSessionState): WebSessionState {
+  private buildWebState(state: RpcSessionState, includeSystemPrompt = true): WebSessionState {
     const wasRunning = this.isRunning();
 
     // Reconcile process-side flags with authoritative child state.
@@ -2110,7 +2110,8 @@ export class AgentSessionWrapper {
       queuedMessages: state.queuedMessages ?? { steering: [], followUp: [] },
       tokensPerSecond: state.tokensPerSecond ?? null,
       contextUsage: state.contextUsage ?? null,
-      systemPrompt: state.systemPrompt?.join("\n\n") ?? "",
+      // `?systemPrompt=0` drops the ~13 KB prompt from the 15 s state poll.
+      ...(includeSystemPrompt ? { systemPrompt: state.systemPrompt?.join("\n\n") ?? "" } : {}),
       thinkingLevel: state.thinkingLevel ?? "off",
       // The child's per-family tier map is authoritative: it changes when the
       // model switches families (isFastModeEnabled is family-scoped) or when
@@ -2656,7 +2657,7 @@ export class AgentSessionWrapper {
       case "get_state": {
         try {
           const state = await this.proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS);
-          return this.buildWebState(state);
+          return this.buildWebState(state, command.systemPrompt !== false);
         } catch (error) {
           if (error instanceof RpcCommandTimeoutError) {
             // This is only an observer poll. A busy event loop or delayed RPC

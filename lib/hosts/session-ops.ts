@@ -22,6 +22,7 @@ import {
   MAX_SESSION_LOAD_BYTES,
   parseTitleSlotLine,
   readSessionHeaderSync,
+  scanSessionInfoCached,
   setSessionTitle,
   writeSessionFileAtomicSync,
 } from "../omp/session-files";
@@ -38,6 +39,7 @@ import {
 } from "../project-registry";
 import {
   buildSessionContext,
+  buildSessionContextSummary,
   getSessionContextBoundary,
   getSessionEntries,
   getSessionEntriesForDisplayAsync,
@@ -64,6 +66,9 @@ export type OpResult<T> = { ok: true; value: T } | { ok: false; status: number; 
 export interface SessionReadOptions {
   deferThinking: boolean;
   deferMedia: boolean;
+  /** Navigation-only shape (`?meta=1`): `context` is null and `info` carries
+   *  the branch's model/thinking level and the conversation's activity time. */
+  meta?: boolean;
 }
 
 export interface ContextReadOptions extends SessionReadOptions {
@@ -78,10 +83,15 @@ export interface ContextReadOptions extends SessionReadOptions {
 /** `GET /api/sessions/[id]` minus the route's `sessionId` and live `agent`. */
 export interface SessionReadValue {
   filePath: string;
-  info: Omit<SessionInfo, "lastMessageAt" | "projectRoot" | "projectKey" | "worktreeBranch">;
+  info: Omit<SessionInfo, "projectRoot" | "projectKey" | "worktreeBranch"> & {
+    /** `?meta=1` only: the branch's model choice and reasoning level. */
+    model?: SessionContext["model"];
+    thinkingLevel?: string;
+  };
   leafId: string | null;
   tree: unknown[];
-  context: SessionContext;
+  /** null in the `?meta=1` navigation shape. */
+  context: SessionContext | null;
 }
 
 export interface ProjectUpdate {
@@ -156,6 +166,27 @@ function branchPreviewForEntry(entry: { id?: string; type?: string; message?: un
   if (!text) text = message.role === "assistant" ? "[assistant]" : "message";
   const role = message.role === "user" || message.role === "assistant" ? message.role : undefined;
   return { ...(role ? { role } : {}), text };
+}
+
+/** First `{type:"text"}` block's text in a message content array ("" when none). */
+function textBlockText(content: readonly unknown[]): string {
+  for (const block of content) {
+    if (block && typeof block === "object" && "type" in block && block.type === "text" && "text" in block && typeof block.text === "string") {
+      return block.text;
+    }
+  }
+  return "";
+}
+
+/** `info.firstMessage`: the first user message's text, with the "(no messages)" fallback. */
+function firstUserMessageText(messages: ReadonlyArray<{ role?: string; content?: unknown }>): string {
+  const message = messages.find((entry) => entry.role === "user");
+  if (!message) return "(no messages)";
+  const content = message.content;
+  const text = typeof content === "string"
+    ? content
+    : Array.isArray(content) ? textBlockText(content) : "";
+  return text || "(no messages)";
 }
 
 /**
@@ -288,7 +319,7 @@ async function runOmpExport(filePath: string, outputPath: string): Promise<void>
 export const sessionOps: SessionOps = {
   listSessions: () => listAllSessions(),
 
-  async readSession(id, { deferThinking, deferMedia: deferToolResultImages }) {
+  async readSession(id, { deferThinking, deferMedia: deferToolResultImages, meta }) {
     const filePath = await resolveSessionPath(id);
     if (!filePath) return sessionNotFound();
     try {
@@ -300,14 +331,21 @@ export const sessionOps: SessionOps = {
       const displayEntries = await getSessionEntriesForDisplayAsync(filePath, { skipToolResultImages: deferToolResultImages });
       const leafId = getLeafEntryId(displayEntries);
       const tree = projectTreeForResponse(buildSessionTree(displayEntries));
-      const context = buildSessionContext(displayEntries, leafId, { deferThinking, deferToolResultImages });
+      // ?meta=1 is the navigation shape: the tree and leaf the native client
+      // reads from this route, without the second transcript copy. The context
+      // stays on /api/sessions/[id]/context, which defers media/thinking and
+      // answers 304. Without the parameter the historical shape is unchanged.
+      const context = meta ? null : buildSessionContext(displayEntries, leafId, { deferThinking, deferToolResultImages });
+      const summary = meta ? buildSessionContextSummary(displayEntries, leafId, { deferThinking, deferToolResultImages }) : null;
+      // Same scan the session list uses (memoized on size+mtime), so the
+      // detail's activity time cannot diverge from the sidebar's.
+      const lastMessageAt = meta ? scanSessionInfoCached(filePath)?.lastMessageAt?.toISOString() : undefined;
 
       let modified = header.timestamp ?? new Date().toISOString();
       try { modified = statSync(filePath).mtime.toISOString(); } catch { /* use header timestamp */ }
       const parentSessionId = header.parentSession
         ? await resolveParentSessionId(header.parentSession)
         : undefined;
-      const firstUser = context.messages.find((m) => m.role === "user");
       const info = {
         path: filePath,
         id: header.id,
@@ -315,14 +353,16 @@ export const sessionOps: SessionOps = {
         name: header.title,
         created: header.timestamp,
         modified,
-        messageCount: context.messages.length,
-        firstMessage: firstUser
-          ? (() => {
-              const c = (firstUser as { content: unknown }).content;
-              return typeof c === "string" ? c : (Array.isArray(c) ? (c.find((b: { type: string }) => b.type === "text") as { text: string } | undefined)?.text ?? "" : "") || "(no messages)";
-            })()
-          : "(no messages)",
+        messageCount: context ? context.messages.length : summary!.messageCount,
+        firstMessage: context ? firstUserMessageText(context.messages) : summary!.firstMessage,
         parentSessionId,
+        // The meta shape has no `context`, so the branch's model/thinking
+        // level and the conversation's activity time ride in `info` instead.
+        ...(summary ? {
+          model: summary.model,
+          thinkingLevel: summary.thinkingLevel,
+          ...(lastMessageAt ? { lastMessageAt } : {}),
+        } : {}),
       };
       return ok({ filePath, info, leafId, tree, context });
     } catch (error) {
