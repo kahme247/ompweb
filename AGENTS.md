@@ -559,9 +559,13 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   capabilities gate old daemons; unavailable operations never fall back to main.
   File tabs retain host/cwd/session ownership. Upload publication extends the
   existing staged 2 GiB uploader; its workspace receipts are not session attachments.
-- **Not yet remote:** Skills/Plugins/Agents/MCP settings and session archiving.
-  Archive remains 501 `remote_unavailable` with its menu item disabled; transcript
-  search and the archive browser still read this machine's files.
+- **Session archive is per host.** `POST /api/sessions/[id]/archive` archives on the
+  session's host. `/api/sessions/archive` lists this machine's archive (read on main)
+  plus each linked host's (`listArchives` op), every entry tagged `hostId`; an
+  offline or older host is reported in `unavailableHosts`. Restore sends `hostId`
+  and runs on that host (`restoreArchive` op).
+- **Not yet remote:** Skills/Plugins/Agents/MCP settings; transcript search reads
+  this machine's files.
 
 #### Local daemon (`docs/specs/2026-10-29-local-daemon-design.md`)
 - **Two services.** `ompweb` (web) and `ompweb-host` (`ompweb host`, the daemon) are installed together by `ompweb systemd install`, `ompweb launchd install` and the Windows tray install; uninstall removes both, `ompweb systemd restart` restarts the web unit only. The daemon owns this machine's omp children, so a web restart, update or redeploy leaves runs going; restarting the daemon ends them (auto-resume then resumes the sessions that were running). An upgrade restarts the daemon only when the running daemon's link version is outside the new release's `[MIN_LINK_PROTOCOL_VERSION, LINK_PROTOCOL_VERSION]` range (it would get 4426 or 426 and exit); a daemon inside the range keeps running.
@@ -1280,7 +1284,7 @@ during the wait.
   `invalidateSessionFileListCache()` — never add a session-mutation path that
   forgets this. Regression test: `session-reader.test.mjs`.
 - A mutation that main triggers calls `invalidateLocalSessionLists()`: it clears main's per-host entry and sends the daemon `invalidateSessionLists` (the daemon runs the invalidation above). A route that changes this machine's session files and does not call it leaves the sidebar stale for up to 30 s.
-- **Still read on main, from this machine's own files:** transcript search (`session-content-search.ts`, `/api/sessions/search`), the session watcher (`session-watcher.ts`), archive list/restore, import, usage (`usage-db.ts`), subagent history and local file-reference readers. Their main-side session caches are invalidated separately. Workspace shell-output authorization and bytes now come from the owning daemon; new remote-capable readers must use the host seam.
+- **Still read on main, from this machine's own files:** transcript search (`session-content-search.ts`, `/api/sessions/search`), the session watcher (`session-watcher.ts`), this machine's archive list/restore (linked hosts' go through their daemons), import, usage (`usage-db.ts`), subagent history and local file-reference readers. Their main-side session caches are invalidated separately. Workspace shell-output authorization and bytes now come from the owning daemon; new remote-capable readers must use the host seam.
 
 ### Chat scroll-follow
 - `useAgentSession` follows the conversation: the effect depends on both
