@@ -1,6 +1,7 @@
 import { createReadStream, createWriteStream } from "fs";
-import { linkSync, readdirSync, statSync } from "fs";
-import { lstat, mkdir, mkdtemp, open, realpath, rename, rm, unlink } from "fs/promises";
+import { linkSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync } from "fs";
+import { lstat, mkdir, mkdtemp, open, realpath, rm } from "fs/promises";
+import { randomUUID } from "crypto";
 import { Transform } from "stream";
 import { pipeline } from "stream/promises";
 import { createGunzip } from "zlib";
@@ -211,9 +212,59 @@ async function validateRestorePath(root: string, target: string): Promise<void> 
     }
     // Check every ancestor, not only the final path: a symlink may escape and re-enter.
     let canonical: string;
-    try { canonical = await realpath(current); } catch { throw new Error("Invalid archive key"); }
-    const canonicalRelative = path.relative(canonicalRoot, canonical);
-    if (!canonicalRelative || canonicalRelative === ".." || canonicalRelative.startsWith(`..${path.sep}`) || path.isAbsolute(canonicalRelative)) throw new Error("Invalid archive key");
+    try {
+      canonical = await realpath(current);
+    } catch (error) {
+      // Gone since the lstat above (a concurrent restore moved it): nothing there to escape through, like a path that was
+      // never there. A dangling link still exists, and is refused.
+      if (errnoCode(error) === "ENOENT" && !(await lstatIfExists(current))) break;
+      throw new Error("Invalid archive key");
+    }
+    if (escapesRoot(canonicalRoot, canonical)) throw new Error("Invalid archive key");
+  }
+}
+
+/** Whether `canonical` is the root itself or outside it (both refused: a restore touches only what is strictly inside). */
+function escapesRoot(canonicalRoot: string, canonical: string): boolean {
+  const relative = path.relative(canonicalRoot, canonical);
+  return !relative || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+}
+
+/** `validateRestorePath`, synchronously, for the commit: the async checks before it can be a thread-pool turn stale, and
+ * another process can swap a directory for a link in that time. Run last, under the caller's guard, right before the moves. */
+function validateRestorePathSync(root: string, target: string): void {
+  const relative = path.relative(root, target);
+  if (!relative || relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) throw new Error("Invalid archive key");
+  let ancestor = root;
+  const missing: string[] = [];
+  while (true) {
+    try {
+      lstatSync(ancestor);
+      break;
+    } catch (error) {
+      if (errnoCode(error) !== "ENOENT") throw error;
+      missing.unshift(path.basename(ancestor));
+      ancestor = path.dirname(ancestor);
+    }
+  }
+  const canonicalRoot = path.join(realpathSync(ancestor), ...missing);
+  let current = root;
+  for (const component of relative.split(path.sep)) {
+    current = path.join(current, component);
+    try {
+      lstatSync(current);
+    } catch (error) {
+      if (errnoCode(error) === "ENOENT") break;
+      throw error;
+    }
+    let canonical: string;
+    try {
+      canonical = realpathSync(current);
+    } catch (error) {
+      if (errnoCode(error) === "ENOENT" && !lstatSyncIfExists(current)) break;
+      throw new Error("Invalid archive key");
+    }
+    if (escapesRoot(canonicalRoot, canonical)) throw new Error("Invalid archive key");
   }
 }
 
@@ -223,6 +274,150 @@ async function lstatIfExists(filePath: string) {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     return undefined;
+  }
+}
+
+function errnoCode(error: unknown): string | undefined {
+  return error instanceof Error && "code" in error && typeof error.code === "string" ? error.code : undefined;
+}
+
+function lstatSyncIfExists(filePath: string) {
+  try {
+    return lstatSync(filePath);
+  } catch (error) {
+    if (errnoCode(error) !== "ENOENT") throw error;
+    return undefined;
+  }
+}
+
+/**
+ * Moves the directory `from` to `to`, which must not exist, and never replaces anything at `to`. POSIX rename(2) replaces an
+ * empty directory at its target, so a rename after an existence check silently replaces one that another process created in
+ * between (an attachment's `mkdir -p`, say). Here `to` is first taken with mkdir, which is exclusive: once it succeeds the
+ * name is this call's, and the rename replaces only that empty directory of its own. If something has been put into it since,
+ * the rename fails (ENOTEMPTY) rather than replace it, and what was put there is never removed (rmdir refuses a directory
+ * that is not empty, so only our own, still-empty claim is dropped). Windows' MoveFileEx refuses to replace a directory, so
+ * there a plain rename already never does.
+ */
+function moveDirectoryNoReplace(from: string, to: string): void {
+  const taken = () => new Error("Active session destination already exists");
+  if (process.platform === "win32") {
+    try {
+      renameSync(from, to);
+    } catch (error) {
+      if (lstatSyncIfExists(to)) throw taken();
+      throw error;
+    }
+    return;
+  }
+  try {
+    mkdirSync(to);
+  } catch (error) {
+    if (errnoCode(error) === "EEXIST") throw taken();
+    throw error;
+  }
+  try {
+    renameSync(from, to);
+  } catch (error) {
+    try { rmdirSync(to); } catch { /* content was put in it: not ours to remove */ }
+    // `from` gone: another restore consumed it.
+    if (["ENOTEMPTY", "EEXIST", "ENOENT"].includes(errnoCode(error) ?? "")) throw taken();
+    throw error;
+  }
+}
+
+/** Whether `first` and `second` are the same file (a hard link of it), by device and inode. */
+function isSameFile(first: string, second: string): boolean {
+  try {
+    const a = lstatSync(first, { bigint: true });
+    const b = lstatSync(second, { bigint: true });
+    return a.dev === b.dev && a.ino === b.ino;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Undoes the commit's publish: removes the transcript this restore linked at `destination` (`tempFile` is its other name).
+ * It never deletes a file it did not create. Whatever is at `destination` is first renamed away, atomically, to a name of
+ * its own, so the identity check and the removal are of that one file and not of a path another process can swap; a file
+ * that is not ours is linked back, exclusively. Returns the path a file this call could not put right is left at, or null.
+ */
+function takeBackTranscript(destination: string, tempFile: string): string | null {
+  const taken = `${destination}.${randomUUID()}.rollback`;
+  try {
+    renameSync(destination, taken);
+  } catch (error) {
+    return errnoCode(error) === "ENOENT" ? null : destination;
+  }
+  if (isSameFile(taken, tempFile)) {
+    try { unlinkSync(taken); return null; } catch { return taken; }
+  }
+  try {
+    linkSync(taken, destination);
+    unlinkSync(taken);
+    return null;
+  } catch {
+    return taken;
+  }
+}
+
+/**
+ * The restore's commit: the archived artifacts move into place, the transcript is published, and the archive entry is
+ * consumed, in that order and all synchronously.
+ *
+ * The order is the point. A published transcript makes the session visible, and whatever then acts on it (an upload attaching
+ * to it, a tab opening it) can create its artifacts directory. Moving the artifacts after the transcript raced that: the
+ * restore found the directory taken, rolled the transcript back, and left that directory behind, which then refused every
+ * retry. With the artifacts first the session is never visible without them (an attachment finds the archived names and
+ * avoids them). With no `await` between the steps nothing else in this process runs between them, and the caller's guard
+ * holds its lock across all of it. Other processes can still act at any instant, so every step is exclusive or
+ * identity-checked rather than a check followed by an act: directories move by `moveDirectoryNoReplace`, the transcript by
+ * an exclusive hard link, and the undo by `takeBackTranscript`. A transcript or artifacts directory that appears at the
+ * destination is never merged into, replaced or removed, and a step that fails undoes the earlier ones, newest first.
+ *
+ * A process killed inside this step (a crash, a power loss) can leave the artifacts at the destination with no transcript, or
+ * an empty destination directory: the archive entry is still listed, and restoring it is refused as "already exists" until
+ * the leftover is moved back to `<name>.jsonl` beside the archive (or removed, if empty). Nothing is lost; there is no fsync
+ * or journal, deliberately.
+ */
+function commitRestore({ archiveBase, activeRoot, source, sourceArtifacts, destination, destinationArtifacts, tempFile }: { archiveBase: string; activeRoot: string; source: string; sourceArtifacts: string; destination: string; destinationArtifacts: string; tempFile: string }): void {
+  validateRestorePathSync(archiveBase, source);
+  validateRestorePathSync(archiveBase, sourceArtifacts);
+  validateRestorePathSync(activeRoot, destination);
+  validateRestorePathSync(activeRoot, destinationArtifacts);
+  const artifacts = lstatSyncIfExists(sourceArtifacts);
+  if (artifacts && !artifacts.isDirectory()) throw new Error("Archived artifacts are invalid");
+  // The active artifacts directory is the session's own: one already there belongs to another session, or to a restore
+  // of this one that is running elsewhere.
+  if (lstatSyncIfExists(destinationArtifacts)) throw new Error("Active session destination already exists");
+  let movedArtifacts = false;
+  let published = false;
+  try {
+    if (artifacts) {
+      moveDirectoryNoReplace(sourceArtifacts, destinationArtifacts);
+      movedArtifacts = true;
+    }
+    // A hard link publishes atomically without overwriting a concurrently created transcript.
+    try {
+      linkSync(tempFile, destination);
+    } catch (error) {
+      if (errnoCode(error) === "EEXIST") throw new Error("Active session destination already exists");
+      throw error;
+    }
+    published = true;
+    unlinkSync(source);
+  } catch (error) {
+    const stranded: string[] = [];
+    if (published) {
+      const left = takeBackTranscript(destination, tempFile);
+      if (left) stranded.push(left);
+    }
+    if (movedArtifacts) {
+      try { moveDirectoryNoReplace(destinationArtifacts, sourceArtifacts); } catch { stranded.push(destinationArtifacts); }
+    }
+    if (stranded.length > 0 && error instanceof Error) error.message += `; the restore could not be undone at ${stranded.join(" and ")}`;
+    throw error;
   }
 }
 
@@ -262,8 +457,8 @@ async function readArchivedSessionId(filePath: string): Promise<string> {
   return header.id;
 }
 
-/** `publish` wraps the one step that makes the transcript visible, a synchronous hard link (a caller holding a lock across it
- * must never await there); a caller whose claim may have lapsed refuses in it. */
+/** `publish` wraps the restore's whole commit (see `commitRestore`) as one synchronous step: a caller holding a lock across it
+ * must never have to await there, and one whose claim may have lapsed refuses in it, before anything moves. */
 export async function restoreArchivedSession(key: string, sessionsRoot = getSessionsDir(), archiveRoot = getArchivedSessionsDir(), publish: <T>(run: () => T) => T = (run) => run()): Promise<string> {
   const activeRoot = archiveRootPath(sessionsRoot);
   const archiveBase = archiveRootPath(archiveRoot);
@@ -286,48 +481,30 @@ export async function restoreArchivedSession(key: string, sessionsRoot = getSess
   await validateRestorePath(activeRoot, destinationArtifacts);
   const tempDir = await mkdtemp(path.join(path.dirname(destination), ".omp-web-restore-"));
   const tempFile = path.join(tempDir, path.basename(destination));
-  let destinationCreated = false;
-  let artifactsMoved = false;
   try {
     await validateRestorePath(activeRoot, tempDir);
-    await pipeline(
-      createReadStream(source),
-      archiveSizeLimit("compressed", MAX_ARCHIVE_COMPRESSED_BYTES),
-      createGunzip(),
-      archiveSizeLimit("expanded", MAX_ARCHIVE_EXPANDED_BYTES),
-      createWriteStream(tempFile, { flags: "wx" }),
-    );
-    const sessionId = await readArchivedSessionId(tempFile);
-    await validateRestorePath(activeRoot, destination);
-    await validateRestorePath(activeRoot, destinationArtifacts);
-    // A hard link publishes atomically without overwriting a concurrently created transcript.
     try {
-      publish(() => linkSync(tempFile, destination));
+      await pipeline(
+        createReadStream(source),
+        archiveSizeLimit("compressed", MAX_ARCHIVE_COMPRESSED_BYTES),
+        createGunzip(),
+        archiveSizeLimit("expanded", MAX_ARCHIVE_EXPANDED_BYTES),
+        createWriteStream(tempFile, { flags: "wx" }),
+      );
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("Active session destination already exists");
+      // Another restore consumed the archive between the check above and this read: it is gone, not unreadable.
+      if (errnoCode(error) === "ENOENT" && !lstatSyncIfExists(source)) throw new Error("Archived session not found");
       throw error;
     }
-    destinationCreated = true;
-    const artifactStat = await lstatIfExists(sourceArtifacts);
-    if (artifactStat) {
-      await validateRestorePath(archiveBase, sourceArtifacts);
-      if (!artifactStat.isDirectory()) throw new Error("Archived artifacts are invalid");
-      if (await lstatIfExists(destinationArtifacts)) throw new Error("Active session destination already exists");
-      await mkdir(path.dirname(destinationArtifacts), { recursive: true });
-      await rename(sourceArtifacts, destinationArtifacts);
-      artifactsMoved = true;
-    }
-    await unlink(source);
+    const sessionId = await readArchivedSessionId(tempFile);
+    // Revalidated again here to refuse early, before the guard is taken; the commit repeats it synchronously, which is the
+    // check that counts.
+    await validateRestorePath(activeRoot, destination);
+    await validateRestorePath(activeRoot, destinationArtifacts);
+    await validateRestorePath(archiveBase, sourceArtifacts);
+    publish(() => commitRestore({ archiveBase, activeRoot, source, sourceArtifacts, destination, destinationArtifacts, tempFile }));
     invalidateSessionFileListCache();
     return sessionId;
-  } catch (error) {
-    if (artifactsMoved) {
-      try { await rename(destinationArtifacts, sourceArtifacts); } catch { /* preserve original failure */ }
-    }
-    if (destinationCreated) {
-      try { await unlink(destination); } catch { /* preserve original failure */ }
-    }
-    throw error;
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
