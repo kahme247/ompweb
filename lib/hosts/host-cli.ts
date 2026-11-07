@@ -1,10 +1,9 @@
-// `ompweb host`: link this machine to a main omp-web so sessions can run here (./daemon). Run by
-// bin/omp-web-host.js (Node, through jiti) and by the compiled binary (server/binary.ts): no `@/` imports.
-//   ompweb host login --url <url>   reads the host token from stdin
-//   ompweb host [--allow-http]      dials the saved server and keeps the link up (http:// is accepted without the flag for loopback)
-import { loginHost, readHostLogin } from "./host-login";
+// `ompweb host`: link this machine to web servers through ./daemon.
+// Loaded by Node/jiti and the compiled binary: no `@/` imports.
+// Tokens are read from stdin, never from argv.
+import { addHostLink, loginHost, readHostLinks, removeHostLink } from "./host-login";
 
-const USAGE = "Usage: ompweb host login --url <server url>   (the host token is read from stdin)\n       ompweb host [--allow-http]";
+const USAGE = "Usage: ompweb host login [--add] --url <server url>   (the host token is read from stdin)\n       ompweb host logout --url <server url>\n       ompweb host [--allow-http]";
 
 /** A host token is 43 characters; anything this long is not one. */
 const MAX_TOKEN_LINE_BYTES = 4096;
@@ -32,15 +31,23 @@ function readTokenLine(): Promise<string> {
 }
 
 async function main(argv: string[]): Promise<number> {
-  if (argv[0] === "login") {
-    const urlIndex = argv.indexOf("--url");
-    const url = urlIndex === -1 ? undefined : argv[urlIndex + 1];
-    if (!url || argv.length !== 3) {
+  if (argv[0] === "login" || argv[0] === "logout") {
+    const add = argv[0] === "login" && argv.includes("--add");
+    const args = add ? argv.filter((arg) => arg !== "--add") : argv;
+    if (args.length !== 3 || args[1] !== "--url" || !args[2] || args[2].startsWith("--") || argv.length !== (add ? 4 : 3)) {
       console.error(USAGE);
       return 2;
     }
-    loginHost({ url, token: (await readTokenLine()).trim() });
-    console.log(`Saved. Run \`ompweb host\` to link this machine to ${url}.`);
+    const url = args[2];
+    if (argv[0] === "logout") {
+      await removeHostLink(url);
+      console.log(`Removed the link to ${url}.`);
+    } else {
+      const link = { url, token: (await readTokenLine()).trim() };
+      if (add) await addHostLink(link);
+      else await loginHost(link);
+      console.log(`Saved. Run \`ompweb host\` to link this machine to ${url}.`);
+    }
     return 0;
   }
 
@@ -48,14 +55,13 @@ async function main(argv: string[]): Promise<number> {
     console.error(USAGE);
     return 2;
   }
-  const login = readHostLogin();
-  if (!login) {
+  if (readHostLinks().length === 0) {
     console.error("This machine is not linked yet. Start ompweb on this machine (it writes the link), or run `ompweb host login --url <server url>`.");
     return 1;
   }
-  // Loaded here, not at the top: `login` needs none of the daemon, which jiti would otherwise transpile on every run.
+  // Login/logout need none of the daemon, which jiti would otherwise transpile on every run.
   const { runHostDaemon } = await import("./daemon");
-  const daemon = runHostDaemon({ ...login, allowHttp: argv.includes("--allow-http") });
+  const daemon = runHostDaemon({ allowHttp: argv.includes("--allow-http") });
   for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => void daemon.stop());
   return daemon.done;
 }

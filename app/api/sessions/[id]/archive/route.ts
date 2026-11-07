@@ -36,7 +36,8 @@ export async function POST(
     // Disposing a child behind a down link would wait for the link to return.
     const offline = hostOfflineResponse(resolved.host);
     if (offline) return offline;
-    await getRpcSession(id)?.destroyAndWait?.();
+    const live = getRpcSession(id);
+    if (!live?.hostOwnedLifecycle) await live?.destroyAndWait?.("archive", true);
     const result = await sessionOps.archiveSession(id);
     if (!result.ok) return opErrorResponse(result);
     invalidateHostSessionList(resolved.host.id);

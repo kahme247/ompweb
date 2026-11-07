@@ -26,6 +26,12 @@ export interface SpawnResult {
   fellBack: boolean;
   /** The host's project launch config forces --advisor. */
   launchAdvisor: boolean;
+  /** Actual --advisor flag on a shared channel, independent of this link's requested mode. */
+  advisorSpawned?: boolean;
+  /** Existing shared channel: startup/ready already completed on the daemon. */
+  joined?: boolean;
+  pending?: string[];
+  streaming?: string | null;
 }
 
 /** A machine omp sessions run on. Every machine-local action of a session goes through it. */
@@ -34,7 +40,7 @@ export interface Host {
   readonly label: string;
   status(): HostStatus;
   onStatus(listener: (status: HostStatus) => void): () => void;
-  spawnRpc(request: SpawnRequest): Promise<SpawnResult>;
+  spawnRpc(request: SpawnRequest, sessionId?: string | null, options?: { replaceAdvisor?: boolean; preparing?: boolean; expectedChannel?: string }): Promise<SpawnResult>;
   sessionFileExists(path: string): Promise<boolean>;
   invalidateSessionLists(sessionFile?: string): void;
   autoApproveExtension(): boolean;

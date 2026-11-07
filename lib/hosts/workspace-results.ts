@@ -1,4 +1,5 @@
 import { isRecord } from "../type-guards";
+import { isWindowsAbsolutePath } from "../paths";
 import type { WorkspaceOps } from "../workspace-types";
 import { LINK_LIMITS } from "./link-protocol";
 
@@ -24,6 +25,7 @@ export function validWorkspaceResult(op: keyof WorkspaceOps, result: unknown): b
   switch (op) {
     case "home": return text(value.home);
     case "defaultCwd": return text(value.cwd);
+    case "resolveLocalFile": return text(value.path) && (value.path.startsWith("/") || isWindowsAbsolutePath(value.path));
     case "startClone": return text(value.id);
     case "readClone": case "cancelClone": return count(value.cursor) && typeof value.reset === "boolean" && typeof value.terminal === "boolean"
       && Array.isArray(value.frames) && value.frames.length <= 8193 && value.frames.every((frame) => isRecord(frame) && (

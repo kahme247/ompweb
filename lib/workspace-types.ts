@@ -8,7 +8,8 @@ import type { CloneProgress } from "./git-clone";
 
 export interface WorkspaceFileSource { hostId: string; cwd: string | null; sessionId: string | null }
 
-export interface WorkspaceFileRequest { segments: string[]; sessionId: string | null }
+/** `sessionFile` is main's hint of a live session's file: the host trusts it only after checking it is that session's own. */
+export interface WorkspaceFileRequest { segments: string[]; sessionId: string | null; sessionFile?: string | null }
 export interface WorkspaceFileInfo {
   path: string; name: string; size: number; mtimeMs: number; isDirectory: boolean;
   language: string; mime: string; previewKind: "pdf" | "docx" | null;
@@ -56,6 +57,9 @@ export interface WorkspaceOps {
   startClone(id: string, parent: string, url: string): Promise<OpResult<{ id: string }>>;
   readClone(id: string, cursor: number): Promise<OpResult<CloneProgress>>;
   cancelClone(id: string): Promise<OpResult<CloneProgress>>;
+  /** The absolute path of a file in a session's `local://` directory on this host (stat'ed, never read). `sessionFile`
+   * is main's hint of the live session file; the host verifies it. */
+  resolveLocalFile(id: string, uri: string, sessionFile: string | null): Promise<OpResult<{ path: string }>>;
 }
 
 export const WORKSPACE_OP_PARAMS: { readonly [K in keyof WorkspaceOps]: readonly string[] } = {
@@ -70,6 +74,7 @@ export const WORKSPACE_OP_PARAMS: { readonly [K in keyof WorkspaceOps]: readonly
   browseDirectories: ["path"], defaultCwd: [], startClone: ["id", "parent", "url"], readClone: ["id", "cursor"], cancelClone: ["id"],
   // Older peers cap the advertised prefix before filtering unknown capabilities.
   listFilesInRoot: ["input", "root"],
+  resolveLocalFile: ["id", "uri", "sessionFile"],
 };
 
 export function isWorkspaceOp(value: string): value is keyof WorkspaceOps {
