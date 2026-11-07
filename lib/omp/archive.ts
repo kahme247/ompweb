@@ -182,7 +182,7 @@ export async function listArchivedSessionInfos(archiveRoot = getArchivedSessions
 
 /** HTTP status for a `restoreArchivedSession` failure message. */
 export function restoreFailureStatus(message: string): number {
-  return message.includes("Invalid archive key") || message.includes("Invalid archived session ID") || message.includes("required") ? 400 : message.includes("not found") ? 404 : message.includes("already exists") ? 409 : 500;
+  return message.includes("already exists") ? 409 : message.includes("Invalid archive key") || message.includes("Invalid archived session ID") || message.includes("required") ? 400 : message.includes("not found") ? 404 : 500;
 }
 
 async function validateRestorePath(root: string, target: string): Promise<void> {
