@@ -27,6 +27,7 @@ export interface AttachedTextFileData {
   mimeType: string;
   content: string;
   size: number;
+  uploadId?: string;
 }
 
 /** Extracts lowercased file extension without leading dot. */
@@ -197,10 +198,161 @@ export function decodeXmlEntities(str: string): string {
   });
 }
 
+export const MAX_XML_TAGS = 250_000;
+export const MAX_TABLE_COLS = 512;
+export const MAX_TABLE_ROWS = 10_000;
+export const MAX_TABLE_CELLS = 100_000;
+export const MAX_PDF_OBJECTS = 8_192;
+export const MAX_OBJSTM_OBJECTS = 2_048;
+export const MAX_PDF_STREAM_TOKENS = 200_000;
+
 const MAX_DECOMPRESSED_BYTES = MAX_TOTAL_ATTACHED_TEXT_BYTES * 4;
 const MAX_CMAP_ENTRIES = 262144;
 const MAX_CMAP_RANGE_SPAN = 4096;
 
+export interface XmlTagBudget {
+  tags: number;
+  maxTags: number;
+}
+
+/** Formats a 2D string array as Markdown table with bounds checking. */
+export function formatMarkdownTable(rows: string[][]): string | null {
+  if (rows.length === 0) return "";
+  if (rows.length > MAX_TABLE_ROWS) return null;
+  let maxCols = 0;
+  for (const r of rows) {
+    if (r.length > MAX_TABLE_COLS) return null;
+    if (r.length > maxCols) maxCols = r.length;
+  }
+  if (maxCols > MAX_TABLE_COLS) return null;
+  if (rows.length * maxCols > MAX_TABLE_CELLS) return null;
+
+  const formattedRows = rows.map((r) => {
+    const padded = [...r];
+    while (padded.length < maxCols) padded.push("");
+    return "| " + padded.map((c) => c.replace(/\|/g, "\\|").replace(/\n/g, " ")).join(" | ") + " |";
+  });
+  const header = formattedRows[0];
+  const separator = "| " + Array(maxCols).fill("---").join(" | ") + " |";
+  return [header, separator, ...formattedRows.slice(1)].join("\n");
+}
+
+/**
+ * Linear O(N) XML scanner using indexOf("<") and indexOf(">").
+ * Enforces shared per-document tag budget.
+ */
+export function walkXml(
+  xml: string,
+  budget: XmlTagBudget,
+  onTag: (name: string, isClose: boolean, selfClosing: boolean, attrs: string) => boolean | void,
+  onText?: (text: string) => boolean | void,
+): boolean {
+  let pos = 0;
+  const len = xml.length;
+
+  while (pos < len) {
+    const lt = xml.indexOf("<", pos);
+    if (lt === -1) {
+      if (onText && pos < len) {
+        onText(xml.slice(pos));
+      }
+      break;
+    }
+
+    if (onText && lt > pos) {
+      if (onText(xml.slice(pos, lt)) === false) return false;
+    }
+
+    if (xml.startsWith("<!--", lt)) {
+      const endComment = xml.indexOf("-->", lt + 4);
+      if (endComment === -1) break;
+      pos = endComment + 3;
+      continue;
+    }
+
+    if (xml.startsWith("<![CDATA[", lt)) {
+      const endCdata = xml.indexOf("]]>", lt + 9);
+      if (endCdata === -1) break;
+      if (onText) {
+        if (onText(xml.slice(lt + 9, endCdata)) === false) return false;
+      }
+      pos = endCdata + 3;
+      continue;
+    }
+
+    if (xml.startsWith("<?", lt) || xml.startsWith("<!", lt)) {
+      const gt = xml.indexOf(">", lt + 2);
+      if (gt === -1) break;
+      pos = gt + 1;
+      continue;
+    }
+
+    const gt = xml.indexOf(">", lt + 1);
+    if (gt === -1) break;
+
+    budget.tags++;
+    if (budget.tags > budget.maxTags) {
+      return false;
+    }
+
+    let rawTag = xml.slice(lt + 1, gt).trim();
+    const isClose = rawTag.startsWith("/");
+    if (isClose) {
+      rawTag = rawTag.slice(1).trim();
+    }
+    const selfClosing = !isClose && rawTag.endsWith("/");
+    if (selfClosing) {
+      rawTag = rawTag.slice(0, -1).trim();
+    }
+
+    let name = rawTag;
+    let attrs = "";
+    const spaceIdx = rawTag.search(/\s/);
+    if (spaceIdx !== -1) {
+      name = rawTag.slice(0, spaceIdx);
+      attrs = rawTag.slice(spaceIdx + 1).trim();
+    }
+
+    if (onTag(name, isClose, selfClosing, attrs) === false) {
+      return false;
+    }
+
+    pos = gt + 1;
+  }
+
+  return true;
+}
+
+/** Strips <style> and <script> blocks using case-insensitive linear indexOf. */
+export function stripStyleAndScriptTags(html: string): string {
+  const lower = html.toLowerCase();
+  let result = "";
+  let pos = 0;
+  while (pos < html.length) {
+    const nextStyle = lower.indexOf("<style", pos);
+    const nextScript = lower.indexOf("<script", pos);
+    let target = -1;
+    let closeTag = "";
+    if (nextStyle !== -1 && (nextScript === -1 || nextStyle < nextScript)) {
+      target = nextStyle;
+      closeTag = "</style>";
+    } else if (nextScript !== -1) {
+      target = nextScript;
+      closeTag = "</script>";
+    } else {
+      result += html.slice(pos);
+      break;
+    }
+
+    result += html.slice(pos, target);
+    const closeIdx = lower.indexOf(closeTag, target);
+    if (closeIdx === -1) {
+      break;
+    }
+    pos = closeIdx + closeTag.length;
+  }
+  return result;
+}
 interface DecompressBudget {
   remaining: number;
 }
@@ -293,53 +445,108 @@ function decodeCMapTargetHex(hex: string): string {
 function parseCMap(cmapStr: string, cmapBudget: DecompressBudget): PdfCMap {
   const map = new Map<number, string>();
   let codeBytes: 1 | 2 = 1;
-  const csRegex = /begincodespacerange([\s\S]*?)endcodespacerange/g;
-  let match: RegExpExecArray | null;
-  while ((match = csRegex.exec(cmapStr)) !== null) {
-    const pairs = match[1].match(/<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>/g) ?? [];
-    for (const pair of pairs) {
-      const m = pair.match(/<([0-9a-fA-F]+)>/);
-      if (m && m[1].length >= 4) codeBytes = 2;
+  const MAX_CMAP_ITERATIONS = 65_536;
+  let totalEntries = 0;
+
+  let pos = 0;
+  while (pos < cmapStr.length) {
+    const startIdx = cmapStr.indexOf("begincodespacerange", pos);
+    if (startIdx === -1) break;
+    const contentStart = startIdx + "begincodespacerange".length;
+    const endIdx = cmapStr.indexOf("endcodespacerange", contentStart);
+    if (endIdx === -1) break;
+    const block = cmapStr.slice(contentStart, endIdx);
+    pos = endIdx + "endcodespacerange".length;
+
+    const pairRegex = /<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>/g;
+    let pm: RegExpExecArray | null;
+    while ((pm = pairRegex.exec(block)) !== null) {
+      if (pm[1].length >= 4) codeBytes = 2;
     }
   }
 
-  const bfcharRegex = /beginbfchar([\s\S]*?)endbfchar/g;
-  while ((match = bfcharRegex.exec(cmapStr)) !== null && cmapBudget.remaining > 0) {
+  pos = 0;
+  while (pos < cmapStr.length && cmapBudget.remaining > 0 && totalEntries < MAX_CMAP_ITERATIONS) {
+    const startIdx = cmapStr.indexOf("beginbfchar", pos);
+    if (startIdx === -1) break;
+    const contentStart = startIdx + "beginbfchar".length;
+    const endIdx = cmapStr.indexOf("endbfchar", contentStart);
+    if (endIdx === -1) break;
+    const block = cmapStr.slice(contentStart, endIdx);
+    pos = endIdx + "endbfchar".length;
+
     const pairRegex = /<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>/g;
     let pm: RegExpExecArray | null;
-    while ((pm = pairRegex.exec(match[1])) !== null && --cmapBudget.remaining >= 0) {
+    while ((pm = pairRegex.exec(block)) !== null && --cmapBudget.remaining >= 0 && ++totalEntries <= MAX_CMAP_ITERATIONS) {
       if (pm[1].length >= 4) codeBytes = 2;
       map.set(parseInt(pm[1], 16), decodeCMapTargetHex(pm[2]));
     }
   }
 
-  const bfrangeRegex = /beginbfrange([\s\S]*?)endbfrange/g;
-  while ((match = bfrangeRegex.exec(cmapStr)) !== null && cmapBudget.remaining > 0) {
-    const rangeRegex = /<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>\s*(?:<([0-9a-fA-F]+)>|\[([\s\S]*?)\])/g;
-    let rm: RegExpExecArray | null;
-    while ((rm = rangeRegex.exec(match[1])) !== null && cmapBudget.remaining > 0) {
-      if (rm[1].length >= 4) codeBytes = 2;
-      const start = parseInt(rm[1], 16);
-      const end = parseInt(rm[2], 16);
-      if (end < start) continue;
-      if (rm[3]) {
-        const baseStr = decodeCMapTargetHex(rm[3]);
+  pos = 0;
+  while (pos < cmapStr.length && cmapBudget.remaining > 0 && totalEntries < MAX_CMAP_ITERATIONS) {
+    const startIdx = cmapStr.indexOf("beginbfrange", pos);
+    if (startIdx === -1) break;
+    const contentStart = startIdx + "beginbfrange".length;
+    const endIdx = cmapStr.indexOf("endbfrange", contentStart);
+    if (endIdx === -1) break;
+    const block = cmapStr.slice(contentStart, endIdx);
+    pos = endIdx + "endbfrange".length;
+
+    let bPos = 0;
+    while (bPos < block.length && cmapBudget.remaining > 0 && totalEntries < MAX_CMAP_ITERATIONS) {
+      const lt1 = block.indexOf("<", bPos);
+      if (lt1 === -1) break;
+      const gt1 = block.indexOf(">", lt1 + 1);
+      if (gt1 === -1) break;
+      const startHex = block.slice(lt1 + 1, gt1);
+
+      const lt2 = block.indexOf("<", gt1 + 1);
+      if (lt2 === -1) break;
+      const gt2 = block.indexOf(">", lt2 + 1);
+      if (gt2 === -1) break;
+      const endHex = block.slice(lt2 + 1, gt2);
+
+      if (startHex.length >= 4) codeBytes = 2;
+      const start = parseInt(startHex, 16);
+      const end = parseInt(endHex, 16);
+      if (end < start) {
+        bPos = gt2 + 1;
+        continue;
+      }
+
+      let cur = gt2 + 1;
+      while (cur < block.length && /\s/.test(block[cur])) cur++;
+      if (cur >= block.length) break;
+
+      if (block[cur] === "<") {
+        const gt3 = block.indexOf(">", cur + 1);
+        if (gt3 === -1) break;
+        const destHex = block.slice(cur + 1, gt3);
+        bPos = gt3 + 1;
+        const baseStr = decodeCMapTargetHex(destHex);
         if (!baseStr) continue;
         const prefix = baseStr.slice(0, -1);
         const lastUnit = baseStr.charCodeAt(baseStr.length - 1);
         const maxEnd = Math.min(end, start + MAX_CMAP_RANGE_SPAN - 1);
-        for (let code = start; code <= maxEnd && --cmapBudget.remaining >= 0; code++) {
+        for (let code = start; code <= maxEnd && --cmapBudget.remaining >= 0 && ++totalEntries <= MAX_CMAP_ITERATIONS; code++) {
           const nextUnit = lastUnit + (code - start);
           if (nextUnit >= 0xffff) break;
           if (nextUnit > 0) {
             map.set(code, prefix + String.fromCharCode(nextUnit));
           }
         }
-      } else if (rm[4]) {
-        const items = rm[4].match(/<([0-9a-fA-F]+)>/g) ?? [];
-        for (let i = 0; i < items.length && start + i <= end && --cmapBudget.remaining >= 0; i++) {
+      } else if (block[cur] === "[") {
+        const closeBracket = block.indexOf("]", cur + 1);
+        if (closeBracket === -1) break;
+        const arrayContent = block.slice(cur + 1, closeBracket);
+        bPos = closeBracket + 1;
+        const items = arrayContent.match(/<([0-9a-fA-F]+)>/g) ?? [];
+        for (let i = 0; i < items.length && start + i <= end && --cmapBudget.remaining >= 0 && ++totalEntries <= MAX_CMAP_ITERATIONS; i++) {
           map.set(start + i, decodeCMapTargetHex(items[i].slice(1, -1)));
         }
+      } else {
+        bPos = cur + 1;
       }
     }
   }
@@ -439,8 +646,10 @@ async function extractPdfText(buf: ArrayBuffer): Promise<string | null> {
   const streamMarkerRe = />>\s*stream(?:\r?\n|\r)/g;
   const nonTextStreamRe = /\/Subtype\s*\/(?:Image|Type1C|CIDFontType0C|OpenType)\b|\/Length[123]\b|\/Type\s*\/(?:XRef|Metadata|EmbeddedFile)\b|\/BitsPerComponent\b/;
   const objects = new Map<number, { dict: string; streamText: string | null; body: string }>();
+  let totalObjStmBytes = 0;
   let m: RegExpExecArray | null;
   while ((m = objHeaderRegex.exec(latin1)) !== null) {
+    if (objects.size >= MAX_PDF_OBJECTS) break;
     const id = parseInt(m[1], 10);
     const bodyStart = m.index + m[0].length;
     const endObjIdx = latin1.indexOf("endobj", bodyStart);
@@ -485,14 +694,28 @@ async function extractPdfText(buf: ArrayBuffer): Promise<string | null> {
         if (firstMatch && countMatch) {
           const first = parseInt(firstMatch[1], 10);
           const count = parseInt(countMatch[1], 10);
-          const header = streamText.slice(0, first).trim().split(/\s+/).map(Number);
+          if (first < 0 || first > streamText.length || count < 0 || count > MAX_OBJSTM_OBJECTS) {
+            return null;
+          }
+          const headerStr = streamText.slice(0, first).trim();
+          const headerNumbers = headerStr ? headerStr.split(/\s+/).map(Number) : [];
+          if (headerNumbers.length < count * 2) {
+            return null;
+          }
           const content = streamText.slice(first);
-          for (let i = 0; i < count && i * 2 + 1 < header.length; i++) {
-            const objNum = header[i * 2];
-            const offset = header[i * 2 + 1];
-            const nextOffset = i + 1 < count ? header[(i + 1) * 2 + 1] : content.length;
+          for (let i = 0; i < count; i++) {
+            const objNum = headerNumbers[i * 2];
+            const offset = headerNumbers[i * 2 + 1];
+            const nextOffset = i + 1 < count ? headerNumbers[(i + 1) * 2 + 1] : content.length;
+            if (!Number.isInteger(objNum) || objNum <= 0) return null;
+            if (!Number.isInteger(offset) || !Number.isInteger(nextOffset)) return null;
+            if (!(0 <= offset && offset <= nextOffset && nextOffset <= content.length)) {
+              return null;
+            }
             const subBody = content.slice(offset, nextOffset);
-            if (!objects.has(objNum)) {
+            totalObjStmBytes += subBody.length;
+            if (totalObjStmBytes > MAX_DECOMPRESSED_BYTES) return null;
+            if (objects.size < MAX_PDF_OBJECTS && !objects.has(objNum)) {
               objects.set(objNum, { dict: subBody, streamText: null, body: subBody });
             }
           }
@@ -514,10 +737,11 @@ async function extractPdfText(buf: ArrayBuffer): Promise<string | null> {
   const fontObjIds = new Set<number>();
   const fontObjToCMap = new Map<number, PdfCMap>();
   for (const [id, obj] of objects) {
-    if (/\/Type\s*\/Font\b/.test(obj.body) || /\/Subtype\s*\/(?:Type0|Type1|TrueType|MMType1|Type3|CIDFontType[02])\b/.test(obj.body)) {
+    const dictSlice = obj.dict.slice(0, 4096);
+    if (/\/Type\s*\/Font\b/.test(dictSlice) || /\/Subtype\s*\/(?:Type0|Type1|TrueType|MMType1|Type3|CIDFontType[02])\b/.test(dictSlice)) {
       fontObjIds.add(id);
     }
-    const tu = /\/ToUnicode\s+(\d+)\s+\d+\s+R/.exec(obj.body);
+    const tu = /\/ToUnicode\s+(\d+)\s+\d+\s+R/.exec(dictSlice);
     if (tu) {
       fontObjIds.add(id);
       const cmap = cmapsByObj.get(parseInt(tu[1], 10));
@@ -527,9 +751,10 @@ async function extractPdfText(buf: ArrayBuffer): Promise<string | null> {
   const knownFontNames = new Set<string>();
   const fontNameToCMap = new Map<string, PdfCMap>();
   for (const [, obj] of objects) {
+    const dictSlice = obj.dict.slice(0, 4096);
     const fontRefRe = /\/([A-Za-z0-9_.-]+)\s+(\d+)\s+\d+\s+R/g;
     let fm: RegExpExecArray | null;
-    while ((fm = fontRefRe.exec(obj.body)) !== null) {
+    while ((fm = fontRefRe.exec(dictSlice)) !== null) {
       const targetId = parseInt(fm[2], 10);
       if (fontObjIds.has(targetId)) {
         knownFontNames.add(fm[1]);
@@ -600,7 +825,9 @@ async function extractPdfText(buf: ArrayBuffer): Promise<string | null> {
   const streamTokenRe =
     /\/([A-Za-z0-9_.-]+)|\((?:\\[\s\S]|[^\\()])*\)|<([0-9a-fA-F\s]+)>|(\[|\])|([-+]?(?:\d+\.?\d*|\.\d+))|(\b(?:BT|ET|Tf|Tm|Td|TD|TL|Tc|Tw|Tz|cm|q|Q|Tj|TJ)\b|\bT\*|['"])|\b([A-Za-z*]+)\b/g;
 
+  let totalStreamTokens = 0;
   for (const [, obj] of objects) {
+    if (totalStreamTokens >= MAX_PDF_STREAM_TOKENS) break;
     if (!obj.streamText || !obj.streamText.includes("BT") || obj.streamText.includes("begincmap")) continue;
     let ctm: Mat2D = [1, 0, 0, 1, 0, 0];
     const ctmStack: Mat2D[] = [];
@@ -659,6 +886,7 @@ async function extractPdfText(buf: ArrayBuffer): Promise<string | null> {
     streamTokenRe.lastIndex = 0;
     let tok: RegExpExecArray | null;
     while ((tok = streamTokenRe.exec(obj.streamText)) !== null) {
+      if (++totalStreamTokens > MAX_PDF_STREAM_TOKENS) break;
       if (tok[1] !== undefined) {
         pendingName = tok[1];
       } else if (tok[0].startsWith("(")) {
@@ -864,25 +1092,6 @@ async function readZipEntries(buffer: ArrayBuffer): Promise<Map<string, () => Pr
   return entries;
 }
 
-/** Extracts plain text from DOCX run XML elements. */
-function extractDocxRuns(containerXml: string): string {
-  const elemRegex = /<w:t(?:[\s>][\s\S]*?<\/w:t>|\/>)|<w:br\b[^>]*\/>|<w:tab\b[^>]*\/>/g;
-  let text = "";
-  let m: RegExpExecArray | null;
-  while ((m = elemRegex.exec(containerXml)) !== null) {
-    const tag = m[0];
-    if (tag.startsWith("<w:t")) {
-      const content = tag.replace(/^<w:t[^>]*>/, "").replace(/<\/w:t>$/, "");
-      text += decodeXmlEntities(content);
-    } else if (tag.startsWith("<w:br")) {
-      text += "\n";
-    } else if (tag.startsWith("<w:tab")) {
-      text += "\t";
-    }
-  }
-  return text;
-}
-
 /** Extracts paragraphs and tables from OOXML DOCX document entries. */
 async function extractDocx(entries: Map<string, () => Promise<Uint8Array>>): Promise<string | null> {
   const xmlNames = ["word/document.xml"];
@@ -891,49 +1100,118 @@ async function extractDocx(entries: Map<string, () => Promise<Uint8Array>>): Pro
       xmlNames.push(name);
     }
   }
+
+  const tagBudget: XmlTagBudget = { tags: 0, maxTags: MAX_XML_TAGS };
   const parts: string[] = [];
+
   for (const name of xmlNames) {
     const fn = entries.get(name);
     if (!fn) continue;
     const buf = await fn();
     const xml = new TextDecoder("utf-8").decode(buf);
-    const blockRegex = /<w:tbl[\s\S]*?<\/w:tbl>|<w:p[\s\S]*?<\/w:p>/g;
-    let m: RegExpExecArray | null;
-    while ((m = blockRegex.exec(xml)) !== null) {
-      const block = m[0];
-      if (block.startsWith("<w:tbl")) {
-        const rows: string[][] = [];
-        const trRegex = /<w:tr[\s\S]*?<\/w:tr>/g;
-        let trMatch: RegExpExecArray | null;
-        while ((trMatch = trRegex.exec(block)) !== null) {
-          const tr = trMatch[0];
-          const cells: string[] = [];
-          const tcRegex = /<w:tc[\s\S]*?<\/w:tc>/g;
-          let tcMatch: RegExpExecArray | null;
-          while ((tcMatch = tcRegex.exec(tr)) !== null) {
-            const tc = tcMatch[0];
-            const text = extractDocxRuns(tc);
-            cells.push(text.trim());
+
+    let inTable = false;
+    let tableRows: string[][] = [];
+    let currentRow: string[] = [];
+    let inCell = false;
+    let cellText = "";
+    let inPara = false;
+    let paraText = "";
+    let inT = false;
+    let totalCellsInTable = 0;
+
+    const ok = walkXml(
+      xml,
+      tagBudget,
+      (tagName, isClose, selfClosing) => {
+        if (tagName === "w:tbl") {
+          if (!isClose) {
+            inTable = true;
+            tableRows = [];
+            totalCellsInTable = 0;
+          } else {
+            inTable = false;
+            const tableMd = formatMarkdownTable(tableRows);
+            if (tableMd === null) return false;
+            if (tableMd) parts.push(tableMd);
+            tableRows = [];
           }
-          if (cells.length > 0) rows.push(cells);
+        } else if (tagName === "w:tr") {
+          if (!isClose) {
+            if (tableRows.length + 1 > MAX_TABLE_ROWS) return false;
+            currentRow = [];
+          } else {
+            if (currentRow.length > 0) {
+              tableRows.push(currentRow);
+            }
+          }
+        } else if (tagName === "w:tc") {
+          if (!isClose) {
+            if (currentRow.length + 1 > MAX_TABLE_COLS) return false;
+            if (totalCellsInTable + 1 > MAX_TABLE_CELLS) return false;
+            totalCellsInTable++;
+            inCell = true;
+            cellText = "";
+          } else {
+            inCell = false;
+            currentRow.push(cellText.trim());
+            cellText = "";
+          }
+        } else if (tagName === "w:p") {
+          if (!isClose) {
+            if (inPara && !inCell) {
+              const trimmed = paraText.trim();
+              if (trimmed) parts.push(trimmed);
+            }
+            inPara = true;
+            if (!inCell) {
+              paraText = "";
+            }
+          } else {
+            inPara = false;
+            if (!inCell) {
+              const trimmed = paraText.trim();
+              if (trimmed) parts.push(trimmed);
+              paraText = "";
+            } else {
+              if (cellText && !cellText.endsWith("\n")) {
+                cellText += " ";
+              }
+            }
+          }
+        } else if (tagName === "w:t") {
+          if (!isClose && !selfClosing) {
+            inT = true;
+          } else {
+            inT = false;
+          }
+        } else if (tagName === "w:br") {
+          if (inCell) cellText += "\n";
+          else if (inPara) paraText += "\n";
+        } else if (tagName === "w:tab") {
+          if (inCell) cellText += "\t";
+          else if (inPara) paraText += "\t";
         }
-        if (rows.length > 0) {
-          const maxCols = Math.max(...rows.map((r) => r.length));
-          const formattedRows = rows.map((r) => {
-            const padded = [...r];
-            while (padded.length < maxCols) padded.push("");
-            return "| " + padded.map((c) => c.replace(/\|/g, "\\|").replace(/\n/g, " ")).join(" | ") + " |";
-          });
-          const header = formattedRows[0];
-          const separator = "| " + Array(maxCols).fill("---").join(" | ") + " |";
-          parts.push([header, separator, ...formattedRows.slice(1)].join("\n"));
+      },
+      (text) => {
+        if (inT) {
+          const decoded = decodeXmlEntities(text);
+          if (inCell) {
+            cellText += decoded;
+          } else if (inPara) {
+            paraText += decoded;
+          }
         }
-      } else {
-        const text = extractDocxRuns(block);
-        if (text.trim()) parts.push(text.trim());
-      }
+      },
+    );
+    if (inPara && !inCell) {
+      const trimmed = paraText.trim();
+      if (trimmed) parts.push(trimmed);
     }
+
+    if (!ok) return null;
   }
+
   const res = parts.join("\n\n").trim();
   return res || null;
 }
@@ -941,22 +1219,41 @@ async function extractDocx(entries: Map<string, () => Promise<Uint8Array>>): Pro
 /** Extracts worksheets and shared strings from OOXML XLSX into Markdown tables. */
 async function extractXlsx(entries: Map<string, () => Promise<Uint8Array>>): Promise<string | null> {
   const sharedStrings: string[] = [];
+  const tagBudget: XmlTagBudget = { tags: 0, maxTags: MAX_XML_TAGS };
+
   const ssFn = entries.get("xl/sharedStrings.xml");
   if (ssFn) {
     const ssBuf = await ssFn();
     const ssXml = new TextDecoder("utf-8").decode(ssBuf);
-    const siRegex = /<si[\s\S]*?<\/si>/g;
-    let m: RegExpExecArray | null;
-    while ((m = siRegex.exec(ssXml)) !== null) {
-      const si = m[0];
-      const tRegex = /<t[\s\S]*?<\/t>/g;
-      let tMatch: RegExpExecArray | null;
-      let text = "";
-      while ((tMatch = tRegex.exec(si)) !== null) {
-        text += tMatch[0].replace(/^<t[^>]*>/, "").replace(/<\/t>$/, "");
-      }
-      sharedStrings.push(decodeXmlEntities(text));
-    }
+    let inSi = false;
+    let inT = false;
+    let siText = "";
+
+    const ok = walkXml(
+      ssXml,
+      tagBudget,
+      (tagName, isClose, selfClosing) => {
+        if (tagName === "si") {
+          if (!isClose) {
+            inSi = true;
+            siText = "";
+          } else {
+            inSi = false;
+            sharedStrings.push(decodeXmlEntities(siText));
+            siText = "";
+          }
+        } else if (tagName === "t") {
+          if (!isClose && !selfClosing) inT = true;
+          else inT = false;
+        }
+      },
+      (text) => {
+        if (inSi && inT) {
+          siText += text;
+        }
+      },
+    );
+    if (!ok) return null;
   }
 
   const relsFn = entries.get("xl/_rels/workbook.xml.rels");
@@ -991,10 +1288,13 @@ async function extractXlsx(entries: Map<string, () => Promise<Uint8Array>>): Pro
       sheets.push({ name, target });
     }
   }
+
   const sections: string[] = [];
   const visitedSheets = new Set<string>();
   const encoder = new TextEncoder();
   let projectedBytes = 0;
+  let totalCellsAcrossWorkbook = 0;
+
   for (let i = 0; i < sheets.length; i++) {
     const { name, target } = sheets[i];
     const path = target || `xl/worksheets/sheet${i + 1}.xml`;
@@ -1004,91 +1304,133 @@ async function extractXlsx(entries: Map<string, () => Promise<Uint8Array>>): Pro
     if (!sFn) continue;
     const sBuf = await sFn();
     const sXml = new TextDecoder("utf-8").decode(sBuf);
+
     const rows: string[][] = [];
     let rawCellBytes = 0;
-    const rowRegex = /<row\b[^>]*\/>|<row\b[^>]*>[\s\S]*?<\/row>/g;
-    let rMatch: RegExpExecArray | null;
-    while ((rMatch = rowRegex.exec(sXml)) !== null) {
-      const rowXml = rMatch[0];
-      const cells = new Map<number, string>();
-      let maxCol = 0;
-      const cRegex = /<c\b([^>]*?)\/>|<c\b([^>]*)>([\s\S]*?)<\/c>/g;
-      let cMatch: RegExpExecArray | null;
-      while ((cMatch = cRegex.exec(rowXml)) !== null) {
-        const attrs = cMatch[1] ?? cMatch[2] ?? "";
-        const body = cMatch[3] || "";
-        const rAttr = attrs.match(/\br="([A-Z]+)(\d+)"/);
-        const tAttr = attrs.match(/\bt="([^"]+)"/);
-        let colNum = cells.size + 1;
-        if (rAttr) {
-          const colStr = rAttr[1];
-          let num = 0;
-          for (let k = 0; k < colStr.length; k++) {
-            num = num * 26 + (colStr.charCodeAt(k) - 64);
-          }
-          colNum = num;
-        }
-        maxCol = Math.max(maxCol, colNum);
+    let inRow = false;
+    let rowCells = new Map<number, string>();
+    let rowMaxCol = 0;
+    let sheetMaxCol = 0;
+    let rowCount = 0;
+    let inCell = false;
+    let cellColNum = 0;
+    let cellType = "";
+    let inV = false;
+    let inT = false;
+    let cellRawText = "";
 
-        let val = "";
-        const type = tAttr ? tAttr[1] : "";
-        if (type === "s") {
-          const vMatch = body.match(/<v>(\d+)<\/v>/);
-          if (vMatch) val = sharedStrings[parseInt(vMatch[1], 10)] ?? "";
-        } else if (type === "inlineStr") {
-          const tMatch = body.match(/<t[^>]*>([\s\S]*?)<\/t>/);
-          if (tMatch) val = decodeXmlEntities(tMatch[1]);
-        } else if (type === "b") {
-          const vMatch = body.match(/<v>([01])<\/v>/);
-          if (vMatch) val = vMatch[1] === "1" ? "TRUE" : "FALSE";
-        } else {
-          const vMatch = body.match(/<v>([\s\S]*?)<\/v>/);
-          if (vMatch) val = decodeXmlEntities(vMatch[1]);
+    const ok = walkXml(
+      sXml,
+      tagBudget,
+      (tagName, isClose, selfClosing, attrs) => {
+        if (tagName === "row") {
+          if (!isClose) {
+            rowCount++;
+            if (rowCount > MAX_TABLE_ROWS) return false;
+            inRow = true;
+            rowCells = new Map<number, string>();
+            rowMaxCol = 0;
+            if (selfClosing) {
+              inRow = false;
+            }
+          } else {
+            inRow = false;
+            if (rowCount > MAX_TABLE_ROWS || sheetMaxCol > MAX_TABLE_COLS || rowCount * sheetMaxCol > MAX_TABLE_CELLS) {
+              return false;
+            }
+            if (rowMaxCol > 0) {
+              const rowList: string[] = [];
+              for (let c = 1; c <= rowMaxCol; c++) {
+                rowList.push(rowCells.get(c) || "");
+              }
+              rows.push(rowList);
+              totalCellsAcrossWorkbook += rowMaxCol;
+              if (totalCellsAcrossWorkbook > MAX_TABLE_CELLS) return false;
+            }
+          }
+        } else if (tagName === "c") {
+          if (!isClose) {
+            inCell = true;
+            cellRawText = "";
+            const rMatch = attrs.match(/\br="([A-Za-z]+)(\d+)"/);
+            const tMatch = attrs.match(/\bt="([^"]+)"/);
+            cellType = tMatch ? tMatch[1] : "";
+
+            let colNum: number;
+            if (rMatch) {
+              const colStr = rMatch[1].toUpperCase();
+              if (colStr.length < 1 || colStr.length > 3) return false;
+              let num = 0;
+              for (let k = 0; k < colStr.length; k++) {
+                num = num * 26 + (colStr.charCodeAt(k) - 64);
+              }
+              colNum = num;
+              if (colNum < 1 || colNum > MAX_TABLE_COLS) return false;
+            } else {
+              colNum = rowCells.size + 1;
+              if (colNum > MAX_TABLE_COLS) return false;
+            }
+
+            cellColNum = colNum;
+            rowMaxCol = Math.max(rowMaxCol, colNum);
+            sheetMaxCol = Math.max(sheetMaxCol, rowMaxCol);
+
+            if (rowCount > MAX_TABLE_ROWS || sheetMaxCol > MAX_TABLE_COLS || rowCount * sheetMaxCol > MAX_TABLE_CELLS) {
+              return false;
+            }
+
+            if (selfClosing) {
+              inCell = false;
+              rowCells.set(cellColNum, "");
+            }
+          } else {
+            if (inCell) {
+              inCell = false;
+              let val = "";
+              if (cellType === "s") {
+                const idx = parseInt(cellRawText.trim(), 10);
+                val = Number.isFinite(idx) ? sharedStrings[idx] ?? "" : "";
+              } else if (cellType === "inlineStr") {
+                val = decodeXmlEntities(cellRawText);
+              } else if (cellType === "b") {
+                val = cellRawText.trim() === "1" ? "TRUE" : "FALSE";
+              } else {
+                val = decodeXmlEntities(cellRawText);
+              }
+              const trimmed = val.trim();
+              if (trimmed) {
+                rawCellBytes += encoder.encode(trimmed).byteLength;
+                if (projectedBytes + rawCellBytes > MAX_ATTACHED_TEXT_BYTES) return false;
+              }
+              rowCells.set(cellColNum, trimmed);
+            }
+          }
+        } else if (tagName === "v") {
+          if (!isClose && !selfClosing) inV = true;
+          else inV = false;
+        } else if (tagName === "t") {
+          if (!isClose && !selfClosing) inT = true;
+          else inT = false;
         }
-        const trimmed = val.trim();
-        if (trimmed) {
-          rawCellBytes += encoder.encode(trimmed).byteLength;
-          if (projectedBytes + rawCellBytes > MAX_ATTACHED_TEXT_BYTES) return null;
+      },
+      (text) => {
+        if (inCell && (inV || inT)) {
+          cellRawText += text;
         }
-        cells.set(colNum, trimmed);
-      }
-      if (maxCol > 0) {
-        const rowList: string[] = [];
-        for (let c = 1; c <= maxCol; c++) {
-          rowList.push(cells.get(c) || "");
-        }
-        rows.push(rowList);
-      }
-    }
+      },
+    );
+
+    if (!ok) return null;
 
     if (rows.length > 0) {
-      const maxCols = Math.max(...rows.map((r) => r.length));
-      // Heading: "### ${name}\n\n"
-      let sheetBytes = encoder.encode(`### ${name}\n\n`).byteLength;
-      // Separator row: "| --- | ... |" -> 2 + maxCols * 6 + 1 (\n)
-      sheetBytes += 2 + maxCols * 6 + 1;
-      // Format data rows and calculate byte size
-      for (const r of rows) {
-        let rowContentBytes = 0;
-        for (const c of r) {
-          const escaped = c.replace(/\|/g, "\\|").replace(/\n/g, " ");
-          rowContentBytes += encoder.encode(escaped).byteLength;
-        }
-        // "| " + joined + " |\n" -> 2 + rowContentBytes + (r.length - 1) * 3 + (maxCols - r.length) * 3 + 2 + 1
-        // = rowContentBytes + maxCols * 3 + 2 (outer pipes/spaces) + 1 (\n)
-        sheetBytes += rowContentBytes + maxCols * 3 + 3;
-      }
+      const tableMd = formatMarkdownTable(rows);
+      if (tableMd === null) return null;
+      const heading = `### ${name}\n\n`;
+      const sheetBytes = encoder.encode(heading).byteLength + encoder.encode(tableMd).byteLength;
       const sectionSeparatorBytes = sections.length > 0 ? 2 : 0;
       if (projectedBytes + sectionSeparatorBytes + sheetBytes > MAX_ATTACHED_TEXT_BYTES) return null;
       projectedBytes += sectionSeparatorBytes + sheetBytes;
-      const formattedRows = rows.map((r) => {
-        const padded = [...r];
-        while (padded.length < maxCols) padded.push("");
-        return "| " + padded.map((c) => c.replace(/\|/g, "\\|").replace(/\n/g, " ")).join(" | ") + " |";
-      });
-      const header = formattedRows[0];
-      const separator = "| " + Array(maxCols).fill("---").join(" | ") + " |";
-      sections.push(`### ${name}\n\n` + [header, separator, ...formattedRows.slice(1)].join("\n"));
+      sections.push(heading + tableMd);
     }
   }
 
@@ -1112,6 +1454,7 @@ async function extractPptx(entries: Map<string, () => Promise<Uint8Array>>): Pro
 
   slideEntries.sort((a, b) => a.num - b.num || (a.isNote ? 1 : -1));
 
+  const tagBudget: XmlTagBudget = { tags: 0, maxTags: MAX_XML_TAGS };
   const slidesMap = new Map<number, { text: string[]; notes: string[] }>();
   for (const item of slideEntries) {
     if (!slidesMap.has(item.num)) slidesMap.set(item.num, { text: [], notes: [] });
@@ -1119,19 +1462,41 @@ async function extractPptx(entries: Map<string, () => Promise<Uint8Array>>): Pro
     if (!fn) continue;
     const buf = await fn();
     const xml = new TextDecoder("utf-8").decode(buf);
-    const pRegex = /<a:p[\s\S]*?<\/a:p>/g;
-    let pMatch: RegExpExecArray | null;
+
+    let inP = false;
+    let inT = false;
+    let pText = "";
     const pList: string[] = [];
-    while ((pMatch = pRegex.exec(xml)) !== null) {
-      const p = pMatch[0];
-      const tRegex = /<a:t[\s\S]*?<\/a:t>/g;
-      let tMatch: RegExpExecArray | null;
-      let text = "";
-      while ((tMatch = tRegex.exec(p)) !== null) {
-        text += tMatch[0].replace(/^<a:t[^>]*>/, "").replace(/<\/a:t>$/, "");
-      }
-      if (text.trim()) pList.push(decodeXmlEntities(text.trim()));
-    }
+
+    const ok = walkXml(
+      xml,
+      tagBudget,
+      (tagName, isClose, selfClosing) => {
+        if (tagName === "a:p") {
+          if (!isClose) {
+            inP = true;
+            pText = "";
+          } else {
+            inP = false;
+            const trimmed = pText.trim();
+            if (trimmed) pList.push(decodeXmlEntities(trimmed));
+            pText = "";
+          }
+        } else if (tagName === "a:t") {
+          if (!isClose && !selfClosing) inT = true;
+          else inT = false;
+        } else if (tagName === "a:br") {
+          if (inP) pText += "\n";
+        }
+      },
+      (text) => {
+        if (inP && inT) {
+          pText += text;
+        }
+      },
+    );
+    if (!ok) return null;
+
     if (item.isNote) {
       slidesMap.get(item.num)!.notes.push(...pList);
     } else {
@@ -1160,71 +1525,111 @@ async function extractOdf(entries: Map<string, () => Promise<Uint8Array>>): Prom
   const buf = await contentFn();
   const xml = new TextDecoder("utf-8").decode(buf);
 
+  const tagBudget: XmlTagBudget = { tags: 0, maxTags: MAX_XML_TAGS };
   const encoder = new TextEncoder();
   let outputBytes = 0;
   const parts: string[] = [];
-  const blockRegex = /<table:table[\s\S]*?<\/table:table>|<text:h\b[\s\S]*?<\/text:h>|<text:p\b[\s\S]*?<\/text:p>/g;
-  let m: RegExpExecArray | null;
-  while ((m = blockRegex.exec(xml)) !== null) {
-    const block = m[0];
-    if (block.startsWith("<table:table")) {
-      const rows: string[][] = [];
-      const trRegex = /<table:table-row[\s\S]*?<\/table:table-row>/g;
-      let trMatch: RegExpExecArray | null;
-      while ((trMatch = trRegex.exec(block)) !== null) {
-        const tr = trMatch[0];
-        const cells: string[] = [];
-        const tcRegex = /<table:(?:covered-)?table-cell\b([^>]*?)\/>|<table:(?:covered-)?table-cell\b([^>]*)>([\s\S]*?)<\/table:(?:covered-)?table-cell>/g;
-        let tcMatch: RegExpExecArray | null;
-        while ((tcMatch = tcRegex.exec(tr)) !== null) {
-          const attrs = tcMatch[1] ?? tcMatch[2] ?? "";
-          const body = tcMatch[3] ?? "";
-          const text = decodeXmlEntities(body.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
-          const repeat = Math.min(Math.max(Number(/table:number-columns-repeated="(\d+)"/.exec(attrs)?.[1] ?? 1), 1), 64);
-          const escaped = text.replace(/\|/g, "\\|").replace(/\n/g, " ");
-          if (escaped.length > 0) {
-            const cellBytes = encoder.encode(escaped).byteLength + 3;
-            outputBytes += repeat * cellBytes;
-            if (outputBytes > MAX_ATTACHED_TEXT_BYTES) return null;
+
+  let inTable = false;
+  let tableRows: string[][] = [];
+  let currentRow: string[] = [];
+  let inCell = false;
+  let cellText = "";
+  let cellRepeat = 1;
+  let totalCellsInTable = 0;
+
+  let inPara = false;
+  let paraText = "";
+
+  const ok = walkXml(
+    xml,
+    tagBudget,
+    (tagName, isClose, selfClosing, attrs) => {
+      if (tagName === "table:table") {
+        if (!isClose) {
+          inTable = true;
+          tableRows = [];
+          totalCellsInTable = 0;
+        } else {
+          inTable = false;
+          if (tableRows.length > 0) {
+            const tableMd = formatMarkdownTable(tableRows);
+            if (tableMd === null) return false;
+            outputBytes += encoder.encode(tableMd).byteLength + 2;
+            if (outputBytes > MAX_ATTACHED_TEXT_BYTES) return false;
+            parts.push(tableMd);
           }
-          for (let i = 0; i < repeat; i++) cells.push(text);
+          tableRows = [];
         }
-        while (cells.length > 0 && cells[cells.length - 1] === "") cells.pop();
-        if (cells.length > 0) {
-          for (const c of cells) {
-            if (c === "") outputBytes += 3;
+      } else if (tagName === "table:table-row") {
+        if (!isClose) {
+          if (tableRows.length + 1 > MAX_TABLE_ROWS) return false;
+          currentRow = [];
+        } else {
+          while (currentRow.length > 0 && currentRow[currentRow.length - 1] === "") {
+            currentRow.pop();
           }
-          outputBytes += 2;
-          if (outputBytes > MAX_ATTACHED_TEXT_BYTES) return null;
-          rows.push(cells);
+          if (currentRow.length > 0) {
+            tableRows.push(currentRow);
+          }
+        }
+      } else if (tagName === "table:table-cell" || tagName === "table:covered-table-cell") {
+        if (!isClose) {
+          const repMatch = attrs.match(/\btable:number-columns-repeated="(\d+)"/);
+          const repeat = repMatch ? Number(repMatch[1]) : 1;
+          if (repeat > MAX_TABLE_COLS || currentRow.length + repeat > MAX_TABLE_COLS) {
+            return false;
+          }
+          if (totalCellsInTable + repeat > MAX_TABLE_CELLS) {
+            return false;
+          }
+          totalCellsInTable += repeat;
+          cellRepeat = repeat;
+          inCell = true;
+          cellText = "";
+          if (selfClosing) {
+            for (let i = 0; i < cellRepeat; i++) currentRow.push("");
+            inCell = false;
+          }
+        } else {
+          inCell = false;
+          const trimmed = decodeXmlEntities(cellText.trim());
+          const escaped = trimmed.replace(/\|/g, "\\|").replace(/\n/g, " ");
+          for (let i = 0; i < cellRepeat; i++) {
+            currentRow.push(escaped);
+          }
+          cellText = "";
+        }
+      } else if (tagName.startsWith("text:h") || tagName.startsWith("text:p")) {
+        if (!isClose) {
+          if (!inTable) {
+            inPara = true;
+            paraText = "";
+          }
+        } else {
+          if (!inTable && inPara) {
+            inPara = false;
+            const trimmed = decodeXmlEntities(paraText.trim());
+            if (trimmed) {
+              outputBytes += encoder.encode(trimmed).byteLength + 2;
+              if (outputBytes > MAX_ATTACHED_TEXT_BYTES) return false;
+              parts.push(trimmed);
+            }
+            paraText = "";
+          }
         }
       }
-      if (rows.length > 0) {
-        const maxCols = Math.max(...rows.map((r) => r.length));
-        outputBytes += 2 + maxCols * 6;
-        for (const r of rows) {
-          outputBytes += (maxCols - r.length) * 3;
-        }
-        if (outputBytes > MAX_ATTACHED_TEXT_BYTES) return null;
-        const formattedRows = rows.map((r) => {
-          const padded = [...r];
-          while (padded.length < maxCols) padded.push("");
-          return "| " + padded.map((c) => c.replace(/\|/g, "\\|").replace(/\n/g, " ")).join(" | ") + " |";
-        });
-        const header = formattedRows[0];
-        const separator = "| " + Array(maxCols).fill("---").join(" | ") + " |";
-        parts.push([header, separator, ...formattedRows.slice(1)].join("\n"));
+    },
+    (text) => {
+      if (inCell) {
+        cellText += (cellText ? " " : "") + text;
+      } else if (inPara) {
+        paraText += (paraText ? " " : "") + text;
       }
-    } else {
-      const text = block.replace(/<[^>]+>/g, "").trim();
-      if (text) {
-        const decoded = decodeXmlEntities(text);
-        outputBytes += encoder.encode(decoded).byteLength + 2;
-        if (outputBytes > MAX_ATTACHED_TEXT_BYTES) return null;
-        parts.push(decoded);
-      }
-    }
-  }
+    },
+  );
+
+  if (!ok) return null;
   const res = parts.join("\n\n").trim();
   return res || null;
 }
@@ -1267,8 +1672,10 @@ async function extractEpub(entries: Map<string, () => Promise<Uint8Array>>): Pro
     }
   }
 
+  const tagBudget: XmlTagBudget = { tags: 0, maxTags: MAX_XML_TAGS };
   const chapters: string[] = [];
   const visitedChapters = new Set<string>();
+
   for (const href of spine) {
     const fullPath = (basePath + href).replace(/^\//, "");
     if (visitedChapters.has(fullPath)) continue;
@@ -1277,15 +1684,31 @@ async function extractEpub(entries: Map<string, () => Promise<Uint8Array>>): Pro
     if (!fn) continue;
     const buf = await fn();
     const html = new TextDecoder("utf-8").decode(buf);
-    const stripped = html
-      .replace(/<style[\s\S]*?<\/style>/gi, "")
-      .replace(/<script[\s\S]*?<\/script>/gi, "")
-      .replace(/<br\s*\/?>/gi, "\n")
-      .replace(/<\/p>/gi, "\n\n")
-      .replace(/<\/h[1-6]>/gi, "\n\n")
-      .replace(/<\/div>/gi, "\n")
-      .replace(/<[^>]+>/g, "");
-    const text = decodeXmlEntities(stripped)
+    const strippedHtml = stripStyleAndScriptTags(html);
+
+    let chapterText = "";
+    const ok = walkXml(
+      strippedHtml,
+      tagBudget,
+      (tagName, isClose, selfClosing) => {
+        const lowerName = tagName.toLowerCase();
+        if (lowerName === "br") {
+          chapterText += "\n";
+        } else if (isClose && lowerName === "p") {
+          chapterText += "\n\n";
+        } else if (isClose && /^h[1-6]$/.test(lowerName)) {
+          chapterText += "\n\n";
+        } else if (isClose && lowerName === "div") {
+          chapterText += "\n";
+        }
+      },
+      (text) => {
+        chapterText += text;
+      },
+    );
+    if (!ok) return null;
+
+    const text = decodeXmlEntities(chapterText)
       .replace(/\r\n/g, "\n")
       .replace(/\n{3,}/g, "\n\n")
       .trim();
@@ -1504,33 +1927,86 @@ const DOCUMENT_ATTACHMENT_MIMES: Record<string, true> = {
   "application/epub+zip": true,
 };
 
+export function isKnownBinaryDocumentMeta(file: { name: string; type?: string }): boolean {
+  const ext = getFileExtension(file.name);
+  if (DOCUMENT_ATTACHMENT_EXTENSIONS[ext] === true) return true;
+  if (file.type && DOCUMENT_ATTACHMENT_MIMES[file.type] === true) return true;
+  return false;
+}
+
+export async function isBinaryDocumentAttachment(file: {
+  name: string;
+  type?: string;
+  slice?: (start?: number, end?: number) => Blob;
+  arrayBuffer?: () => Promise<ArrayBuffer>;
+  text?: () => Promise<string>;
+}): Promise<boolean> {
+  if (isKnownBinaryDocumentMeta(file)) return true;
+  try {
+    let headerBytes: Uint8Array | null = null;
+    if (typeof file.slice === "function") {
+      const slice = file.slice(0, 8);
+      if (slice && typeof slice.arrayBuffer === "function") {
+        const sliceBuf = await slice.arrayBuffer();
+        headerBytes = new Uint8Array(sliceBuf);
+      }
+    }
+    if (!headerBytes && typeof file.arrayBuffer === "function") {
+      const buf = await file.arrayBuffer();
+      headerBytes = new Uint8Array(buf, 0, Math.min(8, buf.byteLength));
+    } else if (!headerBytes && typeof file.text === "function") {
+      const head = await file.text();
+      if (head.startsWith("%PDF-") || head.startsWith("PK\u0003\u0004") || head.startsWith("\u00d0\u00cf\u0011\u00e0")) {
+        return true;
+      }
+    }
+    if (headerBytes && headerBytes.length >= 4) {
+      if (headerBytes.length >= 5 && headerBytes[0] === 0x25 && headerBytes[1] === 0x50 && headerBytes[2] === 0x44 && headerBytes[3] === 0x46 && headerBytes[4] === 0x2d) {
+        return true;
+      }
+      if (headerBytes[0] === 0x50 && headerBytes[1] === 0x4b && headerBytes[2] === 0x03 && headerBytes[3] === 0x04) {
+        return true;
+      }
+      if (headerBytes[0] === 0xd0 && headerBytes[1] === 0xcf && headerBytes[2] === 0x11 && headerBytes[3] === 0xe0) {
+        return true;
+      }
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
 /** Reads and decodes text content from text files or supported document formats. */
 export async function readAttachmentText(file: {
   name: string;
   type?: string;
-  text: () => Promise<string>;
+  text?: () => Promise<string>;
   arrayBuffer?: () => Promise<ArrayBuffer>;
+  slice?: (start?: number, end?: number) => Blob;
 }): Promise<string | null> {
   const ext = getFileExtension(file.name);
-  const isKnownDocument = DOCUMENT_ATTACHMENT_EXTENSIONS[ext] === true
-    || Boolean(file.type && DOCUMENT_ATTACHMENT_MIMES[file.type] === true);
+  const isKnownDocument = isKnownBinaryDocumentMeta(file);
 
-  // Start non-document reads with file.text() synchronously so callers and
-  // tests that hold/intercept File.prototype.text observe the read immediately,
-  // and ordinary UTF-8 files avoid a second buffer allocation.
   let fallbackText: string | null = null;
   if (!isKnownDocument && typeof file.text === "function") {
     const text = await file.text();
-    if (!text.includes("\u0000") && !text.includes("\uFFFD")) {
+    if (text.startsWith("%PDF-") || text.startsWith("PK\u0003\u0004") || text.startsWith("\u00d0\u00cf\u0011\u00e0")) {
+      fallbackText = text;
+    } else if (!text.includes("\u0000") && !text.includes("\uFFFD")) {
       return text;
+    } else {
+      fallbackText = text;
     }
-    fallbackText = text;
   }
 
   let buffer: ArrayBuffer | null = null;
   if (typeof file.arrayBuffer === "function") {
     buffer = await file.arrayBuffer();
+  } else if (fallbackText !== null && (fallbackText.startsWith("%PDF-") || fallbackText.startsWith("PK\u0003\u0004") || fallbackText.startsWith("\u00d0\u00cf\u0011\u00e0"))) {
+    buffer = Uint8Array.from(fallbackText, (c) => c.charCodeAt(0) & 0xff).buffer;
   }
+
   if (buffer) {
     const bytes = new Uint8Array(buffer);
 
@@ -1615,7 +2091,10 @@ export async function readAttachmentText(file: {
   if (fallbackText !== null) {
     return null;
   }
-  const text = await file.text();
-  if (text.includes("\u0000") || text.includes("\uFFFD")) return null;
-  return text;
+  if (typeof file.text === "function") {
+    const text = await file.text();
+    if (text.includes("\u0000") || text.includes("\uFFFD")) return null;
+    return text;
+  }
+  return null;
 }

@@ -32,19 +32,33 @@ export function draftImagesToAttachedImages(images: ChatDraftImage[] | undefined
 }
 
 export function textFileToDraftFile(file: AttachedTextFile): ChatDraftFile {
-  return { name: file.name, mimeType: file.mimeType, content: file.content, size: file.size };
+  return {
+    name: file.name,
+    mimeType: file.mimeType,
+    content: file.content,
+    size: file.size,
+    ...(file.uploadId ? { uploadId: file.uploadId } : {}),
+  };
 }
 
 /** Recovery and Edit relocation can merge individually valid drafts past picker
  *  budgets. Keep every well-formed file; sending validates the composed request,
  *  not the picker file-count or text-byte limits. */
 export function draftFilesToAttachedFiles(files: ChatDraftFile[] | undefined): AttachedTextFile[] {
-  return (files ?? []).filter((file) => file !== null && typeof file === "object"
-    && typeof file.name === "string"
-    && typeof file.mimeType === "string"
-    && typeof file.content === "string"
-    && Number.isFinite(file.size)
-    && file.size >= 0);
+  return (files ?? [])
+    .filter((file) => file !== null && typeof file === "object"
+      && typeof file.name === "string"
+      && typeof file.mimeType === "string"
+      && typeof file.content === "string"
+      && Number.isFinite(file.size)
+      && file.size >= 0)
+    .map((file) => ({
+      name: file.name,
+      mimeType: file.mimeType,
+      content: file.content,
+      size: file.size,
+      ...(file.uploadId ? { uploadId: file.uploadId } : {}),
+    }));
 }
 
 export function revokeImagePreview(image: AttachedImage): void {

@@ -1499,3 +1499,281 @@ test("a completed slash builtin must not erase an attachment added while its cal
   assert.equal(textbox.value, "/goal keep this draft", "an attachment change preserves the composer text too");
   assert.deepEqual(getDraft(KEY), changedDraft, "builtin completion must not erase the newly attached file");
 });
+
+function createStoredZip(entries) {
+  function crc32(buf) {
+    let crc = ~0;
+    for (let i = 0; i < buf.length; i++) {
+      crc ^= buf[i];
+      for (let j = 0; j < 8; j++) {
+        crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+      }
+    }
+    return ~crc >>> 0;
+  }
+
+  const localHeaders = [];
+  const cdHeaders = [];
+  let offset = 0;
+
+  for (const entry of entries) {
+    const nameBuf = Buffer.from(entry.name, "utf-8");
+    const dataBuf = Buffer.isBuffer(entry.data) ? entry.data : Buffer.from(entry.data, "utf-8");
+    const crc = crc32(dataBuf);
+    const uncompressedSize = dataBuf.length;
+    const method = 0;
+    const compressedBuf = dataBuf;
+    const compressedSize = compressedBuf.length;
+
+    const localHeader = Buffer.alloc(30 + nameBuf.length + compressedBuf.length);
+    localHeader.writeUInt32LE(0x04034b50, 0);
+    localHeader.writeUInt16LE(20, 4);
+    localHeader.writeUInt16LE(0, 6);
+    localHeader.writeUInt16LE(method, 8);
+    localHeader.writeUInt16LE(0, 10);
+    localHeader.writeUInt16LE(0, 12);
+    localHeader.writeUInt32LE(crc, 14);
+    localHeader.writeUInt32LE(compressedSize, 18);
+    localHeader.writeUInt32LE(uncompressedSize, 22);
+    localHeader.writeUInt16LE(nameBuf.length, 26);
+    localHeader.writeUInt16LE(0, 28);
+    nameBuf.copy(localHeader, 30);
+    compressedBuf.copy(localHeader, 30 + nameBuf.length);
+    localHeaders.push(localHeader);
+
+    const cdHeader = Buffer.alloc(46 + nameBuf.length);
+    cdHeader.writeUInt32LE(0x02014b50, 0);
+    cdHeader.writeUInt16LE(20, 4);
+    cdHeader.writeUInt16LE(20, 6);
+    cdHeader.writeUInt16LE(0, 8);
+    cdHeader.writeUInt16LE(method, 10);
+    cdHeader.writeUInt16LE(0, 12);
+    cdHeader.writeUInt16LE(0, 14);
+    cdHeader.writeUInt32LE(crc, 16);
+    cdHeader.writeUInt32LE(compressedSize, 20);
+    cdHeader.writeUInt32LE(uncompressedSize, 24);
+    cdHeader.writeUInt16LE(nameBuf.length, 28);
+    cdHeader.writeUInt16LE(0, 30);
+    cdHeader.writeUInt16LE(0, 32);
+    cdHeader.writeUInt16LE(0, 34);
+    cdHeader.writeUInt16LE(0, 36);
+    cdHeader.writeUInt32LE(0, 38);
+    cdHeader.writeUInt32LE(offset, 42);
+    nameBuf.copy(cdHeader, 46);
+    cdHeaders.push(cdHeader);
+
+    offset += localHeader.length;
+  }
+
+  const cdTotalSize = cdHeaders.reduce((acc, h) => acc + h.length, 0);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(0, 4);
+  eocd.writeUInt16LE(0, 6);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(cdTotalSize, 12);
+  eocd.writeUInt32LE(offset, 16);
+  eocd.writeUInt16LE(0, 20);
+
+  return Buffer.concat([...localHeaders, ...cdHeaders, eocd]);
+}
+
+function createDocxBuffer(text = "Hello DOCX") {
+  const xml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
+    `<w:body><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:body></w:document>`;
+  return createStoredZip([
+    { name: "word/document.xml", data: Buffer.from(xml, "utf-8") },
+  ]);
+}
+
+function createPdfBuffer(text = "Hello PDF") {
+  const stream = `BT\n/F1 12 Tf\n(${text}) Tj\nET\n`;
+  return Buffer.from(
+    `%PDF-1.4\n` +
+    `1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n` +
+    `2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n` +
+    `3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n` +
+    `4 0 obj\n<< /Length ${Buffer.byteLength(stream)} >>\nstream\n` +
+    stream +
+    `endstream\nendobj\n` +
+    `trailer\n<< /Root 1 0 R >>\n%%EOF`
+  );
+}
+
+function setupUploadFetchMock() {
+  const previousFetch = globalThis.fetch;
+  override(globalThis, "fetch", async (url, init = {}) => {
+    const method = init.method ?? "GET";
+    const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    if (url === "/api/uploads" && method === "POST") return json({ received: 0 });
+    if (String(url).startsWith("/api/uploads/") && method === "PUT") {
+      const offset = Number(new URL(String(url), "https://omp.test/").searchParams.get("offset") ?? 0);
+      return json({ received: offset + (init.body?.size ?? 0), done: true });
+    }
+    if (previousFetch) return previousFetch(url, init);
+    return json({});
+  });
+}
+
+test("binary documents (report.docx) preserve upload As file while extracting inline text", async () => {
+  setupUploadFetchMock();
+  const user = userEvent.setup();
+  const calls = [];
+  const ref = React.createRef();
+  render(React.createElement(ChatInput, {
+    ref,
+    draftKey: KEY,
+    isStreaming: false,
+    onAbort() {},
+    onSend: async (message, images, ...uploads) => {
+      calls.push({ message, images, uploads });
+      return { status: "accepted" };
+    },
+  }));
+
+  const docxBuf = createDocxBuffer("Extracted docx text");
+  await act(async () => {
+    ref.current.addFiles([
+      new File([docxBuf], "report.docx", { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }),
+    ]);
+  });
+
+  // Verify only 1 chip renders (UploadChip, not a duplicate text chip)
+  await waitFor(() => {
+    const draft = getDraft(KEY);
+    assert.equal(draft?.files?.length, 1);
+    assert.equal(draft?.uploads?.length, 1);
+    assert.equal(draft?.files[0]?.uploadId, draft?.uploads[0]?.id);
+  });
+  const chips = screen.getAllByText("report.docx");
+  assert.equal(chips.length, 1, "only a single UploadChip renders for report.docx");
+
+  const textbox = screen.getByRole("textbox");
+  await user.type(textbox, "check this docx");
+  await user.keyboard("{Enter}");
+
+  await waitFor(() => assert.equal(calls.length, 1));
+  assert.match(calls[0].message, /check this docx/);
+  assert.match(calls[0].message, /Extracted docx text/);
+  assert.equal(calls[0].uploads?.[0]?.length, 1, "upload argument is present");
+});
+
+test("extensionless binary documents preserve upload As file while extracting inline text", async () => {
+  setupUploadFetchMock();
+  const user = userEvent.setup();
+  const calls = [];
+  const ref = React.createRef();
+  render(React.createElement(ChatInput, {
+    ref,
+    draftKey: KEY,
+    isStreaming: false,
+    onAbort() {},
+    onSend: async (message, images, ...uploads) => {
+      calls.push({ message, images, uploads });
+      return { status: "accepted" };
+    },
+  }));
+
+  const docxBuf = createDocxBuffer("Extensionless docx text");
+  await act(async () => {
+    ref.current.addFiles([
+      new File([docxBuf], "report", { type: "" }),
+    ]);
+  });
+
+  await waitFor(() => {
+    const draft = getDraft(KEY);
+    assert.equal(draft?.files?.length, 1);
+    assert.equal(draft?.uploads?.length, 1);
+    assert.equal(draft?.files[0]?.uploadId, draft?.uploads[0]?.id);
+  });
+  const chips = screen.getAllByText("report");
+  assert.equal(chips.length, 1, "only a single chip renders for extensionless report");
+
+  const textbox = screen.getByRole("textbox");
+  await user.type(textbox, "check extensionless");
+  await user.keyboard("{Enter}");
+
+  await waitFor(() => assert.equal(calls.length, 1));
+  assert.match(calls[0].message, /check extensionless/);
+  assert.match(calls[0].message, /Extensionless docx text/);
+  assert.equal(calls[0].uploads?.[0]?.length, 1, "upload argument is present");
+});
+
+test("PDF documents (report.pdf and extensionless report) preserve upload As file while extracting inline text", async () => {
+  setupUploadFetchMock();
+  const user = userEvent.setup();
+  const calls = [];
+  const ref = React.createRef();
+  render(React.createElement(ChatInput, {
+    ref,
+    draftKey: KEY,
+    isStreaming: false,
+    onAbort() {},
+    onSend: async (message, images, ...uploads) => {
+      calls.push({ message, images, uploads });
+      return { status: "accepted" };
+    },
+  }));
+
+  const pdfBuf = createPdfBuffer("Extracted PDF content");
+  await act(async () => {
+    ref.current.addFiles([
+      new File([pdfBuf], "report.pdf", { type: "application/pdf" }),
+    ]);
+  });
+
+  await waitFor(() => {
+    const draft = getDraft(KEY);
+    assert.equal(draft?.files?.length, 1);
+    assert.equal(draft?.uploads?.length, 1);
+    assert.equal(draft?.files[0]?.uploadId, draft?.uploads[0]?.id);
+  });
+  const chips = screen.getAllByText("report.pdf");
+  assert.equal(chips.length, 1, "only a single chip renders for report.pdf");
+
+  const textbox = screen.getByRole("textbox");
+  await user.type(textbox, "check this pdf");
+  await user.keyboard("{Enter}");
+
+  await waitFor(() => assert.equal(calls.length, 1));
+  assert.match(calls[0].message, /check this pdf/);
+  assert.match(calls[0].message, /Extracted PDF content/);
+  assert.equal(calls[0].uploads?.[0]?.length, 1, "upload argument is present");
+});
+
+test("removing an upload chip also removes paired extracted text file from draft", async () => {
+  setupUploadFetchMock();
+  const ref = React.createRef();
+  render(React.createElement(ChatInput, {
+    ref,
+    draftKey: KEY,
+    isStreaming: false,
+    onAbort() {},
+    onSend: async () => ({ status: "accepted" }),
+  }));
+
+  const docxBuf = createDocxBuffer("To be removed");
+  await act(async () => {
+    ref.current.addFiles([
+      new File([docxBuf], "remove-me.docx", { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }),
+    ]);
+  });
+
+  await waitFor(() => {
+    const draft = getDraft(KEY);
+    assert.equal(draft?.files?.length, 1);
+    assert.equal(draft?.uploads?.length, 1);
+  });
+
+  const removeBtn = screen.getByLabelText(/chatInput\.removeFile|Remove file/i);
+  fireEvent.click(removeBtn);
+
+  await waitFor(() => {
+    const draft = getDraft(KEY);
+    assert.equal(draft?.files?.length ?? 0, 0, "paired text file removed from draft");
+    assert.equal(draft?.uploads?.length ?? 0, 0, "upload removed from draft");
+  });
+});
