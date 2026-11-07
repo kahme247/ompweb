@@ -576,31 +576,47 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   30 s op deadline, a lost link or a web restart, and a sender suspended after its
   claim may send its restore long after another request took the ID over. No lease
   clock or "status false" may free the ID meanwhile, so the claim is fenced at the
-  daemon, which is the only authority on whether a restore can still start. The
-  daemon starts `restoreArchive` only under a claim token (the lock row's owner)
-  that main reserved with `restoreReserve` and nothing has since spent or revoked
-  (`session-ops.ts`, a set capped at 256: an evicted token's restore is refused,
-  never run). The route reserves (an op answer or error ends a restore that never
-  left: no claim kept), then `hold`s the claim (the row gains the host; a held row
-  never lapses by time), then sends `restoreArchive`, and `release`s only on the
-  host's answer, a refusal included. `host_timeout` or `host_offline` leaves it
-  held and answers `archive_restore_unconfirmed` (504/503). A held claim whose
-  request still renews it is `archive_restore_busy`; one that stopped renewing is
-  resolved by the next restore of that ID, on any host: main sends the holding
-  host `restoreFence {claim}`, which revokes the token (a request still in a
-  suspended sender, or resent to a restarted daemon, is then refused) and reports
-  whether that restore is running; main takes the claim over only on `running:
-  false`. Still running, offline, a daemon that answers 501 (no restore is sent to a
-  daemon that cannot reserve either) or a host unregistered since all keep it
-  blocked (409 `archive_restore_unconfirmed`, naming the session, the host and when
-  the claim was last seen alive). **Recovery limitation:** unregistering a host
-  does not stop its daemon, so a claim held for an unregistered host stays blocked
-  for good: there is deliberately no timeout and no automatic or blind clearing,
-  and registering the machine again gives it a new id, which does not help. Only an
-  operator who has verified on that machine that no `ompweb host` daemon holding the
-  old registration is running may delete that session's row from `restore_claims`
+  daemon, which is the only authority on whether a restore can still start, and
+  **bound to the daemon process** that took it. The daemon starts `restoreArchive`
+  only under a claim token (the lock row's owner) that main reserved with
+  `restoreReserve` and nothing has since spent or revoked (`session-ops.ts`, an
+  in-memory set capped at 256: an evicted token's restore is refused, never run).
+  Every daemon process has a random `instance`, which `restoreReserve` and
+  `restoreFence` return and the claim row records (`instance` column). The route
+  reserves (an op answer or error ends a restore that never left: no claim kept),
+  then `hold`s the claim with that instance (the row gains host and instance; a held
+  row never lapses by time), then sends `restoreArchive`. It `release`s only on a
+  result that proves this claim's restore ended: `ok`, or `archive_restore_failed`,
+  which only the process that admitted the token produces. Everything else keeps the
+  claim held and answers `archive_restore_unconfirmed`: silence or a lost link
+  (504/503), any other error, and **a refusal to admit (`archive_restore_not_admitted`)**,
+  because a replacement daemon that never saw the token refuses a resent request
+  while the original may still be running it. A held claim whose request still
+  renews it is `archive_restore_busy`; one that stopped renewing is resolved by the
+  next restore of that ID, on any host: main sends the holding host `restoreFence
+  {claim}`, which revokes the token (a request still in a suspended sender is then
+  refused) and answers with its `instance` and whether that restore runs. Main
+  takes the claim over only when the answering `instance` is the one recorded **and**
+  `running` is false. A fence answered by another process proves nothing: link
+  replacement (the same host id and token dialed by another daemon) ends only that
+  link in the replaced daemon, which keeps running an admitted restore while it has
+  another link (another server), and the replacement knows no token. So a
+  replaced, restarted or shut-down daemon, a still-running restore, offline, a daemon
+  that answers 501 (no restore is sent to a daemon that cannot reserve either), a
+  host unregistered since, and a row an earlier build wrote with no instance all keep
+  it blocked (409 `archive_restore_unconfirmed`, naming the session, the host and
+  when the claim was last seen alive). **Recovery limitation:** unregistering a host
+  does not stop its daemon, and a daemon that was replaced or restarted (a reboot
+  after a lost link included) cannot be shown stopped from here, so such a claim
+  stays blocked for good: there is deliberately no timeout and no automatic or blind
+  clearing, and registering the machine again gives it a new id, which does not
+  help. Only an operator who has verified on that machine that no `ompweb host`
+  daemon process that could have taken the restore is running (the claim names the
+  host and its last-alive time) may delete that session's row from `restore_claims`
   in `<agent dir>/omp-web/archive-restore-locks.sqlite`; deleting it while that
-  daemon could still run lets a duplicate publish. A local restore (in this
+  daemon could still run lets a duplicate publish. A daemon-side proof of death (a
+  machine-wide token registry, a PID with its start identity) would remove this
+  limit for a restart; it is not built. A local restore (in this
   process) is fenced at its publish: the claim's `publish` runs the hard link
   (`linkSync`, never awaited) inside `BEGIN IMMEDIATE`, refusing unless the row is
   still this request's, so a web process suspended past its lease cannot publish
@@ -608,12 +624,14 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   published session. The step must stay synchronous: SQLite waits for a lock by
   blocking the whole process, so a lock held across an await would freeze the
   event loop for the 5 s busy timeout. The store is `restore_claims`, written with
-  `synchronous = FULL` so a power loss cannot forget a held claim; the first open
-  after an upgrade renames an earlier build's `restore_leases` table into it
-  (keeping its claims), adds `host_id`, and leaves `restore_leases` as a read-only
-  view, so a build that still uses the old name reads but fails every claim,
-  delete and update instead of lapsing a held row by its clock (later opens only
-  read to check). Async restore streams archives with fixed 256 MiB compressed and
+  `synchronous = FULL` so a power loss cannot forget a held claim. A migration gated
+  by `PRAGMA user_version` (2) runs once: it renames an earlier build's
+  `restore_leases` table into `restore_claims` (keeping its claims), adds `host_id`
+  and `instance` where missing (a held row from a build that lacked `instance` keeps
+  none and so stays blocked), and leaves `restore_leases` as a read-only view, so a
+  build that still uses the old name reads but fails every claim, delete and update
+  instead of lapsing a held row by its clock (later opens only read the version).
+  Async restore streams archives with fixed 256 MiB compressed and
   expanded limits, rejecting unsupported IDs before archive consumption.
 - **Not yet remote:** Skills/Plugins/Agents/MCP settings; transcript search reads
   this machine's files.

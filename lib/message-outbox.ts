@@ -720,7 +720,8 @@ async function refused(entry: Row, response: Response, sent: boolean): Promise<O
   if (body.hostOffline === true && (!sent || body.delivery === "refused")) return "offline";
   if (body.code === "session_busy" || body.code === "session_restarting"
     || (!sent && (body.code === "host_timeout" || body.code === "host_sessions_unavailable"))) return retry(entry);
-  if (!sent && response.status === 404) {
+  // Only a missing session can be an archived one; any other 404 (an upload that is gone, say) is that refusal.
+  if (!sent && response.status === 404 && body.code === "session_not_found") {
     const archive = await archiveState(entry.session_id);
     // An unreadable archive cannot prove the session is gone: never failed. A passing failure is tried again; one
     // only a host's next hello can change waits for it, as for an offline host, without a timer.
