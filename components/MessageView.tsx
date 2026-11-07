@@ -210,10 +210,8 @@ export function haveSameRelevantToolResults(
   if (!Array.isArray(content)) return true;
   for (const block of content) {
     if (!block || typeof block !== "object") continue;
-    const b = block as unknown as Record<string, unknown>;
-    if (b.type === "toolCall" || b.type === "tool_use" || b.type === "tool_call") {
-      const id = typeof b.toolCallId === "string" ? b.toolCallId : typeof b.id === "string" ? b.id : undefined;
-      if (id && previous?.get(id) !== next?.get(id)) {
+    if (block.type === "toolCall" && block.toolCallId) {
+      if (previous?.get(block.toolCallId) !== next?.get(block.toolCallId)) {
         return false;
       }
     }

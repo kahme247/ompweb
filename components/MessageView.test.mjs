@@ -1031,8 +1031,7 @@ test("user messages fork at their own entry and edit the prompt", async (t) => {
 });
 
 test("SafeMarkdownBody is wrapped in React.memo", () => {
-  assert.equal(typeof SafeMarkdownBody, "object");
-  assert.ok(SafeMarkdownBody.$$typeof, "SafeMarkdownBody should have a React component symbol");
+  assert.equal(SafeMarkdownBody.$$typeof, React.memo(() => null).$$typeof);
 });
 
 test("areMessageViewPropsEqual skips re-render when unrelated toolResults change", () => {
@@ -1057,24 +1056,6 @@ test("areMessageViewPropsEqual skips re-render when unrelated toolResults change
   assert.equal(areMessageViewPropsEqual(baseProps, { ...baseProps, toolResults: mapC }), false);
 });
 
-test("haveSameRelevantToolResults supports tool_use and tool_call block formats", () => {
-  const msg = {
-    role: "assistant",
-    content: [
-      { type: "tool_use", id: "tool-u1", name: "bash", input: {} },
-      { type: "tool_call", id: "tool-c1", name: "glob", input: {} },
-    ],
-  };
-  const resU1 = { role: "toolResult", toolCallId: "tool-u1", content: "done" };
-  const resC1 = { role: "toolResult", toolCallId: "tool-c1", content: "done" };
-
-  const map1 = new Map([["tool-u1", resU1], ["tool-c1", resC1]]);
-  const map2 = new Map([["tool-u1", resU1], ["tool-c1", resC1], ["tool-other", { role: "toolResult", toolCallId: "tool-other", content: "x" }]]);
-  const map3 = new Map([["tool-u1", { ...resU1, content: "changed" }], ["tool-c1", resC1]]);
-
-  assert.equal(haveSameRelevantToolResults(msg, map1, map2), true);
-  assert.equal(haveSameRelevantToolResults(msg, map1, map3), false);
-});
 test("haveSameRelevantToolResults and MessageView re-render look up hybrid toolCall blocks by toolCallId over id", () => {
   const hybridMsg = {
     role: "assistant",
