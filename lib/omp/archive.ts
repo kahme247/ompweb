@@ -376,10 +376,11 @@ function takeBackTranscript(destination: string, tempFile: string): string | nul
  * an exclusive hard link, and the undo by `takeBackTranscript`. A transcript or artifacts directory that appears at the
  * destination is never merged into, replaced or removed, and a step that fails undoes the earlier ones, newest first.
  *
- * A process killed inside this step (a crash, a power loss) can leave the artifacts at the destination with no transcript, or
- * an empty destination directory: the archive entry is still listed, and restoring it is refused as "already exists" until
- * the leftover is moved back to `<name>.jsonl` beside the archive (or removed, if empty). Nothing is lost; there is no fsync
- * or journal, deliberately.
+ * A process killed inside this step (SIGKILL, an OOM kill) can leave the artifacts at the destination with no transcript, or
+ * an empty destination directory: the kernel keeps every rename and link that had completed, so the archive entry is still
+ * listed, and restoring it is refused as "already exists" until the leftover is moved back to `<name>.jsonl` beside the
+ * archive (or removed, if empty). A power loss or kernel crash is not covered: nothing here calls fsync or keeps a journal,
+ * so which of these directory operations reached the disk is not guaranteed, and no recovery is promised for it.
  */
 function commitRestore({ archiveBase, activeRoot, source, sourceArtifacts, destination, destinationArtifacts, tempFile }: { archiveBase: string; activeRoot: string; source: string; sourceArtifacts: string; destination: string; destinationArtifacts: string; tempFile: string }): void {
   validateRestorePathSync(archiveBase, source);

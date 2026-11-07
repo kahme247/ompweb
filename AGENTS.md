@@ -641,12 +641,15 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   checks it (a concurrent restore moved it) counts as absent, and a source consumed
   between the existence check and the read is "not found". A transcript or artifacts
   directory found at the destination fails the restore with 409 and is never merged
-  into or removed. **Crash limitation:** a process killed inside the commit (a crash
-  or power loss; no fsync or journal is added on purpose) can leave the artifacts at
-  the destination with no transcript, or an empty destination directory. The archive
-  entry stays listed and restoring it is refused as "already exists" until the
-  leftover is moved back to `<name>.jsonl` beside the archive, or removed if empty.
-  Nothing is lost.
+  into or removed. **Crash limitation:** a process killed inside the commit (SIGKILL,
+  an OOM kill) can leave the artifacts at the destination with no transcript, or an
+  empty destination directory; the kernel keeps every rename and link that had
+  completed, so nothing already moved is lost. The archive entry stays listed and
+  restoring it is refused as "already exists" until the leftover is moved back to
+  `<name>.jsonl` beside the archive, or removed if empty. A power loss or kernel
+  crash is not covered: the commit calls no fsync and keeps no journal (none is added
+  on purpose), so which of its directory operations reached the disk is not
+  guaranteed, and no recovery is promised for that.
   A local restore (in this process) is fenced at the same step: the claim's `publish`
   runs the whole commit inside `BEGIN IMMEDIATE`, refusing unless the row is still
   this request's, so a web process suspended past its lease cannot move artifacts or
