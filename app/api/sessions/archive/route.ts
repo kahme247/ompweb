@@ -21,8 +21,11 @@ class RestoreHostOfflineError extends HostOpError {
 async function activeSessionHosts(sessionId: string): Promise<string[]> {
   const hosts = [getHost(LOCAL_HOST_ID), ...listHosts().map((row) => getHost(row.id))];
   const ensureLinked = () => {
-    const offline = hosts.find((host) => !host || !isLinkUp(host.status()));
-    if (offline !== undefined) throw new RestoreHostOfflineError(offline?.label ?? "A removed host");
+    for (const host of hosts) {
+      // Removed mid-check: not offline, but its sessions were not read either.
+      if (!host) throw new HostOpError(503, "host_sessions_unavailable", "A host was removed while checking active sessions; the archive was not restored");
+      if (!isLinkUp(host.status())) throw new RestoreHostOfflineError(host.label);
+    }
   };
   ensureLinked();
   const lists = await Promise.all(hosts.map(async (host) => {
