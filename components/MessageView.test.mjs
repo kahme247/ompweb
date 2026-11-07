@@ -1030,6 +1030,27 @@ test("user messages fork at their own entry and edit the prompt", async (t) => {
   view.unmount();
 });
 
+test("assistant messages at active leaf fork in place with undefined entryId after confirmation", async (t) => {
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+  t.after(() => {
+    if (originalMatchMedia) window.matchMedia = originalMatchMedia;
+    else delete window.matchMedia;
+  });
+  const forked = [];
+  const view = render(React.createElement(MessageView, {
+    message: { role: "assistant", model: "test", provider: "test", content: [{ type: "text", text: "Leaf response." }] },
+    entryId: "assistant-leaf",
+    forkIsLeaf: true,
+    onFork: (entryId, editPrompt) => forked.push([entryId, editPrompt]),
+  }));
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: FORK_LABEL })); });
+  assert.deepEqual(forked, []);
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "Fork" })); });
+  assert.deepEqual(forked, [[undefined, false]]);
+  view.unmount();
+});
+
 test("user-message Edit only runs after confirmation, and not once blocked", async (t) => {
   const originalMatchMedia = window.matchMedia;
   window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
