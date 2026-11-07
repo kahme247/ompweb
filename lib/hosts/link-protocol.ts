@@ -83,6 +83,8 @@ export const SESSION_OP_PARAMS: { readonly [K in keyof SessionOps]: readonly str
   renameSessionFile: ["id", "title", "source"],
   deleteSession: ["id", "liveSessionIds"],
   archiveSession: ["id"],
+  listArchives: [],
+  restoreArchive: ["key"],
   exportSession: ["id"],
   readMedia: ["hash"],
   listProjects: [],

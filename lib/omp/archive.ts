@@ -1,9 +1,9 @@
 import { createReadStream } from "fs";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { createGunzip, gunzipSync } from "zlib";
 import path from "path";
 import type { Dirent } from "fs";
-import type { SessionHeader } from "../types";
+import type { ArchivedSessionInfo, SessionHeader } from "../types";
 import { getArchivedSessionsDir, getSessionsDir } from "./paths";
 import { invalidateSessionFileListCache, loadSessionFile, type SessionStatus } from "./session-files";
 
@@ -157,6 +157,60 @@ export async function listArchivedSessions(archiveRoot = getArchivedSessionsDir(
   return records.filter((record): record is ArchivedSessionRecord => Boolean(record)).sort((a, b) => b.archivedAt.getTime() - a.archivedAt.getTime());
 }
 
+/** The Archived Sessions browser's entries (dates as ISO strings): also what a host sends over its link. */
+export async function listArchivedSessionInfos(archiveRoot = getArchivedSessionsDir()): Promise<ArchivedSessionInfo[]> {
+  return (await listArchivedSessions(archiveRoot)).map((archive) => ({
+    key: archive.key,
+    id: archive.id,
+    cwd: archive.cwd,
+    ...(archive.title ? { name: archive.title } : {}),
+    created: archive.created.toISOString(),
+    archivedAt: archive.archivedAt.toISOString(),
+    messageCount: archive.messageCount,
+    firstMessage: archive.firstMessage,
+    size: archive.size,
+    status: archive.status,
+  }));
+}
+
+/** HTTP status for a `restoreArchivedSession` failure message. */
+export function restoreFailureStatus(message: string): number {
+  return message.includes("Invalid archive key") || message.includes("required") ? 400 : message.includes("not found") ? 404 : message.includes("already exists") ? 409 : 500;
+}
+
+function validateRestorePath(root: string, target: string): void {
+  const relative = path.relative(root, target);
+  if (!relative || relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) throw new Error("Invalid archive key");
+  let ancestor = root;
+  const missing: string[] = [];
+  while (true) {
+    try {
+      lstatSync(ancestor);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      missing.unshift(path.basename(ancestor));
+      ancestor = path.dirname(ancestor);
+    }
+  }
+  const canonicalRoot = path.join(realpathSync(ancestor), ...missing);
+  let current = root;
+  for (const component of relative.split(path.sep)) {
+    current = path.join(current, component);
+    try {
+      lstatSync(current);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") break;
+      throw error;
+    }
+    // Check every ancestor, not only the final path: a symlink may escape and re-enter.
+    let canonical: string;
+    try { canonical = realpathSync(current); } catch { throw new Error("Invalid archive key"); }
+    const canonicalRelative = path.relative(canonicalRoot, canonical);
+    if (!canonicalRelative || canonicalRelative === ".." || canonicalRelative.startsWith(`..${path.sep}`) || path.isAbsolute(canonicalRelative)) throw new Error("Invalid archive key");
+  }
+}
+
 export function restoreArchivedSession(key: string, sessionsRoot = getSessionsDir(), archiveRoot = getArchivedSessionsDir()): string {
   const activeRoot = archiveRootPath(sessionsRoot);
   const archiveBase = archiveRootPath(archiveRoot);
@@ -165,17 +219,23 @@ export function restoreArchivedSession(key: string, sessionsRoot = getSessionsDi
   const destination = path.resolve(activeRoot, relative.slice(0, -3));
   const sourceArtifacts = source.slice(0, -3);
   const destinationArtifacts = destination.slice(0, -6);
-  if (!source.startsWith(`${archiveBase}${path.sep}`) || !destination.startsWith(`${activeRoot}${path.sep}`)) throw new Error("Invalid archive key");
+  validateRestorePath(archiveBase, source);
+  validateRestorePath(archiveBase, sourceArtifacts);
+  validateRestorePath(activeRoot, destination);
+  validateRestorePath(activeRoot, destinationArtifacts);
   if (!existsSync(source) || !lstatSync(source).isFile()) throw new Error("Archived session not found");
   if (existsSync(destination) || existsSync(destinationArtifacts)) throw new Error("Active session destination already exists");
 
   const restored = gunzipSync(readFileSync(source));
+  mkdirSync(path.dirname(destination), { recursive: true });
+  validateRestorePath(activeRoot, destination);
+  validateRestorePath(activeRoot, destinationArtifacts);
   const tempDir = mkdtempSync(path.join(path.dirname(destination), ".omp-web-restore-"));
   const tempFile = path.join(tempDir, path.basename(destination));
   let destinationCreated = false;
   let artifactsMoved = false;
   try {
-    mkdirSync(path.dirname(destination), { recursive: true });
+    validateRestorePath(activeRoot, tempDir);
     writeFileSync(tempFile, restored);
     renameSync(tempFile, destination);
     destinationCreated = true;

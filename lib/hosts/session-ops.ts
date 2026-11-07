@@ -13,6 +13,7 @@ import { promisify } from "util";
 import { comparableProjectPath } from "../comparable-path";
 import { mediaFilePath } from "../media-cache";
 import { resolveOmpBin } from "../omp/omp-cli";
+import { listArchivedSessionInfos, restoreArchivedSession, restoreFailureStatus } from "../omp/archive";
 import {
   archiveSessionFileWithArtifacts,
   buildSessionTree,
@@ -56,7 +57,7 @@ import type { SessionHistoryCursor } from "../session-sync";
 import { extractSubagentHistory, readCompletionArtifact, readSubagentTranscriptPage, resolveSubagentArtifact, subagentTranscriptPath } from "../subagent-history";
 import { SUBAGENT_ID_RE } from "../subagent-types";
 import { isRecord } from "../type-guards";
-import type { ManagedProject, ProjectLaunchConfig, SessionContext, SessionInfo, SessionTitleSource } from "../types";
+import type { ArchivedSessionInfo, ManagedProject, ProjectLaunchConfig, SessionContext, SessionInfo, SessionTitleSource } from "../types";
 import { resolveProject } from "../worktree";
 
 export type OpResult<T> = { ok: true; value: T } | { ok: false; status: number; code: string; error: string };
@@ -104,6 +105,10 @@ export interface SessionOps {
   /** `liveSessionIds`: sessions main has a live omp process for; their files are never rewritten. */
   deleteSession(id: string, liveSessionIds: string[]): Promise<OpResult<{ skippedChildren?: Array<{ id: string; reason: string }> }>>;
   archiveSession(id: string): Promise<OpResult<{ archivedPath: string }>>;
+  /** This host's archive, newest first (browser entries; no hostId). */
+  listArchives(): Promise<ArchivedSessionInfo[]>;
+  /** Restore one archived session on this host; `sessionId` is the restored session's id. */
+  restoreArchive(key: string): Promise<OpResult<{ sessionId: string }>>;
   exportSession(id: string): Promise<OpResult<{ html: string; fileName: string }>>;
   readMedia(hash: string): Promise<OpResult<Uint8Array>>;
   /** Raw registry entries, hidden ones included (main merges session-discovered projects). */
@@ -540,6 +545,22 @@ export const sessionOps: SessionOps = {
     // The file is gone: full flush is correct (drops its caches + refreshes list).
     invalidateSessionListCache();
     return ok({ archivedPath });
+  },
+
+  async listArchives() {
+    return listArchivedSessionInfos();
+  },
+
+  async restoreArchive(key) {
+    if (typeof key !== "string" || !key.trim()) return fail(400, "archive_key_required", "Archive key is required");
+    try {
+      const sessionId = restoreArchivedSession(key);
+      invalidateSessionListCache();
+      return ok({ sessionId });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return fail(restoreFailureStatus(message), "archive_restore_failed", message);
+    }
   },
 
   async exportSession(id) {

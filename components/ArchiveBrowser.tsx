@@ -7,6 +7,8 @@ import { copyText } from "@/lib/clipboard";
 import { Dialog, DialogContent, DialogTitle, DialogClose, Tooltip } from "./ui/primitives";
 import { toast } from "./ui/toast";
 import type { ArchivedSessionInfo } from "@/lib/types";
+import { useHostRows } from "@/hooks/useHostRows";
+import { hostName } from "./host-status";
 import {
   Archive,
   Calendar,
@@ -22,6 +24,7 @@ import {
   X,
   AlertCircle,
   Hash,
+  Server,
 } from "lucide-react";
 
 export interface ArchiveBrowserProps {
@@ -29,6 +32,9 @@ export interface ArchiveBrowserProps {
   onClose: () => void;
   onRestored: (sessionId: string) => void;
 }
+
+/** Identity across hosts: two hosts can hold an archive under the same key. */
+const archiveId = (archive: ArchivedSessionInfo) => `${archive.hostId ?? "local"}:${archive.key}`;
 
 export function formatArchiveSize(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "0 B";
@@ -208,9 +214,15 @@ export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProp
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [restoringKey, setRestoringKey] = useState<string | null>(null);
+  const [unavailableHosts, setUnavailableHosts] = useState<{ id: string; label: string }[]>([]);
   const [copiedId, setCopiedId] = useState(false);
   const [relativeTimeNow] = useState(() => Date.now());
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const { hosts: hostRows } = useHostRows();
+  const hostLabel = useCallback((hostId: string) => {
+    const row = hostRows?.find((host) => host.id === hostId);
+    return row ? hostName(t, row) : hostId;
+  }, [hostRows, t]);
 
   const fetchArchives = useCallback(async (isManualRefresh = false) => {
     if (isManualRefresh) setRefreshing(true);
@@ -223,12 +235,13 @@ export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProp
         const payload = await res.json().catch(() => ({})) as { error?: string; code?: string };
         throw new Error(formatApiError(payload, `errors.http${res.status}`));
       }
-      const data = (await res.json()) as { archives?: ArchivedSessionInfo[] };
+      const data = (await res.json()) as { archives?: ArchivedSessionInfo[]; unavailableHosts?: { id: string; label: string }[] };
       const items = Array.isArray(data.archives) ? data.archives : [];
       setArchives(items);
+      setUnavailableHosts(Array.isArray(data.unavailableHosts) ? data.unavailableHosts : []);
       setSelectedKey((prevKey) => {
-        if (prevKey && items.some((item) => item.key === prevKey)) return prevKey;
-        return items.length > 0 ? items[0].key : null;
+        if (prevKey && items.some((item) => archiveId(item) === prevKey)) return prevKey;
+        return items.length > 0 ? archiveId(items[0]) : null;
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -269,16 +282,17 @@ export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProp
         id.includes(query) ||
         cwd.includes(query) ||
         firstMessage.includes(query) ||
-        status.includes(query)
+        status.includes(query) ||
+        hostLabel(archive.hostId ?? "local").toLowerCase().includes(query)
       );
     });
-  }, [archives, searchQuery]);
+  }, [archives, searchQuery, hostLabel]);
 
   // Update selectedKey if current selection is filtered out
   useEffect(() => {
     if (filteredArchives.length > 0) {
-      if (!selectedKey || !filteredArchives.some((item) => item.key === selectedKey)) {
-        setSelectedKey(filteredArchives[0].key);
+      if (!selectedKey || !filteredArchives.some((item) => archiveId(item) === selectedKey)) {
+        setSelectedKey(archiveId(filteredArchives[0]));
       }
     } else {
       setSelectedKey(null);
@@ -287,7 +301,7 @@ export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProp
 
   const selectedArchive = useMemo(() => {
     if (!selectedKey) return null;
-    return archives.find((a) => a.key === selectedKey) ?? null;
+    return archives.find((a) => archiveId(a) === selectedKey) ?? null;
   }, [archives, selectedKey]);
 
   const handleCopyId = useCallback(async (id: string) => {
@@ -304,7 +318,7 @@ export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProp
   const handleRestore = useCallback(
     async (archive: ArchivedSessionInfo) => {
       if (restoringKey) return;
-      setRestoringKey(archive.key);
+      setRestoringKey(archiveId(archive));
 
       try {
         const res = await fetch("/api/sessions/archive", {
@@ -312,7 +326,7 @@ export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProp
           headers: {
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ key: archive.key }),
+          body: JSON.stringify({ key: archive.key, hostId: archive.hostId ?? "local" }),
         });
 
         if (!res.ok) {
@@ -503,6 +517,12 @@ export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProp
           </div>
         </div>
 
+        {unavailableHosts.length > 0 && (
+          <div role="status" style={{ padding: "8px 20px", borderBottom: "1px solid var(--border)", fontSize: 12, color: "var(--text-muted)" }}>
+            {t("archiveBrowser.hostsUnavailable", { hosts: unavailableHosts.map((host) => host.label).join(", ") })}
+          </div>
+        )}
+
         {/* Content Area */}
         <div style={{ display: "flex", flex: 1, minHeight: 0, overflow: "hidden" }}>
           {loading && archives.length === 0 ? (
@@ -666,7 +686,8 @@ export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProp
                     </div>
                   ) : (
                     filteredArchives.map((archive) => {
-                      const isSelected = archive.key === selectedKey;
+                      const id = archiveId(archive);
+                      const isSelected = id === selectedKey;
                       const title =
                         archive.name ||
                         archive.firstMessage.trim().slice(0, 48) ||
@@ -678,9 +699,9 @@ export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProp
 
                       return (
                         <button
-                          key={archive.key}
+                          key={id}
                           type="button"
-                          onClick={() => setSelectedKey(archive.key)}
+                          onClick={() => setSelectedKey(id)}
                           style={{
                             display: "flex",
                             flexDirection: "column",
@@ -746,6 +767,9 @@ export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProp
                               overflow: "hidden",
                             }}
                           >
+                            {archive.hostId && archive.hostId !== "local" && (
+                              <span style={{ flexShrink: 0, color: "var(--text-muted)" }}>{hostLabel(archive.hostId)}</span>
+                            )}
                             <span
                               style={{
                                 overflow: "hidden",
@@ -871,11 +895,11 @@ export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProp
                         <RotateCcw
                           size={14}
                           strokeWidth={2.2}
-                          className={restoringKey === selectedArchive.key ? "icon-spin" : undefined}
+                          className={restoringKey === archiveId(selectedArchive) ? "icon-spin" : undefined}
                           aria-hidden="true"
                         />
                         <span>
-                          {restoringKey === selectedArchive.key
+                          {restoringKey === archiveId(selectedArchive)
                             ? t("archiveBrowser.restoring")
                             : t("archiveBrowser.restore")}
                         </span>
@@ -911,6 +935,13 @@ export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProp
                         value={selectedArchive.cwd}
                         mono
                       />
+                      {selectedArchive.hostId && selectedArchive.hostId !== "local" && (
+                        <MetadataRow
+                          icon={Server}
+                          label={t("archiveBrowser.host")}
+                          value={hostLabel(selectedArchive.hostId)}
+                        />
+                      )}
                       <MetadataRow
                         icon={Hash}
                         label={t("archiveBrowser.sessionId")}
