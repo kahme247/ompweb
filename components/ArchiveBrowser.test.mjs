@@ -144,3 +144,31 @@ test("a restore refused by an offline host names that host and why it blocks the
     "Failed to restore session: Laptop is offline. Restoring needs every registered host online, to check that the session is not active on one of them.",
   ]));
 });
+
+test("capture evidence cannot be restored or alias the replacement archive's selectable target", async (t) => {
+  globalThis.Worker = class FakeWorker { postMessage() {} };
+  const base = { hostId: "local", cwd: "/local", firstMessage: "", created: "2026-11-01T12:00:00Z", archivedAt: "2026-11-02T12:00:00Z", size: 10, messageCount: 1 };
+  const capture = { ...base, key: "kept.jsonl.gz.11111111-2222-4333-8444-555555555555.restore-consume", id: "capture-a", name: "Captured A", restorePending: true };
+  const replacement = { ...base, key: "kept.jsonl.gz", id: "replacement-b", name: "Replacement B" };
+  const posts = [];
+  t.mock.method(globalThis, "fetch", async (_url, init) => {
+    if (init?.method === "POST") {
+      posts.push(JSON.parse(init.body));
+      return Response.json({ ok: true, sessionId: replacement.id });
+    }
+    return Response.json({ archives: [capture, replacement] });
+  });
+  render(React.createElement(ArchiveBrowser, { open: true, onClose() {}, onRestored() {} }));
+  await screen.findByRole("heading", { name: "Captured A" });
+  const user = userEvent.setup();
+  const blocked = screen.getByRole("button", { name: "Restoring…" });
+  assert.equal(blocked.disabled, true);
+  await user.click(blocked);
+  assert.deepEqual(posts, []);
+  await user.click(screen.getByRole("button", { name: /Replacement B/ }));
+  await screen.findByRole("heading", { name: "Replacement B" });
+  const restore = screen.getByRole("button", { name: "Restore Session" });
+  assert.equal(restore.disabled, false);
+  await user.click(restore);
+  await waitFor(() => assert.deepEqual(posts, [{ key: replacement.key, hostId: "local" }]));
+});

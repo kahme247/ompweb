@@ -23,6 +23,8 @@ export interface ArchivedSessionRecord {
   firstMessage: string;
   size: number;
   status?: SessionStatus;
+  /** Captured by a restore: discovery evidence only, never an actionable restore target. */
+  restorePending?: true;
 }
 
 const ARCHIVE_PREFIX_BYTES = 128 * 1024;
@@ -43,8 +45,8 @@ function normalizeArchiveKey(key: string): string {
   return normalized;
 }
 
-/** Only names emitted by commitRestore: arbitrary similarly named files are not archive evidence. Captured archives stay
- * discoverable by their original key and parsed session ID while the transcript is unpublished, including after a crash. */
+/** Only names emitted by commitRestore: arbitrary similarly named files are not archive evidence. Captures retain a unique
+ * physical key and are explicitly discovery-only, never aliases of an ordinary archive's actionable key. */
 function capturedArchiveSource(filePath: string): string | null {
   return /^(.*\.jsonl\.gz)\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.restore-consume$/i.exec(filePath)?.[1] ?? null;
 }
@@ -158,36 +160,41 @@ function parseArchivePrefix(prefix: Buffer, filePath: string, archiveRoot: strin
 
 export async function listArchivedSessions(archiveRoot = getArchivedSessionsDir()): Promise<ArchivedSessionRecord[]> {
   const root = archiveRootPath(archiveRoot);
-  // A .gz can be renamed to a capture after enumeration but before its read. Rescan once in that case instead of returning
-  // a falsely complete "not archived" answer during the unpublished part of a restore.
-  for (let attempt = 0; ; attempt++) {
-    let disappeared = false;
-    const files = collectArchives(root);
-    // Prefer the ordinary entry if both it and a captured entry of the same key/ID exist.
-    files.sort((a, b) => Number(capturedArchiveSource(a) !== null) - Number(capturedArchiveSource(b) !== null));
-    const records = await Promise.all(files.map(async (filePath) => {
-      try {
+  const snapshot = () => new Map(collectArchives(root).map((file) => {
+    const stat = lstatSync(file, { bigint: true });
+    if (!stat.isFile()) throw new Error("Archive changed during listing; retry discovery");
+    return [file, `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}`] as const;
+  }));
+  // Verify both names AND generations after reading. A successful read can be replacement B, while capture A was added
+  // after enumeration: merely rescanning on ENOENT silently drops A and falsely proves that session absent.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const before = snapshot();
+      const records = await Promise.all([...before.keys()].map(async (filePath) => {
         if (statSync(filePath).size > MAX_ARCHIVE_COMPRESSED_BYTES) return undefined;
         const record = parseArchivePrefix(await readGzipPrefix(filePath, ARCHIVE_PREFIX_BYTES), filePath, root);
-        if (!record && !lstatSyncIfExists(filePath)) disappeared = true;
-        const original = capturedArchiveSource(filePath);
-        if (record && original) record.key = path.relative(root, original).split(path.sep).join("/");
+        if (record && capturedArchiveSource(filePath)) record.restorePending = true;
         return record;
-      } catch (error) {
-        if (errnoCode(error) === "ENOENT") disappeared = true;
-        return undefined;
+      }));
+      const after = snapshot();
+      const stable = before.size === after.size && [...before].every(([file, generation]) => after.get(file) === generation);
+      if (!stable) {
+        if (attempt === 0) continue;
+        throw new Error("Archive changed during listing; retry discovery");
       }
-    }));
-    if (disappeared && attempt === 0) continue;
-    if (disappeared) throw new Error("Archive changed during listing; retry discovery");
-    const unique = new Map<string, ArchivedSessionRecord>();
-    for (const record of records) {
-      if (!record) continue;
-      const identity = `${record.key}\0${record.id}`;
-      if (!unique.has(identity)) unique.set(identity, record);
+      // A captured entry keeps its unique physical key. It must never alias an ordinary archive's actionable key, even when
+      // both compressed headers have the same session ID.
+      return records.filter((record): record is ArchivedSessionRecord => record !== undefined)
+        .sort((a, b) => b.archivedAt.getTime() - a.archivedAt.getTime());
+    } catch (error) {
+      if (errnoCode(error) === "ENOENT") {
+        if (attempt === 0) continue;
+        throw new Error("Archive changed during listing; retry discovery");
+      }
+      throw error;
     }
-    return [...unique.values()].sort((a, b) => b.archivedAt.getTime() - a.archivedAt.getTime());
   }
+  throw new Error("Archive changed during listing; retry discovery");
 }
 
 /** The Archived Sessions browser's entries (dates as ISO strings): also what a host sends over its link. */
@@ -203,6 +210,7 @@ export async function listArchivedSessionInfos(archiveRoot = getArchivedSessions
     firstMessage: archive.firstMessage,
     size: archive.size,
     status: archive.status,
+    ...(archive.restorePending ? { restorePending: true as const } : {}),
   }));
 }
 
@@ -563,6 +571,14 @@ async function readArchivedSessionId(filePath: string): Promise<string> {
   return header.id;
 }
 
+/** Absence during any stage may mean another owner captured the source. Never hide its recovery diagnostic behind 404. */
+function throwMissingArchive(activeRoot: string, destination: string): never {
+  const claim = `${destination}.restore-lock`;
+  validateRestorePathSync(activeRoot, claim);
+  if (lstatSyncIfExists(claim)) throw new Error(`Active session destination already exists (restore commit claimed at ${claim}; if its owner was killed, manual recovery is required)`);
+  throw new Error("Archived session not found");
+}
+
 /** `publish` wraps the restore's whole commit (see `commitRestore`) as one synchronous step: a caller holding a lock across it
  * must never have to await there, and one whose claim may have lapsed refuses in it, before anything moves. */
 export async function restoreArchivedSession(key: string, sessionsRoot = getSessionsDir(), archiveRoot = getArchivedSessionsDir(), publish: <T>(run: () => T) => T = (run) => run()): Promise<string> {
@@ -578,12 +594,7 @@ export async function restoreArchivedSession(key: string, sessionsRoot = getSess
   await validateRestorePath(activeRoot, destination);
   await validateRestorePath(activeRoot, destinationArtifacts);
   const sourceStat = await lstatIfExists(source);
-  if (!sourceStat?.isFile()) {
-    const claim = `${destination}.restore-lock`;
-    validateRestorePathSync(activeRoot, claim);
-    if (lstatSyncIfExists(claim)) throw new Error(`Active session destination already exists (restore commit claimed at ${claim}; if its owner was killed, manual recovery is required)`);
-    throw new Error("Archived session not found");
-  }
+  if (!sourceStat?.isFile()) throwMissingArchive(activeRoot, destination);
   if (await lstatIfExists(destination) || await lstatIfExists(destinationArtifacts)) throw new Error("Active session destination already exists");
 
   if (sourceStat.size > MAX_ARCHIVE_COMPRESSED_BYTES) throw new Error("Archived session compressed size exceeds 256 MiB limit; archive was not consumed");
@@ -598,7 +609,7 @@ export async function restoreArchivedSession(key: string, sessionsRoot = getSess
   try {
     validateRestorePathSync(archiveBase, source);
     try { linkSync(source, pin); } catch (error) {
-      if (errnoCode(error) === "ENOENT") throw new Error("Archived session not found");
+      if (errnoCode(error) === "ENOENT") throwMissingArchive(activeRoot, destination);
       throw error;
     }
     const generation = lstatSync(pin, { bigint: true });

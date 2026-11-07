@@ -1057,14 +1057,14 @@ function projectEntry(value: unknown): ProjectRegistryEntry | null {
 /** A daemon's archive entry reduced to ArchivedSessionInfo's fields; null when one has the wrong type. */
 function archiveEntry(value: unknown): ArchivedSessionInfo | null {
   if (!isRecord(value)) return null;
-  const { key, id, cwd, name, created, archivedAt, messageCount, firstMessage, size, status } = value;
+  const { key, id, cwd, name, created, archivedAt, messageCount, firstMessage, size, status, restorePending } = value;
   if (
     typeof key !== "string" || typeof id !== "string" || typeof cwd !== "string" || typeof created !== "string"
     || typeof archivedAt !== "string" || typeof firstMessage !== "string"
     || typeof messageCount !== "number" || !Number.isFinite(messageCount) || typeof size !== "number" || !Number.isFinite(size)
-    || !optionalString(name) || !optionalString(status)
+    || !optionalString(name) || !optionalString(status) || (restorePending !== undefined && restorePending !== true)
   ) return null;
-  return { key, id, cwd, name, created, archivedAt, messageCount, firstMessage, size, status } as ArchivedSessionInfo;
+  return { key, id, cwd, name, created, archivedAt, messageCount, firstMessage, size, status, ...(restorePending ? { restorePending: true } : {}) } as ArchivedSessionInfo;
 }
 
 const MEDIA_HASH_RE = /^[0-9a-f]{64}$/;

@@ -317,7 +317,7 @@ export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProp
 
   const handleRestore = useCallback(
     async (archive: ArchivedSessionInfo) => {
-      if (restoringKey) return;
+      if (restoringKey || archive.restorePending) return;
       setRestoringKey(archiveId(archive));
 
       try {
@@ -875,7 +875,7 @@ export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProp
                       <button
                         type="button"
                         onClick={() => void handleRestore(selectedArchive)}
-                        disabled={restoringKey !== null}
+                        disabled={restoringKey !== null || selectedArchive.restorePending === true}
                         style={{
                           display: "inline-flex",
                           alignItems: "center",
@@ -887,8 +887,8 @@ export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProp
                           border: "none",
                           fontSize: 13,
                           fontWeight: 600,
-                          cursor: restoringKey !== null ? "wait" : "pointer",
-                          opacity: restoringKey !== null ? 0.7 : 1,
+                          cursor: selectedArchive.restorePending ? "not-allowed" : restoringKey !== null ? "wait" : "pointer",
+                          opacity: restoringKey !== null || selectedArchive.restorePending ? 0.7 : 1,
                           boxShadow: "0 1px 3px rgba(0,0,0,0.12)",
                           transition: "opacity var(--dur-fast), transform var(--dur-fast)",
                           flexShrink: 0,
@@ -901,7 +901,7 @@ export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProp
                           aria-hidden="true"
                         />
                         <span>
-                          {restoringKey === archiveId(selectedArchive)
+                          {selectedArchive.restorePending || restoringKey === archiveId(selectedArchive)
                             ? t("archiveBrowser.restoring")
                             : t("archiveBrowser.restore")}
                         </span>
