@@ -673,11 +673,13 @@ export function AppShell({ appName }: { appName: string }) {
   const [autoNameStatus, setAutoNameStatus] = useState<AutoNameStatus>({ kind: "idle" });
   const autoNameTimerRef = useRef<TimerHandle | undefined>(undefined);
   const activeSessionIdRef = useRef<string | null>(selectedSession?.id ?? null);
+  const activeSettingsTabRef = useRef(settingsTab);
   const archiveRetryTimerRef = useRef<TimerHandle | undefined>(undefined);
   useEffect(() => () => clearTimeout(archiveRetryTimerRef.current), []);
   useLayoutEffect(() => {
     activeSessionIdRef.current = selectedSession?.id ?? null;
-  }, [selectedSession?.id]);
+    activeSettingsTabRef.current = settingsTab;
+  }, [selectedSession?.id, settingsTab]);
   const handleSessionStatsChange = useCallback((stats: SessionStatsInfo | null) => {
     setSessionStats(stats);
   }, []);
@@ -1571,18 +1573,26 @@ export function AppShell({ appName }: { appName: string }) {
       : `Asked the user to confirm opening ${url}.`;
   }, [openUrlAutomatically]);
   const handleSessionOpenUrl = useCallback((url: string) => requestOpenUrl(url, selectedSession?.id ?? "", false), [requestOpenUrl, selectedSession?.id]);
+  const pendingCrossHostToolsRef = useRef(new Map<string, AbortController>());
   const handleCrossSessionHostTool = useCallback(async (call: CrossSessionHostToolCall) => {
+    const key = JSON.stringify([call.sessionId, call.id]);
+    if (pendingCrossHostToolsRef.current.has(key)) return;
+    const controller = new AbortController();
+    pendingCrossHostToolsRef.current.set(key, controller);
     // Full-page Settings hides the chat, so its session counts as not viewed.
-    const viewing = call.sessionId === selectedSession?.id && !settingsTab;
-    const { text, isError } = await runHostTool(call.toolName, call.arguments, {
-      openUrl: (url) => requestOpenUrl(url, call.sessionId, !viewing),
-      openFile: (path, name) => {
-        if (viewing) return handleOpenFile(path, name, call);
-        setPendingOpens((queue) => [...queue, { kind: "file", target: path, name, sessionId: call.sessionId, source: call, crossSession: true }]);
-        return `Asked the user to confirm opening ${path}; they are viewing another omp-web session.`;
-      },
-    });
+    const viewing = () => call.sessionId === activeSessionIdRef.current && !activeSettingsTabRef.current;
+
     try {
+      const { text, isError } = await runHostTool(call.toolName, call.arguments, {
+        openUrl: (url) => requestOpenUrl(url, call.sessionId, !viewing()),
+        openFile: (path, name, owner) => {
+          const source = owner ? { ...call, sessionId: owner } : call;
+          if (viewing()) return handleOpenFile(path, name, source);
+          setPendingOpens((queue) => [...queue, { kind: "file", target: path, name, sessionId: call.sessionId, source, crossSession: true }]);
+          return `Asked the user to confirm opening ${path}; they are viewing another omp-web session.`;
+        },
+      }, call.sessionId, controller.signal);
+      if (controller.signal.aborted) return;
       await sendAgentCommand(call.sessionId, {
         type: "host_tool_result",
         id: call.id,
@@ -1591,18 +1601,23 @@ export function AppShell({ appName }: { appName: string }) {
       });
     } catch (e) {
       console.error("Failed to send host tool result:", e);
+    } finally {
+      pendingCrossHostToolsRef.current.delete(key);
     }
-  }, [handleOpenFile, requestOpenUrl, selectedSession?.id, settingsTab]);
+  }, [handleOpenFile, requestOpenUrl]);
   const crossSessionHostToolRef = useRef(handleCrossSessionHostTool);
   useEffect(() => { crossSessionHostToolRef.current = handleCrossSessionHostTool; }, [handleCrossSessionHostTool]);
   useEffect(() => {
     // Mounted with the shell (not the sidebar) so it keeps listening on the
     // full-page Settings view too.
+    const pending = pendingCrossHostToolsRef.current;
     const source = openEventStream({ kind: "host-tools" });
     source.onmessage = (e) => {
       try {
-        const call = JSON.parse(e.data) as CrossSessionHostToolCall & { type?: string };
-        if (call.type === "host_tool_call" && call.sessionId && call.id && call.toolName
+        const call = JSON.parse(e.data);
+        if (call.type === "host_tool_cancel" && typeof call.sessionId === "string" && typeof call.targetId === "string") {
+          pending.get(JSON.stringify([call.sessionId, call.targetId]))?.abort();
+        } else if (call.type === "host_tool_call" && call.sessionId && call.id && call.toolName
           && typeof call.hostId === "string" && typeof call.cwd === "string") {
           void crossSessionHostToolRef.current(call);
         }
@@ -1610,7 +1625,12 @@ export function AppShell({ appName }: { appName: string }) {
         // ignore malformed frames
       }
     };
-    return () => source.close();
+    // A drop loses the server-side subscription, and with it the calls routed to this tab (rejectCrossSessionHostTools).
+    source.onerror = () => { for (const controller of pending.values()) controller.abort(); };
+    return () => {
+      for (const controller of pending.values()) controller.abort();
+      source.close();
+    };
   }, []);
 
   const activeFileTab = fileTabs.find((tab) => tab.id === activeFileTabId) ?? null;

@@ -363,6 +363,13 @@ that upload's file.
 
 ### Protocol versions and compatibility
 
+Protocol v7 extends this original design with several web servers sharing one
+daemon and host-owned lifecycle. Its authoritative contracts, including `open`,
+`close`, `interest`, `channels_changed` and recovery, are in
+`2026-11-06-multi-server-host-design.md`. `MIN_LINK_PROTOCOL_VERSION` remains 4;
+v4–v6 links retain exclusive channels and their legacy server-owned lifecycle.
+
+
 - **A released version changes only compatibly.** Compatible means both: every
   message the newer side can send is valid for an older receiver, and every
   message the older side can send is valid for a newer receiver. Anything else

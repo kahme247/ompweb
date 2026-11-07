@@ -53,28 +53,22 @@ export async function POST(req: Request) {
     }
 
     // The cwd is checked on its host; the host answers with the path it will use.
-    const started = await startNewRpcSession(host, requestedCwd, toolNames, advisor === true);
+    const preparing = promptCommand.type !== "ensure_session" || !!(provider && modelId) || !!thinkingLevel;
+    const started = await startNewRpcSession(host, requestedCwd, toolNames, advisor === true, preparing);
     if (!started.ok) return opErrorResponse(started);
     const { session, realSessionId } = started.value;
 
     try {
-      // Apply pre-selected model before sending the prompt
-      if (provider && modelId) {
-        await session.send({ type: "set_model", provider, modelId });
-      }
-
-      // Apply pre-selected thinking level before sending the prompt
-      if (thinkingLevel) {
-        await session.send({ type: "set_thinking_level", level: thinkingLevel });
-      }
-
-      if (promptCommand.type === "ensure_session") {
-        return Response.json({ success: true, sessionId: realSessionId, data: null });
-      }
-
-      const result = await session.send(promptCommand);
-
-      return Response.json({ success: true, sessionId: realSessionId, data: result });
+      const run = async () => {
+        if (provider && modelId) await session.send({ type: "set_model", provider, modelId });
+        if (thinkingLevel) await session.send({ type: "set_thinking_level", level: thinkingLevel });
+        if (promptCommand.type === "ensure_session") {
+          return Response.json({ success: true, sessionId: realSessionId, data: null });
+        }
+        const result = await session.send(promptCommand);
+        return Response.json({ success: true, sessionId: realSessionId, data: result });
+      };
+      return await (preparing ? session.withPendingCommand(run, true) : run());
     } catch (error) {
       // The child was spawned but the prompt never ran: without this cleanup a
       // failed set_model/set_thinking_level/prompt leaves an orphaned omp

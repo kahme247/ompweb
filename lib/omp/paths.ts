@@ -175,3 +175,15 @@ export function getProjectAgentsDir(cwd: string): string {
 export function getAgentsBundledCacheDir(): string {
   return path.join(tmpdir(), "omp-web-bundled-agents");
 }
+
+// omp's own rule (internal-urls/local-protocol.ts): long artifact paths move to the temp dir on Windows.
+const WINDOWS_LOCAL_ROOT_MAX_CHARS = 180;
+
+/** omp's `local://` root for a session (`resolveLocalRoot` in omp's local-protocol.ts). */
+export function sessionLocalRoot(sessionFile: string, sessionId: string, platform: NodeJS.Platform = process.platform): string {
+  const candidate = path.resolve(path.dirname(sessionFile), path.basename(sessionFile, ".jsonl"), "local");
+  if (platform === "win32" && candidate.length >= WINDOWS_LOCAL_ROOT_MAX_CHARS) {
+    return path.join(tmpdir(), "omp-local", sessionId.replace(/[^a-zA-Z0-9_.-]/g, "_"));
+  }
+  return candidate;
+}

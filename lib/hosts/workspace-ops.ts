@@ -26,6 +26,8 @@ import { invalidateSessionListCache } from "../session-reader";
 import { grantWorkspaceRoot, invalidateWorkspaceRoots } from "./workspace-roots";
 import { getBrowseStartDirectory, getParentDirectory, listDirectories, listWindowsDrives, resolveDirectory, shouldShowWindowsDrivePicker } from "../directory-browser";
 import { WorkspaceClones } from "./workspace-clone";
+import { parseLocalUri } from "../local-uri";
+import { resolveSessionLocalFile } from "../session-local-files";
 import { filePathApiSegments } from "../file-paths";
 
 const invalid = () => new HostOpError(400, "invalid_request", "Invalid workspace request");
@@ -59,8 +61,9 @@ function fileInfo(filePath: string, stat: fs.Stats): WorkspaceFileInfo {
 }
 async function access(input: WorkspaceFileRequest, reference: boolean) {
   if (!isRecord(input) || !Array.isArray(input.segments) || !input.segments.every((part) => typeof part === "string")
-    || !(input.sessionId === null || typeof input.sessionId === "string")) throw invalid();
-  const checked = await authorizeFileAccess(input.segments, input.sessionId, reference, await getWorkspaceRoots());
+    || !(input.sessionId === null || typeof input.sessionId === "string")
+    || !(input.sessionFile === undefined || input.sessionFile === null || typeof input.sessionFile === "string")) throw invalid();
+  const checked = await authorizeFileAccess(input.segments, input.sessionId, reference, await getWorkspaceRoots(), input.sessionFile);
   if (!checked.ok) throw new HostOpError(checked.status, checked.code, checked.error);
   return checked;
 }
@@ -137,6 +140,15 @@ export function createWorkspaceService(uploads: StagedUploads, emit: (id: string
     startClone: (id, parent, url) => result(() => clones.start(id, parent, url)),
     readClone: (id, cursor) => result(() => clones.read(id, cursor)),
     cancelClone: (id) => result(() => clones.cancel(id)),
+    resolveLocalFile: (id, uri, sessionFile) => result(async () => {
+      if (typeof id !== "string" || typeof uri !== "string" || !(sessionFile === null || typeof sessionFile === "string")) throw invalid();
+      // Parsed again here: this host's platform decides what an absolute or drive-lettered name is.
+      const parsed = parseLocalUri(uri);
+      if (!parsed.ok) throw new HostOpError(400, "invalid_local_uri", parsed.error);
+      const located = await resolveSessionLocalFile(id, parsed.relative, sessionFile);
+      if (!located.ok) throw new HostOpError(located.status, located.code, located.error);
+      return { path: located.path };
+    }),
     gitStatus: (cwd) => result(async () => getGitStatus(await authorizeWorkspaceDirectory(cwd))),
     gitDiff: (cwd, requested) => result(async () => {
       const directory = await authorizeWorkspaceDirectory(cwd);
