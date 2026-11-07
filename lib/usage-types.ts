@@ -136,6 +136,11 @@ export interface UsageReport {
   dayBreakdown: DayUsageSummary[];
   projectBreakdown: ProjectUsageSummary[];
   scanInfo: UsageReportScanInfo;
+  /** True when this is the last cached report served while a rescan runs in
+   *  the background; false for a report computed for this request. */
+  stale: boolean;
+  /** Epoch ms at which the served report was computed. */
+  scannedAt: number;
 }
 
 export interface UsageQueryOptions {
