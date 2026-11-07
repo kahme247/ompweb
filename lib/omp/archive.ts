@@ -1,6 +1,6 @@
 import { createReadStream, createWriteStream } from "fs";
-import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from "fs";
-import { link, mkdir, mkdtemp, open, rename, rm, stat, unlink } from "fs/promises";
+import { readdirSync, statSync } from "fs";
+import { link, lstat, mkdir, mkdtemp, open, realpath, rename, rm, unlink } from "fs/promises";
 import { Transform } from "stream";
 import { pipeline } from "stream/promises";
 import { createGunzip } from "zlib";
@@ -184,14 +184,14 @@ export function restoreFailureStatus(message: string): number {
   return message.includes("Invalid archive key") || message.includes("Invalid archived session ID") || message.includes("required") ? 400 : message.includes("not found") ? 404 : message.includes("already exists") ? 409 : 500;
 }
 
-function validateRestorePath(root: string, target: string): void {
+async function validateRestorePath(root: string, target: string): Promise<void> {
   const relative = path.relative(root, target);
   if (!relative || relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) throw new Error("Invalid archive key");
   let ancestor = root;
   const missing: string[] = [];
   while (true) {
     try {
-      lstatSync(ancestor);
+      await lstat(ancestor);
       break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -199,21 +199,30 @@ function validateRestorePath(root: string, target: string): void {
       ancestor = path.dirname(ancestor);
     }
   }
-  const canonicalRoot = path.join(realpathSync(ancestor), ...missing);
+  const canonicalRoot = path.join(await realpath(ancestor), ...missing);
   let current = root;
   for (const component of relative.split(path.sep)) {
     current = path.join(current, component);
     try {
-      lstatSync(current);
+      await lstat(current);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") break;
       throw error;
     }
     // Check every ancestor, not only the final path: a symlink may escape and re-enter.
     let canonical: string;
-    try { canonical = realpathSync(current); } catch { throw new Error("Invalid archive key"); }
+    try { canonical = await realpath(current); } catch { throw new Error("Invalid archive key"); }
     const canonicalRelative = path.relative(canonicalRoot, canonical);
     if (!canonicalRelative || canonicalRelative === ".." || canonicalRelative.startsWith(`..${path.sep}`) || path.isAbsolute(canonicalRelative)) throw new Error("Invalid archive key");
+  }
+}
+
+async function lstatIfExists(filePath: string) {
+  try {
+    return await lstat(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return undefined;
   }
 }
 
@@ -261,23 +270,24 @@ export async function restoreArchivedSession(key: string, sessionsRoot = getSess
   const destination = path.resolve(activeRoot, relative.slice(0, -3));
   const sourceArtifacts = source.slice(0, -3);
   const destinationArtifacts = destination.slice(0, -6);
-  validateRestorePath(archiveBase, source);
-  validateRestorePath(archiveBase, sourceArtifacts);
-  validateRestorePath(activeRoot, destination);
-  validateRestorePath(activeRoot, destinationArtifacts);
-  if (!existsSync(source) || !lstatSync(source).isFile()) throw new Error("Archived session not found");
-  if (existsSync(destination) || existsSync(destinationArtifacts)) throw new Error("Active session destination already exists");
+  await validateRestorePath(archiveBase, source);
+  await validateRestorePath(archiveBase, sourceArtifacts);
+  await validateRestorePath(activeRoot, destination);
+  await validateRestorePath(activeRoot, destinationArtifacts);
+  const sourceStat = await lstatIfExists(source);
+  if (!sourceStat?.isFile()) throw new Error("Archived session not found");
+  if (await lstatIfExists(destination) || await lstatIfExists(destinationArtifacts)) throw new Error("Active session destination already exists");
 
-  if ((await stat(source)).size > MAX_ARCHIVE_COMPRESSED_BYTES) throw new Error("Archived session compressed size exceeds 256 MiB limit; archive was not consumed");
+  if (sourceStat.size > MAX_ARCHIVE_COMPRESSED_BYTES) throw new Error("Archived session compressed size exceeds 256 MiB limit; archive was not consumed");
   await mkdir(path.dirname(destination), { recursive: true });
-  validateRestorePath(activeRoot, destination);
-  validateRestorePath(activeRoot, destinationArtifacts);
+  await validateRestorePath(activeRoot, destination);
+  await validateRestorePath(activeRoot, destinationArtifacts);
   const tempDir = await mkdtemp(path.join(path.dirname(destination), ".omp-web-restore-"));
   const tempFile = path.join(tempDir, path.basename(destination));
   let destinationCreated = false;
   let artifactsMoved = false;
   try {
-    validateRestorePath(activeRoot, tempDir);
+    await validateRestorePath(activeRoot, tempDir);
     await pipeline(
       createReadStream(source),
       archiveSizeLimit("compressed", MAX_ARCHIVE_COMPRESSED_BYTES),
@@ -286,8 +296,8 @@ export async function restoreArchivedSession(key: string, sessionsRoot = getSess
       createWriteStream(tempFile, { flags: "wx" }),
     );
     const sessionId = await readArchivedSessionId(tempFile);
-    validateRestorePath(activeRoot, destination);
-    validateRestorePath(activeRoot, destinationArtifacts);
+    await validateRestorePath(activeRoot, destination);
+    await validateRestorePath(activeRoot, destinationArtifacts);
     // A hard link publishes atomically without overwriting a concurrently created transcript.
     try {
       await link(tempFile, destination);
@@ -296,10 +306,11 @@ export async function restoreArchivedSession(key: string, sessionsRoot = getSess
       throw error;
     }
     destinationCreated = true;
-    if (existsSync(sourceArtifacts)) {
-      validateRestorePath(archiveBase, sourceArtifacts);
-      if (!lstatSync(sourceArtifacts).isDirectory()) throw new Error("Archived artifacts are invalid");
-      if (existsSync(destinationArtifacts)) throw new Error("Active session destination already exists");
+    const artifactStat = await lstatIfExists(sourceArtifacts);
+    if (artifactStat) {
+      await validateRestorePath(archiveBase, sourceArtifacts);
+      if (!artifactStat.isDirectory()) throw new Error("Archived artifacts are invalid");
+      if (await lstatIfExists(destinationArtifacts)) throw new Error("Active session destination already exists");
       await mkdir(path.dirname(destinationArtifacts), { recursive: true });
       await rename(sourceArtifacts, destinationArtifacts);
       artifactsMoved = true;
