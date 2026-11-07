@@ -7,7 +7,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 ## [Unreleased]
 
 ### Added
-
+- **Traditional Chinese (`zh-TW`) interface language.** Switch the interface to Traditional Chinese (繁體中文) in **Settings → Appearance → Language**, or let omp-web pick it automatically when the browser language is `zh-TW`, `zh-HK`, `zh-MO`, or `zh-Hant`. Localized Web Push notifications and a Traditional Chinese README (`README.zh-TW.md`) are included.
 - **Several web apps can share one host daemon and the same live sessions.** Link additional servers with `ompweb host login --add --url <server>` (token from stdin). Prompts, tool progress, results and dialogs stay synchronized, and restarting one web app leaves the other connected to the same omp process. Link protocol v7 moves session startup, idle cleanup and interrupted-run recovery into the host; older links remain supported without sharing their processes. Schedule the first daemon upgrade while its host is quiescent.
 - **Sidebar marks sessions with an unsent draft.** A session whose composer still holds text or attachments shows a small pencil beside its title, so a half-written message is easy to find again. The mark follows this browser tab's drafts.
 - **Identify untagged builds from the logo.** Clicking or tapping the ompweb logo still reveals the version; builds made from an untagged Git commit also show its full hash and commit date (`YYYY-MM-DD`). Builds made on a tag keep the version-only display. The metadata is embedded in the browser bundle, so installed packages and binaries do not need Git.
