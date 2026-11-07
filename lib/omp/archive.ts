@@ -215,9 +215,13 @@ async function validateRestorePath(root: string, target: string): Promise<void> 
     try {
       canonical = await realpath(current);
     } catch (error) {
-      // Gone since the lstat above (a concurrent restore moved it): nothing there to escape through, like a path that was
-      // never there. A dangling link still exists, and is refused.
-      if (errnoCode(error) === "ENOENT" && !(await lstatIfExists(current))) break;
+      // A competing commit may remove and recreate a directory while realpath is pending. Absence is fine; a recreated
+      // ordinary directory needs fresh validation, not a traversal error. A dangling symlink is still refused.
+      if (errnoCode(error) === "ENOENT") {
+        const now = await lstatIfExists(current);
+        if (!now) break;
+        if (!now.isSymbolicLink()) return validateRestorePath(root, target);
+      }
       throw new Error("Invalid archive key");
     }
     if (escapesRoot(canonicalRoot, canonical)) throw new Error("Invalid archive key");
@@ -261,7 +265,11 @@ function validateRestorePathSync(root: string, target: string): void {
     try {
       canonical = realpathSync(current);
     } catch (error) {
-      if (errnoCode(error) === "ENOENT" && !lstatSyncIfExists(current)) break;
+      if (errnoCode(error) === "ENOENT") {
+        const now = lstatSyncIfExists(current);
+        if (!now) break;
+        if (!now.isSymbolicLink()) return validateRestorePathSync(root, target);
+      }
       throw new Error("Invalid archive key");
     }
     if (escapesRoot(canonicalRoot, canonical)) throw new Error("Invalid archive key");
@@ -376,17 +384,45 @@ function takeBackTranscript(destination: string, tempFile: string): string | nul
  * an exclusive hard link, and the undo by `takeBackTranscript`. A transcript or artifacts directory that appears at the
  * destination is never merged into, replaced or removed, and a step that fails undoes the earlier ones, newest first.
  *
- * A process killed inside this step (SIGKILL, an OOM kill) can leave the artifacts at the destination with no transcript, or
- * an empty destination directory: the kernel keeps every rename and link that had completed, so the archive entry is still
- * listed, and restoring it is refused as "already exists" until the leftover is moved back to `<name>.jsonl` beside the
- * archive (or removed, if empty). A power loss or kernel crash is not covered: nothing here calls fsync or keeps a journal,
- * so which of these directory operations reached the disk is not guaranteed, and no recovery is promised for it.
+ * A process killed inside this step (SIGKILL, an OOM kill) leaves its `.restore-lock` directory behind and may leave artifacts
+ * at the destination without a transcript. Never expire/remove the marker while a restorer can still run: stop all owners,
+ * inspect and repair the partial commit, then remove the orphaned marker manually. A power loss or kernel crash is not
+ * covered: nothing here calls fsync or keeps a journal, so which directory operations reached disk is not guaranteed.
  */
-function commitRestore({ archiveBase, activeRoot, source, sourceArtifacts, destination, destinationArtifacts, tempFile }: { archiveBase: string; activeRoot: string; source: string; sourceArtifacts: string; destination: string; destinationArtifacts: string; tempFile: string }): void {
+/** A filesystem claim coordinates the whole commit across independent web/daemon processes. Artifact source/destination
+ * observations cannot safely coordinate it: another process may move artifacts between those observations, and a loser
+ * can then publish the transcript before the mover does, causing the mover to roll the winner's artifacts back.
+ * Never expire this claim: a suspended holder can still publish. A killed holder requires manual recovery. */
+function commitRestore(plan: { archiveBase: string; activeRoot: string; source: string; sourceArtifacts: string; destination: string; destinationArtifacts: string; tempFile: string }): void {
+  validateRestorePathSync(plan.activeRoot, plan.destination);
+  const claim = `${plan.destination}.restore-lock`;
+  validateRestorePathSync(plan.activeRoot, claim);
+  try {
+    mkdirSync(claim);
+  } catch (error) {
+    if (errnoCode(error) === "EEXIST") throw new Error(`Active session destination already exists (restore commit claimed at ${claim}; if its owner was killed, manual recovery is required)`);
+    throw error;
+  }
+  const identity = lstatSync(claim, { bigint: true });
+  try {
+    commitRestoreOwned(plan);
+  } finally {
+    const current = lstatSync(claim, { bigint: true });
+    if (current.dev !== identity.dev || current.ino !== identity.ino) throw new Error(`Restore claim changed at ${claim}; manual recovery is required`);
+    rmdirSync(claim);
+  }
+}
+
+function commitRestoreOwned({ archiveBase, activeRoot, source, sourceArtifacts, destination, destinationArtifacts, tempFile }: { archiveBase: string; activeRoot: string; source: string; sourceArtifacts: string; destination: string; destinationArtifacts: string; tempFile: string }): void {
   validateRestorePathSync(archiveBase, source);
   validateRestorePathSync(archiveBase, sourceArtifacts);
   validateRestorePathSync(activeRoot, destination);
   validateRestorePathSync(activeRoot, destinationArtifacts);
+  // Staging happened before ownership was acquired: a previous owner may already have consumed the archive.
+  if (!lstatSyncIfExists(source)?.isFile()) {
+    if (lstatSyncIfExists(destination)) throw new Error("Active session destination already exists");
+    throw new Error("Archived session not found");
+  }
   const artifacts = lstatSyncIfExists(sourceArtifacts);
   if (artifacts && !artifacts.isDirectory()) throw new Error("Archived artifacts are invalid");
   // The active artifacts directory is the session's own: one already there belongs to another session, or to a restore

@@ -624,8 +624,20 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   attach (`StagedUploads.attach` creates `<session>/local/uploads/` the moment the
   session is visible) take the artifacts path between the steps; the restore then
   rolled the transcript back and left that directory behind, refusing every retry.
-  No `await` between the steps covers only this process; another process can act at
-  any instant, so no step is a check followed by an act. Directories move with
+  No `await` between the steps covers only this process. A filesystem-exclusive
+  directory claim, `<destination.jsonl>.restore-lock`, owns the whole commit across
+  web and daemon processes, from before source/destination observations through
+  rollback. Without it a competitor can snapshot artifacts absent while another
+  process has moved them; if that mover rolls back, the competitor can publish a
+  transcript without its artifacts. After ownership is acquired the archive's
+  existence is checked again: a late starter cannot publish from a staged copy
+  after an earlier winner consumed the archive. Ownership is never time-expired,
+  and cleanup checks the claim directory's device/inode before removing it.
+  Orphaned claims report their path and manual-recovery requirement in the 409.
+  An operator must first verify that every restorer using this session directory
+  is stopped, inspect/repair any partial commit, then remove the orphaned claim;
+  removing a live or suspended owner's claim reintroduces the data-loss race.
+  Individual filesystem steps remain exclusive or identity-checked. Directories move with
   `moveDirectoryNoReplace`: POSIX `rename(2)` replaces an *empty* directory at its
   target, so the target is first taken with `mkdir` (exclusive) and the rename then
   replaces only that empty directory of its own, failing ENOTEMPTY, and removing
@@ -642,11 +654,11 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   between the existence check and the read is "not found". A transcript or artifacts
   directory found at the destination fails the restore with 409 and is never merged
   into or removed. **Crash limitation:** a process killed inside the commit (SIGKILL,
-  an OOM kill) can leave the artifacts at the destination with no transcript, or an
-  empty destination directory; the kernel keeps every rename and link that had
-  completed, so nothing already moved is lost. The archive entry stays listed and
-  restoring it is refused as "already exists" until the leftover is moved back to
-  `<name>.jsonl` beside the archive, or removed if empty. A power loss or kernel
+  an OOM kill) leaves the commit claim in place and can leave the artifacts at the
+  destination with no transcript, or an empty destination directory; the kernel keeps every rename and link that had
+  completed, so nothing already moved is lost. If the archive was not consumed it
+  stays listed; retries stay blocked until the partial commit is repaired and the
+  orphaned claim is removed as described above. A power loss or kernel
   crash is not covered: the commit calls no fsync and keeps no journal (none is added
   on purpose), so which of its directory operations reached the disk is not
   guaranteed, and no recovery is promised for that.
