@@ -28,10 +28,12 @@ export async function withArchiveRestoreLock<T>(sessionId: string, restore: () =
     db.exec("CREATE TABLE IF NOT EXISTS restore_leases (session_id TEXT PRIMARY KEY, owner TEXT NOT NULL, renewed_at INTEGER NOT NULL)");
     claimed = db.transaction(() => {
       const now = Date.now();
-      db.prepare("DELETE FROM restore_leases WHERE session_id = ? AND renewed_at < ?").run(sessionId, now - LEASE_MS);
+      // A lease dated ahead (the writer's clock was fast) lapses too, or it would never expire.
+      db.prepare("DELETE FROM restore_leases WHERE session_id = ? AND renewed_at NOT BETWEEN ? AND ?").run(sessionId, now - LEASE_MS, now + LEASE_MS);
       return db.prepare("INSERT INTO restore_leases (session_id, owner, renewed_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING").run(sessionId, owner, now).changes === 1;
     }).immediate();
     if (!claimed) throw new HostOpError(409, "archive_restore_busy", `Session ${sessionId} is already being restored`);
+    // shortcut: no fencing once a holder lost its lease (e.g. suspended > 30 s); the daemon's atomic link publish (409 already exists) is the backstop.
     renewal = setInterval(() => {
       try {
         db.prepare("UPDATE restore_leases SET renewed_at = ? WHERE session_id = ? AND owner = ?").run(Date.now(), sessionId, owner);

@@ -569,8 +569,8 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   be online, deliberately: an offline laptop blocks even a local restore (503
   `host_offline` with the blocking host's `host` label; the browser names it).
   `withArchiveRestoreLock` (`lib/archive-restore-lock.ts`) is a per-session SQLite
-  lease in `<agent dir>/omp-web/`, renewed every 10 s and reclaimable 30 s after its
-  last renewal (never by PID, which can be reused). It only coordinates web
+  lease in `<agent dir>/omp-web/`, renewed every 10 s and reclaimable once its
+  renewal time is over 30 s away from now, past or future (never by PID, which can be reused). It only coordinates web
   processes that share one agent directory, not separate web servers sharing a
   daemon. Async restore streams archives with fixed 256 MiB compressed and expanded
   limits, rejecting unsupported IDs before archive consumption.
