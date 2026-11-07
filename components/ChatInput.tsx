@@ -2,7 +2,7 @@
 
 import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, ClipboardPaste, CornerDownRight, ListChecks, Loader2, Mic, Paperclip, Plus, RotateCw, Shrink, Snail, Sparkles, Wrench, X, Zap } from "lucide-react";
+import { ChevronDown, ClipboardPaste, CornerDownRight, ListChecks, Loader2, Mic, Paperclip, Plus, Reply, RotateCw, Shrink, Snail, Sparkles, Wrench, X, Zap } from "lucide-react";
 import { getSubmitDuringRunBehavior, isWordCompletionEnabled } from "@/lib/composer-prefs";
 import type { BuiltinSlashCommandResult, CompactResultInfo, PromptSubmissionResult, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
@@ -1245,12 +1245,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const raw = overrideText ?? value;
     const msg = raw.trim();
     if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length) return;
+    // /btw runs beside any main turn and never enters the prompt queue.
+    // Check it before the streaming / submission guards so it works even when a
+    // shell command owns the session and onFollowUp is temporarily absent.
+    if (sendSideQuestion(msg, overrideText)) return;
+    if (rejectsPendingUploads()) return;
     // `!cmd` runs right away during a run too, as in omp's terminal; it is never queued as text.
     const shellCommand = msg.startsWith("!") && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length;
     if (submissionBlockedRef.current || holdingRef.current || (isStreaming && !shellCommand)) return;
     onAudioUnlock?.();
-    if (sendSideQuestion(msg, overrideText)) return;
-    if (rejectsPendingUploads()) return;
     const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFilesRef.current);
     if (!attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length && msg.startsWith("/") && onBuiltinCommand) {
       const expansion = expandWebSlashCommand(msg);
@@ -1462,7 +1465,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           return modelCollator.compare(a.name, b.name);
         });
     }
-    const commands = [...(isStreaming ? [] : builtinSlashCommands), ...externalSlashCommands];
+    const streamingAvailableBuiltins = isStreaming
+      ? builtinSlashCommands.filter((command) => command.name === "btw")
+      : builtinSlashCommands;
+    const commands = [...streamingAvailableBuiltins, ...externalSlashCommands];
     return [...commands]
       .filter((command) => {
         const name = command.name.toLowerCase();
@@ -1814,10 +1820,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const uploadsBlockSend = uploadingCount + failedUploadCount > 0;
   const imageUploads = attachedUploads.filter((upload) => upload.previewUrl !== null);
   const fileUploads = attachedUploads.filter((upload) => upload.previewUrl === null);
+  const isBtwDraft = /^\/btw(\s|$)/.test(value.trim());
   const primaryActionQueuesMessage =
     isStreaming
     && (Boolean(value.trim()) || hasAttachments || dictationCapturing)
-    && Boolean(onFollowUp);
+    && (Boolean(onFollowUp) || isBtwDraft);
   // The button follows the same Settings choice as Enter: soft keyboards have no
   // Enter to submit with, so this button is how touch devices steer.
   const primaryActionMode = primaryActionQueuesMessage && onSteer && getSubmitDuringRunBehavior() === "steer" ? "steer" : "followup";
@@ -3886,7 +3893,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   else sendQueued(primaryActionMode);
                 }}
                 disabled={submissionBlocked || isTranscribing}
-                title={t(primaryActionMode === "steer" ? "chatInput.steerNowTitle" : "chatInput.queueMessage")}
+                title={isBtwDraft ? t("btw.panelTitle") : t(primaryActionMode === "steer" ? "chatInput.steerNowTitle" : "chatInput.queueMessage")}
                 style={{
                   display: "flex", alignItems: "center", gap: 6,
                   background: "var(--accent-strong)",
@@ -3899,10 +3906,22 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   transition: "background var(--dur-fast) var(--ease-out-warm)",
                 }}
               >
-                {primaryActionMode === "steer"
-                  ? <CornerDownRight size={13} strokeWidth={2} aria-hidden="true" />
-                  : <ListChecks size={13} strokeWidth={2} aria-hidden="true" />}
-                {t(primaryActionMode === "steer" ? "chatInput.steer" : "chatInput.queue")}
+                {isBtwDraft ? (
+                  <>
+                    <Reply size={13} strokeWidth={2} aria-hidden="true" />
+                    {t("btw.ask")}
+                  </>
+                ) : primaryActionMode === "steer" ? (
+                  <>
+                    <CornerDownRight size={13} strokeWidth={2} aria-hidden="true" />
+                    {t("chatInput.steer")}
+                  </>
+                ) : (
+                  <>
+                    <ListChecks size={13} strokeWidth={2} aria-hidden="true" />
+                    {t("chatInput.queue")}
+                  </>
+                )}
               </button>
             ) : isStreaming ? (
               <button
