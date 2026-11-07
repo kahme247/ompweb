@@ -56,8 +56,10 @@ function collectArchives(directory: string, files: string[] = []): string[] {
   let entries: Dirent[];
   try {
     entries = readdirSync(directory, { withFileTypes: true });
-  } catch {
-    return files;
+  } catch (error) {
+    if (errnoCode(error) === "ENOENT") return files;
+    // An unreadable root/subtree can contain any session's archive. Never turn access or I/O failures into proven absence.
+    throw error;
   }
   for (const entry of entries) {
     const fullPath = path.join(directory, entry.name);

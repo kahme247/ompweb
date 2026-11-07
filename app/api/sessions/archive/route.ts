@@ -87,13 +87,22 @@ async function linkedHostArchives(): Promise<{ archives: ArchivedSessionInfo[]; 
 
 export async function GET() {
   try {
-    const [local, linked] = await Promise.all([
+    const [local, linked] = await Promise.allSettled([
       listArchivedSessionInfos(),
       linkedHostArchives(),
     ]);
-    const archives = [...local.map((archive) => ({ ...archive, hostId: LOCAL_HOST_ID })), ...linked.archives]
-      .sort((a, b) => b.archivedAt.localeCompare(a.archivedAt));
-    return Response.json({ archives, unavailableHosts: linked.unavailableHosts }, { headers: { "Cache-Control": "no-store" } });
+    if (linked.status === "rejected") throw linked.reason;
+    // Local corruption/unreadability is one host's failure, just like a linked daemon that cannot list its archive. Keep the
+    // healthy hosts visible; direct archive discovery still throws, so outbox callers cannot mistake this for proven absence.
+    const archives = [
+      ...(local.status === "fulfilled" ? local.value.map((archive) => ({ ...archive, hostId: LOCAL_HOST_ID })) : []),
+      ...linked.value.archives,
+    ].sort((a, b) => b.archivedAt.localeCompare(a.archivedAt));
+    const unavailableHosts = [
+      ...(local.status === "rejected" ? [{ id: LOCAL_HOST_ID, label: getHost(LOCAL_HOST_ID).label }] : []),
+      ...linked.value.unavailableHosts,
+    ];
+    return Response.json({ archives, unavailableHosts }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return apiErrorResponse(error);
   }

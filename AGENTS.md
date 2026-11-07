@@ -654,6 +654,9 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   fresh snapshot after reading, even if every read succeeded: replacement B at an
   enumerated pathname must not hide capture A added after enumeration. One changed
   snapshot retries; repeated churn throws rather than proving absence.
+  `collectArchives` treats only `ENOENT` from root/subdirectory enumeration as
+  absence; access-denied, disk I/O and other traversal failures propagate through
+  local and daemon discovery. An unreadable subtree cannot prove any ID absent.
   A corrupt gzip also rejects the whole host's archive-list answer, unlike the old
   best-effort scanner that silently skipped it. Its session ID cannot be established,
   so skipping it would let outbox discovery falsely prove that session absent and
@@ -661,6 +664,11 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   availability: other sessions on that host may wait too, and archive browsing may
   report the host unavailable until an operator repairs or removes the corrupt
   entry. No files are removed automatically and no unrelated ID is marked archived.
+  The aggregate browser GET isolates failure per host, including this machine:
+  local corruption/unreadability adds `local` with its configured label to
+  `unavailableHosts` while healthy linked archives remain visible in a 200 response.
+  This UI aggregation does not catch errors for direct outbox discovery, which
+  still receives the scanner rejection and retains messages conservatively.
   Outbox discovery keeps the captured session's messages held without marking unrelated
   IDs archived. Missing-source lookup AND an ENOENT while pinning both check for the
   destination's orphan `.restore-lock`, reporting 409 with its path/manual recovery
