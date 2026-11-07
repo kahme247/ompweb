@@ -162,6 +162,7 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { id: "completion-sound", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.completionSound", descKey: "settingsConfig.completionSoundDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Completion sound", fallbackDesc: "Play a tone when the agent completes a run.", scope: "UI" },
   { id: "keep-tool-calls-collapsed", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.keepToolCallsCollapsed", descKey: "settingsConfig.keepToolCallsCollapsedDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Keep tool calls collapsed", fallbackDesc: "Show only compact headers while tools execute.", scope: "UI" },
   { id: "expand-thinking-by-default", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.expandThinkingByDefault", descKey: "settingsConfig.expandThinkingByDefaultDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Expand thinking blocks by default", fallbackDesc: "Open every thinking block as it appears, including while it streams, and keep it out of Process details so reasoning is readable without clicking each one. Collapsing a block by hand still works.", scope: "UI" },
+  { id: "expand-process-details", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.expandProcessDetails", descKey: "settingsConfig.expandProcessDetailsDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Expand process details by default", fallbackDesc: "Open the Process details row of each turn, so thinking, intermediate replies and tool calls are visible without clicking. Collapsing a row by hand still works.", scope: "UI" },
   { id: "hide-tool-activity", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.hideToolActivity", descKey: "settingsConfig.hideToolActivityDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Hide tool activity while working", fallbackDesc: "Fold a running turn's tool calls into one Process details row, the same way a finished turn folds them. Expand the row to see each call and its result.", scope: "UI" },
   { id: "show-tool-calls-unfolded", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.showToolCallsUnfolded", descKey: "settingsConfig.showToolCallsUnfoldedDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Show tool calls outside Process details", fallbackDesc: "Keep each tool call's row visible in the transcript instead of folding it into Process details. Whether the row opens is still set by \"Keep tool calls collapsed\".", scope: "UI" },
   { id: "never-fold-activity", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.neverFoldActivity", descKey: "settingsConfig.neverFoldActivityDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Never fold tool activity", fallbackDesc: "Show thinking, tool calls and notices as their own rows in every turn instead of folding them into Process details. Overrides \"Hide tool activity while working\".", scope: "UI" },
@@ -861,7 +862,7 @@ function CompactionMethodOrder({ value, onChange, ...aria }: { value: readonly C
   );
 }
 
-export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, hideToolActivity, onHideToolActivityChange, neverFoldActivity, onNeverFoldActivityChange, showToolCallsUnfolded, onShowToolCallsUnfoldedChange, expandThinkingByDefault, onExpandThinkingByDefaultChange, onHideThinkingBlockChange, providerUsageVisible, onProviderUsageVisibleChange, scopeNativeSelectAll, onScopeNativeSelectAllChange, openUrlAutomatically, onOpenUrlAutomaticallyChange, cwd, remoteHost, sessionId, onModelsSaved, onPluginsReloaded, appUpdate, onRefreshAppUpdate, onRequestAppUpdate, onSelectTab, onClose }: {
+export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, hideToolActivity, onHideToolActivityChange, neverFoldActivity, onNeverFoldActivityChange, showToolCallsUnfolded, onShowToolCallsUnfoldedChange, expandThinkingByDefault, onExpandThinkingByDefaultChange, expandProcessDetails, onExpandProcessDetailsChange, onHideThinkingBlockChange, providerUsageVisible, onProviderUsageVisibleChange, scopeNativeSelectAll, onScopeNativeSelectAllChange, openUrlAutomatically, onOpenUrlAutomaticallyChange, cwd, remoteHost, sessionId, onModelsSaved, onPluginsReloaded, appUpdate, onRefreshAppUpdate, onRequestAppUpdate, onSelectTab, onClose }: {
   activeTab: SettingsTab;
   toolCallsDefaultCollapsed: boolean;
   onToolCallsDefaultCollapsedChange: (collapsed: boolean) => void;
@@ -873,6 +874,8 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   onShowToolCallsUnfoldedChange: (show: boolean) => void;
   expandThinkingByDefault: boolean;
   onExpandThinkingByDefaultChange: (expand: boolean) => void;
+  expandProcessDetails: boolean;
+  onExpandProcessDetailsChange: (expand: boolean) => void;
   onHideThinkingBlockChange?: (hide: boolean) => void;
   providerUsageVisible: boolean;
   onProviderUsageVisibleChange: (visible: boolean) => void;
@@ -1281,6 +1284,9 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   </NativeSetting>
                   <NativeSetting searchId="expand-thinking-by-default" label={t("settingsConfig.expandThinkingByDefault")} description={t("settingsConfig.expandThinkingByDefaultDesc")} scope="UI">
                     <ToggleSwitch checked={expandThinkingByDefault} onChange={onExpandThinkingByDefaultChange} />
+                  </NativeSetting>
+                  <NativeSetting searchId="expand-process-details" label={t("settingsConfig.expandProcessDetails")} description={t("settingsConfig.expandProcessDetailsDesc")} scope="UI">
+                    <ToggleSwitch checked={expandProcessDetails} onChange={onExpandProcessDetailsChange} />
                   </NativeSetting>
                   <NativeSetting searchId="hide-tool-activity" label={t("settingsConfig.hideToolActivity")} description={t("settingsConfig.hideToolActivityDesc")} scope="UI">
                     <ToggleSwitch checked={hideToolActivity} onChange={onHideToolActivityChange} />

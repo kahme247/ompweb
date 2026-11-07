@@ -1443,6 +1443,8 @@
   "settingsConfig.neverFoldActivityDesc": "すべてのターンで、思考・ツール呼び出し・通知を「プロセス詳細」にまとめず、それぞれ個別の行として表示します。「作業中のツール実行を隠す」より優先されます。",
   "settingsConfig.expandThinkingByDefault": "思考ブロックを既定で展開",
   "settingsConfig.expandThinkingByDefaultDesc": "各思考ブロックを表示された時点で展開し（ストリーミング中も含む）、「プロセス詳細」にまとめずに表示します。1つずつクリックせずに推論を読めます。手動での折りたたみも引き続き可能です。",
+  "settingsConfig.expandProcessDetails": "プロセス詳細を既定で展開",
+  "settingsConfig.expandProcessDetailsDesc": "各ターンの「プロセス詳細」を最初から展開し、クリックせずに思考・途中の返信・ツール呼び出しを確認できます。手動での折りたたみも引き続き可能です。",
   "settingsConfig.openUrlAutomatically": "エージェントのリンクを確認せずに開く",
   "settingsConfig.openUrlAutomaticallyDesc": "表示中のセッションでエージェントが開くリンクを、すぐに新しいタブで開きます。他のセッションからのリンクは常に確認します。ブラウザーがポップアップをブロックする場合があります。",
   "settingsConfig.scopeNativeSelectAll": "ネイティブの「すべて選択」の範囲を制限（試験的）",
