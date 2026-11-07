@@ -62,7 +62,14 @@ import { ComposerModeStatus, ModelErrorBanner, QueuedActionButton } from "./Chat
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
 import {
   composeMessageWithTextAttachments,
+  inferImageMimeType,
+  isBinaryDocumentAttachment,
+  isImageAttachmentFile,
+  isKnownBinaryDocumentMeta,
+  MAX_ATTACHED_TEXT_BYTES,
   MAX_ATTACHED_TEXT_FILES,
+  MAX_TOTAL_ATTACHED_TEXT_BYTES,
+  readAttachmentText,
   selectTextAttachments,
 } from "@/lib/chat-attachments";
 import {
@@ -677,9 +684,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   }, [patchUpload]);
 
   /** Attaches files As file and starts their uploads: up to MAX_UPLOAD_BYTES each, MAX_UPLOADS_PER_MESSAGE in all
-   *  (the only refusals left, spec U2). `previewUrls[i]`: an image's thumbnail, made here when missing. Returns how
-   *  many were attached. */
-  const attachAsFiles = useCallback((files: File[], previewUrls: string[] = []): number => {
+   *  (the only refusals left, spec U2). `previewUrls[i]`: an image's thumbnail, made here when missing. Returns
+   *  the attached uploads. */
+  const attachAsFiles = useCallback((files: File[], previewUrls: string[] = []): AttachedUpload[] => {
     const room = Math.max(0, MAX_UPLOADS_PER_MESSAGE - attachedUploadsRef.current.length);
     const fitting = files.flatMap((file, i) => (file.size <= MAX_UPLOAD_BYTES ? [{ file, previewUrl: previewUrls[i] }] : []));
     const added = fitting.slice(0, room).map(({ file, previewUrl }): AttachedUpload => ({
@@ -698,13 +705,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     } else if (added.length < fitting.length) {
       setAttachError(t("chatInput.attachmentUploadLimit", { count: MAX_UPLOADS_PER_MESSAGE }));
     }
-    if (added.length === 0) return 0;
+    if (added.length === 0) return [];
     markInputEdited();
     // Counted at once: another batch in the same tick sees these.
     attachedUploadsRef.current = [...attachedUploadsRef.current, ...added];
     setAttachedUploads((prev) => [...prev, ...added]);
     added.forEach(runUpload);
-    return added.length;
+    return added;
   }, [markInputEdited, runUpload, t]);
 
   /** Whether `bytes` more of images (`extra` more of them) still fit the inline budget the send checks. */
@@ -728,7 +735,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       }
     }
     const switched = attachAsFiles(asFiles);
-    if (switched > 0) setAttachNotice(t("chatInput.imagesAsFile", { count: switched }));
+    if (switched.length > 0) setAttachNotice(t("chatInput.imagesAsFile", { count: switched.length }));
     if (!imageFiles.length) return;
     // Admission is a new composer edit now, not only when FileReader finishes: an older ACK must not invalidate it.
     markInputEdited();
@@ -740,7 +747,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     try {
       const newImages = await Promise.all(
         imageFiles.map(async (file) => {
-          const image: AttachedImage = { data: await readBase64(file), mimeType: file.type, previewUrl: URL.createObjectURL(file), file };
+          const image: AttachedImage = { data: await readBase64(file), mimeType: inferImageMimeType(file), previewUrl: URL.createObjectURL(file), file };
           created.push(image);
           return image;
         }),
@@ -771,57 +778,134 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     }
   }, [attachAsFiles, fitsInline, markInputEdited, t]);
 
-  /** Text is inlined while it fits the text budget; past it, when it turns out binary, and always for a PDF (omp reads
-   *  it as a document; its decoded bytes are not text), it goes As file. */
+  /** Text is inlined while it fits the text budget; past it, when it turns out binary, it goes As file.
+   *  Binary documents (PDF, Office, etc.) are always attached As file, and their text is inlined
+   *  while it fits the budget without showing a duplicate chip. */
   const processTextFiles = useCallback(async (files: File[]) => {
+    if (!files.length) return;
+    const knownBinaryDocs = files.filter((file) => isKnownBinaryDocumentMeta(file));
+    const docUploads = knownBinaryDocs.length ? attachAsFiles(knownBinaryDocs) : [];
+    const docUploadMap = new Map<File, AttachedUpload>();
+    for (const upload of docUploads) {
+      if (upload.file) docUploadMap.set(upload.file, upload);
+    }
     // In-flight batches reserve their bytes too, so two overlapping drops
     // cannot each fit under the aggregate budget on their own.
-    const { accepted: textFiles } = selectTextAttachments(files.filter((file) => file.type !== "application/pdf" && !/\.pdf$/i.test(file.name)), {
+    const { accepted: acceptedFiles } = selectTextAttachments(files, {
       usedBytes: attachedTextFilesRef.current.reduce((total, file) => total + file.size, 0) + pendingTextFileBytesRef.current,
       usedSlots: attachedTextFilesRef.current.length + pendingTextFileCountRef.current,
     });
-    attachAsFiles(files.filter((file) => !textFiles.includes(file)));
-    if (!textFiles.length) return;
+
+    const rejectedTextCandidates = files.filter((file) => !docUploadMap.has(file) && !acceptedFiles.includes(file));
+    if (rejectedTextCandidates.length) {
+      attachAsFiles(rejectedTextCandidates);
+    }
+
+    if (!acceptedFiles.length) return;
     markInputEdited();
     const revision = attachmentRevisionRef.current;
     const identityRevision = attachmentIdentityRevisionRef.current;
-    pendingTextFileCountRef.current += textFiles.length;
-    pendingTextFileBytesRef.current += textFiles.reduce((total, file) => total + file.size, 0);
+    const reservedBytes = acceptedFiles.reduce((total, file) => total + file.size, 0);
+    pendingTextFileCountRef.current += acceptedFiles.length;
+    pendingTextFileBytesRef.current += reservedBytes;
     try {
+      type ReadCandidate =
+        | { status: "binary"; file: File; isDoc: boolean }
+        | { status: "text"; file: File; isDoc: boolean; attachedFile: AttachedTextFile };
+
       const readFiles = await Promise.all(
-        textFiles.map(async (file): Promise<AttachedTextFile> => ({
-          name: file.name,
-          mimeType: file.type,
-          content: await file.text(),
-          size: file.size,
-        })),
+        acceptedFiles.map(async (file): Promise<ReadCandidate> => {
+          const content = await readAttachmentText(file);
+          const isDoc = docUploadMap.has(file) || await isBinaryDocumentAttachment(file);
+          if (content === null || content.includes("\u0000") || content.includes("\uFFFD")) {
+            return { status: "binary", file, isDoc };
+          }
+          const contentBytes = new TextEncoder().encode(content).byteLength;
+          const upload = docUploadMap.get(file);
+          return {
+            status: "text",
+            file,
+            isDoc,
+            attachedFile: {
+              name: file.name,
+              mimeType: file.type,
+              content,
+              size: contentBytes,
+              ...(upload ? { uploadId: upload.id } : {}),
+            },
+          };
+        }),
       );
       // The composer was cleared/sent while the reads were in flight —
       // drop the batch instead of re-appending stale attachments.
       if (attachmentRevisionRef.current !== revision) return;
-      // Binary content cannot be inlined into the prompt: NUL bytes, or
-      // U+FFFD replacement characters left by mis-decoded binary (e.g.
-      // UTF-16 text read as UTF-8).
-      const binary = readFiles.map((file) => file.content.includes("\u0000") || file.content.includes("\uFFFD"));
-      const newFiles = readFiles.filter((_, index) => !binary[index]);
-      attachAsFiles(textFiles.filter((_, index) => binary[index]));
-      setAttachedTextFiles((prev) => [
-        ...prev,
-        ...(identityRevision !== attachmentIdentityRevisionRef.current
-          ? newFiles
-          : newFiles.slice(0, Math.max(0, MAX_ATTACHED_TEXT_FILES - prev.length))),
-      ]);
+      const sniffedDocs = readFiles
+        .filter((candidate) => candidate.isDoc && !docUploadMap.has(candidate.file))
+        .map((candidate) => candidate.file);
+      if (sniffedDocs.length > 0) {
+        for (const upload of attachAsFiles(sniffedDocs)) {
+          if (upload.file) docUploadMap.set(upload.file, upload);
+        }
+        for (const candidate of readFiles) {
+          if (candidate.status === "text" && !candidate.attachedFile.uploadId) {
+            const upload = docUploadMap.get(candidate.file);
+            if (upload) candidate.attachedFile.uploadId = upload.id;
+          }
+        }
+      }
+      const fallbackAsFiles: File[] = [];
+      const otherInFlightBytes = Math.max(0, pendingTextFileBytesRef.current - reservedBytes);
+      let currentBytes = attachedTextFilesRef.current.reduce((total, file) => total + file.size, 0) + otherInFlightBytes;
+      const validTextFiles: AttachedTextFile[] = [];
+
+      for (const candidate of readFiles) {
+        if (candidate.status === "binary") {
+          if (!candidate.isDoc) {
+            fallbackAsFiles.push(candidate.file);
+          }
+          continue;
+        }
+        if (
+          candidate.attachedFile.size > MAX_ATTACHED_TEXT_BYTES
+          || currentBytes + candidate.attachedFile.size > MAX_TOTAL_ATTACHED_TEXT_BYTES
+        ) {
+          if (!candidate.isDoc) {
+            fallbackAsFiles.push(candidate.file);
+          }
+          continue;
+        }
+        currentBytes += candidate.attachedFile.size;
+        validTextFiles.push(candidate.attachedFile);
+      }
+      if (fallbackAsFiles.length > 0) {
+        attachAsFiles(fallbackAsFiles);
+      }
+
+      setAttachedTextFiles((prev) => {
+        if (identityRevision !== attachmentIdentityRevisionRef.current) {
+          return [...prev, ...validTextFiles];
+        }
+        let committedBytes = prev.reduce((total, file) => total + file.size, 0);
+        const accepted = validTextFiles
+          .filter((file) => {
+            if (committedBytes + file.size > MAX_TOTAL_ATTACHED_TEXT_BYTES) return false;
+            committedBytes += file.size;
+            return true;
+          })
+          .slice(0, Math.max(0, MAX_ATTACHED_TEXT_FILES - prev.length));
+        return [...prev, ...accepted];
+      });
     } catch {
       setAttachError(t("chatInput.attachmentTextReadFailed"));
     } finally {
-      pendingTextFileCountRef.current -= textFiles.length;
-      pendingTextFileBytesRef.current -= textFiles.reduce((total, file) => total + file.size, 0);
+      pendingTextFileCountRef.current -= acceptedFiles.length;
+      pendingTextFileBytesRef.current -= reservedBytes;
     }
   }, [attachAsFiles, markInputEdited, t]);
 
   const processFiles = useCallback((files: File[]) => {
-    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
-    const otherFiles = files.filter((file) => !file.type.startsWith("image/"));
+    const imageFiles = files.filter((file) => isImageAttachmentFile(file));
+    const otherFiles = files.filter((file) => !isImageAttachmentFile(file));
     void processImageFiles(imageFiles);
     void processTextFiles(otherFiles);
   }, [processImageFiles, processTextFiles]);
@@ -874,9 +958,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     setAttachNotice(null);
   }, [markInputEdited]);
 
-  const removeTextFile = useCallback((index: number) => {
+  const removeTextFile = useCallback((target: number | AttachedTextFile) => {
     markInputEdited();
-    setAttachedTextFiles((prev) => prev.filter((_, fileIndex) => fileIndex !== index));
+    setAttachedTextFiles((prev) => {
+      if (typeof target === "number") {
+        return prev.filter((_, fileIndex) => fileIndex !== target);
+      }
+      return prev.filter((file) => file !== target);
+    });
     setAttachError(null);
   }, [markInputEdited]);
 
@@ -904,6 +993,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
       return prev.filter((upload) => upload.id !== id);
     });
+    setAttachedTextFiles((prev) => prev.filter((file) => file.uploadId !== id));
     setAttachError(null);
     setAttachNotice(null);
   }, [markInputEdited]);
@@ -923,7 +1013,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       `image.${image.mimeType.slice("image/".length)}`,
       { type: image.mimeType },
     );
-    if (!attachAsFiles([file], [image.previewUrl])) return;
+    if (!attachAsFiles([file], [image.previewUrl]).length) return;
     setAttachedImages((prev) => prev.filter((each) => each !== image));
   }, [attachAsFiles]);
 
@@ -2495,67 +2585,70 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             ))}
           </div>
         )}
-        {(attachedTextFiles.length > 0 || fileUploads.length > 0) && (
-          <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
-            {attachedTextFiles.map((file, i) => (
-              <div
-                key={i}
-                style={{
-                  display: "flex", alignItems: "center", gap: 7,
-                  maxWidth: 260, height: 30,
-                  padding: "0 6px 0 9px",
-                  border: "1px solid var(--border)",
-                  borderRadius: 6,
-                  background: "var(--bg-panel)",
-                  fontSize: 12,
-                  color: "var(--text)",
-                }}
-              >
-                <span style={{ flexShrink: 0, display: "flex", color: "var(--text-muted)" }}>
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
-                    <polyline points="14 2 14 8 20 8" />
-                  </svg>
-                </span>
-                <span
-                  title={file.name}
+        {(() => {
+          const standaloneTextFiles = attachedTextFiles.filter((file) => !file.uploadId);
+          return (standaloneTextFiles.length > 0 || fileUploads.length > 0) && (
+            <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
+              {standaloneTextFiles.map((file, i) => (
+                <div
+                  key={i}
                   style={{
-                    minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                    fontFamily: "var(--font-mono)", fontSize: 11.5,
+                    display: "flex", alignItems: "center", gap: 7,
+                    maxWidth: 260, height: 30,
+                    padding: "0 6px 0 9px",
+                    border: "1px solid var(--border)",
+                    borderRadius: 6,
+                    background: "var(--bg-panel)",
+                    fontSize: 12,
+                    color: "var(--text)",
                   }}
                 >
-                  {file.name}
-                </span>
-                <span style={{ flexShrink: 0, fontSize: 10, color: "var(--text-dim)" }}>
-                  {file.size < 1024 ? `${file.size} B` : `${Math.round(file.size / 1024)} KB`}
-                </span>
-                <button
-                  className="attachment-remove-button"
-                  onClick={() => removeTextFile(i)}
-                  title={t("chatInput.removeFile")}
-                  aria-label={t("chatInput.removeFile")}
-                  style={{
-                    flexShrink: 0, width: 18, height: 18,
-                    borderRadius: "50%",
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    background: "transparent", border: "none",
-                    cursor: "pointer", padding: 0, color: "var(--text-muted)",
-                    transition: "color var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm)",
-                  }}
-                  onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "transparent"; }}
-                >
-                  <svg width="9" height="9" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-                    <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
-                  </svg>
-                </button>
-              </div>
-            ))}
-            {fileUploads.map((upload) => (
-              <UploadChip key={upload.id} upload={upload} onRemove={() => removeUpload(upload.id)} onRetry={() => retryUpload(upload.id)} />
-            ))}
-          </div>
-        )}
+                  <span style={{ flexShrink: 0, display: "flex", color: "var(--text-muted)" }}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
+                      <polyline points="14 2 14 8 20 8" />
+                    </svg>
+                  </span>
+                  <span
+                    title={file.name}
+                    style={{
+                      minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                      fontFamily: "var(--font-mono)", fontSize: 11.5,
+                    }}
+                  >
+                    {file.name}
+                  </span>
+                  <span style={{ flexShrink: 0, fontSize: 10, color: "var(--text-dim)" }}>
+                    {file.size < 1024 ? `${file.size} B` : `${Math.round(file.size / 1024)} KB`}
+                  </span>
+                  <button
+                    className="attachment-remove-button"
+                    onClick={() => removeTextFile(file)}
+                    title={t("chatInput.removeFile")}
+                    aria-label={t("chatInput.removeFile")}
+                    style={{
+                      flexShrink: 0, width: 18, height: 18,
+                      borderRadius: "50%",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      background: "transparent", border: "none",
+                      cursor: "pointer", padding: 0, color: "var(--text-muted)",
+                      transition: "color var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm)",
+                    }}
+                    onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "transparent"; }}
+                  >
+                    <svg width="9" height="9" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                      <line x1="1" y1="1" x2="7" y2="7" /><line x1="7" y1="1" x2="1" y2="7" />
+                    </svg>
+                  </button>
+                </div>
+              ))}
+              {fileUploads.map((upload) => (
+                <UploadChip key={upload.id} upload={upload} onRemove={() => removeUpload(upload.id)} onRetry={() => retryUpload(upload.id)} />
+              ))}
+            </div>
+          );
+        })()}
 
         {/* Main input */}
         <div style={{ position: "relative" }}>

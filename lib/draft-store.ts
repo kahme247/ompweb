@@ -8,6 +8,7 @@ export interface ChatDraftFile {
   mimeType: string;
   content: string;
   size: number;
+  uploadId?: string;
 }
 
 /** A finished upload staged on `hostId` (docs/specs/2026-11-02-file-uploads-design.md U2). */
