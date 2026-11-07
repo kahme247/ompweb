@@ -1081,6 +1081,10 @@ function remoteSessionOps(hostId: string): SessionOps {
       }
       if (ORPHAN_SENSITIVE_OPS[op]) await orphanExit(hostId, String(args[0]));
       const result = await request(hostId, op, Object.fromEntries(params.map((name, i) => [name, args[i]])));
+      if (op === "listSessionIdsForRestore") {
+        if (Array.isArray(result) && result.every((id) => typeof id === "string" && id.length > 0)) return result;
+        throw new HostOpError(502, "host_bad_result", `${labelOf(hostId)} sent an incomplete active-session inventory`);
+      }
       const list: ((value: unknown) => object | null) | null = op === "listSessions" ? sessionEntry : op === "listProjects" ? projectEntry : op === "listArchives" ? archiveEntry : null;
       // Untrusted list entries: malformed ones are dropped, the rest keep only their known fields.
       if (list && Array.isArray(result)) return result.map(list).filter((entry) => entry !== null);

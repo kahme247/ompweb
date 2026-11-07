@@ -568,6 +568,20 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   including a same-host session at a different path. So every registered host must
   be online, deliberately: an offline laptop blocks even a local restore (503
   `host_offline` with the blocking host's `host` label; the browser names it).
+  Restore preflight uses the separate `listSessionIdsForRestore` host op, not
+  `listSessions`: the sidebar's ordinary scanner intentionally skips unreadable
+  projects and caches best-effort results, which cannot prove a UUID absent.
+  The strict op shares the one-level session-file walker but bypasses all walk,
+  metadata and sidebar caches, propagates access/I/O failures at root or project
+  depth, reads each bounded header strictly and refuses unidentifiable headers.
+  It neither populates nor invalidates general listing caches. Genuine directory
+  ENOENT stays absence; a file vanishing while reading conservatively blocks this
+  attempt. Any incomplete inventory or malformed wire result blocks restore with
+  503 `host_sessions_unavailable`, before reserve/restore/consumption. Older daemons
+  answer 501 for the new op, which is also surfaced as that 503: update/restart
+  them before restoring; never fall back to their best-effort lists or use an
+  optional strict argument they could silently ignore. Normal listing semantics,
+  cache behavior and older-host browsing compatibility are unchanged.
   `withArchiveRestoreLock` (`lib/archive-restore-lock.ts`) is a per-session SQLite
   lease in `<agent dir>/omp-web/`, renewed every 10 s and reclaimable once its
   renewal time is over 30 s away from now, past or future (never by PID, which can be reused). It only coordinates web

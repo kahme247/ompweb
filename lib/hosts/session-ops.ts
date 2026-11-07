@@ -17,6 +17,7 @@ import { listArchivedSessionInfos, restoreArchivedSession, restoreFailureStatus 
 import {
   archiveSessionFileWithArtifacts,
   buildSessionTree,
+  listSessionIdsForRestore,
   deleteSessionFileWithArtifacts,
   getLeafEntryId,
   loadSessionFile,
@@ -95,6 +96,8 @@ export interface ProjectUpdate {
 
 export interface SessionOps {
   listSessions(): Promise<SessionInfo[]>;
+  /** Strict, uncached active-ID inventory for restore conflict checks; errors mean absence cannot be established. */
+  listSessionIdsForRestore(): Promise<string[]>;
   readSession(id: string, options: SessionReadOptions): Promise<OpResult<SessionReadValue>>;
   readContext(id: string, leafId: string | undefined, options: ContextReadOptions): Promise<OpResult<unknown>>;
   readThinking(id: string, entryId: string, block: number): Promise<OpResult<unknown>>;
@@ -310,6 +313,7 @@ async function runOmpExport(filePath: string, outputPath: string): Promise<void>
 /** This machine's session and project files. */
 export const sessionOps: SessionOps = {
   listSessions: () => listAllSessions(),
+  listSessionIdsForRestore: async () => listSessionIdsForRestore(),
 
   async readSession(id, { deferThinking, deferMedia: deferToolResultImages }) {
     const filePath = await resolveSessionPath(id);

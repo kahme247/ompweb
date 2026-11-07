@@ -55,16 +55,16 @@ async function activeSessionHosts(sessionId: string): Promise<string[]> {
   ensureLinked();
   const lists = await Promise.all(hosts.map(async (host) => {
     try {
-      // Ordered link requests invalidate the daemon's own cache before its list runs.
-      host!.invalidateSessionLists();
-      return { hostId: host!.id, sessions: await host!.sessionOps.listSessions() };
+      // This separate op cannot be silently ignored by an older daemon as an unknown optional argument. It either returns
+      // a complete fresh inventory or fails; the sidebar's best-effort lists and caches are not absence evidence.
+      return { hostId: host!.id, sessions: await host!.sessionOps.listSessionIdsForRestore() };
     } catch {
       ensureLinked();
       throw new HostOpError(503, "host_sessions_unavailable", "Could not read every host's active sessions; the archive was not restored");
     }
   }));
   ensureLinked();
-  return lists.filter(({ sessions }) => sessions.some((session) => session.id === sessionId)).map(({ hostId }) => hostId);
+  return lists.filter(({ sessions }) => sessions.includes(sessionId)).map(({ hostId }) => hostId);
 }
 
 /** Each linked host's archive; a host that is offline or cannot answer (an older daemon) is listed in `unavailableHosts`. */

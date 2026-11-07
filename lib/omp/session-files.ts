@@ -522,12 +522,13 @@ export function loadSessionFile(filePath: string, options: LoadSessionOptions = 
  * the second when line 1 is a title slot), capped at 64 KiB. The slot title is
  * folded into the returned header.
  */
-export function readSessionHeaderSync(filePath: string): SessionHeader | null {
+export function readSessionHeaderSync(filePath: string, strict = false): SessionHeader | null {
   const maxHeaderBytes = 64 * 1024 + SESSION_TITLE_SLOT_BYTES;
   let fd: number;
   try {
     fd = openSync(filePath, "r");
-  } catch {
+  } catch (error) {
+    if (strict) throw error;
     return null;
   }
   let head: string;
@@ -1160,7 +1161,19 @@ export async function listSessionFiles(sessionsRoot: string): Promise<string[]> 
   return files;
 }
 
-function collectSessionFiles(sessionsRoot: string): string[] {
+/** Restore conflict preflight only: an uncached, complete ID inventory. Never populate or trust the best-effort sidebar
+ * caches: skipped directories or unreadable/unidentifiable headers cannot prove a session absent on this machine. */
+export function listSessionIdsForRestore(sessionsRoot = getSessionsDir()): string[] {
+  const ids: string[] = [];
+  for (const file of collectSessionFiles(sessionsRoot, true)) {
+    const header = readSessionHeaderSync(file, true);
+    if (!header || typeof header.id !== "string" || !header.id) throw new Error(`Cannot identify active session at ${file}`);
+    ids.push(header.id);
+  }
+  return ids;
+}
+
+function collectSessionFiles(sessionsRoot: string, strict = false): string[] {
   const files: string[] = [];
   try {
     for (const dirent of readDirectorySyncRuntime(sessionsRoot, { withFileTypes: true })) {
@@ -1169,7 +1182,8 @@ function collectSessionFiles(sessionsRoot: string): string[] {
       let inner: Dirent[];
       try {
         inner = readDirectorySyncRuntime(dirPath, { withFileTypes: true });
-      } catch {
+      } catch (error) {
+        if (strict && !(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
         continue;
       }
       for (const file of inner) {
@@ -1178,7 +1192,8 @@ function collectSessionFiles(sessionsRoot: string): string[] {
         }
       }
     }
-  } catch {
+  } catch (error) {
+    if (strict && !(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
     return [];
   }
   return files;
