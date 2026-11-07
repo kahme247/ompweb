@@ -2442,16 +2442,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               marginBottom: 8, padding: "5px 10px",
               background: "color-mix(in srgb, var(--status-warning) 8%, transparent)", border: "1px solid color-mix(in srgb, var(--status-warning) 25%, transparent)",
               borderRadius: 6, fontSize: 12, color: "var(--status-warning)",
-              display: "flex", alignItems: "center", gap: 6,
+              display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6,
             }}>
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
                 <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
                 <path d="M3 3v5h5" />
               </svg>
-              {remainingSec !== undefined
-                ? t("chatInput.retryingWithCountdown", { attempt: retryInfo.attempt, maxAttempts: retryInfo.maxAttempts, seconds: remainingSec })
-                : t("chatInput.retrying", { attempt: retryInfo.attempt, maxAttempts: retryInfo.maxAttempts })}
-              {retryInfo.errorMessage && <span style={{ opacity: 0.7, marginLeft: 4 }}>— {retryInfo.errorMessage}</span>}
+              <span tabIndex={0} style={{ flex: "1 1 160px", minWidth: 0, maxHeight: 120, overflowY: "auto", overflowWrap: "anywhere" }}>
+                {remainingSec !== undefined
+                  ? t("chatInput.retryingWithCountdown", { attempt: retryInfo.attempt, maxAttempts: retryInfo.maxAttempts, seconds: remainingSec })
+                  : t("chatInput.retrying", { attempt: retryInfo.attempt, maxAttempts: retryInfo.maxAttempts })}
+                {retryInfo.errorMessage && <span style={{ opacity: 0.7, marginLeft: 4 }}>— {retryInfo.errorMessage}</span>}
+              </span>
               {onAbortRetry && (
                 <button
                   type="button"
@@ -2459,6 +2461,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   title={t("chatInput.abortRetryTitle")}
                   style={{
                     marginLeft: "auto",
+                    flexShrink: 0,
                     padding: "3px 9px",
                     fontSize: 11,
                     color: "var(--status-warning)",
@@ -2466,7 +2469,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     border: "1px solid color-mix(in srgb, var(--status-warning) 45%, transparent)",
                     borderRadius: 6,
                     cursor: "pointer",
-                    whiteSpace: "nowrap",
+                    maxWidth: "100%",
+                    whiteSpace: "normal",
+                    overflowWrap: "anywhere",
                     transition: "background var(--dur-fast) var(--ease-out-warm)",
                   }}
                   onMouseEnter={(e) => { e.currentTarget.style.background = "color-mix(in srgb, var(--status-warning) 12%, transparent)"; }}
