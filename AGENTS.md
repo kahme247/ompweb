@@ -642,7 +642,8 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   replacement installed after capture is left untouched. If exclusive return is
   blocked, the captured generation is retained at the reported recovery name.
   **Discovery during capture:** `collectArchives` also recognizes strictly named
-  `.jsonl.gz.<UUID>.restore-consume` files and parses their actual compressed header.
+  `.jsonl.gz.<UUID>.restore-consume` basenames (including valid POSIX stems/parents
+  containing newlines) and parses their actual compressed header.
   Each capture keeps its unique physical key and carries `restorePending: true`;
   it is exact-session archive evidence, never an alias of the original `.gz` key.
   The browser disables Restore for capture evidence, and the API independently
@@ -652,8 +653,15 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   verifies file names and generation signatures (device/inode/size/mtime) in a
   fresh snapshot after reading, even if every read succeeded: replacement B at an
   enumerated pathname must not hide capture A added after enumeration. One changed
-  snapshot retries; repeated churn throws rather than proving absence. Outbox
-  discovery keeps the captured session's messages held without marking unrelated
+  snapshot retries; repeated churn throws rather than proving absence.
+  A corrupt gzip also rejects the whole host's archive-list answer, unlike the old
+  best-effort scanner that silently skipped it. Its session ID cannot be established,
+  so skipping it would let outbox discovery falsely prove that session absent and
+  permanently fail a held message. This deliberately favors retention over
+  availability: other sessions on that host may wait too, and archive browsing may
+  report the host unavailable until an operator repairs or removes the corrupt
+  entry. No files are removed automatically and no unrelated ID is marked archived.
+  Outbox discovery keeps the captured session's messages held without marking unrelated
   IDs archived. Missing-source lookup AND an ENOENT while pinning both check for the
   destination's orphan `.restore-lock`, reporting 409 with its path/manual recovery
   instead of 404. Once the owner is verified dead, return the capture to its original

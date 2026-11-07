@@ -161,7 +161,8 @@ test("capture evidence cannot be restored or alias the replacement archive's sel
   render(React.createElement(ArchiveBrowser, { open: true, onClose() {}, onRestored() {} }));
   await screen.findByRole("heading", { name: "Captured A" });
   const user = userEvent.setup();
-  const blocked = screen.getByRole("button", { name: "Restoring…" });
+  const blocked = screen.getByRole("button", { name: "Restore Session" });
+  assert.equal(screen.queryByRole("button", { name: "Restoring…" }), null, "capture evidence does not imply that an operation is running");
   assert.equal(blocked.disabled, true);
   await user.click(blocked);
   assert.deepEqual(posts, []);

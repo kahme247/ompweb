@@ -901,7 +901,7 @@ export function ArchiveBrowser({ open, onClose, onRestored }: ArchiveBrowserProp
                           aria-hidden="true"
                         />
                         <span>
-                          {selectedArchive.restorePending || restoringKey === archiveId(selectedArchive)
+                          {restoringKey === archiveId(selectedArchive)
                             ? t("archiveBrowser.restoring")
                             : t("archiveBrowser.restore")}
                         </span>

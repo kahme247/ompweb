@@ -47,8 +47,9 @@ function normalizeArchiveKey(key: string): string {
 
 /** Only names emitted by commitRestore: arbitrary similarly named files are not archive evidence. Captures retain a unique
  * physical key and are explicitly discovery-only, never aliases of an ordinary archive's actionable key. */
-function capturedArchiveSource(filePath: string): string | null {
-  return /^(.*\.jsonl\.gz)\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.restore-consume$/i.exec(filePath)?.[1] ?? null;
+function isCapturedArchive(filePath: string): boolean {
+  // Match only the basename suffix: parent directories and valid POSIX filename stems may contain line terminators.
+  return /\.jsonl\.gz\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.restore-consume$/i.test(path.basename(filePath));
 }
 
 function collectArchives(directory: string, files: string[] = []): string[] {
@@ -61,7 +62,7 @@ function collectArchives(directory: string, files: string[] = []): string[] {
   for (const entry of entries) {
     const fullPath = path.join(directory, entry.name);
     if (entry.isDirectory()) collectArchives(fullPath, files);
-    else if (entry.isFile() && (entry.name.endsWith(".jsonl.gz") || capturedArchiveSource(entry.name))) files.push(fullPath);
+    else if (entry.isFile() && (entry.name.endsWith(".jsonl.gz") || isCapturedArchive(entry.name))) files.push(fullPath);
   }
   return files;
 }
@@ -173,7 +174,7 @@ export async function listArchivedSessions(archiveRoot = getArchivedSessionsDir(
       const records = await Promise.all([...before.keys()].map(async (filePath) => {
         if (statSync(filePath).size > MAX_ARCHIVE_COMPRESSED_BYTES) return undefined;
         const record = parseArchivePrefix(await readGzipPrefix(filePath, ARCHIVE_PREFIX_BYTES), filePath, root);
-        if (record && capturedArchiveSource(filePath)) record.restorePending = true;
+        if (record && isCapturedArchive(filePath)) record.restorePending = true;
         return record;
       }));
       const after = snapshot();
@@ -191,6 +192,8 @@ export async function listArchivedSessions(archiveRoot = getArchivedSessionsDir(
         if (attempt === 0) continue;
         throw new Error("Archive changed during listing; retry discovery");
       }
+      // Corrupt gzip/unreadable archive: its unknown session ID may be the held message's owner. Reject discovery rather
+      // than silently skip it and falsely prove absence; this intentionally makes the whole host temporarily unavailable.
       throw error;
     }
   }
