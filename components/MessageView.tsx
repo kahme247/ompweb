@@ -212,7 +212,7 @@ export function haveSameRelevantToolResults(
     if (!block || typeof block !== "object") continue;
     const b = block as unknown as Record<string, unknown>;
     if (b.type === "toolCall" || b.type === "tool_use" || b.type === "tool_call") {
-      const id = typeof b.id === "string" ? b.id : typeof b.toolCallId === "string" ? b.toolCallId : undefined;
+      const id = typeof b.toolCallId === "string" ? b.toolCallId : typeof b.id === "string" ? b.id : undefined;
       if (id && previous?.get(id) !== next?.get(id)) {
         return false;
       }

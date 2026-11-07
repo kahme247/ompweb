@@ -50,7 +50,6 @@ import {
   resolveParentSessionId,
   resolveSessionIdByPath,
   resolveSessionPath,
-  SessionFileMalformedError,
   SessionFileTooLargeError,
 } from "../session-reader";
 import type { SessionHistoryCursor } from "../session-sync";
@@ -356,8 +355,8 @@ export const sessionOps: SessionOps = {
       return ok({ context });
     } catch (error) {
       // Past the load ceiling: the same 413 as the null-header path, not a
+      // 500, so the frontend does not treat history as gone.
       if (error instanceof SessionFileTooLargeError) return sessionTooLarge();
-      if (error instanceof SessionFileMalformedError) return fail(404, "session_file_malformed", "Session file is missing or malformed");
       throw error;
     }
   },
