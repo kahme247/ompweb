@@ -7,7 +7,9 @@ import { join } from "path";
 import { Database } from "bun:sqlite";
 import { commandErrorResponse, runAgentCommand } from "./agent-command";
 import { apiErrorResponse, resolveSessionHostOr404 } from "./api-utils";
-import { onHostHello } from "./hosts/hub";
+import { getHost, listHosts, onHostHello } from "./hosts/hub";
+import { isLinkUp } from "./hosts/host";
+import { HostOpError } from "./hosts/link-protocol";
 import { STAGED_MAX_AGE_MS } from "./hosts/uploads";
 import { validateAgentImages, MAX_AGENT_COMMAND_REQUEST_BYTES, MAX_ATTACHED_IMAGE_BYTES, MAX_TOTAL_ATTACHED_IMAGE_BYTES, MAX_ATTACHED_IMAGES, getBase64DecodedByteLength } from "./image-attachments";
 import { listArchivedSessions } from "./omp/archive";
@@ -351,8 +353,9 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
   }
   const resolved = await resolveSessionHostOr404(sessionId);
   // Unavailable host lists cannot prove absence: retain the entry until discovery can resolve its owner. An archived
-  // session is not gone either: its entries wait until it is restored (spec O6).
-  if ("response" in resolved && resolved.response.status === 404 && !(await isArchived(sessionId))) return resolved.response;
+  // session (on this machine or a linked host) is not gone either: its entries wait until it is restored (spec O6),
+  // and so do those whose archive no host could be asked about.
+  if ("response" in resolved && resolved.response.status === 404 && (await archiveState(sessionId)) === "absent") return resolved.response;
 
   const now = Date.now();
   const database = db();
@@ -717,16 +720,46 @@ async function refused(entry: Row, response: Response, sent: boolean): Promise<O
   if (body.hostOffline === true && (!sent || body.delivery === "refused")) return "offline";
   if (body.code === "session_busy" || body.code === "session_restarting"
     || (!sent && (body.code === "host_timeout" || body.code === "host_sessions_unavailable"))) return retry(entry);
-  if (!sent && response.status === 404 && (await isArchived(entry.session_id))) {
-    // An archived session keeps its entries held until it is restored (spec O6).
-    if (!setState(entry.id, "held")) return "next";
-    publish(entry.session_id);
-    return "wait";
+  // Only a missing session can be an archived one; any other 404 (an upload that is gone, say) is that refusal.
+  if (!sent && response.status === 404 && body.code === "session_not_found") {
+    const archive = await archiveState(entry.session_id);
+    // An unreadable archive cannot prove the session is gone: never failed. A passing failure is tried again; one
+    // only a host's next hello can change waits for it, as for an offline host, without a timer.
+    if (archive === "retry") return retry(entry);
+    if (archive === "hello") return "offline";
+    if (archive === "archived") {
+      // An archived session keeps its entries held until it is restored (spec O6).
+      if (!setState(entry.id, "held")) return "next";
+      publish(entry.session_id);
+      return "wait";
+    }
   }
   // A lost reply (delivery unknown), a server error or an unresponsive child after the message went: omp may have it.
   return fail(entry, error, sent && (response.status >= 500 || body.code === "session_unresponsive"));
 }
 
-async function isArchived(sessionId: string): Promise<boolean> {
-  return (await listArchivedSessions()).some((archive) => archive.id === sessionId);
+/** `archived`/`absent`: every source answered. Otherwise the archive could not be read: `hello` while only a host's
+ * next hello can change that (its link is down, or an older daemon answered 501 and may hold archives it cannot
+ * list), `retry` for a failure that may pass by itself (timeout, bad answer, unreadable local archive). */
+type ArchiveState = "archived" | "absent" | "hello" | "retry";
+type ArchiveRead = boolean | "hello" | "retry";
+
+/** Whether `sessionId` is in an archive: this machine's, or any linked host's (as GET /api/sessions/archive lists them).
+ * An unreadable archive is never `absent`: the session may be in it. */
+async function archiveState(sessionId: string): Promise<ArchiveState> {
+  const reads: Promise<ArchiveRead>[] = [
+    listArchivedSessions().then((archives) => archives.some((archive) => archive.id === sessionId), (): ArchiveRead => "retry"),
+    ...listHosts().map(async (row): Promise<ArchiveRead> => {
+      const host = isLinkUp(row.status) ? getHost(row.id) : null;
+      if (!host) return "hello";
+      try {
+        return (await host.sessionOps.listArchives()).some((archive) => archive.id === sessionId);
+      } catch (error) {
+        return error instanceof HostOpError && (error.status === 501 || error.code === "host_offline") ? "hello" : "retry";
+      }
+    }),
+  ];
+  const found = await Promise.all(reads);
+  if (found.includes(true)) return "archived";
+  return found.includes("retry") ? "retry" : found.includes("hello") ? "hello" : "absent";
 }

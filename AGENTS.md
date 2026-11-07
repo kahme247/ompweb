@@ -559,9 +559,82 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   capabilities gate old daemons; unavailable operations never fall back to main.
   File tabs retain host/cwd/session ownership. Upload publication extends the
   existing staged 2 GiB uploader; its workspace receipts are not session attachments.
-- **Not yet remote:** Skills/Plugins/Agents/MCP settings and session archiving.
-  Archive remains 501 `remote_unavailable` with its menu item disabled; transcript
-  search and the archive browser still read this machine's files.
+- **Session archive is per host.** `POST /api/sessions/[id]/archive` archives on the
+  session's host. `/api/sessions/archive` lists this machine's archive (read on main)
+  plus each linked host's (`listArchives` op), every entry tagged `hostId`; an
+  offline or older host is reported in `unavailableHosts`. Restore sends `hostId`
+  and runs on that host (`restoreArchive` op). Restore requires fresh successful
+  session discovery from all registered hosts and blocks any already-active ID,
+  including a same-host session at a different path. So every registered host must
+  be online, deliberately: an offline laptop blocks even a local restore (503
+  `host_offline` with the blocking host's `host` label; the browser names it).
+  `withArchiveRestoreLock` (`lib/archive-restore-lock.ts`) is a per-session SQLite
+  lease in `<agent dir>/omp-web/`, renewed every 10 s and reclaimable once its
+  renewal time is over 30 s away from now, past or future (never by PID, which can be reused). It only coordinates web
+  processes that share one agent directory, not separate web servers sharing a
+  daemon. A remote restore outlives its request: the daemon keeps restoring after the
+  30 s op deadline, a lost link or a web restart, and a sender suspended after its
+  claim may send its restore long after another request took the ID over. No lease
+  clock or "status false" may free the ID meanwhile, so the claim is fenced at the
+  daemon, which is the only authority on whether a restore can still start, and
+  **bound to the daemon process** that took it. The daemon starts `restoreArchive`
+  only under a claim token (the lock row's owner) that main reserved with
+  `restoreReserve` and nothing has since spent or revoked (`session-ops.ts`, an
+  in-memory set capped at 256: an evicted token's restore is refused, never run).
+  Every daemon process has a random `instance`, which `restoreReserve` and
+  `restoreFence` return and the claim row records (`instance` column). The route
+  reserves (an op answer or error ends a restore that never left: no claim kept),
+  then `hold`s the claim with that instance (the row gains host and instance; a held
+  row never lapses by time), then sends `restoreArchive`. It `release`s only on a
+  result that proves this claim's restore ended: `ok`, or `archive_restore_failed`,
+  which only the process that admitted the token produces. Everything else keeps the
+  claim held and answers `archive_restore_unconfirmed`: silence or a lost link
+  (504/503), any other error, and **a refusal to admit (`archive_restore_not_admitted`)**,
+  because a replacement daemon that never saw the token refuses a resent request
+  while the original may still be running it. A held claim whose request still
+  renews it is `archive_restore_busy`; one that stopped renewing is resolved by the
+  next restore of that ID, on any host: main sends the holding host `restoreFence
+  {claim}`, which revokes the token (a request still in a suspended sender is then
+  refused) and answers with its `instance` and whether that restore runs. Main
+  takes the claim over only when the answering `instance` is the one recorded **and**
+  `running` is false. A fence answered by another process proves nothing: link
+  replacement (the same host id and token dialed by another daemon) ends only that
+  link in the replaced daemon, which keeps running an admitted restore while it has
+  another link (another server), and the replacement knows no token. So a
+  replaced, restarted or shut-down daemon, a still-running restore, offline, a daemon
+  that answers 501 (no restore is sent to a daemon that cannot reserve either), a
+  host unregistered since, and a row an earlier build wrote with no instance all keep
+  it blocked (409 `archive_restore_unconfirmed`, naming the session, the host and
+  when the claim was last seen alive). **Recovery limitation:** unregistering a host
+  does not stop its daemon, and a daemon that was replaced or restarted (a reboot
+  after a lost link included) cannot be shown stopped from here, so such a claim
+  stays blocked for good: there is deliberately no timeout and no automatic or blind
+  clearing, and registering the machine again gives it a new id, which does not
+  help. Only an operator who has verified on that machine that no `ompweb host`
+  daemon process that could have taken the restore is running (the claim names the
+  host and its last-alive time) may delete that session's row from `restore_claims`
+  in `<agent dir>/omp-web/archive-restore-locks.sqlite`; deleting it while that
+  daemon could still run lets a duplicate publish. A daemon-side proof of death (a
+  machine-wide token registry, a PID with its start identity) would remove this
+  limit for a restart; it is not built. A local restore (in this
+  process) is fenced at its publish: the claim's `publish` runs the hard link
+  (`linkSync`, never awaited) inside `BEGIN IMMEDIATE`, refusing unless the row is
+  still this request's, so a web process suspended past its lease cannot publish
+  over a request that took the session over, and one that takes over after sees the
+  published session. The step must stay synchronous: SQLite waits for a lock by
+  blocking the whole process, so a lock held across an await would freeze the
+  event loop for the 5 s busy timeout. The store is `restore_claims`, written with
+  `synchronous = FULL` so a power loss cannot forget a held claim. A migration gated
+  by `PRAGMA user_version` (2) runs once: it renames an earlier build's
+  `restore_leases` table into `restore_claims` (keeping its claims), adds `host_id`
+  and `instance` where missing (a held row from a build that lacked `instance` keeps
+  none and so stays blocked), and leaves `restore_leases` as a read-only view, so a
+  build that still uses the old name reads but fails every claim, delete and update
+  instead of lapsing a held row by its clock (later opens only read the version).
+  Async restore streams archives with fixed 256 MiB compressed and
+  expanded limits, rejecting unsupported IDs before archive consumption.
+- **Not yet remote:** Skills/Plugins/Agents/MCP settings; transcript search reads
+  this machine's files.
 
 #### Local daemon (`docs/specs/2026-10-29-local-daemon-design.md`)
 - **Two services.** `ompweb` (web) and `ompweb-host` (`ompweb host`, the daemon) are installed together by `ompweb systemd install`, `ompweb launchd install` and the Windows tray install; uninstall removes both, `ompweb systemd restart` restarts the web unit only. The daemon owns this machine's omp children, so a web restart, update or redeploy leaves runs going; restarting the daemon ends them (auto-resume then resumes the sessions that were running). An upgrade restarts the daemon only when the running daemon's link version is outside the new release's `[MIN_LINK_PROTOCOL_VERSION, LINK_PROTOCOL_VERSION]` range (it would get 4426 or 426 and exit); a daemon inside the range keeps running.
@@ -1280,7 +1353,7 @@ during the wait.
   `invalidateSessionFileListCache()` — never add a session-mutation path that
   forgets this. Regression test: `session-reader.test.mjs`.
 - A mutation that main triggers calls `invalidateLocalSessionLists()`: it clears main's per-host entry and sends the daemon `invalidateSessionLists` (the daemon runs the invalidation above). A route that changes this machine's session files and does not call it leaves the sidebar stale for up to 30 s.
-- **Still read on main, from this machine's own files:** transcript search (`session-content-search.ts`, `/api/sessions/search`), the session watcher (`session-watcher.ts`), archive list/restore, import, usage (`usage-db.ts`), subagent history and local file-reference readers. Their main-side session caches are invalidated separately. Workspace shell-output authorization and bytes now come from the owning daemon; new remote-capable readers must use the host seam.
+- **Still read on main, from this machine's own files:** transcript search (`session-content-search.ts`, `/api/sessions/search`), the session watcher (`session-watcher.ts`), this machine's archive list/restore (linked hosts' go through their daemons), import, usage (`usage-db.ts`), subagent history and local file-reference readers. Their main-side session caches are invalidated separately. Workspace shell-output authorization and bytes now come from the owning daemon; new remote-capable readers must use the host seam.
 
 ### Chat scroll-follow
 - `useAgentSession` follows the conversation: the effect depends on both

@@ -473,6 +473,8 @@ export interface ArchivedSessionInfo {
   firstMessage: string;
   size: number;
   status?: "complete" | "interrupted" | "aborted" | "error" | "pending" | "unknown";
+  /** Host whose archive holds it ("local" for this machine). Set by the all-hosts list; a host's own list leaves it out. */
+  hostId?: string;
 }
 
 /** Workspace-level omp launch configuration; only affects omp children spawned for that workspace. */
