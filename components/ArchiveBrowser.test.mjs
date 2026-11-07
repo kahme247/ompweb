@@ -126,3 +126,21 @@ test("selecting a remote archive with a local key collision switches details and
   await waitFor(() => assert.deepEqual(restored, [shared.id]));
   assert.equal(closed, 1);
 });
+
+test("a restore refused by an offline host names that host and why it blocks the restore", async (t) => {
+  const { toast } = await import("./ui/toast.tsx");
+  const errors = [];
+  t.mock.method(toast, "error", (message) => { errors.push(message); });
+  globalThis.Worker = class FakeWorker { postMessage() {} };
+  const archive = { key: "kept.jsonl.gz", id: "kept", hostId: "local", name: "Kept", cwd: "/local", firstMessage: "", created: "2026-11-01T12:00:00Z",
+    archivedAt: "2026-11-02T12:00:00Z", size: 10, messageCount: 1, status: "complete" };
+  t.mock.method(globalThis, "fetch", async (_url, init) => init?.method === "POST"
+    ? Response.json({ error: "Laptop is offline", code: "host_offline", hostOffline: true, host: "Laptop" }, { status: 503 })
+    : Response.json({ archives: [archive] }));
+  render(React.createElement(ArchiveBrowser, { open: true, onClose() {}, onRestored() {} }));
+  await screen.findByRole("heading", { name: "Kept" });
+  await userEvent.setup().click(screen.getByRole("button", { name: "Restore Session" }));
+  await waitFor(() => assert.deepEqual(errors, [
+    "Failed to restore session: Laptop is offline. Restoring needs every registered host online, to check that the session is not active on one of them.",
+  ]));
+});

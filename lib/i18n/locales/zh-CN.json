@@ -83,6 +83,7 @@
   "archiveBrowser.restoring": "恢复中…",
   "archiveBrowser.restoreSuccess": "已恢复会话“{name}”",
   "archiveBrowser.restoreFailed": "恢复会话失败：{detail}",
+  "archiveBrowser.restoreHostOffline": "{host} 处于离线状态。恢复前需确认该会话未在任何主机上处于活动状态，因此所有已注册的主机都必须在线。",
   "archiveBrowser.directory": "工作目录",
   "archiveBrowser.host": "主机",
   "archiveBrowser.sessionId": "会话 ID",

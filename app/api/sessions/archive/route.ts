@@ -11,12 +11,18 @@ import type { ArchivedSessionInfo } from "@/lib/types";
 import { isValidSessionId } from "@/lib/session-file-references-core";
 import { withArchiveRestoreLock } from "@/lib/archive-restore-lock";
 
+/** A registered host is offline, so restore cannot prove the session is not active there. */
+class RestoreHostOfflineError extends HostOpError {
+  constructor(readonly host: string) {
+    super(503, "host_offline", `${host} is offline; restoring an archive needs every registered host online to check the session is not active there`);
+  }
+}
+
 async function activeSessionHosts(sessionId: string): Promise<string[]> {
   const hosts = [getHost(LOCAL_HOST_ID), ...listHosts().map((row) => getHost(row.id))];
   const ensureLinked = () => {
-    if (hosts.some((host) => !host || !isLinkUp(host.status()))) {
-      throw new HostOpError(503, "host_offline", "Every host must be linked before restoring an archive");
-    }
+    const offline = hosts.find((host) => !host || !isLinkUp(host.status()));
+    if (offline !== undefined) throw new RestoreHostOfflineError(offline?.label ?? "A removed host");
   };
   ensureLinked();
   const lists = await Promise.all(hosts.map(async (host) => {
@@ -114,6 +120,9 @@ export async function POST(req: Request) {
       return Response.json({ ok: true, sessionId });
     });
   } catch (error) {
+    if (error instanceof RestoreHostOfflineError) {
+      return Response.json({ error: error.message, code: error.code, hostOffline: true, host: error.host }, { status: error.status });
+    }
     if (error instanceof HostOpError) return apiErrorResponse(error);
     const message = error instanceof Error ? error.message : String(error);
     return Response.json({ error: message, code: "archive_restore_failed" }, { status: restoreFailureStatus(message) });

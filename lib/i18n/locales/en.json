@@ -83,6 +83,7 @@
   "archiveBrowser.restoring": "Restoring…",
   "archiveBrowser.restoreSuccess": "Restored session “{name}”",
   "archiveBrowser.restoreFailed": "Failed to restore session: {detail}",
+  "archiveBrowser.restoreHostOffline": "{host} is offline. Restoring needs every registered host online, to check that the session is not active on one of them.",
   "archiveBrowser.directory": "Directory",
   "archiveBrowser.host": "Host",
   "archiveBrowser.sessionId": "Session ID",

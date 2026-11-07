@@ -83,6 +83,7 @@
   "archiveBrowser.restoring": "復元中…",
   "archiveBrowser.restoreSuccess": "セッション「{name}」を復元しました",
   "archiveBrowser.restoreFailed": "セッションの復元に失敗しました: {detail}",
+  "archiveBrowser.restoreHostOffline": "{host} がオフラインです。セッションがどのホストでもアクティブでないことを確認するため、復元には登録済みのすべてのホストがオンラインである必要があります。",
   "archiveBrowser.directory": "ディレクトリ",
   "archiveBrowser.host": "ホスト",
   "archiveBrowser.sessionId": "セッション ID",
