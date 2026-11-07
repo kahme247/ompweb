@@ -629,9 +629,22 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   web and daemon processes, from before source/destination observations through
   rollback. Without it a competitor can snapshot artifacts absent while another
   process has moved them; if that mover rolls back, the competitor can publish a
-  transcript without its artifacts. After ownership is acquired the archive's
-  existence is checked again: a late starter cannot publish from a staged copy
-  after an earlier winner consumed the archive. Ownership is never time-expired,
+  transcript without its artifacts. Staging pins the compressed source with a
+  private `.restore-pin` hard link beside the archive and reads that link, retaining
+  its inode so replacement/reuse cannot masquerade as the staged generation.
+  After ownership is acquired the source must match that generation (device, inode,
+  size and nanosecond mtime); mere existence is insufficient when another server
+  has restored, updated and re-archived the session meanwhile. The source pathname
+  is then atomically captured as a unique `.restore-consume` sibling and checked
+  again before any artifacts move. Only that captured name is consumed, never the
+  original pathname: a replacement installed between comparison and capture is
+  rejected with 409 `generation changed` and returned by exclusive link, and a
+  replacement installed after capture is left untouched. If exclusive return is
+  blocked, the captured generation is retained at the reported recovery name.
+  Normal cleanup removes the pin; process death may leave a pin or captured entry
+  requiring inspection alongside an orphaned commit claim. The pin requires hard
+  links on the archive filesystem, independently of the sessions filesystem.
+  Ownership is never time-expired,
   and cleanup checks the claim directory's device/inode before removing it.
   Orphaned claims report their path and manual-recovery requirement in the 409.
   An operator must first verify that every restorer using this session directory

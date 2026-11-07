@@ -799,6 +799,20 @@ async function refused(entry: Row, response: Response, sent: boolean): Promise<O
       publish(entry.session_id);
       return "wait";
     }
+    // The archive and active lists are separate reads: a restore can move the session between them after the
+    // command's 404. Before declaring it gone, discover its active owner again. A discovery failure is uncertainty,
+    // not deletion; a deferred host-change wake must likewise get a chance to resume this still-unsent entry.
+    const resolved = await resolveSessionHostOr404(entry.session_id);
+    if ("host" in resolved) {
+      if (outbox().wakes?.has(entry.session_id)) {
+        if (!setState(entry.id, "held")) return "next";
+        publish(entry.session_id);
+        return "wait";
+      }
+      return retry(entry);
+    }
+    if (resolved.response.status !== 404) return refused(entry, resolved.response, false);
+    if (outbox().wakes?.has(entry.session_id)) return retry(entry);
   }
   // A lost reply (delivery unknown), a server error or an unresponsive child after the message went: omp may have it.
   return fail(entry, error, sent && (response.status >= 500 || body.code === "session_unresponsive"));

@@ -36,6 +36,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Fixes & Improvements
 
+- **A delayed archive restore cannot overwrite newer archived work.** Restore now pins the compressed source generation it staged and verifies an atomically captured archive entry before moving artifacts. If another server restored, updated and re-archived that session meanwhile, the stale restore is refused and the newer transcript and artifacts remain available.
 - **The model picker shows the new model at once.** Picking a model in an existing chat updates the composer immediately, as the effort picker already did, instead of waiting until omp has restarted with it. A refused pick is dropped, an error notice explains why, and the composer refreshes the running model when possible.
 - **The dictation waveform recovers when the browser suspends its audio.** If the browser suspends or interrupts the meter's audio context mid-recording or during a pause, the recording resumes it, so the bars follow your voice again instead of staying flat while the recording itself works.
 - **Provider cards no longer look clickable.** Hovering or tapping a provider's non-interactive card no longer accents its border. Configure and Manage keep the neutral secondary-button styling used elsewhere in Settings; the clickable Browse all providers card keeps its hover feedback.

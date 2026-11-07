@@ -182,7 +182,7 @@ export async function listArchivedSessionInfos(archiveRoot = getArchivedSessions
 
 /** HTTP status for a `restoreArchivedSession` failure message. */
 export function restoreFailureStatus(message: string): number {
-  return message.includes("already exists") ? 409 : message.includes("Invalid archive key") || message.includes("Invalid archived session ID") || message.includes("required") ? 400 : message.includes("not found") ? 404 : 500;
+  return message.includes("already exists") || message.includes("generation changed") ? 409 : message.includes("Invalid archive key") || message.includes("Invalid archived session ID") || message.includes("required") ? 400 : message.includes("not found") ? 404 : 500;
 }
 
 async function validateRestorePath(root: string, target: string): Promise<void> {
@@ -224,7 +224,12 @@ async function validateRestorePath(root: string, target: string): Promise<void> 
       }
       throw new Error("Invalid archive key");
     }
-    if (escapesRoot(canonicalRoot, canonical)) throw new Error("Invalid archive key");
+    if (escapesRoot(canonicalRoot, canonical)) {
+      // realpath may resolve an opened directory at its new location after another commit renames it. If the original
+      // pathname disappeared, this is absence, not an escaping link. The guarded commit validates the paths again.
+      if (!(await lstatIfExists(current))) break;
+      throw new Error("Invalid archive key");
+    }
   }
 }
 
@@ -272,7 +277,10 @@ function validateRestorePathSync(root: string, target: string): void {
       }
       throw new Error("Invalid archive key");
     }
-    if (escapesRoot(canonicalRoot, canonical)) throw new Error("Invalid archive key");
+    if (escapesRoot(canonicalRoot, canonical)) {
+      if (!lstatSyncIfExists(current)) break;
+      throw new Error("Invalid archive key");
+    }
   }
 }
 
@@ -389,11 +397,38 @@ function takeBackTranscript(destination: string, tempFile: string): string | nul
  * inspect and repair the partial commit, then remove the orphaned marker manually. A power loss or kernel crash is not
  * covered: nothing here calls fsync or keeps a journal, so which directory operations reached disk is not guaranteed.
  */
+
+type ArchiveGeneration = { dev: bigint; ino: bigint; size: bigint; mtimeNs: bigint };
+
+/** The pin retains the inode until staging and commit end, so an unlinked generation cannot have its inode reused. Size and
+ * mtime also reject in-place changes; normal archive publication replaces the inode atomically. */
+function matchesArchiveGeneration(file: string, expected: ArchiveGeneration): boolean {
+  try {
+    const actual = lstatSync(file, { bigint: true });
+    return actual.isFile() && actual.dev === expected.dev && actual.ino === expected.ino
+      && actual.size === expected.size && actual.mtimeNs === expected.mtimeNs;
+  } catch (error) {
+    if (errnoCode(error) === "ENOENT") return false;
+    throw error;
+  }
+}
+
+/** Restore a captured pathname without overwriting a replacement installed meanwhile. On conflict keep the captured entry
+ * at its recovery name, never silently delete either generation. */
+function returnCapturedArchive(captured: string, source: string): string | null {
+  try {
+    linkSync(captured, source);
+    unlinkSync(captured);
+    return null;
+  } catch {
+    return captured;
+  }
+}
 /** A filesystem claim coordinates the whole commit across independent web/daemon processes. Artifact source/destination
  * observations cannot safely coordinate it: another process may move artifacts between those observations, and a loser
  * can then publish the transcript before the mover does, causing the mover to roll the winner's artifacts back.
  * Never expire this claim: a suspended holder can still publish. A killed holder requires manual recovery. */
-function commitRestore(plan: { archiveBase: string; activeRoot: string; source: string; sourceArtifacts: string; destination: string; destinationArtifacts: string; tempFile: string }): void {
+function commitRestore(plan: { archiveBase: string; activeRoot: string; source: string; sourceArtifacts: string; destination: string; destinationArtifacts: string; tempFile: string; generation: ArchiveGeneration }): void {
   validateRestorePathSync(plan.activeRoot, plan.destination);
   const claim = `${plan.destination}.restore-lock`;
   validateRestorePathSync(plan.activeRoot, claim);
@@ -413,7 +448,7 @@ function commitRestore(plan: { archiveBase: string; activeRoot: string; source: 
   }
 }
 
-function commitRestoreOwned({ archiveBase, activeRoot, source, sourceArtifacts, destination, destinationArtifacts, tempFile }: { archiveBase: string; activeRoot: string; source: string; sourceArtifacts: string; destination: string; destinationArtifacts: string; tempFile: string }): void {
+function commitRestoreOwned({ archiveBase, activeRoot, source, sourceArtifacts, destination, destinationArtifacts, tempFile, generation }: { archiveBase: string; activeRoot: string; source: string; sourceArtifacts: string; destination: string; destinationArtifacts: string; tempFile: string; generation: ArchiveGeneration }): void {
   validateRestorePathSync(archiveBase, source);
   validateRestorePathSync(archiveBase, sourceArtifacts);
   validateRestorePathSync(activeRoot, destination);
@@ -423,6 +458,7 @@ function commitRestoreOwned({ archiveBase, activeRoot, source, sourceArtifacts, 
     if (lstatSyncIfExists(destination)) throw new Error("Active session destination already exists");
     throw new Error("Archived session not found");
   }
+  if (!matchesArchiveGeneration(source, generation)) throw new Error("Archived session generation changed; retry restore");
   const artifacts = lstatSyncIfExists(sourceArtifacts);
   if (artifacts && !artifacts.isDirectory()) throw new Error("Archived artifacts are invalid");
   // The active artifacts directory is the session's own: one already there belongs to another session, or to a restore
@@ -430,7 +466,12 @@ function commitRestoreOwned({ archiveBase, activeRoot, source, sourceArtifacts, 
   if (lstatSyncIfExists(destinationArtifacts)) throw new Error("Active session destination already exists");
   let movedArtifacts = false;
   let published = false;
+  // A check followed by unlink(source) can delete a newer archive. Take the pathname atomically first, verify what was
+  // actually taken, and consume only this private captured name. A replacement at source is never deleted.
+  const captured = `${source}.${randomUUID()}.restore-consume`;
+  renameSync(source, captured);
   try {
+    if (!matchesArchiveGeneration(captured, generation)) throw new Error("Archived session generation changed; retry restore");
     if (artifacts) {
       moveDirectoryNoReplace(sourceArtifacts, destinationArtifacts);
       movedArtifacts = true;
@@ -443,7 +484,7 @@ function commitRestoreOwned({ archiveBase, activeRoot, source, sourceArtifacts, 
       throw error;
     }
     published = true;
-    unlinkSync(source);
+    unlinkSync(captured);
   } catch (error) {
     const stranded: string[] = [];
     if (published) {
@@ -453,6 +494,8 @@ function commitRestoreOwned({ archiveBase, activeRoot, source, sourceArtifacts, 
     if (movedArtifacts) {
       try { moveDirectoryNoReplace(destinationArtifacts, sourceArtifacts); } catch { stranded.push(destinationArtifacts); }
     }
+    const left = returnCapturedArchive(captured, source);
+    if (left) stranded.push(left);
     if (stranded.length > 0 && error instanceof Error) error.message += `; the restore could not be undone at ${stranded.join(" and ")}`;
     throw error;
   }
@@ -518,11 +561,21 @@ export async function restoreArchivedSession(key: string, sessionsRoot = getSess
   await validateRestorePath(activeRoot, destinationArtifacts);
   const tempDir = await mkdtemp(path.join(path.dirname(destination), ".omp-web-restore-"));
   const tempFile = path.join(tempDir, path.basename(destination));
+  // Same filesystem as the archive, independent of the sessions filesystem. Reading this private hard link pins exactly
+  // the source generation staged here, even if another restorer consumes and later re-archives the same pathname.
+  const pin = `${source}.${randomUUID()}.restore-pin`;
   try {
+    validateRestorePathSync(archiveBase, source);
+    try { linkSync(source, pin); } catch (error) {
+      if (errnoCode(error) === "ENOENT") throw new Error("Archived session not found");
+      throw error;
+    }
+    const generation = lstatSync(pin, { bigint: true });
+    if (!generation.isFile()) throw new Error("Invalid archive key");
     await validateRestorePath(activeRoot, tempDir);
     try {
       await pipeline(
-        createReadStream(source),
+        createReadStream(pin),
         archiveSizeLimit("compressed", MAX_ARCHIVE_COMPRESSED_BYTES),
         createGunzip(),
         archiveSizeLimit("expanded", MAX_ARCHIVE_EXPANDED_BYTES),
@@ -539,10 +592,11 @@ export async function restoreArchivedSession(key: string, sessionsRoot = getSess
     await validateRestorePath(activeRoot, destination);
     await validateRestorePath(activeRoot, destinationArtifacts);
     await validateRestorePath(archiveBase, sourceArtifacts);
-    publish(() => commitRestore({ archiveBase, activeRoot, source, sourceArtifacts, destination, destinationArtifacts, tempFile }));
+    publish(() => commitRestore({ archiveBase, activeRoot, source, sourceArtifacts, destination, destinationArtifacts, tempFile, generation }));
     invalidateSessionFileListCache();
     return sessionId;
   } finally {
+    try { unlinkSync(pin); } catch (error) { if (errnoCode(error) !== "ENOENT") throw error; }
     await rm(tempDir, { recursive: true, force: true });
   }
 }
