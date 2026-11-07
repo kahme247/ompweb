@@ -450,7 +450,7 @@ parts of those routes stay on main.
 | Op | Moved from |
 |---|---|
 | `listSessions` | `listAllSessions()` (`lib/session-reader.ts`) |
-| `listSessionIdsForRestore` | Restore-only complete ID inventory (`lib/omp/session-files.ts`): uncached one-level walk and strict bounded header reads; access/I/O failures reject rather than omit sessions. Malformed result entries reject the entire answer. Compatible addition: old daemons answer 501, and restore fails closed with 503 until those daemons update/restart; ordinary browsing still uses the unchanged best-effort `listSessions` |
+| `listSessionIdsForRestore` | Restore-only complete ID inventory (`lib/omp/session-files.ts`): uncached one-level walk and strict bounded header reads. Access/I/O failures, disappearance of an already-enumerated project, relevant symlinks and session replacement during open reject rather than omit sessions; only an initially absent root is empty. Malformed result entries reject the entire answer. Compatible addition: old daemons answer 501, and restore fails closed with 503 until those daemons update/restart; ordinary browsing still uses the unchanged best-effort `listSessions` |
 | `readSession {id, options}` | `GET /api/sessions/[id]` |
 | `readContext {id, leafId, options}` | `GET /api/sessions/[id]/context` |
 | `readThinking {id, entryId, block}` | `GET /api/sessions/[id]/entries/[entryId]/thinking` |

@@ -574,9 +574,16 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   The strict op shares the one-level session-file walker but bypasses all walk,
   metadata and sidebar caches, propagates access/I/O failures at root or project
   depth, reads each bounded header strictly and refuses unidentifiable headers.
-  It neither populates nor invalidates general listing caches. Genuine directory
-  ENOENT stays absence; a file vanishing while reading conservatively blocks this
-  attempt. Any incomplete inventory or malformed wire result blocks restore with
+  It neither populates nor invalidates general listing caches. Only a sessions root
+  absent from the outset is an empty inventory. Once the root/project was observed,
+  even ENOENT is uncertainty (the directory may have been renamed with active
+  sessions inside). Project symlinks and `.jsonl` file symlinks, which ordinary
+  listing skips but cached paths can still use, reject strict discovery instead of
+  disappearing. Strict header reads reject non-regular paths and symlinked parents,
+  open with `O_NOFOLLOW` where available, and compare the opened descriptor's
+  device/inode with before/after pathname checks, refusing replacement during open.
+  A file vanishing while reading likewise blocks this attempt. Any incomplete
+  inventory or malformed wire result blocks restore with
   503 `host_sessions_unavailable`, before reserve/restore/consumption. Older daemons
   answer 501 for the new op, which is also surfaced as that 503: update/restart
   them before restoring; never fall back to their best-effort lists or use an

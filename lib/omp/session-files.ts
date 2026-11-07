@@ -2,6 +2,8 @@ import { randomUUID } from "crypto";
 import type { Dirent } from "fs";
 import {
   closeSync,
+  constants as fsConstants,
+  fstatSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
@@ -524,15 +526,27 @@ export function loadSessionFile(filePath: string, options: LoadSessionOptions = 
  */
 export function readSessionHeaderSync(filePath: string, strict = false): SessionHeader | null {
   const maxHeaderBytes = 64 * 1024 + SESSION_TITLE_SLOT_BYTES;
+  if (strict && !lstatSync(path.dirname(filePath)).isDirectory()) throw new Error(`Cannot inventory symlinked session project at ${filePath}`);
+  const expected = strict ? lstatSync(filePath, { bigint: true }) : null;
+  if (expected && !expected.isFile()) throw new Error(`Cannot inventory non-regular session path ${filePath}`);
   let fd: number;
   try {
-    fd = openSync(filePath, "r");
+    fd = openSync(filePath, strict ? fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) : "r");
   } catch (error) {
     if (strict) throw error;
     return null;
   }
   let head: string;
   try {
+    if (expected) {
+      const opened = fstatSync(fd, { bigint: true });
+      const current = lstatSync(filePath, { bigint: true });
+      if (!lstatSync(path.dirname(filePath)).isDirectory()) throw new Error(`Session project changed during strict discovery: ${filePath}`);
+      if (!current.isFile() || expected.dev !== opened.dev || expected.ino !== opened.ino
+        || current.dev !== opened.dev || current.ino !== opened.ino) {
+        throw new Error(`Session path changed during strict discovery: ${filePath}`);
+      }
+    }
     const buffer = Buffer.allocUnsafe(maxHeaderBytes);
     const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
     head = buffer.subarray(0, bytesRead).toString("utf8");
@@ -1175,26 +1189,39 @@ export function listSessionIdsForRestore(sessionsRoot = getSessionsDir()): strin
 
 function collectSessionFiles(sessionsRoot: string, strict = false): string[] {
   const files: string[] = [];
+  let projects: Dirent[];
+  let observedRoot = false;
   try {
-    for (const dirent of readDirectorySyncRuntime(sessionsRoot, { withFileTypes: true })) {
-      if (!dirent.isDirectory()) continue;
-      const dirPath = path.join(sessionsRoot, dirent.name);
-      let inner: Dirent[];
-      try {
-        inner = readDirectorySyncRuntime(dirPath, { withFileTypes: true });
-      } catch (error) {
-        if (strict && !(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
-        continue;
-      }
-      for (const file of inner) {
-        if (file.isFile() && file.name.endsWith(".jsonl")) {
-          files.push(path.join(dirPath, file.name));
-        }
-      }
+    if (strict) {
+      const root = lstatSync(sessionsRoot);
+      observedRoot = true;
+      if (!root.isDirectory()) throw new Error(`Cannot inventory non-directory sessions root ${sessionsRoot}`);
     }
+    projects = readDirectorySyncRuntime(sessionsRoot, { withFileTypes: true });
   } catch (error) {
-    if (strict && !(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
+    // Only a root absent from the outset is an empty inventory. Once observed, disappearance is uncertainty.
+    if (strict && (observedRoot || !(error && typeof error === "object" && "code" in error && error.code === "ENOENT"))) throw error;
     return [];
+  }
+  for (const dirent of projects) {
+    const dirPath = path.join(sessionsRoot, dirent.name);
+    if (strict && dirent.isSymbolicLink()) throw new Error(`Cannot inventory symlinked session project ${dirPath}`);
+    if (!dirent.isDirectory()) continue;
+    let inner: Dirent[];
+    try {
+      if (strict && !lstatSync(dirPath).isDirectory()) throw new Error(`Session project changed during strict discovery: ${dirPath}`);
+      inner = readDirectorySyncRuntime(dirPath, { withFileTypes: true });
+    } catch (error) {
+      // This project was enumerated: even ENOENT may mean it was renamed with active sessions inside. Never skip it in preflight.
+      if (strict) throw error;
+      continue;
+    }
+    for (const file of inner) {
+      if (strict && file.isSymbolicLink() && file.name.endsWith(".jsonl")) {
+        throw new Error(`Cannot inventory symlinked session file ${path.join(dirPath, file.name)}`);
+      }
+      if (file.isFile() && file.name.endsWith(".jsonl")) files.push(path.join(dirPath, file.name));
+    }
   }
   return files;
 }
