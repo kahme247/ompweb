@@ -623,6 +623,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const authoritativeModelSeqRef = useRef(0);
   const modelCommandPendingRef = useRef(0);
   const modelPickSeqRef = useRef(0);
+  const [modelSwitchesPending, setModelSwitchesPending] = useState(0);
   const syncActionsRef = useRef<{
     live: (snapshot: SessionLiveSnapshot, fields: SessionLiveFields) => void;
     subscribe: (force: boolean) => boolean;
@@ -705,7 +706,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const catalogSlowModel = liveSlowModeSupported === undefined && displayModel
     ? modelList.find((m) => m.provider === displayModel.provider && m.id === displayModel.modelId && m.supportsSlowMode)
     : undefined;
-  const slowModeSupported = liveSlowModeSupported ?? Boolean(catalogSlowModel);
+  const slowModeSupported = modelSwitchesPending === 0 && (liveSlowModeSupported ?? Boolean(catalogSlowModel));
   const slowModeEnabled = catalogSlowModel ? catalogSlowModel.provider === "anthropic" && anthropicSlowMode : liveSlowModeEnabled;
   const slowModeScope: SlowModeScope | undefined = catalogSlowModel
     ? (catalogSlowModel.provider === "anthropic" ? "global" : "session")
@@ -3608,6 +3609,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     modelCommandPendingRef.current += 1;
     const choice = { provider, modelId };
     const pick = ++modelPickSeqRef.current;
+    setModelSwitchesPending((count) => count + 1);
     try {
       if (isNew) {
         setNewSessionModel({ provider, modelId });
@@ -3624,8 +3626,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Show the pick at once: set_model may wait for omp to start.
       setCurrentModelOverride(choice);
       await sendAgentCommand(sid, { type: "set_model", provider, modelId });
-      // A runtime event during the wait may have cleared the optimistic pick.
-      setCurrentModelOverride((cur) => cur ?? choice);
       await refreshLiveModelState(sid);
     } catch (e) {
       // A cold-start failure (e.g. an unrestorable saved model, #277) must not
@@ -3640,6 +3640,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const sid = sessionIdRef.current;
       if (!isNew && sid && pick === modelPickSeqRef.current) await refreshLiveModelState(sid);
     } finally {
+      setModelSwitchesPending((count) => count - 1);
       modelCommandPendingRef.current -= 1;
     }
   }, [isNew, setNewSessionModel, refreshLiveModelState, addNotice]);
@@ -3766,6 +3767,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const sid = sessionIdRef.current;
     if (!sid) return;
     authoritativeModelSeqRef.current += 1;
+    modelPickSeqRef.current += 1;
     modelCommandPendingRef.current += 1;
     try {
       await sendAgentCommand(sid, { type: "cycle_model" });

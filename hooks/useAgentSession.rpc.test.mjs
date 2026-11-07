@@ -5382,6 +5382,60 @@ test("a refused pick after a successful one shows the model omp now runs", async
   assert.equal(w.latest.displayModel.modelId, "model-a", "the superseded refresh cannot roll it back");
 });
 
+test("a delayed pick response preserves a newer runtime model when refresh fails", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  world.agents.set("s1", { running: true, state: { model: SLOW_MODEL, slowModeSupported: true } });
+  const w = await mountSession("s1");
+  await act(async () => { lastEs().open(); });
+  await settle();
+  assert.equal(w.latest.slowModeSupported, true);
+  let finishPick;
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "set_model",
+    produce: () => new Promise((resolve) => { finishPick = resolve; }),
+  });
+  let command;
+  await act(async () => { command = w.latest.handleModelChange("test", "picked"); await sleep(20); });
+  assert.equal(w.latest.displayModel.modelId, "picked");
+  assert.equal(w.latest.slowModeSupported, false, "old model controls are unavailable during the switch");
+  await act(async () => { lastEs().emit({ type: "config_update", model: { provider: "test", id: "runtime" } }); });
+  world.holds.push({
+    match: (method, url) => method === "GET" && /\/api\/sessions\/s1\/state/.test(url),
+    produce: async () => ({ status: 503, value: {} }),
+  });
+  await act(async () => { finishPick({ value: {} }); await command; });
+  await settle();
+  assert.equal(w.latest.displayModel.modelId, "runtime");
+});
+
+test("a failed pick cannot invalidate a newer cycle refresh", async () => {
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "q")]);
+  const w = await mountSession("s1");
+  let failPick;
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "set_model",
+    produce: () => new Promise((resolve) => { failPick = resolve; }),
+  });
+  let pick;
+  await act(async () => { pick = w.latest.handleModelChange("test", "picked"); await sleep(20); });
+  let finishRefresh;
+  world.holds.push({
+    match: (method, url) => method === "GET" && /\/api\/sessions\/s1\/state/.test(url),
+    produce: () => new Promise((resolve) => { finishRefresh = resolve; }),
+  });
+  let cycle;
+  await act(async () => { cycle = w.latest.handleCycleModel(); await sleep(20); });
+  await act(async () => { failPick({ status: 500, value: { error: "refused" } }); await pick; });
+  await act(async () => {
+    finishRefresh({ value: { running: true, state: { model: { provider: "test", id: "cycled" } } } });
+    await cycle;
+  });
+  await settle();
+  assert.equal(w.latest.displayModel.modelId, "cycled");
+});
+
 test("idle catch-up cannot overwrite a pending thinking command", async () => {
   resetWorld();
   primeSession("s1", [userMsg("u0", "q")]);
