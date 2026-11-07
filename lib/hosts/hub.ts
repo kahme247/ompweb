@@ -170,6 +170,7 @@ interface HubState {
   links: Map<string, Link>;
   changeListeners: Set<() => void>;
   helloListeners: Set<(hostId: string, channels: HelloChannel[]) => void>;
+  sessionChangeListeners: Set<(hostId: string) => void>;
   /** This server is shutting down (freezeHostLinks): links neither send nor apply anything. */
   frozen: boolean;
   linkSamples: LinkSampleBatch;
@@ -188,6 +189,7 @@ function hub(): HubState {
     links: new Map(),
     changeListeners: new Set(),
     helloListeners: new Set(),
+    sessionChangeListeners: new Set(),
     frozen: false,
     linkSamples: { samples: [], file: "", timer: undefined },
     uploadListeners: new Set(),
@@ -197,7 +199,15 @@ function hub(): HubState {
   globalThis.__ompHostHub.linkSamples ??= { samples: [], file: "", timer: undefined };
   globalThis.__ompHostHub.uploadListeners ??= new Set();
   globalThis.__ompHostHub.fileListeners ??= new Map();
+  globalThis.__ompHostHub.sessionChangeListeners ??= new Set();
   return globalThis.__ompHostHub;
+}
+
+/** The daemon changed its session files, including a restore that completed after its RPC timed out. */
+export function onHostSessionsChanged(listener: (hostId: string) => void): () => void {
+  const listeners = hub().sessionChangeListeners;
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
 }
 
 /** Only main-created watch identities route daemon events to their owning consumer. */
@@ -902,6 +912,7 @@ function applyUp(link: Link, message: UpMessage | UnknownMessage, whole?: UpMess
     case "sessions_changed":
       void import("./session-index").then(({ invalidateHostSessionList }) => {
         invalidateHostSessionList(link.id);
+        notify(hub().sessionChangeListeners, link.id);
         return import("../rpc-manager");
       }).then(({ notifyRunningChange }) => notifyRunningChange({ refreshSessionList: true }));
       return;

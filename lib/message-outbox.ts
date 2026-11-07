@@ -7,7 +7,7 @@ import { join } from "path";
 import { Database } from "bun:sqlite";
 import { commandErrorResponse, runAgentCommand } from "./agent-command";
 import { apiErrorResponse, resolveSessionHostOr404 } from "./api-utils";
-import { getHost, listHosts, onHostHello } from "./hosts/hub";
+import { getHost, listHosts, onHostHello, onHostSessionsChanged } from "./hosts/hub";
 import { isLinkUp } from "./hosts/host";
 import { HostOpError } from "./hosts/link-protocol";
 import { STAGED_MAX_AGE_MS } from "./hosts/uploads";
@@ -82,7 +82,7 @@ interface Row {
 
 declare global {
   var __ompOutboxStore: { path: string; db: Database } | undefined;
-  var __ompOutbox: { busy: Set<string>; listeners: Map<string, Set<(entries: OutboxEntry[]) => void>>; started: boolean; maintenance?: NodeJS.Timeout; startupRetry?: NodeJS.Timeout; retries?: Set<NodeJS.Timeout>; detach?: () => void; preparing?: Map<string, object> } | undefined;
+  var __ompOutbox: { busy: Set<string>; wakes?: Set<string>; listeners: Map<string, Set<(entries: OutboxEntry[]) => void>>; started: boolean; maintenance?: NodeJS.Timeout; startupRetry?: NodeJS.Timeout; retries?: Set<NodeJS.Timeout>; detach?: () => void; preparing?: Map<string, object> } | undefined;
 }
 
 // globalThis, like the rpc-manager registry: survives a `bun --hot` re-evaluation.
@@ -430,7 +430,13 @@ export function pumpOutbox(sessionId: string): void {
   }
   if (!next) return;
   for (const key of keys) busy.add(key);
-  const release = () => { for (const key of keys) busy.delete(key); };
+  const state = outbox();
+  const release = () => {
+    for (const key of keys) busy.delete(key);
+    for (const key of keys) if (state.wakes?.delete(key)) queueMicrotask(() => {
+      if (globalThis.__ompOutbox === state && state.started) pumpOutbox(key);
+    });
+  };
   void deliver(next).then((outcome) => {
     release();
     if (outcome === "next") pumpOutbox(sessionId);
@@ -487,6 +493,48 @@ export function startOutbox(): void {
   }
   process.once("exit", closeOutboxStore);
   const detachHello = onHostHello(() => { if (globalThis.__ompOutbox === state && state.started) pumpAll(); });
+  // Restores can finish after the caller's timeout, without another hello or a successful route reply. Re-read only
+  // the host that signalled a change, and wake only sessions it now lists with held work. Coalesce bursts, but do
+  // not lose a second change arriving while the first list is in flight.
+  let attached = true;
+  const checking = new Set<string>();
+  const dirty = new Set<string>();
+  const wakeHost = async (hostId: string): Promise<void> => {
+    if (!attached || !state.started) return;
+    dirty.add(hostId);
+    if (checking.has(hostId)) return;
+    checking.add(hostId);
+    try {
+      while (dirty.delete(hostId) && attached && state.started) {
+        const held = db().prepare("SELECT DISTINCT session_id FROM entries WHERE state IN ('held', 'waiting_host')").all() as { session_id: string }[];
+        if (!held.length) continue;
+        const host = getHost(hostId);
+        if (!host || !isLinkUp(host.status())) continue; // the next hello resumes offline work
+        const sessions = await host.sessionOps.listSessions();
+        if (!attached || !state.started) return;
+        const ids = new Set(sessions.map((session) => session.id));
+        for (const { session_id } of held) if (ids.has(session_id)) {
+          // A change can race the dispatcher's archive read. Leave one wake to run after that claim releases.
+          if (state.busy.has(session_id)) wakes.add(session_id);
+          else pumpOutbox(session_id);
+        }
+      }
+    } catch {
+      if (attached && state.started) {
+        const retries = (state.retries ??= new Set());
+        const timer = setTimeout(() => {
+          retries.delete(timer);
+          if (attached) void wakeHost(hostId);
+        }, RETRY_MS);
+        retries.add(timer);
+        timer.unref?.();
+      }
+    } finally {
+      checking.delete(hostId);
+    }
+  };
+  const wakes = (state.wakes ??= new Set());
+  const detachSessionChanges = onHostSessionsChanged((hostId) => { void wakeHost(hostId); });
   const detachFrames = tapSessionFrames((wrapper, event) => {
     if (globalThis.__ompOutbox === state && state.started) onChildExit(wrapper, event);
   });
@@ -494,6 +542,9 @@ export function startOutbox(): void {
     if (globalThis.__ompOutbox === state && state.started) publish(from);
   });
   state.detach = () => {
+    attached = false;
+    wakes.clear();
+    detachSessionChanges();
     process.removeListener("exit", closeOutboxStore);
     detachHello();
     detachFrames();
