@@ -1,11 +1,15 @@
-import { createReadStream } from "fs";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs";
-import { createGunzip, gunzipSync } from "zlib";
+import { createReadStream, createWriteStream } from "fs";
+import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from "fs";
+import { link, mkdir, mkdtemp, open, rename, rm, stat, unlink } from "fs/promises";
+import { Transform } from "stream";
+import { pipeline } from "stream/promises";
+import { createGunzip } from "zlib";
 import path from "path";
 import type { Dirent } from "fs";
 import type { ArchivedSessionInfo, SessionHeader } from "../types";
 import { getArchivedSessionsDir, getSessionsDir } from "./paths";
-import { invalidateSessionFileListCache, loadSessionFile, type SessionStatus } from "./session-files";
+import { invalidateSessionFileListCache, parseTitleSlotLine, SESSION_TITLE_SLOT_BYTES, type SessionStatus } from "./session-files";
+import { isValidSessionId } from "../session-file-references-core";
 
 export interface ArchivedSessionRecord {
   key: string;
@@ -21,7 +25,9 @@ export interface ArchivedSessionRecord {
 }
 
 const ARCHIVE_PREFIX_BYTES = 128 * 1024;
-const MAX_ARCHIVE_COMPRESSED_BYTES = 256 * 1024 * 1024;
+export const MAX_ARCHIVE_COMPRESSED_BYTES = 256 * 1024 * 1024;
+/** Restores never expand more than 256 MiB into the staged transcript. */
+export const MAX_ARCHIVE_EXPANDED_BYTES = 256 * 1024 * 1024;
 
 function archiveRootPath(root: string): string {
   return path.resolve(root);
@@ -175,7 +181,7 @@ export async function listArchivedSessionInfos(archiveRoot = getArchivedSessions
 
 /** HTTP status for a `restoreArchivedSession` failure message. */
 export function restoreFailureStatus(message: string): number {
-  return message.includes("Invalid archive key") || message.includes("required") ? 400 : message.includes("not found") ? 404 : message.includes("already exists") ? 409 : 500;
+  return message.includes("Invalid archive key") || message.includes("Invalid archived session ID") || message.includes("required") ? 400 : message.includes("not found") ? 404 : message.includes("already exists") ? 409 : 500;
 }
 
 function validateRestorePath(root: string, target: string): void {
@@ -211,7 +217,43 @@ function validateRestorePath(root: string, target: string): void {
   }
 }
 
-export function restoreArchivedSession(key: string, sessionsRoot = getSessionsDir(), archiveRoot = getArchivedSessionsDir()): string {
+function archiveSizeLimit(kind: "compressed" | "expanded", limit: number): Transform {
+  let bytes = 0;
+  return new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      bytes += chunk.length;
+      callback(bytes > limit ? new Error(`Archived session ${kind} size exceeds 256 MiB limit; archive was not consumed`) : null, bytes > limit ? undefined : chunk);
+    },
+  });
+}
+
+async function readArchivedSessionId(filePath: string): Promise<string> {
+  const maxHeaderBytes = 64 * 1024 + SESSION_TITLE_SLOT_BYTES;
+  const file = await open(filePath, "r");
+  let prefix: string;
+  let bytesRead: number;
+  try {
+    const buffer = Buffer.allocUnsafe(maxHeaderBytes);
+    ({ bytesRead } = await file.read(buffer, 0, buffer.length, 0));
+    prefix = buffer.toString("utf8", 0, bytesRead);
+  } finally {
+    await file.close();
+  }
+  const lines = prefix.split("\n");
+  const headerIndex = parseTitleSlotLine(lines[0] ?? "") ? 1 : 0;
+  if (lines.length <= headerIndex + 1 && bytesRead === maxHeaderBytes) throw new Error("Archived session header is invalid");
+  let header: SessionHeader;
+  try {
+    header = JSON.parse(lines[headerIndex] ?? "") as SessionHeader;
+  } catch {
+    throw new Error("Archived session header is invalid");
+  }
+  if (!header || header.type !== "session") throw new Error("Archived session header is invalid");
+  if (typeof header.id !== "string" || !isValidSessionId(header.id)) throw new Error("Invalid archived session ID");
+  return header.id;
+}
+
+export async function restoreArchivedSession(key: string, sessionsRoot = getSessionsDir(), archiveRoot = getArchivedSessionsDir()): Promise<string> {
   const activeRoot = archiveRootPath(sessionsRoot);
   const archiveBase = archiveRootPath(archiveRoot);
   const relative = normalizeArchiveKey(key);
@@ -226,39 +268,54 @@ export function restoreArchivedSession(key: string, sessionsRoot = getSessionsDi
   if (!existsSync(source) || !lstatSync(source).isFile()) throw new Error("Archived session not found");
   if (existsSync(destination) || existsSync(destinationArtifacts)) throw new Error("Active session destination already exists");
 
-  const restored = gunzipSync(readFileSync(source));
-  mkdirSync(path.dirname(destination), { recursive: true });
+  if ((await stat(source)).size > MAX_ARCHIVE_COMPRESSED_BYTES) throw new Error("Archived session compressed size exceeds 256 MiB limit; archive was not consumed");
+  await mkdir(path.dirname(destination), { recursive: true });
   validateRestorePath(activeRoot, destination);
   validateRestorePath(activeRoot, destinationArtifacts);
-  const tempDir = mkdtempSync(path.join(path.dirname(destination), ".omp-web-restore-"));
+  const tempDir = await mkdtemp(path.join(path.dirname(destination), ".omp-web-restore-"));
   const tempFile = path.join(tempDir, path.basename(destination));
   let destinationCreated = false;
   let artifactsMoved = false;
   try {
     validateRestorePath(activeRoot, tempDir);
-    writeFileSync(tempFile, restored);
-    renameSync(tempFile, destination);
+    await pipeline(
+      createReadStream(source),
+      archiveSizeLimit("compressed", MAX_ARCHIVE_COMPRESSED_BYTES),
+      createGunzip(),
+      archiveSizeLimit("expanded", MAX_ARCHIVE_EXPANDED_BYTES),
+      createWriteStream(tempFile, { flags: "wx" }),
+    );
+    const sessionId = await readArchivedSessionId(tempFile);
+    validateRestorePath(activeRoot, destination);
+    validateRestorePath(activeRoot, destinationArtifacts);
+    // A hard link publishes atomically without overwriting a concurrently created transcript.
+    try {
+      await link(tempFile, destination);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("Active session destination already exists");
+      throw error;
+    }
     destinationCreated = true;
     if (existsSync(sourceArtifacts)) {
+      validateRestorePath(archiveBase, sourceArtifacts);
       if (!lstatSync(sourceArtifacts).isDirectory()) throw new Error("Archived artifacts are invalid");
-      mkdirSync(path.dirname(destinationArtifacts), { recursive: true });
-      renameSync(sourceArtifacts, destinationArtifacts);
+      if (existsSync(destinationArtifacts)) throw new Error("Active session destination already exists");
+      await mkdir(path.dirname(destinationArtifacts), { recursive: true });
+      await rename(sourceArtifacts, destinationArtifacts);
       artifactsMoved = true;
     }
-    const loaded = loadSessionFile(destination);
-    if (!loaded.header?.id) throw new Error("Archived session is invalid");
-    unlinkSync(source);
+    await unlink(source);
     invalidateSessionFileListCache();
-    return loaded.header.id;
+    return sessionId;
   } catch (error) {
     if (artifactsMoved) {
-      try { renameSync(destinationArtifacts, sourceArtifacts); } catch { /* preserve original failure */ }
+      try { await rename(destinationArtifacts, sourceArtifacts); } catch { /* preserve original failure */ }
     }
     if (destinationCreated) {
-      try { unlinkSync(destination); } catch { /* preserve original failure */ }
+      try { await unlink(destination); } catch { /* preserve original failure */ }
     }
     throw error;
   } finally {
-    rmSync(tempDir, { recursive: true, force: true });
+    await rm(tempDir, { recursive: true, force: true });
   }
 }

@@ -563,7 +563,11 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   session's host. `/api/sessions/archive` lists this machine's archive (read on main)
   plus each linked host's (`listArchives` op), every entry tagged `hostId`; an
   offline or older host is reported in `unavailableHosts`. Restore sends `hostId`
-  and runs on that host (`restoreArchive` op).
+  and runs on that host (`restoreArchive` op). Restore requires fresh successful
+  session discovery from all registered hosts and blocks any already-active ID,
+  including a same-host session at a different path. A per-session claim is shared
+  across web-server processes. Async restore streams archives with fixed 256 MiB
+  compressed and expanded limits, rejecting unsupported IDs before archive consumption.
 - **Not yet remote:** Skills/Plugins/Agents/MCP settings; transcript search reads
   this machine's files.
 

@@ -554,7 +554,7 @@ export const sessionOps: SessionOps = {
   async restoreArchive(key) {
     if (typeof key !== "string" || !key.trim()) return fail(400, "archive_key_required", "Archive key is required");
     try {
-      const sessionId = restoreArchivedSession(key);
+      const sessionId = await restoreArchivedSession(key);
       invalidateSessionListCache();
       return ok({ sessionId });
     } catch (error) {
