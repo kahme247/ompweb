@@ -107,8 +107,13 @@ export interface SessionOps {
   archiveSession(id: string): Promise<OpResult<{ archivedPath: string }>>;
   /** This host's archive, newest first (browser entries; no hostId). */
   listArchives(): Promise<ArchivedSessionInfo[]>;
-  /** Restore one archived session on this host; `sessionId` is the restored session's id. */
-  restoreArchive(key: string): Promise<OpResult<{ sessionId: string }>>;
+  /** Admit one restore: `restoreArchive` starts only under a claim token reserved here and not fenced since. */
+  restoreReserve(claim: string): Promise<OpResult<null>>;
+  /** Restore one archived session on this host under a reserved `claim`; `sessionId` is the restored session's id. */
+  restoreArchive(key: string, claim: string): Promise<OpResult<{ sessionId: string }>>;
+  /** Forbid any restore under `claim` from starting here, now or whenever its request arrives, and say whether one is running.
+   * Main takes over a restore claim whose outcome it never learned only on `running: false`. */
+  restoreFence(claim: string): Promise<OpResult<{ running: boolean }>>;
   exportSession(id: string): Promise<OpResult<{ html: string; fileName: string }>>;
   readMedia(hash: string): Promise<OpResult<Uint8Array>>;
   /** Raw registry entries, hidden ones included (main merges session-discovered projects). */
@@ -125,6 +130,13 @@ const ok = <T>(value: T): OpResult<T> => ({ ok: true, value });
 const fail = (status: number, code: string, error: string): OpResult<never> => ({ ok: false, status, code, error });
 const sessionNotFound = () => fail(404, "session_not_found", "Session not found");
 const sessionTooLarge = () => fail(413, "session_file_too_large", "Session file is too large to open in omp-web");
+
+/** Restore claim tokens main reserved that no restore has spent and no fence has revoked, oldest first. The cap drops the
+ * oldest, whose restore is then refused, never run. */
+const reservedRestores = new Set<string>();
+const MAX_RESERVED_RESTORES = 256;
+/** Claim tokens whose restore is running in this process, set before its first await. */
+const runningRestores = new Set<string>();
 
 const SUBAGENT_ID_MAX_LENGTH = 100;
 
@@ -551,8 +563,21 @@ export const sessionOps: SessionOps = {
     return listArchivedSessionInfos();
   },
 
-  async restoreArchive(key) {
+  async restoreReserve(claim) {
+    if (typeof claim !== "string" || !claim) return fail(400, "archive_claim_required", "Restore claim is required");
+    reservedRestores.add(claim);
+    if (reservedRestores.size > MAX_RESERVED_RESTORES) reservedRestores.delete(reservedRestores.values().next().value as string);
+    return ok(null);
+  },
+
+  async restoreArchive(key, claim) {
     if (typeof key !== "string" || !key.trim()) return fail(400, "archive_key_required", "Archive key is required");
+    // Spent before any await: a fence behind this request on the link sees the restore running, and one that came first
+    // already revoked it, whenever this request reached the daemon.
+    if (typeof claim !== "string" || !reservedRestores.delete(claim)) {
+      return fail(409, "archive_restore_not_admitted", "This restore was not admitted or was fenced; the archive was not consumed");
+    }
+    runningRestores.add(claim);
     try {
       const sessionId = await restoreArchivedSession(key);
       invalidateSessionListCache();
@@ -560,7 +585,15 @@ export const sessionOps: SessionOps = {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return fail(restoreFailureStatus(message), "archive_restore_failed", message);
+    } finally {
+      runningRestores.delete(claim);
     }
+  },
+
+  async restoreFence(claim) {
+    if (typeof claim !== "string" || !claim) return fail(400, "archive_claim_required", "Restore claim is required");
+    reservedRestores.delete(claim);
+    return ok({ running: runningRestores.has(claim) });
   },
 
   async exportSession(id) {

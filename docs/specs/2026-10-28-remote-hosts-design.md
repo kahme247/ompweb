@@ -459,6 +459,7 @@ parts of those routes stay on main.
 | `renameSessionFile {id, title}` | `PATCH /api/sessions/[id]` on-disk fallback |
 | `deleteSession {id}` | `DELETE /api/sessions/[id]` |
 | `archiveSession {id}` | `POST /api/sessions/[id]/archive` |
+| `listArchives` / `restoreReserve {claim}` / `restoreArchive {key, claim}` / `restoreFence {claim}` | `/api/sessions/archive`: compatible additions (the link version is unchanged; older daemons answer 501 `unknown_op`). The daemon starts `restoreArchive` only under a `claim` it reserved and nothing has spent or fenced; `restoreFence` revokes a claim and answers `{running}` for it, so a restore request that is still in a suspended sender, or is resent to a restarted daemon, is refused whenever it arrives |
 | `exportSession {id}` | `GET /api/sessions/[id]/export` |
 | `readMedia {hash}` | `mediaFilePath()` (`lib/media-cache.ts`) |
 | `listProjects` / `addProject {path}` / `updateProject {path, updates}` / `hideProject {path}` | `/api/projects` |
@@ -469,6 +470,8 @@ parts of those routes stay on main.
 | `setUploadRetention {days}` | compatible addition (the link version is unchanged; older daemons answer 501 `unknown_op`, which main ignores): days to keep sent uploads, `null` = for ever; sent on every hello and when the web setting changes (`docs/specs/2026-11-02-file-uploads-design.md`, U6) |
 
 Op timeout: 30 s of silence (each result byte frame that arrives restarts it), then 504 naming the host; `uploadAttach` gets 10 minutes (a 2 GiB copy across file systems).
+
+A timeout (or a link lost after the op was sent) does not stop the daemon: the op may still run to completion, and its late result is dropped. A caller whose op can change state another host's checks read must not treat the timeout as "did not happen", nor a daemon's "not running" as proof it never will: the request may still be in a suspended sender. `restoreArchive` is such an op: the archive route reserves a claim token on the daemon, holds the session's claim across the op, and a later restore fences the token (`restoreFence`) before taking the claim over (`AGENTS.md`, "Session archive is per host").
 
 ## Data flow
 

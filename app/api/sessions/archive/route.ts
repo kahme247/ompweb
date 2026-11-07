@@ -9,13 +9,33 @@ import { pumpOutbox } from "@/lib/message-outbox";
 import { invalidateSessionListCache } from "@/lib/session-reader";
 import type { ArchivedSessionInfo } from "@/lib/types";
 import { isValidSessionId } from "@/lib/session-file-references-core";
-import { withArchiveRestoreLock } from "@/lib/archive-restore-lock";
+import { withArchiveRestoreLock, type HeldRestore } from "@/lib/archive-restore-lock";
 
 /** A registered host is offline, so restore cannot prove the session is not active there. */
 class RestoreHostOfflineError extends HostOpError {
   constructor(readonly host: string) {
     super(503, "host_offline", `${host} is offline; restoring an archive needs every registered host online to check the session is not active there`);
   }
+}
+
+/** Resolves only once the host has fenced an earlier restore of this session (it can no longer start, whenever its request
+ * arrives) and reports none running: until then it may still publish the session. */
+async function confirmRestoreStopped(held: HeldRestore): Promise<void> {
+  const host = getHost(held.hostId);
+  const sent = `sent to ${host?.label ?? `host ${held.hostId}`} (last seen alive ${new Date(held.since).toISOString()})`;
+  // Fails closed, with no timeout and no clearing: unregistering a host does not stop its daemon, which may still run or be sent
+  // the restore, and nothing here can ask it. The claim stays until an operator who verified the daemon is stopped removes its row.
+  if (!host) {
+    throw new HostOpError(409, "archive_restore_unconfirmed", `Session ${held.sessionId} cannot be restored: an earlier restore of it was ${sent}, and its outcome was never learned. That host is no longer registered, and unregistering does not stop its daemon, so the session stays blocked. There is no automatic recovery; see AGENTS.md, "Session archive is per host".`);
+  }
+  let reason: string | null;
+  try {
+    const fence = await host.sessionOps.restoreFence(held.claim);
+    reason = !fence.ok ? fence.error : fence.value.running ? "it is still running" : null;
+  } catch (error) {
+    reason = error instanceof Error ? error.message : String(error);
+  }
+  if (reason) throw new HostOpError(409, "archive_restore_unconfirmed", `Session ${held.sessionId} cannot be restored yet: an earlier restore of it was ${sent} and may still be running or arrive (${reason})`);
 }
 
 async function activeSessionHosts(sessionId: string): Promise<string[]> {
@@ -93,7 +113,7 @@ export async function POST(req: Request) {
     if (!isValidSessionId(archive.id)) {
       return Response.json({ error: "Invalid archived session ID", code: "archive_session_invalid" }, { status: 400 });
     }
-    return await withArchiveRestoreLock(archive.id, async () => {
+    return await withArchiveRestoreLock(archive.id, async (claim) => {
       const conflicts = await activeSessionHosts(archive.id);
       const foreign = conflicts.find((id) => id !== hostId);
       if (foreign) {
@@ -109,19 +129,34 @@ export async function POST(req: Request) {
         }, { status: 409 });
       }
       if (host) {
-        const result = await host.sessionOps.restoreArchive(body.key as string);
+        // A daemon starts a restore only under a token it reserved, and a fence revokes it. So a request this process sends
+        // late (suspended after the hold) is refused once another request took the claim over, however late it arrives.
+        const reserved = await host.sessionOps.restoreReserve(claim.token);
+        if (!reserved.ok) return opErrorResponse(reserved);
+        // Held before the restore leaves: the claim must outlive a timeout, a lost link and this process, as the daemon keeps restoring.
+        claim.hold(hostId);
+        let result;
+        try {
+          result = await host.sessionOps.restoreArchive(body.key as string, claim.token);
+        } catch (error) {
+          // An answer, even a refusal, or an op that never left ends the claim. A silent host or a lost link leaves it held.
+          if (error instanceof HostOpError && error.code !== "host_timeout" && error.code !== "host_offline") claim.release();
+          else if (error instanceof HostOpError) throw new HostOpError(error.status, "archive_restore_unconfirmed", `${error.message}; the restore may still be running there, so this session stays blocked until ${host.label} confirms it stopped`);
+          throw error;
+        }
+        claim.release();
         if (!result.ok) return opErrorResponse(result);
         invalidateHostSessionList(hostId);
         pumpOutbox(result.value.sessionId);
         return Response.json({ ok: true, sessionId: result.value.sessionId });
       }
-      const sessionId = await restoreArchivedSession(body.key as string);
+      const sessionId = await restoreArchivedSession(body.key as string, undefined, undefined, claim.publish);
       invalidateSessionListCache();
       invalidateLocalSessionLists();
       // Messages held while it was archived go now (spec O6).
       pumpOutbox(sessionId);
       return Response.json({ ok: true, sessionId });
-    });
+    }, confirmRestoreStopped);
   } catch (error) {
     if (error instanceof RestoreHostOfflineError) {
       return Response.json({ error: error.message, code: error.code, hostOffline: true, host: error.host }, { status: error.status });

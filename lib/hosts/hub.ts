@@ -1000,6 +1000,9 @@ function validResult(op: keyof SessionOps, result: unknown, args: unknown[]): bo
         && Array.isArray(value.newRoots) && value.newRoots.every((root) => typeof root === "string");
     case "restoreArchive":
       return isRecord(value) && typeof value.sessionId === "string" && isValidSessionId(value.sessionId);
+    // An unknown answer must not read as "fenced and stopped": the route drops its claim on `running: false`.
+    case "restoreFence":
+      return isRecord(value) && typeof value.running === "boolean";
     default:
       return true;
   }
