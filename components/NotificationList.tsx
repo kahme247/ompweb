@@ -80,7 +80,7 @@ export function NotificationList() {
  */
 function NotificationRow({ entry }: { entry: NotificationHistoryEntry }) {
   const { t, locale } = useI18n();
-  const { title, body } = renderNotification(entry.event, t);
+  const { title, body } = renderNotification(entry.event, t, locale);
   const { sessionId } = entry.event;
   // Following a notification is reading it.
   const open = sessionId ? () => {

@@ -218,6 +218,16 @@ export interface RpcAskDialogQuestion {
 }
 
 /** Per-question answer, sent back in question order. */
+/**
+ * One answer to a blocking extension dialog. Exactly one variant is sent, both
+ * by the web dialog (ExtensionDialog) and by the notification answer endpoint.
+ */
+export type ExtensionUiResponse =
+  | { value: string }
+  | { confirmed: boolean }
+  | { cancelled: true }
+  | { answers: RpcAskDialogAnswer[] };
+
 export interface RpcAskDialogAnswer {
   id: string;
   selectedOptions: string[];
