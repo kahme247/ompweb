@@ -3153,7 +3153,7 @@ html.dark .dropdown-surface :is(select, option) {
   transition: border-color var(--dur-fast) var(--ease-out-warm), box-shadow var(--dur-fast) var(--ease-out-warm);
 }
 
-.provider-grid-card:hover {
+button.provider-grid-card:hover {
   border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
 }
 

@@ -35,6 +35,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Fixes & Improvements
 
+- **Provider cards no longer look clickable.** Hovering or tapping a provider's non-interactive card no longer accents its border. Configure and Manage keep the neutral secondary-button styling used elsewhere in Settings; the clickable Browse all providers card keeps its hover feedback.
 - **Windows host updates allow more time for safety checks.** The process inventory gets up to 20 seconds to start and finish on a busy machine, instead of five. Shared installations and failed or unreadable inventories still block the update before the daemon is stopped.
 - **Copied uploads start retention at the send time on Windows too.** When a hard link cannot be used or its timestamp cannot be changed, the host writes a fresh exclusive copy instead of inheriting an old staging timestamp. Failed copies remain retryable without replacing unrelated files.
 - **Newly sent uploads survive an overlapping retention sweep.** The host refreshes the staged file's timestamp before making its hard link visible, for attachments and Files-panel uploads alike, so cleanup cannot mistake a just-sent file for an expired one. A Files-panel overwrite of an expired file can no longer be deleted by a sweep that inspected the file it replaced.
