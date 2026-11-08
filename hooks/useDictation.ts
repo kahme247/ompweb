@@ -740,6 +740,15 @@ export function useDictation({ onTranscript, onError, scope, identityMove }: Use
         ctx = new AudioContext();
         audioContextRef.current = ctx;
         void ctx.resume().catch(() => {});
+        // The browser can suspend or interrupt the context mid-recording (other
+        // audio, a tab switch, an OS audio-session change) while the recorder
+        // keeps going: resume it, or the bars go flat for the rest of the take.
+        const meter = ctx;
+        meter.onstatechange = () => {
+          if (audioContextRef.current === meter && meter.state !== "running" && meter.state !== "closed") {
+            void meter.resume().catch(() => {});
+          }
+        };
       } catch {}
     }
     try {
@@ -843,6 +852,9 @@ export function useDictation({ onTranscript, onError, scope, identityMove }: Use
       }
       captureRef.current.pausedAt = null;
       recorder.resume();
+      // Inside the click: resume a meter the browser suspended during the pause.
+      const meter = audioContextRef.current;
+      if (meter && meter.state !== "running") void meter.resume().catch(() => {});
       setIsPaused(false);
     }
   }, [isTranscribing, transcribeError, getCapturedBlob, setupPreviewAudio, pausePreview, teardownPreviewAudio]);

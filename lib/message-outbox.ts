@@ -7,7 +7,9 @@ import { join } from "path";
 import { Database } from "bun:sqlite";
 import { commandErrorResponse, runAgentCommand } from "./agent-command";
 import { apiErrorResponse, resolveSessionHostOr404 } from "./api-utils";
-import { onHostHello } from "./hosts/hub";
+import { getHost, listHosts, onHostHello, onHostSessionsChanged } from "./hosts/hub";
+import { isLinkUp } from "./hosts/host";
+import { HostOpError } from "./hosts/link-protocol";
 import { STAGED_MAX_AGE_MS } from "./hosts/uploads";
 import { validateAgentImages, MAX_AGENT_COMMAND_REQUEST_BYTES, MAX_ATTACHED_IMAGE_BYTES, MAX_TOTAL_ATTACHED_IMAGE_BYTES, MAX_ATTACHED_IMAGES, getBase64DecodedByteLength } from "./image-attachments";
 import { listArchivedSessions } from "./omp/archive";
@@ -80,7 +82,7 @@ interface Row {
 
 declare global {
   var __ompOutboxStore: { path: string; db: Database } | undefined;
-  var __ompOutbox: { busy: Set<string>; listeners: Map<string, Set<(entries: OutboxEntry[]) => void>>; started: boolean; maintenance?: NodeJS.Timeout; startupRetry?: NodeJS.Timeout; retries?: Set<NodeJS.Timeout>; detach?: () => void; preparing?: Map<string, object> } | undefined;
+  var __ompOutbox: { busy: Set<string>; wakes?: Set<string>; listeners: Map<string, Set<(entries: OutboxEntry[]) => void>>; started: boolean; maintenance?: NodeJS.Timeout; startupRetry?: NodeJS.Timeout; retries?: Set<NodeJS.Timeout>; detach?: () => void; preparing?: Map<string, object> } | undefined;
 }
 
 // globalThis, like the rpc-manager registry: survives a `bun --hot` re-evaluation.
@@ -351,8 +353,14 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
   }
   const resolved = await resolveSessionHostOr404(sessionId);
   // Unavailable host lists cannot prove absence: retain the entry until discovery can resolve its owner. An archived
-  // session is not gone either: its entries wait until it is restored (spec O6).
-  if ("response" in resolved && resolved.response.status === 404 && !(await isArchived(sessionId))) return resolved.response;
+  // session (on this machine or a linked host) is not gone either: its entries wait until it is restored (spec O6),
+  // and so do those whose archive no host could be asked about.
+  if ("response" in resolved && resolved.response.status === 404 && (await archiveState(sessionId)) === "absent") {
+    // A restore can move the session from archive to active between these independent reads. Only a fresh active
+    // lookup may confirm deletion; an owner discovered now, or uncertain discovery, keeps this intent durable.
+    const current = await resolveSessionHostOr404(sessionId);
+    if ("response" in current && current.response.status === 404) return current.response;
+  }
 
   const now = Date.now();
   const database = db();
@@ -427,7 +435,13 @@ export function pumpOutbox(sessionId: string): void {
   }
   if (!next) return;
   for (const key of keys) busy.add(key);
-  const release = () => { for (const key of keys) busy.delete(key); };
+  const state = outbox();
+  const release = () => {
+    for (const key of keys) busy.delete(key);
+    for (const key of keys) if (state.wakes?.delete(key)) queueMicrotask(() => {
+      if (globalThis.__ompOutbox === state && state.started) pumpOutbox(key);
+    });
+  };
   void deliver(next).then((outcome) => {
     release();
     if (outcome === "next") pumpOutbox(sessionId);
@@ -484,6 +498,58 @@ export function startOutbox(): void {
   }
   process.once("exit", closeOutboxStore);
   const detachHello = onHostHello(() => { if (globalThis.__ompOutbox === state && state.started) pumpAll(); });
+  // Restores can finish after the caller's timeout, without another hello or a successful route reply. Re-read only
+  // the host that signalled a change, and wake only sessions it now lists with held work. Coalesce bursts, but do
+  // not lose a second change arriving while the first list is in flight.
+  let attached = true;
+  const checking = new Set<string>();
+  const dirty = new Set<string>();
+  const hostRetries = new Map<string, NodeJS.Timeout>();
+  const wakeHost = async (hostId: string): Promise<void> => {
+    if (!attached || !state.started) return;
+    dirty.add(hostId);
+    if (checking.has(hostId)) return;
+    // A fresh event supersedes this host's timer. Success must not leave an older failed attempt polling it.
+    const scheduled = hostRetries.get(hostId);
+    if (scheduled) {
+      clearTimeout(scheduled);
+      state.retries?.delete(scheduled);
+      hostRetries.delete(hostId);
+    }
+    checking.add(hostId);
+    try {
+      while (dirty.delete(hostId) && attached && state.started) {
+        const held = db().prepare("SELECT DISTINCT session_id FROM entries WHERE state IN ('held', 'waiting_host')").all() as { session_id: string }[];
+        if (!held.length) continue;
+        const host = getHost(hostId);
+        if (!host || !isLinkUp(host.status())) continue; // the next hello resumes offline work
+        const sessions = await host.sessionOps.listSessions();
+        if (!attached || !state.started) return;
+        const ids = new Set(sessions.map((session) => session.id));
+        for (const { session_id } of held) if (ids.has(session_id)) {
+          // A change can race the dispatcher's archive read. Leave one wake to run after that claim releases.
+          if (state.busy.has(session_id)) wakes.add(session_id);
+          else pumpOutbox(session_id);
+        }
+      }
+    } catch {
+      if (attached && state.started) {
+        const retries = (state.retries ??= new Set());
+        const timer = setTimeout(() => {
+          retries.delete(timer);
+          hostRetries.delete(hostId);
+          if (attached) void wakeHost(hostId);
+        }, RETRY_MS);
+        retries.add(timer);
+        hostRetries.set(hostId, timer);
+        timer.unref?.();
+      }
+    } finally {
+      checking.delete(hostId);
+    }
+  };
+  const wakes = (state.wakes ??= new Set());
+  const detachSessionChanges = onHostSessionsChanged((hostId) => { void wakeHost(hostId); });
   const detachFrames = tapSessionFrames((wrapper, event) => {
     if (globalThis.__ompOutbox === state && state.started) onChildExit(wrapper, event);
   });
@@ -491,6 +557,14 @@ export function startOutbox(): void {
     if (globalThis.__ompOutbox === state && state.started) publish(from);
   });
   state.detach = () => {
+    attached = false;
+    for (const timer of hostRetries.values()) {
+      clearTimeout(timer);
+      state.retries?.delete(timer);
+    }
+    hostRetries.clear();
+    wakes.clear();
+    detachSessionChanges();
     process.removeListener("exit", closeOutboxStore);
     detachHello();
     detachFrames();
@@ -717,16 +791,60 @@ async function refused(entry: Row, response: Response, sent: boolean): Promise<O
   if (body.hostOffline === true && (!sent || body.delivery === "refused")) return "offline";
   if (body.code === "session_busy" || body.code === "session_restarting"
     || (!sent && (body.code === "host_timeout" || body.code === "host_sessions_unavailable"))) return retry(entry);
-  if (!sent && response.status === 404 && (await isArchived(entry.session_id))) {
-    // An archived session keeps its entries held until it is restored (spec O6).
-    if (!setState(entry.id, "held")) return "next";
-    publish(entry.session_id);
-    return "wait";
+  // Only a missing session can be an archived one; any other 404 (an upload that is gone, say) is that refusal.
+  if (!sent && response.status === 404 && body.code === "session_not_found") {
+    const archive = await archiveState(entry.session_id);
+    // An unreadable archive cannot prove the session is gone: never failed. A passing failure is tried again; one
+    // only a host's next hello can change waits for it, as for an offline host, without a timer.
+    if (archive === "retry") return retry(entry);
+    if (archive === "hello") return "offline";
+    if (archive === "archived") {
+      // An archived session keeps its entries held until it is restored (spec O6).
+      if (!setState(entry.id, "held")) return "next";
+      publish(entry.session_id);
+      return "wait";
+    }
+    // The archive and active lists are separate reads: a restore can move the session between them after the
+    // command's 404. Before declaring it gone, discover its active owner again. A discovery failure is uncertainty,
+    // not deletion; a deferred host-change wake must likewise get a chance to resume this still-unsent entry.
+    const resolved = await resolveSessionHostOr404(entry.session_id);
+    if ("host" in resolved) {
+      if (outbox().wakes?.has(entry.session_id)) {
+        if (!setState(entry.id, "held")) return "next";
+        publish(entry.session_id);
+        return "wait";
+      }
+      return retry(entry);
+    }
+    if (resolved.response.status !== 404) return refused(entry, resolved.response, false);
+    if (outbox().wakes?.has(entry.session_id)) return retry(entry);
   }
   // A lost reply (delivery unknown), a server error or an unresponsive child after the message went: omp may have it.
   return fail(entry, error, sent && (response.status >= 500 || body.code === "session_unresponsive"));
 }
 
-async function isArchived(sessionId: string): Promise<boolean> {
-  return (await listArchivedSessions()).some((archive) => archive.id === sessionId);
+/** `archived`/`absent`: every source answered. Otherwise the archive could not be read: `hello` while only a host's
+ * next hello can change that (its link is down, or an older daemon answered 501 and may hold archives it cannot
+ * list), `retry` for a failure that may pass by itself (timeout, bad answer, unreadable local archive). */
+type ArchiveState = "archived" | "absent" | "hello" | "retry";
+type ArchiveRead = boolean | "hello" | "retry";
+
+/** Whether `sessionId` is in an archive: this machine's, or any linked host's (as GET /api/sessions/archive lists them).
+ * An unreadable archive is never `absent`: the session may be in it. */
+async function archiveState(sessionId: string): Promise<ArchiveState> {
+  const reads: Promise<ArchiveRead>[] = [
+    listArchivedSessions().then((archives) => archives.some((archive) => archive.id === sessionId), (): ArchiveRead => "retry"),
+    ...listHosts().map(async (row): Promise<ArchiveRead> => {
+      const host = isLinkUp(row.status) ? getHost(row.id) : null;
+      if (!host) return "hello";
+      try {
+        return (await host.sessionOps.listArchives()).some((archive) => archive.id === sessionId);
+      } catch (error) {
+        return error instanceof HostOpError && (error.status === 501 || error.code === "host_offline") ? "hello" : "retry";
+      }
+    }),
+  ];
+  const found = await Promise.all(reads);
+  if (found.includes(true)) return "archived";
+  return found.includes("retry") ? "retry" : found.includes("hello") ? "hello" : "absent";
 }

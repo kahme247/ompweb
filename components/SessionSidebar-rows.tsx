@@ -10,7 +10,6 @@ import { copyText } from "@/lib/clipboard";
 import { transcriptToMarkdown } from "@/lib/transcript";
 import { toast } from "./ui/toast";
 import { SessionSearchMatches, type SearchMatchTarget } from "./SessionSearchMatches";
-import { remoteHostId } from "@/lib/project-ordering";
 import { hasDraft, subscribeDrafts } from "@/lib/draft-store";
 import {
   MAX_PROJECT_SESSIONS,
@@ -757,9 +756,8 @@ const SessionItem = memo(function SessionItem({
  toast.error(t("sessionSidebar.archiveFailed"));
  }
  }, [session.id, onDeleted, t]);
-  // The Archived Sessions browser lists this machine's archive only, so a remote archive could not be restored.
-  const archiveBlocked = hasChildren || remoteHostId(session.hostId) !== undefined;
-  const archiveTitle = hasChildren ? t("sessionSidebar.archiveLeafOnly") : archiveBlocked ? t("hosts.notAvailableRemote") : t("sessionSidebar.archive");
+  const archiveBlocked = hasChildren;
+  const archiveTitle = hasChildren ? t("sessionSidebar.archiveLeafOnly") : t("sessionSidebar.archive");
 
   const handleDelete = useCallback(async () => {
     if (deleting) return;
