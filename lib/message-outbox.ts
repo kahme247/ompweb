@@ -36,7 +36,7 @@ const ENTRY_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const MODES: Record<OutboxMode, true> = { prompt: true, followUp: true, steer: true };
 
 
-const COLUMNS = "id, session_id, mode, message, images, uploads, owner, advisor, state, error, may_have_been_sent, created_at, upload_receipts, previous_entry_ids, source_session_id";
+const COLUMNS = "id, session_id, mode, message, images, uploads, owner, advisor, state, error, may_have_been_sent, created_at, upload_receipts, previous_entry_ids, source_session_id, settlement";
 
 /** `owner`: the web session whose uploads the entry attaches; `advisor`: the chat's spawn flag at Send. */
 interface Row {
@@ -55,6 +55,7 @@ interface Row {
   may_have_been_sent: number;
   created_at: number;
   previous_entry_ids: string | null;
+  settlement: string | null;
 }
 
 type NotificationProgress = { revision?: string; retryAt: number };
@@ -75,7 +76,7 @@ type OutboxState = {
 };
 
 declare global {
-  var __ompOutboxStore: { path: string; db: Database } | undefined;
+  var __ompOutboxStore: { path: string; db: Database; schema?: string } | undefined;
   var __ompOutbox: OutboxState | undefined;
 }
 
@@ -93,7 +94,9 @@ function db(): Database {
   const dir = join(getAgentDir(), "omp-web");
   const path = join(dir, "outbox.db");
   const cached = globalThis.__ompOutboxStore;
-  if (cached?.path === path) return cached.db;
+  // A `bun --hot` reload keeps a connection the previous code migrated: reopen when the migration changed.
+  const schema = `${OUTBOX_SCHEMA}${OUTBOX_CHANGE_SCHEMA}${COLUMNS}`;
+  if (cached?.path === path && cached.schema === schema) return cached.db;
   mkdirSync(dir, { recursive: true });
   // Owner-only before SQLite opens it: it holds message texts. SQLite gives its -wal/-shm files the same mode.
   closeSync(openSync(path, "a", 0o600));
@@ -115,7 +118,7 @@ function db(): Database {
     database.transaction(() => {
       database.exec(OUTBOX_SCHEMA);
       const columns = database.prepare("PRAGMA table_info(entries)").all() as { name: string }[];
-      for (const [name, type] of [["dispatch_pid", "INTEGER"], ["upload_receipts", "TEXT"], ["payload_bytes", "INTEGER NOT NULL DEFAULT 0"], ["previous_entry_ids", "TEXT"], ["source_session_id", "TEXT"]]) {
+      for (const [name, type] of [["dispatch_pid", "INTEGER"], ["upload_receipts", "TEXT"], ["payload_bytes", "INTEGER NOT NULL DEFAULT 0"], ["previous_entry_ids", "TEXT"], ["source_session_id", "TEXT"], ["settlement", "TEXT"]]) {
         if (!columns.some((column) => column.name === name)) database.exec(`ALTER TABLE entries ADD COLUMN ${name} ${type}`);
       }
       database.exec("CREATE INDEX IF NOT EXISTS entries_source_session ON entries (source_session_id, state)");
@@ -134,7 +137,7 @@ function db(): Database {
     throw error;
   }
   cached?.db.close(true);
-  globalThis.__ompOutboxStore = { path, db: database };
+  globalThis.__ompOutboxStore = { path, db: database, schema };
   return database;
 }
 
@@ -242,6 +245,9 @@ function toEntry(entry: Row): OutboxEntry {
     ...(entry.error ? { error: entry.error } : {}),
     ...(entry.may_have_been_sent ? { mayHaveBeenSent: true } : {}),
     ...(entry.state === "delivering" && entry.previous_entry_ids ? { previousEntryIds: JSON.parse(entry.previous_entry_ids) as string[] } : {}),
+    ...(entry.state === "delivered" ? {
+      settlement: entry.settlement === "native" || entry.settlement === "none" ? entry.settlement : "uncorrelated" as const,
+    } : {}),
     createdAt: entry.created_at,
   };
 }
@@ -255,22 +261,35 @@ export function outboxEntries(sessionId: string): OutboxEntry[] {
 }
 
 /** Recent tombstones let a browser retire its first-leg bridge even if it subscribes after the message was delivered. */
-export function outboxSettledIds(sessionId: string): string[] {
+export function outboxSettlements(sessionId: string): {
+  settledIds: string[]; nativeSettledIds?: string[];
+} {
   const keys = sessionKeys(sessionId);
   const cutoff = Date.now() - KEEP_DELIVERED_MS;
-  const current = db().prepare(`SELECT id FROM entries WHERE session_id IN (${slots(keys)}) AND state = 'delivered' AND done_at >= ? ORDER BY done_at DESC, rowid DESC LIMIT 256`)
-    .all(...keys, cutoff) as { id: string }[];
-  // Historical identities retain their own bounded window without displacing the current session's receipts.
-  const moved = db().prepare(`SELECT id FROM entries WHERE ${entrySessionMatch(keys)} AND session_id NOT IN (${slots(keys)}) AND state = 'delivered' AND done_at >= ? ORDER BY done_at DESC, rowid DESC LIMIT 256`)
-    .all(...keys, ...keys, ...keys, ...keys, cutoff) as { id: string }[];
-  return [...current, ...moved].map(({ id }) => id);
+  // Read both bounded windows and their dispositions in one SQLite snapshot.
+  const receipts = db().prepare(`
+    WITH current_receipts AS (
+      SELECT id, settlement FROM entries WHERE session_id IN (${slots(keys)})
+        AND state = 'delivered' AND done_at >= ? ORDER BY done_at DESC, rowid DESC LIMIT 256
+    ), moved_receipts AS (
+      SELECT id, settlement FROM entries WHERE ${entrySessionMatch(keys)}
+        AND session_id NOT IN (${slots(keys)}) AND state = 'delivered' AND done_at >= ?
+        ORDER BY done_at DESC, rowid DESC LIMIT 256
+    )
+    SELECT id, settlement FROM current_receipts UNION ALL SELECT id, settlement FROM moved_receipts
+  `).all(...keys, cutoff, ...keys, ...keys, ...keys, ...keys, cutoff) as { id: string; settlement: string | null }[];
+  const nativeSettledIds = receipts.filter((entry) => entry.settlement === "native").map((entry) => entry.id);
+  return {
+    settledIds: receipts.map((entry) => entry.id),
+    ...(nativeSettledIds.length ? { nativeSettledIds } : {}),
+  };
 }
 
 function sessionKeys(sessionId: string): string[] {
   const wrapper = getRpcSession(sessionId);
   return [...new Set([sessionId, ...getRpcSessionKeys(sessionId), ...(wrapper?.sessionId ? [wrapper.sessionId] : [])])];
 }
-const slots = (keys: string[]) => keys.map(() => "?").join(",");
+const slots = (keys: readonly string[]) => keys.map(() => "?").join(",");
 
 function entrySessionMatch(keys: string[]): string {
   const values = slots(keys);
@@ -367,8 +386,8 @@ function setState(id: string, state: OutboxEntry["state"], error: string | null 
 
 /** Delivered, or removed by the user: the id stays (without the message) so a late resend of it (keepalive, Background
  * Sync) is answered instead of added again. */
-function retire(id: string): void {
-  db().prepare("UPDATE entries SET state = 'delivered', message = '', images = NULL, uploads = NULL, upload_receipts = NULL, previous_entry_ids = NULL, error = NULL, done_at = ? WHERE id = ?").run(Date.now(), id);
+function retire(id: string, settlement: "native" | "none" | "uncorrelated"): void {
+  db().prepare("UPDATE entries SET state = 'delivered', message = '', images = NULL, uploads = NULL, upload_receipts = NULL, previous_entry_ids = NULL, error = NULL, done_at = ?, settlement = ? WHERE id = ?").run(Date.now(), settlement, id);
 }
 
 const invalid = (error: string) => Response.json({ error, code: "invalid_outbox_entry" }, { status: 400 });
@@ -445,7 +464,7 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
       if (total.bytes + payloadBytes > MAX_OUTBOX_BYTES - 64 * 1024) return false;
       const global = database.prepare("SELECT COALESCE(SUM(payload_bytes), 0) AS bytes, COUNT(*) AS count FROM entries WHERE state != 'delivered'").get() as { bytes: number; count: number };
       if (global.bytes + payloadBytes > MAX_GLOBAL_OUTBOX_BYTES || global.count >= MAX_GLOBAL_OUTBOX_ENTRIES) return false;
-      database.prepare(`INSERT INTO entries (${COLUMNS}, payload_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'held', NULL, 0, ?, ?, NULL, ?, ?)`).run(
+      database.prepare(`INSERT INTO entries (${COLUMNS}, payload_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'held', NULL, 0, ?, ?, NULL, ?, NULL, ?)`).run(
         id, sessionId, mode, message,
         Array.isArray(images) && images.length ? JSON.stringify(images) : null,
         Array.isArray(uploads) && uploads.length ? JSON.stringify(uploads) : null,
@@ -475,7 +494,7 @@ function removeEntry(sessionId: string, id: string): Response {
     if (entry.state === "delivering") {
       return Response.json({ error: "This message is already being delivered.", code: "outbox_dispatched" }, { status: 409 });
     }
-    retire(id);
+    retire(id, "none");
     removed = entry;
     return Response.json({ success: true, data: { removed: true, entry: { ...toEntry(entry), sessionId } } });
   }).immediate();
@@ -527,6 +546,8 @@ export function pumpOutbox(sessionId: string): void {
       const state = row(next.id)?.state;
       if (state === "delivering") fail(next, message, true);
       else if (state === "held" || state === "waiting_host") retry(next);
+      // Settled, but publishing or the next pump failed (a busy store): resume the session later.
+      else schedulePump(next.session_id);
     } catch {
       // The store itself failed; the next start settles a "delivering" row.
     }
@@ -731,6 +752,9 @@ async function deliver(entry: Row): Promise<Outcome> {
   if (!current || (current.state !== "held" && current.state !== "waiting_host")) return "next";
   if (!started.ok) return refused(current, started, false);
   if (!wrapper?.isAlive()) return retry(current);
+  const baseline = await started.json() as { data?: { queuedMessages?: unknown; supportsClientMessageIds?: boolean } };
+  // An OMP without client message IDs gets the earlier text-matched hand-off; its rows retire without a bridge.
+  const correlated = baseline.data?.supportsClientMessageIds === true;
   if (wrapper.getMessageCommandGeneration() !== (priorWrapper === wrapper ? generation : 0)
     || (competingPending && !wrapper.hasPendingMessageCommands())) return "next";
   if (competingPending && !wrapper.isRunning()) {
@@ -762,6 +786,7 @@ async function deliver(entry: Row): Promise<Outcome> {
   const command: Record<string, unknown> = {
     ...commandOf(current, !idle),
     message: current.message,
+    ...(correlated ? { clientMessageId: current.id } : {}),
     ...(current.images ? { images: JSON.parse(current.images) as unknown } : {}),
     ...(current.uploads ? { uploads: JSON.parse(current.uploads) as unknown } : {}),
   };
@@ -771,11 +796,9 @@ async function deliver(entry: Row): Promise<Outcome> {
   // attachment preparation and fences inside runAgentCommand) leaves it unsent, so it is retried.
   const preparing = (outbox().preparing ??= new Map());
   preparing.set(current.id, command);
-  let baseline: { data?: { queuedMessages?: unknown } };
   let previousEntryIds: string[] | undefined;
   let handedOn = false;
   try {
-    baseline = await started.json() as { data?: { queuedMessages?: unknown } };
     if (idle) {
       try {
         const boundary = await wrapper.withPendingCommand(() => wrapper.host.sessionOps.readContext(wrapper.sessionId, undefined, { boundary: true, deferThinking: true, deferMedia: true, includePreCompaction: false, sync: null }));
@@ -791,7 +814,7 @@ async function deliver(entry: Row): Promise<Outcome> {
         }
         db().prepare("UPDATE entries SET previous_entry_ids = ? WHERE id = ?").run(JSON.stringify(entryIds), current.id);
         previousEntryIds = entryIds;
-        if (Buffer.byteLength(JSON.stringify({ entries: outboxEntries(sessionId), settledIds: outboxSettledIds(sessionId) })) > MAX_OUTBOX_BYTES) {
+        if (Buffer.byteLength(JSON.stringify({ entries: outboxEntries(sessionId), ...outboxSettlements(sessionId) })) > MAX_OUTBOX_BYTES) {
           return fail(current, "The saved transcript boundary exceeds the outbox snapshot limit", false);
         }
       } catch (error) {
@@ -831,7 +854,7 @@ async function deliver(entry: Row): Promise<Outcome> {
     // Proven dropped (spec O6) leaves the child untainted, like a delivery: no renewal before the next message.
     if (!handOff.error || handOff.mayHaveBeenSent === false) wrapper.confirmMessageCommandGeneration((priorWrapper === wrapper ? generation : 0) + 1);
     if (handOff.error) return fail(current, handOff.error, handOff.mayHaveBeenSent === true);
-    retire(current.id);
+    retire(current.id, body.data?.agentInvoked === false ? "none" : correlated ? "native" : "uncorrelated");
     publish(sessionId);
     return "next";
   } finally {
@@ -860,15 +883,19 @@ function fail(entry: Row, error: string, mayHaveBeenSent: boolean): Outcome {
 function retry(entry: Row): Outcome {
   if (!setState(entry.id, "held")) return "next";
   publish(entry.session_id);
+  schedulePump(entry.session_id);
+  return "wait";
+}
+
+function schedulePump(sessionId: string): void {
   const state = outbox();
   const retries = (state.retries ??= new Set());
   const timer = setTimeout(() => {
     retries.delete(timer);
-    if (globalThis.__ompOutbox === state) pumpOutbox(entry.session_id);
+    if (globalThis.__ompOutbox === state) pumpOutbox(sessionId);
   }, RETRY_MS);
   retries.add(timer);
   timer.unref?.();
-  return "wait";
 }
 
 /** A non-2xx answer to the start (`sent` false) or to the message itself (spec O6). */

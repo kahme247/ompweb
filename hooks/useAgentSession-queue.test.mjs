@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EMPTY_SERVER_OUTBOX, applyOutboxSnapshot, mergeHeldMessages } from "./useAgentSession-queue.ts";
+import { readQueueSnapshot } from "../lib/client-message-ids";
 
 const local = (id, createdAt, enqueueOrder) => ({ id, sessionId: "s", scope: "scope", mode: "followUp", message: id, state: "sending", createdAt, enqueueOrder });
 const stored = (id, createdAt, state = "held") => ({ id, sessionId: "s", mode: "followUp", message: id, state, createdAt });
@@ -19,4 +20,27 @@ test("a confirmation the server snapshot has not covered yet replaces the browse
   const confirmed = [stored("second", 1100), stored("gone", 900, "delivered")];
   assert.deepEqual(order(mergeHeldMessages("s", browser, confirmed, server)), ["first:server", "second:server", "third:browser"]);
   assert.deepEqual(order(mergeHeldMessages("s", [local("gone", 50, 0)], confirmed, EMPTY_SERVER_OUTBOX)), ["second:server"], "a delivered confirmation removes the browser copy");
+});
+
+test("queue snapshots retain aligned native client IDs, including uncorrelated slots", () => {
+  assert.deepEqual(readQueueSnapshot({
+    steering: ["same text", "same text"], followUp: ["later"],
+    clientMessageIds: { steering: ["first-intent", null], followUp: ["later-intent"] },
+  }), {
+    steering: ["same text", "same text"], followUp: ["later"],
+    clientMessageIds: { steering: ["first-intent", null], followUp: ["later-intent"] },
+  });
+  assert.deepEqual(readQueueSnapshot({ steering: ["legacy"], followUp: [] }), { steering: ["legacy"], followUp: [] },
+    "legacy snapshots stay uncorrelated rather than acquiring guessed IDs");
+  assert.deepEqual(readQueueSnapshot({
+    steering: ["first", 42, "third"], followUp: [],
+    clientMessageIds: { steering: ["first-id", "invalid-text-id", "third-id"], followUp: [] },
+  }), {
+    steering: ["first", "third"], followUp: [],
+    clientMessageIds: { steering: ["first-id", "third-id"], followUp: [] },
+  }, "filtering malformed queue text preserves its original ID alignment");
+  assert.deepEqual(readQueueSnapshot({
+    steering: ["first", "second"], followUp: [],
+    clientMessageIds: { steering: ["cannot-prove-alignment"], followUp: [] },
+  })?.clientMessageIds, { steering: [null, null], followUp: [] }, "misaligned ID arrays cannot identify either queue slot");
 });

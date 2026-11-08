@@ -28,9 +28,9 @@ let question;
 const saved = fs.readFileSync(sessionFile, "utf8").trim().split("\n").map(JSON.parse);
 let parentId = saved.findLast((entry) => entry.type !== "session" && entry.id)?.id ?? null;
 let entryNumber = 0;
-const persist = (message) => {
+const persist = (message, clientMessageId) => {
   const id = `native-${process.pid}-${++entryNumber}`;
-  fs.appendFileSync(sessionFile, `${JSON.stringify({ type: "message", id, parentId, timestamp: new Date().toISOString(), message })}\n`);
+  fs.appendFileSync(sessionFile, `${JSON.stringify({ type: "message", id, parentId, timestamp: new Date().toISOString(), message, ...(clientMessageId ? { clientMessageId } : {}) })}\n`);
   parentId = id;
 };
 const end = () => {
@@ -46,7 +46,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const reply = (data = {}) => out({ type: "response", id: command.id, command: command.type, success: true, data });
   switch (command.type) {
     case "negotiate_protocol": return reply({ protocolVersion: 2 });
-    case "get_state": return reply({ sessionId, sessionFile, cwd: process.cwd(), isStreaming: streaming, isSettled: !streaming, isCompacting: false, queuedMessages: [], messages });
+    case "get_state": return reply({ sessionId, sessionFile, cwd: process.cwd(), supportsClientMessageIds: true, isStreaming: streaming, isSettled: !streaming, isCompacting: false, queuedMessages: [], messages });
     case "get_subagents": return reply({ subagents: [] });
     case "get_btw_history": return reply({ records: [] });
     case "abort":
@@ -64,9 +64,10 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       const user = { role: "user", content: [{ type: "text", text: command.message }], timestamp: Date.now() };
       messages.push(user);
       out({ type: "agent_start" });
-      out({ type: "message_start", messageId: `u${n}`, message: user });
-      persist(user);
-      out({ type: "message_end", messageId: `u${n}`, message: user });
+      const correlation = command.clientMessageId ? { clientMessageId: command.clientMessageId } : {};
+      out({ type: "message_start", messageId: `u${n}`, message: user, ...correlation });
+      persist(user, command.clientMessageId);
+      out({ type: "message_end", messageId: `u${n}`, message: user, ...correlation });
       if (command.message === "ask") {
         question = { type: "extension_ui_request", id: `q${n}`, method: "ask", questions: [{ id: "pick", question: "Pick one", options: [{ label: "A" }, { label: "B" }] }] };
         out(question);

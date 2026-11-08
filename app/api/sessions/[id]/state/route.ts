@@ -1,6 +1,6 @@
 import { getExitedRpcSession, getRpcSession, WebRpcError } from "@/lib/rpc-manager";
 import { apiErrorResponse, opErrorResponse, resolveSessionHostOr404 } from "@/lib/api-utils";
-import { outboxEntries, outboxScope, outboxSettledIds } from "@/lib/message-outbox";
+import { outboxEntries, outboxScope, outboxSettlements } from "@/lib/message-outbox";
 
 /** Every answer, an offline host's 503 included, carries the session's held messages (`outbox`): a tab opening a
  * session with no omp running learns from it that there is an outbox to subscribe to. */
@@ -10,11 +10,13 @@ export async function GET(
 ) {
   const { id } = await params;
   const response = await sessionState(id);
+  const { settledIds, ...settlements } = outboxSettlements(id);
   return Response.json({
     ...(await response.json() as object),
     outbox: outboxEntries(id),
     outboxScope: outboxScope(),
-    outboxSettledIds: outboxSettledIds(id),
+    outboxSettledIds: settledIds,
+    ...settlements,
   }, { status: response.status });
 }
 

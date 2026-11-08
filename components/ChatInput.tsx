@@ -242,7 +242,7 @@ interface Props {
   generationSpeed?: GenerationSpeedInfo | null;
   /** Cancel one pending message in omp before removing it from the queue
    *  panel; resolves to its images once omp confirms, else false. */
-  onRemoveQueuedMessage?: (text: string, queue: keyof QueuedMessages) => Promise<ChatDraftImage[] | false>;
+  onRemoveQueuedMessage?: (text: string, queue: "steering" | "followUp") => Promise<ChatDraftImage[] | false>;
   /** Promote the first matching native follow-up into steering. */
   onPromoteQueuedToSteer?: (text: string) => void | Promise<void>;
   slashCommands?: SlashCommandInfo[];

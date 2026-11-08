@@ -7,7 +7,7 @@ import { HostOpError } from "./hosts/link-protocol";
 import type { WorkspaceFileEvent } from "./workspace-types";
 import { attachNotificationClient } from "./notification-hub";
 import { getExitedRpcSessions, getRpcSession, getRunningRpcSessions, subscribeHostToolCalls, subscribeRunningSessions, type AgentSessionWrapper } from "./rpc-manager";
-import { onOutboxChange, outboxEntries, outboxSettledIds } from "./message-outbox";
+import { onOutboxChange, outboxEntries, outboxSettlements } from "./message-outbox";
 import { subscribeSessionFileChanges } from "./session-watcher";
 import {
   MUX_CONTROL_EVENT,
@@ -461,7 +461,7 @@ function openSessionChannel(sessionId: string, handle: SubscriptionHandle): Subs
   const detachRunning = subscribeRunningSessions(rebind);
   const detachOutbox = onOutboxChange(sessionId, (entries) => {
     rebind();
-    handle.send({ type: "outbox_update", entries, settledIds: outboxSettledIds(sessionId) });
+    handle.send({ type: "outbox_update", entries, ...outboxSettlements(sessionId) });
   });
   rebind();
   handle.setDetach(() => {
@@ -469,7 +469,7 @@ function openSessionChannel(sessionId: string, handle: SubscriptionHandle): Subs
     detachRunning();
     detachSession();
   });
-  if (handle.active) handle.send({ type: "outbox_update", entries: outboxEntries(sessionId), settledIds: outboxSettledIds(sessionId) });
+  if (handle.active) handle.send({ type: "outbox_update", entries: outboxEntries(sessionId), ...outboxSettlements(sessionId) });
   return SUBSCRIBED;
 }
 
