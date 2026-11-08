@@ -13,6 +13,7 @@ import { HostOpError } from "./hosts/link-protocol";
 import { STAGED_MAX_AGE_MS } from "./hosts/uploads";
 import { validateAgentImages, MAX_AGENT_COMMAND_REQUEST_BYTES, MAX_ATTACHED_IMAGE_BYTES, MAX_TOTAL_ATTACHED_IMAGE_BYTES, MAX_ATTACHED_IMAGES, getBase64DecodedByteLength } from "./image-attachments";
 import { listArchivedSessions } from "./omp/archive";
+import { OUTBOX_CHANGE_SCHEMA, OUTBOX_SCHEMA } from "./message-outbox-schema";
 import { getAgentDir } from "./omp/paths";
 import { getRpcSession, getRpcSessionKeys, nativeWriteStarted, onSessionMove, tapSessionFrames, type AgentEvent, type AgentSessionWrapper } from "./rpc-manager";
 import { isRecord } from "./type-guards";
@@ -34,30 +35,6 @@ const MAX_GLOBAL_OUTBOX_ENTRIES = 1000;
 const ENTRY_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const MODES: Record<OutboxMode, true> = { prompt: true, followUp: true, steer: true };
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS entries (
-  id TEXT PRIMARY KEY,
-  session_id TEXT NOT NULL,
-  source_session_id TEXT,
-  mode TEXT NOT NULL,
-  message TEXT NOT NULL,
-  images TEXT,
-  uploads TEXT,
-  upload_receipts TEXT,
-  owner TEXT NOT NULL,
-  advisor INTEGER NOT NULL,
-  state TEXT NOT NULL,
-  error TEXT,
-  may_have_been_sent INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL,
-  dispatch_pid INTEGER,
-  payload_bytes INTEGER NOT NULL DEFAULT 0,
-  previous_entry_ids TEXT,
-  done_at INTEGER
-);
-CREATE INDEX IF NOT EXISTS entries_session ON entries (session_id, state);
-CREATE TABLE IF NOT EXISTS completed_uploads (id TEXT PRIMARY KEY, owner TEXT NOT NULL, receipt TEXT NOT NULL, at INTEGER NOT NULL);
-`;
 
 const COLUMNS = "id, session_id, mode, message, images, uploads, owner, advisor, state, error, may_have_been_sent, created_at, upload_receipts, previous_entry_ids, source_session_id";
 
@@ -80,14 +57,35 @@ interface Row {
   previous_entry_ids: string | null;
 }
 
+type NotificationProgress = { revision?: string; retryAt: number };
+type OutboxState = {
+  busy: Set<string>;
+  wakes?: Set<string>;
+  listeners: Map<string, Set<(entries: OutboxEntry[]) => void>>;
+  pendingNotifications: Map<string, number>;
+  notifiedRevisions: Map<string, string>;
+  listenerProgress: Map<string, WeakMap<(entries: OutboxEntry[]) => void, NotificationProgress>>;
+  started: boolean;
+  maintenance?: NodeJS.Timeout;
+  changes?: NodeJS.Timeout;
+  startupRetry?: NodeJS.Timeout;
+  retries?: Set<NodeJS.Timeout>;
+  detach?: () => void;
+  preparing?: Map<string, object>;
+};
+
 declare global {
   var __ompOutboxStore: { path: string; db: Database } | undefined;
-  var __ompOutbox: { busy: Set<string>; wakes?: Set<string>; listeners: Map<string, Set<(entries: OutboxEntry[]) => void>>; started: boolean; maintenance?: NodeJS.Timeout; changes?: NodeJS.Timeout; startupRetry?: NodeJS.Timeout; retries?: Set<NodeJS.Timeout>; detach?: () => void; preparing?: Map<string, object> } | undefined;
+  var __ompOutbox: OutboxState | undefined;
 }
 
 // globalThis, like the rpc-manager registry: survives a `bun --hot` re-evaluation.
 function outbox(): NonNullable<typeof globalThis.__ompOutbox> {
-  return (globalThis.__ompOutbox ??= { busy: new Set(), listeners: new Map(), started: false });
+  const state = (globalThis.__ompOutbox ??= { busy: new Set(), listeners: new Map(), pendingNotifications: new Map(), notifiedRevisions: new Map(), listenerProgress: new Map(), started: false });
+  state.pendingNotifications ??= new Map();
+  state.notifiedRevisions ??= new Map();
+  state.listenerProgress ??= new Map();
+  return state;
 }
 
 /** The store for the current agent directory; reopened when PI_CODING_AGENT_DIR changes. */
@@ -115,7 +113,7 @@ function db(): Database {
     }
     database.exec("PRAGMA synchronous = NORMAL");
     database.transaction(() => {
-      database.exec(SCHEMA);
+      database.exec(OUTBOX_SCHEMA);
       const columns = database.prepare("PRAGMA table_info(entries)").all() as { name: string }[];
       for (const [name, type] of [["dispatch_pid", "INTEGER"], ["upload_receipts", "TEXT"], ["payload_bytes", "INTEGER NOT NULL DEFAULT 0"], ["previous_entry_ids", "TEXT"], ["source_session_id", "TEXT"]]) {
         if (!columns.some((column) => column.name === name)) database.exec(`ALTER TABLE entries ADD COLUMN ${name} ${type}`);
@@ -126,6 +124,7 @@ function db(): Database {
         if (!uploadColumns.some((column) => column.name === name)) database.exec(`ALTER TABLE completed_uploads ADD COLUMN ${name} TEXT`);
       }
       database.exec("UPDATE entries SET source_session_id = session_id WHERE source_session_id IS NULL");
+      database.exec(OUTBOX_CHANGE_SCHEMA);
       for (const entry of database.prepare(`SELECT ${COLUMNS} FROM entries WHERE state != 'delivered' AND payload_bytes = 0`).all() as Row[]) {
         database.prepare("UPDATE entries SET payload_bytes = ? WHERE id = ?").run(Buffer.byteLength(JSON.stringify(toEntry(entry))) + 8192, entry.id);
       }
@@ -152,6 +151,9 @@ export function closeOutboxStore(): void {
     state.detach = undefined;
     state.maintenance = undefined;
     state.changes = undefined;
+    state.pendingNotifications?.clear();
+    state.notifiedRevisions?.clear();
+    state.listenerProgress?.clear();
     state.startupRetry = undefined;
     state.started = false;
   }
@@ -248,7 +250,7 @@ function toEntry(entry: Row): OutboxEntry {
  * browser that its held messages have vanished. */
 export function outboxEntries(sessionId: string): OutboxEntry[] {
   const keys = sessionKeys(sessionId);
-  const rows = db().prepare(`SELECT ${COLUMNS} FROM entries WHERE (session_id IN (${slots(keys)}) OR source_session_id = ?) AND state != 'delivered' ORDER BY rowid`).all(...keys, sessionId) as Row[];
+  const rows = db().prepare(`SELECT ${COLUMNS} FROM entries WHERE ${entrySessionMatch(keys)} AND state != 'delivered' ORDER BY rowid`).all(...keys, ...keys, ...keys) as Row[];
   return rows.map((entry) => ({ ...toEntry(entry), sessionId }));
 }
 
@@ -258,9 +260,9 @@ export function outboxSettledIds(sessionId: string): string[] {
   const cutoff = Date.now() - KEEP_DELIVERED_MS;
   const current = db().prepare(`SELECT id FROM entries WHERE session_id IN (${slots(keys)}) AND state = 'delivered' AND done_at >= ? ORDER BY done_at DESC, rowid DESC LIMIT 256`)
     .all(...keys, cutoff) as { id: string }[];
-  // A peer's native move keeps the submitting ID; its receipts cannot crowd out this session's own history.
-  const moved = db().prepare(`SELECT id FROM entries WHERE source_session_id = ? AND session_id NOT IN (${slots(keys)}) AND state = 'delivered' AND done_at >= ? ORDER BY done_at DESC, rowid DESC LIMIT 256`)
-    .all(sessionId, ...keys, cutoff) as { id: string }[];
+  // Historical identities retain their own bounded window without displacing the current session's receipts.
+  const moved = db().prepare(`SELECT id FROM entries WHERE ${entrySessionMatch(keys)} AND session_id NOT IN (${slots(keys)}) AND state = 'delivered' AND done_at >= ? ORDER BY done_at DESC, rowid DESC LIMIT 256`)
+    .all(...keys, ...keys, ...keys, ...keys, cutoff) as { id: string }[];
   return [...current, ...moved].map(({ id }) => id);
 }
 
@@ -270,19 +272,31 @@ function sessionKeys(sessionId: string): string[] {
 }
 const slots = (keys: string[]) => keys.map(() => "?").join(",");
 
+function entrySessionMatch(keys: string[]): string {
+  const values = slots(keys);
+  return `(session_id IN (${values}) OR source_session_id IN (${values}) OR id IN (SELECT entry_id FROM entry_aliases WHERE session_id IN (${values})))`;
+}
+
 function entryBelongsToSession(entry: Row, sessionId: string): boolean {
-  return entry.session_id === sessionId || entry.source_session_id === sessionId || sessionKeys(sessionId).includes(entry.session_id);
+  const keys = sessionKeys(sessionId);
+  return db().prepare(`SELECT 1 FROM entries WHERE id = ? AND ${entrySessionMatch(keys)}`).get(entry.id, ...keys, ...keys, ...keys) !== null;
 }
 
 /** Call `listener` with the session's entries after every change. */
 export function onOutboxChange(sessionId: string, listener: (entries: OutboxEntry[]) => void): () => void {
-  const { listeners } = outbox();
+  const state = outbox();
+  const { listeners } = state;
   const set = listeners.get(sessionId) ?? new Set();
   set.add(listener);
   listeners.set(sessionId, set);
   return () => {
     set.delete(listener);
-    if (set.size === 0 && listeners.get(sessionId) === set) listeners.delete(sessionId);
+    if (set.size === 0 && listeners.get(sessionId) === set) {
+      listeners.delete(sessionId);
+      state.pendingNotifications.delete(sessionId);
+      state.notifiedRevisions.delete(sessionId);
+      state.listenerProgress.delete(sessionId);
+    }
   };
 }
 
@@ -291,23 +305,59 @@ function publish(sessionId: string): void {
   const canonical = getRpcSession(sessionId)?.sessionId;
   if (canonical && keys.length > 1) {
     // Native identity moves keep old registry keys. Ordinary branch/switch drops them and cannot migrate other rows.
-    db().prepare(`UPDATE entries SET session_id = ? WHERE session_id IN (${slots(keys)})`).run(canonical, ...keys);
+    db().prepare(`UPDATE entries SET session_id = ? WHERE session_id IN (${slots(keys)}) AND session_id != ?`).run(canonical, ...keys, canonical);
   }
-  for (const key of keys) notifyListeners(key);
-  // Original-ID observers still own their receipts after a native move's registry aliases are gone.
-  for (const source of outbox().listeners.keys()) {
-    if (keys.includes(source)) continue;
-    if (db().prepare(`SELECT 1 FROM entries WHERE source_session_id = ? AND session_id IN (${slots(keys)}) LIMIT 1`).get(source, ...keys)) {
-      notifyListeners(source);
-    }
-  }
+  for (const watched of [...outbox().listeners.keys()]) notifyListeners(watched);
 }
 
 function notifyListeners(sessionId: string): void {
-  const listeners = outbox().listeners.get(sessionId);
-  if (!listeners?.size) return;
-  const entries = outboxEntries(sessionId);
-  for (const listener of [...listeners]) listener(entries);
+  const state = outbox();
+  const listeners = state.listeners.get(sessionId);
+  if (!listeners?.size) {
+    state.pendingNotifications.delete(sessionId);
+    state.notifiedRevisions.delete(sessionId);
+    state.listenerProgress.delete(sessionId);
+    return;
+  }
+  const now = performance.now();
+  if ((state.pendingNotifications.get(sessionId) ?? 0) > now && !state.notifiedRevisions.has(sessionId)) return;
+  try {
+    const keys = sessionKeys(sessionId).sort();
+    const changed = db().prepare<{ revision: number }, string[]>(
+      `SELECT COALESCE(SUM(revision), 0) AS revision FROM session_changes WHERE session_id IN (${slots(keys)})`,
+    ).get(...keys);
+    const revision = `${keys.join("\0")}:${changed?.revision}`;
+    if (state.notifiedRevisions.get(sessionId) === revision && (state.pendingNotifications.get(sessionId) ?? Infinity) > now) return;
+    let progress = state.listenerProgress.get(sessionId);
+    if (!progress) {
+      progress = new WeakMap();
+      state.listenerProgress.set(sessionId, progress);
+    }
+    let entries: OutboxEntry[] | undefined;
+    let retryAt = Infinity;
+    for (const listener of [...listeners]) {
+      const previous = progress.get(listener);
+      if (previous?.revision === revision) continue;
+      if (previous && previous.retryAt > now) { retryAt = Math.min(retryAt, previous.retryAt); continue; }
+      entries ??= outboxEntries(sessionId);
+      try {
+        listener(entries);
+        progress.set(listener, { revision, retryAt: 0 });
+      } catch (error) {
+        const nextRetry = now + RETRY_MS;
+        progress.set(listener, { revision: previous?.revision, retryAt: nextRetry });
+        retryAt = Math.min(retryAt, nextRetry);
+        console.warn(`[omp-web] outbox notification failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    state.notifiedRevisions.set(sessionId, revision);
+    if (Number.isFinite(retryAt)) state.pendingNotifications.set(sessionId, retryAt);
+    else state.pendingNotifications.delete(sessionId);
+  } catch (error) {
+    state.notifiedRevisions.delete(sessionId);
+    state.pendingNotifications.set(sessionId, now + RETRY_MS);
+    console.warn(`[omp-web] outbox notification failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 function setState(id: string, state: OutboxEntry["state"], error: string | null = null, mayHaveBeenSent = false): boolean {
@@ -391,7 +441,7 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
       const uploadReceipts = snapshotOutboxUploads(Array.isArray(uploads) ? uploads as string[] : [], owner, command.uploadProofs);
       const savedUploads = uploadReceipts.length ? JSON.stringify(uploadReceipts) : null;
       const payloadBytes = entryBytes + (savedUploads ? Buffer.byteLength(savedUploads) : 0);
-      const total = database.prepare(`SELECT COALESCE(SUM(payload_bytes), 0) AS bytes FROM entries WHERE (session_id IN (${slots(keys)}) OR source_session_id = ?) AND state != 'delivered'`).get(...keys, sessionId) as { bytes: number };
+      const total = database.prepare(`SELECT COALESCE(SUM(payload_bytes), 0) AS bytes FROM entries WHERE ${entrySessionMatch(keys)} AND state != 'delivered'`).get(...keys, ...keys, ...keys) as { bytes: number };
       if (total.bytes + payloadBytes > MAX_OUTBOX_BYTES - 64 * 1024) return false;
       const global = database.prepare("SELECT COALESCE(SUM(payload_bytes), 0) AS bytes, COUNT(*) AS count FROM entries WHERE state != 'delivered'").get() as { bytes: number; count: number };
       if (global.bytes + payloadBytes > MAX_GLOBAL_OUTBOX_BYTES || global.count >= MAX_GLOBAL_OUTBOX_ENTRIES) return false;
@@ -602,29 +652,19 @@ export function startOutbox(): void {
   // SQLite changes made by a peer server do not pass through this process's publish().
   const dataVersion = db().prepare<{ data_version: number }, []>("PRAGMA data_version");
   let version: number | undefined;
-  const pending = new Map<string, number>();
+  const pending = state.pendingNotifications;
   const changes = setInterval(() => {
     if (globalThis.__ompOutbox !== state) { clearInterval(changes); return; }
     if (state.listeners.size === 0) { pending.clear(); return; }
     try {
       const next = dataVersion.get()?.data_version;
       if (next !== version) {
-        for (const sessionId of state.listeners.keys()) {
-          if (!pending.has(sessionId)) pending.set(sessionId, 0);
-        }
+        for (const sessionId of [...state.listeners.keys()]) notifyListeners(sessionId);
         version = next;
       }
-      const now = Date.now();
+      const now = performance.now();
       for (const [sessionId, retryAt] of pending) {
-        if (!state.listeners.has(sessionId)) { pending.delete(sessionId); continue; }
-        if (now < retryAt) continue;
-        try {
-          notifyListeners(sessionId);
-          pending.delete(sessionId);
-        } catch (error) {
-          pending.set(sessionId, now + RETRY_MS);
-          console.warn(`[omp-web] outbox notification failed: ${error instanceof Error ? error.message : String(error)}`);
-        }
+        if (now >= retryAt) notifyListeners(sessionId);
       }
     } catch (error) {
       console.warn(`[omp-web] outbox change check failed: ${error instanceof Error ? error.message : String(error)}`);
