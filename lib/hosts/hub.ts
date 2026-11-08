@@ -9,7 +9,7 @@ import type { ProjectRegistryEntry } from "../project-registry";
 import { isValidSessionId } from "../session-file-references-core";
 import { appendTransportSamples, transportMetricsPath } from "../transport-metrics";
 import { isRecord } from "../type-guards";
-import type { SessionInfo } from "../types";
+import type { ArchivedSessionInfo, SessionInfo } from "../types";
 import { isLinkUp, type Host, type HostStatus, type SpawnRequest, type SpawnResult } from "./host";
 import {
   decodeBlobFrame,
@@ -170,6 +170,7 @@ interface HubState {
   links: Map<string, Link>;
   changeListeners: Set<() => void>;
   helloListeners: Set<(hostId: string, channels: HelloChannel[]) => void>;
+  sessionChangeListeners: Set<(hostId: string) => void>;
   /** This server is shutting down (freezeHostLinks): links neither send nor apply anything. */
   frozen: boolean;
   linkSamples: LinkSampleBatch;
@@ -188,6 +189,7 @@ function hub(): HubState {
     links: new Map(),
     changeListeners: new Set(),
     helloListeners: new Set(),
+    sessionChangeListeners: new Set(),
     frozen: false,
     linkSamples: { samples: [], file: "", timer: undefined },
     uploadListeners: new Set(),
@@ -197,7 +199,15 @@ function hub(): HubState {
   globalThis.__ompHostHub.linkSamples ??= { samples: [], file: "", timer: undefined };
   globalThis.__ompHostHub.uploadListeners ??= new Set();
   globalThis.__ompHostHub.fileListeners ??= new Map();
+  globalThis.__ompHostHub.sessionChangeListeners ??= new Set();
   return globalThis.__ompHostHub;
+}
+
+/** The daemon changed its session files, including a restore that completed after its RPC timed out. */
+export function onHostSessionsChanged(listener: (hostId: string) => void): () => void {
+  const listeners = hub().sessionChangeListeners;
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
 }
 
 /** Only main-created watch identities route daemon events to their owning consumer. */
@@ -902,6 +912,7 @@ function applyUp(link: Link, message: UpMessage | UnknownMessage, whole?: UpMess
     case "sessions_changed":
       void import("./session-index").then(({ invalidateHostSessionList }) => {
         invalidateHostSessionList(link.id);
+        notify(hub().sessionChangeListeners, link.id);
         return import("../rpc-manager");
       }).then(({ notifyRunningChange }) => notifyRunningChange({ refreshSessionList: true }));
       return;
@@ -998,6 +1009,14 @@ function validResult(op: keyof SessionOps, result: unknown, args: unknown[]): bo
     case "updateProject":
       return isRecord(value) && Array.isArray(value.projects) && value.projects.every((project) => projectEntry(project) !== null)
         && Array.isArray(value.newRoots) && value.newRoots.every((root) => typeof root === "string");
+    case "restoreArchive":
+      return isRecord(value) && typeof value.sessionId === "string" && isValidSessionId(value.sessionId);
+    // An answer without the daemon process's identity cannot be matched to the claim: the route would otherwise trust it.
+    case "restoreReserve":
+      return isRecord(value) && typeof value.instance === "string" && value.instance !== "";
+    // An unknown answer must not read as "fenced and stopped": the route drops its claim on `running: false`.
+    case "restoreFence":
+      return isRecord(value) && typeof value.instance === "string" && value.instance !== "" && typeof value.running === "boolean";
     default:
       return true;
   }
@@ -1035,6 +1054,19 @@ function projectEntry(value: unknown): ProjectRegistryEntry | null {
   return { path, addedAt, hidden, alias, sortOrder, pinOrder, launchConfig } as ProjectRegistryEntry;
 }
 
+/** A daemon's archive entry reduced to ArchivedSessionInfo's fields; null when one has the wrong type. */
+function archiveEntry(value: unknown): ArchivedSessionInfo | null {
+  if (!isRecord(value)) return null;
+  const { key, id, cwd, name, created, archivedAt, messageCount, firstMessage, size, status, restorePending } = value;
+  if (
+    typeof key !== "string" || typeof id !== "string" || typeof cwd !== "string" || typeof created !== "string"
+    || typeof archivedAt !== "string" || typeof firstMessage !== "string"
+    || typeof messageCount !== "number" || !Number.isFinite(messageCount) || typeof size !== "number" || !Number.isFinite(size)
+    || !optionalString(name) || !optionalString(status) || (restorePending !== undefined && restorePending !== true)
+  ) return null;
+  return { key, id, cwd, name, created, archivedAt, messageCount, firstMessage, size, status, ...(restorePending ? { restorePending: true } : {}) } as ArchivedSessionInfo;
+}
+
 const MEDIA_HASH_RE = /^[0-9a-f]{64}$/;
 
 /** Ops that rewrite or move a session's file: an exiting orphan of that session may still flush it. */
@@ -1049,7 +1081,11 @@ function remoteSessionOps(hostId: string): SessionOps {
       }
       if (ORPHAN_SENSITIVE_OPS[op]) await orphanExit(hostId, String(args[0]));
       const result = await request(hostId, op, Object.fromEntries(params.map((name, i) => [name, args[i]])));
-      const list: ((value: unknown) => object | null) | null = op === "listSessions" ? sessionEntry : op === "listProjects" ? projectEntry : null;
+      if (op === "listSessionIdsForRestore") {
+        if (Array.isArray(result) && result.every((id) => typeof id === "string" && id.length > 0)) return result;
+        throw new HostOpError(502, "host_bad_result", `${labelOf(hostId)} sent an incomplete active-session inventory`);
+      }
+      const list: ((value: unknown) => object | null) | null = op === "listSessions" ? sessionEntry : op === "listProjects" ? projectEntry : op === "listArchives" ? archiveEntry : null;
       // Untrusted list entries: malformed ones are dropped, the rest keep only their known fields.
       if (list && Array.isArray(result)) return result.map(list).filter((entry) => entry !== null);
       if (!list && validResult(op, result, args)) return result;
