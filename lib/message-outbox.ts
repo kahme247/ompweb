@@ -82,7 +82,7 @@ interface Row {
 
 declare global {
   var __ompOutboxStore: { path: string; db: Database } | undefined;
-  var __ompOutbox: { busy: Set<string>; wakes?: Set<string>; listeners: Map<string, Set<(entries: OutboxEntry[]) => void>>; started: boolean; maintenance?: NodeJS.Timeout; startupRetry?: NodeJS.Timeout; retries?: Set<NodeJS.Timeout>; detach?: () => void; preparing?: Map<string, object> } | undefined;
+  var __ompOutbox: { busy: Set<string>; wakes?: Set<string>; listeners: Map<string, Set<(entries: OutboxEntry[]) => void>>; started: boolean; maintenance?: NodeJS.Timeout; changes?: NodeJS.Timeout; startupRetry?: NodeJS.Timeout; retries?: Set<NodeJS.Timeout>; detach?: () => void; preparing?: Map<string, object> } | undefined;
 }
 
 // globalThis, like the rpc-manager registry: survives a `bun --hot` re-evaluation.
@@ -143,12 +143,14 @@ export function closeOutboxStore(): void {
   const state = globalThis.__ompOutbox;
   if (state) {
     clearInterval(state.maintenance);
+    clearInterval(state.changes);
     clearTimeout(state.startupRetry);
     for (const timer of state.retries ?? []) clearTimeout(timer);
     state.retries?.clear();
     state.detach?.();
     state.detach = undefined;
     state.maintenance = undefined;
+    state.changes = undefined;
     state.startupRetry = undefined;
     state.started = false;
   }
@@ -285,12 +287,14 @@ function publish(sessionId: string): void {
     // Native identity moves keep old registry keys. Ordinary branch/switch drops them and cannot migrate other rows.
     db().prepare(`UPDATE entries SET session_id = ? WHERE session_id IN (${slots(keys)})`).run(canonical, ...keys);
   }
-  for (const key of keys) {
-    const listeners = outbox().listeners.get(key);
-    if (!listeners?.size) continue;
-    const entries = outboxEntries(key);
-    for (const listener of [...listeners]) listener(entries);
-  }
+  for (const key of keys) notifyListeners(key);
+}
+
+function notifyListeners(sessionId: string): void {
+  const listeners = outbox().listeners.get(sessionId);
+  if (!listeners?.size) return;
+  const entries = outboxEntries(sessionId);
+  for (const listener of [...listeners]) listener(entries);
 }
 
 function setState(id: string, state: OutboxEntry["state"], error: string | null = null, mayHaveBeenSent = false): boolean {
@@ -582,6 +586,23 @@ export function startOutbox(): void {
   }, RETRY_MS);
   state.maintenance = maintenance;
   maintenance.unref?.();
+  // SQLite changes made by a peer server do not pass through this process's publish().
+  const dataVersion = db().prepare<{ data_version: number }, []>("PRAGMA data_version");
+  let version = dataVersion.get()?.data_version;
+  const changes = setInterval(() => {
+    if (globalThis.__ompOutbox !== state) { clearInterval(changes); return; }
+    if (state.listeners.size === 0) return;
+    try {
+      const next = dataVersion.get()?.data_version;
+      if (next === version) return;
+      version = next;
+      for (const sessionId of state.listeners.keys()) notifyListeners(sessionId);
+    } catch (error) {
+      console.warn(`[omp-web] outbox change check failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, 250);
+  state.changes = changes;
+  changes.unref?.();
   state.started = true;
   pumpAll();
 }
