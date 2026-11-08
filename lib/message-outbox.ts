@@ -248,7 +248,7 @@ function toEntry(entry: Row): OutboxEntry {
  * browser that its held messages have vanished. */
 export function outboxEntries(sessionId: string): OutboxEntry[] {
   const keys = sessionKeys(sessionId);
-  const rows = db().prepare(`SELECT ${COLUMNS} FROM entries WHERE session_id IN (${slots(keys)}) AND state != 'delivered' ORDER BY rowid`).all(...keys) as Row[];
+  const rows = db().prepare(`SELECT ${COLUMNS} FROM entries WHERE (session_id IN (${slots(keys)}) OR source_session_id = ?) AND state != 'delivered' ORDER BY rowid`).all(...keys, sessionId) as Row[];
   return rows.map((entry) => ({ ...toEntry(entry), sessionId }));
 }
 
@@ -294,6 +294,13 @@ function publish(sessionId: string): void {
     db().prepare(`UPDATE entries SET session_id = ? WHERE session_id IN (${slots(keys)})`).run(canonical, ...keys);
   }
   for (const key of keys) notifyListeners(key);
+  // Original-ID observers still own their receipts after a native move's registry aliases are gone.
+  for (const source of outbox().listeners.keys()) {
+    if (keys.includes(source)) continue;
+    if (db().prepare(`SELECT 1 FROM entries WHERE source_session_id = ? AND session_id IN (${slots(keys)}) LIMIT 1`).get(source, ...keys)) {
+      notifyListeners(source);
+    }
+  }
 }
 
 function notifyListeners(sessionId: string): void {
@@ -384,7 +391,7 @@ export async function runOutboxCommand(sessionId: string, command: Record<string
       const uploadReceipts = snapshotOutboxUploads(Array.isArray(uploads) ? uploads as string[] : [], owner, command.uploadProofs);
       const savedUploads = uploadReceipts.length ? JSON.stringify(uploadReceipts) : null;
       const payloadBytes = entryBytes + (savedUploads ? Buffer.byteLength(savedUploads) : 0);
-      const total = database.prepare(`SELECT COALESCE(SUM(payload_bytes), 0) AS bytes FROM entries WHERE session_id IN (${slots(keys)}) AND state != 'delivered'`).get(...keys) as { bytes: number };
+      const total = database.prepare(`SELECT COALESCE(SUM(payload_bytes), 0) AS bytes FROM entries WHERE (session_id IN (${slots(keys)}) OR source_session_id = ?) AND state != 'delivered'`).get(...keys, sessionId) as { bytes: number };
       if (total.bytes + payloadBytes > MAX_OUTBOX_BYTES - 64 * 1024) return false;
       const global = database.prepare("SELECT COALESCE(SUM(payload_bytes), 0) AS bytes, COUNT(*) AS count FROM entries WHERE state != 'delivered'").get() as { bytes: number; count: number };
       if (global.bytes + payloadBytes > MAX_GLOBAL_OUTBOX_BYTES || global.count >= MAX_GLOBAL_OUTBOX_ENTRIES) return false;
