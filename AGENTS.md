@@ -559,9 +559,202 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   capabilities gate old daemons; unavailable operations never fall back to main.
   File tabs retain host/cwd/session ownership. Upload publication extends the
   existing staged 2 GiB uploader; its workspace receipts are not session attachments.
-- **Not yet remote:** Skills/Plugins/Agents/MCP settings and session archiving.
-  Archive remains 501 `remote_unavailable` with its menu item disabled; transcript
-  search and the archive browser still read this machine's files.
+- **Session archive is per host.** `POST /api/sessions/[id]/archive` archives on the
+  session's host. `/api/sessions/archive` lists this machine's archive (read on main)
+  plus each linked host's (`listArchives` op), every entry tagged `hostId`; an
+  offline or older host is reported in `unavailableHosts`. Restore sends `hostId`
+  and runs on that host (`restoreArchive` op). Restore requires fresh successful
+  session discovery from all registered hosts and blocks any already-active ID,
+  including a same-host session at a different path. So every registered host must
+  be online, deliberately: an offline laptop blocks even a local restore (503
+  `host_offline` with the blocking host's `host` label; the browser names it).
+  Restore preflight uses the separate `listSessionIdsForRestore` host op, not
+  `listSessions`: the sidebar's ordinary scanner intentionally skips unreadable
+  projects and caches best-effort results, which cannot prove a UUID absent.
+  The strict op shares the one-level session-file walker but bypasses all walk,
+  metadata and sidebar caches, propagates access/I/O failures at root or project
+  depth, reads each bounded header strictly and refuses unidentifiable headers.
+  It neither populates nor invalidates general listing caches. Only a sessions root
+  absent from the outset is an empty inventory. Once the root/project was observed,
+  even ENOENT is uncertainty (the directory may have been renamed with active
+  sessions inside). Project symlinks and `.jsonl` file symlinks, which ordinary
+  listing skips but cached paths can still use, reject strict discovery instead of
+  disappearing. Strict header reads reject non-regular paths and symlinked parents,
+  open with `O_NOFOLLOW` where available, and compare the opened descriptor's
+  device/inode with before/after pathname checks, refusing replacement during open.
+  A file vanishing while reading likewise blocks this attempt. Any incomplete
+  inventory or malformed wire result blocks restore with
+  503 `host_sessions_unavailable`, before reserve/restore/consumption. Older daemons
+  answer 501 for the new op, which is also surfaced as that 503: update/restart
+  them before restoring; never fall back to their best-effort lists or use an
+  optional strict argument they could silently ignore. Normal listing semantics,
+  cache behavior and older-host browsing compatibility are unchanged.
+  `withArchiveRestoreLock` (`lib/archive-restore-lock.ts`) is a per-session SQLite
+  lease in `<agent dir>/omp-web/`, renewed every 10 s and reclaimable once its
+  renewal time is over 30 s away from now, past or future (never by PID, which can be reused). It only coordinates web
+  processes that share one agent directory, not separate web servers sharing a
+  daemon. A remote restore outlives its request: the daemon keeps restoring after the
+  30 s op deadline, a lost link or a web restart, and a sender suspended after its
+  claim may send its restore long after another request took the ID over. No lease
+  clock or "status false" may free the ID meanwhile, so the claim is fenced at the
+  daemon, which is the only authority on whether a restore can still start, and
+  **bound to the daemon process** that took it. The daemon starts `restoreArchive`
+  only under a claim token (the lock row's owner) that main reserved with
+  `restoreReserve` and nothing has since spent or revoked (`session-ops.ts`, an
+  in-memory set capped at 256: an evicted token's restore is refused, never run).
+  Every daemon process has a random `instance`, which `restoreReserve` and
+  `restoreFence` return and the claim row records (`instance` column). The route
+  reserves (an op answer or error ends a restore that never left: no claim kept),
+  then `hold`s the claim with that instance (the row gains host and instance; a held
+  row never lapses by time), then sends `restoreArchive`. It `release`s only on a
+  result that proves this claim's restore ended: `ok`, or `archive_restore_failed`,
+  which only the process that admitted the token produces. Everything else keeps the
+  claim held and answers `archive_restore_unconfirmed`: silence or a lost link
+  (504/503), any other error, and **a refusal to admit (`archive_restore_not_admitted`)**,
+  because a replacement daemon that never saw the token refuses a resent request
+  while the original may still be running it. A held claim whose request still
+  renews it is `archive_restore_busy`; one that stopped renewing is resolved by the
+  next restore of that ID, on any host: main sends the holding host `restoreFence
+  {claim}`, which revokes the token (a request still in a suspended sender is then
+  refused) and answers with its `instance` and whether that restore runs. Main
+  takes the claim over only when the answering `instance` is the one recorded **and**
+  `running` is false. A fence answered by another process proves nothing: link
+  replacement (the same host id and token dialed by another daemon) ends only that
+  link in the replaced daemon, which keeps running an admitted restore while it has
+  another link (another server), and the replacement knows no token. So a
+  replaced, restarted or shut-down daemon, a still-running restore, offline, a daemon
+  that answers 501 (no restore is sent to a daemon that cannot reserve either), a
+  host unregistered since, and a row an earlier build wrote with no instance all keep
+  it blocked (409 `archive_restore_unconfirmed`, naming the session, the host and
+  when the claim was last seen alive). **Recovery limitation:** unregistering a host
+  does not stop its daemon, and a daemon that was replaced or restarted (a reboot
+  after a lost link included) cannot be shown stopped from here, so such a claim
+  stays blocked for good: there is deliberately no timeout and no automatic or blind
+  clearing, and registering the machine again gives it a new id, which does not
+  help. Only an operator who has verified on that machine that no `ompweb host`
+  daemon process that could have taken the restore is running (the claim names the
+  host and its last-alive time) may delete that session's row from `restore_claims`
+  in `<agent dir>/omp-web/archive-restore-locks.sqlite`; deleting it while that
+  daemon could still run lets a duplicate publish. A daemon-side proof of death (a
+  machine-wide token registry, a PID with its start identity) would remove this
+  limit for a restart; it is not built. **Restore commit order**
+  (`commitRestore`, `lib/omp/archive.ts`, used by every restore, daemon and local):
+  the archived artifacts directory moves into place first, then the transcript is
+  hard-linked, then the `.gz` is removed, all with synchronous calls, so the session
+  is never visible without its artifacts. The reverse order let another tab's upload
+  attach (`StagedUploads.attach` creates `<session>/local/uploads/` the moment the
+  session is visible) take the artifacts path between the steps; the restore then
+  rolled the transcript back and left that directory behind, refusing every retry.
+  No `await` between the steps covers only this process. A filesystem-exclusive
+  directory claim, `<destination.jsonl>.restore-lock`, owns the whole commit across
+  web and daemon processes, from before source/destination observations through
+  rollback. Without it a competitor can snapshot artifacts absent while another
+  process has moved them; if that mover rolls back, the competitor can publish a
+  transcript without its artifacts. Staging pins the compressed source with a
+  private `.restore-pin` hard link beside the archive and reads that link, retaining
+  its inode so replacement/reuse cannot masquerade as the staged generation.
+  After ownership is acquired the source must match that generation (device, inode,
+  size and nanosecond mtime); mere existence is insufficient when another server
+  has restored, updated and re-archived the session meanwhile. The source pathname
+  is then atomically captured as a unique `.restore-consume` sibling and checked
+  again before any artifacts move. Only that captured name is consumed, never the
+  original pathname: a replacement installed between comparison and capture is
+  rejected with 409 `generation changed` and returned by exclusive link, and a
+  replacement installed after capture is left untouched. If exclusive return is
+  blocked, the captured generation is retained at the reported recovery name.
+  **Discovery during capture:** `collectArchives` also recognizes strictly named
+  `.jsonl.gz.<UUID>.restore-consume` basenames (including valid POSIX stems/parents
+  containing newlines) and parses their actual compressed header.
+  Artifact trees are not archive-entry trees: in each enumerated directory,
+  `<name>.jsonl.gz` (or its valid capture name) identifies the sibling
+  `<name>.jsonl/` as that session's artifacts, and discovery never recurses into it.
+  Uploaded files inside may have arbitrary names, including non-gzip `.jsonl.gz`
+  attachments or capture lookalikes; they must not become archive evidence or
+  fail the host's archive scan. Unpaired `.jsonl` project directories, hidden
+  directories and genuine nested archives are still traversed. Actual archive
+  entries outside paired artifact trees retain the fail-closed read/error policy.
+  Each capture keeps its unique physical key and carries `restorePending: true`;
+  it is exact-session archive evidence, never an alias of the original `.gz` key.
+  The browser disables Restore for capture evidence, and the API independently
+  refuses it with 409 before claiming a session. A capture A and replacement archive
+  B therefore remain separately discoverable without selecting A while restoring B.
+  `restore-pin` files and malformed capture lookalikes are not listed. Discovery
+  verifies file names and generation signatures (device/inode/size/mtime) in a
+  fresh snapshot after reading, even if every read succeeded: replacement B at an
+  enumerated pathname must not hide capture A added after enumeration. One changed
+  snapshot retries; repeated churn throws rather than proving absence.
+  `collectArchives` treats only `ENOENT` from root/subdirectory enumeration as
+  absence; access-denied, disk I/O and other traversal failures propagate through
+  local and daemon discovery. An unreadable subtree cannot prove any ID absent.
+  A corrupt gzip also rejects the whole host's archive-list answer, unlike the old
+  best-effort scanner that silently skipped it. Its session ID cannot be established,
+  so skipping it would let outbox discovery falsely prove that session absent and
+  permanently fail a held message. This deliberately favors retention over
+  availability: other sessions on that host may wait too, and archive browsing may
+  report the host unavailable until an operator repairs or removes the corrupt
+  entry. No files are removed automatically and no unrelated ID is marked archived.
+  The aggregate browser GET isolates failure per host, including this machine:
+  local corruption/unreadability adds `local` with its configured label to
+  `unavailableHosts` while healthy linked archives remain visible in a 200 response.
+  This UI aggregation does not catch errors for direct outbox discovery, which
+  still receives the scanner rejection and retains messages conservatively.
+  Outbox discovery keeps the captured session's messages held without marking unrelated
+  IDs archived. Missing-source lookup AND an ENOENT while pinning both check for the
+  destination's orphan `.restore-lock`, reporting 409 with its path/manual recovery
+  instead of 404. Once the owner is verified dead, return the capture to its original
+  name and inspect artifact moves before removing the orphan claim and retrying.
+  Normal cleanup removes the pin; process death may leave a pin or captured entry
+  requiring inspection alongside an orphaned commit claim. The pin requires hard
+  links on the archive filesystem, independently of the sessions filesystem.
+  Ownership is never time-expired,
+  and cleanup checks the claim directory's device/inode before removing it.
+  Orphaned claims report their path and manual-recovery requirement in the 409.
+  An operator must first verify that every restorer using this session directory
+  is stopped, inspect/repair any partial commit, then remove the orphaned claim;
+  removing a live or suspended owner's claim reintroduces the data-loss race.
+  Individual filesystem steps remain exclusive or identity-checked. Directories move with
+  `moveDirectoryNoReplace`: POSIX `rename(2)` replaces an *empty* directory at its
+  target, so the target is first taken with `mkdir` (exclusive) and the rename then
+  replaces only that empty directory of its own, failing ENOTEMPTY, and removing
+  nothing, if anything was put into it; Windows' rename never replaces a directory.
+  The same helper undoes the move, so an archive path retaken meanwhile is not
+  replaced either (the artifacts then stay at the destination and the error says the
+  undo failed). The transcript is published by an exclusive hard link, and undone by
+  `takeBackTranscript`, which renames whatever is at the destination to a name of its
+  own first and deletes it only if it is still this restore's link (device and inode),
+  linking any other file back. The commit starts with a synchronous
+  `validateRestorePathSync` of every path it touches, as the async checks before it
+  can be a thread-pool turn stale; a path that vanishes while `validateRestorePath`
+  checks it (a concurrent restore moved it) counts as absent, and a source consumed
+  between the existence check and the read is "not found". A transcript or artifacts
+  directory found at the destination fails the restore with 409 and is never merged
+  into or removed. **Crash limitation:** a process killed inside the commit (SIGKILL,
+  an OOM kill) leaves the commit claim in place and can leave the artifacts at the
+  destination with no transcript, or an empty destination directory; the kernel keeps every rename and link that had
+  completed, so nothing already moved is lost. If the archive was not consumed it
+  stays listed; retries stay blocked until the partial commit is repaired and the
+  orphaned claim is removed as described above. A power loss or kernel
+  crash is not covered: the commit calls no fsync and keeps no journal (none is added
+  on purpose), so which of its directory operations reached the disk is not
+  guaranteed, and no recovery is promised for that.
+  A local restore (in this process) is fenced at the same step: the claim's `publish`
+  runs the whole commit inside `BEGIN IMMEDIATE`, refusing unless the row is still
+  this request's, so a web process suspended past its lease cannot move artifacts or
+  publish over a request that took the session over, and one that takes over after
+  sees the published session. The step must stay synchronous: SQLite waits for a
+  lock by blocking the whole process, so a lock held across an await would freeze the
+  event loop for the 5 s busy timeout. The store is `restore_claims`, written with
+  `synchronous = FULL` so a power loss cannot forget a held claim. A migration gated
+  by `PRAGMA user_version` (2) runs once: it renames an earlier build's
+  `restore_leases` table into `restore_claims` (keeping its claims), adds `host_id`
+  and `instance` where missing (a held row from a build that lacked `instance` keeps
+  none and so stays blocked), and leaves `restore_leases` as a read-only view, so a
+  build that still uses the old name reads but fails every claim, delete and update
+  instead of lapsing a held row by its clock (later opens only read the version).
+  Async restore streams archives with fixed 256 MiB compressed and
+  expanded limits, rejecting unsupported IDs before archive consumption.
+- **Not yet remote:** Skills/Plugins/Agents/MCP settings; transcript search reads
+  this machine's files.
 
 #### Local daemon (`docs/specs/2026-10-29-local-daemon-design.md`)
 - **Two services.** `ompweb` (web) and `ompweb-host` (`ompweb host`, the daemon) are installed together by `ompweb systemd install`, `ompweb launchd install` and the Windows tray install; uninstall removes both, `ompweb systemd restart` restarts the web unit only. The daemon owns this machine's omp children, so a web restart, update or redeploy leaves runs going; restarting the daemon ends them (auto-resume then resumes the sessions that were running). An upgrade restarts the daemon only when the running daemon's link version is outside the new release's `[MIN_LINK_PROTOCOL_VERSION, LINK_PROTOCOL_VERSION]` range (it would get 4426 or 426 and exit); a daemon inside the range keeps running.
@@ -1280,7 +1473,7 @@ during the wait.
   `invalidateSessionFileListCache()` — never add a session-mutation path that
   forgets this. Regression test: `session-reader.test.mjs`.
 - A mutation that main triggers calls `invalidateLocalSessionLists()`: it clears main's per-host entry and sends the daemon `invalidateSessionLists` (the daemon runs the invalidation above). A route that changes this machine's session files and does not call it leaves the sidebar stale for up to 30 s.
-- **Still read on main, from this machine's own files:** transcript search (`session-content-search.ts`, `/api/sessions/search`), the session watcher (`session-watcher.ts`), archive list/restore, import, usage (`usage-db.ts`), subagent history and local file-reference readers. Their main-side session caches are invalidated separately. Workspace shell-output authorization and bytes now come from the owning daemon; new remote-capable readers must use the host seam.
+- **Still read on main, from this machine's own files:** transcript search (`session-content-search.ts`, `/api/sessions/search`), the session watcher (`session-watcher.ts`), this machine's archive list/restore (linked hosts' go through their daemons), import, usage (`usage-db.ts`), subagent history and local file-reference readers. Their main-side session caches are invalidated separately. Workspace shell-output authorization and bytes now come from the owning daemon; new remote-capable readers must use the host seam.
 
 ### Chat scroll-follow
 - `useAgentSession` follows the conversation: the effect depends on both
