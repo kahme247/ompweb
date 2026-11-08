@@ -210,7 +210,7 @@ export function haveSameRelevantToolResults(
   if (!Array.isArray(content)) return true;
   for (const block of content) {
     if (!block || typeof block !== "object") continue;
-    if (block.type === "toolCall" && block.toolCallId) {
+    if (block.type === "toolCall") {
       if (previous?.get(block.toolCallId) !== next?.get(block.toolCallId)) {
         return false;
       }

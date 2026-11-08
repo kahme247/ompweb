@@ -1092,6 +1092,38 @@ test("haveSameRelevantToolResults and MessageView re-render look up hybrid toolC
   assert.doesNotMatch(container.textContent, /initial output/);
 });
 
+test("haveSameRelevantToolResults and areMessageViewPropsEqual handle toolCall with empty string toolCallId", () => {
+  const emptyIdMsg = {
+    role: "assistant",
+    content: [
+      { type: "toolCall", toolCallId: "", toolName: "bash", input: {} },
+    ],
+  };
+  const resEmpty1 = { role: "toolResult", toolCallId: "", content: [{ type: "text", text: "empty id output 1" }] };
+  const resEmpty2 = { role: "toolResult", toolCallId: "", content: [{ type: "text", text: "empty id output 2" }] };
+  const resUnrelated = { role: "toolResult", toolCallId: "other", content: [{ type: "text", text: "other" }] };
+
+  const mapEmpty1 = new Map([["", resEmpty1]]);
+  const mapEmpty2 = new Map([["", resEmpty2]]);
+  const mapEmpty1WithUnrelated = new Map([["", resEmpty1], ["other", resUnrelated]]);
+  const mapEmptyWithoutResult = new Map();
+
+  // Adding a result under "" causes unequal comparison
+  assert.equal(haveSameRelevantToolResults(emptyIdMsg, mapEmptyWithoutResult, mapEmpty1), false);
+  // Updating result under "" causes unequal comparison
+  assert.equal(haveSameRelevantToolResults(emptyIdMsg, mapEmpty1, mapEmpty2), false);
+  // Unrelated key changing while "" is unchanged causes equal comparison
+  assert.equal(haveSameRelevantToolResults(emptyIdMsg, mapEmpty1, mapEmpty1WithUnrelated), true);
+
+  const baseProps = {
+    isStreaming: false,
+    message: emptyIdMsg,
+    toolResults: mapEmpty1,
+  };
+  assert.equal(areMessageViewPropsEqual(baseProps, { ...baseProps, toolResults: mapEmpty2 }), false);
+  assert.equal(areMessageViewPropsEqual(baseProps, { ...baseProps, toolResults: mapEmpty1WithUnrelated }), true);
+});
+
 
 test("user-message Edit only runs after confirmation, and not once blocked", async (t) => {
   const originalMatchMedia = window.matchMedia;
