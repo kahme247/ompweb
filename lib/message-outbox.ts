@@ -120,6 +120,7 @@ function db(): Database {
       for (const [name, type] of [["dispatch_pid", "INTEGER"], ["upload_receipts", "TEXT"], ["payload_bytes", "INTEGER NOT NULL DEFAULT 0"], ["previous_entry_ids", "TEXT"], ["source_session_id", "TEXT"]]) {
         if (!columns.some((column) => column.name === name)) database.exec(`ALTER TABLE entries ADD COLUMN ${name} ${type}`);
       }
+      database.exec("CREATE INDEX IF NOT EXISTS entries_source_session ON entries (source_session_id, state)");
       const uploadColumns = database.prepare("PRAGMA table_info(completed_uploads)").all() as { name: string }[];
       for (const name of ["proof", "scope"]) {
         if (!uploadColumns.some((column) => column.name === name)) database.exec(`ALTER TABLE completed_uploads ADD COLUMN ${name} TEXT`);
@@ -254,8 +255,9 @@ export function outboxEntries(sessionId: string): OutboxEntry[] {
 /** Recent tombstones let a browser retire its first-leg bridge even if it subscribes after the message was delivered. */
 export function outboxSettledIds(sessionId: string): string[] {
   const keys = sessionKeys(sessionId);
-  return (db().prepare(`SELECT id FROM entries WHERE session_id IN (${slots(keys)}) AND state = 'delivered' AND done_at >= ? ORDER BY done_at DESC, rowid DESC LIMIT 256`)
-    .all(...keys, Date.now() - KEEP_DELIVERED_MS) as { id: string }[]).map(({ id }) => id);
+  // The submitting ID survives a peer's native move even before this server learns its aliases.
+  return (db().prepare(`SELECT id FROM entries WHERE (session_id IN (${slots(keys)}) OR source_session_id = ?) AND state = 'delivered' AND done_at >= ? ORDER BY done_at DESC, rowid DESC LIMIT 256`)
+    .all(...keys, sessionId, Date.now() - KEEP_DELIVERED_MS) as { id: string }[]).map(({ id }) => id);
 }
 
 function sessionKeys(sessionId: string): string[] {
@@ -588,15 +590,23 @@ export function startOutbox(): void {
   maintenance.unref?.();
   // SQLite changes made by a peer server do not pass through this process's publish().
   const dataVersion = db().prepare<{ data_version: number }, []>("PRAGMA data_version");
-  let version = dataVersion.get()?.data_version;
+  let version: number | undefined;
   const changes = setInterval(() => {
     if (globalThis.__ompOutbox !== state) { clearInterval(changes); return; }
     if (state.listeners.size === 0) return;
     try {
       const next = dataVersion.get()?.data_version;
       if (next === version) return;
-      version = next;
-      for (const sessionId of state.listeners.keys()) notifyListeners(sessionId);
+      let complete = true;
+      for (const sessionId of state.listeners.keys()) {
+        try {
+          notifyListeners(sessionId);
+        } catch (error) {
+          complete = false;
+          console.warn(`[omp-web] outbox notification failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      if (complete) version = next;
     } catch (error) {
       console.warn(`[omp-web] outbox change check failed: ${error instanceof Error ? error.message : String(error)}`);
     }
