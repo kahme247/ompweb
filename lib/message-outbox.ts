@@ -255,9 +255,13 @@ export function outboxEntries(sessionId: string): OutboxEntry[] {
 /** Recent tombstones let a browser retire its first-leg bridge even if it subscribes after the message was delivered. */
 export function outboxSettledIds(sessionId: string): string[] {
   const keys = sessionKeys(sessionId);
-  // The submitting ID survives a peer's native move even before this server learns its aliases.
-  return (db().prepare(`SELECT id FROM entries WHERE (session_id IN (${slots(keys)}) OR source_session_id = ?) AND state = 'delivered' AND done_at >= ? ORDER BY done_at DESC, rowid DESC LIMIT 256`)
-    .all(...keys, sessionId, Date.now() - KEEP_DELIVERED_MS) as { id: string }[]).map(({ id }) => id);
+  const cutoff = Date.now() - KEEP_DELIVERED_MS;
+  const current = db().prepare(`SELECT id FROM entries WHERE session_id IN (${slots(keys)}) AND state = 'delivered' AND done_at >= ? ORDER BY done_at DESC, rowid DESC LIMIT 256`)
+    .all(...keys, cutoff) as { id: string }[];
+  // A peer's native move keeps the submitting ID; its receipts cannot crowd out this session's own history.
+  const moved = db().prepare(`SELECT id FROM entries WHERE source_session_id = ? AND session_id NOT IN (${slots(keys)}) AND state = 'delivered' AND done_at >= ? ORDER BY done_at DESC, rowid DESC LIMIT 256`)
+    .all(sessionId, ...keys, cutoff) as { id: string }[];
+  return [...current, ...moved].map(({ id }) => id);
 }
 
 function sessionKeys(sessionId: string): string[] {
@@ -591,22 +595,30 @@ export function startOutbox(): void {
   // SQLite changes made by a peer server do not pass through this process's publish().
   const dataVersion = db().prepare<{ data_version: number }, []>("PRAGMA data_version");
   let version: number | undefined;
+  const pending = new Map<string, number>();
   const changes = setInterval(() => {
     if (globalThis.__ompOutbox !== state) { clearInterval(changes); return; }
-    if (state.listeners.size === 0) return;
+    if (state.listeners.size === 0) { pending.clear(); return; }
     try {
       const next = dataVersion.get()?.data_version;
-      if (next === version) return;
-      let complete = true;
-      for (const sessionId of state.listeners.keys()) {
+      if (next !== version) {
+        for (const sessionId of state.listeners.keys()) {
+          if (!pending.has(sessionId)) pending.set(sessionId, 0);
+        }
+        version = next;
+      }
+      const now = Date.now();
+      for (const [sessionId, retryAt] of pending) {
+        if (!state.listeners.has(sessionId)) { pending.delete(sessionId); continue; }
+        if (now < retryAt) continue;
         try {
           notifyListeners(sessionId);
+          pending.delete(sessionId);
         } catch (error) {
-          complete = false;
+          pending.set(sessionId, now + RETRY_MS);
           console.warn(`[omp-web] outbox notification failed: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
-      if (complete) version = next;
     } catch (error) {
       console.warn(`[omp-web] outbox change check failed: ${error instanceof Error ? error.message : String(error)}`);
     }
