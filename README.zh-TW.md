@@ -185,6 +185,7 @@ ExecStart=%h/.local/share/ompweb-linux-x64/ompweb host
 Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=-%h/.omp/agent/web-service.env
 Restart=always
+RestartPreventExitStatus=0
 RestartSec=10
 
 [Install]
@@ -234,10 +235,11 @@ npx --yes @kahme247/ompweb@latest ompweb-launchd uninstall   # 停止並移除�
 該服務執行 `npx --yes @kahme247/ompweb@latest`；若要鎖定特定版本，可傳入套件規格，例如 `ompweb-launchd install @kahme247/ompweb@0.3.6`。安裝時會讀取所有[環境變數](#環境變數)並寫入 plist 檔案，此外還包含 `OMP_WEB_PKG`（套件規格，等同於位置引數）。作為服務執行時，預設**不會**自動開啟瀏覽器——安裝時帶入 `OMP_WEB_NO_OPEN=0` 可恢復自動開啟行為。
 
 ```bash
-OMP_WEB_PASSWORD=secret npx --yes @kahme247/ompweb@latest ompweb-launchd install
+ompweb hash-password   # 以互動方式輸入密碼並產生雜湊值
+OMP_WEB_PASSWORD_HASH='<hash>' npx --yes @kahme247/ompweb@latest ompweb-launchd install
 ```
 
-`OMP_WEB_PASSWORD` 會在安裝時立即進行雜湊；plist 內只會儲存雜湊值，絕不包含密碼明文。若使用 `ompweb hash-password` 自行產生了雜湊，亦可直接傳入 `OMP_WEB_PASSWORD_HASH`。
+請先執行 `ompweb hash-password` 以互動方式產生密碼雜湊，再透過 `OMP_WEB_PASSWORD_HASH` 傳入，避免將密碼明文留在 shell 歷史紀錄中；plist 內只會儲存雜湊值，絕不包含密碼明文。
 
 當繫結至非回呼（non-loopback）主機時，請務必設定 `OMP_WEB_PASSWORD_HASH`（反向代理或 VPN 僅提供額外防護），並透過受信任的反向代理或 VPN 使用 HTTPS。切勿將未經驗證的 Web UI 暴露在公開網路中，或在明文 HTTP 連線下傳送密碼與工作階段 Cookie。
 
@@ -252,14 +254,15 @@ npx --yes --package=@kahme247/ompweb@latest ompweb-systemd install
 ```
 安裝程式會自動建立權限為 `600` 的 `~/.omp/agent/web-service.env`；無需手動建立檔案。明確指定 `--package` 參數可確保 `npx` 執行所選套件內的 systemd 執行檔。
 
-若要將服務繫結至所有 IPv4 介面以供區網存取，請在安裝時設定密碼：
+若要將服務繫結至所有 IPv4 介面以供區網存取，請先以互動方式產生密碼雜湊，並於安裝時透過 `OMP_WEB_PASSWORD_HASH` 設定（避免將密碼明文留在 shell 歷史紀錄中）：
 
 ```bash
-OMP_WEB_HOSTNAME=0.0.0.0 OMP_WEB_PASSWORD='change-me' \
+ompweb hash-password   # 以互動方式輸入密碼並產生雜湊值
+OMP_WEB_HOSTNAME=0.0.0.0 OMP_WEB_PASSWORD_HASH='<hash>' \
   npx --yes --package=@kahme247/ompweb@latest ompweb-systemd install
 ```
 
-密碼在寫入 `web-service.env` 之前會先進行雜湊處理。
+密碼雜湊會直接寫入 `web-service.env`。
 
 管理指令如下：
 
@@ -287,9 +290,9 @@ loginctl enable-linger "$USER"
 在 Linux 上，`ompweb-tray` 會註冊一個具備快顯功能表的 StatusNotifierItem 系統匣圖示：可開啟 Web UI、複製網址、啟動／停止／重新啟動 systemd 服務、檢視記錄、將 Web UI 暴露至網路、變更連接埠、設定網頁密碼、切換開機自動啟動，以及結束系統匣程式。
 
 ```bash
-npx --yes @kahme247/ompweb@latest ompweb-tray --install      # 圖示 + 自動啟動 + 啟動系統匣
-npx --yes @kahme247/ompweb@latest ompweb-tray --status       # 檢視系統匣與服務狀態
-npx --yes @kahme247/ompweb@latest ompweb-tray --uninstall    # 移除自動啟動並停止系統匣
+npx --yes --package=@kahme247/ompweb@latest ompweb-tray --install      # 圖示 + 自動啟動 + 啟動系統匣
+npx --yes --package=@kahme247/ompweb@latest ompweb-tray --status       # 檢視系統匣與服務狀態
+npx --yes --package=@kahme247/ompweb@latest ompweb-tray --uninstall    # 移除自動啟動並停止系統匣
 ```
 
 **暴露至網路（Expose to Network）**會將服務從 `127.0.0.1` 重新繫結至 `0.0.0.0`，讓 Web UI 能自區網或 VPN（例如 Tailscale）存取。離開回呼介面時必須設定網頁密碼——必要時系統匣會透過 `kdialog`/`zenity` 跳出提示詢問密碼，並儲存其雜湊值。**變更連接埠…**與**設定網頁密碼…**會修改 `~/.omp/agent/web-service.env` 並重新啟動服務。當繫結至非回呼主機時，請務必透過受信任的反向代理或 VPN 使用 HTTPS 進行遠端連線。
@@ -341,12 +344,12 @@ npx @kahme247/ompweb@latest host --allow-http
 - **每台主機上的工作區檔案：** 檔案總管、預覽、下載、檔案搜尋、@-提及與即時檔案監聽皆使用所屬機器的守護行程，包括這台機器。檔案總管上傳每個檔案支援最高 2 GiB，且無 100 MiB 批次總上限；預覽限制仍為文字 256 KiB、圖片與 DOCX 10 MiB。切換對話時，檔案分頁會保留其來源主機。無法連線或版本較舊的守護行程會回報離線或提示需要更新；主伺服器絕不會以本機檔案系統代為取代。
 - **每台主機上的 Git 與工作樹：** 狀態、差異（diff）、GitHub Issue 連結，以及工作樹的建立、選擇與移除皆在所屬守護行程上執行。包含未提交變更（dirty）的工作樹仍需要明確的強制確認。切換工作樹只會改變新對話啟動的位置，不會影響已開啟的對話。
 - **每台主機上的目錄瀏覽與複製：** 「新增工作區」挑選器可巡覽該主機的目錄並在該處複製（clone）HTTPS/SSH 儲存庫。取消複製會等待複製程序退出並進行安全清理；連線中斷時會回報未知的結果，而非假定複製已取消。若清理期間目標路徑發生變更，擷取的資料會保存在私有隔離目錄中，錯誤訊息會顯示其位置；在移除或還原任何內容前請先檢查該目錄。
-- **遠端主機尚不支援：** 對話工作階段封存，以及技能、外掛程式、代理與 MCP 設定。對話紀錄文字搜尋目前仍僅掃描這台機器。
+- **遠端主機尚不支援：** 技能、外掛程式、代理與 MCP 設定。對話紀錄文字搜尋目前仍僅掃描這台機器。對話工作階段可以在已連結主機上封存及還原。
 - **由代理發起的對話：** 在啟用代理工具時，代理可傳遞 `host` 給 `new_session`（預設為該代理自身所在的主機）。遠端主機每次都會要求確認，除非在「設定 → 主機」中為其開啟了**代理可在此處直接開始對話，無需詢問**。在遠端主機上執行的代理在於本機開始對話或傳送訊息之前，一定會先詢問確認。
 
 ### 讓主機作為服務持續執行
 
-以下方式皆以主機模式執行[單一二進位檔](#單一二進位檔)。在 Linux 與 Windows 上，服務可在登出與重新開機後持續維持連線；在 macOS 上，則透過指令碼在終端機中保持執行（原因詳見下方）。請先解壓縮適用於該機器的發行版，接著依照步驟 2 執行一次 `ompweb host login --url …` 以儲存連線資訊（將 `npx @kahme247/ompweb@latest` 替換為二進位檔路徑）。每種設定都會在 `ompweb host` 失敗 10 秒後重新啟動，但結束代碼為 `0` 時不會重新啟動：那代表有使用相同權杖的較新連線取代了它，若重新啟動會導致每 10 秒互相搶奪連線。若伺服器網址為純 `http://`，請在 `host` 後方加上 `--allow-http`；若儲存連線資訊時有設定 `PI_CODING_AGENT_DIR`，請在服務中也一併設定。一台機器僅能連結至一台伺服器：請勿在同一台機器上同時執行 ompweb 網頁伺服器，因為它會為自己的守護行程寫入同一個連線設定檔。若要更新，請先停止服務、替換發行版目錄，然後重新啟動服務。撤銷主機後，請停止並移除其服務，否則它會持續重試。
+以下方式皆以主機模式執行[單一二進位檔](#單一二進位檔)。在 Linux 與 Windows 上，服務可在登出與重新開機後持續維持連線；在 macOS 上，則透過指令碼在終端機中保持執行（原因詳見下方）。請先解壓縮適用於該機器的發行版，接著依照步驟 2 執行一次 `ompweb host login --url …` 以儲存連線資訊（將 `npx @kahme247/ompweb@latest` 替換為二進位檔路徑）。每種設定都會在 `ompweb host` 失敗 10 秒後重新啟動，但結束代碼為 `0` 時不會重新啟動：那代表有使用相同權杖的較新連線取代了它，若重新啟動會導致每 10 秒互相搶奪連線。若伺服器網址為純 `http://`，請在 `host` 後方加上 `--allow-http`；若儲存連線資訊時有設定 `PI_CODING_AGENT_DIR`，請在服務中也一併設定。獨立主機可同時連結至多台伺服器，並在伺服器支援連線協定 v7 時共用即時對話：請從每台額外的伺服器取得權杖，並執行 `ompweb host login --add --url <server>`。請勿在同一台機器上同時執行本機 ompweb 網頁伺服器，因為它會為自己的守護行程寫入同一個連線設定檔。若要更新，請先停止服務、替換發行版目錄，然後重新啟動服務。撤銷主機後，請停止並移除其服務，否則它會持續重試。
 
 **Linux（systemd 使用者服務）。** 建立 `~/.config/systemd/user/ompweb-host.service`（請調整發行版路徑，並將 omp 所在目錄加入 `PATH` 或設定 `OMP_WEB_OMP_BIN`）：
 
