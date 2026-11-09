@@ -717,6 +717,8 @@
   "errors.invalid_git_url": "请输入 https:// 或 ssh 格式的 Git 仓库 URL",
   "errors.invalid_path": "路径无效",
   "errors.invalid_profile": "Profile 不合法：需为 1–64 个字符（a–z、0–9、.、_、-），以字母或数字开头；不能以 . 结尾，也不能是 Windows 保留设备名。",
+  "errors.stored_invalid_profile": "保存的工作区 Profile 无效。请在启动会话前打开工作区启动配置，修正或清除 Profile。",
+  "errors.stored_reserved_launch_arg": "保存的工作区附加参数包含保留选项。请在启动会话前打开工作区启动配置，删除该选项及其值。",
   "errors.invalid_request": "请求无效",
   "errors.invalid_request_type": "文件请求类型无效",
   "errors.invalid_upload_type": "上传请求类型无效",

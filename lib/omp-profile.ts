@@ -9,7 +9,9 @@
  * extension such as con.txt).
  */
 
-const PROFILE_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+// JavaScript's `$` also matches before a final newline; the CLI requires the
+// entire name to match, including for untrimmed values read from disk.
+const PROFILE_NAME_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}(?![\s\S])/;
 
 // Reserved device names apply to the base name before the first dot.
 const WINDOWS_RESERVED_BASE = new Set([

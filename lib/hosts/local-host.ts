@@ -3,6 +3,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { fileURLToPath } from "url";
 import { comparableProjectPath } from "../comparable-path";
+import { isValidOmpProfile } from "../omp-profile";
 import { getAgentEnvOverrides } from "../omp/agent-env";
 import { spawnOmpTransport } from "../omp/rpc-process";
 import { readNativeSettings } from "../omp/settings-config";
@@ -11,6 +12,7 @@ import { invalidateSessionEntriesCache, invalidateSessionListCache, invalidateSe
 import { PRESET_FULL } from "../tool-presets";
 import type { ProjectLaunchConfig } from "../types";
 import type { Host } from "./host";
+import { HostOpError } from "./link-protocol";
 import { sessionOps } from "./session-ops";
 
 const EXTENSION_BESIDE_MODULE = fileURLToPath(new URL("../omp/session-edit-extension.mjs", import.meta.url));
@@ -69,11 +71,21 @@ export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[],
   }
   if (advisor) args.push("--advisor");
   else if (launchConfig?.advisor) args.push("--advisor");
-  // Defense in depth: the registry is hand-editable, so re-strip reserved
-  // args and dash-leading profiles at the spawn boundary even though the
-  // API validates them on write.
-  if (launchConfig?.profile && !launchConfig.profile.startsWith("-")) args.push("--profile", launchConfig.profile);
-  if (launchConfig?.extraArgs) args.push(...launchConfig.extraArgs.filter((arg) => !isReservedLaunchArg(arg)));
+  // Refuse the whole launch, not individual tokens: filtering a reserved
+  // flag would silently change the profile or pass its value as a positional.
+  if (launchConfig?.profile !== undefined) {
+    if (!launchConfig.profile || !isValidOmpProfile(launchConfig.profile)) {
+      throw new HostOpError(400, "stored_invalid_profile", "Invalid saved workspace profile. Open the workspace launch configuration and correct or clear the profile before starting a session.");
+    }
+    args.push("--profile", launchConfig.profile);
+  }
+  if (launchConfig?.extraArgs) {
+    const reserved = launchConfig.extraArgs.find(isReservedLaunchArg);
+    if (reserved !== undefined) {
+      throw new HostOpError(400, "stored_reserved_launch_arg", `Saved workspace extra arguments contain the reserved option ${JSON.stringify(reserved)}. Open the workspace launch configuration and remove it and its value before starting a session.`);
+    }
+    args.push(...launchConfig.extraArgs);
+  }
   return args;
 }
 

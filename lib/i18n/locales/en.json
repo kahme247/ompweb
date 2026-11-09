@@ -734,6 +734,8 @@
   "errors.invalid_git_url": "Enter an https:// or ssh Git repository URL",
   "errors.invalid_path": "Invalid path",
   "errors.invalid_profile": "Invalid profile name: use 1–64 characters (a–z, 0–9, '.', '_', '-'), starting with a letter or digit; cannot end with '.' or be a Windows reserved device name.",
+  "errors.stored_invalid_profile": "The saved workspace profile is invalid. Open the workspace launch configuration and correct or clear the profile before starting a session.",
+  "errors.stored_reserved_launch_arg": "The saved workspace extra arguments contain a reserved option. Open the workspace launch configuration and remove it and its value before starting a session.",
   "errors.invalid_request": "Invalid request",
   "errors.invalid_request_type": "Invalid file request type",
   "errors.invalid_upload_type": "Invalid upload request type",

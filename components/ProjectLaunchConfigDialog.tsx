@@ -21,7 +21,7 @@ export function ProjectLaunchConfigDialog({ projectPath, initialConfig, onClose,
   const [extraArgs, setExtraArgs] = useState(initialConfig?.extraArgs?.join("\n") ?? "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const profileInvalid = profile.trim() !== "" && !isValidOmpProfile(profile.trim());
+  const profileInvalid = profile !== "" && !isValidOmpProfile(profile);
 
   /** Shape the form contents into the structured config the API uses. */
   const buildConfig = (): ProjectLaunchConfig | null => {
@@ -72,7 +72,7 @@ export function ProjectLaunchConfigDialog({ projectPath, initialConfig, onClose,
             <textarea value={extraArgs} onChange={(event) => setExtraArgs(event.target.value)} placeholder={t("projectLaunchConfig.extraArgsPlaceholder")} rows={6} disabled={saving} style={{ padding: "8px 9px", resize: "vertical", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 12, outline: "none" }} />
           </label>
           <div style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.5 }}>
-            <code>--mode</code> <code>--cwd</code> <code>--resume</code> {t("projectLaunchConfig.reservedNote")}
+            <code>--mode</code> <code>rpc-ui</code> <code>--cwd</code> <code>--resume</code> <code>--profile</code> {t("projectLaunchConfig.reservedNote")}
           </div>
           {error && <div role="alert" style={{ color: "var(--status-error)", fontSize: 12, lineHeight: 1.4 }}>{error}</div>}
         </div>

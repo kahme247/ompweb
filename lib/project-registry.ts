@@ -2,7 +2,6 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, 
 import { homedir } from "os";
 import { isAbsolute, resolve } from "path";
 import { comparableProjectPath } from "./comparable-path";
-import { isValidOmpProfile } from "./omp-profile";
 import { getAgentDir } from "./omp/paths";
 import type { ManagedProject, ProjectLaunchConfig } from "./types";
 
@@ -73,20 +72,18 @@ export function isReservedLaunchArg(arg: string): boolean {
   return RESERVED_LAUNCH_ARGS[arg] === true || RESERVED_LAUNCH_ARG_PREFIXES.some((prefix) => arg.startsWith(prefix));
 }
 
-/** Parse the on-disk registry's launch config; invalid fields are safely ignored. */
+/** Preserve stored strings so invalid legacy configurations can be corrected,
+ * rather than silently changing the profile or leaving orphaned arguments. */
 function parseLaunchConfig(item: Record<string, unknown>): ProjectLaunchConfig | undefined {
   const raw = item.launchConfig;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const value = raw as Record<string, unknown>;
-  const rawProfile = typeof value.profile === "string" && value.profile.trim() && !value.profile.trim().startsWith("-") ? value.profile.trim() : undefined;
-  // A profile omp would reject (e.g. containing a space) must not reach the
-  // spawn boundary: it makes every session in the workspace fail at startup.
-  const profile = rawProfile !== undefined && isValidOmpProfile(rawProfile) ? rawProfile : undefined;
+  const profile = typeof value.profile === "string" ? value.profile : undefined;
   const advisor = value.advisor === true ? true : undefined;
   const extraArgs = Array.isArray(value.extraArgs)
-    ? value.extraArgs.filter((arg): arg is string => typeof arg === "string" && arg.length > 0 && arg.length <= 256 && !isReservedLaunchArg(arg)).slice(0, 32)
+    ? value.extraArgs.filter((arg): arg is string => typeof arg === "string")
     : undefined;
-  if (!profile && advisor === undefined && (!extraArgs || extraArgs.length === 0)) return undefined;
+  if (profile === undefined && advisor === undefined && (!extraArgs || extraArgs.length === 0)) return undefined;
   return { profile, advisor, extraArgs };
 }
 
