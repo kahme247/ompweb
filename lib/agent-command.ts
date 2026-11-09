@@ -28,16 +28,23 @@ const LIVE_SESSION_ONLY: Record<string, { error: string; code: string }> = {
   set_skill_startup_diagnostics: { error: "Skill diagnostics require a running session", code: "skill_diagnostics_unavailable" },
 };
 
+/** The goal ops that may start a child: they are how a client sets, holds or
+ * clears a goal on a session that is not running. Everything else (`get`, a
+ * missing op, a typo) only reads state a live child holds, and omp rejects an
+ * unknown op (`Unknown goal op: undefined`) — spawning a full child (MCP, LSP)
+ * just to relay that rejection is not what the caller asked for. */
+const GOAL_START_OPS: Record<string, true> = { create: true, pause: true, resume: true, drop: true };
+
 /** The refusal for a command that may only ride a live child, or undefined when
  * the command may start one. `goal` reads the state a running child holds: a
  * native client inspecting goal mode must not resume a full omp child (MCP,
- * LSP) for it, and a saved session's goal is not read off disk here. The
+ * LSP) for it, and a saved session's goal is not read off disk here. Only the
  * mutating ops (`create`, `pause`, `resume`, `drop`) keep their start
  * semantics — they are what a client uses to set a goal on an idle session. */
 function liveOnlyRefusal(type: string, command: Record<string, unknown>): { error: string; code: string } | undefined {
   const refusal = LIVE_SESSION_ONLY[type];
   if (refusal) return refusal;
-  if (type === "goal" && command.op === "get") {
+  if (type === "goal" && !Object.hasOwn(GOAL_START_OPS, command.op as string)) {
     return { error: "Goal state requires a running session", code: "goal_state_unavailable" };
   }
   return undefined;

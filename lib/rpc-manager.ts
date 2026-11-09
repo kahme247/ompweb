@@ -26,6 +26,7 @@ import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./
 import { eventWithToolResultImageUrls } from "./media-cache";
 import type {
   BashResultInfo,
+  GoalCommandReply,
   OmpModel,
   RpcAvailableSlashCommand,
   RpcSessionState,
@@ -167,9 +168,6 @@ const PASSTHROUGH_COMMANDS = new Set([
   "btw",
   "btw_cancel",
   "get_btw_history",
-  // Goal mode (`{type:"goal", op}`) has the same shape as omp's RPC frame and
-  // is the only way native clients reach it; every op answers `{goal, state}`.
-  "goal",
 ]);
 
 // Outlasts omp's cold prediction-daemon start (up to 3 × 30s start rounds plus a
@@ -2724,6 +2722,16 @@ export class AgentSessionWrapper {
         if (typeof command.id === "string") this.pendingHostUris.delete(command.id);
         this.proc.sendFrame(command as { type: string; [key: string]: unknown });
         return null;
+      }
+
+      // Goal mode: `{type:"goal", op}` is omp's own RPC frame, forwarded
+      // verbatim. Every op answers `{goal, state}` — `goal` the record the op
+      // acted on, `state` the mode snapshot around it, both `null` once no goal
+      // is set (omp answers that after `drop`). Typed here because this is the
+      // only place omp-web sees the reply shape.
+      case "goal": {
+        const reply: GoalCommandReply = await this.sendNativeMessageCommand<GoalCommandReply>(command as { type: string }, undefined, command);
+        return reply;
       }
 
       default: {
