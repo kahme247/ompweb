@@ -211,7 +211,7 @@ exactly one response variant: `{confirmed}`, `{value}`, `{cancelled: true}`, or
   nothing is a silent push (iOS revokes the permission, Chromium and Firefox
   substitute a generic card and mute the origin), so a device that is not
   reachable keeps the stale card until the next `input` push replaces it by
-  tag or the app syncs.
+  tag; only a reachable tab closes it, through the stream.
 - A resync that dropped a dialog (a linked host discarding buffered output)
   retracts it too, but as a *forgotten* settlement: the retraction is
   temporary, so if the host replays the same request id the question is

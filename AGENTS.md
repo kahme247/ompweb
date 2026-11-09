@@ -1815,7 +1815,8 @@ during the wait.
   therefore always shows what it receives, and a settled dialog is retracted on
   the tab streams only (`{type: "notification-dismiss", tag, sessionId,
   requestId}`) — never by a push. A device that is not reachable keeps the
-  stale card until the next `input` push replaces it by tag or the app syncs.
+  stale card until the next `input` push replaces it by tag; only a reachable
+  tab closes it, through the stream.
 - Notifications have their own `notifications` channel (`clientId` = the
   tab's notification client id), opened by `useNotifications` in `AppShell`,
   so a tab stays reachable on every view, Settings included. A tab on

@@ -186,16 +186,11 @@ const MODEL_SWITCH_NOTICE_SOURCES = new Set(["prewalk", "plan-yolo"]);
 
 /**
  * Extension UI dialogs the user answers in the chat (omp's rpc.md "Extension UI
-<<<<<<< HEAD
  * Sub-Protocol": these expect an `extension_ui_response`). `open_url` is
  * fire-and-forget — omp registers no resolver for it — so it is not a dialog
  * and takes no answer; it is only *blocking* in the sense that it is replayed.
-=======
- * Sub-Protocol": dialog methods expect an `extension_ui_response`; `open_url`
- * is fire-and-forget). Introduced by #319 (`feat/sidebar-awaiting-input`),
- * which uses it for the "waiting for your answer" sidebar state; the input
- * reminder arms only for these, because an `open_url` has no answer to wait for.
->>>>>>> a5630ce4 (feat(notifications): repeat an unanswered question every two hours)
+ * The input reminder repeats only these, because an `open_url` has no answer
+ * to wait for.
  */
 export const DIALOG_UI_METHODS: ReadonlySet<string> = new Set(["select", "confirm", "input", "editor", "ask"]);
 

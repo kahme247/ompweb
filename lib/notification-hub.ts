@@ -318,7 +318,8 @@ export function publishNotification(event: NotificationEvent): void {
  * Chromium and Firefox answer one with a browser-substituted card ("This site
  * has been updated in the background") and eventually mute the origin, exactly
  * as iOS revokes the permission. A device that is not reachable keeps the stale
- * card until the next `input` push replaces it by tag or the app syncs.
+ * card until the next `input` push replaces it by tag; only a reachable tab
+ * closes it, through the stream.
  *
  * Never throws: callers run on the RPC frame path.
  */
