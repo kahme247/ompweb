@@ -45,6 +45,7 @@ import { subscribeSessionsChanged } from "@/lib/session-change-bus";
 import { EVENT_STREAM_CLOSED, EVENT_STREAM_OPEN, addToOutbox, dropFromOutbox, newOutboxId, openEventStream, subscribeOutbox, type EventStream, type LocalOutboxEntry } from "@/lib/event-stream";
 import { createSessionCatchUp, type SessionCatchUp, type SessionLiveFields } from "./useAgentSession-sync";
 import type { SessionLiveSnapshot } from "@/lib/session-sync";
+import type { ForkTarget } from "@/lib/chat-fork";
 import {
   mergeSubagentRoster,
   parseSubagentActivityEvent,
@@ -3561,20 +3562,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   // editPrompt: omp's `branch` drops the chosen user prompt from the fork and
   // returns its text — put it in the fork's composer (edit-and-resend).
-  const handleFork = useCallback(async (entryId: string, editPrompt: boolean) => {
+  // Leaf fork: parameterless `fork` clones session in-place up to the active leaf.
+  const handleFork = useCallback(async (target?: ForkTarget | string, editPrompt?: boolean) => {
     if (bashRunningRef.current || agentRunningRef.current || forkInFlightRef.current || editInFlightRef.current) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
+
+    const entryId = typeof target === "object" ? target?.entryId : (typeof target === "string" ? target : undefined);
+    const shouldEdit = typeof target === "object" ? target?.editPrompt : (editPrompt ?? false);
+
     forkInFlightRef.current = true;
-    setForkingEntryId(entryId);
+    setForkingEntryId(entryId ?? "__LEAF__");
     try {
       const result = await sendAgentCommand<{ cancelled?: boolean; newSessionId?: string; text?: string }>(sid, {
         type: "fork",
-        entryId,
+        ...(entryId ? { entryId } : {}),
       });
       const { cancelled, newSessionId, text } = result ?? {};
       if (!cancelled && newSessionId) {
-        if (editPrompt && text) setDraft(newSessionId, { value: text, images: [], files: [] });
+        if (shouldEdit && text) setDraft(newSessionId, { value: text, images: [], files: [] });
         // The forked child keeps its spawn flags: carry the advisor choice to
         // the new id, or the toggle flips off on switch and the next prompt
         // respawns the fork without --advisor.

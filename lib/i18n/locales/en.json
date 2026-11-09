@@ -960,6 +960,8 @@
   "messageView.modifiedFiles": "Modified files",
   "messageView.newSession": "Fork",
   "messageView.newSessionTitle": "Fork a new session from this point",
+  "messageView.forkSession": "Fork session (clone full conversation)",
+  "messageView.branchFromHere": "Branch from here (rewind to prompt)",
   "messageView.noMessage": "(no message)",
   "messageView.noOutput": "(no output)",
   "messageView.noSummary": "(no summary)",

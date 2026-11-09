@@ -919,6 +919,8 @@
   "messageView.modifiedFiles": "已修改的文件",
   "messageView.newSession": "新会话",
   "messageView.newSessionTitle": "从此处分叉出新会话",
+  "messageView.forkSession": "分叉会话（完整克隆当前对话）",
+  "messageView.branchFromHere": "从此处分支（回退并重新编辑提示词）",
   "messageView.noMessage": "（无消息）",
   "messageView.noOutput": "（无输出）",
   "messageView.noSummary": "（无摘要）",

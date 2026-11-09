@@ -2709,20 +2709,29 @@ export class AgentSessionWrapper {
         return this.editMessage(command.entryId);
 
       case "fork": {
-        // omp's `branch` is pi-web's fork: it creates a branched session file
-        // and switches this live process onto it (entryId must be a user
-        // message entry, matching the web UI's fork buttons).
         if (this.bashRunning) {
           throw new Error("Cannot fork while a shell command is running");
         }
-        const result = await this.proc.sendCommand<{ text: string; cancelled: boolean }>({
-          type: "branch",
-          entryId: command.entryId as string,
-        });
-        if (result.cancelled) return { cancelled: true };
-        const newSessionId = await this.refreshIdentityAfterSessionChange();
-        // `text` is the branched prompt omp hands back for edit-and-resend.
-        return { cancelled: false, newSessionId, text: result.text };
+        if (this.isRunning() || this.streaming) {
+          throw new Error("Cannot fork while a response is streaming");
+        }
+        const entryId = typeof command.entryId === "string" && command.entryId.trim() ? command.entryId.trim() : undefined;
+        if (entryId) {
+          const result = await this.proc.sendCommand<{ text: string; cancelled: boolean }>({
+            type: "branch",
+            entryId,
+          });
+          if (result.cancelled) return { cancelled: true };
+          const newSessionId = await this.refreshIdentityAfterSessionChange();
+          return { cancelled: false, newSessionId, text: result.text };
+        } else {
+          const result = await this.proc.sendCommand<{ cancelled: boolean }>({
+            type: "fork",
+          });
+          if (result.cancelled) return { cancelled: true };
+          const newSessionId = await this.refreshIdentityAfterSessionChange();
+          return { cancelled: false, newSessionId };
+        }
       }
 
       case "new_session":
