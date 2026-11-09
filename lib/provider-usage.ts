@@ -199,6 +199,14 @@ export function parseProviderUsageOutput(output: string, query: UsageQuery = {},
   if (!isRecord(payload)) throw new Error("omp usage returned an invalid response");
   const rawReports = Array.isArray(payload.reports) ? payload.reports : [];
   const reports = rawReports.flatMap((report, index) => isRecord(report) ? normalizeReport(report, query, now, index) : []);
+  const accountsWithoutUsage = Array.isArray(payload.accountsWithoutUsage) ? payload.accountsWithoutUsage : [];
+  for (const [index, account] of accountsWithoutUsage.entries()) {
+    if (!isRecord(account)) continue;
+    reports.push(...normalizeReport({
+      provider: account.provider,
+      metadata: { email: account.email },
+    }, query, now, rawReports.length + index));
+  }
   const generatedAt = asNumber(payload.generatedAt) ?? null;
   return { generatedAt, reports };
 }
