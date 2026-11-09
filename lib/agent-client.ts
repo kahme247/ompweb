@@ -14,8 +14,7 @@ import { formatApiError } from "@/lib/i18n/api-error";
 /** A failed `POST /api/agent/[id]` carrying the route's stable code. Callers
  * that must react differently from a plain error (a `session_slow` ack timeout
  * with `maybeStarted` is not a rolled-back prompt; `abortUnconfirmed` is not a
- * completed stop; `session_running_elsewhere` means another omp holds the
- * session and the user must decide) branch on these fields. */
+ * completed stop) branch on these fields. */
 export class AgentCommandError extends Error {
   readonly code: string | undefined;
   readonly maybeStarted: boolean;

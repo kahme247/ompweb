@@ -728,7 +728,7 @@ async function deliver(entry: Row): Promise<Outcome> {
   publish(sessionId);
   try {
     // attachUploads mutates this same command before writing it: the watcher matches the final attachment block too.
-    const response = await runAgentCommand(sessionId, command, current.advisor === 1, current.owner, { trustedUploads: uploadReceipts });
+    const response = await runAgentCommand(sessionId, command, current.advisor === 1, current.owner, uploadReceipts);
     if (!response.ok) {
       // Nothing was written: a gone child is retried, and any other refusal is classified as not sent.
       const written = nativeWriteStarted(command);
@@ -783,7 +783,7 @@ function retry(entry: Row): Outcome {
 
 /** A non-2xx answer to the start (`sent` false) or to the message itself (spec O6). */
 async function refused(entry: Row, response: Response, sent: boolean): Promise<Outcome> {
-  const body = await response.json().catch(() => ({})) as { error?: unknown; code?: unknown; hostOffline?: unknown; delivery?: unknown };
+  const body = await response.json().catch(() => ({})) as { error?: unknown; code?: unknown; hostOffline?: unknown; delivery?: unknown; maybeStarted?: unknown };
   const current = row(entry.id);
   if (!current || current.state === "delivered" || current.state === "failed") return "next";
   const error = typeof body.error === "string" ? body.error : `HTTP ${response.status}`;
@@ -820,7 +820,10 @@ async function refused(entry: Row, response: Response, sent: boolean): Promise<O
     if (outbox().wakes?.has(entry.session_id)) return retry(entry);
   }
   // A lost reply (delivery unknown), a server error or an unresponsive child after the message went: omp may have it.
-  return fail(entry, error, sent && (response.status >= 500 || body.code === "session_unresponsive"));
+  // `maybeStarted` is the same statement from the wrapper itself: a `session_slow` ack timeout (HTTP 400) means the
+  // frame is already in omp's stdin, so the run may exist even though this request failed. Without it the UI called
+  // the message "Not sent" and offered a resend while omp was already executing it.
+  return fail(entry, error, sent && (response.status >= 500 || body.code === "session_unresponsive" || body.maybeStarted === true));
 }
 
 /** `archived`/`absent`: every source answered. Otherwise the archive could not be read: `hello` while only a host's

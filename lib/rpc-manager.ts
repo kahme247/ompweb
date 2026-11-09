@@ -27,7 +27,6 @@ import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./
 import { eventWithToolResultImageUrls } from "./media-cache";
 import type {
   BashResultInfo,
-  ExtensionUiResponse,
   OmpModel,
   RpcAvailableSlashCommand,
   RpcSessionState,
@@ -71,7 +70,7 @@ interface CompactionResultLike {
  * `Number(...) || 0`, which silently disabled the very watchdog that rescues a
  * wedged child. Such a value now keeps the default and warns once at startup.
  */
-export function readNonNegativeMs(name: string, fallback: number): number {
+function readNonNegativeMs(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined) return fallback;
   const parsed = raw.trim() === "" ? Number.NaN : Number(raw);
@@ -195,7 +194,7 @@ function slowSessionError(details?: Record<string, unknown>): WebRpcError {
 }
 
 /** Shape check for an ask-dialog `answers` payload; omp validates the content. */
-export function isAskAnswers(value: unknown): boolean {
+function isAskAnswers(value: unknown): boolean {
   return Array.isArray(value) && value.every((answer: unknown) =>
     isRecord(answer)
     && typeof answer.id === "string"
@@ -235,9 +234,6 @@ const PASSTHROUGH_COMMANDS = new Set([
   "btw",
   "btw_cancel",
   "get_btw_history",
-  // Goal mode (`{type:"goal", op}`) has the same shape as omp's RPC frame and
-  // is the only way native clients reach it; every op answers `{goal, state}`.
-  "goal",
 ]);
 
 // Outlasts omp's cold prediction-daemon start (up to 3 × 30s start rounds plus a
@@ -555,6 +551,10 @@ export class AgentSessionWrapper {
   private readonly movedFromIds: string[] = [];
   private initPromise: Promise<void> | null = null;
   private restarting = false;
+  /** A session switch whose answer never arrived: commands stay fenced until a
+   * state read reconciles which conversation the child now serves. */
+  private identityStale = false;
+  private identityReconcile: Promise<void> | null = null;
   private mcpListWaiter: { resolve: (text: string) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
   /** Synchronous mutex for getMcpList: checked+set before any await, so two
    *  concurrent callers can never both enter (the waiter/promptRunning
@@ -1543,52 +1543,13 @@ export class AgentSessionWrapper {
       clearTimeout(timer);
       this.uiExpiryTimers.delete(id);
     }
-    // Every settle path (answer, cancel, expiry, restart, destroy, new run)
-    // forgets the dialog; the repeat must stop with it.
-  }
-
-  /**
-   * A pending dialog is settled (answered, cancelled, expired or its child is
-   * gone): forget it and retract the `input` notification it produced.
-   */
-  private settlePendingUiRequest(id: string): boolean {
-    if (!this.pendingUiRequests.has(id)) return false;
-    this.forgetPendingUiRequest(id);
-    return true;
   }
 
   private clearPendingUiRequests(): void {
     this.dropServerUiRequests();
     for (const timer of this.uiExpiryTimers.values()) clearTimeout(timer);
     this.uiExpiryTimers.clear();
-    for (const id of [...this.pendingUiRequests.keys()]) this.settlePendingUiRequest(id);
-  }
-
-  /**
-   * Answer a blocking dialog from a notification action. Uses the same
-   * validation and frame as the agent route's `extension_ui_response` command,
-   * and returns whether the request was still pending.
-   */
-  answerExtensionUiRequest(id: string, response: ExtensionUiResponse): "answered" | "alreadySettled" {
-    const pending = this.pendingUiRequests.get(id);
-    if (!pending) return "alreadySettled";
-    const pendingAsk = pending.method === "ask";
-    // A pending ask accepts only its answers or a cancel; any other pending
-    // dialog accepts no answers. Anything else would drop it from reconnect
-    // replay while omp rejects the payload.
-    if (pendingAsk) {
-      if (!("cancelled" in response) && !isAskAnswers("answers" in response ? response.answers : undefined)) {
-        throw new WebRpcError("Invalid ask dialog answers", "invalid_ask_answers");
-      }
-    } else if ("answers" in response) {
-      throw new WebRpcError("This dialog does not take answers", "invalid_ask_answers");
-    }
-    const wasPending = this.settlePendingUiRequest(id);
-    this.proc.sendFrame({ type: "extension_ui_response", id, ...response });
-    // omp sends no cancel for an answered dialog; other tabs on this session
-    // would keep showing it, so settle it for them here.
-    if (wasPending) this.emit({ type: "extension_ui_request", id: `cancel:${id}`, method: "cancel", targetId: id });
-    return "answered";
+    this.pendingUiRequests.clear();
   }
 
   /** Settle every server dialog as declined and close it in attached tabs. */
@@ -1619,8 +1580,7 @@ export class AgentSessionWrapper {
     const method = event.method as string;
     const id = event.id as string;
     if (method === "cancel") {
-      const targetId = typeof event.targetId === "string" ? event.targetId : "";
-      if (targetId) this.settlePendingUiRequest(targetId);
+      this.forgetPendingUiRequest(event.targetId as string);
       return false;
     }
     // Only the “Allow tool: <name>” confirmation is covered. Other extension
@@ -1637,7 +1597,7 @@ export class AgentSessionWrapper {
       const timeout = typeof event.timeout === "number" ? event.timeout : undefined;
       if (timeout && timeout > 0) {
         event.expiresAt = Date.now() + timeout;
-        const timer = setTimeout(() => this.settlePendingUiRequest(id), timeout);
+        const timer = setTimeout(() => this.forgetPendingUiRequest(id), timeout);
         timer.unref?.();
         this.uiExpiryTimers.set(id, timer);
       }
@@ -2302,7 +2262,7 @@ export class AgentSessionWrapper {
   private async sendRpc<T = unknown>(
     command: { type: string; [key: string]: unknown },
     timeoutMs?: number,
-    onReply?: (success: boolean) => void,
+    onReply?: (success: boolean, id: string) => void,
   ): Promise<T> {
     try {
       const result = await this.proc.sendCommand<T>(command, timeoutMs, onReply);
@@ -2325,7 +2285,7 @@ export class AgentSessionWrapper {
     command: { type: string; [key: string]: unknown },
     timeoutMs: number,
     timeoutDetails?: Record<string, unknown>,
-    onReply?: (success: boolean) => void,
+    onReply?: (success: boolean, id: string) => void,
   ): Promise<T> {
     try {
       return await this.sendRpc<T>(command, timeoutMs, onReply);
@@ -2344,6 +2304,10 @@ export class AgentSessionWrapper {
    * path: the exited-session map gets a `detail: "stalled"` record which
    * `GET /api/sessions/[id]/state` serves, while `GET /api/agent/[id]` only
    * sees `{running:false}` — exactly like a process crash.
+   *
+   * `stopShared` is essential for a daemon-owned child: without it `dispose()`
+   * only drops this web app's membership and the wedged child keeps running on
+   * the host, so claiming it was stopped would be false.
    *
    * Returns whether the child was disposed.
    */
@@ -2376,7 +2340,9 @@ export class AgentSessionWrapper {
     if (this.streaming || this.promptRunning || this.unsettled) {
       this.publishNotifications({ type: "process_exit", detail: "stalled" });
     }
-    this.destroy();
+    // `_alive` turns false synchronously, so the wrapper is gone before this
+    // returns; the child itself is stopped by the same call (shared or not).
+    void this.destroyAndWait("stalled", true);
     return true;
   }
 
@@ -2391,6 +2357,33 @@ export class AgentSessionWrapper {
     }
     this.invalidateSessionLists();
     return this._sessionId;
+  }
+
+  /**
+   * A session switch timed out: the child may still be writing a new session
+   * file and may answer the switch after this request gave up. Until a state
+   * read names the conversation the child now serves, every command stays
+   * fenced — a command sent for the old id would otherwise act on the new
+   * conversation while the registry still maps the old id to this child.
+   *
+   * The flag outlives a failed read: the next command retries the reconcile
+   * instead of acting on a stale identity.
+   */
+  /** One reconcile attempt for a fenced identity; throws `session_slow` when the child still cannot say. */
+  private async reconcileFencedIdentity(): Promise<void> {
+    this.identityReconcile ??= (async () => {
+      const oldId = this._sessionId;
+      // Generous: the child is busy by definition here, and `get_state` is the
+      // only read that names the new identity.
+      const state = await this.sendRpc<RpcSessionState>({ type: "get_state" }, PROMPT_ACK_TIMEOUT_MS);
+      this.applyIdentity(state);
+      if (oldId && oldId !== this._sessionId) this.onIdentityChangeCallback?.(oldId, this._sessionId);
+      this.invalidateSessionLists();
+      this.identityStale = false;
+    })().finally(() => {
+      this.identityReconcile = null;
+    });
+    await this.identityReconcile;
   }
 
   private async editMessage(entryId: unknown): Promise<SessionEditResult> {
@@ -2760,6 +2753,14 @@ export class AgentSessionWrapper {
 
   async send(command: Record<string, unknown>): Promise<unknown> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
+    // A timed-out session switch may still land: never act on a stale identity.
+    if (this.identityStale) {
+      try {
+        await this.reconcileFencedIdentity();
+      } catch {
+        throw slowSessionError();
+      }
+    }
     if (this.mcpListInFlight) throw new WebRpcError("MCP management is in progress. Try again when it finishes.", "session_busy");
     if (!this.isAlive()) throw new Error("Session is no longer running");
     if (this.pendingCommands >= MAX_PENDING_COMMANDS) {
@@ -3012,7 +3013,16 @@ export class AgentSessionWrapper {
         // Switching writes a session file before answering, so it gets the
         // generous prompt-ack bound instead of the 5 s poll bound — but it is
         // still bounded: a wedged child must not pin the request forever.
-        const result = await this.sendControl<{ cancelled: boolean }>(command as { type: string }, PROMPT_ACK_TIMEOUT_MS);
+        // A timeout leaves the outcome unknown: the switch may still land after
+        // this request gives up, so the wrapper's identity is fenced until a
+        // state read reconciles it (see reconcileFencedIdentity).
+        let result: { cancelled: boolean };
+        try {
+          result = await this.sendControl<{ cancelled: boolean }>(command as { type: string }, PROMPT_ACK_TIMEOUT_MS);
+        } catch (error) {
+          if (error instanceof WebRpcError && error.code === SESSION_SLOW_CODE) this.identityStale = true;
+          throw error;
+        }
         if (!result.cancelled) {
           const newSessionId = await this.refreshIdentityAfterSessionChange();
           return { cancelled: false, newSessionId };
@@ -3088,9 +3098,9 @@ export class AgentSessionWrapper {
         if (("answers" in rest || pendingAsk) && !isAskAnswers(rest.answers) && !(pendingAsk && rest.cancelled === true)) {
           throw new WebRpcError("Invalid ask dialog answers", "invalid_ask_answers");
         }
-        // Forgets the pending dialog and retracts its notification for other
-        // tabs/devices; the cancel frame below settles it in other tabs.
-        const wasPending = this.settlePendingUiRequest(id);
+        // Forgets the pending dialog; the cancel frame below settles it in other tabs.
+        const wasPending = this.pendingUiRequests.has(id);
+        this.forgetPendingUiRequest(id);
         const serverRequest = this.serverUiRequests.get(id);
         if (serverRequest) {
           this.serverUiRequests.delete(id);
@@ -3422,18 +3432,6 @@ function getRegistry(): Map<string, AgentSessionWrapper> {
 function getLocks(): Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> {
   if (!globalThis.__ompStartLocks) globalThis.__ompStartLocks = new Map();
   return globalThis.__ompStartLocks;
-}
-
-/**
- * Whether this server is currently spawning or adopting a child for
- * `sessionId`. Between the host's spawn and `registerSession` the wrapper
- * registry knows nothing about the child while its `--resume` line already
- * names the file, so ownership detection must count the in-flight start as
- * ours — otherwise a cold start reports its own child as a foreign writer
- * (409 on the next command, an `elsewhere` badge in the list).
- */
-export function isSessionStarting(sessionId: string): boolean {
-  return getLocks().has(sessionId);
 }
 
 export function getRpcSession(sessionId: string): AgentSessionWrapper | undefined {

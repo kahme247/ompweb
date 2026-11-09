@@ -34,6 +34,13 @@ async function sessionState(id: string): Promise<Response> {
         // this tree raises (`session_slow`) and 0.6.0's own
         // `session_state_timeout` mean the same thing to a client.
         if (error instanceof WebRpcError && (error.code === "session_slow" || error.code === "session_state_timeout")) {
+          // The liveness watchdog disposes a child that stayed silent past its
+          // threshold; that child is gone, so the busy answer would be a lie.
+          // Its `detail: "stalled"` record answers like any other exit.
+          if (!rpc.isAlive()) {
+            const exited = getExitedRpcSession(id);
+            return Response.json({ running: false, alive: false, ...(exited ? { exited } : {}) });
+          }
           return Response.json(
             {
               error: error.message,
