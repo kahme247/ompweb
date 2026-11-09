@@ -1937,8 +1937,8 @@
   "settingsConfig.mobileAppWindowsTray": "Windows トレイアプリ",
   "settingsConfig.mobileAppWindowsTrayHint": "ハッシュを生成し、ユーザー用に保存する非表示のプロンプトに貼り付けてから、すべてのインターフェースにバインドしたトレイアプリをインストールします。ハッシュがコマンドラインに現れることはありません。",
   "settingsConfig.mobileAppSystemd": "systemd サービス",
-  "settingsConfig.mobileAppSystemdHint": "ハッシュを非表示のプロンプトに貼り付けてからインストーラーを実行すると、ユニットが書き込まれます。ネットワークバインドではパスワードなしでは拒否されます。",
+  "settingsConfig.mobileAppSystemdHint": "ハッシュを非表示のプロンプトに貼り付けてからインストーラーを実行すると、ユニットが書き込まれます。パスワードハッシュがないと、サービスはネットワークアドレスでの起動を拒否するため、ユニットは再起動を繰り返します。",
   "settingsConfig.mobileAppLaunchd": "launchd サービス",
-  "settingsConfig.mobileAppLaunchdHint": "ハッシュを非表示のプロンプトに貼り付けてからインストーラーを実行すると、plist が書き込まれます。ネットワークバインドではパスワードなしでは拒否されます。",
+  "settingsConfig.mobileAppLaunchdHint": "ハッシュを非表示のプロンプトに貼り付けてからインストーラーを実行すると、plist が書き込まれます。パスワードハッシュがないと、サービスはネットワークアドレスでの起動を拒否するため、ジョブは再起動を繰り返します。",
   "settingsConfig.mobileAppLoadFailed": "モバイルアクセスの詳細を読み込めませんでした。"
 }

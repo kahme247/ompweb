@@ -1937,8 +1937,8 @@
   "settingsConfig.mobileAppWindowsTray": "Windows 托盘应用",
   "settingsConfig.mobileAppWindowsTrayHint": "生成哈希，将其粘贴到为用户保存的隐藏提示中，然后安装绑定所有接口的托盘应用。哈希绝不会出现在命令行上。",
   "settingsConfig.mobileAppSystemd": "systemd 服务",
-  "settingsConfig.mobileAppSystemdHint": "将哈希粘贴到隐藏提示中，然后运行安装程序，它会写入 unit。绑定网络时没有密码会拒绝安装。",
+  "settingsConfig.mobileAppSystemdHint": "将哈希粘贴到隐藏提示中，然后运行安装程序，它会写入 unit。没有密码哈希时，服务会拒绝在网络地址上启动，unit 会反复重启。",
   "settingsConfig.mobileAppLaunchd": "launchd 服务",
-  "settingsConfig.mobileAppLaunchdHint": "将哈希粘贴到隐藏提示中，然后运行安装程序，它会写入 plist。绑定网络时没有密码会拒绝安装。",
+  "settingsConfig.mobileAppLaunchdHint": "将哈希粘贴到隐藏提示中，然后运行安装程序，它会写入 plist。没有密码哈希时，服务会拒绝在网络地址上启动，任务会反复重启。",
   "settingsConfig.mobileAppLoadFailed": "无法加载移动访问详情。"
 }

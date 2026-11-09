@@ -36,22 +36,14 @@ export function parseMobilePort(value: unknown): number | null {
   return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;
 }
 
-/** Next.js `-H/--hostname` is the only launch-time bind information a route can see. */
-export function detectBindHostname(env: NodeJS.ProcessEnv = process.env, argv: string[] = process.argv): string | null {
-  const fromEnv = env.OMP_WEB_HOSTNAME?.trim();
-  if (fromEnv) return fromEnv;
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (arg === "-H" || arg === "--hostname") {
-      const value = argv[i + 1]?.trim();
-      if (value) return value;
-    }
-    if (arg.startsWith("--hostname=")) {
-      const value = arg.slice("--hostname=".length).trim();
-      if (value) return value;
-    }
-  }
-  return null;
+/**
+ * The bind this server was launched with. `startProduction` (server/app.ts)
+ * writes `OMP_WEB_HOSTNAME` from the bound listener before serving, and every
+ * entry point (`npm start`, the binary, the launcher) goes through it, so the
+ * environment is the authoritative source — there is no argv to fall back to.
+ */
+export function detectBindHostname(env: NodeJS.ProcessEnv = process.env): string | null {
+  return env.OMP_WEB_HOSTNAME?.trim() || null;
 }
 
 export function classifyExposure(hostname: string | null): MobileExposure {

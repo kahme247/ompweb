@@ -1978,8 +1978,8 @@
   "settingsConfig.mobileAppWindowsTray": "Windows tray app",
   "settingsConfig.mobileAppWindowsTrayHint": "Generate a hash, paste it into a hidden prompt that stores it for your user, then install the tray app bound to all interfaces. The hash never appears on a command line.",
   "settingsConfig.mobileAppSystemd": "systemd service",
-  "settingsConfig.mobileAppSystemdHint": "Paste the hash into a hidden prompt, then run the installer; it writes the unit. A network binding is refused without a password.",
+  "settingsConfig.mobileAppSystemdHint": "Paste the hash into a hidden prompt, then run the installer; it writes the unit. Without a password hash the service refuses to start on a network address, so the unit would restart-loop.",
   "settingsConfig.mobileAppLaunchd": "launchd service",
-  "settingsConfig.mobileAppLaunchdHint": "Paste the hash into a hidden prompt, then run the installer; it writes the plist. A network binding is refused without a password.",
+  "settingsConfig.mobileAppLaunchdHint": "Paste the hash into a hidden prompt, then run the installer; it writes the plist. Without a password hash the service refuses to start on a network address, so the job would restart-loop.",
   "settingsConfig.mobileAppLoadFailed": "Could not load the mobile access details."
 }

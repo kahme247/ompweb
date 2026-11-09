@@ -106,8 +106,14 @@ function getAccessibleAddresses({ hostname, port, interfaces = os.networkInterfa
   }
 
   if (!isWildcardHost(hostname)) {
+    // A specific-IP bind listens on that address only, so it is one entry — but
+    // it is still the Tailscale address when the bind is on the tailnet, and a
+    // bare IPv6 host needs brackets in a URL (`getBrowserUrl` adds them).
     return {
-      entries: [{ label: "Network", url: `http://${hostname}:${port}` }],
+      entries: [{
+        label: isTailscaleAddress(undefined, hostname.trim()) ? "Tailscale" : "Network",
+        url: getBrowserUrl(hostname.trim(), port),
+      }],
     };
   }
 
