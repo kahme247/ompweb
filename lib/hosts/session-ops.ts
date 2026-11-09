@@ -58,8 +58,9 @@ import type { SessionHistoryCursor } from "../session-sync";
 import { extractSubagentHistory, readCompletionArtifact, readSubagentTranscriptPage, resolveSubagentArtifact, subagentTranscriptPath } from "../subagent-history";
 import { SUBAGENT_ID_RE } from "../subagent-types";
 import { isRecord } from "../type-guards";
-import type { ArchivedSessionInfo, ManagedProject, ProjectLaunchConfig, SessionContext, SessionInfo, SessionTitleSource } from "../types";
+import type { ArchivedSessionInfo, ManagedProject, ProjectLaunchConfig, SessionContext, SessionInfo, SessionOwnership, SessionTitleSource } from "../types";
 import { resolveProject } from "../worktree";
+import { detectSessionOwnership } from "./session-ownership";
 
 export type OpResult<T> = { ok: true; value: T } | { ok: false; status: number; code: string; error: string };
 
@@ -129,6 +130,10 @@ export interface SessionOps {
   updateProject(updates: ProjectUpdate[]): Promise<OpResult<{ projects: ProjectRegistryEntry[]; newRoots: string[] }>>;
   hideProject(path: string): Promise<OpResult<null>>;
   validateCwd(path: string): Promise<OpResult<{ cwd: string; projectRoot: string; projectKey?: string }>>;
+  /** Who holds each session's writer lease on this host (lib/hosts/session-ownership.ts): one entry per id, in request
+   *  order, at most `LINK_LIMITS.ownershipIds`. Read-only; never spawns, kills or writes. An inspection that fails, is
+   *  switched off or is unavailable answers `owner: "unknown"`, never `"none"`. */
+  sessionOwnership(ids: string[]): Promise<OpResult<SessionOwnership[]>>;
 }
 
 const execFileAsync = promisify(execFile);
@@ -782,4 +787,9 @@ export const sessionOps: SessionOps = {
     const project = await resolveProject(normalizedCwd);
     return ok({ cwd: normalizedCwd, projectRoot: project.projectRoot, projectKey: projectIdentityKey(project.projectRoot) });
   },
+
+  // The plain file-side answer, for a caller inside the daemon process that has no ChannelTable at hand: the scan
+  // excludes this process's own descendants by ppid chain, so a child it spawned never reads as foreign. The daemon's
+  // op dispatch adds the exact transport pids on top (daemon.ts).
+  sessionOwnership: (ids) => detectSessionOwnership(ids, { excludePids: () => [process.pid] }),
 };

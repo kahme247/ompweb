@@ -461,6 +461,24 @@ export interface SessionInfo {
   hostId?: string;
 }
 
+/** Who holds a session's writer lease on one host, as the `sessionOwnership` host op reports it
+ *  (lib/hosts/session-ownership.ts). */
+export interface SessionOwnership {
+  id: string;
+  /** `daemon`: this host's daemon runs or starts the session (its ChannelTable is the authority, so a spawning, adopted
+   *  or idle child counts). `foreign`: a live `omp --resume` process outside the daemon. `none`: a successful inspection
+   *  found no writer. `unknown`: the inspection failed, is switched off or is unsupported — never a claim that nobody
+   *  runs it. */
+  owner: "daemon" | "foreign" | "none" | "unknown";
+  /** A run is executing (or starting) right now. Absent when activity is unknown: with `owner: "unknown"` and no
+   *  readable tail, `false` would be a fact the inspection cannot establish. */
+  running?: boolean;
+  /** Evidence behind `running`: a process, or the transcript tail alone (an activity hint, never proof of a writer). */
+  source?: "process" | "transcript";
+  /** Epoch ms of the session file's last write, when it could be read. */
+  lastActivityAt?: number;
+}
+
 /** Metadata for a gzip-compressed session in OMP's archive tree. */
 export interface ArchivedSessionInfo {
   key: string;

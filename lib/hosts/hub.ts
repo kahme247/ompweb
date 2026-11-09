@@ -1005,6 +1005,19 @@ function validResult(op: keyof SessionOps, result: unknown, args: unknown[]): bo
     }
     case "archiveSession":
       return isRecord(value) && typeof value.archivedPath === "string";
+    case "sessionOwnership": {
+      // One entry per requested id, in request order: a daemon that answers a
+      // different set, order or shape would let a caller read one session's
+      // owner as another's. Everything below the id is optional by contract.
+      const ids = Array.isArray(args[0]) ? args[0] : null;
+      if (!ids || !Array.isArray(value) || value.length !== ids.length) return false;
+      return value.every((entry, index) => isRecord(entry)
+        && entry.id === ids[index]
+        && (entry.owner === "daemon" || entry.owner === "foreign" || entry.owner === "none" || entry.owner === "unknown")
+        && (entry.running === undefined || typeof entry.running === "boolean")
+        && (entry.source === undefined || entry.source === "process" || entry.source === "transcript")
+        && optionalNumber(entry.lastActivityAt));
+    }
     // The route reads `projects` and iterates `newRoots`.
     case "updateProject":
       return isRecord(value) && Array.isArray(value.projects) && value.projects.every((project) => projectEntry(project) !== null)
