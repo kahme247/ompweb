@@ -40,13 +40,14 @@ function packagedWorker(dir: string): string | undefined {
  * otherwise execute that project's `lib/usage-worker.ts` inside a worker with
  * full server privileges.
  *
- * Both overrides are pinned to absolute paths inside the package directory:
- * the worker runs with the server's provider credentials, so a relative value
- * (resolved against whatever cwd the launcher had) or a directory another
- * process can write is not an acceptable code source. `OMP_WEB_PACKAGE_DIR`
- * is set by the launcher and by the compiled binary (to its own directory);
- * the module-relative path is the normal case for a source run, since the
- * server then lives in this package's `lib/`.
+ * Both overrides are honoured only as absolute paths: the worker runs with the
+ * server's provider credentials, so a relative value (resolved against
+ * whatever cwd the launcher had) is ignored with a warning. An absolute
+ * `OMP_WEB_USAGE_WORKER` is the operator's explicit choice and wins over the
+ * packaged worker. `OMP_WEB_PACKAGE_DIR` is set by the launcher and by the
+ * compiled binary (to its own directory); the module-relative path is the
+ * normal case for a source run, since the server then lives in this
+ * package's `lib/`.
  *
  * A compiled binary's own modules sit in Bun's embedded filesystem
  * (`B:\~BUN\root\` on Windows, `/$bunfs/root/` elsewhere), where `existsSync`
