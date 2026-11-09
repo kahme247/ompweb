@@ -708,19 +708,24 @@ end to end:
   time and carry `web.first`, their first piece's sequence. Deltas of different
   blocks never merge past each other: that would break the sequence order.
 - Tool snapshots (`event-stream-hub.ts`, session channel): omp sends the whole
-  accumulated output on every `tool_execution_update`, so one snapshot per tool
-  call is held per subscription and written at most once per
-  `TOOL_UPDATE_FRAME_MIN_INTERVAL_MS`. The hold is per `toolCallId`: concurrent
-  tools never supersede each other, and one tool's window never delays another
-  tool's snapshot. A superseding snapshot removes the held one and takes the
-  newer frame's position at the end of the same ordered queue as the message
-  deltas and outbox snapshots: `web.sequence` is the browser's cursor, so a
-  replacement carrying a later sequence must never be written ahead of a frame
-  emitted before it. A boundary frame (`tool_execution_end`, `message_end`, …)
-  or a delta emitted after it can therefore never be overtaken, and the
-  heartbeat force-flush drains that one queue rather than writing around it. A
-  written snapshot is stamped with its write time, not the emit time: the
-  deliberate hold must not appear as network latency in Connection diagnostics.
+  accumulated output on every `tool_execution_update`, so the newest snapshot per
+  `toolCallId` is held **outside** the ordered message queue and written at most
+  once per `TOOL_UPDATE_FRAME_MIN_INTERVAL_MS`. A tool frame needs no position
+  among the deltas: the browser fences it by `max(lifecycleSequence,
+  toolsSnapshotSequence, toolSequences.get(tool))` and never by
+  `messageSequence` (`hooks/useAgentSession-sync.ts`). Two consequences, both
+  required: a message delta neither waits for a held snapshot nor releases one
+  (otherwise a bash tool printing during a streaming turn got one snapshot per
+  delta, i.e. no cap at all), and a tool that has never been written has no
+  window, so its first snapshot is never delayed behind another tool's hold.
+  Held snapshots release in their own emission order, so a replacement carrying
+  a later `web.sequence` never precedes one carrying an earlier sequence. A
+  boundary frame (`tool_execution_end`, `message_end`, …) merges every held
+  snapshot into the queue ahead of itself, in emission order, and the forced
+  drain then writes the whole queue regardless of backpressure, so the end frame
+  never overtakes the output it ends. A written snapshot is stamped with its
+  write time, not the emit time: the deliberate hold must not appear as network
+  latency in Connection diagnostics.
 - Browser (`lib/message-update-coalescer.ts`): applies each delta on arrival and
   dispatches the whole message at display rate, so `useAgentSession` only ever
   sees whole messages. A delta with no base is held and triggers a catch-up; the
