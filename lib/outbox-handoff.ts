@@ -1,6 +1,6 @@
 import { isClientMessageId, readQueueSnapshot } from "./client-message-ids";
 import { isLinkUp } from "./hosts/host";
-import { adoptedChild, listHosts } from "./hosts/hub";
+import { adoptedChild, hostListsChild, listHosts } from "./hosts/hub";
 import { HostOpError } from "./hosts/link-protocol";
 import { LOCAL_HOST_ID } from "./hosts/registry";
 import { hostForSessionId } from "./hosts/session-index";
@@ -52,6 +52,8 @@ async function liveChild(sessionId: string) {
   }
   if (live?.isAlive()) return live;
   if (!live) {
+    // A child a host still runs is not gone just because this server failed to adopt it: retry.
+    if (hostListsChild(sessionId)) throw new HostOpError(503, "handoff_child_pending", "The session's native process is running but not attached here yet");
     // Throws a 503 while a host that may hold the session is offline or its list unavailable.
     const host = await hostForSessionId(sessionId);
     if (host && !isLinkUp(host.status())) throw new WebRpcError(`${host.label} is offline`, "host_offline", "refused");

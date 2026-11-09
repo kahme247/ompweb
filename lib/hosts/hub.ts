@@ -153,6 +153,8 @@ interface Link {
   statsWarned: boolean;
   pending: Map<string, PendingOp>;
   channels: Map<string, RemoteRpcTransport>;
+  /** v7: the sessions of every child the host last listed, joined by this server or not. */
+  listedSessions: Set<string>;
   pingTimer: NodeJS.Timeout | undefined;
   offlineTimer: NodeJS.Timeout | undefined;
   statusListeners: Set<(status: HostStatus) => void>;
@@ -257,6 +259,7 @@ function linkFor(id: string): Link {
       statsWarned: false,
       pending: new Map(),
       channels: new Map(),
+      listedSessions: new Set(),
       pingTimer: undefined,
       offlineTimer: undefined,
       statusListeners: new Set(),
@@ -792,6 +795,8 @@ const ORPHAN_KILL_GRACE_MS = 5_000;
  * way they stay registered until their `exit` (see orphanExit).
  */
 function reattach(link: Link, listed: HelloChannel[], refreshExisting = true): void {
+  // Hello and channels_changed both carry the host's full listing.
+  if ((link.hostVersion ?? 0) >= 7) link.listedSessions = new Set(listed.flatMap(({ sessionId }) => sessionId ? [sessionId] : []));
   const live = new Set(listed.map(({ ch }) => ch));
   for (const [ch, transport] of refreshExisting ? link.channels : []) {
     // A spawn still in flight is not listed yet.
@@ -1637,6 +1642,14 @@ export function onHostHello(listener: (hostId: string, channels: HelloChannel[])
 export async function adoptedChild(hostId: string, sessionId: string): Promise<boolean> {
   const listed = [...(hub().links.get(hostId)?.channels.values() ?? [])].filter((child) => child.sessionId === sessionId);
   return (await Promise.all(listed.map((child) => child.adoption))).includes(true);
+}
+
+/** Whether a v7 host still runs a child of `sessionId`, joined by this server or not (a failed join leaves it running). */
+export function hostListsChild(sessionId: string): boolean {
+  for (const link of hub().links.values()) {
+    if (isLinkUp(link.status) && link.listedSessions.has(sessionId)) return true;
+  }
+  return false;
 }
 
 /** Resolves once every child of `sessionId` the host listed in a hello has exited or been adopted.
