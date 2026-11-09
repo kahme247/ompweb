@@ -67,6 +67,11 @@ export function getUsageWorkerPath(): string {
 /**
  * The decision {@link getUsageWorkerPath} makes, with every input passed in so
  * a test can exercise the release layout without building a binary.
+ *
+ * `OMP_WEB_USAGE_WORKER` wins over the packaged worker, in every layout: it is
+ * the documented escape hatch for running a different report module, and a
+ * packaged worker that silently overrode it made the variable dead exactly
+ * where a release user would reach for it.
  */
 export function resolveUsageWorkerPath(input: {
   packageDir?: string;
@@ -74,10 +79,6 @@ export function resolveUsageWorkerPath(input: {
   moduleDir: string;
   execDir: string;
 }): string {
-  if (input.packageDir) {
-    const fromPackage = packagedWorker(input.packageDir);
-    if (fromPackage) return fromPackage;
-  }
   if (input.override) {
     // An absolute path only: a relative value would be resolved against
     // whatever cwd the launcher happened to have, which is exactly the
@@ -85,6 +86,10 @@ export function resolveUsageWorkerPath(input: {
     // rule out.
     if (isAbsolute(input.override)) return resolve(input.override);
     console.warn(`[usage] ignoring relative OMP_WEB_USAGE_WORKER=${input.override}`);
+  }
+  if (input.packageDir) {
+    const fromPackage = packagedWorker(input.packageDir);
+    if (fromPackage) return fromPackage;
   }
   if (/(^|[\\/])(~BUN|\$bunfs)([\\/]|$)/i.test(input.moduleDir)) {
     // OMP_WEB_PACKAGE_DIR pointed somewhere incomplete; the executable's own
