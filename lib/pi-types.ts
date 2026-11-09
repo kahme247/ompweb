@@ -16,11 +16,11 @@ export type UsageLimitState =
 
 export type SlowModeScope = "session" | "global";
 
-/** omp's goal record (`goal` command reply, `goal_updated`, `get_state.goal.goal`). */
+/** omp's goal record: the `goal` value of a `goal` command reply and of `state.goal` in `get_state`. */
 export interface GoalInfo {
   id: string;
   objective: string;
-  /** `active` / `paused`; completed and dropped goals answer `null` instead. */
+  /** `active` or `paused`; a dropped goal is reported as `null` instead of a record. */
   status: string;
   tokenBudget?: number;
   tokensUsed: number;
@@ -29,11 +29,23 @@ export interface GoalInfo {
   updatedAt: number;
 }
 
-/** Mirror of omp's GoalModeState: the `goal` reply and the `goal` field of `get_state`. */
+/** omp's goal-mode state snapshot: the `state` value of a `goal` command reply,
+ * and the `goal` field of `get_state`. Not the command reply itself (see
+ * GoalCommandReply). */
 export interface GoalModeState {
   enabled: boolean;
+  /** omp reports `active` for a running and for a paused goal alike; `enabled`
+   * is what says whether it runs. */
   mode: string;
   goal: GoalInfo | null;
+}
+
+/** Reply to `{type:"goal", op}`: `{goal, state}`, both `null` once no goal is
+ * set (omp answers that after `drop`). `goal` is the record the op acted on,
+ * `state` the mode snapshot around it. */
+export interface GoalCommandReply {
+  goal: GoalInfo | null;
+  state: GoalModeState | null;
 }
 
 export interface ModelLike {

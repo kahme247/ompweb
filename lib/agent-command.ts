@@ -23,7 +23,25 @@ export const NO_SPAWN_REPLIES: Record<string, unknown> = {
 // flip one setting is not what the click asked for: with no live wrapper these
 // answer 409 instead of starting omp, and a live idle child is never replaced
 // because the advisor flag differs.
-const LIVE_SESSION_ONLY = new Set(["get_skill_diagnostics", "set_skill_startup_diagnostics"]);
+const LIVE_SESSION_ONLY: Record<string, { error: string; code: string }> = {
+  get_skill_diagnostics: { error: "Skill diagnostics require a running session", code: "skill_diagnostics_unavailable" },
+  set_skill_startup_diagnostics: { error: "Skill diagnostics require a running session", code: "skill_diagnostics_unavailable" },
+};
+
+/** The refusal for a command that may only ride a live child, or undefined when
+ * the command may start one. `goal` reads the state a running child holds: a
+ * native client inspecting goal mode must not resume a full omp child (MCP,
+ * LSP) for it, and a saved session's goal is not read off disk here. The
+ * mutating ops (`create`, `pause`, `resume`, `drop`) keep their start
+ * semantics — they are what a client uses to set a goal on an idle session. */
+function liveOnlyRefusal(type: string, command: Record<string, unknown>): { error: string; code: string } | undefined {
+  const refusal = LIVE_SESSION_ONLY[type];
+  if (refusal) return refusal;
+  if (type === "goal" && command.op === "get") {
+    return { error: "Goal state requires a running session", code: "goal_state_unavailable" };
+  }
+  return undefined;
+}
 
 /** omp-web's own failures carry a stable code the client can localize; omp's
  * errors stay opaque English text. */
@@ -107,7 +125,7 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
     let resumeId = id;
     let resumeHost: AgentSessionWrapper["host"] | undefined;
     const noSpawn = Object.hasOwn(NO_SPAWN_REPLIES, type);
-    const liveOnly = LIVE_SESSION_ONLY.has(type);
+    const liveOnly = liveOnlyRefusal(type, command);
     if (existing?.isAlive()) {
       if (noSpawn || liveOnly || existing.advisorSpawned === advisor || existing.isRunning() || existing.isEditingHistory()) {
         const result = await send(existing);
@@ -122,10 +140,7 @@ export async function runAgentCommand(id: string, body: unknown, advisor: boolea
     }
     if (noSpawn) return Response.json({ success: true, data: NO_SPAWN_REPLIES[type] });
     if (liveOnly) {
-      return Response.json(
-        { error: "Skill diagnostics require a running session", code: "skill_diagnostics_unavailable" },
-        { status: 409 },
-      );
+      return Response.json({ error: liveOnly.error, code: liveOnly.code }, { status: 409 });
     }
 
     const resolved = resumeHost ? { host: resumeHost } : await resolveSessionHostOr404(resumeId);
