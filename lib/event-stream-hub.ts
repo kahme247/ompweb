@@ -200,11 +200,6 @@ export class EventStreamConnection {
     return this.closed;
   }
 
-  /** The keep-alive interval this connection's sink actually uses. */
-  get heartbeatMs(): number {
-    return this.sink.heartbeatMs;
-  }
-
   get subscriptionCount(): number {
     return this.subscriptions.size;
   }
