@@ -194,7 +194,9 @@ const MODEL_SWITCH_NOTICE_SOURCES = new Set(["prewalk", "plan-yolo"]);
  */
 export const DIALOG_UI_METHODS: ReadonlySet<string> = new Set(["select", "confirm", "input", "editor", "ask"]);
 
-/** Extension UI methods that block the agent until the user answers (rpc-manager replays these too). */
+/** Extension UI methods rpc-manager replays to a newly attached tab: the dialogs,
+ * which block the agent until answered, plus `open_url`, which only needs to be
+ * shown once a tab is there. */
 export const BLOCKING_UI_METHODS = new Set([...DIALOG_UI_METHODS, "open_url"]);
 
 const NOTIFICATION_ID_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
