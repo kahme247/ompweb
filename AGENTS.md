@@ -707,6 +707,18 @@ end to end:
   dropped or reordered. Merged frames keep the latest frame's sequence and emit
   time and carry `web.first`, their first piece's sequence. Deltas of different
   blocks never merge past each other: that would break the sequence order.
+- Tool snapshots (`event-stream-hub.ts`, session channel): omp sends the whole
+  accumulated output on every `tool_execution_update`, so one snapshot per tool
+  call is held per subscription and written at most once per
+  `TOOL_UPDATE_FRAME_MIN_INTERVAL_MS`. The hold is per `toolCallId`: concurrent
+  tools never supersede each other, and one tool's window never delays another
+  tool's snapshot. The held snapshot keeps its place in the same ordered queue
+  as the message deltas and outbox snapshots, so a boundary frame
+  (`tool_execution_end`, `message_end`, …) or a delta emitted after it can never
+  overtake it, and the heartbeat force-flush drains that one queue rather than
+  writing around it. A written snapshot is stamped with its write time, not the
+  emit time: the deliberate hold must not appear as network latency in
+  Connection diagnostics.
 - Browser (`lib/message-update-coalescer.ts`): applies each delta on arrival and
   dispatches the whole message at display rate, so `useAgentSession` only ever
   sees whole messages. A delta with no base is held and triggers a catch-up; the
