@@ -203,7 +203,7 @@ export function getDraftRevision(key: string): number {
 }
 
 // Attachment payloads disappear on reload; keep a bang-prefixed prompt from turning into shell input with them.
-function requiresPromptMode(draft: ChatDraft): boolean {
+export function requiresPromptMode(draft: ChatDraft): boolean {
   return draft.promptOnly === true || (draft.value.trimStart().startsWith("!")
     && (draft.images.length > 0 || draft.files.length > 0 || Boolean(draft.uploads?.length)));
 }

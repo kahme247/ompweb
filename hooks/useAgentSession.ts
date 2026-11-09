@@ -3419,7 +3419,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const mayHaveRun = toastStoppedSend(e);
       if (mayHaveRun === null) addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
       if (mayHaveRun) return true;
-      if (trimmedMessage) opts.chatInputRef?.current?.insertIfEmpty(trimmedMessage);
+      if (trimmedMessage) opts.chatInputRef?.current?.insertIfEmpty(trimmedMessage, { promptOnly: true });
       return false;
     }
   }, [addNotice, catchUp, eventCoalescer, ensureEventsConnected, refreshSubagentRoster, clearTerminalReconcileTimer, opts.chatInputRef, snapshotRunEntries]);
@@ -3681,11 +3681,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // Free the source slot before inserting an absent target: moving a
         // draft at capacity must not evict an unrelated conversation's draft.
         clearDraft(sid);
+        // Model text prefilled into an empty merged draft is model input even when it starts with `!` (its images are not restored).
+        const prefilled = loaded && !value.trim() && content.trim() !== "";
         setDraft(edit.sessionId, {
           value: loaded && !value.trim() ? content : value,
           images: destination ? [...draft.images, ...destination.images] : draft.images,
           files: destination ? [...draft.files, ...destination.files] : draft.files,
-          ...((draft.promptOnly || destination?.promptOnly) ? { promptOnly: true } : {}),
+          ...((prefilled || draft.promptOnly || destination?.promptOnly) ? { promptOnly: true } : {}),
           // The same upload may sit in both drafts (an id is one file): keep its first occurrence.
           uploads: destination
             ? [...(draft.uploads ?? []), ...(destination.uploads ?? [])].filter((upload, at, all) => all.findIndex((other) => other.id === upload.id) === at)
@@ -3696,7 +3698,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!loaded) throw new Error(translate("agentSession.commandFailed"));
       // A moved composer adopts the merged target snapshot during its identity
       // transition; writing through the old ref could overwrite target text.
-      if (!moved) opts.chatInputRef?.current?.insertIfEmpty(content);
+      if (!moved) opts.chatInputRef?.current?.insertIfEmpty(content, { promptOnly: true });
       return true;
     } catch (error) {
       if (isCurrent()) {
@@ -3734,7 +3736,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       });
       const { cancelled, newSessionId, text } = result ?? {};
       if (!cancelled && newSessionId) {
-        if (editPrompt && text) setDraft(newSessionId, { value: text, images: [], files: [] });
+        if (editPrompt && text) setDraft(newSessionId, { value: text, images: [], files: [], promptOnly: true });
         // The forked child keeps its spawn flags: carry the advisor choice to
         // the new id, or the toggle flips off on switch and the next prompt
         // respawns the fork without --advisor.

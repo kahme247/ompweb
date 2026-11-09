@@ -15,7 +15,7 @@ import type { SttAfter } from "@/lib/stt";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { ContextDetailPanel } from "./ComposerPanels";
 import { RecordingDeck } from "./RecordingDeck";
-import { beginDraftSubmission, clearDraft, consumeDraft, endDraftSubmission, getDraft, getDraftRevision, isSameDraft, markDraftEdited, mergeRecoveredText, moveDraftSubmissions, recoverDraft, setDraft, subscribeDraftConsumption, subscribeDraftRecovery, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
+import { beginDraftSubmission, clearDraft, consumeDraft, endDraftSubmission, getDraft, getDraftRevision, isSameDraft, markDraftEdited, mergeRecoveredText, moveDraftSubmissions, recoverDraft, requiresPromptMode, setDraft, subscribeDraftConsumption, subscribeDraftRecovery, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import type { AttachedImage, AttachedTextFile } from "./ChatInput-draft-attachments";
 import {
@@ -174,8 +174,8 @@ const TOOL_PRESET_OPTIONS: Array<{ value: ToolPreset; descriptionKey: string }> 
 
 interface Props {
   /** Without `outbox`, only a rejected submission is restored; completed/superseded runs must not be replayed.
-   *  `uploads`: the ids of files sent As file, passed only when there are some. `options`: passed only when inline
-   *  text files were folded into `message`, so its leading `!` is not taken for a shell command. */
+   *  `uploads`: the ids of files sent As file, passed only when there are some. `options` preserves explicit model-input
+   *  intent when attachments or prefills would otherwise leave a shell-looking string. */
   onSend: (message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>, options?: PromptSendOptions) => Promise<PromptSubmissionResult>;
   /** Sends go through the message outbox (an existing session): the composer clears once `onSend` (or a queue
    *  callback) reports the message stored, and keeps it otherwise. */
@@ -274,7 +274,7 @@ interface Props {
 export interface ChatInputHandle {
   focus: () => void;
   insertText: (text: string) => void;
-  insertIfEmpty: (text: string) => void;
+  insertIfEmpty: (text: string, options?: PromptSendOptions) => void;
   prependText: (text: string) => void;
   addFiles: (files: File[]) => void;
   openContextPanel: () => void;
@@ -575,6 +575,21 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   attachedUploadsRef.current = attachedUploads;
   uploadHostIdRef.current = uploadHostId;
 
+  const captureDraft = useCallback((): ChatDraft => {
+    const uploads = attachedUploadsRef.current;
+    const draft: ChatDraft = {
+      value: valueRef.current,
+      images: attachedImagesRef.current.map(imageToDraftImage),
+      files: attachedTextFilesRef.current.map(textFileToDraftFile),
+      ...(promptOnlyRef.current ? { promptOnly: true } : {}),
+      uploads,
+    };
+    // Establish intent from every live chip before unfinished upload payloads are omitted.
+    if (requiresPromptMode(draft)) draft.promptOnly = true;
+    draft.uploads = attachedUploadsToDraftUploads(uploads);
+    return draft;
+  }, []);
+
   const insertTextAtCursor = useCallback((text: string) => {
     const ta = textareaRef.current;
     if (!ta) {
@@ -608,10 +623,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     focus() {
       textareaRef.current?.focus();
     },
-    insertIfEmpty(text: string) {
+    insertIfEmpty(text: string, options?: PromptSendOptions) {
       const ta = textareaRef.current;
       const current = ta ? ta.value : value;
       if (current.trim()) return;
+      if (options?.promptOnly && text.trim()) setPromptOnly(true);
       setValue(text);
       setAtQuery(null);
       setSlashMatch(null);
@@ -1006,13 +1022,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const key = draftKeyRef.current;
     // Dictation can submit before the layout persistence effect sees its inserted text.
     if (key && draftRecoveryIdentityRef.current.key === key) {
-      setDraft(key, {
-        value: valueRef.current,
-        images: images.map(imageToDraftImage),
-        files: files.map(textFileToDraftFile),
-        ...(promptOnlyRef.current ? { promptOnly: true } : {}),
-        uploads: attachedUploadsToDraftUploads(uploads),
-      });
+      setDraft(key, captureDraft());
     }
     const pending = beginDraftSubmission(draftKeyRef.current);
     const commit = () => {
@@ -1029,35 +1039,22 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     /** The submission settled without a commit (refused or failed): stop tracking it. */
     commit.release = () => endDraftSubmission(pending);
     return commit;
-  }, [clearInput]);
+  }, [clearInput, captureDraft]);
 
   useLayoutEffect(() => subscribeDraftConsumption((key, snapshot) => {
     if (draftKeyRef.current !== key) return;
-    const uploads = attachedUploadsToDraftUploads(attachedUploadsRef.current);
-    const current: ChatDraft = {
-      value: valueRef.current,
-      images: attachedImagesRef.current.map(imageToDraftImage),
-      files: attachedTextFilesRef.current.map(textFileToDraftFile),
-      ...(promptOnlyRef.current ? { promptOnly: true } : {}),
-      ...(uploads.length ? { uploads } : {}),
-    };
+    const current = captureDraft();
     if (isSameDraft(current, snapshot)) clearInput();
-  }), [clearInput]);
+  }), [clearInput, captureDraft]);
 
   useLayoutEffect(() => {
     // The synchronous ref handoff can precede the prop commit. Keep live deltas in React for the existing move merge,
     // rather than recreating the obsolete key (which could evict an unrelated draft at capacity).
     if (!draftKey || draftKeyRef.current !== draftKey || draftRecoveryIdentityRef.current.key !== draftKey) return;
-    const draft = {
-      value,
-      images: attachedImages.map(imageToDraftImage),
-      files: attachedTextFiles.map(textFileToDraftFile),
-      ...(promptOnlyRef.current ? { promptOnly: true } : {}),
-      uploads: attachedUploadsToDraftUploads(attachedUploads),
-    };
+    const draft = captureDraft();
     persistedDraftRef.current = draft;
     setDraft(draftKey, draft);
-  }, [attachedImages, attachedTextFiles, attachedUploads, draftKey, value, promptOnly]);
+  }, [attachedImages, attachedTextFiles, attachedUploads, draftKey, value, promptOnly, captureDraft]);
 
   useLayoutEffect(() => {
     const previousDraftKey = draftKeyRef.current;
@@ -1127,13 +1124,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     setQueuedDeleteTarget(null);
 
     if (previousDraftKey) {
-      setDraft(previousDraftKey, {
-        value: valueRef.current,
-        images: attachedImagesRef.current.map(imageToDraftImage),
-        files: attachedTextFilesRef.current.map(textFileToDraftFile),
-        ...(promptOnlyRef.current ? { promptOnly: true } : {}),
-        uploads: attachedUploadsToDraftUploads(attachedUploadsRef.current),
-      });
+      setDraft(previousDraftKey, captureDraft());
     }
 
     const draft = draftKey ? getDraft(draftKey) : null;
@@ -1156,7 +1147,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       for (const upload of prev) if (upload.previewUrl) URL.revokeObjectURL(upload.previewUrl);
       return draftUploadsToAttachedUploads(draft?.uploads);
     });
-  }, [draftKey, draftIdentityMove, setPromptOnly]);
+  }, [draftKey, draftIdentityMove, setPromptOnly, captureDraft]);
 
   useLayoutEffect(() => subscribeDraftRecovery((key, recovery) => {
     if (draftKeyRef.current !== key) return;

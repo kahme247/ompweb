@@ -4294,7 +4294,7 @@ for (const order of ["identity/history before HTTP", "HTTP before history delive
     assert.equal(w.view.getByRole("textbox"), composer, "ownership relocation preserves the live composer instance");
     assert.equal(w.view.getByRole("textbox").value, "U2-original");
     assert.equal(new URL(window.location.href).searchParams.get("session"), target);
-    assert.deepEqual(getDraft(target), { value: "U2-original", images, files });
+    assert.deepEqual(getDraft(target), { value: "U2-original", images, files, promptOnly: true });
     assert.equal(getDraft(sid), null, "the draft moves rather than remaining on the abandoned branch");
     assert.deepEqual(world.sessions.get(sid), original, "the non-owned source file remains historical");
     assert.equal(native.persistedFiles.get(original.filePath), originalJsonl, "copy-on-write must never append the Edit marker to the source file");
@@ -4483,6 +4483,99 @@ test("relocation adopts existing target text without prefilling over it", async 
   assert.equal(getDraft(sid), null);
 });
 
+// The model prompt may have carried images or inline files that Edit cannot restore; its text starting with `!!` must
+// still go out as a prompt. Anything the user typed or kept keeps its own (shell) meaning.
+const bangHistory = [userMsg("u1", "U1"), assistantMsg("a1", "A1"), userMsg("u2", "!!model text"), assistantMsg("a2", "A2")];
+const bashCalls = () => world.calls.filter((call) => call.body?.type === "bash");
+
+test("same-ID Edit of a `!!` model prompt resends it as a held prompt, never a shell command", async (t) => {
+  resetWorld();
+  const { clearDraft } = await import("@/lib/draft-store");
+  const sid = "edit-bang-same";
+  clearDraft(sid);
+  t.after(() => clearDraft(sid));
+  const native = primeEditableHistory(sid, bangHistory);
+  world.outboxHold = true;
+  const w = await mountMovableChat(sid);
+  await confirmEdit(w.view, w.editButton());
+  await until(() => native.edits.length === 1 && w.view.getByRole("textbox").value === "!!model text", "Edit must prefill the model prompt");
+  await act(async () => { fireEvent.keyDown(w.view.getByRole("textbox"), { key: "Enter" }); });
+  await until(() => world.outbox.length === 1 || bashCalls().length > 0, "the prefilled prompt must be dispatched");
+  assert.deepEqual(bashCalls(), []);
+  assert.equal(world.outbox[0]?.mode, "prompt");
+  assert.equal(world.outbox[0]?.message, "!!model text");
+  w.unmount();
+});
+
+test("same-ID Edit leaves a typed `!!` draft alone and still runs it as a shell command", async (t) => {
+  resetWorld();
+  const { setDraft, clearDraft } = await import("@/lib/draft-store");
+  const sid = "edit-bang-same-typed";
+  setDraft(sid, { value: "!!typed shell", images: [], files: [] });
+  t.after(() => clearDraft(sid));
+  const native = primeEditableHistory(sid, bangHistory);
+  world.outboxHold = true;
+  const w = await mountMovableChat(sid);
+  await confirmEdit(w.view, w.editButton());
+  await until(() => native.edits.length === 1, "Edit must reach native history");
+  await settle();
+  assert.equal(w.view.getByRole("textbox").value, "!!typed shell", "Edit never overwrites a typed draft");
+  await act(async () => { fireEvent.keyDown(w.view.getByRole("textbox"), { key: "Enter" }); });
+  await until(() => bashCalls().length === 1 || world.outbox.length === 1, "the typed draft must be dispatched");
+  assert.deepEqual(bashCalls().map((call) => call.body.command), ["typed shell"]);
+  assert.deepEqual(world.outbox, []);
+  w.unmount();
+});
+
+test("moved-ID Edit of a `!!` model prompt resends it as a held prompt, never a shell command", async (t) => {
+  resetWorld();
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
+  const sid = "edit-bang-move", target = `${sid}-owned`;
+  for (const id of [sid, target]) clearDraft(id);
+  t.after(() => { clearDraft(sid); clearDraft(target); });
+  const native = primeEditableHistory(sid, bangHistory);
+  native.moveTo = target;
+  await attachEditableWrapper(t, native);
+  const w = await mountMovableChat(sid);
+  await confirmEdit(w.view, w.editButton());
+  await until(() => w.selectedId === target, "the confirmed target must become selected");
+  await settle();
+  assert.equal(w.view.getByRole("textbox").value, "!!model text");
+  assert.equal(getDraft(target)?.promptOnly, true, "the prefill is marked as model input");
+  world.outboxHold = true;
+  await act(async () => { fireEvent.keyDown(w.view.getByRole("textbox"), { key: "Enter" }); });
+  await until(() => world.outbox.length === 1 || bashCalls().length > 0, "the prefilled prompt must be dispatched");
+  assert.deepEqual(bashCalls(), []);
+  assert.equal(world.outbox[0]?.sessionId, target);
+  assert.equal(world.outbox[0]?.mode, "prompt");
+  assert.equal(world.outbox[0]?.message, "!!model text");
+  w.unmount();
+});
+
+test("moved-ID Edit keeps an existing target `!!` draft as shell input, not prompt-only", async (t) => {
+  resetWorld();
+  const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
+  const sid = "edit-bang-move-typed", target = `${sid}-owned`;
+  for (const id of [sid, target]) clearDraft(id);
+  t.after(() => { clearDraft(sid); clearDraft(target); });
+  setDraft(target, { value: "!!target shell", images: [], files: [] });
+  const native = primeEditableHistory(sid, bangHistory);
+  native.moveTo = target;
+  await attachEditableWrapper(t, native);
+  const w = await mountMovableChat(sid);
+  await confirmEdit(w.view, w.editButton());
+  await until(() => w.selectedId === target, "the confirmed target must become selected");
+  await settle();
+  assert.equal(w.view.getByRole("textbox").value, "!!target shell", "Edit must not prefill over existing target text");
+  assert.notEqual(getDraft(target)?.promptOnly, true);
+  world.outboxHold = true;
+  await act(async () => { fireEvent.keyDown(w.view.getByRole("textbox"), { key: "Enter" }); });
+  await until(() => bashCalls().length === 1 || world.outbox.length === 1, "the existing draft must be dispatched");
+  assert.deepEqual(bashCalls().map((call) => call.body.command), ["target shell"]);
+  assert.deepEqual(world.outbox, []);
+  w.unmount();
+});
+
 test("relocation at draft capacity preserves every unrelated draft and its attachments", async (t) => {
   resetWorld();
   const { getDraft, setDraft, clearDraft } = await import("@/lib/draft-store");
@@ -4517,7 +4610,7 @@ test("relocation at draft capacity preserves every unrelated draft and its attac
   await settle();
   assert.equal(w.view.getByRole("textbox"), composer);
   assert.equal(composer.value, "U2-original");
-  assert.deepEqual(getDraft(target), { ...source, value: "U2-original" });
+  assert.deepEqual(getDraft(target), { ...source, value: "U2-original", promptOnly: true });
   assert.equal(getDraft(sid), null);
   for (const [id, draft] of unrelated) {
     assert.deepEqual(getDraft(id), draft, `relocation must preserve ${id}, including its attachments`);
@@ -6760,6 +6853,7 @@ test("an interrupt-and-reply whose abort_and_prompt reply was lost is reported a
     assert.deepEqual(toastCalls, [["info", translate("agentSession.transportLostMaybeSent")]]);
   });
 });
+
 
 test("the hosts channel decides the offline banner; a frame only speaks before its first snapshot", async () => {
   resetWorld();
