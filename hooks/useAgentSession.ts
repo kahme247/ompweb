@@ -1210,6 +1210,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setShowPreCompactionHistory(false);
     setOptimisticUserMessage(null);
     setEchoedUserMessage(null);
+    // Native history moved (an edit rewound it): echoes bridging the old tail are not in the new one.
+    setCorrelatedMessages([]);
     setShowCorrelatedMessages(true);
     eventCoalescer.reset();
     dispatch({ type: "reset" });

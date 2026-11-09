@@ -6611,6 +6611,30 @@ for (const loss of ["unresolved", "child gone"]) {
   });
 }
 
+test("a native history rewind drops a correlated echo the delayed catch-up was still bridging", async () => {
+  resetWorld();
+  const sid = "outbox-rewound-echo";
+  primeSession(sid, [userMsg("u0", "first"), assistantMsg("a0", "answer")]);
+  world.agents.set(sid, { running: true, state: { isStreaming: true, supportsClientMessageIds: true } });
+  const w = await mountSession(sid);
+  const es = lastEs();
+  await act(() => es.open());
+  await settle();
+  // The saved history cannot be read yet, so only the correlated echo shows this message.
+  world.contextUnavailable = true;
+  const echo = { role: "user", content: [{ type: "text", text: "rewound later" }], timestamp: 5 };
+  await act(() => es.emit({ type: "message_end", message: echo, clientMessageId: "rewound-intent" }, { persist: false }));
+  await settle();
+  assert.ok(w.latest.messages.some((message) => message.clientMessageId === "rewound-intent"));
+  // An edit elsewhere rewinds native history to before "first"'s answer; the echo is not in the new tail.
+  world.contextUnavailable = false;
+  saveSession(sid, [userMsg("u0", "first edited")], ["e-edited"]);
+  await act(() => es.emit({ type: "session_history_changed", leafId: "e-edited" }));
+  await settle();
+  assert.deepEqual(w.latest.messages.map((message) => message.id), ["u0"]);
+  assert.equal(w.latest.messages.some((message) => message.clientMessageId === "rewound-intent"), false, "the rewound echo is gone");
+});
+
 function clientMessageStatus(overrides = {}) {
   return {
     messages: [],
