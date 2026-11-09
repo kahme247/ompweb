@@ -16,6 +16,38 @@ export type UsageLimitState =
 
 export type SlowModeScope = "session" | "global";
 
+/** omp's goal record: the `goal` value of a `goal` command reply and of `state.goal` in `get_state`. */
+export interface GoalInfo {
+  id: string;
+  objective: string;
+  /** `active` or `paused`; a dropped goal is reported as `null` instead of a record. */
+  status: string;
+  tokenBudget?: number;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** omp's goal-mode state snapshot: the `state` value of a `goal` command reply,
+ * and the `goal` field of `get_state`. Not the command reply itself (see
+ * GoalCommandReply). */
+export interface GoalModeState {
+  enabled: boolean;
+  /** omp reports `active` for a running and for a paused goal alike; `enabled`
+   * is what says whether it runs. */
+  mode: string;
+  goal: GoalInfo | null;
+}
+
+/** Reply to `{type:"goal", op}`: `{goal, state}`, both `null` once no goal is
+ * set (omp answers that after `drop`). `goal` is the record the op acted on,
+ * `state` the mode snapshot around it. */
+export interface GoalCommandReply {
+  goal: GoalInfo | null;
+  state: GoalModeState | null;
+}
+
 export interface ModelLike {
   id: string;
   provider: string;
@@ -102,6 +134,8 @@ export interface RpcSessionState {
   tokensPerSecond?: number | null;
   /** Structured skill resolution diagnostics; absent on older OMP builds. */
   skillDiagnostics?: SkillDiagnosticsSnapshot;
+  /** omp goal mode; absent on older OMP builds (never invented here). */
+  goal?: GoalModeState | null;
 }
 
 /**
@@ -140,6 +174,8 @@ export interface WebSessionState {
   /** Parsed public diagnostics DTO; absent means unsupported or malformed. */
   skillDiagnostics?: SkillDiagnosticsSnapshot;
   todoPhases: TodoPhase[];
+  /** omp goal mode snapshot; omitted when the child predates the `goal` field. */
+  goal?: GoalModeState | null;
   extensionStatuses: Array<{ key: string; text: string }>;
   extensionWidgets: Array<{ key: string; lines: string[]; placement: "aboveEditor" | "belowEditor" }>;
 }
