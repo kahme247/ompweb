@@ -106,6 +106,28 @@ prefix claims nothing). A resume argument is only evidence on an omp row:
 `-r` is also `grep -r`, `rm -r` and `tar -r`, and a POSIX scan lists every
 process of the user.
 
+**The omp entry point is anchored, not searched for.** A row counts as omp when
+the entry point is `argv[0]` — `omp`, `omp.exe`, `omp.cmd`, `omp.bat`, `omp.js`,
+`omp.cjs`, `omp.mjs`, or a shim's JS entry below `@oh-my-pi` — or when it is the
+program a known launcher runs: `cmd[.exe] /c …`, `sh|bash|dash|zsh -c …`,
+`node|bun …`, optionally behind `env`/`nice`/`nohup`/`command`/`exec`/`time`
+(with `VAR=value` assignments and value-taking flags such as `nice -n 5`
+skipped). A quoted command string is re-split and walked the same way, so
+`sh -c "omp --resume <id>"` counts. A token that merely appears later is an
+argument of *that* program, so `grep -r <id> lib/omp`, `cp -r <id> …/omp`,
+`grep -r <id> --exclude-dir=omp .`, `omp-web` and a path below `…/omp/` claim
+nothing. Matching "somewhere on the line" was the earlier rule, and it made an
+ordinary background `grep -r` a foreign owner — which slice 2 would turn into a
+refused send.
+
+**The POSIX scan asks for an unlimited width.** `ps -eo pid=,ppid=,uid=,args=`
+clips `args` — the last column — to the screen width, and `COLUMNS` overrides
+the pipe default when a daemon inherits it (tmux panes, some CI wrappers). A
+clipped command line loses the `--resume` value and the row reads as naming no
+session, the false `none` this slice exists to prevent, so the scan passes
+`-ww`; a command-line option wins over the environment, so no env plumbing is
+needed.
+
 **Every requested id is scanned.** An id whose file does not resolve — a session
 a foreign `omp` created after the 30 s list cache was warmed, or a file outside
 the sessions tree — still goes to the scan with no path. Dropping such ids made a

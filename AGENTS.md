@@ -392,8 +392,14 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   Every requested id goes to the scan (a file that does not resolve must not
   turn a named writer into `none`), and a scan hit is re-checked against the OS
   because the snapshot is cached for 10 s. `--resume`, `--restore` and `-r` are
-  recognised, including a unique id prefix; only an omp row can own a session
-  (`grep -r`/`rm -r` cannot), and on Windows a `.cmd`/node shim row counts too.
+  recognised, including a unique id prefix; only an omp row can own a session,
+  and the entry point must be anchored — `argv[0]`, or the program a known
+  launcher runs (`cmd[.exe] /c …`, `sh|bash -c …`, `node|bun …`, after
+  `env`/`nice`/`nohup`) — so a token that merely appears as an argument
+  (`grep -r <id> lib/omp`, `cp -r <id> …/omp`, `--exclude-dir=omp`) cannot
+  claim one, and on Windows a `.cmd`/node shim row counts too. The POSIX scan
+  asks `ps` for an unlimited width (`-ww`), because `args` is its last column
+  and a clipped command line would read as naming no session.
   The daemon's own children are excluded by transport pid plus a bounded
   ppid-chain walk. Detection is advisory, not an atomic lock: a writer can start
   between the inspection and a later spawn.

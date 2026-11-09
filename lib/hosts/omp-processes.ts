@@ -60,7 +60,7 @@ export interface OmpProcessInfo {
 
 /** How long one process scan is reused. Cheap enough to hide in a request,
  *  short enough that a stale process list cannot block for long. */
-export const FOREIGN_SCAN_TTL_MS = 10_000;
+const FOREIGN_SCAN_TTL_MS = 10_000;
 /** Hard bound on one scan; a slow PowerShell must not stall an inspection. */
 const FOREIGN_SCAN_TIMEOUT_MS = 1_500;
 
@@ -78,6 +78,10 @@ const MAX_ANCESTOR_DEPTH = 8;
  *  unique prefix, and four characters keep `rm -r 1111` from matching a whole
  *  batch of unrelated ids. */
 const MIN_PREFIX_CHARS = 4;
+/** How many argv tokens an entry-point search may walk. Real shapes are
+ *  `env VAR=x nice -n 5 cmd.exe /c omp.cmd` — a handful; a hostile line of
+ *  thousands of flags must not turn this into a long parse. */
+const MAX_LAUNCHER_DEPTH = 8;
 
 export type ProcessScanRunner = (file: string, args: string[]) => Promise<string>;
 
@@ -108,7 +112,7 @@ export interface OmpProcessScan {
   enabled: boolean;
 }
 
-export function foreignScanEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+function foreignScanEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.OMP_WEB_FOREIGN_SCAN !== "0";
 }
 
@@ -263,25 +267,172 @@ export function sameUserProcesses(processes: OmpProcessInfo[], uid: number | nul
   return uid === null ? processes : processes.filter((process) => process.uid === uid);
 }
 
-/** An omp entry point named anywhere on a command line: the binary itself, a
- *  Windows launcher (`omp.cmd`/`omp.bat`), a shim's JS entry (`omp.js`, or any
- *  file below `@oh-my-pi`), so a `cmd.exe /c …\omp.cmd` or
- *  `node …\@oh-my-pi\…` row is recognised as omp too. The name must start a
- *  token or a path segment and end a token or a path segment, so `omp-web`,
+/** The image names that *are* omp, compared on the basename. */
+const OMP_IMAGE_NAMES: Record<string, true> = {
+  omp: true,
+  "omp.exe": true,
+  "omp.cmd": true,
+  "omp.bat": true,
+  "omp.js": true,
+  "omp.cjs": true,
+  "omp.mjs": true,
+};
+
+/** Launchers that run another program as their first non-flag argument:
+ *  `cmd.exe /c omp.cmd …`, `sh -c "omp --resume x"`, `node …\cli.js …`. */
+const LAUNCHER_NAMES: Record<string, true> = {
+  cmd: true,
+  "cmd.exe": true,
+  sh: true,
+  bash: true,
+  dash: true,
+  zsh: true,
+  node: true,
+  "node.exe": true,
+  bun: true,
+  "bun.exe": true,
+};
+/** Prefix commands that run another program as their first non-flag argument
+ *  (`env FOO=1 omp …`, `nice -n 5 omp …`). */
+const WRAPPER_NAMES: Record<string, true> = {
+  env: true,
+  nice: true,
+  nohup: true,
+  command: true,
+  exec: true,
+  time: true,
+};
+
+/** Launchers that take a whole command string as one argument (`-c`/`/c`). */
+const COMMAND_STRING_LAUNCHERS: Record<string, true> = {
+  cmd: true,
+  "cmd.exe": true,
+  sh: true,
+  bash: true,
+  dash: true,
+  zsh: true,
+};
+
+/** Split a command line into argv, honouring both quote styles. `ps` loses the
+ *  original quoting, so this is the best available reconstruction: a quoted
+ *  run stays one token, everything else splits on whitespace. */
+function splitCommandLine(commandLine: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | null = null;
+  for (const char of capCommandLine(commandLine)) {
+    if (quote) {
+      if (char === quote) quote = null;
+      else current += char;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (current) tokens.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (current) tokens.push(current);
+  return tokens;
+}
+
+/** Whether `token` names an omp entry point: the image itself (`omp`,
+ *  `omp.exe`, `omp.cmd`, `omp.bat`, `omp.js`) or a shim's JS entry below
+ *  `@oh-my-pi`. The comparison is on the basename, so `omp-web`,
  *  `fake-omp.cmd` and `…/omp/foo` do not match. */
-const OMP_ENTRY_RE = /(?:^|[\s"'=\\/])omp(?:\.exe|\.cmd|\.bat|\.js|\.cjs|\.mjs)?(?=$|[\s"'])|[\\/]@?oh-my-pi[\\/]/i;
+function isOmpEntryToken(token: string): boolean {
+  const base = basenameAny(token).toLowerCase();
+  if (OMP_IMAGE_NAMES[base]) return true;
+  return /[\\/]@?oh-my-pi[\\/]/i.test(token);
+}
 
 /**
  * Whether the row can be an omp process at all. A resume argument is only
  * evidence when the process carrying it is omp: `-r` is also `grep -r`, `rm -r`
- * and `tar -r`, and a POSIX scan lists every process of the user. Windows
- * additionally recognises the shim shapes (`cmd.exe /c omp.cmd …`,
+ * and `tar -r`, and a POSIX scan lists every process of the user.
+ *
+ * The entry point must be *anchored*, never "somewhere on the line". It is
+ * `argv[0]`, or the first non-flag argument after a known launcher
+ * (`cmd[.exe] /c …`, `sh|bash -c …`, `node|bun …`), or after a prefix command
+ * (`env FOO=1 …`, `nice -n 5 …`). A token that merely appears later — a grep
+ * pattern, an `--exclude-dir=omp`, a path below `…/omp/` — is an argument of
+ * that program, not an omp entry, so `grep -r <id> lib/omp` cannot claim a
+ * session.
+ *
+ * Windows additionally recognises the shim shapes (`cmd.exe /c omp.cmd …`,
  * `node …\@oh-my-pi\…\cli.js …`), which the old name filter missed.
  */
 export function isOmpProcess(process: OmpProcessInfo): boolean {
   const name = process.name?.toLowerCase();
   if (name === "omp" || name === "omp.exe") return true;
-  return OMP_ENTRY_RE.test(process.commandLine);
+  return commandLineRunsOmp(process.commandLine);
+}
+
+/** Launcher/wrapper flags that consume the *next* token as their value
+ *  (`nice -n 5`, `env -u NAME`, `time -f FORMAT`), so the value is not
+ *  mistaken for the program. Attached forms (`-n5`, `--adjustment=5`) are
+ *  single tokens and need no entry. */
+const FLAGS_WITH_VALUE: Record<string, true> = {
+  "-n": true,
+  "--adjustment": true,
+  "-u": true,
+  "--unset": true,
+  "-C": true,
+  "--chdir": true,
+  "-S": true,
+  "-f": true,
+  "--format": true,
+  "-o": true,
+  "--output": true,
+};
+
+/** Skip the tokens a launcher/wrapper puts before the program it runs: its
+ *  flags (`cmd.exe /d /s /c`, `nice -n`), the values of value-taking flags, and
+ *  `env`'s `VAR=value` assignments. A POSIX absolute path is not a flag, so the
+ *  cmd-style test is a bare `/x` or `/xy` only. */
+function skipLaunchPrefix(argv: string[], start: number): number {
+  let index = start;
+  while (index < argv.length) {
+    const token = argv[index]!;
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) index += 1;
+    else if (FLAGS_WITH_VALUE[token]) index += 2;
+    else if (token.startsWith("-") || /^\/[A-Za-z]{1,2}$/.test(token)) index += 1;
+    else break;
+  }
+  return index;
+}
+
+/** Walk `argv` from the front: an omp entry at the head, or as the program a
+ *  known launcher/wrapper runs. Bounded by {@link MAX_LAUNCHER_DEPTH} per
+ *  command string, and by it again across a nested `sh -c "…"`. */
+function commandLineRunsOmp(commandLine: string, depth = 0): boolean {
+  if (depth >= MAX_LAUNCHER_DEPTH) return false;
+  const argv = splitCommandLine(commandLine);
+  let index = 0;
+  for (let step = 0; step < MAX_LAUNCHER_DEPTH; step += 1) {
+    index = skipLaunchPrefix(argv, index);
+    const token = argv[index];
+    if (token === undefined) return false;
+    index += 1;
+    if (isOmpEntryToken(token)) return true;
+    const base = basenameAny(token).toLowerCase();
+    if (!LAUNCHER_NAMES[base] && !WRAPPER_NAMES[base]) return false;
+    // `sh -c "<command string>"` / `cmd.exe /c <command string>`: the program
+    // is inside the next token, which splitCommandLine already unquoted into
+    // one token — so recurse on it instead of reading it as a program name.
+    if (COMMAND_STRING_LAUNCHERS[base]) {
+      index = skipLaunchPrefix(argv, index);
+      const commandString = argv[index];
+      if (commandString === undefined) return false;
+      return isOmpEntryToken(commandString) || commandLineRunsOmp(commandString, depth + 1);
+    }
+  }
+  return false;
 }
 
 async function runScan(platform: NodeJS.Platform, run: ProcessScanRunner, uid: number | null, psBin: string | null | undefined): Promise<OmpProcessInfo[]> {
@@ -303,7 +454,12 @@ async function runScan(platform: NodeJS.Platform, run: ProcessScanRunner, uid: n
     // rather than resolving some binary from PATH.
     const resolved = psBin === undefined ? resolvePosixPsBin() : psBin;
     if (!resolved) throw new Error("no absolute ps binary");
-    processes = sameUserProcesses(parsePosixProcessList(await run(resolved, ["-eo", "pid=,ppid=,uid=,args="])), uid);
+    // `-ww`: an unlimited output width. `args` is the last column, so a
+    // narrow terminal (`COLUMNS` exported in a tmux pane or CI wrapper) clips
+    // the `--resume` value and the row reads as naming no session — the exact
+    // false `none` this scan exists to prevent. An explicit option wins over
+    // the environment (procps `choose_dimensions`), so no env plumbing.
+    processes = sameUserProcesses(parsePosixProcessList(await run(resolved, ["-ww", "-eo", "pid=,ppid=,uid=,args="])), uid);
   }
   // Parse the resume arguments once per process: one snapshot answers a whole
   // batch of session ids.
@@ -363,9 +519,10 @@ function basenameAny(value: string): string {
  */
 const RESUME_MARKERS = ["--resume", "--restore", "-r"] as const;
 
-/** One resume argument: the value it carried and the flag that carried it. */
+/** One resume argument: the value it carried. The flag itself is not kept —
+ *  every caller asks only which session a row names, and the flag never
+ *  changes that answer. */
 export interface ResumeArgument {
-  flag: typeof RESUME_MARKERS[number];
   value: string;
 }
 
@@ -401,7 +558,7 @@ export function resumeArguments(commandLine: string): ResumeArgument[] {
       const quote = text[cursor];
       if (quote === '"' || quote === "'") {
         const end = text.indexOf(quote, cursor + 1);
-        values.push({ flag: marker, value: end > cursor + 1 ? text.slice(cursor + 1, end) : text.slice(cursor + 1) });
+        values.push({ value: end > cursor + 1 ? text.slice(cursor + 1, end) : text.slice(cursor + 1) });
         continue;
       }
       // Unquoted: the token itself plus the joins with the tokens after it. A
@@ -411,10 +568,13 @@ export function resumeArguments(commandLine: string): ResumeArgument[] {
       while (cursor < text.length && tokens.length < MAX_BARE_JOIN_TOKENS) {
         let end = cursor;
         while (end < text.length && !/\s/.test(text[end])) end += 1;
-        const token = text.slice(cursor, end);
+        // A token inside a quoted command string (`sh -c "omp --resume <id>"`)
+        // carries that string's closing quote; a session id or path never ends
+        // in one, so it is not part of the value.
+        const token = text.slice(cursor, end).replace(/["']+$/, "");
         if (token.startsWith("-")) break;
         tokens.push(token);
-        values.push({ flag: marker, value: tokens.join(" ") });
+        values.push({ value: tokens.join(" ") });
         while (end < text.length && /\s/.test(text[end])) end += 1;
         cursor = end;
       }
