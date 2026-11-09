@@ -1141,12 +1141,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         const { stateRes, agentState } = reply;
         if (!stateRes.ok) {
-          // A busy child (503 `session_slow` / `session_state_timeout`) is not
-          // a failed load: the transcript above is the on-disk copy, the run
-          // keeps going and the state is merely unknown right now. The code
-          // comes from the body already parsed above — a Response body can be
-          // read only once, and re-reading it threw, turning the busy path into
-          // an HTTP 503 load failure.
+          // A busy child (503 `session_slow`, or `session_state_timeout` from a
+          // wrapper that outlived a `bun --hot` reload) is not a failed load:
+          // the transcript above is the on-disk copy, the run keeps going and
+          // the state is merely unknown right now. The code comes from the body
+          // already parsed above — a Response body can be read only once, and
+          // re-reading it threw, turning the busy path into an HTTP 503 load
+          // failure.
           if (stateRes.status === 503 && (agentState.code === "session_slow" || agentState.code === "session_state_timeout")) {
             if (!hookAliveRef.current || sessionIdRef.current !== sid
               || contextRequestSeqRef.current !== requestSeq || promptRunIdRef.current !== requestRun) {

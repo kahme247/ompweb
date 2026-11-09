@@ -52,9 +52,10 @@ export async function GET(
       return Response.json({ running: session.isRunning(), alive: true, state });
     } catch (error) {
       // omp being slow is not the run ending: answer 503 so clients retry the
-      // poll instead of treating the session as idle/recovered. Both the code
-      // this tree raises (`session_slow`) and 0.6.0's own
-      // `session_state_timeout` mean the same thing to a client.
+      // poll instead of treating the session as idle/recovered. This tree raises
+      // `session_slow`; `session_state_timeout` is the code a wrapper that
+      // outlived a `bun --hot` reload still raises (the old module instance
+      // keeps its own error class), and it means the same thing to a client.
       if (error instanceof WebRpcError && (error.code === "session_slow" || error.code === "session_state_timeout")) {
         // The liveness watchdog disposes a child that stayed silent past its
         // threshold; that child is gone, so the busy answer would be a lie.
