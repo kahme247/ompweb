@@ -27,6 +27,13 @@ import { isRecord } from "./type-guards";
 
 // Heartbeat keeps the socket alive through reverse proxies that drop silent connections.
 const HEARTBEAT_MS = 30_000;
+const encoder = new TextEncoder();
+
+export type SubscribeResult =
+  | { ok: true }
+  | { ok: false; status: number; error: string; code: string };
+
+const SUBSCRIBED: SubscribeResult = { ok: true };
 
 /**
  * The floor between two `tool_execution_update` snapshots of one tool in one
@@ -40,13 +47,6 @@ const HEARTBEAT_MS = 30_000;
  * incremental since the delta protocol.
  */
 export const TOOL_UPDATE_FRAME_MIN_INTERVAL_MS = 1_000;
-const encoder = new TextEncoder();
-
-export type SubscribeResult =
-  | { ok: true }
-  | { ok: false; status: number; error: string; code: string };
-
-const SUBSCRIBED: SubscribeResult = { ok: true };
 
 class Subscription {
   active = true;
@@ -437,16 +437,20 @@ type QueuedFrame =
 
 /**
  * Hold the newest snapshot of one tool in the queue. Each frame carries the
- * tool's whole accumulated output, so a newer snapshot replaces the pending one
- * in place: the queue stays bounded to one slot per tool, snapshots of
- * concurrent tools never supersede each other, and a newer snapshot never
- * overtakes the frames emitted before it.
+ * tool's whole accumulated output, so a newer snapshot supersedes the pending
+ * one: its old slot is removed and the replacement takes the position of the
+ * newer frame, i.e. the end of the queue. The queue stays bounded to one slot
+ * per tool and snapshots of concurrent tools never supersede each other, but a
+ * replacement never keeps an old position either: `web.sequence` is a cursor
+ * for the browser, so a snapshot carrying sequence 3 must not be written ahead
+ * of a frame carrying sequence 2 that was emitted before it.
  */
 function queueToolUpdate(queue: QueuedFrame[], toolCallId: string, data: Record<string, unknown>): void {
-  for (const frame of queue) {
+  for (let i = 0; i < queue.length; i++) {
+    const frame = queue[i];
     if (frame.kind === "tool" && frame.toolCallId === toolCallId) {
-      frame.data = data;
-      return;
+      queue.splice(i, 1);
+      break;
     }
   }
   queue.push({ kind: "tool", toolCallId, data });
