@@ -252,6 +252,7 @@ export function getDraft(key: string): ChatDraft | null {
 }
 
 export function recoverDraft(key: string, recovery: DraftRecovery): void {
+  if (!recovery.text && !recovery.images?.length && !recovery.files?.length && !recovery.uploads?.length) return;
   if (key) {
     const draft = getDraft(key) ?? { value: "", images: [], files: [] };
     setDraft(key, {
