@@ -673,14 +673,18 @@ export function startOutbox(): void {
   // SQLite changes made by a peer server do not pass through this process's publish(). Prepared per tick through db():
   // a hot reload can replace (and finalize) the connection, and the watcher must follow it.
   let version: number | undefined;
+  let observed: Database | undefined;
   const pending = state.pendingNotifications;
   const changes = setInterval(() => {
     if (globalThis.__ompOutbox !== state) { clearInterval(changes); return; }
     if (state.listeners.size === 0) { pending.clear(); return; }
     try {
-      const next = db().query<{ data_version: number }, []>("PRAGMA data_version").get()?.data_version;
-      if (next !== version) {
+      const store = db();
+      const next = store.query<{ data_version: number }, []>("PRAGMA data_version").get()?.data_version;
+      // data_version is per connection: a replacement's baseline can equal the old value yet hide a peer change in between.
+      if (store !== observed || next !== version) {
         for (const sessionId of [...state.listeners.keys()]) notifyListeners(sessionId);
+        observed = store;
         version = next;
       }
       const now = performance.now();

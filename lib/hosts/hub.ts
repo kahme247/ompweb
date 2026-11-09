@@ -1647,7 +1647,9 @@ export async function adoptedChild(hostId: string, sessionId: string): Promise<b
 /** Whether a v7 host still runs a child of `sessionId`, joined by this server or not (a failed join leaves it running). */
 export function hostListsChild(sessionId: string): boolean {
   for (const link of hub().links.values()) {
-    if (isLinkUp(link.status) && link.listedSessions.has(sessionId)) return true;
+    // A link kept across `bun --hot` from older code lacks the set: a v7 host's listing is unknown, so stay retryable.
+    const listed: Set<string> | undefined = link.listedSessions;
+    if (isLinkUp(link.status) && (listed ? listed.has(sessionId) : (link.hostVersion ?? 0) >= 7)) return true;
   }
   return false;
 }

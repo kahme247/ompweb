@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { EMPTY_SERVER_OUTBOX, applyOutboxSnapshot, mergeHeldMessages, rememberOutboxEntries } from "./useAgentSession-queue.ts";
+import { EMPTY_SERVER_OUTBOX, applyOutboxSnapshot, markOutboxUncertain, mergeHeldMessages, rememberOutboxEntries } from "./useAgentSession-queue.ts";
 import { readQueueSnapshot } from "../lib/client-message-ids";
 
 const local = (id, createdAt, enqueueOrder) => ({ id, sessionId: "s", scope: "scope", mode: "followUp", message: id, state: "sending", createdAt, enqueueOrder });
@@ -20,6 +20,20 @@ test("a confirmation the server snapshot has not covered yet replaces the browse
   const confirmed = [stored("second", 1100), stored("gone", 900, "delivered")];
   assert.deepEqual(order(mergeHeldMessages("s", browser, confirmed, server)), ["first:server", "second:server", "third:browser"]);
   assert.deepEqual(order(mergeHeldMessages("s", [local("gone", 50, 0)], confirmed, EMPTY_SERVER_OUTBOX)), ["second:server"], "a delivered confirmation removes the browser copy");
+});
+
+test("a bridge kept after the server settled its row keeps its place ahead of the rows queued after it", () => {
+  const pending = applyOutboxSnapshot(EMPTY_SERVER_OUTBOX, [stored("A", 1000), stored("B", 1100)]);
+  // A is dispatched and native-settled; this peer has not seen its echo yet.
+  const dispatched = applyOutboxSnapshot(pending, [stored("B", 1100)], ["A"], ["A"]);
+  assert.deepEqual(order(mergeHeldMessages("s", [], [], dispatched)), ["A:server", "B:server"]);
+  assert.deepEqual(order(mergeHeldMessages("s", [local("C", 300, 3)], [], dispatched)), ["A:server", "B:server", "C:browser"],
+    "this browser's first-leg rows still come last");
+  const uncertain = markOutboxUncertain(dispatched, ["A"]);
+  const held = mergeHeldMessages("s", [], [], uncertain);
+  assert.deepEqual(order(held), ["A:server", "B:server"], "an uncertain bridge keeps its position");
+  assert.equal(held[0].state, "failed");
+  assert.equal(held[0].mayHaveBeenSent, true);
 });
 
 test("queue snapshots retain aligned native client IDs, including uncorrelated slots", () => {

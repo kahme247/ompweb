@@ -51,7 +51,10 @@ async function liveChild(sessionId: string) {
     live = getRpcSession(sessionId);
   }
   if (live?.isAlive()) return live;
-  if (!live) {
+  if (live) {
+    // A wrapper disposed during a link drop proves nothing about the child: it may still run on the offline host.
+    if (!isLinkUp(live.host.status())) throw new WebRpcError(`${live.host.label} is offline`, "host_offline", "refused");
+  } else {
     // A child a host still runs is not gone just because this server failed to adopt it: retry.
     if (hostListsChild(sessionId)) throw new HostOpError(503, "handoff_child_pending", "The session's native process is running but not attached here yet");
     // Throws a 503 while a host that may hold the session is offline or its list unavailable.

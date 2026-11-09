@@ -103,10 +103,12 @@ export function applyOutboxSnapshot(current: ServerOutbox, entries: OutboxEntry[
 
 /** This session's held messages in delivery order, merged by id: the server's snapshot wins over a confirmation it
  * has not covered yet (`stored`), which wins over the browser's own copy; delivered ones are gone. Everything the
- * server holds goes first (its snapshot in arrival order, then newer confirmations), then this browser's first-leg
- * entries in the worker's submission order. The two `createdAt` clocks are never compared. */
+ * server holds, and the bridges kept after it settled them, goes first in the order this browser first saw it
+ * (`server.known`; an unseen id after the seen ones, in snapshot order), then this browser's first-leg entries in
+ * the worker's submission order. The two `createdAt` clocks are never compared. */
 export function mergeHeldMessages(sessionId: string | null, local: LocalOutboxEntry[], stored: OutboxEntry[], server: ServerOutbox): HeldMessage[] {
   const held: HeldMessage[] = [];
+  const firstLeg: HeldMessage[] = [];
   const known = new Set<string>();
   for (const entry of [...server.entries, ...stored.filter((entry) => !server.seen.has(entry.id))]) {
     if (entry.sessionId !== sessionId) continue;
@@ -117,7 +119,7 @@ export function mergeHeldMessages(sessionId: string | null, local: LocalOutboxEn
   for (const entry of local) {
     if (entry.sessionId === sessionId && !server.represented.has(entry.id) && !server.seen.has(entry.id) && !known.has(entry.id)) {
       known.add(entry.id);
-      held.push({ ...entry, local: true });
+      firstLeg.push({ ...entry, local: true });
     }
   }
   for (const [id, entry] of server.known) {
@@ -125,5 +127,8 @@ export function mergeHeldMessages(sessionId: string | null, local: LocalOutboxEn
     if (server.uncertain.has(id)) held.push({ ...entry, state: "failed", mayHaveBeenSent: true, local: false });
     else if (server.nativeSettled.has(id)) held.push({ ...entry, state: "delivering", local: false });
   }
-  return held;
+  const rank = new Map([...server.known.keys()].map((id, index) => [id, index]));
+  // Array.prototype.sort is stable: unranked rows keep their relative order.
+  held.sort((a, b) => (rank.get(a.id) ?? rank.size) - (rank.get(b.id) ?? rank.size));
+  return [...held, ...firstLeg];
 }

@@ -6637,6 +6637,57 @@ test("a native history rewind drops a correlated echo the delayed catch-up was s
   assert.equal(w.latest.messages.some((message) => message.clientMessageId === "rewound-intent"), false, "the rewound echo is gone");
 });
 
+test("a failed history reload keeps the correlated echo until a readable history replaces it", async () => {
+  resetWorld();
+  const sid = "outbox-rewind-reload-fails";
+  primeSession(sid, [userMsg("u0", "first"), assistantMsg("a0", "answer")]);
+  world.agents.set(sid, { running: true, state: { isStreaming: true, supportsClientMessageIds: true } });
+  const w = await mountSession(sid);
+  const es = lastEs();
+  await act(() => es.open());
+  await settle();
+  world.contextUnavailable = true;
+  const echo = { role: "user", content: [{ type: "text", text: "rewound later" }], timestamp: 5 };
+  await act(() => es.emit({ type: "message_end", message: echo, clientMessageId: "rewound-intent" }, { persist: false }));
+  await settle();
+  // The rewind reload cannot read history: nothing yet proves the echo is gone from the new tail.
+  await act(() => es.emit({ type: "session_history_changed", leafId: "e-edited" }));
+  await settle();
+  assert.ok(w.latest.messages.some((message) => message.clientMessageId === "rewound-intent"), "the echo survives the failed reload");
+  world.contextUnavailable = false;
+  saveSession(sid, [userMsg("u0", "first edited")], ["e-edited"]);
+  await act(() => es.open());
+  await settle();
+  assert.deepEqual(w.latest.messages.map((message) => message.id), ["u0"]);
+  assert.equal(w.latest.messages.some((message) => message.clientMessageId === "rewound-intent"), false, "the rewound echo is gone once the history is readable");
+});
+
+for (const [name, savedTimestamp, expected] of [["the same native timestamp replaces the echo", 777, 1], ["another native timestamp keeps both", 778, 2]]) {
+  test(`a saved copy without clientMessageId (older daemon) with ${name}`, async () => {
+    resetWorld();
+    const sid = `outbox-legacy-saved-copy-${savedTimestamp}`;
+    primeSession(sid, [userMsg("u0", "before")]);
+    world.agents.set(sid, { running: true, state: { isStreaming: true, supportsClientMessageIds: true } });
+    const w = await mountSession(sid);
+    const es = lastEs();
+    await act(() => es.open());
+    await settle();
+    world.contextUnavailable = true;
+    const echo = { role: "user", content: [{ type: "text", text: "legacy echo" }], timestamp: 777 };
+    await act(() => es.emit({ type: "message_end", message: echo, clientMessageId: "legacy-intent" }, { persist: false }));
+    await settle();
+    const shown = () => w.latest.messages.filter((message) => message.role === "user" && JSON.stringify(message.content).includes("legacy echo"));
+    assert.equal(shown().length, 1, "only the echo shows this message while history is unreadable");
+    // An older daemon saves the same message without the outer clientMessageId.
+    world.contextUnavailable = false;
+    appendEntry(sid, { role: "user", id: "u1", content: [{ type: "text", text: "legacy echo" }], timestamp: savedTimestamp });
+    await act(() => es.open());
+    await settle();
+    assert.equal(shown().length, expected);
+    assert.ok(w.latest.messages.some((message) => message.id === "u1"), "the saved copy is shown");
+  });
+}
+
 function clientMessageStatus(overrides = {}) {
   // `unresolvedClientMessageIds` is computed by the stub from what is asked, as lib/outbox-handoff.ts does.
   return {

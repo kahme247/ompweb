@@ -226,6 +226,13 @@ function isSameNativeMessage(message: AgentMessage, other: AgentMessage): boolea
     && extractMessageText(message) === extractMessageText(other);
 }
 
+/** A daemon from before correlation saves history without `clientMessageId`: the same native role, timestamp, type and
+ * text is still the echo's saved copy. A saved message carrying another intent's ID never is. */
+function isSavedCopyOf(saved: AgentMessage, echo: AgentMessage): boolean {
+  if ((saved.role !== "user" && saved.role !== "custom") || (echo.role !== "user" && echo.role !== "custom")) return false;
+  return isSameNativeMessage(saved.clientMessageId ? saved : { ...saved, clientMessageId: echo.clientMessageId }, echo);
+}
+
 /** Toast a send its connection stopped: the host's link (HostOfflineError) or
  *  this browser's session socket (TransportLostError). True when it may have
  *  left and still run, so the composer must not offer it again; null for any
@@ -279,11 +286,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [echoedUserMessage, setEchoedUserMessage] = useState<AgentMessage | null>(null);
   const [correlatedMessages, setCorrelatedMessages] = useState<{ sessionId: string; message: AgentMessage }[]>([]);
   const [showCorrelatedMessages, setShowCorrelatedMessages] = useState(true);
+  // Set when native history rewound: the next readable history replaces the echoes, so a failed reload keeps them.
+  const pruneCorrelatedOnReloadRef = useRef(false);
   const messages = useMemo(() => {
     const pending = optimisticUserMessage ?? echoedUserMessage;
     const base = pending ? [...confirmedMessages, pending] : confirmedMessages;
     const native = showCorrelatedMessages ? correlatedMessages.filter((entry) => entry.sessionId === session?.id
-      && !base.some((message) => isSameNativeMessage(message, entry.message))).map((entry) => entry.message) : [];
+      && !base.some((message) => isSavedCopyOf(message, entry.message))).map((entry) => entry.message) : [];
     return native.length ? [...base, ...native] : base;
   }, [confirmedMessages, optimisticUserMessage, echoedUserMessage, correlatedMessages, showCorrelatedMessages, session?.id]);
   const confirmedMessagesRef = useRef(confirmedMessages);
@@ -347,6 +356,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     outboxRevisionRef.current += 1;
     handoffReadRef.current = null;
     setShowCorrelatedMessages(true);
+    pruneCorrelatedOnReloadRef.current = false;
   }, [session?.id]);
   // The server's persisted history captured before it dispatched the delivering entry: the next turn's boundary.
   // Keyed by entry: a peer's later poll republishes the same delivering row, whose boundary its run already took.
@@ -683,8 +693,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           ...(context.persistedClientMessageIds ?? []), ...(context.resolvedClientMessageIds ?? []),
         ]);
         setShowCorrelatedMessages(!catchUpRef.current?.view().leafId);
-        setCorrelatedMessages((current) => current.filter((entry) =>
-          !context.messages.some((message) => isSameNativeMessage(message, entry.message))
+        const pruneCorrelated = pruneCorrelatedOnReloadRef.current;
+        pruneCorrelatedOnReloadRef.current = false;
+        setCorrelatedMessages((current) => pruneCorrelated ? [] : current.filter((entry) =>
+          !context.messages.some((message) => isSavedCopyOf(message, entry.message))
           && !((entry.message.role === "user" || entry.message.role === "custom")
             && entry.message.clientMessageId && context.persistedClientMessageIds?.includes(entry.message.clientMessageId))));
         setEntryIds(context.entryIds);
@@ -720,7 +732,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (native.role === "custom" && "display" in native && native.display === false) return;
     const message = { ...native, clientMessageId };
     setCorrelatedMessages((current) => {
-      if (confirmedMessagesRef.current.some((saved) => isSameNativeMessage(saved, message))) return current;
+      if (confirmedMessagesRef.current.some((saved) => isSavedCopyOf(saved, message))) return current;
       const existing = current.findIndex((entry) => entry.sessionId === sid && isSameNativeMessage(entry.message, message));
       return existing < 0 ? [...current, { sessionId: sid, message }]
         : current.map((entry, index) => index === existing ? { sessionId: sid, message } : entry);
@@ -1210,8 +1222,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setShowPreCompactionHistory(false);
     setOptimisticUserMessage(null);
     setEchoedUserMessage(null);
-    // Native history moved (an edit rewound it): echoes bridging the old tail are not in the new one.
-    setCorrelatedMessages([]);
+    // Native history moved (an edit rewound it): once the new history is readable it replaces the echoes bridging the old tail.
+    pruneCorrelatedOnReloadRef.current = true;
     setShowCorrelatedMessages(true);
     eventCoalescer.reset();
     dispatch({ type: "reset" });
