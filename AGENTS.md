@@ -189,7 +189,7 @@ lib/
   session-match-listing.ts   server: lists a session's search hits counted per rendered text node (remark parse)
   session-resume.ts    running-session list for auto-resume after a restart
   web-auth.ts          password-hash check + session cookie signing
-  mobile-access.ts     Settings → Mobile app facts: bind classification, phone-reachable addresses (a specific bind keeps its kind — a CGNAT/Tailscale IP is `tailscale`; IPv6 is bracketed), MagicDNS only when the bind covers the tailnet, and the installer command sequences
+  mobile-access.ts     Settings → Mobile app facts: bind classification, phone-reachable addresses (a specific bind keeps its kind — a CGNAT `100.64.0.0/10` or Tailscale IPv6 `fd7a:115c:a1e0::/48` address is `tailscale`; IPv6 is bracketed), MagicDNS only when the bind covers the tailnet, and the installer command sequences
   web-auth-secret.ts   per-installation session-signing key (~/.omp/agent/omp-web/web-auth-secret.json)
   web-password-hash.ts typed view of bin/omp-web-password-hash.js (the scrypt hash format)
   web-settings.ts      omp-web server settings (~/.omp/agent/omp-web-settings.json)

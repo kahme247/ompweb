@@ -38,9 +38,10 @@ export function parseMobilePort(value: unknown): number | null {
 
 /**
  * The bind this server was launched with. `startProduction` (server/app.ts)
- * writes `OMP_WEB_HOSTNAME` from the bound listener before serving, and every
- * entry point (`npm start`, the binary, the launcher) goes through it, so the
- * environment is the authoritative source — there is no argv to fall back to.
+ * writes `OMP_WEB_HOSTNAME` from the bound listener before serving, and the dev
+ * entry point (server/dev.ts) writes it the same way after its own bind, so the
+ * environment is the authoritative source for every entry point — there is no
+ * argv to fall back to.
  */
 export function detectBindHostname(env: NodeJS.ProcessEnv = process.env): string | null {
   return env.OMP_WEB_HOSTNAME?.trim() || null;

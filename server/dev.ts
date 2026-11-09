@@ -25,7 +25,13 @@ if (Object.keys(env).some((name) => process.env[name] === undefined)) {
 
 Object.assign(process.env, { NODE_ENV: "development" });
 const { parseListenArgs, startServer } = await import("./app");
-const server = startServer({ ...parseListenArgs(Bun.argv.slice(2), 30178), dev: true, root, html, worker });
+const listen = parseListenArgs(Bun.argv.slice(2), 30178);
+const server = startServer({ ...listen, dev: true, root, html, worker });
+// The local daemon link and the update worker dial this address, and Settings →
+// Mobile app reads the bind from here (lib/mobile-access.ts). startProduction
+// writes both after its bind; the dev entry point must do the same or
+// `npm run dev:lan` reports an unknown bind and offers no address.
+Object.assign(process.env, { OMP_WEB_PORT: String(server.port), OMP_WEB_HOSTNAME: listen.hostname });
 // `bun --hot` re-evaluates this file on every edit; register() must run once per process.
 globalThis.__ompWebRegistered ??= import("../instrumentation.node").then(({ register }) => register());
 await globalThis.__ompWebRegistered;

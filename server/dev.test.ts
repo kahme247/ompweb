@@ -105,3 +105,63 @@ test("hot reload of a shared worker dependency keeps the dev server listening", 
   assert.match(await (await fetch(`${origin}/event-stream-worker.js`)).text(), /hot-reload-worker-probe/);
   assert.equal(parent.exitCode, null);
 });
+
+// `npm run dev:lan` starts server/dev.ts with `-H 0.0.0.0`. Settings → Mobile
+// app reads the bind from OMP_WEB_HOSTNAME, which startProduction writes for
+// every production entry point; the dev entry point must write it too, or the
+// card reports an unknown bind and offers no address at all. The assertion goes
+// through the real HTTP route, so it fails if either the env write or the
+// route's read regresses.
+test("dev.ts publishes its bind so the Mobile app card can list addresses", { timeout: 60_000 }, async (t) => {
+  const home = mkdtempSync(path.join(os.tmpdir(), "omp-web-dev-bind-"));
+  // The OMP_WEB_PUBLIC_* values are set here so dev.ts does not re-run itself
+  // with them (`bunfig.toml` inlines them at startup): the test then owns the
+  // one process it started and can stop it.
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("OMP_WEB_")));
+  const parent = Bun.spawn([process.execPath, "server/dev.ts", "-H", "0.0.0.0", "-p", "0"], {
+    cwd: repo,
+    env: {
+      ...env,
+      HOME: home,
+      PI_CODING_AGENT_DIR: path.join(home, ".omp", "agent"),
+      OMP_WEB_OMP_BIN: "/nonexistent/omp",
+      OMP_WEB_DISABLE_AUTOUPDATE: "1",
+      OMP_WEB_PUBLIC_APP_VERSION: "0.0.0-test",
+      OMP_WEB_PUBLIC_COMMIT_HASH: "",
+      OMP_WEB_PUBLIC_COMMIT_DATE: "",
+      OMP_WEB_PUBLIC_EVENT_STREAM_WORKER_VERSION: "test",
+    },
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  t.after(async () => {
+    parent.kill("SIGKILL");
+    await parent.exited;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  // Read without cancelling: a closed pipe could kill the server on its next log line and fake a pass.
+  const reader = parent.stdout.getReader();
+  const decoder = new TextDecoder();
+  let output = "";
+  while (!/\[omp-web\] Ready on (http:\/\/[^\s]+)/.test(output)) {
+    const { done, value } = await reader.read();
+    assert.equal(done, false, output);
+    output += decoder.decode(value);
+  }
+  // The Ready line names the bound origin; a wildcard bind is reached over loopback.
+  const ready = /\[omp-web\] Ready on (\S+)/.exec(output);
+  assert.ok(ready, output);
+  const port = Number(new URL(ready[1]).port);
+  assert.ok(port > 0, output);
+
+  // No password is configured in this temp home, so the gate lets the request through.
+  const response = await fetch(`http://127.0.0.1:${port}/api/mobile-access`);
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.binding.hostname, "0.0.0.0", "dev.ts must publish the bind it was started with");
+  assert.equal(body.binding.exposure, "network");
+  assert.equal(body.binding.port, port, "the bound port, not the request URL's");
+  // The point of the card: a phone needs an address, and a wildcard bind has them.
+  assert.ok(body.addresses.length > 0, `a network bind must offer an address: ${JSON.stringify(body.addresses)}`);
+});
