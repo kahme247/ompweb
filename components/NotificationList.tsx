@@ -80,7 +80,8 @@ export function NotificationList() {
  */
 function NotificationRow({ entry }: { entry: NotificationHistoryEntry }) {
   const { t, locale } = useI18n();
-  const { title, body } = renderNotification(entry.event, t);
+  // The locale makes a reminder's elapsed duration read in the same language.
+  const { title, body } = renderNotification(entry.event, t, locale);
   const { sessionId } = entry.event;
   // Following a notification is reading it.
   const open = sessionId ? () => {

@@ -103,6 +103,7 @@ app/api/
   hosts/route.ts                  GET hosts (this machine first) | POST { label } → token once + login command | PATCH { id, label?, allowAgentStart? } (`local`: label only, empty resets to "This machine") | DELETE ?id= revoke (registry first, then close the link); 503 if hosts.json is unreadable
   hosts/link/route.ts             GET WebSocket upgrade (the `ompweb host` daemon; bearer checked before the upgrade, skipped by the `proxy.ts` gate) | POST 426 for pre-WebSocket daemons
   notifications/devices/route.ts  GET VAPID key + subscribed | PUT { deviceId, prefs, subscription? }
+  notifications/answer/route.ts   POST { sessionId, requestId, response } answer a pending dialog from a notification (never spawns omp)
   notifications/presence/route.ts POST { clientId, deviceId, visible, sessionId, seq }
   notifications/test/route.ts     POST { deviceId } send a test push (502 on push-service refusal)
   notifications/history/route.ts  GET entries | PATCH { ids } mark read | DELETE ?id= remove one, ?all=1 clear
@@ -1808,8 +1809,14 @@ during the wait.
   leak it); else if a visible tab with an open stream exists, `whenActive:
   "toast"` devices get a toast on their active tabs only; else push (subscribed
   devices) or in-page `showNotification` (tabs with an open stream).
-- The server decides before pushing: iOS revokes push permission for pushes
-  that display nothing, so `public/sw.js` always shows what it receives.
+- The server decides before pushing: a push that displays nothing is a silent
+  push, and iOS revokes the permission for one while Chromium and Firefox
+  substitute a generic card and eventually mute the origin. `public/sw.js`
+  therefore always shows what it receives, and a settled dialog is retracted on
+  the tab streams only (`{type: "notification-dismiss", tag, sessionId,
+  requestId}`) — never by a push. A device that is not reachable keeps the
+  stale card until the next `input` push replaces it by tag; only a reachable
+  tab closes it, through the stream.
 - Notifications have their own `notifications` channel (`clientId` = the
   tab's notification client id), opened by `useNotifications` in `AppShell`,
   so a tab stays reachable on every view, Settings included. A tab on
@@ -1824,6 +1831,18 @@ during the wait.
   rendered server-side in the device's locale. Browsers with saved settings (enabled or not) sync on load; never-configured browsers do not.
 - A crash notifies "Run failed" while a run is live or while background work
   started by it has not settled yet (`unsettled`, cleared by `session_settled`).
+- An unanswered `input` notification repeats while its dialog stays pending:
+  `INPUT_REMINDER_MS` (2 h) apart, at most `MAX_INPUT_REMINDERS` (12) times,
+  then it stays quiet until it settles. `OMP_WEB_INPUT_REMINDER_MS` overrides
+  the spacing for this process (`0` disables reminders; unset, negative,
+  non-numeric or above `2^31-1` keep the default — a larger value overflows
+  `setTimeout` and would fire immediately). Each device can turn the repeats
+  off with `prefs.inputReminder`; the first notification is unaffected. The
+  schedule is per request id and survives a host replay of the same id, so a
+  reconnecting host neither restarts the budget nor resets the "waiting for"
+  duration; only a real settlement drops it. The history entry is shared, so a
+  device that turned repeats off still sees the reminder rows another device
+  wanted.
 - The Settings test button pushes through the server for subscribed devices
   (502 with the push service's answer on failure) and shows a local
   notification otherwise, or a toast where none are allowed.

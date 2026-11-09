@@ -26,6 +26,12 @@ function deliverNotification(message) {
   assert.ok(id, "useNotifications must hold a notifications channel");
   eventWorker.onmessage({ data: { id, type: "message", data: JSON.stringify({ type: "notification", ...message }) } });
 }
+/** A frame the server's notification channel sends verbatim (lib/event-stream-hub.ts). */
+function deliverFrame(frame) {
+  const id = [...eventStreams].findLast(([, channel]) => channel.kind === "notifications")?.[0];
+  assert.ok(id, "useNotifications must hold a notifications channel");
+  eventWorker.onmessage({ data: { id, type: "message", data: JSON.stringify(frame) } });
+}
 
 before(() => {
   globalThis.AbortController = window.AbortController;
@@ -122,6 +128,59 @@ test("a session notification toast opens its session from a card click; one with
   assert.equal(withoutSession.style.cursor, "");
   act(() => withoutSession.querySelector(".display-serif").click());
   assert.deepEqual(sessions, ["s1"]);
+});
+
+test("a retraction frame closes the toast of its own request and leaves a newer dialog of the same tag", async () => {
+  render(React.createElement(ToastProvider, null));
+  renderHook(() => useNotifications({ sessionId: null, locale: "en", onOpenSession: () => {} }));
+  const cards = () => Array.from(document.querySelectorAll(".toast-card"));
+  const titles = () => cards().map((card) => card.querySelector(".display-serif")?.textContent);
+
+  // The first dialog of this session, then the retraction that settles it.
+  act(() => {
+    deliverNotification({ kind: "toast", event: { type: "input", sessionId: "s1", sessionName: "Deploy", detail: "Ship it?", requestId: "req-1" } });
+  });
+  assert.deepEqual(titles(), ["Deploy"]);
+  act(() => {
+    deliverFrame({ type: "notification-dismiss", tag: "s1:input", sessionId: "s1", requestId: "req-1" });
+  });
+  assert.deepEqual(titles(), [], "the settled question's card is gone");
+
+  // A replacement dialog of the same tag: a late retraction of the old request
+  // must not close it, and the matching one does.
+  act(() => {
+    deliverNotification({ kind: "toast", event: { type: "input", sessionId: "s1", sessionName: "Deploy", detail: "Or now?", requestId: "req-2" } });
+  });
+  act(() => {
+    deliverFrame({ type: "notification-dismiss", tag: "s1:input", sessionId: "s1", requestId: "req-1" });
+  });
+  assert.deepEqual(titles(), ["Deploy"], "a stale retraction leaves the next dialog alone");
+  act(() => {
+    deliverFrame({ type: "notification-dismiss", tag: "s1:input", sessionId: "s1", requestId: "req-2" });
+  });
+  assert.deepEqual(titles(), []);
+});
+
+test("a retraction refreshes the history mirror, so a settled entry stops showing as unread", async () => {
+  const requests = [];
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    requests.push([init.method ?? "GET", String(url)]);
+    return { ok: true, json: async () => ({ entries: [] }) };
+  };
+  try {
+    renderHook(() => useNotifications({ sessionId: null, locale: "en", onOpenSession: () => {} }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    requests.length = 0;
+    await act(async () => {
+      deliverFrame({ type: "notification-dismiss", tag: "s1:input", sessionId: "s1", requestId: "req-1" });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.deepEqual(requests, [["GET", "/api/notifications/history"]], "the tab re-reads what the server marked read");
+  } finally {
+    globalThis.fetch = previousFetch;
+    act(() => notificationHistory.clear());
+  }
 });
 
 test("a notification the OS showed is listed in history", async () => {
