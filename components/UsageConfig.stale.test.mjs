@@ -145,3 +145,46 @@ test("a slow earlier answer cannot overwrite a newer report", async (t) => {
   await act(async () => {});
   assert.equal(recordsShown(), 44, "the newer report stays on screen");
 });
+
+test("a failed stale poll reschedules with the bounded backoff and shows the error until a fresh report lands", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  // The maintainer's sequence: stale report, 503 on the first poll, then a
+  // recovered fresh report. The 503 must neither stop the polling nor hide.
+  const requested = [];
+  globalThis.fetch = async (url) => {
+    requested.push(String(url));
+    if (requested.length === 1) return { ok: true, json: async () => report(11, true) };
+    if (requested.length === 2) return { ok: false, status: 503, statusText: "Service Unavailable", json: async () => ({}) };
+    return { ok: true, json: async () => report(22, false) };
+  };
+
+  render(createElement(UsageConfig));
+  await act(async () => {});
+  assert.equal(requested.length, 1);
+  assert.equal(recordsShown(), 11, "the stale report shows while the rescan runs");
+
+  await act(async () => t.mock.timers.tick(STALE_POLL_MS));
+  await act(async () => {});
+  assert.equal(requested.length, 2, "the stale answer schedules the first poll");
+  assert.equal(recordsShown(), 11, "the stale report stays on screen after a failed poll");
+  assert.ok(
+    screen.getByRole("alert").textContent?.includes("Service Unavailable"),
+    "the failure is visible while the stale report is shown",
+  );
+
+  // The next attempt uses the existing bounded backoff (2x), not a tight loop.
+  await act(async () => t.mock.timers.tick(STALE_POLL_MS));
+  await act(async () => {});
+  assert.equal(requested.length, 2, "no request before the doubled backoff elapsed");
+
+  await act(async () => t.mock.timers.tick(STALE_POLL_MS));
+  await act(async () => {});
+  assert.equal(requested.length, 3, "the failed poll rescheduled the next attempt");
+  assert.equal(recordsShown(), 22, "the recovered fresh report replaces the stale numbers");
+  assert.equal(screen.queryByRole("alert"), null, "the error clears once a report arrives");
+
+  // A fresh report ends the loop again.
+  await act(async () => t.mock.timers.tick(STALE_POLL_MS * 10));
+  await act(async () => {});
+  assert.equal(requested.length, 3, "a fresh report stops the re-fetch loop");
+});

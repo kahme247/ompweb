@@ -60,6 +60,9 @@ export function UsageConfig() {
   const requestIdRef = useRef(0);
   // Consecutive stale answers, which set the wait before asking again.
   const stalePollsRef = useRef(0);
+  // Bumped by a failed poll so the stale-poll effect re-arms: a failure leaves
+  // `report` unchanged, and without this the effect would never run again.
+  const [failedPolls, setFailedPolls] = useState(0);
 
   const fetchUsage = useCallback(
     async (isRefresh = false, signal?: AbortSignal) => {
@@ -88,6 +91,9 @@ export function UsageConfig() {
         }
         if (requestId !== requestIdRef.current) return;
         setError(err instanceof Error ? err.message : String(err));
+        // A failed poll must not end the stale-report recovery: bumping this
+        // re-arms the poll effect even though `report` did not change.
+        setFailedPolls((count) => count + 1);
       } finally {
         if (requestId === requestIdRef.current) {
           setLoading(false);
@@ -110,6 +116,9 @@ export function UsageConfig() {
   // background. Ask again until that scan lands, backing off so a long scan
   // does not turn into a tight poll loop; the server stops serving stale
   // answers once the report is older than its bound and waits for the scan.
+  // A failed poll keeps the stale report on screen and schedules the next
+  // attempt: `report` does not change on failure, so the effect would not run
+  // again and polling would stop for good.
   useEffect(() => {
     if (!report?.stale) {
       stalePollsRef.current = 0;
@@ -121,7 +130,7 @@ export function UsageConfig() {
       void fetchUsage(false);
     }, delay);
     return () => clearTimeout(timer);
-  }, [report, fetchUsage]);
+  }, [report, fetchUsage, failedPolls]);
 
   // Date range subtitle calculation
   const dateRangeSubtitle = useMemo(() => {
@@ -468,6 +477,29 @@ export function UsageConfig() {
           </button>
         </div>
       </div>
+
+      {/* A failed poll must stay visible: the numbers below are the last report
+          that arrived, which may predate the failure. */}
+      {error && report && (
+        <div
+          role="alert"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "8px 12px",
+            border: "1px solid var(--border)",
+            borderRadius: "var(--radius-control)",
+            background: "var(--bg-panel)",
+            color: "var(--text-muted)",
+            fontSize: 12,
+          }}
+        >
+          <AlertCircle size={14} style={{ color: "var(--text-dim)", flexShrink: 0 }} />
+          <span>{t("usageConfig.error")}</span>
+          <span style={{ color: "var(--text-dim)" }}>{error}</span>
+        </div>
+      )}
 
       {/* 2. Top Row: Raw Token Cost & Chart */}
       <div

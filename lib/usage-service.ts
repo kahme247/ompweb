@@ -448,7 +448,10 @@ export async function getUsageReport(options: UsageQueryOptions = {}): Promise<U
     invalidateSessionFileListCache();
     // Only this query's report is stale now; the other queries' cached reports
     // describe the same database, which the rescan rebuilds to the same rows.
-    getUsageReportCache().delete(key);
+    // This query's entry stays cached while the rescan runs and is replaced
+    // only by a successful report (refreshUsageReport sets it): a failed
+    // rescan must leave the last good report in place as a fallback instead of
+    // deleting it and leaving the page with nothing.
     return runSingleFlight(flights, key, () => refreshUsageReport(key, options, agentDir)).promise;
   }
 

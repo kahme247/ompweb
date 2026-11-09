@@ -51,6 +51,9 @@ const usageWorker = await Bun.build({
   target: "bun",
   format: "esm",
   minify: true,
+  // Its dependencies ship beside the binary as this bundle, so their licenses
+  // must come from this metafile too: the main bundle may not name them.
+  metafile: true,
   throw: false,
 });
 for (const log of usageWorker.logs) console.log(log);
@@ -66,7 +69,14 @@ for (const file of new Bun.Glob("app/fonts/*-{OFL.txt,LICENSE.*}").scanSync(root
 const katex = path.dirname(Bun.resolveSync("katex/package.json", root));
 for (const file of ["package.json", "LICENSE", "dist/katex.min.css", "dist/fonts"]) copy(path.join(katex, file), `node_modules/katex/${file}`);
 const clientPackages = (JSON.parse(readFileSync(clientPackagesFile, "utf8")) as string[]).map((dir) => path.resolve(root, dir));
-writeLicenses(out, [...new Set([...bundledPackageDirs(result.metafile!, process.cwd()), ...clientPackages])].sort(), bunLicense);
+// The server bundle, the client bundle and the usage worker's own bundle: the
+// worker is a separate build shipped as a file, so a dependency only it uses
+// would otherwise ship without its license.
+writeLicenses(out, [...new Set([
+  ...bundledPackageDirs(result.metafile!, process.cwd()),
+  ...bundledPackageDirs(usageWorker.metafile!, process.cwd()),
+  ...clientPackages,
+])].sort(), bunLicense);
 
 // Bun.Archive writes every entry as 0644 (the binary would lose its execute bit) and makes no zip: the system tools do.
 // On Windows that is its own bsdtar, which makes zips: a GNU tar from Git Bash on PATH makes none.
