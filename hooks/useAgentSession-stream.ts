@@ -21,6 +21,7 @@ import type {
 import { translate } from "@/lib/i18n";
 import { isLocalUri } from "@/lib/local-uri";
 import type { SessionStreamCursor } from "@/lib/session-sync";
+import type { ChatDraft } from "@/lib/draft-store";
 
 export interface SessionData {
   sessionId: string;
@@ -494,7 +495,7 @@ export function buildOutgoingPrompt(
 
 export interface ChatInputHandle {
   insertText: (text: string) => void;
-  insertIfEmpty: (content: string) => void;
+  insertIfEmpty: (content: string, options?: Pick<ChatDraft, "promptOnly">) => void;
   prependText: (text: string) => void;
   addFiles: (files: File[]) => void;
 }

@@ -2439,6 +2439,31 @@ span.token.table {
   box-shadow: var(--shadow-card), 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent) !important;
 }
 
+/* Composer shell mode. "!" shares output with the model → root-style red warning;
+   "!!" stays local → muted terminal. Tokens feed the inline border/background. */
+[data-shell="model"] {
+  --shell-accent: var(--status-error);
+  --shell-border: color-mix(in srgb, var(--status-error) 65%, transparent);
+  --shell-bg: color-mix(in srgb, var(--status-error) 7%, var(--tool-bg));
+}
+[data-shell="local"] {
+  --shell-accent: var(--text-muted);
+  --shell-border: color-mix(in srgb, var(--text-muted) 55%, transparent);
+  --shell-bg: var(--tool-bg);
+}
+.chat-input-shell[data-shell]:focus-within {
+  border-color: var(--shell-border) !important;
+  box-shadow: var(--shadow-card), 0 0 0 3px color-mix(in srgb, var(--shell-accent) 18%, transparent) !important;
+}
+.chat-input-shell[data-shell] textarea { caret-color: var(--shell-accent); }
+.shell-mode-label {
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+.shell-mode-label[data-shell="model"] { font-weight: 600; }
+.shell-mode-label[data-shell="model"]::before { content: "# "; }
+.shell-mode-label[data-shell="local"]::before { content: "$ "; }
+
 /* Fade + scale/slide entrance utilities for dropdowns, popovers, panels. */
 @keyframes ui-fade-in {
   from { opacity: 0; }

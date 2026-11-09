@@ -149,6 +149,12 @@ export type PromptSubmissionResult =
   | { status: "rejected"; recoveryKey?: string }
   | { status: "superseded" };
 
+/** What the composer knows about a prompt that its text no longer shows. */
+export interface PromptSendOptions {
+  /** Explicit model input (inline files or a recovered queue entry), even when its text starts with `!`. */
+  promptOnly?: boolean;
+}
+
 const MAX_HANDLED_EDIT_HISTORY_MARKERS = 64;
 // A running-channel lookup that failed is retried after 1 s, 2 s and 4 s, then waits for the next frame.
 const RUNNING_LOOKUP_RETRIES = 3;
@@ -3149,14 +3155,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return snapshot.entryIds;
   }, []);
 
-  const handleSend = useCallback(async (message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>): Promise<PromptSubmissionResult> => {
+  const handleSend = useCallback(async (message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>, options?: PromptSendOptions): Promise<PromptSubmissionResult> => {
     const trimmedMessage = message.trim();
     if (!trimmedMessage && !images?.length && !uploads?.length) return { status: "rejected" };
     if (bashRunningRef.current || editInFlightRef.current) return { status: "rejected" };
     if (initialHydrationPendingRef.current) return { status: "rejected" };
     // Shell commands run during a turn too, as in omp's terminal: omp holds the
     // result back until a later prompt starts.
-    const isBashCommand = !images?.length && !uploads?.length && trimmedMessage.startsWith("!");
+    const isBashCommand = !options?.promptOnly && !images?.length && !uploads?.length && trimmedMessage.startsWith("!");
     if (isBashCommand) {
       const isExcluded = trimmedMessage.startsWith("!!");
       const bashCmd = (isExcluded ? trimmedMessage.slice(2) : trimmedMessage.slice(1)).trim();
@@ -3413,7 +3419,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const mayHaveRun = toastStoppedSend(e);
       if (mayHaveRun === null) addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
       if (mayHaveRun) return true;
-      if (trimmedMessage) opts.chatInputRef?.current?.insertIfEmpty(trimmedMessage);
+      if (trimmedMessage) opts.chatInputRef?.current?.insertIfEmpty(trimmedMessage, { promptOnly: true });
       return false;
     }
   }, [addNotice, catchUp, eventCoalescer, ensureEventsConnected, refreshSubagentRoster, clearTerminalReconcileTimer, opts.chatInputRef, snapshotRunEntries]);
@@ -3511,7 +3517,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         .map((entry) => entry.text)
         .filter((text): text is string => typeof text === "string" && text.length > 0);
       const images = entries.flatMap((entry) => toDraftImages(entry.images));
-      if (texts.length > 0 || images.length > 0) recoverDraft(sid, { text: texts.join("\n\n"), images });
+      if (texts.length > 0 || images.length > 0) recoverDraft(sid, { text: texts.join("\n\n"), images, promptOnly: true });
       // A failed attempt may have withdrawn messages whose texts were in the
       // lost response; say so unless the retry brought texts back.
       if (failures > 0 && texts.length === 0 && hookAliveRef.current && sessionIdRef.current === sid) {
@@ -3540,7 +3546,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (fresh.length === 0) return;
       entries.forEach((_, i) => { if (removed[i]) restored[i] = true; });
       const block = entries.filter((_, i) => restored[i]).map((entry) => entry.text).join("\n\n");
-      recoverDraft(sid, { text: block, replace: recoveredBlock ? { lead: recoveredBlock, fallback: fresh.join("\n\n") } : undefined });
+      recoverDraft(sid, { text: block, replace: recoveredBlock ? { lead: recoveredBlock, fallback: fresh.join("\n\n") } : undefined, promptOnly: true });
       recoveredBlock = block;
     };
     const removals = Promise.all(entries.map(async (entry, i) => {
@@ -3675,10 +3681,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // Free the source slot before inserting an absent target: moving a
         // draft at capacity must not evict an unrelated conversation's draft.
         clearDraft(sid);
+        // Model text prefilled into an empty merged draft is model input even when it starts with `!` (its images are not restored).
+        const prefilled = loaded && !value.trim() && content.trim() !== "";
         setDraft(edit.sessionId, {
           value: loaded && !value.trim() ? content : value,
           images: destination ? [...draft.images, ...destination.images] : draft.images,
           files: destination ? [...draft.files, ...destination.files] : draft.files,
+          ...((prefilled || draft.promptOnly || destination?.promptOnly) ? { promptOnly: true } : {}),
           // The same upload may sit in both drafts (an id is one file): keep its first occurrence.
           uploads: destination
             ? [...(draft.uploads ?? []), ...(destination.uploads ?? [])].filter((upload, at, all) => all.findIndex((other) => other.id === upload.id) === at)
@@ -3689,7 +3698,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!loaded) throw new Error(translate("agentSession.commandFailed"));
       // A moved composer adopts the merged target snapshot during its identity
       // transition; writing through the old ref could overwrite target text.
-      if (!moved) opts.chatInputRef?.current?.insertIfEmpty(content);
+      if (!moved) opts.chatInputRef?.current?.insertIfEmpty(content, { promptOnly: true });
       return true;
     } catch (error) {
       if (isCurrent()) {
@@ -3727,7 +3736,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       });
       const { cancelled, newSessionId, text } = result ?? {};
       if (!cancelled && newSessionId) {
-        if (editPrompt && text) setDraft(newSessionId, { value: text, images: [], files: [] });
+        if (editPrompt && text) setDraft(newSessionId, { value: text, images: [], files: [], promptOnly: true });
         // The forked child keeps its spawn flags: carry the advisor choice to
         // the new id, or the toggle flips off on switch and the next prompt
         // respawns the fork without --advisor.
