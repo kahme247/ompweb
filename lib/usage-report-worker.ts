@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { getAgentDir } from "./omp/paths";
 import type { UsageQueryOptions, UsageReport } from "./usage-types";
@@ -12,7 +12,7 @@ import type { UsageQueryOptions, UsageReport } from "./usage-types";
  * every changed transcript followed by several aggregate queries). Computing
  * it on the server's thread blocked every other request — `/api/app-info` polls
  * timed out behind a cold `GET /api/usage` — so the whole computation lives in
- * {@link USAGE_WORKER_FILE} and the request path only awaits a message.
+ * `lib/usage-worker.ts` and the request path only awaits a message.
  *
  * There is deliberately no in-thread fallback: running the same statements on
  * the event loop again is exactly the stall this module removes. A worker that
@@ -20,8 +20,19 @@ import type { UsageQueryOptions, UsageReport } from "./usage-types";
  * {@link UsageWorkerError}, which the route reports as a 500.
  */
 
-/** The worker entry, shipped beside this module in the package's `lib/`. */
-const USAGE_WORKER_FILE = "usage-worker.ts";
+/** The worker entry as it ships in a release: a single bundled file. */
+const USAGE_WORKER_BUNDLE = "usage-worker.mjs";
+/** The worker entry in a checkout: TypeScript, run by Bun directly. */
+const USAGE_WORKER_SOURCE = "usage-worker.ts";
+
+/** The worker under `<dir>/lib/`, preferring the bundle a release ships. */
+function packagedWorker(dir: string): string | undefined {
+  for (const name of [USAGE_WORKER_BUNDLE, USAGE_WORKER_SOURCE]) {
+    const candidate = join(dir, "lib", name);
+    if (existsSync(candidate)) return candidate;
+  }
+  return undefined;
+}
 
 /**
  * Resolve the worker entry from the package layout — never from
@@ -33,25 +44,54 @@ const USAGE_WORKER_FILE = "usage-worker.ts";
  * the worker runs with the server's provider credentials, so a relative value
  * (resolved against whatever cwd the launcher had) or a directory another
  * process can write is not an acceptable code source. `OMP_WEB_PACKAGE_DIR`
- * is set by the launcher; the module-relative path is the normal case, since
- * the server runs from source and therefore from this package's `lib/`.
+ * is set by the launcher and by the compiled binary (to its own directory);
+ * the module-relative path is the normal case for a source run, since the
+ * server then lives in this package's `lib/`.
+ *
+ * A compiled binary's own modules sit in Bun's embedded filesystem
+ * (`B:\~BUN\root\` on Windows, `/$bunfs/root/` elsewhere), where `existsSync`
+ * fails and `new Worker` cannot resolve anything, so that case reads the
+ * bundle the release ships beside the executable (`lib/usage-worker.mjs`,
+ * scripts/build-binary.ts). `execPath` is the running program, which is the
+ * binary itself there.
  */
 export function getUsageWorkerPath(): string {
-  const packageDir = process.env.OMP_WEB_PACKAGE_DIR;
-  if (packageDir) {
-    const fromPackage = join(packageDir, "lib", USAGE_WORKER_FILE);
-    if (existsSync(fromPackage)) return fromPackage;
+  return resolveUsageWorkerPath({
+    packageDir: process.env.OMP_WEB_PACKAGE_DIR,
+    override: process.env.OMP_WEB_USAGE_WORKER,
+    moduleDir: fileURLToPath(new URL(".", import.meta.url)),
+    execDir: dirname(process.execPath),
+  });
+}
+
+/**
+ * The decision {@link getUsageWorkerPath} makes, with every input passed in so
+ * a test can exercise the release layout without building a binary.
+ */
+export function resolveUsageWorkerPath(input: {
+  packageDir?: string;
+  override?: string;
+  moduleDir: string;
+  execDir: string;
+}): string {
+  if (input.packageDir) {
+    const fromPackage = packagedWorker(input.packageDir);
+    if (fromPackage) return fromPackage;
   }
-  const override = process.env.OMP_WEB_USAGE_WORKER;
-  if (override) {
+  if (input.override) {
     // An absolute path only: a relative value would be resolved against
     // whatever cwd the launcher happened to have, which is exactly the
     // "another project's file runs with our env" case this function exists to
     // rule out.
-    if (isAbsolute(override)) return resolve(override);
-    console.warn(`[usage] ignoring relative OMP_WEB_USAGE_WORKER=${override}`);
+    if (isAbsolute(input.override)) return resolve(input.override);
+    console.warn(`[usage] ignoring relative OMP_WEB_USAGE_WORKER=${input.override}`);
   }
-  return fileURLToPath(new URL(`./${USAGE_WORKER_FILE}`, import.meta.url));
+  if (/(^|[\\/])(~BUN|\$bunfs)([\\/]|$)/i.test(input.moduleDir)) {
+    // OMP_WEB_PACKAGE_DIR pointed somewhere incomplete; the executable's own
+    // directory is still a real directory on disk.
+    return packagedWorker(input.execDir) ?? join(input.execDir, "lib", USAGE_WORKER_BUNDLE);
+  }
+  return packagedWorker(input.moduleDir) ?? join(input.moduleDir, USAGE_WORKER_SOURCE);
 }
 
 const DEFAULT_USAGE_WORKER_TIMEOUT_MS = 10 * 60_000;

@@ -43,6 +43,21 @@ const result = await Bun.build({
 for (const log of result.logs) console.log(log);
 if (!result.success) process.exit(1);
 
+// The usage report worker as its own file beside the binary: a compiled binary's modules live in Bun's embedded
+// filesystem, which `new Worker` cannot start from, so lib/usage-report-worker.ts resolves this bundle on disk
+// instead. Bundled here (not shipped as .ts) so the release carries no TypeScript the server would have to compile.
+const usageWorker = await Bun.build({
+  entrypoints: [path.join(root, "lib", "usage-worker.ts")],
+  target: "bun",
+  format: "esm",
+  minify: true,
+  throw: false,
+});
+for (const log of usageWorker.logs) console.log(log);
+if (!usageWorker.success) process.exit(1);
+const usageWorkerFile = path.join(out, "lib", "usage-worker.mjs");
+await Bun.write(usageWorkerFile, await usageWorker.outputs[0].text());
+
 // The static root (server/binary.ts): the client, the public files, the extension the daemon hands omp, the KaTeX CSS
 // and fonts (where the server resolves the katex package), and the licenses of what ships.
 const copy = (from: string, to: string) => cpSync(from, path.join(out, to), { recursive: true });

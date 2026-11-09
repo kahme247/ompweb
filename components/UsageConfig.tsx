@@ -34,6 +34,11 @@ function formatCurrency(amount: number): string {
   return `$${amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+/** First wait before re-asking for a report the server served as `stale`. */
+export const STALE_POLL_MS = 1_000;
+/** Longest wait between those re-asks while one background rescan runs. */
+export const STALE_POLL_MAX_MS = 15_000;
+
 export function UsageConfig() {
   const { t } = useI18n();
 
@@ -51,9 +56,14 @@ export function UsageConfig() {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [hoverPos, setHoverPos] = useState<{ x: number; y: number } | null>(null);
   const chartSvgRef = useRef<SVGSVGElement | null>(null);
+  // Bumped by every fetch so a slow answer cannot overwrite a newer one.
+  const requestIdRef = useRef(0);
+  // Consecutive stale answers, which set the wait before asking again.
+  const stalePollsRef = useRef(0);
 
   const fetchUsage = useCallback(
     async (isRefresh = false, signal?: AbortSignal) => {
+      const requestId = ++requestIdRef.current;
       if (isRefresh) setRefreshing(true);
       else setLoading(true);
       setError(null);
@@ -70,15 +80,19 @@ export function UsageConfig() {
           throw new Error(`Failed to fetch usage: ${res.statusText}`);
         }
         const data: UsageReport = await res.json();
+        if (requestId !== requestIdRef.current) return;
         setReport(data);
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") {
           return;
         }
+        if (requestId !== requestIdRef.current) return;
         setError(err instanceof Error ? err.message : String(err));
       } finally {
-        setLoading(false);
-        setRefreshing(false);
+        if (requestId === requestIdRef.current) {
+          setLoading(false);
+          setRefreshing(false);
+        }
       }
     },
     [timeRange, granularity],
@@ -91,6 +105,23 @@ export function UsageConfig() {
       controller.abort();
     };
   }, [fetchUsage]);
+
+  // `stale` means the server answered from its cache while it rescans in the
+  // background. Ask again until that scan lands, backing off so a long scan
+  // does not turn into a tight poll loop; the server stops serving stale
+  // answers once the report is older than its bound and waits for the scan.
+  useEffect(() => {
+    if (!report?.stale) {
+      stalePollsRef.current = 0;
+      return;
+    }
+    const delay = Math.min(STALE_POLL_MS * 2 ** stalePollsRef.current, STALE_POLL_MAX_MS);
+    const timer = setTimeout(() => {
+      stalePollsRef.current += 1;
+      void fetchUsage(false);
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [report, fetchUsage]);
 
   // Date range subtitle calculation
   const dateRangeSubtitle = useMemo(() => {

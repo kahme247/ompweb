@@ -424,7 +424,10 @@ export function parseSessionUsage(
  * request path more than necessary: the last report for a query is served
  * immediately (`stale: true`) while one background rescan runs, and concurrent
  * requests for the same query share that rescan. A report younger than
- * {@link USAGE_REPORT_REFRESH_MS} is served as current without any rescan.
+ * {@link USAGE_REPORT_REFRESH_MS} is served as current without any rescan, and
+ * one older than {@link USAGE_STALE_MAX_AGE_MS} is never served stale: that
+ * request waits for the scan instead, so no caller is handed an arbitrarily
+ * old report.
  * The scan itself runs in a worker (see usage-report-worker.ts): its
  * synchronous SQLite work must never block this server's event loop.
  */
@@ -435,17 +438,17 @@ export async function getUsageReport(options: UsageQueryOptions = {}): Promise<U
   if (options.forceRefresh) {
     const flights = getUsageReportFlights();
     // A refresh request while this query is already scanning joins that scan
-    // instead of starting a second full pass (and discarding every cached
-    // report other callers hold).
+    // instead of starting a second full pass. That scan syncs every changed
+    // transcript, so it answers this refresh too.
     const inFlight = flights.get(key);
     if (inFlight) return inFlight;
-    const cached = getUsageReportCache().get(key);
-    if (cached && Date.now() - cached.scannedAt < USAGE_FORCE_REFRESH_COOLDOWN_MS) {
-      return { ...cached.report, stale: false, scannedAt: cached.scannedAt };
-    }
+    // An explicit refresh is never answered from the cache: the user asked for
+    // a rescan, and the route's `refresh` parameter has no cooldown.
     invalidateUsageCache();
     invalidateSessionFileListCache();
-    getUsageReportCache().clear();
+    // Only this query's report is stale now; the other queries' cached reports
+    // describe the same database, which the rescan rebuilds to the same rows.
+    getUsageReportCache().delete(key);
     return runSingleFlight(flights, key, () => refreshUsageReport(key, options, agentDir)).promise;
   }
 
@@ -456,7 +459,9 @@ export async function getUsageReport(options: UsageQueryOptions = {}): Promise<U
       return { ...cached.report, stale: false, scannedAt: cached.scannedAt };
     }
     // Serve the cached report now; rescans are coalesced per query.
-    runSingleFlight(getUsageReportFlights(), key, () => refreshUsageReport(key, options, agentDir)).promise.catch(() => {
+    const { promise } = runSingleFlight(getUsageReportFlights(), key, () => refreshUsageReport(key, options, agentDir));
+    if (age >= USAGE_STALE_MAX_AGE_MS) return promise;
+    promise.catch(() => {
       // A failed background rescan keeps the cached report; the next request retries.
     });
     return { ...cached.report, stale: true, scannedAt: cached.scannedAt };
@@ -469,8 +474,8 @@ export async function getUsageReport(options: UsageQueryOptions = {}): Promise<U
 /** Minimum age before a served report starts a background rescan. */
 export const USAGE_REPORT_REFRESH_MS = 5_000;
 
-/** A `refresh=true` this soon after a completed scan is answered from that scan. */
-export const USAGE_FORCE_REFRESH_COOLDOWN_MS = 60_000;
+/** Oldest report served while a rescan runs; past this the request waits for it. */
+export const USAGE_STALE_MAX_AGE_MS = 5 * 60_000;
 
 /** Number of query reports kept; the usage page asks for one or two at a time. */
 const MAX_CACHED_USAGE_REPORTS = 24;
