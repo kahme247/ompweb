@@ -260,6 +260,12 @@ export function outboxEntries(sessionId: string): OutboxEntry[] {
   return rows.map((entry) => ({ ...toEntry(entry), sessionId }));
 }
 
+/** The sessions that own these ids' rows now. A native identity move re-homes a row while its browser still asks under the old id. */
+export function outboxCanonicalSessions(ids: readonly string[]): string[] {
+  const rows = db().prepare(`SELECT DISTINCT session_id FROM entries WHERE id IN (${slots(ids)})`).all(...ids) as { session_id: string }[];
+  return rows.map((row) => row.session_id);
+}
+
 /** Recent tombstones let a browser retire its first-leg bridge even if it subscribes after the message was delivered. */
 export function outboxSettlements(sessionId: string): {
   settledIds: string[]; nativeSettledIds?: string[];

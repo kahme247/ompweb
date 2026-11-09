@@ -247,11 +247,7 @@ async function fetchStub(url, init = {}) {
       const requested = new Set(body.clientMessageIds);
       assert.equal(requested.size, body.clientMessageIds.length, "selective reads contain unique IDs");
       const selected = { ...data, messages: data.messages.filter((envelope) => requested.has(envelope.clientMessageId)) };
-      for (const key of ["resolvedClientMessageIds", "persistedClientMessageIds"]) selected[key] = data[key].filter((id) => requested.has(id));
-      // As lib/outbox-handoff.ts: unresolved is whatever was asked and is neither a message, resolved, persisted nor queued.
-      const queued = Object.values(data.queuedMessages?.clientMessageIds ?? {}).flat();
-      const answered = new Set([...selected.messages.map((envelope) => envelope.clientMessageId), ...selected.resolvedClientMessageIds, ...selected.persistedClientMessageIds, ...queued]);
-      selected.unresolvedClientMessageIds = body.clientMessageIds.filter((id) => !answered.has(id));
+      for (const key of ["resolvedClientMessageIds", "persistedClientMessageIds", "unresolvedClientMessageIds"]) selected[key] = data[key].filter((id) => requested.has(id));
       return jsonResponse(200, { success: true, data: selected });
     }
     const wrapper = world.wrappers.get(sid);
@@ -6608,7 +6604,7 @@ for (const loss of ["unresolved", "child gone"]) {
     await act(() => es.open());
     await settle();
     const entry = { id: "lost-bridge", sessionId: sid, mode: "followUp", message: "lost when the child died", state: "delivering", createdAt: 1 };
-    if (loss === "unresolved") world.clientMessageStatuses.set(sid, clientMessageStatus());
+    if (loss === "unresolved") world.clientMessageStatuses.set(sid, clientMessageStatus({ unresolvedClientMessageIds: ["lost-bridge"] }));
     else world.clientMessageStatuses.set(sid, { error: "No live omp child", code: "handoff_child_unavailable", status: 409 });
     await act(() => {
       es.emit({ type: "outbox_update", entries: [entry], settledIds: [] });
@@ -6756,12 +6752,13 @@ for (const [name, savedData, expected] of [["the same image replaces the echo", 
 }
 
 function clientMessageStatus(overrides = {}) {
-  // `unresolvedClientMessageIds` is computed by the stub from what is asked, as lib/outbox-handoff.ts does.
+  // `unresolvedClientMessageIds` is native's own verdict, as lib/outbox-handoff.ts passes it: set it where native has no trace.
   return {
     messages: [],
     queuedMessages: { steering: [], followUp: [] },
     resolvedClientMessageIds: [],
     persistedClientMessageIds: [],
+    unresolvedClientMessageIds: [],
     ...overrides,
   };
 }
@@ -6861,6 +6858,7 @@ test("selective persisted-only handoff waits for successful history catch-up; ex
   world.clientMessageStatuses.set(sid, clientMessageStatus({
     persistedClientMessageIds: ["persisted", "compacted"],
     resolvedClientMessageIds: ["withdrawn"],
+    unresolvedClientMessageIds: ["unknown"],
   }));
   await act(() => es.emit({ type: "outbox_update", entries, settledIds: [], nativeSettledIds: [] }));
   world.contextUnavailable = true;
@@ -6939,7 +6937,7 @@ test("correlated native queue snapshots replace only their exact handoff IDs and
     steering: [], followUp: ["identical text"],
     clientMessageIds: { steering: [], followUp: ["queued"] },
   };
-  world.clientMessageStatuses.set(sid, clientMessageStatus({ queuedMessages }));
+  world.clientMessageStatuses.set(sid, clientMessageStatus({ queuedMessages, unresolvedClientMessageIds: ["same-text-unresolved"] }));
   await act(() => es.emit({ type: "outbox_update", entries, settledIds: [], nativeSettledIds: [] }));
   await act(() => es.emit({
     type: "outbox_update", entries: [], settledIds: ["queued", "same-text-unresolved"], nativeSettledIds: ["queued", "same-text-unresolved"],
@@ -7449,7 +7447,7 @@ test("dismissing an uncertain bridge deletes the browser copy the worker still h
   const es = lastEs();
   await act(() => es.open());
   await settle();
-  world.clientMessageStatuses.set(sid, clientMessageStatus());
+  world.clientMessageStatuses.set(sid, clientMessageStatus({ unresolvedClientMessageIds: ["uncertain-with-copy"] }));
   const entry = { id: "uncertain-with-copy", sessionId: sid, mode: "followUp", message: "settled before its receipt", state: "delivering", createdAt: 1 };
   // The server settled the id before the worker saw its outbox_add receipt: the worker still holds, and would retry, its copy.
   const copy = { ...entry, scope: "test-scope", state: "sending" };

@@ -4,6 +4,7 @@ import { adoptedChild, hostListsChild, listHosts } from "./hosts/hub";
 import { HostOpError } from "./hosts/link-protocol";
 import { LOCAL_HOST_ID } from "./hosts/registry";
 import { hostForSessionId } from "./hosts/session-index";
+import { outboxCanonicalSessions } from "./message-outbox";
 import type { ClientMessageStatus } from "./pi-types";
 import { getRpcSession, WebRpcError } from "./rpc-manager";
 import { isRecord } from "./type-guards";
@@ -66,17 +67,37 @@ async function liveChild(sessionId: string) {
   throw new HostOpError(409, "handoff_child_unavailable", "No running native session can answer for these messages");
 }
 
+/** The child answering for `sessionId` or, after a native identity move, for the session that owns these entries now.
+ * A candidate that cannot prove absence keeps the answer retryable: 409 only once every candidate is known gone. */
+async function liveChildFor(sessionId: string, ids: readonly string[]) {
+  let failure: unknown;
+  try {
+    return await liveChild(sessionId);
+  } catch (error) {
+    failure = error;
+  }
+  for (const owner of outboxCanonicalSessions(ids)) {
+    if (owner === sessionId) continue;
+    try {
+      return await liveChild(owner);
+    } catch (error) {
+      if (failure instanceof HostOpError && failure.status === 409) failure = error;
+    }
+  }
+  throw failure;
+}
+
 /** Ask the live native child about intents the browser still holds; this never starts or replaces omp. Absence of a
  * child answers 409 and the browser reads its own history instead; uncertainty answers a retryable 503. */
 export async function reconcileOutboxHandoffs(sessionId: string, ids: readonly string[]): Promise<ClientMessageStatus> {
-  const live = await liveChild(sessionId);
+  const live = await liveChildFor(sessionId, ids);
   const nativeSessionId = live.sessionId;
   const raw = await live.send({ type: "get_client_message_status", clientMessageIds: ids });
   if (!live.isAlive() || live.sessionId !== nativeSessionId) {
     throw new HostOpError(409, "handoff_context_changed", "The native conversation changed during handoff reconciliation");
   }
   const status = nativeStatus(raw, ids);
-  // Queue and message bodies share one response budget; a message left out stays unresolved for the history read.
+  // Queue and message bodies share one response budget; whatever is left out is in no list, so the browser asks again.
   let budget = MAX_HANDOFF_BYTES;
   const queueBytes = Buffer.byteLength(JSON.stringify(status.queuedMessages));
   const queuedMessages = queueBytes <= budget ? status.queuedMessages : null;
@@ -87,14 +108,10 @@ export async function reconcileOutboxHandoffs(sessionId: string, ids: readonly s
     budget -= bytes;
     return true;
   });
-  const answered = new Set([
-    ...messages.map((item) => item.clientMessageId), ...status.resolvedClientMessageIds, ...status.persistedClientMessageIds,
-    ...(queuedMessages?.clientMessageIds ? [...queuedMessages.clientMessageIds.steering, ...queuedMessages.clientMessageIds.followUp] : []),
-  ]);
   return {
     messages, queuedMessages,
     resolvedClientMessageIds: ids.filter((id) => status.resolvedClientMessageIds.includes(id)),
     persistedClientMessageIds: ids.filter((id) => status.persistedClientMessageIds.includes(id)),
-    unresolvedClientMessageIds: ids.filter((id) => !answered.has(id)),
+    unresolvedClientMessageIds: ids.filter((id) => status.unresolvedClientMessageIds.includes(id)),
   };
 }
