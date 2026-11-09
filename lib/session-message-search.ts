@@ -1,4 +1,4 @@
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { open } from "fs/promises";
 import { isRecord } from "./type-guards";
 import { listAllSessionInfos, type OmpSessionInfo } from "./omp/session-files";
@@ -265,6 +265,11 @@ export function decodeSearchCursor(raw: string): SessionSearchCursor | undefined
  * ago is found even where a write inside a project subdirectory leaves the
  * sessions root's mtime alone (Windows/NTFS; see `listSessionFiles`). The map
  * lives on `globalThis` so `bun --hot` re-evaluations share it.
+ *
+ * Snapshot ids are unique across processes, not just within one: the counter
+ * restarts at 0 after a restart, so ids carry {@link LISTING_ID_NONCE}. A
+ * cursor from before a restart therefore resolves nothing and is refused,
+ * instead of resolving a new run's snapshot that happens to reuse its number.
  */
 const SEARCH_LISTING_TTL_MS = 5 * 60_000;
 /** Concurrent pagination runs whose snapshots stay addressable. */
@@ -283,15 +288,28 @@ interface SearchListingCacheHost {
   __ompSessionSearchListings?: Map<string, SearchListingSnapshot>;
   /**
    * Monotonic id generator. Deliberately NOT reset by
-   * {@link invalidateSessionSearchListing}: ids must never be reused, or a
-   * cursor from a dropped run could resolve a later run's snapshot and page a
-   * corpus it never scanned. Only the id counter survives an invalidation, and
-   * it carries no corpus state.
+   * {@link invalidateSessionSearchListing}: ids must never be reused within a
+   * process, or a cursor from a dropped run could resolve a later run's
+   * snapshot and page a corpus it never scanned. Only the id counter survives
+   * an invalidation, and it carries no corpus state.
    */
   __ompSessionSearchListingIds?: number;
 }
 
 const listingCacheHost = globalThis as unknown as SearchListingCacheHost;
+
+/**
+ * Distinguishes this process's listing ids from those of an earlier one.
+ *
+ * The counter above restarts at 0 after a server restart, so `l1` minted by a
+ * new process would collide with an `l1` an old cursor still names. A cursor
+ * is only meaningful against the snapshot it was issued for, and that snapshot
+ * died with the old process: without the nonce a new run's first page would
+ * claim the recycled id and an old cursor would silently page the new corpus,
+ * skipping every session that sorted between the two walks. The nonce makes
+ * such a cursor resolve nothing, which the caller reports as `cursor_expired`.
+ */
+const LISTING_ID_NONCE = randomUUID().slice(0, 8);
 
 /** Drop every pagination listing snapshot (tests and explicit invalidation). */
 export function invalidateSessionSearchListing(): void {
@@ -352,7 +370,7 @@ export function installSessionSearchListing(
   const map = getListingSnapshots();
   const next = (listingCacheHost.__ompSessionSearchListingIds ?? 0) + 1;
   listingCacheHost.__ompSessionSearchListingIds = next;
-  const id = `l${next}`;
+  const id = `l${LISTING_ID_NONCE}-${next}`;
   const sorted = sortSessionSearchFiles(files);
   map.set(id, { id, root: getSessionsDir(), at: now(), files: sorted });
   pruneListingSnapshots(map, now());
