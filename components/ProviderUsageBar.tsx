@@ -328,7 +328,7 @@ export function ProviderUsageBar() {
                 {account}
               </span>
               {report.noLimits ? (
-                <span style={{ fontSize: 10, color: "var(--text-dim)", flexShrink: 0 }}>∞</span>
+                <span title={t("appShell.providerUsageNoData")} aria-label={t("appShell.providerUsageNoData")} style={{ fontSize: 10, color: "var(--text-dim)", flexShrink: 0 }}>—</span>
               ) : (
                 <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 700, color: tone, fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>
                   {pct}%

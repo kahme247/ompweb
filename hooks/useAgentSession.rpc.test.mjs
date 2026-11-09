@@ -6073,6 +6073,20 @@ test("a send to an offline host is accepted and held without a toast or recovere
   assert.deepEqual(callsTo("POST", "/api/agent/"), []);
 });
 
+test("a rejected saved profile is shown on a fresh chat and leaves the draft recoverable", async () => {
+  resetWorld();
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ status: 400, value: { code: "stored_invalid_profile", error: "Invalid saved workspace profile" } }),
+  });
+  const w = await mountSession(null, undefined, { newSessionCwd: "/workspace" });
+  let receipt;
+  await act(async () => { receipt = await w.latest.handleSend("keep this draft"); });
+  assert.deepEqual(receipt, { status: "rejected", recoveryKey: "new:/workspace" });
+  assert.ok(w.latest.notices.some((notice) => notice.type === "error" && notice.message.includes(translate("errors.stored_invalid_profile"))));
+  assert.equal(world.calls.some((call) => call.body?.type === "prompt"), false);
+});
+
 test("a fresh chat on a remote host creates its session there and toasts when that host is offline", async () => {
   resetWorld();
   toastCalls.length = 0;

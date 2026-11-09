@@ -1299,7 +1299,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       });
       const body = await res.json().catch(() => ({})) as { sessionId?: unknown; error?: string; code?: string; hostOffline?: boolean; delivery?: string };
       const offline = res.status === 503 && body.hostOffline === true;
-      if (!res.ok && !offline) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok && !offline) throw new Error(body.error || body.code ? formatApiError(body) : `HTTP ${res.status}`);
       // A host that dropped after the spawn keeps the session (503 with its id):
       // adopt it, so a retry sends there instead of starting a second session.
       const realId = typeof body.sessionId === "string" && body.sessionId ? body.sessionId : null;

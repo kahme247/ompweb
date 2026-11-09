@@ -109,7 +109,7 @@ interface ProjectRowProps {
   onToggleExpand: (project: ManagedProject) => void;
   onRemoveProject: (project: ManagedProject) => void;
   onEditLaunchConfig: (project: ManagedProject) => void;
-  onUpdatePresentation: (project: ManagedProject, updates: { alias?: string | null; sortOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }) => void;
+  onUpdatePresentation: (project: ManagedProject, updates: { alias?: string | null; sortOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }) => Promise<void>;
   onDragProjectChange: (project: ManagedProject | null) => void;
   onDropProject: (project: ManagedProject) => void;
   onMoveProject: (project: ManagedProject, delta: -1 | 1) => void;
@@ -186,7 +186,8 @@ function ProjectRow({
     const alias = aliasValue.trim();
     setAliasEditing(false);
     if (alias === (project.alias ?? "")) return;
-    void onUpdatePresentation(project, { alias });
+    // The sidebar already reports failed presentation writes in a toast.
+    void onUpdatePresentation(project, { alias }).catch(() => {});
   }, [aliasValue, project, onUpdatePresentation]);
   const label = project.alias ?? projectLabel(project.path);
   const pinned = pinnable && project.pinOrder !== undefined;
