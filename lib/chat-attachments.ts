@@ -132,12 +132,20 @@ const RASTER_IMAGE_EXTENSIONS: Record<string, string> = {
   ico: "image/x-icon",
 };
 
+const UNSUPPORTED_INLINE_IMAGE_MIME_TYPES: Record<string, true> = {
+  "image/heic": true,
+  "image/heif": true,
+  "image/heic-sequence": true,
+  "image/heif-sequence": true,
+};
+
 /** Checks whether file is candidate for image attachment by MIME type or extension. */
 export function isImageAttachmentFile(file: Pick<File, "name" | "type">): boolean {
-  if (file.type && file.type.startsWith("image/")) {
-    return true;
+  const mime = file.type?.toLowerCase() ?? "";
+  if (mime.startsWith("image/")) {
+    return !UNSUPPORTED_INLINE_IMAGE_MIME_TYPES[mime];
   }
-  if (!file.type || file.type === "application/octet-stream") {
+  if (!mime || mime === "application/octet-stream") {
     const ext = getFileExtension(file.name);
     return Boolean(RASTER_IMAGE_EXTENSIONS[ext]);
   }
@@ -206,7 +214,14 @@ export const MAX_PDF_OBJECTS = 8_192;
 export const MAX_OBJSTM_OBJECTS = 2_048;
 export const MAX_PDF_STREAM_TOKENS = 200_000;
 
-const MAX_DECOMPRESSED_BYTES = MAX_TOTAL_ATTACHED_TEXT_BYTES * 4;
+export const MAX_DECOMPRESSED_BYTES = MAX_TOTAL_ATTACHED_TEXT_BYTES * 4;
+
+const oversizedDocumentFiles = new WeakSet<object>();
+
+/** Whether `readAttachmentText` rejected `file` because its document content exceeded the inline text budget. */
+export function wasOversizedDocumentText(file: object): boolean {
+  return oversizedDocumentFiles.has(file);
+}
 const MAX_CMAP_ENTRIES = 262144;
 const MAX_CMAP_RANGE_SPAN = 4096;
 
@@ -1214,7 +1229,7 @@ async function extractDocx(entries: Map<string, () => Promise<Uint8Array>>): Pro
 }
 
 /** Extracts worksheets and shared strings from OOXML XLSX into Markdown tables. */
-async function extractXlsx(entries: Map<string, () => Promise<Uint8Array>>): Promise<string | null> {
+async function extractXlsx(entries: Map<string, () => Promise<Uint8Array>>, state?: { oversized?: boolean }): Promise<string | null> {
   const sharedStrings: string[] = [];
   const tagBudget: XmlTagBudget = { tags: 0, maxTags: MAX_XML_TAGS };
 
@@ -1391,7 +1406,10 @@ async function extractXlsx(entries: Map<string, () => Promise<Uint8Array>>): Pro
               const trimmed = val.trim();
               if (trimmed) {
                 rawCellBytes += encoder.encode(trimmed).byteLength;
-                if (projectedBytes + rawCellBytes > MAX_ATTACHED_TEXT_BYTES) return false;
+                if (projectedBytes + rawCellBytes > MAX_ATTACHED_TEXT_BYTES) {
+                  if (state) state.oversized = true;
+                  return false;
+                }
               }
               rowCells.set(cellColNum, trimmed);
             }
@@ -1419,7 +1437,10 @@ async function extractXlsx(entries: Map<string, () => Promise<Uint8Array>>): Pro
       const heading = `### ${name}\n\n`;
       const sheetBytes = encoder.encode(heading).byteLength + encoder.encode(tableMd).byteLength;
       const sectionSeparatorBytes = sections.length > 0 ? 2 : 0;
-      if (projectedBytes + sectionSeparatorBytes + sheetBytes > MAX_ATTACHED_TEXT_BYTES) return null;
+      if (projectedBytes + sectionSeparatorBytes + sheetBytes > MAX_ATTACHED_TEXT_BYTES) {
+        if (state) state.oversized = true;
+        return null;
+      }
       projectedBytes += sectionSeparatorBytes + sheetBytes;
       sections.push(heading + tableMd);
     }
@@ -1510,7 +1531,7 @@ async function extractPptx(entries: Map<string, () => Promise<Uint8Array>>): Pro
 }
 
 /** Extracts paragraphs and tables from OpenDocument (ODT/ODS/ODP) content. */
-async function extractOdf(entries: Map<string, () => Promise<Uint8Array>>): Promise<string | null> {
+async function extractOdf(entries: Map<string, () => Promise<Uint8Array>>, state?: { oversized?: boolean }): Promise<string | null> {
   const contentFn = entries.get("content.xml");
   if (!contentFn) return null;
   const buf = await contentFn();
@@ -1519,6 +1540,7 @@ async function extractOdf(entries: Map<string, () => Promise<Uint8Array>>): Prom
   const tagBudget: XmlTagBudget = { tags: 0, maxTags: MAX_XML_TAGS };
   const encoder = new TextEncoder();
   let outputBytes = 0;
+  let tableCellBytes = 0;
   const parts: string[] = [];
 
   let inTable = false;
@@ -1541,13 +1563,18 @@ async function extractOdf(entries: Map<string, () => Promise<Uint8Array>>): Prom
           inTable = true;
           tableRows = [];
           totalCellsInTable = 0;
+          tableCellBytes = 0;
         } else {
           inTable = false;
+          tableCellBytes = 0;
           if (tableRows.length > 0) {
             const tableMd = formatMarkdownTable(tableRows);
             if (tableMd === null) return false;
             outputBytes += encoder.encode(tableMd).byteLength + 2;
-            if (outputBytes > MAX_ATTACHED_TEXT_BYTES) return false;
+            if (outputBytes > MAX_ATTACHED_TEXT_BYTES) {
+              if (state) state.oversized = true;
+              return false;
+            }
             parts.push(tableMd);
           }
           tableRows = [];
@@ -1585,9 +1612,16 @@ async function extractOdf(entries: Map<string, () => Promise<Uint8Array>>): Prom
         } else {
           inCell = false;
           const trimmed = decodeXmlEntities(cellText.trim());
-          const escaped = trimmed.replace(/\|/g, "\\|").replace(/\n/g, " ");
+          const normalized = trimmed.replace(/\n/g, " ");
+          if (normalized) {
+            tableCellBytes += encoder.encode(normalized).byteLength * cellRepeat;
+            if (outputBytes + tableCellBytes > MAX_ATTACHED_TEXT_BYTES) {
+              if (state) state.oversized = true;
+              return false;
+            }
+          }
           for (let i = 0; i < cellRepeat; i++) {
-            currentRow.push(escaped);
+            currentRow.push(normalized);
           }
           cellText = "";
         }
@@ -1598,24 +1632,40 @@ async function extractOdf(entries: Map<string, () => Promise<Uint8Array>>): Prom
             paraText = "";
           }
         } else {
-          if (!inTable && inPara) {
+          if (inCell) {
+            if (cellText && !/\s$/.test(cellText)) {
+              cellText += " ";
+            }
+          } else if (!inTable && inPara) {
             inPara = false;
             const trimmed = decodeXmlEntities(paraText.trim());
             if (trimmed) {
               outputBytes += encoder.encode(trimmed).byteLength + 2;
-              if (outputBytes > MAX_ATTACHED_TEXT_BYTES) return false;
+              if (outputBytes > MAX_ATTACHED_TEXT_BYTES) {
+                if (state) state.oversized = true;
+                return false;
+              }
               parts.push(trimmed);
             }
             paraText = "";
           }
         }
+      } else if (!isClose && tagName === "text:line-break") {
+        if (inCell) cellText += " ";
+        else if (inPara) paraText += "\n";
+      } else if (!isClose && tagName === "text:tab") {
+        if (inCell) cellText += "\t";
+        else if (inPara) paraText += "\t";
+      } else if (!isClose && tagName === "text:s") {
+        if (inCell) cellText += " ";
+        else if (inPara) paraText += " ";
       }
     },
     (text) => {
       if (inCell) {
-        cellText += (cellText ? " " : "") + text;
+        cellText += text;
       } else if (inPara) {
-        paraText += (paraText ? " " : "") + text;
+        paraText += text;
       }
     },
   );
@@ -1725,9 +1775,14 @@ function extractDocText(buffer: ArrayBuffer): string | null {
     return null;
   }
   const sectorSize = 1 << sectorShift;
+  const miniSectorShift = view.getUint16(32, true);
+  const miniSectorSize = 1 << (miniSectorShift >= 4 && miniSectorShift <= 8 ? miniSectorShift : 6);
   const maxSectors = Math.floor(buffer.byteLength / sectorSize);
   const numFatSectors = Math.min(view.getUint32(44, true), maxSectors);
   const firstDirSector = view.getInt32(48, true);
+  const miniStreamCutoff = view.getUint32(56, true) || 0x1000;
+  const firstMiniFatSector = view.getInt32(60, true);
+  const numMiniFatSectors = Math.min(view.getUint32(64, true), maxSectors);
   const firstDifatSector = view.getInt32(68, true);
   const numDifatSectors = Math.min(view.getUint32(72, true), maxSectors);
 
@@ -1772,7 +1827,7 @@ function extractDocText(buffer: ArrayBuffer): string | null {
     return chain;
   }
 
-  function readStream(startSector: number, size: number): Uint8Array {
+  function readRegularStream(startSector: number, size: number): Uint8Array {
     const chain = getChain(startSector);
     const safeSize = Math.min(size, chain.length * sectorSize, MAX_DECOMPRESSED_BYTES);
     const result = new Uint8Array(safeSize);
@@ -1786,6 +1841,7 @@ function extractDocText(buffer: ArrayBuffer): string | null {
     }
     return result;
   }
+
   const dirChain = getChain(firstDirSector);
   const dirBytes = new Uint8Array(dirChain.length * sectorSize);
   let dOff = 0;
@@ -1798,16 +1854,65 @@ function extractDocText(buffer: ArrayBuffer): string | null {
   const dirView = new DataView(dirBytes.buffer, dirBytes.byteOffset, dirBytes.byteLength);
   const numEntries = dirBytes.byteLength / 128;
   const entries = new Map<string, { startSect: number; size: number }>();
+  let rootEntry: { startSect: number; size: number } | null = null;
 
   for (let i = 0; i < numEntries; i++) {
     const entryOffset = i * 128;
     const nameLen = dirView.getUint16(entryOffset + 64, true);
     if (nameLen === 0) continue;
+    const entryType = dirView.getUint8(entryOffset + 66);
     const actualLen = Math.max(0, nameLen - 2);
     const name = new TextDecoder("utf-16le").decode(new Uint8Array(dirBytes.buffer, entryOffset, actualLen));
     const startSect = dirView.getInt32(entryOffset + 116, true);
     const size = dirView.getUint32(entryOffset + 120, true);
+    if (entryType === 5 || (i === 0 && !rootEntry)) {
+      rootEntry = { startSect, size };
+    }
     entries.set(name, { startSect, size });
+  }
+
+  const miniFat: number[] = [];
+  if (firstMiniFatSector >= 0) {
+    const maxMiniFat = numMiniFatSectors > 0 ? numMiniFatSectors : maxSectors;
+    const miniFatChain = getChain(firstMiniFatSector).slice(0, maxMiniFat);
+    for (const sIndex of miniFatChain) {
+      const offset = (sIndex + 1) * sectorSize;
+      if (offset + sectorSize > buffer.byteLength) break;
+      for (let j = 0; j < sectorSize / 4; j++) {
+        miniFat.push(view.getInt32(offset + j * 4, true));
+      }
+    }
+  }
+
+  const miniStream = rootEntry && rootEntry.startSect >= 0 && rootEntry.size > 0
+    ? readRegularStream(rootEntry.startSect, rootEntry.size)
+    : new Uint8Array(0);
+
+  function readStream(startSector: number, size: number): Uint8Array {
+    if (size < miniStreamCutoff && miniFat.length > 0 && miniStream.byteLength > 0) {
+      const maxMiniSectors = Math.floor(miniStream.byteLength / miniSectorSize);
+      const chain: number[] = [];
+      const visited = new Set<number>();
+      let curr = startSector;
+      while (curr >= 0 && curr < miniFat.length && curr < maxMiniSectors && chain.length < maxMiniSectors && !visited.has(curr)) {
+        visited.add(curr);
+        chain.push(curr);
+        curr = miniFat[curr];
+        if (curr === -2) break;
+      }
+      const safeSize = Math.min(size, chain.length * miniSectorSize, MAX_DECOMPRESSED_BYTES);
+      const result = new Uint8Array(safeSize);
+      let written = 0;
+      for (const mSect of chain) {
+        const offset = mSect * miniSectorSize;
+        const toRead = Math.min(miniSectorSize, safeSize - written);
+        if (toRead <= 0 || offset + toRead > miniStream.byteLength) break;
+        result.set(miniStream.subarray(offset, offset + toRead), written);
+        written += toRead;
+      }
+      return result;
+    }
+    return readRegularStream(startSector, size);
   }
 
   const wordDocEntry = entries.get("WordDocument");
@@ -1824,7 +1929,6 @@ function extractDocText(buffer: ArrayBuffer): string | null {
 
   const tableStream = readStream(tableEntry.startSect, tableEntry.size);
   const tableView = new DataView(tableStream.buffer, tableStream.byteOffset, tableStream.byteLength);
-
   const fcClx = wordDocView.getUint32(0x01A2, true);
   const lcbClx = wordDocView.getUint32(0x01A6, true);
   if (fcClx + lcbClx > tableStream.byteLength) return null;
@@ -2000,12 +2104,27 @@ export async function readAttachmentText(file: {
 
   if (buffer) {
     const bytes = new Uint8Array(buffer);
+    const state = { oversized: false };
+    const finalizeDocResult = (res: string | null): string | null => {
+      if (res !== null && new TextEncoder().encode(res).byteLength > MAX_ATTACHED_TEXT_BYTES) {
+        oversizedDocumentFiles.add(file);
+        return null;
+      }
+      if (res === null && state.oversized) {
+        oversizedDocumentFiles.add(file);
+      }
+      return res;
+    };
 
     // a) PDF (%PDF- magic or .pdf or application/pdf)
     const isPdfMagic = bytes.length >= 5 && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46 && bytes[4] === 0x2D;
     if (isPdfMagic || ext === "pdf" || file.type === "application/pdf") {
+      if (buffer.byteLength > MAX_DECOMPRESSED_BYTES) {
+        oversizedDocumentFiles.add(file);
+        return null;
+      }
       try {
-        return await extractPdfText(buffer);
+        return finalizeDocResult(await extractPdfText(buffer));
       } catch {
         return null;
       }
@@ -2014,22 +2133,26 @@ export async function readAttachmentText(file: {
     // b) ZIP-based documents (PK\x03\x04 magic)
     const isZipMagic = bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4B && bytes[2] === 0x03 && bytes[3] === 0x04;
     if (isZipMagic) {
+      if (buffer.byteLength > MAX_DECOMPRESSED_BYTES) {
+        if (isKnownDocument) oversizedDocumentFiles.add(file);
+        return null;
+      }
       try {
         const entries = await readZipEntries(buffer);
         if (ext === "docx" || entries.has("word/document.xml")) {
-          return await extractDocx(entries);
+          return finalizeDocResult(await extractDocx(entries));
         }
         if (ext === "xlsx" || entries.has("xl/workbook.xml")) {
-          return await extractXlsx(entries);
+          return finalizeDocResult(await extractXlsx(entries, state));
         }
         if (ext === "pptx" || entries.has("ppt/presentation.xml")) {
-          return await extractPptx(entries);
+          return finalizeDocResult(await extractPptx(entries));
         }
         if (ext === "odt" || ext === "ods" || ext === "odp" || entries.has("content.xml")) {
-          return await extractOdf(entries);
+          return finalizeDocResult(await extractOdf(entries, state));
         }
         if (ext === "epub" || entries.has("META-INF/container.xml")) {
-          return await extractEpub(entries);
+          return finalizeDocResult(await extractEpub(entries));
         }
       } catch {
         return null;
@@ -2041,8 +2164,12 @@ export async function readAttachmentText(file: {
       && bytes[0] === 0xD0 && bytes[1] === 0xCF && bytes[2] === 0x11 && bytes[3] === 0xE0
       && bytes[4] === 0xA1 && bytes[5] === 0xB1 && bytes[6] === 0x1A && bytes[7] === 0xE1;
     if (isOleMagic || ext === "doc") {
+      if (buffer.byteLength > MAX_DECOMPRESSED_BYTES) {
+        oversizedDocumentFiles.add(file);
+        return null;
+      }
       try {
-        return extractDocText(buffer);
+        return finalizeDocResult(extractDocText(buffer));
       } catch {
         return null;
       }

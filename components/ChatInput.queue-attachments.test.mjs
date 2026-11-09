@@ -1777,3 +1777,97 @@ test("removing an upload chip also removes paired extracted text file from draft
     assert.equal(draft?.uploads?.length ?? 0, 0, "upload removed from draft");
   });
 });
+
+test("removing a document chip while text extraction is in flight discards the extracted text when it resolves", async () => {
+  setupUploadFetchMock();
+  const ref = React.createRef();
+  render(React.createElement(ChatInput, {
+    ref,
+    draftKey: KEY,
+    isStreaming: false,
+    onAbort() {},
+    onSend: async () => ({ status: "accepted" }),
+  }));
+
+  const docxBuf = createDocxBuffer("Slow extracted text");
+  let resolveBuffer;
+  const slowFile = new File([docxBuf], "slow-remove.docx", {
+    type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  });
+  slowFile.arrayBuffer = () => new Promise((resolve) => {
+    resolveBuffer = () => resolve(docxBuf.buffer.slice(docxBuf.byteOffset, docxBuf.byteOffset + docxBuf.byteLength));
+  });
+
+  await act(async () => {
+    ref.current.addFiles([slowFile]);
+  });
+
+  // Upload chip is visible while extraction is still pending; remove it before extraction resolves.
+  const removeBtn = await screen.findByLabelText(/chatInput\.removeFile|Remove file/i);
+  fireEvent.click(removeBtn);
+
+  await act(async () => {
+    resolveBuffer();
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+
+  const draft = getDraft(KEY);
+  assert.equal(draft?.uploads?.length ?? 0, 0, "upload remains removed");
+  assert.equal(draft?.files?.length ?? 0, 0, "late-resolving extracted text is discarded");
+});
+
+test("410 upload replacement updates uploadId on paired extracted document text", async () => {
+  let postCount = 0;
+  let putCount = 0;
+  const previousFetch = globalThis.fetch;
+  override(globalThis, "fetch", async (url, init = {}) => {
+    const method = init.method ?? "GET";
+    const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    if (url === "/api/uploads" && method === "POST") {
+      postCount += 1;
+      return json({ received: 0 });
+    }
+    if (String(url).startsWith("/api/uploads/") && method === "PUT") {
+      putCount += 1;
+      if (putCount === 1) {
+        return json({ error: "expired" }, 410);
+      }
+      const offset = Number(new URL(String(url), "https://omp.test/").searchParams.get("offset") ?? 0);
+      return json({ received: offset + (init.body?.size ?? 0), done: true });
+    }
+    if (previousFetch) return previousFetch(url, init);
+    return json({});
+  });
+
+  const ref = React.createRef();
+  render(React.createElement(ChatInput, {
+    ref,
+    draftKey: KEY,
+    isStreaming: false,
+    onAbort() {},
+    onSend: async () => ({ status: "accepted" }),
+  }));
+
+  const docxBuf = createDocxBuffer("410 recovered text");
+  await act(async () => {
+    ref.current.addFiles([
+      new File([docxBuf], "retry-410.docx", { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" }),
+    ]);
+  });
+
+  // After 410, the upload settles to error with a newly minted id; the paired text file's uploadId is updated immediately,
+  // so there is still only 1 deduplicated chip. Clicking Retry completes the upload under the new id.
+  const retryBtn = await screen.findByLabelText(/chatInput\.retryUpload|Retry upload/i);
+  assert.equal(screen.getAllByText("retry-410.docx").length, 1, "single chip during 410 error state");
+  fireEvent.click(retryBtn);
+
+  await waitFor(() => {
+    const draft = getDraft(KEY);
+    assert.equal(draft?.uploads?.length, 1);
+    assert.equal(draft?.files?.length, 1);
+    assert.equal(draft?.files[0]?.uploadId, draft?.uploads[0]?.id, "extracted text uploadId matches replacement upload id");
+  });
+  assert.ok(postCount >= 2, "retried POST /api/uploads after 410");
+  const chips = screen.getAllByText("retry-410.docx");
+  assert.equal(chips.length, 1, "still renders a single deduplicated chip after 410 ID replacement");
+});
