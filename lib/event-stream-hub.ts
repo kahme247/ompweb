@@ -350,7 +350,7 @@ async function openChannel(channel: EventStreamChannel, handle: SubscriptionHand
     case "running":
       return openRunningChannel(handle);
     case "notifications":
-      return openNotificationsChannel(channel.clientId, handle);
+      return openNotificationsChannel(channel.clientId, channel.deviceId, handle);
     case "session":
       return openSessionChannel(channel.sessionId, handle);
     case "file":
@@ -395,9 +395,18 @@ function openRunningChannel(handle: SubscriptionHandle): SubscribeResult {
 
 // The notifications the server routes to one tab (`clientId`). The tab counts
 // as reachable for toasts and in-page system notifications while this is open.
-function openNotificationsChannel(clientId: string, handle: SubscriptionHandle): SubscribeResult {
+function openNotificationsChannel(clientId: string, deviceId: string | undefined, handle: SubscriptionHandle): SubscribeResult {
   handle.open();
-  handle.setDetach(attachNotificationClient(clientId, (message) => handle.send({ type: "notification", ...message })));
+  // `deviceId` scopes stream-only deliveries to the owning device's own prefs.
+  handle.setDetach(attachNotificationClient(clientId, (message) => {
+    // A retraction is its own frame type: the client's notification branch
+    // accepts only the toast/os kinds, so a wrapped dismiss would be dropped.
+    if (message.kind === "dismiss") {
+      handle.send({ type: "notification-dismiss", tag: message.tag, sessionId: message.sessionId, requestId: message.requestId });
+      return;
+    }
+    handle.send({ type: "notification", ...message });
+  }, deviceId));
   return SUBSCRIBED;
 }
 

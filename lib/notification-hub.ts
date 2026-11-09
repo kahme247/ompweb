@@ -7,7 +7,7 @@ import {
   type NotificationEvent,
   type RenderedNotification,
 } from "./notification-events";
-import { dropDeviceSubscription, getDevice, getVapidKeys, listDevices, recordHistory, type NotificationDevice } from "./notification-store";
+import { dropDeviceSubscription, getDevice, getVapidKeys, listDevices, markHistoryRead, recordHistory, type NotificationDevice } from "./notification-store";
 
 /**
  * Server side of notifications: presence of open tabs, per-device preferences
@@ -21,6 +21,14 @@ const PUSH_TTL_SECONDS = 3600;
 const PUSH_TIMEOUT_MS = 10_000;
 /** Waits before each retry of a push the push service never answered or answered 429/5xx. Well inside the TTL. */
 export const PUSH_RETRY_DELAYS_MS = [2_000, 10_000, 30_000];
+/**
+ * How long a retraction keeps suppressing further delivery attempts of the
+ * same `input` push: one retry cycle is its backoff waits plus the time a
+ * single attempt may hang, and no retry can outlive that.
+ */
+export const PUSH_RETRACTION_TTL_MS = PUSH_RETRY_DELAYS_MS.reduce((total, delay) => total + delay, 0)
+  + (PUSH_RETRY_DELAYS_MS.length + 1) * PUSH_TIMEOUT_MS;
+
 // Apple's push service rejects VAPID subjects it cannot resolve (e.g. localhost mail).
 const VAPID_SUBJECT = "https://github.com/kahme247/ompweb";
 
@@ -35,7 +43,16 @@ export interface NotificationPresence {
   lastSeen: number;
 }
 
-export type NotificationMessage = { kind: "toast" | "os"; event: NotificationEvent };
+/**
+ * A toast/system notification, or the retraction of a session's `input`
+ * notification once its dialog was answered, cancelled, expired or its omp
+ * child went away. The retraction reaches a tab as `type: "notification-dismiss"`
+ * (lib/event-stream-hub.ts wraps it); it is never pushed (see
+ * `publishNotificationDismiss`).
+ */
+export type NotificationMessage =
+  | { kind: "toast" | "os"; event: NotificationEvent }
+  | { kind: "dismiss"; tag: string; sessionId: string; requestId: string };
 
 type Send = (message: NotificationMessage) => void;
 
@@ -47,6 +64,17 @@ interface HubState {
   presence: Map<string, NotificationPresence>;
   /** Open SSE streams per tab. Independent of presence: streams reconnect, overlap, and close while the tab stays put. */
   streams: Map<string, Set<Send>>;
+  /** The notification device each tab declared with its stream. Absent for tabs that predate the field: those keep the pre-device behaviour (no stream-only delivery). */
+  streamDevices: Map<string, string>;
+  /** `<sessionId>:<requestId>` → when it was retracted. A push retry of a settled dialog must deliver nothing (see `publishNotificationDismiss`). */
+  retractions: Map<string, number>;
+  /**
+   * The same, for a settlement a replay may undo: a resync forgets a dialog
+   * whose replayed frame can restore the very same request id. The retraction
+   * still closes what is on screen and stops a sleeping retry, and publishing
+   * that request id again lifts it (see `publishNotification`).
+   */
+  temporaryRetractions: Map<string, number>;
 }
 
 declare global {
@@ -54,7 +82,13 @@ declare global {
 }
 
 function hub(): HubState {
-  return (globalThis.__ompNotificationHub ??= { presence: new Map(), streams: new Map() });
+  const state = (globalThis.__ompNotificationHub ??= { presence: new Map(), streams: new Map(), streamDevices: new Map(), retractions: new Map(), temporaryRetractions: new Map() });
+  // `bun --hot` keeps this object across a re-evaluation: a state created by
+  // the previous module instance may predate a field added here.
+  state.streamDevices ??= new Map();
+  state.retractions ??= new Map();
+  state.temporaryRetractions ??= new Map();
+  return state;
 }
 
 export function getVapidPublicKey(): string {
@@ -78,16 +112,32 @@ export function reportPresence(report: Omit<NotificationPresence, "lastSeen">): 
   presence.set(report.clientId, { ...report, lastSeen: Date.now() });
 }
 
-/** Attach a tab's SSE stream. Returns the detach callback. */
-export function attachNotificationClient(clientId: string, send: Send): () => void {
-  const { streams } = hub();
-  const own = streams.get(clientId) ?? new Set();
+/** Attach a tab's SSE stream. `deviceId` is the notification device this tab
+ *  belongs to (the web tab's stored device id); a stream without one is
+ *  reachable but never receives stream-only deliveries, exactly like before
+ *  device routing existed. Returns the detach callback. */
+export function attachNotificationClient(clientId: string, send: Send, deviceId?: string): () => void {
+  const state = hub();
+  const own = state.streams.get(clientId) ?? new Set();
   own.add(send);
-  streams.set(clientId, own);
+  state.streams.set(clientId, own);
+  if (deviceId) state.streamDevices.set(clientId, deviceId);
   return () => {
     own.delete(send);
-    if (own.size === 0 && streams.get(clientId) === own) streams.delete(clientId);
+    if (own.size === 0 && state.streams.get(clientId) === own) {
+      state.streams.delete(clientId);
+      state.streamDevices.delete(clientId);
+    }
   };
+}
+
+/** Reachable tabs with the device each one declared (`undefined` when it did
+ *  not declare one). The map doubles as the reachability set. */
+function reachableTabs(): Map<string, string | undefined> {
+  const state = hub();
+  const reachable = new Map<string, string | undefined>();
+  for (const clientId of state.streams.keys()) reachable.set(clientId, state.streamDevices.get(clientId));
+  return reachable;
 }
 
 // ---------------------------------------------------------------- routing
@@ -99,26 +149,56 @@ function isOnScreen(event: NotificationEvent, presence: NotificationPresence[]):
 }
 
 /**
- * Decide where one event goes. `reachable` holds the tabs with an open stream.
+ * Decide where one event goes. `reachable` maps each tab with an open stream
+ * to the notification device it declared (`undefined` when it declared none).
  * 1. A visible tab is showing the session: nothing, for every device.
  * 2. The user is active in some reachable tab and the device prefers toasts:
  *    toast to that device's active tabs only (other devices stay quiet).
  * 3. Otherwise a system notification: push when the device has a
  *    subscription, else in-page on each of its reachable tabs.
+ *
+ * A stream without a live presence entry is reachable but **not visible**.
+ * Native clients (no push subscription) keep their `notifications` stream open
+ * without presence reports, so rule 3 also delivers to stream-only tabs — but
+ * only through the device the tab declared: that device's own preferences
+ * decide, and a device a push already covers gets no frame. A stream that
+ * declared no device keeps the pre-device behaviour (no stream-only delivery).
+ * Presence keeps its kill-switch: rule 1 still suppresses everything while a
+ * visible tab shows the session, and rule 2 still wins over stream-only
+ * delivery for a device whose `whenActive` is `toast`, so a background app
+ * stays quiet while the user is at another tab. Stream-only delivery never
+ * overrides that precedence; it only fills the gap presence leaves.
  */
-export function routeNotification(event: NotificationEvent, presence: NotificationPresence[], reachable: ReadonlySet<string>, devices: NotificationDevice[]): Delivery[] {
+export function routeNotification(event: NotificationEvent, presence: NotificationPresence[], reachable: ReadonlyMap<string, string | undefined>, devices: NotificationDevice[]): Delivery[] {
   if (event.type === "test") return [];
   if (isOnScreen(event, presence)) return [];
+  const presenceById = new Map(presence.map((tab) => [tab.clientId, tab]));
+  // Stream-only tabs grouped by the device that owns them.
+  const streamOnlyByDevice = new Map<string, string[]>();
+  for (const [clientId, deviceId] of reachable) {
+    if (!deviceId || presenceById.has(clientId)) continue;
+    const owned = streamOnlyByDevice.get(deviceId) ?? [];
+    owned.push(clientId);
+    streamOnlyByDevice.set(deviceId, owned);
+  }
   const active = presence.filter((tab) => tab.visible && reachable.has(tab.clientId));
   const deliveries: Delivery[] = [];
+  const seen = new Set<string>();
+  const deliver = (delivery: Delivery) => {
+    const key = delivery.kind === "push" ? `push:${delivery.deviceId}` : `${delivery.kind}:${delivery.clientId}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    deliveries.push(delivery);
+  };
   for (const device of devices) {
     if (!device.prefs.enabled || !device.prefs.types[event.type]) continue;
     if (active.length > 0 && device.prefs.whenActive === "toast") {
-      for (const tab of active) if (tab.deviceId === device.deviceId) deliveries.push({ kind: "toast", clientId: tab.clientId });
+      for (const tab of active) if (tab.deviceId === device.deviceId) deliver({ kind: "toast", clientId: tab.clientId });
     } else if (device.subscription) {
-      deliveries.push({ kind: "push", deviceId: device.deviceId });
+      deliver({ kind: "push", deviceId: device.deviceId });
     } else {
-      for (const tab of presence) if (tab.deviceId === device.deviceId && reachable.has(tab.clientId)) deliveries.push({ kind: "os", clientId: tab.clientId });
+      for (const tab of presence) if (tab.deviceId === device.deviceId && reachable.has(tab.clientId)) deliver({ kind: "os", clientId: tab.clientId });
+      for (const clientId of streamOnlyByDevice.get(device.deviceId) ?? []) deliver({ kind: "os", clientId });
     }
   }
   return deliveries;
@@ -151,15 +231,40 @@ function stillSubscribed(deviceId: string, endpoint: string): boolean {
   }
 }
 
-/** Never throws: a failed push must not break delivery to anyone else. */
+/**
+ * True while this dialog's retraction still covers a push retry. Every path
+ * that settles a dialog (answer, cancel, expiry, process exit) records one,
+ * and `sendPush` asks before every attempt: a retry that wakes up after
+ * another client answered must never re-deliver a question nobody can answer.
+ * A temporary retraction (a resync that forgot the dialog) counts the same way
+ * until the request is published again.
+ */
+function isRetracted(sessionId: string, requestId: string, now: number): boolean {
+  const state = hub();
+  const key = `${sessionId}:${requestId}`;
+  const at = state.retractions.get(key) ?? state.temporaryRetractions.get(key);
+  return at !== undefined && now - at <= PUSH_RETRACTION_TTL_MS;
+}
+
 async function sendPush(device: NotificationDevice, event: NotificationEvent, retryDelaysMs: readonly number[] = []): Promise<{ ok: true } | { ok: false; error: string }> {
   const subscription = device.subscription;
   if (!subscription) return { ok: false, error: "no push subscription" };
   for (let attempt = 0; ; attempt++) {
+    // A retry can wake long after the dialog was answered, cancelled, expired
+    // or its omp child died: delivering now would show a dead question.
+    if (event.type === "input" && event.requestId && isRetracted(event.sessionId, event.requestId, Date.now())) {
+      return { ok: false, error: "dialog settled" };
+    }
     try {
       const { publicKey, privateKey } = getVapidKeys(webpush.generateVAPIDKeys);
-      // `type` lets the service worker tell open tabs which kind of entry to list.
-      await webpush.sendNotification(subscription, JSON.stringify({ ...renderFor(event, device.prefs.locale), type: event.type }), {
+      // `type` lets the service worker tell open tabs which kind of entry to list;
+      // `requestId`/`dialog` let the app answer without opening the session.
+      await webpush.sendNotification(subscription, JSON.stringify({
+        ...renderFor(event, device.prefs.locale),
+        type: event.type,
+        ...(event.requestId ? { requestId: event.requestId } : {}),
+        ...(event.dialog ? { dialog: event.dialog } : {}),
+      }), {
         TTL: PUSH_TTL_SECONDS,
         urgency: event.type === "input" || event.type === "error" ? "high" : "normal",
         timeout: PUSH_TIMEOUT_MS,
@@ -191,6 +296,10 @@ async function sendPush(device: NotificationDevice, event: NotificationEvent, re
 /** Never throws: callers publish from the RPC frame path, and a store failure must not cost them the frame. */
 export function publishNotification(event: NotificationEvent): void {
   const state = hub();
+  // A replayed dialog (resync after a lost link) restores a request a resync
+  // had temporarily retracted: it is pending again, so its notification and
+  // its pushes must go out as for any other question.
+  if (event.type === "input" && event.requestId) state.temporaryRetractions.delete(`${event.sessionId}:${event.requestId}`);
   let devices: NotificationDevice[] = [];
   try {
     devices = listDevices();
@@ -207,7 +316,7 @@ export function publishNotification(event: NotificationEvent): void {
       console.warn("[notifications] history write failed:", error);
     }
   }
-  const reachable = new Set(state.streams.keys());
+  const reachable = reachableTabs();
   for (const delivery of routeNotification(event, presence, reachable, devices)) {
     if (delivery.kind === "push") {
       const device = devices.find((entry) => entry.deviceId === delivery.deviceId);
@@ -217,6 +326,79 @@ export function publishNotification(event: NotificationEvent): void {
     for (const send of state.streams.get(delivery.clientId) ?? []) {
       try {
         send({ kind: delivery.kind, event });
+      } catch {
+        // A closing stream must not break delivery to the others.
+      }
+    }
+  }
+}
+
+/**
+ * Retract a session's `input` notification: its dialog was answered by any
+ * client, cancelled, expired, or its omp child went away. Every reachable tab
+ * gets the retraction on its stream, and the history entry becomes read
+ * because the question is settled.
+ *
+ * No push goes out: a push that displays nothing counts as a silent push, and
+ * Chromium and Firefox answer one with a browser-substituted card ("This site
+ * has been updated in the background") and eventually mute the origin, exactly
+ * as iOS revokes the permission. A device that is not reachable keeps the stale
+ * card until the next `input` push replaces it by tag or the app syncs.
+ *
+ * Never throws: callers run on the RPC frame path.
+ */
+export function publishNotificationDismiss(sessionId: string, requestId: string): void {
+  retract(sessionId, requestId, "permanent");
+}
+
+/**
+ * Retract a dialog this server only *forgot*: a resync dropped the pending
+ * request, and the replayed frames may restore the very same request id.
+ * Everything a retraction does happens (open tabs close it, a sleeping push
+ * retry stops, the history entry becomes read), but the record is temporary:
+ * publishing that request id again lifts it, so a replayed question is
+ * announced and pushed like a new one instead of being suppressed for the
+ * retraction TTL. A dialog that is really gone is never replayed, and its
+ * notification stays closed.
+ */
+export function publishNotificationForgotten(sessionId: string, requestId: string): void {
+  retract(sessionId, requestId, "temporary");
+}
+
+function retract(sessionId: string, requestId: string, kind: "permanent" | "temporary"): void {
+  const tag = `${sessionId}:input`;
+  const state = hub();
+  const now = Date.now();
+  // Recorded first: a retry of that `input` push may be sleeping right now.
+  for (const [key, at] of state.retractions) {
+    if (now - at > PUSH_RETRACTION_TTL_MS) state.retractions.delete(key);
+  }
+  for (const [key, at] of state.temporaryRetractions) {
+    if (now - at > PUSH_RETRACTION_TTL_MS) state.temporaryRetractions.delete(key);
+  }
+  const key = `${sessionId}:${requestId}`;
+  if (kind === "permanent") {
+    state.temporaryRetractions.delete(key);
+    state.retractions.set(key, now);
+  } else if (!state.retractions.has(key)) {
+    // A permanent settlement of the same request wins: a replay of an answered
+    // dialog must not reopen its notification.
+    state.temporaryRetractions.set(key, now);
+  }
+  // Only the entry of this request is read: a newer dialog of the same tag
+  // replaced it in the history, and that one is still waiting for an answer.
+  try {
+    markHistoryRead([tag], requestId);
+  } catch (error) {
+    console.warn("[notifications] history read mark failed:", error);
+  }
+  // Every reachable tab hears it: one that never showed this notification
+  // closes nothing, and the frame names the request so a later dialog of the
+  // same tag stays. A tab whose stream died keeps nothing to clear.
+  for (const sends of state.streams.values()) {
+    for (const send of sends) {
+      try {
+        send({ kind: "dismiss", tag, sessionId, requestId });
       } catch {
         // A closing stream must not break delivery to the others.
       }

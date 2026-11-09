@@ -38,8 +38,14 @@ Rules:
   to Opus, rate limits, provider failures). A fallback still held at
   `auto_retry_end`, `prompt_result` or `session_settled` is sent without one.
 - Every notification has tag `<sessionId>:<type>`, so a repeat replaces the
-  previous one instead of stacking. Notifications are not retracted when they
-  stop applying.
+  previous one instead of stacking. An `input` notification is retracted when
+  the dialog behind it settles (answered, cancelled, expired, or its omp child
+  went away): every reachable tab gets a `notification-dismiss` frame naming
+  the tag and request id. No push carries the retraction — a push that
+  displays nothing is a silent push, which browsers punish — so a device that
+  is not reachable keeps the stale card until the next `input` push replaces
+  it by tag. The request id rides on every delivery, so a retraction closes
+  only its own dialog and never the next one of the same tag.
 
 ## Architecture
 
@@ -113,6 +119,26 @@ For each event:
      show it with `registration.showNotification` (or a toast when the
      browser no longer allows notifications).
 
+A tab may declare its notification device on the `notifications` channel
+(`{kind: "notifications", clientId, deviceId}`). Such a tab is reachable
+without a presence report, which is how a native client with no push
+subscription receives `{kind: "os"}` frames while its app is in the
+background. Stream-only delivery fills only the gap presence leaves:
+**it never overrides the `whenActive: "toast"` rule**. While another device
+has an active tab, a stream-only tab of a `toast` device stays quiet — the
+background app intentionally shows nothing while the user is at the desk —
+and the same device with `whenActive: "system"` does get its frame. Rule 1
+still applies first: a visible tab showing the session silences everything.
+A stream that declares no device keeps the pre-device behaviour and receives
+no stream-only delivery; a malformed `deviceId` is refused by
+`parseEventStreamChannel` rather than silently ignored. Declaring the id is
+not the opt-in: delivery is decided from the device's **stored** prefs, so a
+declared device that was never registered with
+`PUT /api/notifications/devices` receives nothing (there are no prefs to
+honour). The `deviceId` is syntax-checked only, not bound to the caller: any
+authenticated tab of the same user may declare another device's id and would
+then receive that device's `os` frames.
+
 The server decides before pushing, and the service worker always displays a
 push: iOS Safari revokes push permission for pushes that show nothing.
 
@@ -157,13 +183,60 @@ push: iOS Safari revokes push permission for pushes that show nothing.
 
 | Route | Method | Purpose |
 |---|---|---|
-| `/api/agent/running/events?clientId=` | GET | existing SSE stream, now also `{type: "notification", kind, event}` |
+| `/api/agent/running/events?clientId=` | GET | existing SSE stream, now also `{type: "notification", kind, event}` and `{type: "notification-dismiss", tag, sessionId, requestId}` |
 | `/api/notifications/presence` | POST | presence report |
 | `/api/notifications/devices?deviceId=` | GET | VAPID public key, whether this device has a subscription |
 | `/api/notifications/devices` | PUT | `{deviceId, prefs, subscription?}`; an omitted subscription keeps the stored one |
 | `/api/notifications/test` | POST | `{deviceId}`: a test push; 502 with the push service's answer when it fails |
+| `/api/notifications/answer` | POST | `{sessionId, requestId, response}`: answer a pending blocking dialog from a notification |
 
 All routes sit behind the existing password gate and origin check.
+
+### Answering from a notification
+
+A blocking dialog (`confirm`, `select`, `input`, `editor`, `ask`) is carried in
+the `input` notification's `dialog` field, in the SSE frame, the history entry
+and the push body, so a client can offer its answer without an open chat tab.
+`POST /api/notifications/answer` takes `{sessionId, requestId, response}` with
+exactly one response variant: `{confirmed}`, `{value}`, `{cancelled: true}`, or
+`{answers}` for an `ask`. The body is capped at 64 KiB and read with
+`parseJsonWithinLimit`.
+
+- The route looks the session up in the live registry (also through the aliases
+  omp's session moves left) and never spawns omp: an unknown or exited session
+  answers `200 {status: "sessionGone"}`, and a request id that is not pending
+  answers `200 {status: "alreadySettled"}`. Neither is an error.
+- The answer is checked against the pending dialog first, so a payload the
+  dialog cannot take is a 400 and leaves the question answerable: a `select`
+  takes one of its own labels, a `confirm` a confirmation, an `input`/`editor`
+  a value, and an `ask` its answers. A request whose method is not a dialog
+  takes no answer at all: `open_url` is fire-and-forget (omp registers no
+  resolver for it), so any response to it is a 400 `invalid_dialog_answer`
+  before anything is sent. An `ask` payload is validated with omp's
+  own rules (`parseAskDialogResponse` in `rpc-mode.ts`): one answer per
+  question in request order, each answer naming its own question id, only
+  labels that question offers, no label twice, and a single-select question
+  takes either one label or free text — never both. `customInput` is trimmed
+  before it counts, as omp trims it. A cancel is always accepted.
+- An accepted answer goes through the same `extension_ui_response` command the
+  desktop dialog sends, so it resolves a server-owned confirmation and applies
+  the offline/restarting gate: a host that is offline answers 503
+  `{hostOffline: true}` and a restarting session 400 `session_restarting`,
+  never `answered`. The dialog is settled only after the answer was admitted.
+- Settling a dialog retracts its notification on every reachable tab:
+  `{type: "notification-dismiss", tag, sessionId, requestId}`, and the history
+  entry of exactly that request becomes read. A newer dialog of the same tag
+  keeps its own unread entry. A push retry that wakes after the settlement
+  delivers nothing. No push carries the retraction: a push that displays
+  nothing is a silent push (iOS revokes the permission, Chromium and Firefox
+  substitute a generic card and mute the origin), so a device that is not
+  reachable keeps the stale card until the next `input` push replaces it by
+  tag or the app syncs.
+- A resync that dropped a dialog (a linked host discarding buffered output)
+  retracts it too, but as a *forgotten* settlement: the retraction is
+  temporary, so if the host replays the same request id the question is
+  announced and pushed again instead of being suppressed. A permanent
+  settlement of the same request is never lifted by that.
 
 ## Settings: Notifications tab
 
