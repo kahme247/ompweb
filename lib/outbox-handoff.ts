@@ -54,6 +54,8 @@ async function liveChild(sessionId: string) {
   if (live) {
     // A wrapper disposed during a link drop proves nothing about the child: it may still run on the offline host.
     if (!isLinkUp(live.host.status())) throw new WebRpcError(`${live.host.label} is offline`, "host_offline", "refused");
+    // Disposing is not exited: the child may still be flushing its history, and the registry drops the wrapper only once it has exited.
+    if (live.destroyPromise) throw new HostOpError(503, "handoff_child_pending", "The session's native process is shutting down");
   } else {
     // A child a host still runs is not gone just because this server failed to adopt it: retry.
     if (hostListsChild(sessionId)) throw new HostOpError(503, "handoff_child_pending", "The session's native process is running but not attached here yet");

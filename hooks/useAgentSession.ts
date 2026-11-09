@@ -14,6 +14,7 @@ import type {
   SessionInfo,
   SessionTreeNode,
   ToolResultMessage,
+  UserMessage,
 } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
 import { hasVisibleAssistantContent } from "@/lib/assistant-response";
@@ -62,7 +63,7 @@ import {
 export type { SubagentInfo } from "@/lib/subagent-types";
 
 // Pure helpers extracted to sibling modules (extraction only — no logic changes).
-import { EMPTY_QUEUE, EMPTY_SERVER_OUTBOX, applyOutboxSnapshot, isQueuedWhileShellRunning, markOutboxUncertain, mergeHeldMessages, rememberOutboxEntries, representOutboxIds } from "./useAgentSession-queue";
+import { EMPTY_QUEUE, EMPTY_SERVER_OUTBOX, applyOutboxSnapshot, isQueuedWhileShellRunning, markOutboxUncertain, mergeHeldMessages, rememberLocalOutbox, rememberOutboxEntries, representOutboxIds } from "./useAgentSession-queue";
 import { readQueueSnapshot } from "@/lib/client-message-ids";
 import type { QueuedMessages, ServerOutbox } from "./useAgentSession-queue";
 import {
@@ -226,11 +227,18 @@ function isSameNativeMessage(message: AgentMessage, other: AgentMessage): boolea
     && extractMessageText(message) === extractMessageText(other);
 }
 
-/** A daemon from before correlation saves history without `clientMessageId`: the same native role, timestamp, type and
- * text is still the echo's saved copy. A saved message carrying another intent's ID never is. */
+/** A message's image blocks as one comparable string: the text alone cannot tell two attachments apart. */
+function imageSignature(message: UserMessage | CustomMessage): string {
+  if (typeof message.content === "string") return "[]";
+  return JSON.stringify(message.content.flatMap((block) => block.type === "image" ? [[block.mimeType, block.data, block.url, block.source]] : []));
+}
+
+/** A daemon from before correlation saves history without `clientMessageId`: the same native role, timestamp, type,
+ * text and images is still the echo's saved copy. A saved message carrying another intent's ID never is. */
 function isSavedCopyOf(saved: AgentMessage, echo: AgentMessage): boolean {
   if ((saved.role !== "user" && saved.role !== "custom") || (echo.role !== "user" && echo.role !== "custom")) return false;
-  return isSameNativeMessage(saved.clientMessageId ? saved : { ...saved, clientMessageId: echo.clientMessageId }, echo);
+  if (saved.clientMessageId) return isSameNativeMessage(saved, echo);
+  return isSameNativeMessage({ ...saved, clientMessageId: echo.clientMessageId }, echo) && imageSignature(saved) === imageSignature(echo);
 }
 
 /** Toast a send its connection stopped: the host's link (HostOfflineError) or
@@ -284,10 +292,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // omp's echo of a user message, shown until the transcript catch-up has its saved copy (same omp timestamp): the echo
   // is a frame, the copy arrives over HTTP a moment later, and the held bubble it replaces is already gone.
   const [echoedUserMessage, setEchoedUserMessage] = useState<AgentMessage | null>(null);
-  const [correlatedMessages, setCorrelatedMessages] = useState<{ sessionId: string; message: AgentMessage }[]>([]);
+  const [correlatedMessages, setCorrelatedMessages] = useState<{ sessionId: string; message: AgentMessage; epoch: number }[]>([]);
   const [showCorrelatedMessages, setShowCorrelatedMessages] = useState(true);
-  // Set when native history rewound: the next readable history replaces the echoes, so a failed reload keeps them.
-  const pruneCorrelatedOnReloadRef = useRef(false);
+  // Each echo is stamped with the rewind count when it arrives. A native history rewind makes the echoes before it stale:
+  // `pruneBeforeEpochRef` is the first epoch that survives, applied by the next readable history (a failed reload keeps
+  // them), so an echo received after the rewind began is never pruned. 0 = no rewind pending.
+  const rewindEpochRef = useRef(0);
+  const pruneBeforeEpochRef = useRef(0);
   const messages = useMemo(() => {
     const pending = optimisticUserMessage ?? echoedUserMessage;
     const base = pending ? [...confirmedMessages, pending] : confirmedMessages;
@@ -356,7 +367,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     outboxRevisionRef.current += 1;
     handoffReadRef.current = null;
     setShowCorrelatedMessages(true);
-    pruneCorrelatedOnReloadRef.current = false;
+    pruneBeforeEpochRef.current = 0;
   }, [session?.id]);
   // The server's persisted history captured before it dispatched the delivering entry: the next turn's boundary.
   // Keyed by entry: a peer's later poll republishes the same delivering row, whose boundary its run already took.
@@ -693,10 +704,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           ...(context.persistedClientMessageIds ?? []), ...(context.resolvedClientMessageIds ?? []),
         ]);
         setShowCorrelatedMessages(!catchUpRef.current?.view().leafId);
-        const pruneCorrelated = pruneCorrelatedOnReloadRef.current;
-        pruneCorrelatedOnReloadRef.current = false;
-        setCorrelatedMessages((current) => pruneCorrelated ? [] : current.filter((entry) =>
-          !context.messages.some((message) => isSavedCopyOf(message, entry.message))
+        const pruneBefore = pruneBeforeEpochRef.current;
+        pruneBeforeEpochRef.current = 0;
+        setCorrelatedMessages((current) => current.filter((entry) => entry.epoch >= pruneBefore
+          && !context.messages.some((message) => isSavedCopyOf(message, entry.message))
           && !((entry.message.role === "user" || entry.message.role === "custom")
             && entry.message.clientMessageId && context.persistedClientMessageIds?.includes(entry.message.clientMessageId))));
         setEntryIds(context.entryIds);
@@ -731,11 +742,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       || catchUp.view().leafId || (native.role !== "user" && native.role !== "custom")) return;
     if (native.role === "custom" && "display" in native && native.display === false) return;
     const message = { ...native, clientMessageId };
+    const epoch = rewindEpochRef.current;
     setCorrelatedMessages((current) => {
       if (confirmedMessagesRef.current.some((saved) => isSavedCopyOf(saved, message))) return current;
       const existing = current.findIndex((entry) => entry.sessionId === sid && isSameNativeMessage(entry.message, message));
-      return existing < 0 ? [...current, { sessionId: sid, message }]
-        : current.map((entry, index) => index === existing ? { sessionId: sid, message } : entry);
+      return existing < 0 ? [...current, { sessionId: sid, message, epoch }]
+        : current.map((entry, index) => index === existing ? { ...entry, message } : entry);
     });
     markOutboxRepresented([clientMessageId]);
   }, [catchUp, markOutboxRepresented]);
@@ -1222,8 +1234,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setShowPreCompactionHistory(false);
     setOptimisticUserMessage(null);
     setEchoedUserMessage(null);
-    // Native history moved (an edit rewound it): once the new history is readable it replaces the echoes bridging the old tail.
-    pruneCorrelatedOnReloadRef.current = true;
+    // Native history moved (an edit rewound it): once the new history is readable it replaces the echoes received so far,
+    // which bridge the old tail; an echo received from here on belongs to the new one.
+    pruneBeforeEpochRef.current = ++rewindEpochRef.current;
     setShowCorrelatedMessages(true);
     eventCoalescer.reset();
     dispatch({ type: "reset" });
@@ -1635,7 +1648,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useEffect(() => subscribeOutbox((event) => {
     if ("entries" in event) {
       setLocalOutbox(event.entries);
-      serverOutboxRef.current = rememberOutboxEntries(serverOutboxRef.current, event.entries, true);
+      serverOutboxRef.current = rememberLocalOutbox(serverOutboxRef.current, event.entries, sessionIdRef.current);
       setServerOutbox(serverOutboxRef.current);
       return;
     }
@@ -4232,22 +4245,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const heldMessagesRef = useRef(heldMessages);
   heldMessagesRef.current = heldMessages;
+  const localOutboxRef = useRef(localOutbox);
+  localOutboxRef.current = localOutbox;
   const heldDeletionsRef = useRef(new Set<string>());
   /** Delete of a held bubble: one this browser still holds leaves IndexedDB; the server's only until dispatched (omp
-   * may have it from then on, answered 409 outbox_dispatched). */
+   * may have it from then on, answered 409 outbox_dispatched). An uncertain bridge is a view of an id the server
+   * settled, so only the browser's own copy of it (the worker still holds it if the server settled the id before the
+   * worker saw its add receipt) leaves IndexedDB, and the row hides once that commits: a reload cannot bring it back. */
   const deleteHeldMessage = useCallback(async (id: string) => {
     const sid = sessionIdRef.current;
     const held = heldMessagesRef.current.find((entry) => entry.id === id);
     if (!sid || !held || held.state === "sending" || held.state === "delivering" || heldDeletionsRef.current.has(id)) return;
-    if (serverOutboxRef.current.uncertain.has(id)) {
-      markOutboxRepresented([id]);
-      setStoredOutbox((entries) => entries.filter((entry) => entry.id !== id));
-      setLocalOutbox((entries) => entries.filter((entry) => entry.id !== id));
-      return;
-    }
     heldDeletionsRef.current.add(id);
     try {
-      if (held.local) await dropFromOutbox(id);
+      if (serverOutboxRef.current.uncertain.has(id)) {
+        if (localOutboxRef.current.some((entry) => entry.id === id)) await dropFromOutbox(id);
+        markOutboxRepresented([id]);
+        setStoredOutbox((entries) => entries.filter((entry) => entry.id !== id));
+        setLocalOutbox((entries) => entries.filter((entry) => entry.id !== id));
+      } else if (held.local) await dropFromOutbox(id);
       else await sendAgentCommand(sid, { type: "outbox_remove", id });
     } catch (e) {
       if (hookAliveRef.current && sessionIdRef.current === sid) addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });

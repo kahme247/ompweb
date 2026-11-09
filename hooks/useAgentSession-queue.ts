@@ -78,6 +78,12 @@ export function rememberOutboxEntries(current: ServerOutbox, entries: (OutboxEnt
   return representOutboxIds({ ...current, known, nativeSettled, seen }, retired);
 }
 
+/** The worker lists every session's browser entries; only this chat's are remembered, since the rest are never shown
+ * here and would pin their payloads (images included) for as long as the chat lives. */
+export function rememberLocalOutbox(current: ServerOutbox, entries: LocalOutboxEntry[], sessionId: string | null): ServerOutbox {
+  return rememberOutboxEntries(current, entries.filter((entry) => entry.sessionId === sessionId), true);
+}
+
 export function markOutboxUncertain(current: ServerOutbox, ids: Iterable<string>): ServerOutbox {
   const added = [...ids].filter((id) => current.nativeSettled.has(id) && !current.represented.has(id) && !current.uncertain.has(id));
   return added.length ? { ...current, uncertain: new Set([...current.uncertain, ...added]) } : current;
@@ -102,19 +108,21 @@ export function applyOutboxSnapshot(current: ServerOutbox, entries: OutboxEntry[
 }
 
 /** This session's held messages in delivery order, merged by id: the server's snapshot wins over a confirmation it
- * has not covered yet (`stored`), which wins over the browser's own copy; delivered ones are gone. Everything the
- * server holds, and the bridges kept after it settled them, goes first in the order this browser first saw it
- * (`server.known`; an unseen id after the seen ones, in snapshot order), then this browser's first-leg entries in
- * the worker's submission order. The two `createdAt` clocks are never compared. */
+ * has not covered yet (`stored`), which wins over the browser's own copy; delivered ones are gone. The rows the server
+ * holds keep the snapshot's own order (its FIFO, whatever order this browser met them in). A bridge kept after the
+ * server settled its row sits before the first snapshot row this browser saw after it (`server.known` order), else after
+ * the last. This browser's first-leg entries follow in the worker's submission order. The two `createdAt` clocks are
+ * never compared. */
 export function mergeHeldMessages(sessionId: string | null, local: LocalOutboxEntry[], stored: OutboxEntry[], server: ServerOutbox): HeldMessage[] {
-  const held: HeldMessage[] = [];
+  const rows: HeldMessage[] = [];
+  const bridges: HeldMessage[] = [];
   const firstLeg: HeldMessage[] = [];
   const known = new Set<string>();
   for (const entry of [...server.entries, ...stored.filter((entry) => !server.seen.has(entry.id))]) {
     if (entry.sessionId !== sessionId) continue;
     if (server.represented.has(entry.id)) continue;
     known.add(entry.id);
-    if (entry.state !== "delivered") held.push({ ...entry, state: entry.state, local: false });
+    if (entry.state !== "delivered") rows.push({ ...entry, state: entry.state, local: false });
   }
   for (const entry of local) {
     if (entry.sessionId === sessionId && !server.represented.has(entry.id) && !server.seen.has(entry.id) && !known.has(entry.id)) {
@@ -124,11 +132,17 @@ export function mergeHeldMessages(sessionId: string | null, local: LocalOutboxEn
   }
   for (const [id, entry] of server.known) {
     if (entry.sessionId !== sessionId || known.has(id) || server.represented.has(id)) continue;
-    if (server.uncertain.has(id)) held.push({ ...entry, state: "failed", mayHaveBeenSent: true, local: false });
-    else if (server.nativeSettled.has(id)) held.push({ ...entry, state: "delivering", local: false });
+    if (server.uncertain.has(id)) bridges.push({ ...entry, state: "failed", mayHaveBeenSent: true, local: false });
+    else if (server.nativeSettled.has(id)) bridges.push({ ...entry, state: "delivering", local: false });
   }
+  // `bridges` is already in `known` order; a row this browser never saw ranks after every one it did.
   const rank = new Map([...server.known.keys()].map((id, index) => [id, index]));
-  // Array.prototype.sort is stable: unranked rows keep their relative order.
-  held.sort((a, b) => (rank.get(a.id) ?? rank.size) - (rank.get(b.id) ?? rank.size));
-  return [...held, ...firstLeg];
+  const rankOf = (id: string) => rank.get(id) ?? Infinity;
+  const held: HeldMessage[] = [];
+  let next = 0;
+  for (const row of rows) {
+    while (next < bridges.length && rankOf(bridges[next].id) < rankOf(row.id)) held.push(bridges[next++]);
+    held.push(row);
+  }
+  return [...held, ...bridges.slice(next), ...firstLeg];
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { EMPTY_SERVER_OUTBOX, applyOutboxSnapshot, markOutboxUncertain, mergeHeldMessages, rememberOutboxEntries } from "./useAgentSession-queue.ts";
+import { EMPTY_SERVER_OUTBOX, applyOutboxSnapshot, markOutboxUncertain, mergeHeldMessages, rememberLocalOutbox, rememberOutboxEntries } from "./useAgentSession-queue.ts";
 import { readQueueSnapshot } from "../lib/client-message-ids";
 
 const local = (id, createdAt, enqueueOrder) => ({ id, sessionId: "s", scope: "scope", mode: "followUp", message: id, state: "sending", createdAt, enqueueOrder });
@@ -34,6 +34,17 @@ test("a bridge kept after the server settled its row keeps its place ahead of th
   assert.deepEqual(order(held), ["A:server", "B:server"], "an uncertain bridge keeps its position");
   assert.equal(held[0].state, "failed");
   assert.equal(held[0].mayHaveBeenSent, true);
+});
+
+test("the server snapshot's FIFO wins over the order this browser first remembered its rows in", () => {
+  // This browser typed A first and remembered it; the server (with another device's B ahead of it) queued [B, A].
+  const remembered = rememberOutboxEntries(EMPTY_SERVER_OUTBOX, [local("A", 100, 1)], true);
+  const server = applyOutboxSnapshot(remembered, [stored("B", 1000), stored("A", 1100)]);
+  assert.deepEqual(order(mergeHeldMessages("s", [], [], server)), ["B:server", "A:server"]);
+  // A bridge keeps its place relative to rows it was seen before, whatever order the snapshot lists them in.
+  const withBridge = applyOutboxSnapshot(applyOutboxSnapshot(EMPTY_SERVER_OUTBOX, [stored("X", 900), stored("B", 1000), stored("A", 1100)]),
+    [stored("A", 1100), stored("B", 1000)], ["X"], ["X"]);
+  assert.deepEqual(order(mergeHeldMessages("s", [], [], withBridge)), ["X:server", "A:server", "B:server"], "the snapshot's own order is not rewritten around a bridge");
 });
 
 test("queue snapshots retain aligned native client IDs, including uncorrelated slots", () => {
@@ -71,4 +82,12 @@ test("a worker replay of a browser copy never moves a server-remembered row back
   assert.deepEqual(order(mergeHeldMessages("moved", [], [], outbox)), ["row:server"], "the moved session still shows its bridge");
   // A browser-only row has nothing to protect: its replay still remembers the browser's payload.
   assert.equal(rememberOutboxEntries(EMPTY_SERVER_OUTBOX, [local("only-here", 100, 1)], true).known.get("only-here")?.sessionId, "s");
+});
+
+test("only this chat's entries from the worker's all-session list are remembered", () => {
+  const elsewhere = { ...local("elsewhere", 100, 1), sessionId: "other" };
+  const remembered = rememberLocalOutbox(EMPTY_SERVER_OUTBOX, [elsewhere, local("here", 200, 2)], "s");
+  assert.deepEqual([...remembered.known.keys()], ["here"]);
+  assert.equal(rememberLocalOutbox(EMPTY_SERVER_OUTBOX, [elsewhere, local("here", 200, 2)], null).known.size, 0, "a chat with no session yet remembers nothing");
+  assert.equal(rememberOutboxEntries(EMPTY_SERVER_OUTBOX, [elsewhere], true).known.has("elsewhere"), true, "the unfiltered remember is what let it pin the payload");
 });

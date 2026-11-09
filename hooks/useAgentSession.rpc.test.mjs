@@ -6662,6 +6662,34 @@ test("a failed history reload keeps the correlated echo until a readable history
   assert.equal(w.latest.messages.some((message) => message.clientMessageId === "rewound-intent"), false, "the rewound echo is gone once the history is readable");
 });
 
+test("a rewind prunes only the echoes received before it began, not a continuation's echo received while its history was unreadable", async () => {
+  resetWorld();
+  const sid = "outbox-rewind-new-echo";
+  primeSession(sid, [userMsg("u0", "first"), assistantMsg("a0", "answer")]);
+  world.agents.set(sid, { running: true, state: { isStreaming: true, supportsClientMessageIds: true } });
+  const w = await mountSession(sid);
+  const es = lastEs();
+  await act(() => es.open());
+  await settle();
+  world.contextUnavailable = true;
+  const oldEcho = { role: "user", content: [{ type: "text", text: "old tail" }], timestamp: 5 };
+  await act(() => es.emit({ type: "message_end", message: oldEcho, clientMessageId: "old-intent" }, { persist: false }));
+  await settle();
+  // The rewind begins; its history cannot be read yet.
+  await act(() => es.emit({ type: "session_history_changed", leafId: "e-edited" }));
+  await settle();
+  // The continuation's first message is echoed before the rewound history is readable.
+  const newEcho = { role: "user", content: [{ type: "text", text: "continuation" }], timestamp: 6 };
+  await act(() => es.emit({ type: "message_end", message: newEcho, clientMessageId: "new-intent" }, { persist: false }));
+  await settle();
+  world.contextUnavailable = false;
+  saveSession(sid, [userMsg("u0", "first edited")], ["e-edited"]);
+  await act(() => es.open());
+  await settle();
+  assert.equal(w.latest.messages.some((message) => message.clientMessageId === "old-intent"), false, "the old tail's echo is gone");
+  assert.ok(w.latest.messages.some((message) => message.clientMessageId === "new-intent"), "the continuation's echo is still shown");
+});
+
 for (const [name, savedTimestamp, expected] of [["the same native timestamp replaces the echo", 777, 1], ["another native timestamp keeps both", 778, 2]]) {
   test(`a saved copy without clientMessageId (older daemon) with ${name}`, async () => {
     resetWorld();
@@ -6681,6 +6709,31 @@ for (const [name, savedTimestamp, expected] of [["the same native timestamp repl
     // An older daemon saves the same message without the outer clientMessageId.
     world.contextUnavailable = false;
     appendEntry(sid, { role: "user", id: "u1", content: [{ type: "text", text: "legacy echo" }], timestamp: savedTimestamp });
+    await act(() => es.open());
+    await settle();
+    assert.equal(shown().length, expected);
+    assert.ok(w.latest.messages.some((message) => message.id === "u1"), "the saved copy is shown");
+  });
+}
+
+for (const [name, savedData, expected] of [["the same image replaces the echo", "AAAA", 1], ["another image keeps both", "BBBB", 2]]) {
+  test(`a saved copy without clientMessageId (older daemon) with the same timestamp and text but ${name}`, async () => {
+    resetWorld();
+    const sid = `outbox-legacy-saved-image-${savedData}`;
+    primeSession(sid, [userMsg("u0", "before")]);
+    world.agents.set(sid, { running: true, state: { isStreaming: true, supportsClientMessageIds: true } });
+    const w = await mountSession(sid);
+    const es = lastEs();
+    await act(() => es.open());
+    await settle();
+    world.contextUnavailable = true;
+    const content = (data) => [{ type: "text", text: "look at this" }, { type: "image", data, mimeType: "image/png" }];
+    await act(() => es.emit({ type: "message_end", message: { role: "user", content: content("AAAA"), timestamp: 888 }, clientMessageId: "image-intent" }, { persist: false }));
+    await settle();
+    const shown = () => w.latest.messages.filter((message) => message.role === "user" && JSON.stringify(message.content).includes("look at this"));
+    assert.equal(shown().length, 1, "only the echo shows this message while history is unreadable");
+    world.contextUnavailable = false;
+    appendEntry(sid, { role: "user", id: "u1", content: content(savedData), timestamp: 888 });
     await act(() => es.open());
     await settle();
     assert.equal(shown().length, expected);
@@ -7370,6 +7423,47 @@ test("a failed durable browser deletion keeps the held message and shows a notic
   assert.equal(w.latest.heldMessages[0].id, entry.id);
   assert.equal(w.latest.notices[0].type, "error");
   assert.match(w.latest.notices[0].message, /IndexedDB deletion failed/);
+});
+
+test("dismissing an uncertain bridge deletes the browser copy the worker still holds and hides the row only after that commits", async (t) => {
+  resetWorld();
+  const sid = "outbox-uncertain-local-copy";
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.agents.set(sid, { running: true, state: { isStreaming: true, supportsClientMessageIds: true } });
+  world.outboxHold = true;
+  const w = await mountSession(sid);
+  const es = lastEs();
+  await act(() => es.open());
+  await settle();
+  world.clientMessageStatuses.set(sid, clientMessageStatus());
+  const entry = { id: "uncertain-with-copy", sessionId: sid, mode: "followUp", message: "settled before its receipt", state: "delivering", createdAt: 1 };
+  // The server settled the id before the worker saw its outbox_add receipt: the worker still holds, and would retry, its copy.
+  const copy = { ...entry, scope: "test-scope", state: "sending" };
+  world.outbox.push(copy);
+  await act(() => workerPort.onmessage({ data: { outbox: [copy] } }));
+  await act(() => {
+    es.emit({ type: "outbox_update", entries: [entry], settledIds: [] });
+    es.emit({ type: "outbox_update", entries: [], settledIds: [entry.id], nativeSettledIds: [entry.id] });
+  });
+  await settle();
+  await act(async () => { await sleep(50); });
+  assert.equal(w.latest.heldMessages[0]?.state, "failed");
+  assert.equal(w.latest.heldMessages[0]?.mayHaveBeenSent, true);
+  world.outboxDrop = (complete) => complete("IndexedDB deletion failed");
+  await act(async () => { await w.latest.deleteHeldMessage(entry.id); });
+  assert.equal(w.latest.heldMessages[0]?.id, entry.id, "a failed durable delete keeps the row");
+  assert.match(w.latest.notices[0]?.message, /IndexedDB deletion failed/);
+  let commit;
+  t.after(async () => { await act(async () => { commit?.(); }); });
+  world.outboxDrop = (complete) => { commit = complete; };
+  let deleting;
+  await act(async () => { deleting = w.latest.deleteHeldMessage(entry.id); await Promise.resolve(); });
+  assert.ok(commit, "the worker was asked to delete its copy");
+  assert.equal(w.latest.heldMessages[0]?.id, entry.id, "the row stays until IndexedDB commits the delete");
+  await act(async () => { const complete = commit; commit = null; complete(); await deleting; });
+  assert.deepEqual(w.latest.heldMessages, []);
+  assert.equal(world.outbox.some((held) => held.id === entry.id), false, "the browser copy is gone, so a reload cannot bring the row back");
+  assert.equal(world.calls.some((call) => ["prompt", "steer", "follow_up", "outbox_remove"].includes(call.body?.type)), false, "dismissal neither resends nor touches the server row");
 });
 
 test("an offline send follows its held bubble when the worker list arrives before the commit ACK", async () => {

@@ -285,6 +285,12 @@ export function outboxSettlements(sessionId: string): {
   };
 }
 
+/** A session's entries and settlements read in one SQLite snapshot: a peer server retiring an entry between two separate
+ * reads would leave out both the entry and its receipt (or list it as pending and settled at once). */
+export function outboxSnapshot(sessionId: string): { entries: OutboxEntry[]; settledIds: string[]; nativeSettledIds?: string[] } {
+  return db().transaction(() => ({ entries: outboxEntries(sessionId), ...outboxSettlements(sessionId) }))();
+}
+
 function sessionKeys(sessionId: string): string[] {
   const wrapper = getRpcSession(sessionId);
   return [...new Set([sessionId, ...getRpcSessionKeys(sessionId), ...(wrapper?.sessionId ? [wrapper.sessionId] : [])])];
@@ -818,7 +824,7 @@ async function deliver(entry: Row): Promise<Outcome> {
         }
         db().prepare("UPDATE entries SET previous_entry_ids = ? WHERE id = ?").run(JSON.stringify(entryIds), current.id);
         previousEntryIds = entryIds;
-        if (Buffer.byteLength(JSON.stringify({ entries: outboxEntries(sessionId), ...outboxSettlements(sessionId) })) > MAX_OUTBOX_BYTES) {
+        if (Buffer.byteLength(JSON.stringify(outboxSnapshot(sessionId))) > MAX_OUTBOX_BYTES) {
           return fail(current, "The saved transcript boundary exceeds the outbox snapshot limit", false);
         }
       } catch (error) {
