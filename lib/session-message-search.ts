@@ -1,7 +1,8 @@
 import { createHash } from "crypto";
-import { open } from "fs/promises";
+import { open, stat } from "fs/promises";
 import { isRecord } from "./type-guards";
 import { listAllSessionInfos, type OmpSessionInfo } from "./omp/session-files";
+import { getSessionsDir } from "./omp/paths";
 
 /**
  * Full-text search over the on-disk omp session files.
@@ -18,6 +19,28 @@ import { listAllSessionInfos, type OmpSessionInfo } from "./omp/session-files";
  * Only `message` entries are considered: user and assistant text blocks.
  * Thinking blocks, tool results and tool-call arguments are not searchable,
  * matching what the web transcript actually shows.
+ *
+ * Scope and limits, so a client never reads more into an empty page than it
+ * proves:
+ *
+ *  - **This machine only.** The scan reads the session directory of the
+ *    omp-web process. Sessions of linked hosts (the daemon on another
+ *    machine) are not searched and cannot be; the route reports
+ *    `scope: "local"` so a native client does not present an empty answer as
+ *    a global search.
+ *  - **Files above 64 MiB are skipped** and counted in `skippedFiles`; their
+ *    messages are not searchable. Lines above 1 MiB are skipped too.
+ *  - **Two scans per process.** A third concurrent request is refused with
+ *    429 `search_busy` + `Retry-After`; a client that paginates while another
+ *    search runs can see that answer.
+ *  - **A cursor is a snapshot.** Sessions created after the first page are
+ *    not included, and a session that grows between pages is scanned only
+ *    below the cursor offset, so lines appended in the meantime are not
+ *    returned by that pagination run.
+ *
+ * A request may carry an `AbortSignal`; an aborted scan stops at the next
+ * chunk/line boundary and throws `SearchAbortedError`, so the caller's slot is
+ * released instead of being held by work nobody reads.
  */
 
 export const SEARCH_TIME_BUDGET_MS = 5_000;
@@ -52,7 +75,12 @@ interface SearchSlotHost {
 }
 const searchSlotHost = globalThis as unknown as SearchSlotHost;
 
-/** Reserve a scan slot; the caller MUST call `releaseSearchSlot` afterwards. */
+/** Reserve a scan slot; the caller MUST call `releaseSearchSlot` afterwards.
+ *
+ * The read-check-write below is safe because it runs to completion without an
+ * `await`: JavaScript is single-threaded, so no other request can observe the
+ * counter between the read and the write. Keep it that way — an `await` (or a
+ * move to a worker) would need an `Atomics`-backed counter instead. */
 export function tryAcquireSearchSlot(): boolean {
   const active = searchSlotHost.__ompActiveSessionSearches ?? 0;
   if (active >= SEARCH_MAX_CONCURRENT) return false;
@@ -85,13 +113,18 @@ export interface SessionSearchCursor {
   v: 1;
   /** Fingerprint of the query/option set the cursor belongs to. */
   q: string;
-  path: string;
+  /**
+   * Session id the scan resumes at. The id — not the session file path — is
+   * what the cursor carries: a path would disclose the server's home
+   * directory for no benefit, and the id is already in every hit.
+   */
+  sessionId: string;
   /**
    * Resume scanning bytes strictly below this offset. It is a line start,
    * except after a >1 MiB line was skipped mid-way.
    */
   offset: number;
-  /** Used only when the cursor's file vanished: continue with older files. */
+  /** Used only when the cursor's session vanished: continue with older ones. */
   modifiedMs: number;
 }
 
@@ -120,6 +153,8 @@ export interface SessionSearchOptions {
   query: string;
   limit?: number;
   cursor?: string;
+  /** Aborted by the HTTP layer when the client disconnects. */
+  signal?: AbortSignal;
   /** Test hooks; production uses the defaults. */
   now?: () => number;
   budgetMs?: number;
@@ -137,6 +172,19 @@ export class SearchCursorError extends Error {
     super(message);
     this.name = "SearchCursorError";
   }
+}
+
+/** The request went away; the scan stopped early and its slot was released. */
+export class SearchAbortedError extends Error {
+  constructor() {
+    super("search_aborted");
+    this.name = "SearchAbortedError";
+  }
+}
+
+/** Throw when the caller's request has been aborted. */
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new SearchAbortedError();
 }
 
 /** Query fingerprint so a cursor cannot be replayed against another search. */
@@ -161,16 +209,53 @@ export function decodeSearchCursor(raw: string): SessionSearchCursor | undefined
   if (!isRecord(value)) return undefined;
   if (value.v !== 1) return undefined;
   if (typeof value.q !== "string" || !value.q) return undefined;
-  if (typeof value.path !== "string" || !value.path) return undefined;
+  if (typeof value.sessionId !== "string" || !value.sessionId) return undefined;
   if (typeof value.offset !== "number" || !Number.isSafeInteger(value.offset) || value.offset < 0) return undefined;
   if (typeof value.modifiedMs !== "number" || !Number.isFinite(value.modifiedMs)) return undefined;
   return {
     v: 1,
     q: value.q,
-    path: value.path,
+    sessionId: value.sessionId,
     offset: value.offset,
     modifiedMs: value.modifiedMs,
   };
+}
+
+/**
+ * Cached session listing for the pages of one pagination run.
+ *
+ * `listAllSessionInfos()` walks the session directory and stats every file
+ * synchronously. On a 4,000-file corpus that is ~300 ms of blocked event loop
+ * per call — paid again on every page of one pagination run, and *before* the
+ * time budget starts, so the advertised budget covered only the cheap part.
+ *
+ * The cache is used only when a cursor is present: a fresh search always lists
+ * from disk, so a session created a second ago is found. Pages of a run reuse
+ * the listing the first page saw, which is what the cursor's snapshot
+ * semantics already promise. It is keyed by the sessions root and that
+ * directory's mtime — creating or deleting a session bumps it — and bounded by
+ * a TTL for filesystems where a write inside a project subdirectory leaves the
+ * root mtime alone (Windows/NTFS; see `listSessionFiles`). One entry, on
+ * `globalThis` so `bun --hot` re-evaluations share it.
+ */
+const SEARCH_LISTING_CACHE_TTL_MS = 5 * 60_000;
+
+interface SearchListingCacheEntry {
+  root: string;
+  rootMtimeMs: number;
+  at: number;
+  files: SessionSearchFile[];
+}
+
+interface SearchListingCacheHost {
+  __ompSessionSearchListing?: SearchListingCacheEntry;
+}
+
+const listingCacheHost = globalThis as unknown as SearchListingCacheHost;
+
+/** Drop the pagination listing cache (tests and explicit invalidation). */
+export function invalidateSessionSearchListing(): void {
+  listingCacheHost.__ompSessionSearchListing = undefined;
 }
 
 /** Production file list: the same newest-first metadata the sidebar uses. */
@@ -184,6 +269,36 @@ export async function loadSessionSearchFiles(): Promise<SessionSearchFile[]> {
     size: info.size,
     modifiedMs: info.modified.getTime(),
   }));
+}
+
+/**
+ * Listing for a paginated search: the cached one when it still describes this
+ * sessions root, otherwise a fresh walk that becomes the new cache entry.
+ */
+export async function loadSessionSearchFilesForPage(
+  now: () => number,
+): Promise<SessionSearchFile[]> {
+  const root = getSessionsDir();
+  let rootMtimeMs: number;
+  try {
+    rootMtimeMs = (await stat(root)).mtimeMs;
+  } catch {
+    // No sessions directory: an empty corpus, and nothing to cache.
+    invalidateSessionSearchListing();
+    return [];
+  }
+  const cached = listingCacheHost.__ompSessionSearchListing;
+  if (
+    cached &&
+    cached.root === root &&
+    cached.rootMtimeMs === rootMtimeMs &&
+    now() - cached.at < SEARCH_LISTING_CACHE_TTL_MS
+  ) {
+    return cached.files;
+  }
+  const files = await loadSessionSearchFiles();
+  listingCacheHost.__ompSessionSearchListing = { root, rootMtimeMs, at: now(), files };
+  return files;
 }
 
 interface Segment {
@@ -208,24 +323,30 @@ export async function searchSessionMessages(options: SessionSearchOptions): Prom
   const fileScanBytes = Math.max(chunkBytes, options.maxFileScanBytes ?? DEFAULT_FILE_SCAN_BYTES);
   const totalScanBytes = Math.max(chunkBytes, options.maxTotalScanBytes ?? DEFAULT_TOTAL_SCAN_BYTES);
   const key = searchQueryKey(query);
+  const signal = options.signal;
 
   if (!query) {
     return { results: [], partial: false, cursor: null, scannedFiles: 0, scannedBytes: 0, skippedFiles: 0 };
   }
+  throwIfAborted(signal);
 
   // Case-insensitive substring search without `toLowerCase()` on the haystack:
   // a lowercasing pass changes the length for some characters (e.g. "İ"), so
   // an offset found there would slice the wrong part of the original text.
   const matcher = new RegExp(escapeRegExp(query), "i");
-  // Equal mtimes are ordered by path so the vanished-file fallback below can
-  // tell "older" from "same age but already handled" deterministically.
+  // Equal mtimes are ordered by session id so the vanished-session fallback
+  // below can tell "older" from "same age but already handled" without the
+  // cursor having to carry a file path.
   // The deadline is armed *after* the listing: enumerating a large session
   // directory must not consume the scan budget, or the first page would come
-  // back empty with a cursor that never advances.
+  // back empty with a cursor that never advances. `loadSessionSearchFilesForPage`
+  // memoizes that listing per sessions-root mtime, so a pagination run pays
+  // for the walk once instead of on every page.
   const files = (options.sessions
     ? [...options.sessions]
-    : await (options.listSessions ?? loadSessionSearchFiles)())
-    .sort((a, b) => b.modifiedMs - a.modifiedMs || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    : await (options.listSessions ?? (options.cursor ? () => loadSessionSearchFilesForPage(now) : loadSessionSearchFiles))())
+    .sort((a, b) => b.modifiedMs - a.modifiedMs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  throwIfAborted(signal);
   const deadline = now() + Math.max(1, options.budgetMs ?? SEARCH_TIME_BUDGET_MS);
 
   let startIndex = 0;
@@ -236,18 +357,18 @@ export async function searchSessionMessages(options: SessionSearchOptions): Prom
     const cursor = decodeSearchCursor(options.cursor);
     if (!cursor) throw new SearchCursorError("invalid_cursor");
     if (cursor.q !== key) throw new SearchCursorError("cursor_query_mismatch");
-    const index = files.findIndex((file) => file.path === cursor.path);
+    const index = files.findIndex((file) => file.id === cursor.sessionId);
     if (index >= 0) {
       startIndex = index;
       startOffset = cursor.offset;
     } else {
-      // The session file disappeared between pages: everything older than it
-      // is still unscanned, so continue there instead of failing the page.
-      // "Older" follows the sort order above (mtime, then path).
+      // The session disappeared between pages: everything older than it is
+      // still unscanned, so continue there instead of failing the page.
+      // "Older" follows the sort order above (mtime, then session id).
       const fallback = files.findIndex(
         (file) =>
           file.modifiedMs < cursor.modifiedMs ||
-          (file.modifiedMs === cursor.modifiedMs && file.path > cursor.path),
+          (file.modifiedMs === cursor.modifiedMs && file.id > cursor.sessionId),
       );
       if (fallback < 0) {
         return { results: [], partial: false, cursor: null, scannedFiles: 0, scannedBytes: 0, skippedFiles: 0 };
@@ -266,12 +387,14 @@ export async function searchSessionMessages(options: SessionSearchOptions): Prom
   const cursorFor = (file: SessionSearchFile, offset: number): SessionSearchCursor => ({
     v: 1,
     q: key,
-    path: file.path,
+    sessionId: file.id,
     offset,
     modifiedMs: file.modifiedMs,
   });
 
   for (let index = startIndex; index < files.length; index++) {
+    // A client that hung up must not keep a slot while its page is built.
+    throwIfAborted(signal);
     const file = files[index];
     const resuming = index === startIndex && startOffset !== undefined;
     const boundary = Math.min(resuming ? startOffset! : file.size, file.size);
@@ -297,6 +420,7 @@ export async function searchSessionMessages(options: SessionSearchOptions): Prom
       chunkBytes,
       byteCap: fileScanBytes,
       totalByteCap: totalScanBytes - scannedBytes,
+      ...(signal ? { signal } : {}),
     });
     scannedFiles++;
     scannedBytes += outcome.bytes;
@@ -341,6 +465,7 @@ interface ScanFileOptions {
   chunkBytes: number;
   byteCap: number;
   totalByteCap: number;
+  signal?: AbortSignal;
 }
 
 /** A physical line that crosses the current chunk boundary. */
@@ -384,6 +509,10 @@ async function scanFileBackwards(options: ScanFileOptions): Promise<ScanOutcome>
     if (boundary > size) boundary = size;
 
     while (boundary > 0) {
+      // Checked per chunk (the read below is the only await in this loop), so
+      // an abandoned request stops within one read instead of scanning the
+      // rest of the file while holding its slot.
+      throwIfAborted(options.signal);
       let chunkLength = Math.min(
         options.chunkBytes,
         boundary,
@@ -503,7 +632,10 @@ async function scanFileBackwards(options: ScanFileOptions): Promise<ScanOutcome>
     }
 
     return { hits, bytes: bytesRead, done: true };
-  } catch {
+  } catch (error) {
+    // An abandoned request is not an unreadable file: let the caller release
+    // its slot and answer nothing.
+    if (error instanceof SearchAbortedError) throw error;
     // Unreadable file (permissions, deleted mid-scan): skip it, like the list.
     return { hits, bytes: bytesRead, done: true };
   } finally {

@@ -2,6 +2,7 @@ import {
   decodeSearchCursor,
   releaseSearchSlot,
   searchSessionMessages,
+  SearchAbortedError,
   SearchCursorError,
   SEARCH_DEFAULT_LIMIT,
   SEARCH_MAX_LIMIT,
@@ -16,15 +17,32 @@ function badRequest(error: string, code: string): Response {
 }
 
 /**
+ * Strict decimal integer: `Number("0x10")` and `Number("1e2")` would accept
+ * hex and exponent notation, which a `limit` query parameter never means.
+ */
+function parseLimit(raw: string | null): number | null {
+  if (raw === null) return SEARCH_DEFAULT_LIMIT;
+  if (!/^\d{1,3}$/.test(raw)) return null;
+  return Number(raw);
+}
+
+/**
  * GET /api/sessions/messages/search?q=&limit=&cursor=
  *
- * Read-only full-text search across the session files of this machine. The
+ * Read-only full-text search across the session files **of this machine**. The
  * scan is bounded: results are newest-first, `partial:true` plus `cursor` mean
  * "call again for the next slice". Authentication is the normal omp-web gate
  * in `proxy.ts`, because this lives under `/api/`.
  *
- * At most `SEARCH_MAX_CONCURRENT` scans run per process; further requests get
- * `429` + `Retry-After` instead of starving the event loop.
+ * `scope: "local"` is part of the answer: sessions of linked hosts are not
+ * searched, and a client must not present an empty page as a global result.
+ * Files above 64 MiB and lines above 1 MiB are skipped (`skippedFiles` counts
+ * the former). At most `SEARCH_MAX_CONCURRENT` scans run per process; further
+ * requests get `429` + `Retry-After` instead of starving the event loop, so a
+ * client that paginates while another search runs can see that answer.
+ *
+ * A client that disconnects aborts `req.signal`; the scan stops at the next
+ * chunk boundary, the slot is released, and no response body is written.
  */
 export async function GET(req: Request): Promise<Response> {
   const url = new URL(req.url);
@@ -34,9 +52,8 @@ export async function GET(req: Request): Promise<Response> {
     return badRequest(`Search query is too long (max ${SEARCH_MAX_QUERY_LENGTH})`, "query_too_long");
   }
 
-  const rawLimit = url.searchParams.get("limit");
-  const limit = rawLimit === null ? SEARCH_DEFAULT_LIMIT : Number(rawLimit);
-  if (!Number.isSafeInteger(limit) || limit < 1 || limit > SEARCH_MAX_LIMIT) {
+  const limit = parseLimit(url.searchParams.get("limit"));
+  if (limit === null || limit < 1 || limit > SEARCH_MAX_LIMIT) {
     return badRequest(`limit must be an integer between 1 and ${SEARCH_MAX_LIMIT}`, "invalid_limit");
   }
 
@@ -56,10 +73,12 @@ export async function GET(req: Request): Promise<Response> {
     const page = await searchSessionMessages({
       query,
       limit,
+      signal: req.signal,
       ...(rawCursor !== null ? { cursor: rawCursor } : {}),
     });
     return Response.json({
       query,
+      scope: "local",
       results: page.results,
       partial: page.partial,
       cursor: page.cursor,
@@ -68,14 +87,22 @@ export async function GET(req: Request): Promise<Response> {
       skippedFiles: page.skippedFiles,
     }, { headers: NO_STORE });
   } catch (error) {
+    if (error instanceof SearchAbortedError) {
+      // The client is gone; nobody reads this, but the slot must be free.
+      return new Response(null, { status: 499, headers: NO_STORE });
+    }
     if (error instanceof SearchCursorError) {
       return badRequest(
         error.message === "cursor_query_mismatch" ? "Cursor belongs to another search" : "Invalid search cursor",
         error.message,
       );
     }
-    // fs/parse failures can carry absolute paths; keep them server-side.
-    console.error("[api/sessions/messages/search]", error);
+    // fs/parse failures can carry absolute paths; log the message only, never
+    // the error object (its stack and `path` property would reach the log).
+    console.error(
+      "[api/sessions/messages/search] search failed:",
+      error instanceof Error ? error.message : String(error),
+    );
     return Response.json({ error: "Search failed", code: "internal_error" }, { status: 500, headers: NO_STORE });
   } finally {
     releaseSearchSlot();
