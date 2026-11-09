@@ -34,9 +34,10 @@ function stateFromGoal(goal: Goal | null): GoalModeState | null {
 
 export function readGoalModeState(value: unknown): GoalModeState | null {
   if (!isRecord(value)) return null;
+  if (!("goal" in value)) return null;
   const goal = readGoal(value.goal);
   // A present-but-malformed goal is not "no goal": refuse the snapshot.
-  if (value.goal != null && !goal) return null;
+  if (value.goal !== null && !goal) return null;
   const enabled = value.enabled;
   const mode = asString(value.mode);
   if (typeof enabled !== "boolean" || mode === undefined) return stateFromGoal(goal);

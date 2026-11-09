@@ -1405,6 +1405,67 @@ test("GOAL an omp command named goal wins over the client dispatch", async () =>
   assert.equal(world.calls.some((call) => call.body?.type === "goal"), false, "no native goal RPC");
 });
 
+test("GOAL a late catalog snapshot cannot overwrite a newer ownership event", async () => {
+  resetWorld();
+  primeSession("goal-catalog-race", [userMsg("u0", "loaded question")]);
+  const w = await mountSession("goal-catalog-race");
+  let release;
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "get_commands",
+    produce: () => new Promise((resolve) => {
+      release = () => resolve({
+        value: { success: true, data: { commands: [{ name: "todo", source: "builtin" }] } },
+      });
+    }),
+  });
+
+  let loading;
+  await act(async () => {
+    loading = w.latest.loadSlashCommands();
+    await sleep(20);
+  });
+  await act(async () => w.latest.handleAgentEventRef.current({
+    type: "available_commands_update",
+    commands: [{ name: "goal", source: "extension", description: "new owner" }],
+  }));
+  await act(async () => {
+    release();
+    await loading;
+  });
+
+  assert.deepEqual(w.latest.slashCommands.map((command) => command.name), ["goal"]);
+  assert.deepEqual(await act(async () => w.latest.handleBuiltinSlashCommand("/goal ship it")), { handled: false });
+  assert.equal(world.calls.some((call) => call.body?.type === "goal"), false);
+});
+
+test("GOAL a failed catalog refresh preserves a newer ownership event", async (t) => {
+  resetWorld();
+  primeSession("goal-catalog-failure", [userMsg("u0", "loaded question")]);
+  const w = await mountSession("goal-catalog-failure");
+  t.mock.method(console, "error", () => {});
+  await act(async () => w.latest.handleAgentEventRef.current({
+    type: "available_commands_update",
+    commands: [{ name: "goal", source: "extension", description: "new owner" }],
+  }));
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "get_commands",
+    produce: async () => ({ status: 503, value: { error: "offline" } }),
+  });
+
+  let failure;
+  await act(async () => {
+    try {
+      await w.latest.loadSlashCommands();
+    } catch (error) {
+      failure = error;
+    }
+  });
+  assert.match(String(failure), /offline/);
+  assert.deepEqual(w.latest.slashCommands.map((command) => command.name), ["goal"]);
+  assert.deepEqual(await act(async () => w.latest.handleBuiltinSlashCommand("/goal ship it")), { handled: false });
+  assert.equal(world.calls.some((call) => call.body?.type === "goal"), false);
+});
+
 test("GOAL pause, resume and drop send the matching RPC and update the banner", async () => {
   resetWorld();
   primeSession("goal-actions", [userMsg("u0", "loaded question")]);
@@ -2849,6 +2910,103 @@ function holdNext(match) {
   world.holds.push({ match, produce: () => new Promise((resolve) => { held.release = (value, status = 200) => resolve({ status, value }); }) });
   return held;
 }
+
+async function mountCompactionObserver(sid) {
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  world.agents.set(sid, { running: true, state: {} });
+  await deliverRunning([sid]);
+  await settle();
+  const es = lastEs();
+  await act(async () => {
+    es.open();
+    await sleep(30);
+  });
+  return { w, es };
+}
+
+test("manual compaction events preserve overlapping local compaction ownership in either settlement order", async () => {
+  resetWorld();
+  const sid = "manual-local-overlap";
+  const { w, es } = await mountCompactionObserver(sid);
+
+  const first = holdNext((method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "compact");
+  let firstCompaction;
+  await act(async () => {
+    firstCompaction = w.latest.handleCompact();
+    await sleep(30);
+  });
+  await act(async () => {
+    es.emit({ type: "manual_compaction_start" });
+    es.emit({ type: "manual_compaction_end" });
+  });
+  assert.equal(w.latest.isCompacting, true, "a native end cannot release the local command");
+  await act(async () => {
+    first.release({ success: true, data: {} });
+    await firstCompaction;
+  });
+  assert.equal(w.latest.isCompacting, false);
+
+  const second = holdNext((method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "compact");
+  let secondCompaction;
+  await act(async () => {
+    secondCompaction = w.latest.handleCompact();
+    await sleep(30);
+    es.emit({ type: "manual_compaction_start" });
+  });
+  await act(async () => {
+    second.release({ success: true, data: {} });
+    await secondCompaction;
+  });
+  assert.equal(w.latest.isCompacting, true, "the native compaction keeps ownership after the local command settles");
+  await act(async () => {
+    es.emit({ type: "manual_compaction_end" });
+  });
+  assert.equal(w.latest.isCompacting, false);
+});
+
+test("a remote manual compaction blocks a local compact command until its end event", async () => {
+  resetWorld();
+  const sid = "remote-manual-compact";
+  const { w, es } = await mountCompactionObserver(sid);
+  const compactCalls = () => callsTo("POST", `/api/agent/${sid}`).filter((call) => call.body?.type === "compact").length;
+
+  await act(async () => {
+    es.emit({ type: "manual_compaction_start" });
+  });
+  assert.equal(w.latest.isCompacting, true);
+  await act(async () => {
+    await w.latest.handleCompact();
+  });
+  assert.equal(compactCalls(), 0, "the remote owner prevents a competing compact command");
+
+  await act(async () => {
+    es.emit({ type: "manual_compaction_end" });
+  });
+  assert.equal(w.latest.isCompacting, false);
+});
+
+test("an auto-compaction end event cannot release an overlapping local compaction", async () => {
+  resetWorld();
+  const sid = "auto-local-overlap";
+  const { w, es } = await mountCompactionObserver(sid);
+  const compact = holdNext((method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "compact");
+  let compacting;
+  await act(async () => {
+    compacting = w.latest.handleCompact();
+    await sleep(30);
+  });
+  await act(async () => {
+    es.emit({ type: "auto_compaction_start" });
+    es.emit({ type: "auto_compaction_end" });
+  });
+  assert.equal(w.latest.isCompacting, true, "the local command still owns compaction");
+  await act(async () => {
+    compact.release({ success: true, data: {} });
+    await compacting;
+  });
+  assert.equal(w.latest.isCompacting, false);
+});
 
 test("an idle snapshot cannot release a manual compaction this tab is still sending", async () => {
   resetWorld();
@@ -6550,6 +6708,41 @@ test("a fresh chat's /btw question attaches one event stream instead of an obser
   assert.deepEqual(result, { handled: true });
   assert.equal(streamsBeforeOpen, 1, "the question owns the only stream");
   assert.equal(world.esInstances.length, 1);
+});
+
+test("a fresh chat dispatches /btw against the catalog loaded by the composer", async () => {
+  resetWorld();
+  const sid = "fresh-catalog-btw";
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ value: { sessionId: sid } }),
+  });
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "get_commands",
+    produce: async () => ({ value: { success: true, data: { commands: [] } } }),
+  });
+  holdBtwCommand("btw", async () => ({ value: { success: true, data: { record: btwRecord() } } }));
+  const w = await mountSession(null, undefined, { newSessionCwd: "/workspace", onSessionCreated: () => {} });
+
+  await act(async () => {
+    await w.latest.loadSlashCommands();
+  });
+  let asked;
+  await act(async () => {
+    asked = w.latest.handleBuiltinSlashCommand("/btw what is 2+2");
+    await sleep(30);
+  });
+  let result;
+  await act(async () => {
+    lastEs().open();
+    result = await asked;
+  });
+  w.unmount();
+
+  assert.deepEqual(result, { handled: true });
+  assert.equal(callsTo("POST", "/api/agent/new").length, 1, "catalog discovery and dispatch share one runtime");
+  const commands = callsTo("POST", `/api/agent/${sid}`).map((call) => call.body?.type);
+  assert.ok(commands.indexOf("get_commands") < commands.indexOf("btw"), "the authoritative catalog is loaded before client dispatch");
 });
 
 test("a first prompt rejected after promotion identifies the real-session recovery draft", async () => {

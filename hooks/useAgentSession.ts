@@ -426,6 +426,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // but the unknown-command warning must not flag them (#167). Ref-only: it is
   // consulted at send time and must never re-render the composer.
   const knownSlashCommandNamesRef = useRef<string[]>([]);
+  const slashCommandsRef = useRef<SlashCommandInfo[]>([]);
+  /** Invalidates an older `get_commands` snapshot when a live catalog event wins. */
+  const slashCatalogVersionRef = useRef(0);
   /** True once a `get_commands` reply actually arrived: until then an empty
    *  roster means "not asked yet", not "omp owns nothing". */
   const slashRosterLoadedRef = useRef(false);
@@ -1352,31 +1355,31 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const loadSlashCommands = useCallback(async () => {
     if (slashCommandsInFlightRef.current) return slashCommandsInFlightRef.current;
+    const requestedVersion = slashCatalogVersionRef.current;
     const request = (async () => {
       const sid = sessionIdRef.current ?? await ensureNewSession();
       if (!sid) {
-        setSlashCommands([]);
-        knownSlashCommandNamesRef.current = [];
-        return [] as SlashCommandInfo[];
+        throw new Error("No session is available for slash-command discovery");
       }
       setSlashCommandsLoading(true);
       try {
         const data = await sendAgentCommand<SlashCommandsResponse>(sid, { type: "get_commands" });
         const available = Array.isArray(data?.commands) ? data.commands : [];
+        if (slashCatalogVersionRef.current !== requestedVersion) return slashCommandsRef.current;
         // Keep every source, builtins included: omp runs them through the prompt
         // path and they must not be reported as unknown (#167).
-        // A reply carrying no list is not evidence that nothing is known, so it
-        // must not erase a roster an earlier reply did supply.
-        if (available.length > 0) knownSlashCommandNamesRef.current = slashCommandRosterNames(available);
+        // A reply carrying no list is not evidence that nothing is known. An
+        // explicit empty list is authoritative once no newer event superseded it.
+        if (Array.isArray(data?.commands)) {
+          knownSlashCommandNamesRef.current = slashCommandRosterNames(available);
+          slashCommandsRef.current = available.map(toSlashCommandInfo);
+          setSlashCommands(slashCommandsRef.current);
+        }
         slashRosterLoadedRef.current = true;
-        const commands = available.map(toSlashCommandInfo);
-        setSlashCommands(commands);
-        return commands;
+        return slashCommandsRef.current;
       } catch (e) {
         console.error("Failed to load slash commands:", e);
-        setSlashCommands([]);
-        knownSlashCommandNamesRef.current = [];
-        return [] as SlashCommandInfo[];
+        throw e;
       } finally {
         setSlashCommandsLoading(false);
       }
@@ -2696,8 +2699,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       case "available_commands_update": {
         const commands = (event.commands as RpcAvailableSlashCommand[] | undefined) ?? [];
+        slashCatalogVersionRef.current += 1;
+        slashRosterLoadedRef.current = true;
         knownSlashCommandNamesRef.current = slashCommandRosterNames(commands);
-        setSlashCommands(commands.map(toSlashCommandInfo));
+        slashCommandsRef.current = commands.map(toSlashCommandInfo);
+        setSlashCommands(slashCommandsRef.current);
         break;
       }
       case "goal_updated": {
@@ -4137,7 +4143,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [ensureEventsConnected, ensureNewSession, promoteNewSession, sendBtw]);
 
-  const handleBuiltinSlashCommand = useCallback(async (text: string): Promise<BuiltinSlashCommandResult> => {
+  const handleBuiltinSlashCommand = useCallback(async (
+    text: string,
+    sendPrompt?: (message: string) => Promise<PromptSubmissionResult>,
+  ): Promise<BuiltinSlashCommandResult> => {
     if (editInFlightRef.current) return { handled: true, retainInput: true };
     if (!text.startsWith("/")) return { handled: false };
     const match = text.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/);
@@ -4165,10 +4174,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // `name`, or `copy` must not be shadowed. A pasted or dictated command can
       // reach dispatch before autocomplete ever fetched the roster, so ask once
       // here rather than deciding on an empty list.
-      // A fresh chat has no roster until omp starts, and starting it here would
-      // attach an observer stream beside the command's own; its first command
-      // creates the runtime, and the roster is known from the next dispatch on
-      // (typing "/" already loads it through the palette).
+      // ChatInput resolves the catalog before invoking this handler, including
+      // for a fresh chat (that lookup creates its runtime). Direct callers can
+      // still arrive here without a runtime; they create it in the selected
+      // command path, and later dispatches load its roster here.
       if (!slashRosterLoadedRef.current && sessionIdRef.current) await loadSlashCommands();
       if (!hookAliveRef.current) return { handled: true };
       if (knownSlashCommandNamesRef.current.includes(commandName)) return { handled: false };
@@ -4273,7 +4282,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             });
           }
           if (commandName === "plan") setActivePlan({ objective: args });
-          const sent = await handleSend(expansion.prompt);
+          const sent = await (sendPrompt ? sendPrompt(expansion.prompt) : handleSend(expansion.prompt));
           if (sent.status !== "accepted") {
             if (commandName === "plan") setActivePlan(null);
             return { handled: true, retainInput: true };

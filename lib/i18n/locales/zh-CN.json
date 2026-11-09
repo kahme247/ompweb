@@ -502,6 +502,7 @@
   "chatInput.inputHistory": "输入历史",
   "chatInput.kindFollowUp": "追加消息",
   "chatInput.kindSteer": "引导",
+  "chatInput.commandCatalogUnavailable": "无法加载斜杠命令，请重试。",
   "chatInput.loadingCommands": "正在加载命令...",
   "chatInput.loadingFiles": "正在加载文件...",
   "chatInput.loadingModels": "正在加载模型...",

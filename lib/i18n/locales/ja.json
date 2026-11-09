@@ -502,6 +502,7 @@
   "chatInput.inputHistory": "入力履歴",
   "chatInput.kindFollowUp": "フォローアップ",
   "chatInput.kindSteer": "ステア",
+  "chatInput.commandCatalogUnavailable": "スラッシュコマンドを読み込めませんでした。もう一度お試しください。",
   "chatInput.loadingCommands": "コマンドを読み込み中...",
   "chatInput.loadingFiles": "ファイルを読み込み中...",
   "chatInput.loadingModels": "モデルを読み込み中...",

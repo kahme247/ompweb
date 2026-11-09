@@ -39,6 +39,7 @@ function override(target, key, replacement) {
 
 beforeEach(() => {
   window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+  window.HTMLElement.prototype.scrollIntoView = () => {};
   globalThis.FileReader = TestFileReader;
   URL.createObjectURL ??= () => "blob:test";
   URL.revokeObjectURL ??= () => {};
@@ -50,6 +51,7 @@ afterEach(() => {
     clearDraft(KEY);
     localStorage.clear();
     delete window.matchMedia;
+    delete window.HTMLElement.prototype.scrollIntoView;
     globalThis.FileReader = previousFileReader;
     while (overrides.length) {
       const { target, key, original } = overrides.pop();
@@ -191,6 +193,88 @@ test("a catalog-owned goal with attachments is forwarded once the catalog answer
   assert.deepEqual(builtins, [], "with attachments the command goes straight to the prompt");
 });
 
+test("a delayed catalog dispatch never clears text typed after the original command", async () => {
+  const user = userEvent.setup();
+  let release;
+  const catalog = new Promise((resolve) => { release = resolve; });
+  const builtins = [];
+  await renderWithAttachments({
+    attachments: false,
+    isStreaming: false,
+    slashCommands: [],
+    onLoadSlashCommands: () => catalog,
+    onBuiltinCommand: async (message) => {
+      builtins.push(message);
+      return { handled: true };
+    },
+  });
+  const textbox = screen.getByRole("textbox");
+  await user.type(textbox, "/goal first");
+  await user.keyboard("{Enter}");
+  await user.clear(textbox);
+  await user.type(textbox, "newer draft");
+  await act(async () => release([]));
+  await waitFor(() => assert.deepEqual(builtins, ["/goal first"]));
+  assert.equal(textbox.value, "newer draft");
+  assert.equal(getDraft(KEY)?.value, "newer draft");
+});
+
+test("a failed catalog lookup retains the command and retries instead of guessing ownership", async () => {
+  const user = userEvent.setup();
+  let attempts = 0;
+  let failed = false;
+  let rejectFirst;
+  const first = new Promise((_, reject) => { rejectFirst = reject; });
+  const builtins = [];
+  await renderWithAttachments({
+    attachments: false,
+    isStreaming: false,
+    slashCommands: [],
+    onLoadSlashCommands: () => {
+      attempts += 1;
+      return failed ? [] : first;
+    },
+    onBuiltinCommand: async (message) => {
+      builtins.push(message);
+      return { handled: true };
+    },
+  });
+  const textbox = screen.getByRole("textbox");
+  await user.type(textbox, "/goal retry");
+  await user.keyboard("{Enter}");
+  await waitFor(() => assert.ok(attempts >= 1));
+  await act(async () => {
+    failed = true;
+    rejectFirst(new Error("catalog offline"));
+    await Promise.resolve();
+  });
+  assert.equal(textbox.value, "/goal retry");
+  assert.deepEqual(builtins, []);
+
+  await user.keyboard("{Enter}");
+  await waitFor(() => assert.deepEqual(builtins, ["/goal retry"]));
+  assert.ok(attempts >= 2);
+});
+
+test("an idle web slash command expands before its attachments are composed", async () => {
+  const { expandWebSlashCommand } = await import("@/lib/web-slash-commands");
+  const user = userEvent.setup();
+  const { calls } = await renderWithAttachments({
+    isStreaming: false,
+    onBuiltinCommand: async (message, sendPrompt) => {
+      const expansion = expandWebSlashCommand(message);
+      assert.equal(expansion.kind, "expand");
+      const result = await sendPrompt(expansion.prompt);
+      return { handled: true, retainInput: result.status !== "accepted" };
+    },
+  });
+  await user.type(screen.getByRole("textbox"), "/plan ship it");
+  await user.keyboard("{Enter}");
+  await waitFor(() => assert.equal(calls.length, 1));
+  assert.equal(calls[0].name, "onSend");
+  assertQueuedWithAttachments(calls[0], expandWebSlashCommand("/plan ship it").prompt);
+});
+
 test("a queued web slash command is expanded and keeps the attachments", async () => {
   const { expandWebSlashCommand } = await import("@/lib/web-slash-commands");
   window.HTMLElement.prototype.scrollIntoView = () => {};
@@ -202,6 +286,16 @@ test("a queued web slash command is expanded and keeps the attachments", async (
   delete window.HTMLElement.prototype.scrollIntoView;
   assert.equal(calls[0].name, "onFollowUp", "a slash command is held like any follow-up; the server sends it as a prompt");
   assertQueuedWithAttachments(calls[0], expandWebSlashCommand("/plan ship it").prompt);
+});
+
+test("streaming hides client-only commands but keeps queueable web commands in the palette", async () => {
+  window.HTMLElement.prototype.scrollIntoView = () => {};
+  const user = userEvent.setup();
+  await renderWithAttachments({ attachments: false, isStreaming: true, slashCommands: [] });
+  await user.type(screen.getByRole("textbox"), "/");
+  await waitFor(() => assert.ok(screen.getByRole("option", { name: /\/plan\b/i })));
+  assert.equal(screen.queryByRole("option", { name: /\/goal\b/i }), null);
+  delete window.HTMLElement.prototype.scrollIntoView;
 });
 
 test("a queued /goal runs the native goal RPC instead of entering the prompt queue", async () => {

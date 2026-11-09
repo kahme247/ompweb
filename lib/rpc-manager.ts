@@ -38,7 +38,7 @@ import type {
 import type { AgentMessage, CrossSessionHostToolCall, CrossSessionHostToolEvent, ExitedRpcSession, ExtensionWidgetItem } from "./types";
 import { isLinkUp, type Host, type HostStatus, type SpawnRequest, type SpawnResult } from "./hosts/host";
 import { freezeHostLinks, getHost, hostOwnsLifecycle, isNotifier, lastUplinkAt, listHosts, orphanExit } from "./hosts/hub";
-import { HISTORY_MUTATING_COMMANDS, HostOpError, PEER_MESSAGE_FRAME } from "./hosts/link-protocol";
+import { HostOpError, isHistoryMutatingCommand, PEER_MESSAGE_FRAME } from "./hosts/link-protocol";
 import { LOCAL_HOST_ID } from "./hosts/registry";
 import type { OpResult } from "./hosts/session-ops";
 import { hostForSessionId, invalidateHostSessionList, listSessionsAllHosts, sessionSpawnTarget } from "./hosts/session-index";
@@ -1265,10 +1265,15 @@ export class AgentSessionWrapper {
         patchEstimatedTokensAfter(event.result);
         this.invalidateSessionLists();
         break;
+      case "manual_compaction_start":
+        this.compacting = true;
+        break;
       case "manual_compaction_end":
         // `/compact` runs through omp's builtin; the client reads this event
         // result for the banner, so patch it like the RPC response path.
+        this.compacting = false;
         patchEstimatedTokensAfter(event.result);
+        this.invalidateSessionLists();
         break;
       case "notice":
         if (event.source === "session-persistence") void this.followSessionMove();
@@ -2527,12 +2532,9 @@ export class AgentSessionWrapper {
     if (typeof command.type === "string" && command.type.startsWith("abort")) {
       console.info("[omp-web] cancellation-command", JSON.stringify({ sessionId: this._sessionId, type: command.type, at: new Date().toISOString() }));
     }
-    const commandType = command.type as string;
     // Goal mutations change session state and the active tool set, so they
     // must not race a history edit. The read-only `get` op stays available.
-    const mutatesHistory =
-      HISTORY_MUTATING_COMMANDS.has(commandType)
-      || (commandType === "goal" && command.op !== "get");
+    const mutatesHistory = isHistoryMutatingCommand(command);
     if (mutatesHistory && this.historyEditInFlight) {
       throw new WebRpcError("Wait for the history edit to finish", "session_busy");
     }

@@ -124,13 +124,13 @@ current turn continues, and omp decides continuation at the next terminal
 `agent_end`. A client-owned command with attachments is refused before any of
 these steps, so a queued `/goal` cannot clear an attached file.
 
-The catalog is authoritative for the dispatcher too, not only for the palette:
-`handleBuiltinSlashCommand` loads the roster once before the switch when a
-session exists, so a pasted or dictated command cannot reach a client handler
-whose name an extension, skill or custom command also owns. A brand-new chat has
-no roster before omp starts; starting it there would attach an observer stream
-beside the command's own, so its first command creates the runtime and later
-dispatches see the roster (typing `/` loads it through the palette as well).
+The catalog is authoritative for the dispatcher too, not only for the palette.
+`ChatInput` resolves it before routing any slash command, including a pasted or
+dictated command and the first command in a brand-new chat. In the latter case
+the lookup creates the runtime and its observer before dispatch. This prevents a
+client handler from shadowing an extension, skill or custom command with the
+same name. `handleBuiltinSlashCommand` also loads a missing roster when a
+session already exists, covering direct callers that bypass the composer.
 
 An asynchronous client command clears only its unchanged originating draft on
 success. Dictation's explicit text override does not bypass that check: newer

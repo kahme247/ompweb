@@ -519,6 +519,7 @@
   "chatInput.inputHistory": "Input history",
   "chatInput.kindFollowUp": "follow-up",
   "chatInput.kindSteer": "steer",
+  "chatInput.commandCatalogUnavailable": "Couldn’t load slash commands. Try again.",
   "chatInput.loadingCommands": "Loading commands...",
   "chatInput.loadingFiles": "Loading files...",
   "chatInput.loadingModels": "Loading models...",

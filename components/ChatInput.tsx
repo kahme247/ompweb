@@ -248,7 +248,10 @@ interface Props {
   slashCommands?: SlashCommandInfo[];
   slashCommandsLoading?: boolean;
   onLoadSlashCommands?: () => Promise<SlashCommandInfo[]> | SlashCommandInfo[];
-  onBuiltinCommand?: (message: string) => Promise<BuiltinSlashCommandResult>;
+  onBuiltinCommand?: (
+    message: string,
+    sendPrompt?: (message: string) => Promise<PromptSubmissionResult>,
+  ) => Promise<BuiltinSlashCommandResult>;
   onAudioUnlock?: () => void;
   draftKey?: string;
   /** Owning host for file uploads and the @ file index (this machine when absent). */
@@ -439,9 +442,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const resolveCommandCatalog = useCallback((): Promise<Set<string>> => {
     if (ompCommandNames.size > 0 || !onLoadSlashCommands) return Promise.resolve(ompCommandNames);
     if (!catalogRequestRef.current) {
-      catalogRequestRef.current = Promise.resolve(onLoadSlashCommands())
-        .then((commands) => new Set((commands ?? []).flatMap((command) => [command.name, ...(command.aliases ?? [])])))
-        .catch(() => ompCommandNames);
+      const request = Promise.resolve()
+        .then(() => onLoadSlashCommands())
+        .then((commands) => new Set((commands ?? []).flatMap((command) => [command.name, ...(command.aliases ?? [])])));
+      catalogRequestRef.current = request;
+      void request.finally(() => {
+        if (catalogRequestRef.current === request) catalogRequestRef.current = null;
+      }).catch(() => {});
     }
     return catalogRequestRef.current;
   }, [ompCommandNames, onLoadSlashCommands]);
@@ -1242,12 +1249,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const revision = attachmentRevisionRef.current;
     const images = attachedImagesRef.current;
     const files = attachedTextFilesRef.current;
+    const uploads = attachedUploadsRef.current;
+    const sendPrompt = (prompt: string) => onSend(
+      composeMessageWithTextAttachments(prompt, files),
+      images.length ? images : undefined,
+      ...uploadArgs(uploads),
+    );
     // Dictation inserts overrideText in the same batch as dispatch. It still
     // must match on completion; an override does not own subsequent typing.
     const stored = clearOnceStored(sentValue);
     holdingRef.current = true;
     try {
-      const result = await onBuiltinCommand(msg);
+      const result = await onBuiltinCommand(msg, sendPrompt);
       if (!result.handled) return false;
       const unchanged = valueRef.current === sentValue
         && attachmentRevisionRef.current === revision
@@ -1261,7 +1274,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       stored.release();
       holdingRef.current = false;
     }
-  }, [onBuiltinCommand, clearOnceStored]);
+  }, [onBuiltinCommand, onSend, clearOnceStored]);
 
   /** `/btw` asks a side question beside any run: never a prompt, never
    * queued. Attachments cannot ride along, so refuse and keep the draft
@@ -1291,11 +1304,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       catalogGateRef.current = true;
       try {
         catalog = await resolveCommandCatalog();
+      } catch {
+        toast.error(t("chatInput.commandCatalogUnavailable"));
+        return;
       } finally {
         catalogGateRef.current = false;
       }
     }
-    if (sendSideQuestion(msg, overrideText, catalog)) return;
+    if (sendSideQuestion(msg, raw, catalog)) return;
     if (rejectsPendingUploads()) return;
     if (msg.startsWith("/") && (attachedImagesRef.current.length || attachedTextFilesRef.current.length || attachedUploadsRef.current.length)) {
       const commandName = msg.slice(1).split(/\s+/)[0];
@@ -1305,13 +1321,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       }
     }
     const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFilesRef.current);
-    if (!attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length && msg.startsWith("/") && onBuiltinCommand) {
+    if (msg.startsWith("/") && onBuiltinCommand) {
       const commandName = msg.slice(1).split(/\s+/)[0];
       const expansion = catalog.has(commandName)
         ? { kind: "not-web" as const }
         : expandWebSlashCommand(msg);
-      if (expansion.kind === "expand" && rejectsOversizedPrompt(expansion.prompt, attachedImagesRef.current)) return;
-      if (await runBuiltinCommand(msg, overrideText)) return;
+      if (expansion.kind === "expand") {
+        const expandedMessage = composeMessageWithTextAttachments(expansion.prompt, attachedTextFilesRef.current);
+        if (rejectsOversizedPrompt(expandedMessage, attachedImagesRef.current)) return;
+      }
+      if (!catalog.has(commandName) && await runBuiltinCommand(msg, raw)) return;
     }
     if (submissionBlockedRef.current) return;
     if (rejectsOversizedPrompt(composedMessage, attachedImagesRef.current)) return;
@@ -1516,7 +1535,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           return modelCollator.compare(a.name, b.name);
         });
     }
-    const commands = [...(isStreaming ? [] : builtinSlashCommands), ...externalSlashCommands];
+    const commands = [
+      ...builtinSlashCommands.filter((command) => !isStreaming || CLIENT_ONLY_COMMAND_NAMES[command.name] !== true),
+      ...externalSlashCommands,
+    ];
     return [...commands]
       .filter((command) => {
         const name = command.name.toLowerCase();
@@ -1798,11 +1820,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       catalogGateRef.current = true;
       try {
         catalog = await resolveCommandCatalog();
+      } catch {
+        toast.error(t("chatInput.commandCatalogUnavailable"));
+        return;
       } finally {
         catalogGateRef.current = false;
       }
     }
-    if (sendSideQuestion(msg, overrideText, catalog)) return;
+    if (sendSideQuestion(msg, raw, catalog)) return;
     if (rejectsPendingUploads()) return;
     if (msg.startsWith("!") && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length) {
       void handleSend(overrideText);
@@ -1847,7 +1872,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           toast.error(t("chatInput.commandAttachmentsUnsupported"));
           return;
         }
-        if (onBuiltinCommand) void runBuiltinCommand(msg, overrideText);
+        if (onBuiltinCommand) void runBuiltinCommand(msg, raw);
         return;
       }
       // Web-only prompt expansions (/plan, /fix, ...) must be expanded even
