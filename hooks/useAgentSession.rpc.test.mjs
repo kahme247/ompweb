@@ -1273,7 +1273,8 @@ for (const status of ["active", "paused", "dropped", "cleared", "replaced"]) {
       lastEs()?.open();
       await command;
     });
-    assert.deepEqual(w.latest.goalState, nextState);
+    // A dropped goal has nothing left to show, so the banner is already gone.
+    assert.deepEqual(w.latest.goalState, status === "dropped" ? null : nextState);
     assert.deepEqual(
       world.calls.filter((call) => call.body?.type === "prompt").map((call) => call.body.message),
       status === "active" ? ["ship the export"] : [],
@@ -1296,6 +1297,43 @@ test("GOAL get_state and goal_updated both feed the banner", async () => {
   await act(async () => w.latest.handleAgentEventRef.current({ type: "goal_updated", goal: null, state: null }));
   assert.equal(w.latest.goalState, null, "a cleared goal hides the banner");
 });
+
+for (const order of ["event then reply", "reply then event"]) {
+  test(`GOAL a dropped goal hides the banner when the ${order}`, async () => {
+    resetWorld();
+    const sid = `goal-drop-${order.replaceAll(" ", "-")}`;
+    primeSession(sid, [userMsg("u0", "loaded question")]);
+    world.agents.set(sid, { running: false, state: { goal: goalState() } });
+    const w = await mountSession(sid);
+    assert.equal(w.latest.goalState?.goal?.status, "active");
+
+    const dropped = { ...GOAL, status: "dropped", updatedAt: 2000 };
+    const emitDrop = () => w.latest.handleAgentEventRef.current({ type: "goal_updated", goal: dropped, state: goalState(dropped) });
+    let release;
+    world.holds.push({
+      match: (method, _url, body) => method === "POST" && body?.type === "goal",
+      produce: () => new Promise((resolve) => {
+        release = () => resolve({ value: { success: true, data: { goal: null, state: null } } });
+      }),
+    });
+    let action;
+    await act(async () => {
+      action = w.latest.handleGoalAction("drop");
+      await sleep(20);
+    });
+
+    if (order === "event then reply") {
+      await act(async () => emitDrop());
+      assert.equal(w.latest.goalState, null, "the drop event alone hides the banner");
+      await act(async () => { release(); await action; });
+    } else {
+      await act(async () => { release(); await action; });
+      assert.equal(w.latest.goalState, null, "the null reply alone hides the banner");
+      await act(async () => emitDrop());
+    }
+    assert.equal(w.latest.goalState, null, "no later event brings the dropped goal back");
+  });
+}
 
 test("GOAL a failed create reports omp's error and keeps the existing goal", async () => {
   resetWorld();
@@ -2548,7 +2586,7 @@ test("a refused compact command cannot unlock compaction attached from another t
   });
   await act(async () => {
     const result = await w.latest.handleBuiltinSlashCommand("/compact");
-    assert.ok(result.error, "a second compaction is refused");
+    assert.equal(result.handled, false, "omp owns /compact; the web forwards it instead of compacting locally");
   });
   assert.equal(w.latest.isCompacting, true, "the rejected command does not own the attached compaction");
   await act(async () => { await w.latest.handleCompact(); });

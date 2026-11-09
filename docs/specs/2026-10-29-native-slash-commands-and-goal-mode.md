@@ -124,6 +124,14 @@ current turn continues, and omp decides continuation at the next terminal
 `agent_end`. A client-owned command with attachments is refused before any of
 these steps, so a queued `/goal` cannot clear an attached file.
 
+The catalog is authoritative for the dispatcher too, not only for the palette:
+`handleBuiltinSlashCommand` loads the roster once before the switch when a
+session exists, so a pasted or dictated command cannot reach a client handler
+whose name an extension, skill or custom command also owns. A brand-new chat has
+no roster before omp starts; starting it there would attach an observer stream
+beside the command's own, so its first command creates the runtime and later
+dispatches see the roster (typing `/` loads it through the palette as well).
+
 An asynchronous client command clears only its unchanged originating draft on
 success. Dictation's explicit text override does not bypass that check: newer
 typing, changed attachments and pending attachment reads are retained. Text
@@ -225,6 +233,12 @@ A present-but-malformed goal is rejected rather than treated as "no goal".
   published only if no newer goal event/response arrived; its automatic first
   prompt requires that the same goal is still active. The normal active create
   echo does not prevent the initial prompt.
+- A `dropped` goal is never visible: omp keeps the record in its state and
+  answers the `drop` command with `{goal: null, state: null}`, but either the
+  event or that reply may arrive first and no later event repeats the clear.
+  `withoutDroppedGoal` maps it to "no goal" in `publishGoalState` and
+  `applyGoalSnapshot` (the raw record stays in `goalStateRef`, so staleness and
+  the create fence still compare real timestamps). Both orderings are tested.
 
 Session switching:
 

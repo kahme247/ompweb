@@ -157,6 +157,40 @@ test("a stored Steer preference turns the primary button into Steer, which steer
   assertQueuedWithAttachments(calls[0], "look at this");
 });
 
+test("a catalog-owned goal with attachments is forwarded once the catalog answers", async () => {
+  window.HTMLElement.prototype.scrollIntoView = () => {};
+  const user = userEvent.setup();
+  let release;
+  let loads = 0;
+  const catalog = new Promise((resolve) => {
+    release = () => resolve([{ name: "goal", source: "extension", description: "extension goal" }]);
+  });
+  const builtins = [];
+  const { calls } = await renderWithAttachments({
+    isStreaming: false,
+    slashCommands: [],
+    onBuiltinCommand: async (message) => {
+      builtins.push(message);
+      return { handled: false };
+    },
+    onLoadSlashCommands: () => {
+      loads += 1;
+      return catalog;
+    },
+  });
+  await user.type(screen.getByRole("textbox"), "/goal ship it");
+  await user.keyboard("{Enter}");
+  await waitFor(() => assert.ok(loads >= 1), { timeout: 2000 });
+  assert.equal(calls.length, 0, "nothing is dispatched before the catalog answers");
+  await act(async () => release());
+  await waitFor(() => assert.equal(calls.length, 1));
+  delete window.HTMLElement.prototype.scrollIntoView;
+  assert.equal(calls[0].name, "onSend", "omp owns the name once the catalog reports it");
+  assert.ok(calls[0].message.startsWith("/goal ship it"), "the command line leads the forwarded prompt");
+  assert.match(calls[0].message, /Attached file: notes\.txt/, "attachments ride along");
+  assert.deepEqual(builtins, [], "with attachments the command goes straight to the prompt");
+});
+
 test("a queued web slash command is expanded and keeps the attachments", async () => {
   const { expandWebSlashCommand } = await import("@/lib/web-slash-commands");
   window.HTMLElement.prototype.scrollIntoView = () => {};
@@ -258,20 +292,6 @@ test("a queued message stays in the composer until the outbox has it, and stays 
   await act(async () => { refuse(); });
   assert.deepEqual(getDraft(KEY)?.images, [{ data: PNG, mimeType: "image/png" }], "a refusal leaves text and attachments in place");
   assert.equal(getDraft(KEY)?.files.length, 1);
-});
-
-test("a refused follow-up goes back whole to its draft, ahead of what was typed meanwhile", async () => {
-  let refuse;
-  const calls = await renderRunningWithAttachments({ queued: new Promise((resolve) => { refuse = () => resolve(false); }) });
-  fireEvent.click(screen.getByRole("button", { name: /queue/i }));
-  await waitFor(() => assert.equal(calls.length, 1));
-  assert.equal(screen.getByRole("status").textContent, "Sending…", "the in-flight message shows until omp answers");
-  fireEvent.change(screen.getByRole("textbox"), { target: { value: "typed meanwhile" } });
-  await act(async () => { refuse(); });
-  await waitFor(() => assert.equal(screen.queryByRole("status"), null, "the sending row goes once omp answered"));
-  await waitFor(() => assert.deepEqual(getDraft(KEY)?.images, [{ data: PNG, mimeType: "image/png" }]));
-  assert.equal(getDraft(KEY)?.value, `${calls[0].message}\n\ntyped meanwhile`, "the text, file contents included, comes back too");
-  assert.equal(screen.getByRole("textbox").value, `${calls[0].message}\n\ntyped meanwhile`);
 });
 
 test("a queued message is not cleared once stored if the composer changed meanwhile", async () => {

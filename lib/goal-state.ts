@@ -87,6 +87,17 @@ export function isGoalControllable(state: GoalModeState | null | undefined): boo
   return state?.goal?.status === "active" || state?.goal?.status === "paused";
 }
 
+/**
+ * omp keeps a dropped goal in the state it reports, but nothing is left to show
+ * or do with it. Hide it the moment the drop arrives: omp then answers the
+ * `drop` command with `{ goal: null, state: null }`, and no later event repeats
+ * that clear, so waiting for the reply (or for the event, when the order is
+ * reversed) would leave a "Dropped" banner until the next state snapshot.
+ */
+export function withoutDroppedGoal(state: GoalModeState | null | undefined): GoalModeState | null {
+  return state?.goal?.status === "dropped" ? null : (state ?? null);
+}
+
 /** omp reports `timeUsedSeconds`; while active, extrapolate from `updatedAt` for a live display. */
 export function goalElapsedSeconds(state: GoalModeState | null | undefined, now = Date.now()): number {
   const goal = state?.goal;

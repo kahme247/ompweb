@@ -39,7 +39,7 @@ import { toast } from "@/components/ui/toast";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import { validateOutgoingPrompt } from "@/lib/image-attachments";
 import { type ActivePlan } from "@/lib/web-mode-state";
-import { isStaleGoalState, readGoalCommandResponse, readGoalUpdatedEvent } from "@/lib/goal-state";
+import { isStaleGoalState, readGoalCommandResponse, readGoalUpdatedEvent, withoutDroppedGoal } from "@/lib/goal-state";
 import type { GoalCommandResponse, GoalModeState, HostToolDefinition, HostUriSchemeDefinition, RpcAskDialogAnswer, RpcAvailableSlashCommand, SessionStatsInfo, SlowModeScope, TodoPhase, UsageLimitState } from "@/lib/pi-types";
 import { isRecord } from "@/lib/type-guards";
 import { subscribeSessionsChanged } from "@/lib/session-change-bus";
@@ -426,6 +426,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // but the unknown-command warning must not flag them (#167). Ref-only: it is
   // consulted at send time and must never re-render the composer.
   const knownSlashCommandNamesRef = useRef<string[]>([]);
+  /** True once a `get_commands` reply actually arrived: until then an empty
+   *  roster means "not asked yet", not "omp owns nothing". */
+  const slashRosterLoadedRef = useRef(false);
+  const slashCommandsInFlightRef = useRef<Promise<SlashCommandInfo[]> | null>(null);
   const warnedSlashCommandsRef = useRef(new Set<string>());
   const [noticeState, dispatchNotice] = useReducer(noticeReducer, { visible: [], pending: [] });
   const [sessionStatsOverride, setSessionStatsOverride] = useState<SessionStatsInfo | null>(null);
@@ -517,13 +521,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const applyGoalSnapshot = useCallback((seq: number, value: GoalModeState | null) => {
     if (seq !== goalSeqRef.current || isStaleGoalState(goalStateRef.current, value)) return;
     goalStateRef.current = value;
-    setGoalState(value);
+    setGoalState(withoutDroppedGoal(value));
   }, []);
   const publishGoalState = useCallback((value: GoalModeState | null) => {
     goalSeqRef.current += 1;
     if (isStaleGoalState(goalStateRef.current, value)) return;
     goalStateRef.current = value;
-    setGoalState(value);
+    setGoalState(withoutDroppedGoal(value));
   }, []);
   const [subagents, setSubagents] = useState<SubagentInfo[]>([]);
   const [subagentEvents, setSubagentEvents] = useState<Record<string, SubagentActivityEvent[]>>({});
@@ -590,6 +594,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     localCompactionsRef.current -= 1;
     compactionGenRef.current += 1;
     setCompacting(localCompactionsRef.current > 0 || autoCompactingRef.current);
+  }, [setCompacting]);
+  // A compaction omp started and this tab does not own (auto-compaction, or a
+  // manual one from another tab, the TUI, or a forwarded `/compact`). It holds
+  // the control across a local compaction settling, and its end is the only
+  // thing that releases it.
+  const beginNativeCompaction = useCallback(() => {
+    compactionGenRef.current += 1;
+    autoCompactingRef.current = true;
+    setCompacting(true);
+  }, [setCompacting]);
+  const endNativeCompaction = useCallback(() => {
+    compactionGenRef.current += 1;
+    autoCompactingRef.current = false;
+    if (localCompactionsRef.current === 0) setCompacting(false);
   }, [setCompacting]);
   // Set while an interrupt-and-reply (abort_and_prompt) is in flight: the
   // aborted turn's terminal agent_end must not tear down the new run that is
@@ -1333,31 +1351,41 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [ensureNewSession]);
 
   const loadSlashCommands = useCallback(async () => {
-    const sid = sessionIdRef.current ?? await ensureNewSession();
-    if (!sid) {
-      setSlashCommands([]);
-      knownSlashCommandNamesRef.current = [];
-      return [] as SlashCommandInfo[];
-    }
-    setSlashCommandsLoading(true);
+    if (slashCommandsInFlightRef.current) return slashCommandsInFlightRef.current;
+    const request = (async () => {
+      const sid = sessionIdRef.current ?? await ensureNewSession();
+      if (!sid) {
+        setSlashCommands([]);
+        knownSlashCommandNamesRef.current = [];
+        return [] as SlashCommandInfo[];
+      }
+      setSlashCommandsLoading(true);
+      try {
+        const data = await sendAgentCommand<SlashCommandsResponse>(sid, { type: "get_commands" });
+        const available = Array.isArray(data?.commands) ? data.commands : [];
+        // Keep every source, builtins included: omp runs them through the prompt
+        // path and they must not be reported as unknown (#167).
+        // A reply carrying no list is not evidence that nothing is known, so it
+        // must not erase a roster an earlier reply did supply.
+        if (available.length > 0) knownSlashCommandNamesRef.current = slashCommandRosterNames(available);
+        slashRosterLoadedRef.current = true;
+        const commands = available.map(toSlashCommandInfo);
+        setSlashCommands(commands);
+        return commands;
+      } catch (e) {
+        console.error("Failed to load slash commands:", e);
+        setSlashCommands([]);
+        knownSlashCommandNamesRef.current = [];
+        return [] as SlashCommandInfo[];
+      } finally {
+        setSlashCommandsLoading(false);
+      }
+    })();
+    slashCommandsInFlightRef.current = request;
     try {
-      const data = await sendAgentCommand<SlashCommandsResponse>(sid, { type: "get_commands" });
-      const available = Array.isArray(data?.commands) ? data.commands : [];
-      // Keep every source, builtins included: omp runs them through the prompt
-      // path and they must not be reported as unknown (#167).
-      // A reply carrying no list is not evidence that nothing is known, so it
-      // must not erase a roster an earlier reply did supply.
-      if (available.length > 0) knownSlashCommandNamesRef.current = slashCommandRosterNames(available);
-      const commands = available.map(toSlashCommandInfo);
-      setSlashCommands(commands);
-      return commands;
-    } catch (e) {
-      console.error("Failed to load slash commands:", e);
-      setSlashCommands([]);
-      knownSlashCommandNamesRef.current = [];
-      return [] as SlashCommandInfo[];
+      return await request;
     } finally {
-      setSlashCommandsLoading(false);
+      slashCommandsInFlightRef.current = null;
     }
   }, [ensureNewSession]);
 
@@ -2165,7 +2193,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         void reconcileAgentState(sid);
       }
     }
-  }, [applyNativeCompacting, applyQueueStateSnapshot, applySkillDiagnosticsSnapshot, finishPromptWithoutStream, refreshSubagentRoster]);
+  }, [applyGoalSnapshot, applyNativeCompacting, applyQueueStateSnapshot, applySkillDiagnosticsSnapshot, finishPromptWithoutStream, refreshSubagentRoster]);
 
   // Recovery net for missed SSE events: while a prompt or compaction runs, verify
   // against the server periodically and whenever the tab returns to the
@@ -2678,17 +2706,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "manual_compaction_start": {
-        // `/compact` now runs through omp's own builtin; the RPC `compact`
-        // response only covers the web button. Keep both paths visible.
-        isCompactingRef.current = true;
-        setIsCompacting(true);
+        // `/compact` runs through omp's builtin; this event also covers a
+        // compaction another tab, the TUI or a forwarded command started.
+        beginNativeCompaction();
         setCompactError(null);
         setCompactResult(null);
         break;
       }
       case "manual_compaction_end": {
-        isCompactingRef.current = false;
-        setIsCompacting(false);
+        endNativeCompaction();
         const compacted = readCompactResult(event.result, typeof event.mode === "string" ? event.mode : "manual");
         if (compacted) setCompactResult(compacted);
         else if (typeof event.errorMessage === "string" && event.errorMessage) setCompactError(event.errorMessage);
@@ -2879,16 +2905,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setRetryInfo(null);
         break;
       case "auto_compaction_start":
-        compactionGenRef.current += 1;
-        autoCompactingRef.current = true;
-        setCompacting(true);
+        beginNativeCompaction();
         setCompactError(null);
         setCompactResult(null);
         break;
       case "auto_compaction_end":
-        compactionGenRef.current += 1;
-        autoCompactingRef.current = false;
-        if (localCompactionsRef.current === 0) setCompacting(false);
+        endNativeCompaction();
         if (event.errorMessage) {
           setCompactError(event.errorMessage as string);
           setCompactResult(null);
@@ -3054,7 +3076,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, addUnconfirmedRunErrorNotice, catchUp, eventCoalescer, clearLiveToolResults, clearTerminalReconcileTimer, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, reloadActiveSessionHistory, mergeSubagents, onAgentEnd, reconcileAgentState, refreshLiveModelState, refreshSubagentRoster, resetSubagentActivityState, applyAuthoritativeModel, applySkillDiagnosticsSnapshot, publishGoalState, beginAuthoritativeModelSync, setCompacting, setLiveToolResult, surfaceQuotaOnStream, updateQueuedMessages, applyQueueStateSnapshot]);
+  }, [addNotice, addUnconfirmedRunErrorNotice, catchUp, eventCoalescer, clearLiveToolResults, clearTerminalReconcileTimer, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, reloadActiveSessionHistory, mergeSubagents, onAgentEnd, reconcileAgentState, refreshLiveModelState, refreshSubagentRoster, resetSubagentActivityState, applyAuthoritativeModel, applySkillDiagnosticsSnapshot, publishGoalState, beginAuthoritativeModelSync, beginNativeCompaction, endNativeCompaction, setLiveToolResult, surfaceQuotaOnStream, updateQueuedMessages, applyQueueStateSnapshot]);
   handleAgentEventRef.current = handleAgentEvent;
   syncActionsRef.current = {
     metadata: (context, version, hasLive = liveModelMeta !== null || currentModelOverride !== null) => {
@@ -4140,7 +4162,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const ensureRuntime = async () => sessionIdRef.current ?? await ensureNewSession();
       // The catalog wins over every client handler, including the client-only
       // names: an extension/skill command called `goal`, `btw`, `reload`,
-      // `name`, or `copy` must not be shadowed.
+      // `name`, or `copy` must not be shadowed. A pasted or dictated command can
+      // reach dispatch before autocomplete ever fetched the roster, so ask once
+      // here rather than deciding on an empty list.
+      // A fresh chat has no roster until omp starts, and starting it here would
+      // attach an observer stream beside the command's own; its first command
+      // creates the runtime, and the roster is known from the next dispatch on
+      // (typing "/" already loads it through the palette).
+      if (!slashRosterLoadedRef.current && sessionIdRef.current) await loadSlashCommands();
+      if (!hookAliveRef.current) return { handled: true };
       if (knownSlashCommandNamesRef.current.includes(commandName)) return { handled: false };
       switch (commandName) {
 

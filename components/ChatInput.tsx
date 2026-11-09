@@ -430,6 +430,21 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     () => new Set((slashCommands ?? []).flatMap((command) => [command.name, ...(command.aliases ?? [])])),
     [slashCommands],
   );
+  // The catalog decides who owns a slash command. A pasted or dictated command
+  // can reach dispatch before the palette ever opened, so fetch it once before
+  // routing instead of deciding on an empty roster. Concurrent sends share the
+  // request; the gate stops a second Enter from dispatching while it waits.
+  const catalogRequestRef = useRef<Promise<Set<string>> | null>(null);
+  const catalogGateRef = useRef(false);
+  const resolveCommandCatalog = useCallback((): Promise<Set<string>> => {
+    if (ompCommandNames.size > 0 || !onLoadSlashCommands) return Promise.resolve(ompCommandNames);
+    if (!catalogRequestRef.current) {
+      catalogRequestRef.current = Promise.resolve(onLoadSlashCommands())
+        .then((commands) => new Set((commands ?? []).flatMap((command) => [command.name, ...(command.aliases ?? [])])))
+        .catch(() => ompCommandNames);
+    }
+    return catalogRequestRef.current;
+  }, [ompCommandNames, onLoadSlashCommands]);
   const usageLimitLabel = usageLimit
     ? formatUsageLimitLabel(usageLimit, t)
     : undefined;
@@ -1251,9 +1266,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   /** `/btw` asks a side question beside any run: never a prompt, never
    * queued. Attachments cannot ride along, so refuse and keep the draft
    * rather than drop them. False when `msg` is not `/btw`. */
-  const sendSideQuestion = useCallback((msg: string, overrideText?: string): boolean => {
+  const sendSideQuestion = useCallback((msg: string, overrideText?: string, catalog: Set<string> = ompCommandNames): boolean => {
     // A catalog command named `btw` wins over the client side-question panel.
-    if (!/^\/btw(\s|$)/.test(msg) || !onBuiltinCommand || ompCommandNames.has("btw")) return false;
+    if (!/^\/btw(\s|$)/.test(msg) || !onBuiltinCommand || catalog.has("btw")) return false;
     if (attachedImagesRef.current.length || attachedTextFilesRef.current.length || attachedUploadsRef.current.length) {
       toast.error(t("btw.attachmentsUnsupported"));
       return true;
@@ -1270,11 +1285,21 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const shellCommand = msg.startsWith("!") && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length;
     if (submissionBlockedRef.current || holdingRef.current || (isStreaming && !shellCommand)) return;
     onAudioUnlock?.();
-    if (sendSideQuestion(msg, overrideText)) return;
+    let catalog = ompCommandNames;
+    if (msg.startsWith("/") && ompCommandNames.size === 0 && onLoadSlashCommands) {
+      if (catalogGateRef.current) return;
+      catalogGateRef.current = true;
+      try {
+        catalog = await resolveCommandCatalog();
+      } finally {
+        catalogGateRef.current = false;
+      }
+    }
+    if (sendSideQuestion(msg, overrideText, catalog)) return;
     if (rejectsPendingUploads()) return;
     if (msg.startsWith("/") && (attachedImagesRef.current.length || attachedTextFilesRef.current.length || attachedUploadsRef.current.length)) {
       const commandName = msg.slice(1).split(/\s+/)[0];
-      if (CLIENT_ONLY_COMMAND_NAMES[commandName] === true && !ompCommandNames.has(commandName)) {
+      if (CLIENT_ONLY_COMMAND_NAMES[commandName] === true && !catalog.has(commandName)) {
         toast.error(t("chatInput.commandAttachmentsUnsupported"));
         return;
       }
@@ -1282,7 +1307,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFilesRef.current);
     if (!attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length && msg.startsWith("/") && onBuiltinCommand) {
       const commandName = msg.slice(1).split(/\s+/)[0];
-      const expansion = ompCommandNames.has(commandName)
+      const expansion = catalog.has(commandName)
         ? { kind: "not-web" as const }
         : expandWebSlashCommand(msg);
       if (expansion.kind === "expand" && rejectsOversizedPrompt(expansion.prompt, attachedImagesRef.current)) return;
@@ -1324,7 +1349,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (key) recoverDraft(key, recovery);
       throw error;
     }
-  }, [value, isStreaming, onBuiltinCommand, onSend, outbox, clearInput, clearOnceStored, onAudioUnlock, ompCommandNames, rejectsOversizedPrompt, rejectsPendingUploads, runBuiltinCommand, sendSideQuestion, t]);
+  }, [value, isStreaming, onBuiltinCommand, onSend, outbox, clearInput, clearOnceStored, onAudioUnlock, ompCommandNames, resolveCommandCatalog, onLoadSlashCommands, rejectsOversizedPrompt, rejectsPendingUploads, runBuiltinCommand, sendSideQuestion, t]);
   const {
     isRecording,
     isPaused,
@@ -1762,12 +1787,22 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     });
   }, [slashMatch, value, setValue]);
 
-  const sendQueued = useCallback((mode: "steer" | "followup", overrideText?: string) => {
+  const sendQueued = useCallback(async (mode: "steer" | "followup", overrideText?: string) => {
     if (submissionBlockedRef.current || holdingRef.current) return;
     const raw = overrideText ?? value;
     const msg = raw.trim();
     if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length) return;
-    if (sendSideQuestion(msg, overrideText)) return;
+    let catalog = ompCommandNames;
+    if (msg.startsWith("/") && ompCommandNames.size === 0 && onLoadSlashCommands) {
+      if (catalogGateRef.current) return;
+      catalogGateRef.current = true;
+      try {
+        catalog = await resolveCommandCatalog();
+      } finally {
+        catalogGateRef.current = false;
+      }
+    }
+    if (sendSideQuestion(msg, overrideText, catalog)) return;
     if (rejectsPendingUploads()) return;
     if (msg.startsWith("!") && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length) {
       void handleSend(overrideText);
@@ -1807,7 +1842,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       // Client-dispatched commands (/goal uses the native goal RPC, /btw is a
       // side question) must not enter the prompt queue: omp would treat the
       // text as an ordinary message. Run them now, mid-run included.
-      if (CLIENT_ONLY_COMMAND_NAMES[commandName] === true && !ompCommandNames.has(commandName)) {
+      if (CLIENT_ONLY_COMMAND_NAMES[commandName] === true && !catalog.has(commandName)) {
         if (attachedImagesRef.current.length || attachedTextFilesRef.current.length || attachedUploadsRef.current.length) {
           toast.error(t("chatInput.commandAttachmentsUnsupported"));
           return;
@@ -1819,7 +1854,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       // when queued. A name omp's catalog owns is never expanded: omp runs
       // the original command line (extension/custom/skill/builtin) on
       // delivery.
-      const expansion = ompCommandNames.has(commandName)
+      const expansion = catalog.has(commandName)
         ? { kind: "not-web" as const }
         : expandWebSlashCommand(msg);
       if (expansion.kind === "expand") {
@@ -1839,7 +1874,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const composedMessage = composeMessageWithTextAttachments(msg, files);
     if (rejectsOversizedPrompt(composedMessage, attachedImagesRef.current)) return;
     hold(composedMessage);
-  }, [value, handleSend, onSteer, onFollowUp, clearOnceStored, onAudioUnlock, t, ompCommandNames, onBuiltinCommand, rejectsOversizedPrompt, rejectsPendingUploads, runBuiltinCommand, sendSideQuestion]);
+  }, [value, handleSend, onSteer, onFollowUp, clearOnceStored, onAudioUnlock, t, ompCommandNames, resolveCommandCatalog, onLoadSlashCommands, onBuiltinCommand, rejectsOversizedPrompt, rejectsPendingUploads, runBuiltinCommand, sendSideQuestion]);
   // A typed message or attachment during a run is a queued follow-up — and so
   // is a dictation in progress: the primary button must take the same state it
   // would have if the composer already held text. Keep Stop as the action
