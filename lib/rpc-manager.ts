@@ -105,7 +105,7 @@ const NON_TERMINAL_CONTINUATION_GRACE_MS = 2_000;
 const AWAITING_AGENT_START_TIMEOUT_MS = 10_000;
 const RESTARTING_MESSAGE = "This session is restarting — retry in a moment.";
 const BASH_EXCLUDE_MESSAGE =
-  "Nothing was run: this session cannot confirm shell output exclusion (`!!`). Use OMP 18.18.1 or newer and reload the session. For linked hosts, update the ompweb host daemon too so it reports the capability.";
+  "Nothing was run: this session cannot confirm shell output exclusion (`!!`). Use OMP 18.18.1 or newer, update and restart the ompweb host daemon (including This machine), then reload the session.";
 /** Answer to a replayed server agent tool call that changes things: it may have run before the restart. */
 const AGENT_TOOL_UNKNOWN_OUTCOME = "omp-web restarted while this ran; the outcome is unknown, check with list_sessions before retrying";
 

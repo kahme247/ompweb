@@ -30,11 +30,12 @@ export interface ChatDraft {
 /** Content to put back in a composer. `replace` merges a later recovery with
  *  an earlier one in order: while the draft still starts with `lead` (the
  *  earlier block), it becomes `text`; otherwise only `fallback` is prepended.
- *  `images` are appended to the draft's attachments. */
+ *  `images` and `files` are appended to the draft's attachments. */
 export interface DraftRecovery {
   text: string;
   replace?: { lead: string; fallback: string };
   images?: ChatDraftImage[];
+  files?: ChatDraftFile[];
   uploads?: ChatDraftUpload[];
 }
 
@@ -244,6 +245,7 @@ export function recoverDraft(key: string, recovery: DraftRecovery): void {
       ...draft,
       value: mergeRecoveredText(draft.value, recovery),
       images: [...draft.images, ...(recovery.images ?? [])],
+      files: [...draft.files, ...(recovery.files ?? [])],
       uploads: [...(draft.uploads ?? []), ...(recovery.uploads ?? [])],
     });
   }

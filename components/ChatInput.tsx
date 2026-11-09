@@ -2,9 +2,9 @@
 
 import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, ClipboardPaste, CornerDownRight, ListChecks, Loader2, Mic, Paperclip, Plus, RotateCw, Shrink, Snail, Sparkles, Wrench, X, Zap } from "lucide-react";
+import { ChevronDown, ClipboardPaste, CornerDownRight, ListChecks, Loader2, Mic, Paperclip, Plus, RotateCw, Shrink, Snail, Sparkles, Terminal, Wrench, X, Zap } from "lucide-react";
 import { getSubmitDuringRunBehavior, isWordCompletionEnabled } from "@/lib/composer-prefs";
-import type { BuiltinSlashCommandResult, CompactResultInfo, PromptSubmissionResult, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
+import type { BuiltinSlashCommandResult, CompactResultInfo, PromptSendOptions, PromptSubmissionResult, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
 import { toast } from "@/components/ui/toast";
 import { ConfirmDialog } from "@/components/ui/field";
@@ -174,8 +174,9 @@ const TOOL_PRESET_OPTIONS: Array<{ value: ToolPreset; descriptionKey: string }> 
 
 interface Props {
   /** Without `outbox`, only a rejected submission is restored; completed/superseded runs must not be replayed.
-   *  `uploads`: the ids of files sent As file, passed only when there are some. */
-  onSend: (message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>) => Promise<PromptSubmissionResult>;
+   *  `uploads`: the ids of files sent As file, passed only when there are some. `options`: passed only when inline
+   *  text files were folded into `message`, so its leading `!` is not taken for a shell command. */
+  onSend: (message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>, options?: PromptSendOptions) => Promise<PromptSubmissionResult>;
   /** Sends go through the message outbox (an existing session): the composer clears once `onSend` (or a queue
    *  callback) reports the message stored, and keeps it otherwise. */
   outbox?: boolean;
@@ -1148,6 +1149,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (images.length) {
       setAttachedImages((prev) => [...prev, ...draftImagesToAttachedImages(images)]);
     }
+    const files = draftFilesToAttachedFiles(recovery.files);
+    if (files.length) {
+      setAttachedTextFiles((prev) => [...prev, ...files]);
+    }
     const uploads = draftUploadsToAttachedUploads(recovery.uploads);
     if (uploads.length) {
       setAttachedUploads((prev) => [...prev, ...uploads.filter((upload) => !prev.some((each) => each.id === upload.id))]);
@@ -1171,7 +1176,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (!ta) return;
     ta.style.height = "auto";
     if (value) ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-  }, [value]);
+  }, [value, bashMode]); // the shell font changes the wrapping without changing the value
   useEffect(() => {
     return () => {
       // Drop any reads still in flight when the composer goes away entirely
@@ -1253,7 +1258,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     onAudioUnlock?.();
     if (sendSideQuestion(msg, overrideText)) return;
     if (rejectsPendingUploads()) return;
-    const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFilesRef.current);
+    const files = attachedTextFilesRef.current;
+    const composedMessage = composeMessageWithTextAttachments(msg, files);
     if (!attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length && msg.startsWith("/") && onBuiltinCommand) {
       const expansion = expandWebSlashCommand(msg);
       if (expansion.kind === "expand" && rejectsOversizedPrompt(expansion.prompt, attachedImagesRef.current)) return;
@@ -1263,11 +1269,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (rejectsOversizedPrompt(composedMessage, attachedImagesRef.current)) return;
     const key = draftKeyRef.current;
     const images = attachedImagesRef.current.length ? attachedImagesRef.current : undefined;
-    const recovery = { text: composedMessage, images: images?.map(imageToDraftImage), ...uploadRecovery(attachedUploadsRef.current) };
+    const recovery = { text: msg, images: images?.map(imageToDraftImage), files: files.length ? files.map(textFileToDraftFile) : undefined, ...uploadRecovery(attachedUploadsRef.current) };
     const stored = outbox && !shellCommand ? clearOnceStored(raw) : undefined;
+    // Inline text files are folded into `composedMessage`: tell the session its leading `!` is prose, not a command.
+    const sendTail: [uploads?: string[], proofs?: Record<string, string>, options?: PromptSendOptions] = uploadArgs(attachedUploadsRef.current);
+    if (files.length) sendTail[2] = { textAttachments: true };
     let pending: Promise<PromptSubmissionResult>;
     try {
-      pending = onSend(composedMessage, images, ...uploadArgs(attachedUploadsRef.current));
+      pending = onSend(composedMessage, images, ...sendTail);
     } catch (error) {
       stored?.release();
       throw error;
@@ -1823,6 +1832,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   // The button follows the same Settings choice as Enter: soft keyboards have no
   // Enter to submit with, so this button is how touch devices steer.
   const primaryActionMode = primaryActionQueuesMessage && onSteer && getSubmitDuringRunBehavior() === "steer" ? "steer" : "followup";
+  // `!cmd` runs at once even during a run (sendQueued hands it to handleSend), so the button must not offer to queue it.
+  const primaryActionRunsShell = primaryActionQueuesMessage && bashMode;
 
   // ── Queued follow-up bar ────────────────────────────────────────────────
   // Texts are mirrored locally; mutations wait for native acknowledgement.
@@ -3895,7 +3906,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   else sendQueued(primaryActionMode);
                 }}
                 disabled={submissionBlocked || isTranscribing}
-                title={t(primaryActionMode === "steer" ? "chatInput.steerNowTitle" : "chatInput.queueMessage")}
+                title={primaryActionRunsShell ? t("chatInput.runShell") : t(primaryActionMode === "steer" ? "chatInput.steerNowTitle" : "chatInput.queueMessage")}
                 style={{
                   display: "flex", alignItems: "center", gap: 6,
                   background: "var(--accent-strong)",
@@ -3908,10 +3919,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   transition: "background var(--dur-fast) var(--ease-out-warm)",
                 }}
               >
-                {primaryActionMode === "steer"
+                {primaryActionRunsShell
+                  ? <Terminal size={13} strokeWidth={2} aria-hidden="true" />
+                  : primaryActionMode === "steer"
                   ? <CornerDownRight size={13} strokeWidth={2} aria-hidden="true" />
                   : <ListChecks size={13} strokeWidth={2} aria-hidden="true" />}
-                {t(primaryActionMode === "steer" ? "chatInput.steer" : "chatInput.queue")}
+                {t(primaryActionRunsShell ? "chatInput.runShell" : primaryActionMode === "steer" ? "chatInput.steer" : "chatInput.queue")}
               </button>
             ) : isStreaming ? (
               <button

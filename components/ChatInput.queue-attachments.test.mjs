@@ -62,10 +62,10 @@ afterEach(() => {
 /** A composer with an image and a text file attached through the picker path. */
 async function renderWithAttachments({ queued = true, queueCallbacks = true, ...props } = {}) {
   const calls = [];
-  // Images are the last argument of every queue callback, which resolves
-  // false when omp refused the message.
+  // Images follow the message in every callback; `onSend` carries options after them when text files are attached.
+  // The callback resolves false when omp refused the message.
   const record = (name) => async (message, ...rest) => {
-    calls.push({ name, message, images: rest.at(-1) });
+    calls.push({ name, message, images: rest[0] });
     const ok = await queued;
     return name === "onSend" ? { status: ok ? "accepted" : "rejected" } : ok;
   };
@@ -794,13 +794,15 @@ test("a refused ordinary send restores text, file contents and images ahead of n
   let refuse;
   const user = userEvent.setup();
   const { calls } = await renderWithAttachments({ isStreaming: false, queueCallbacks: false, queued: new Promise((resolve) => { refuse = () => resolve(false); }) });
+  const originalFiles = getDraft(KEY).files;
   await user.type(screen.getByRole("textbox"), "original question");
   await user.click(screen.getByRole("button", { name: /^send$/i }));
   await waitFor(() => assert.equal(calls.length, 1));
   await user.type(screen.getByRole("textbox"), "typed meanwhile");
   await act(async () => { refuse(); });
   await waitFor(() => assert.deepEqual(getDraft(KEY)?.images, [{ data: PNG, mimeType: "image/png" }]));
-  assert.equal(getDraft(KEY).value, `${calls[0].message}\n\ntyped meanwhile`);
+  assert.equal(getDraft(KEY).value, "original question\n\ntyped meanwhile");
+  assert.deepEqual(getDraft(KEY).files, originalFiles);
   assert.equal(screen.getByRole("textbox").value, getDraft(KEY).value);
   assertQueuedWithAttachments(calls[0], "original question");
 });
@@ -811,6 +813,7 @@ test("a refused ordinary send recovers only into its originating session draft",
   let refuse;
   const user = userEvent.setup();
   const { calls, rerender } = await renderWithAttachments({ isStreaming: false, queueCallbacks: false, queued: new Promise((resolve) => { refuse = () => resolve(false); }) });
+  const originalFiles = getDraft(KEY).files;
   await user.type(screen.getByRole("textbox"), "original session");
   await user.click(screen.getByRole("button", { name: /^send$/i }));
   await waitFor(() => assert.equal(calls.length, 1));
@@ -818,7 +821,8 @@ test("a refused ordinary send recovers only into its originating session draft",
   await user.type(screen.getByRole("textbox"), "other conversation");
   await act(async () => { refuse(); });
   await waitFor(() => assert.deepEqual(getDraft(KEY)?.images, [{ data: PNG, mimeType: "image/png" }]));
-  assert.equal(getDraft(KEY).value, calls[0].message);
+  assert.equal(getDraft(KEY).value, "original session");
+  assert.deepEqual(getDraft(KEY).files, originalFiles);
   assert.equal(screen.getByRole("textbox").value, "other conversation");
   assert.equal(getDraft(otherKey).value, "other conversation");
   assert.deepEqual(getDraft(otherKey).images, []);
@@ -833,15 +837,17 @@ test("a refused first send follows its promoted conversation rather than the old
     isStreaming: false, queueCallbacks: false,
     onSend: async (message) => { submitted.push(message); return new Promise((resolve) => { refuse = () => resolve({ status: "rejected", recoveryKey: promotedKey }); }); },
   });
+  const originalFiles = getDraft(KEY).files;
   const user = userEvent.setup();
   await user.type(screen.getByRole("textbox"), "first question");
   await user.click(screen.getByRole("button", { name: /^send$/i }));
   await waitFor(() => assert.equal(submitted.length, 1));
   rerender({ draftKey: promotedKey });
   await act(async () => { refuse(); });
-  await waitFor(() => assert.equal(getDraft(promotedKey)?.value, submitted[0]));
+  await waitFor(() => assert.equal(getDraft(promotedKey)?.value, "first question"));
   assert.deepEqual(getDraft(promotedKey).images, [{ data: PNG, mimeType: "image/png" }]);
-  assert.equal(screen.getByRole("textbox").value, submitted[0]);
+  assert.deepEqual(getDraft(promotedKey).files, originalFiles);
+  assert.equal(screen.getByRole("textbox").value, "first question");
   assert.equal(getDraft(KEY), null, "the original new-chat draft must not resurrect this payload later");
 });
 
@@ -1452,3 +1458,25 @@ test("a completed slash builtin must not erase an attachment added while its cal
   assert.equal(textbox.value, "/goal keep this draft", "an attachment change preserves the composer text too");
   assert.deepEqual(getDraft(KEY), changedDraft, "builtin completion must not erase the newly attached file");
 });
+
+test("a rejected attachment prompt retains its files rather than becoming a shell command on retry", async () => {
+  const file = { name: "notes.txt", mimeType: "text/plain", content: "echo attachment-content", size: 23 };
+  setDraft(KEY, { value: "!!explain this", images: [], files: [file] });
+  let attempts = 0;
+  const submissions = [];
+  render(React.createElement(ChatInput, {
+    draftKey: KEY, isStreaming: false, onAbort() {},
+    onSend: async (...args) => {
+      submissions.push(args);
+      return { status: ++attempts === 1 ? "rejected" : "accepted" };
+    },
+  }));
+  fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+  await waitFor(() => assert.deepEqual(getDraft(KEY), { value: "!!explain this", images: [], files: [file] }));
+  assert.equal(document.querySelector(".chat-input-shell").hasAttribute("data-shell"), false);
+  fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+  await waitFor(() => assert.equal(submissions.length, 2));
+  assert.equal(submissions[1][0], "!!explain this\n\nAttached file: notes.txt\n```text\necho attachment-content\n```");
+  assert.deepEqual(submissions[1][4], { textAttachments: true });
+});
+

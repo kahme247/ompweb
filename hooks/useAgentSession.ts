@@ -149,6 +149,12 @@ export type PromptSubmissionResult =
   | { status: "rejected"; recoveryKey?: string }
   | { status: "superseded" };
 
+/** What the composer knows about a prompt that its text no longer shows. */
+export interface PromptSendOptions {
+  /** The text embeds inline text-file attachments, so a leading `!` is part of a prompt, not a shell command. */
+  textAttachments?: boolean;
+}
+
 const MAX_HANDLED_EDIT_HISTORY_MARKERS = 64;
 // A running-channel lookup that failed is retried after 1 s, 2 s and 4 s, then waits for the next frame.
 const RUNNING_LOOKUP_RETRIES = 3;
@@ -3149,14 +3155,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return snapshot.entryIds;
   }, []);
 
-  const handleSend = useCallback(async (message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>): Promise<PromptSubmissionResult> => {
+  const handleSend = useCallback(async (message: string, images?: AttachedImage[], uploads?: string[], uploadProofs?: Record<string, string>, options?: PromptSendOptions): Promise<PromptSubmissionResult> => {
     const trimmedMessage = message.trim();
     if (!trimmedMessage && !images?.length && !uploads?.length) return { status: "rejected" };
     if (bashRunningRef.current || editInFlightRef.current) return { status: "rejected" };
     if (initialHydrationPendingRef.current) return { status: "rejected" };
     // Shell commands run during a turn too, as in omp's terminal: omp holds the
     // result back until a later prompt starts.
-    const isBashCommand = !images?.length && !uploads?.length && trimmedMessage.startsWith("!");
+    const isBashCommand = !options?.textAttachments && !images?.length && !uploads?.length && trimmedMessage.startsWith("!");
     if (isBashCommand) {
       const isExcluded = trimmedMessage.startsWith("!!");
       const bashCmd = (isExcluded ? trimmedMessage.slice(2) : trimmedMessage.slice(1)).trim();

@@ -609,6 +609,28 @@ for (const [preference, mode] of [["steer", "steer"], ["followup", "followUp"]])
   });
 }
 
+test("a `!` message with an inline text attachment is held as a prompt, never run as a shell command", async (t) => {
+  resetWorld();
+  const { setDraft, getDraft, clearDraft } = await import("@/lib/draft-store");
+  const sid = "bang-text-attachment";
+  t.after(() => clearDraft(sid));
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.outboxHold = true;
+  setDraft(sid, {
+    value: "!touch /tmp/ompweb-never-run",
+    images: [],
+    files: [{ name: "notes.txt", mimeType: "text/plain", content: "rm -rf /", size: 8 }],
+  });
+  const view = ownRoot(render(React.createElement(ChatWindow, { session: sessionInfo(sid), newSessionCwd: null }), { wrapper: TestRoot }));
+  await settle();
+  await act(async () => { fireEvent.keyDown(view.getByRole("textbox"), { key: "Enter" }); });
+  await until(() => world.outbox.length === 1, "the composed prompt must reach worker storage");
+  assert.equal(world.outbox[0].mode, "prompt");
+  assert.equal(world.outbox[0].message, "!touch /tmp/ompweb-never-run\n\nAttached file: notes.txt\n```text\nrm -rf /\n```");
+  assert.deepEqual(world.calls.filter((call) => call.body?.type === "bash"), [], "neither the typed text nor the attachment reaches the shell");
+  assert.equal(getDraft(sid), null, "the stored prompt consumes the unchanged draft");
+});
+
 test("a shell-queued outbox prompt and steer use queue_update without a phantom turn or reply notice", async () => {
   resetWorld();
   primeSession("bash-queue", [userMsg("u0", "q")]);
