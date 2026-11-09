@@ -6043,6 +6043,59 @@ test("overlapping Stops share one atomic withdrawal; an image-only entry does no
   clearDraft("abort-atomic-twice");
 });
 
+// A Stop omp never confirmed (too busy to answer) is not a stopped run: the
+// frame may sit in its stdin and the run may still execute. Nothing is known
+// about the queue either, so the attempt is not retried — a second 30-second
+// window on a busy child only keeps Stop pending — and the user is told once.
+test("a Stop whose answer timed out unconfirmed warns once and is not retried", async () => {
+  const { getDraft, clearDraft } = await import("@/lib/draft-store");
+  resetWorld();
+  clearDraft("abort-unconfirmed");
+  primeSession("abort-unconfirmed", [userMsg("u0", "loaded question")]);
+  const { w } = await startRun("abort-unconfirmed", "hello agent");
+  world.holds.push({
+    match: isAtomicStop,
+    produce: async () => ({
+      status: 400,
+      value: { error: "omp is busy and did not acknowledge the command in time.", code: "session_slow", abortUnconfirmed: true },
+    }),
+  });
+
+  await act(async () => { await w.latest.handleAbort(); });
+
+  assert.equal(world.calls.filter((call) => call.body?.type === "abort_and_restore_queue").length, 1, "an unconfirmed stop is not retried");
+  assert.equal(world.calls.some((c) => c.body?.type === "abort"), false, "no fallback abort on a child that never answered");
+  assert.equal(world.calls.some((c) => c.body?.type === "remove_queued_message"), false, "the per-entry path would guess about a queue nothing reported");
+  assert.deepEqual(w.latest.notices.map((notice) => [notice.type, notice.message]),
+    [["warning", translate("agentSession.abortUnconfirmed")]], "exactly one warning");
+  assert.equal(getDraft("abort-unconfirmed"), null, "nothing is put back into the composer on a guess");
+  clearDraft("abort-unconfirmed");
+});
+
+// An omp without `abort_and_restore_queue` falls back to withdraw-then-abort.
+// That abort's ack can time out too: the run may still be going, so say so
+// once — and do not send a second abort into the same busy child.
+test("a fallback abort whose ack timed out unconfirmed warns once and is not repeated", async () => {
+  resetWorld();
+  primeSession("abort-fallback-unconfirmed", [userMsg("u0", "loaded question")]);
+  const { w } = await startRun("abort-fallback-unconfirmed", "hello agent");
+  // The fake route answers `Unknown command: abort_and_restore_queue`, which
+  // selects the per-entry fallback; only the abort's answer times out.
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "abort",
+    produce: async () => ({
+      status: 400,
+      value: { error: "omp is busy and did not acknowledge the command in time.", code: "session_slow", abortUnconfirmed: true },
+    }),
+  });
+
+  await act(async () => { await w.latest.handleAbort(); });
+
+  assert.equal(world.calls.filter((c) => c.body?.type === "abort").length, 1, "an unconfirmed abort is not repeated");
+  assert.deepEqual(w.latest.notices.map((notice) => [notice.type, notice.message]),
+    [["warning", translate("agentSession.abortUnconfirmed")]], "exactly one warning");
+});
+
 function skillDiagnosticsSnapshot(showStartupDiagnostics, name = "review") {
   return {
     cwd: "/workspace",
@@ -6336,6 +6389,48 @@ test("a fresh chat's first prompt attaches one event stream instead of an observ
   assert.equal(streamsBeforeOpen, 1, "the prompt owns the only stream");
   assert.equal(world.esInstances.length, 1);
   assert.equal(callsTo("POST", "/api/agent/fresh-send").some((call) => call.body?.type === "prompt"), true);
+});
+
+// The prompt frame may already sit in omp's stdin when its ack times out
+// (HTTP 400 `session_slow` + `maybeStarted`). That is not a refused send:
+// rolling the bubble back would contradict the hint, and offering the text
+// again would run it twice. Keep the turn, keep sending locked, say why.
+test("a prompt whose ack timed out with maybeStarted keeps its message, stays locked and never resends", async () => {
+  resetWorld();
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ value: { sessionId: "uncertain" } }),
+  });
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url === "/api/agent/uncertain" && body?.type === "prompt",
+    produce: async () => ({
+      status: 400,
+      value: { error: "omp is busy and did not acknowledge the message in time; it may still be running.", code: "session_slow", maybeStarted: true },
+    }),
+  });
+  const w = await mountSession(null, undefined, { newSessionCwd: "/workspace" });
+  let sent;
+  await act(async () => {
+    sent = w.latest.handleSend("uncertain prompt");
+    await sleep(30); // create the runtime and attach the prompt's stream
+  });
+  let receipt;
+  await act(async () => {
+    lastEs().open();
+    receipt = await sent;
+  });
+
+  assert.deepEqual(receipt, { status: "accepted" }, "an unconfirmed prompt is not a refused send");
+  assert.deepEqual(w.latest.messages.map((message) => message.content), ["uncertain prompt"], "the optimistic turn stays: omp may be running it");
+  assert.equal(w.latest.agentRunning, true, "sending stays locked until a frame or a state read settles the run");
+  assert.deepEqual(w.latest.notices.map((notice) => [notice.type, notice.message]), [["warning", translate("agentSession.maybeStarted")]]);
+  const promptPosts = () => callsTo("POST", "/api/agent/uncertain").filter((call) => call.body?.type === "prompt");
+  assert.equal(promptPosts().length, 1);
+
+  // Locked means locked: a second click cannot put the same text into omp twice.
+  await act(async () => { assert.deepEqual(await w.latest.handleSend("uncertain prompt"), { status: "rejected" }); });
+  assert.equal(promptPosts().length, 1, "no resend");
+  w.unmount();
 });
 
 test("upload continuity: a fresh chat sends completion proof only with its direct prompt", async () => {
