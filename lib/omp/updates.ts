@@ -16,9 +16,19 @@ export interface OmpUpdateStatus {
 export const OMP_UPDATE_CHECK_TIMEOUT_MS = 30_000;
 export const OMP_UPDATE_CHECK_TTL_MS = 60 * 60 * 1000;
 
+// Scales the check deadline so a test can run the real subprocess boundary: a
+// launcher that answers past the old 15 s bound and one that outlives the new
+// 30 s bound, both in a fraction of the real time. Production never sets it.
+let checkTimeoutScale = 1;
+
+/** Test-only: scale the default check deadline (1 restores the real one). */
+export function scaleOmpUpdateCheckTimeoutForTests(scale: number): void {
+  checkTimeoutScale = scale;
+}
+
 /** Run a raw `omp update [args]` subcommand. Install durability
  * (lease/status/retry) lives in lib/self-update.ts. */
-export function runOmpUpdate(args: string[], timeoutMs = OMP_UPDATE_CHECK_TIMEOUT_MS): Promise<string> {
+export function runOmpUpdate(args: string[], timeoutMs = OMP_UPDATE_CHECK_TIMEOUT_MS * checkTimeoutScale): Promise<string> {
   const bin = resolveOmpBin();
   if (!bin) return Promise.reject(new Error("omp binary not found. Install oh-my-pi or set OMP_WEB_OMP_BIN."));
   const { promise, resolve, reject } = Promise.withResolvers<string>();
