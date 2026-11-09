@@ -247,9 +247,11 @@ async function fetchStub(url, init = {}) {
       const requested = new Set(body.clientMessageIds);
       assert.equal(requested.size, body.clientMessageIds.length, "selective reads contain unique IDs");
       const selected = { ...data, messages: data.messages.filter((envelope) => requested.has(envelope.clientMessageId)) };
-      for (const key of ["resolvedClientMessageIds", "persistedClientMessageIds", "unresolvedClientMessageIds"]) {
-        selected[key] = data[key].filter((id) => requested.has(id));
-      }
+      for (const key of ["resolvedClientMessageIds", "persistedClientMessageIds"]) selected[key] = data[key].filter((id) => requested.has(id));
+      // As lib/outbox-handoff.ts: unresolved is whatever was asked and is neither a message, resolved, persisted nor queued.
+      const queued = Object.values(data.queuedMessages?.clientMessageIds ?? {}).flat();
+      const answered = new Set([...selected.messages.map((envelope) => envelope.clientMessageId), ...selected.resolvedClientMessageIds, ...selected.persistedClientMessageIds, ...queued]);
+      selected.unresolvedClientMessageIds = body.clientMessageIds.filter((id) => !answered.has(id));
       return jsonResponse(200, { success: true, data: selected });
     }
     const wrapper = world.wrappers.get(sid);
@@ -6542,8 +6544,8 @@ test("a delivered native worker receipt preserves the original intent before a l
     images: [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }], uploads: ["original-upload"],
     state: "delivered", settlement: "native", createdAt: 2,
   };
-  // A live child still holds it somewhere this tab has not seen: neither message nor queue yet.
-  world.clientMessageStatuses.set(sid, clientMessageStatus());
+  // The peer's child cannot answer the selective read yet (an answer finding no trace is "unresolved": Not sent).
+  world.clientMessageStatuses.set(sid, { status: 503, error: "host unavailable" });
   await act(() => {
     workerPort.onmessage({ data: { outboxStored: entry } });
     workerPort.onmessage({ data: { outbox: [] } });
@@ -6592,7 +6594,7 @@ for (const loss of ["unresolved", "child gone"]) {
     await act(() => es.open());
     await settle();
     const entry = { id: "lost-bridge", sessionId: sid, mode: "followUp", message: "lost when the child died", state: "delivering", createdAt: 1 };
-    if (loss === "unresolved") world.clientMessageStatuses.set(sid, clientMessageStatus({ unresolvedClientMessageIds: [entry.id] }));
+    if (loss === "unresolved") world.clientMessageStatuses.set(sid, clientMessageStatus());
     else world.clientMessageStatuses.set(sid, { error: "No live omp child", code: "handoff_child_unavailable", status: 409 });
     await act(() => {
       es.emit({ type: "outbox_update", entries: [entry], settledIds: [] });
@@ -6636,12 +6638,12 @@ test("a native history rewind drops a correlated echo the delayed catch-up was s
 });
 
 function clientMessageStatus(overrides = {}) {
+  // `unresolvedClientMessageIds` is computed by the stub from what is asked, as lib/outbox-handoff.ts does.
   return {
     messages: [],
     queuedMessages: { steering: [], followUp: [] },
     resolvedClientMessageIds: [],
     persistedClientMessageIds: [],
-    unresolvedClientMessageIds: [],
     ...overrides,
   };
 }
@@ -6663,8 +6665,8 @@ for (const catchUp of ["unchanged history", "HTTP failure"]) {
         ? { role: "user", id: "expanded-native", content: [{ type: "text", text: "Expanded skill instructions" }], timestamp: 2 }
         : { role: "custom", id: "expanded-native", customType: "skill-expansion", content: "Native skill expansion", display: true, details: {}, timestamp: 2 };
       const displayed = { ...echo, clientMessageId: entry.id };
-      // The selective read has nothing for it yet: the bridge must wait, not guess.
-      world.clientMessageStatuses.set(sid, clientMessageStatus());
+      // The selective read cannot answer yet: the bridge must wait, not guess.
+      world.clientMessageStatuses.set(sid, { status: 503, error: "host unavailable" });
       const commits = [];
       const w = await mountSession(sid, undefined, {}, false, (state) => commits.push(state));
       const es = lastEs();
@@ -6741,7 +6743,6 @@ test("selective persisted-only handoff waits for successful history catch-up; ex
   world.clientMessageStatuses.set(sid, clientMessageStatus({
     persistedClientMessageIds: ["persisted", "compacted"],
     resolvedClientMessageIds: ["withdrawn"],
-    unresolvedClientMessageIds: ["unknown"],
   }));
   await act(() => es.emit({ type: "outbox_update", entries, settledIds: [], nativeSettledIds: [] }));
   world.contextUnavailable = true;
@@ -6820,7 +6821,7 @@ test("correlated native queue snapshots replace only their exact handoff IDs and
     steering: [], followUp: ["identical text"],
     clientMessageIds: { steering: [], followUp: ["queued"] },
   };
-  world.clientMessageStatuses.set(sid, clientMessageStatus({ queuedMessages, unresolvedClientMessageIds: ["same-text-unresolved"] }));
+  world.clientMessageStatuses.set(sid, clientMessageStatus({ queuedMessages }));
   await act(() => es.emit({ type: "outbox_update", entries, settledIds: [], nativeSettledIds: [] }));
   await act(() => es.emit({
     type: "outbox_update", entries: [], settledIds: ["queued", "same-text-unresolved"], nativeSettledIds: ["queued", "same-text-unresolved"],
@@ -6829,7 +6830,7 @@ test("correlated native queue snapshots replace only their exact handoff IDs and
   assert.deepEqual(w.latest.queuedMessages, queuedMessages, "selective reconciliation applies the real correlated queue");
   assert.deepEqual(w.latest.heldMessages.map((entry) => entry.id), ["same-text-unresolved"], "text equality is not native identity");
   await act(() => es.emit({ type: "queue_update", steering: [], followUp: [], clientMessageIds: { steering: [], followUp: [] } }));
-  world.clientMessageStatuses.set(sid, clientMessageStatus({ unresolvedClientMessageIds: ["same-text-unresolved"] }));
+  world.clientMessageStatuses.set(sid, clientMessageStatus());
   await act(() => {
     es.emit({ type: "outbox_update", entries: [], settledIds: ["queued", "same-text-unresolved"], nativeSettledIds: ["queued", "same-text-unresolved"] });
     workerPort.onmessage({ data: { outboxStored: entries[0] } });
@@ -6856,7 +6857,7 @@ for (const newer of ["queue snapshot", "history navigation"]) {
       match: (method, _url, body) => method === "POST" && body?.type === "get_client_message_status",
       produce: () => new Promise((resolve) => { release = resolve; }),
     });
-    world.clientMessageStatuses.set(sid, clientMessageStatus({ unresolvedClientMessageIds: [entry.id] }));
+    world.clientMessageStatuses.set(sid, clientMessageStatus());
     await act(() => es.emit({ type: "outbox_update", entries: [entry], settledIds: [], nativeSettledIds: [] }));
     await act(() => es.emit({ type: "outbox_update", entries: [], settledIds: [entry.id], nativeSettledIds: [entry.id] }));
     await until(() => typeof release === "function", "selective reconciliation must start");

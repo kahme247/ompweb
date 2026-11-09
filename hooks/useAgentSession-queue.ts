@@ -63,6 +63,8 @@ export function rememberOutboxEntries(current: ServerOutbox, entries: (OutboxEnt
   const retired: string[] = [];
   for (const entry of entries) {
     if (current.represented.has(entry.id)) continue;
+    // A worker replay names the session the row was typed in; the server's copy may have moved to another since.
+    if (local && current.known.get(entry.id)?.local === false) continue;
     if (entry.state === "delivered") {
       seen.add(entry.id);
       if (entry.settlement === "native") nativeSettled.add(entry.id);

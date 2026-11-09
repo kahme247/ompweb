@@ -1,7 +1,11 @@
 import { isClientMessageId, readQueueSnapshot } from "./client-message-ids";
+import { isLinkUp } from "./hosts/host";
+import { adoptedChild, listHosts } from "./hosts/hub";
 import { HostOpError } from "./hosts/link-protocol";
+import { LOCAL_HOST_ID } from "./hosts/registry";
+import { hostForSessionId } from "./hosts/session-index";
 import type { ClientMessageStatus } from "./pi-types";
-import { getRpcSession } from "./rpc-manager";
+import { getRpcSession, WebRpcError } from "./rpc-manager";
 import { isRecord } from "./type-guards";
 import type { AgentMessage } from "./types";
 
@@ -38,11 +42,27 @@ function nativeStatus(value: unknown, ids: readonly string[]): ClientMessageStat
   };
 }
 
-/** Ask the live native child about intents the browser still holds; this never starts or replaces omp. A session
- * with no live child answers 409 and the browser reads its own history instead. */
+/** The live child answering for `sessionId`; 409 only once its absence is established. A child another server started
+ * is adopted here only after its daemon lists it, and an offline or unlisted host proves nothing: those are a retryable 503. */
+async function liveChild(sessionId: string) {
+  let live = getRpcSession(sessionId);
+  if (!live) {
+    await Promise.all([LOCAL_HOST_ID, ...listHosts().map(({ id }) => id)].map((id) => adoptedChild(id, sessionId)));
+    live = getRpcSession(sessionId);
+  }
+  if (live?.isAlive()) return live;
+  if (!live) {
+    // Throws a 503 while a host that may hold the session is offline or its list unavailable.
+    const host = await hostForSessionId(sessionId);
+    if (host && !isLinkUp(host.status())) throw new WebRpcError(`${host.label} is offline`, "host_offline", "refused");
+  }
+  throw new HostOpError(409, "handoff_child_unavailable", "No running native session can answer for these messages");
+}
+
+/** Ask the live native child about intents the browser still holds; this never starts or replaces omp. Absence of a
+ * child answers 409 and the browser reads its own history instead; uncertainty answers a retryable 503. */
 export async function reconcileOutboxHandoffs(sessionId: string, ids: readonly string[]): Promise<ClientMessageStatus> {
-  const live = getRpcSession(sessionId);
-  if (!live?.isAlive()) throw new HostOpError(409, "handoff_child_unavailable", "No running native session can answer for these messages");
+  const live = await liveChild(sessionId);
   const nativeSessionId = live.sessionId;
   const raw = await live.send({ type: "get_client_message_status", clientMessageIds: ids });
   if (!live.isAlive() || live.sessionId !== nativeSessionId) {

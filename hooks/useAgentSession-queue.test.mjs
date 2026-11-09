@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { EMPTY_SERVER_OUTBOX, applyOutboxSnapshot, mergeHeldMessages } from "./useAgentSession-queue.ts";
+import { EMPTY_SERVER_OUTBOX, applyOutboxSnapshot, mergeHeldMessages, rememberOutboxEntries } from "./useAgentSession-queue.ts";
 import { readQueueSnapshot } from "../lib/client-message-ids";
 
 const local = (id, createdAt, enqueueOrder) => ({ id, sessionId: "s", scope: "scope", mode: "followUp", message: id, state: "sending", createdAt, enqueueOrder });
@@ -43,4 +43,18 @@ test("queue snapshots retain aligned native client IDs, including uncorrelated s
     steering: ["first", "second"], followUp: [],
     clientMessageIds: { steering: ["cannot-prove-alignment"], followUp: [] },
   })?.clientMessageIds, { steering: [null, null], followUp: [] }, "misaligned ID arrays cannot identify either queue slot");
+});
+
+test("a worker replay of a browser copy never moves a server-remembered row back to its source session", () => {
+  // The server moved the row to session "moved" (a native move); the worker still lists it under the session it was typed in.
+  const moved = { ...stored("row", 1000, "delivered"), sessionId: "moved", settlement: "native" };
+  let outbox = rememberOutboxEntries(EMPTY_SERVER_OUTBOX, [moved]);
+  assert.equal(outbox.known.get("row")?.sessionId, "moved");
+  for (let replay = 0; replay < 2; replay++) {
+    outbox = rememberOutboxEntries(outbox, [local("row", 100, 1)], true);
+    assert.equal(outbox.known.get("row")?.sessionId, "moved", `replay ${replay + 1}`);
+  }
+  assert.deepEqual(order(mergeHeldMessages("moved", [], [], outbox)), ["row:server"], "the moved session still shows its bridge");
+  // A browser-only row has nothing to protect: its replay still remembers the browser's payload.
+  assert.equal(rememberOutboxEntries(EMPTY_SERVER_OUTBOX, [local("only-here", 100, 1)], true).known.get("only-here")?.sessionId, "s");
 });

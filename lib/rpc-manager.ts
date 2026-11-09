@@ -170,6 +170,7 @@ const PASSTHROUGH_COMMANDS = new Set([
   "btw",
   "btw_cancel",
   "get_btw_history",
+  "get_client_message_status",
 ]);
 
 // Outlasts omp's cold prediction-daemon start (up to 3 × 30s start rounds plus a
@@ -271,10 +272,14 @@ function matchesNativeSkill(message: Record<string, unknown>, submitted: string)
 function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, unknown>, baseline: unknown, generation: number, competingPending: boolean, previousEntryIds?: string[]): MessageReplacementWatch {
   const { promise, resolve } = Promise.withResolvers<HandOff>();
   const ambiguous: HandOff = { error: "Another message was dispatched while this message's native replacement was being confirmed", mayHaveBeenSent: true };
-  // A peer server's admission (the daemon's marker) also contends: its identical echo is not this command's proof.
-  const peers = wrapper.peerMessageCommands;
-  const ownsWindow = () => !competingPending && wrapper.getMessageCommandGeneration() === generation + 1 && wrapper.peerMessageCommands === peers;
   const clientMessageId = isClientMessageId(command.clientMessageId) ? command.clientMessageId : null;
+  // A peer server's admission (the daemon's marker) also contends: its identical echo is not this command's proof. An
+  // exact ID names this command's message whoever else writes meanwhile, so only text inference needs the sole window.
+  const peers = wrapper.peerMessageCommands;
+  const ownsWindow = () => clientMessageId !== null || (!competingPending && wrapper.getMessageCommandGeneration() === generation + 1 && wrapper.peerMessageCommands === peers);
+  // The text rules need omp's user attribution; an exact ID alone also identifies a displayed native custom message.
+  const isUserInput = (message: Record<string, unknown>) => message.role === "user"
+    || (message.role === "custom" && (message.attribution === "user" || (clientMessageId !== null && message.display !== false)));
   const initialQueue = clientMessageId ? [] : queueTexts(baseline);
   let priorQueue = initialQueue;
   let echoDebt: number | undefined;
@@ -336,12 +341,11 @@ function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, 
   };
   const detach = wrapper.onEvent((event) => {
     if (seen) return;
-    if (competingPending || wrapper.getMessageCommandGeneration() > generation + 1 || wrapper.peerMessageCommands !== peers) { finish(ambiguous); return; }
+    if (!clientMessageId && (competingPending || wrapper.getMessageCommandGeneration() > generation + 1 || wrapper.peerMessageCommands !== peers)) { finish(ambiguous); return; }
     if (!ownsWindow() && event.type !== "process_exit") return;
     const text = expectedText();
     if (!clientMessageId && echoDebt === undefined) echoDebt = initialQueue.filter((item) => item === text).length;
-    if ((event.type === "message_start" || event.type === "message_end") && isRecord(event.message)
-      && (event.message.role === "user" || (event.message.role === "custom" && event.message.attribution === "user"))
+    if ((event.type === "message_start" || event.type === "message_end") && isRecord(event.message) && isUserInput(event.message)
       && (!clientMessageId || event.clientMessageId === clientMessageId)) userMessageSeen = true;
     if (event.type === "message_start" && typeof event.messageId === "string" && isRecord(event.message) && event.message.role === "user") {
       openedUserMessages.add(event.messageId);
@@ -362,8 +366,7 @@ function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, 
       }
       if (text && (added.includes(text) || (command.type === "prompt" && text.trimStart().startsWith("/") && added.length === 1))) finish({});
       priorQueue = next;
-    } else if (event.type === "message_end" && isRecord(event.message)
-      && (event.message.role === "user" || (event.message.role === "custom" && event.message.attribution === "user"))) {
+    } else if (event.type === "message_end" && isRecord(event.message) && isUserInput(event.message)) {
       if (clientMessageId) {
         if (event.clientMessageId === clientMessageId) finish({});
       } else if (text && (messageText(event.message) === text || matchesNativeSkill(event.message, text))) {
