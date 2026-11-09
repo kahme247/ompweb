@@ -105,7 +105,7 @@ const NON_TERMINAL_CONTINUATION_GRACE_MS = 2_000;
 const AWAITING_AGENT_START_TIMEOUT_MS = 10_000;
 const RESTARTING_MESSAGE = "This session is restarting — retry in a moment.";
 const BASH_EXCLUDE_MESSAGE =
-  "omp cannot run a shell command with its output excluded from the model context (`!!`): the RPC bash command has no exclusion option, so the output would silently enter the context anyway. Run it with a single `!` to share the output with the model, or use a terminal outside omp web.";
+  "Nothing was run: this session cannot confirm shell output exclusion (`!!`). Use OMP 18.18.1 or newer and reload the session. For linked hosts, update the ompweb host daemon too so it reports the capability.";
 /** Answer to a replayed server agent tool call that changes things: it may have run before the restart. */
 const AGENT_TOOL_UNKNOWN_OUTCOME = "omp-web restarted while this ran; the outcome is unknown, check with list_sessions before retrying";
 
@@ -2819,11 +2819,14 @@ export class AgentSessionWrapper {
       }
 
       case "bash": {
-        // omp's RPC bash command is `{type:"bash", command}` only (rpc-types.ts)
-        // — there is no excludeFromContext option anywhere in modes/rpc. Running
-        // a `!!` command anyway would put output the user meant to keep private
-        // into the model context, so refuse instead of silently ignoring it.
-        if (command.excludeFromContext === true) {
+        const proc = this.proc;
+        if (command.excludeFromContext !== undefined && typeof command.excludeFromContext !== "boolean") {
+          throw new Error("excludeFromContext must be a boolean");
+        }
+        // OMP >= 18.18.1 advertises this on the actual child; a host's installed
+        // version cannot prove that an older, still-running child supports it.
+        if (command.excludeFromContext === true &&
+            (await proc.waitReady(READY_TIMEOUT_MS)).supportsBashExcludeFromContext !== true) {
           throw new WebRpcError(BASH_EXCLUDE_MESSAGE, "bash_exclude_unsupported");
         }
         // A turn may be running: omp runs the command beside it and, as its
@@ -2839,7 +2842,11 @@ export class AgentSessionWrapper {
           // `isStreaming`. Read it then: an agent_end in the same batch is
           // applied before this await resumes.
           let deferred = this.streaming;
-          const result = await this.proc.sendCommand<BashResultInfo>({ type: "bash", command: command.command as string }, undefined, () => { deferred = this.streaming; });
+          const result = await proc.sendCommand<BashResultInfo>({
+            type: "bash",
+            command: command.command as string,
+            ...(command.excludeFromContext === true ? { excludeFromContext: true } : {}),
+          }, undefined, () => { deferred = this.streaming; });
           return { ...result, deferred };
         } finally {
           this.bashRunning = false;

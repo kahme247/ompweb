@@ -164,7 +164,7 @@ export class RpcProcess {
       // It announced readiness and negotiated this version with the server that spawned it.
       this.protocolVersion = options.adopted.protocolVersion;
       this.heldFrames = [];
-      ready.resolve({ type: "ready", supportedProtocolVersions: [options.adopted.protocolVersion] });
+      ready.resolve({ type: "ready", supportedProtocolVersions: [options.adopted.protocolVersion], supportsBashExcludeFromContext: this.transport.supportsBashExcludeFromContext === true });
     }
 
     let decoder = new RpcFrameDecoder();

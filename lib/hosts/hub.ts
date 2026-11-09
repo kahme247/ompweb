@@ -1128,6 +1128,8 @@ export class RemoteRpcTransport implements RpcTransport {
   session: string | null;
   /** The daemon confirmed the spawn (or listed the channel); until then a `hello` without it is not a loss. */
   spawned = false;
+  /** The daemon's ready said this child excludes shell output from context, as of the last open that named it; false until one does. */
+  supportsBashExcludeFromContext = false;
   /** The daemon stopped listing this child: it died while the link was down. Set before the synthesized exit. */
   lost = false;
   /** Killed: a child of a previous run of this server that it could not adopt. Its output has no reader and is dropped. */
@@ -1277,6 +1279,7 @@ export class RemoteRpcTransport implements RpcTransport {
       await request(this.hostId, "open", { ...this.opening, sessionId }, linkTimings.opTimeoutMs, (value) => {
         if (!isOpenResult(value) || value.ch !== this.ch || value.pending === null) throw new Error("Host could not reconcile the shared channel");
         this.refreshing = false;
+        this.supportsBashExcludeFromContext = value.supportsBashExcludeFromContext === true;
         if (this.interested || this.preparing > 0) this.sendInterest();
         notify(this.resyncListeners);
         for (const line of value.pending) this.deliverLine(line);
@@ -1361,13 +1364,14 @@ function isSpawnResult(value: unknown): value is { cwd: string; fellBack: boolea
 
 function isOpenResult(value: unknown): value is OpenChannelResult {
   if (!isRecord(value)) return false;
-  const { ch, joined, pending, streaming, advisorSpawned } = value;
+  const { ch, joined, pending, streaming, advisorSpawned, supportsBashExcludeFromContext } = value;
   return isSpawnResult(value)
     && typeof ch === "string" && ch.length > 0
     && typeof joined === "boolean"
     && typeof advisorSpawned === "boolean"
     && (pending === null || (Array.isArray(pending) && pending.every((line) => typeof line === "string")))
-    && (streaming === null || typeof streaming === "string");
+    && (streaming === null || typeof streaming === "string")
+    && (supportsBashExcludeFromContext === undefined || typeof supportsBashExcludeFromContext === "boolean");
 }
 
 /** Legacy hosts retain their single-server lifecycle and notification behaviour. */
@@ -1428,6 +1432,7 @@ export class RemoteHost implements Host {
         }
         const transport = link.channels.get(value.ch) ?? new RemoteRpcTransport(this.id, value.ch, sessionId, true);
         transport.spawned = true;
+        transport.supportsBashExcludeFromContext = value.supportsBashExcludeFromContext === true;
         transport.noteOpen(opening);
         link.channels.set(value.ch, transport);
         link.autoApprove = value.autoApproveExtension;

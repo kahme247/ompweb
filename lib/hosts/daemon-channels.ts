@@ -35,6 +35,8 @@ type Channel = {
   stopReason?: string;
   /** omp accepted the resume prompt but has not started (or ended) that run yet: still recorded as running. */
   resuming?: boolean;
+  /** The child's ready advertised exclude-from-context; configure sets it, false until then. */
+  supportsBashExcludeFromContext: boolean;
 };
 type ChannelDeps = {
   spawn(launch: SpawnRequest): Promise<SpawnResult>;
@@ -160,7 +162,7 @@ export class ChannelTable {
   }
   private snapshot(channel: Channel, link: DaemonLink, joined: boolean): OpenChannelResult {
     return { ch: channel.ch, joined, pending: this.pendingFor(channel, link), streaming: channel.snapshot.whole(), cwd: channel.cwd,
-      fellBack: channel.fellBack, launchAdvisor: channel.launchAdvisor, advisorSpawned: channel.launch.advisor || channel.launchAdvisor, autoApproveExtension: this.deps.autoApproveExtension?.() ?? false };
+      fellBack: channel.fellBack, launchAdvisor: channel.launchAdvisor, advisorSpawned: channel.launch.advisor || channel.launchAdvisor, autoApproveExtension: this.deps.autoApproveExtension?.() ?? false, supportsBashExcludeFromContext: channel.supportsBashExcludeFromContext };
   }
 
   async spawnLegacy(link: DaemonLink, args: SpawnRequest & { ch: string }): Promise<Omit<OpenChannelResult, "ch" | "joined" | "pending" | "streaming" | "advisorSpawned">> {
@@ -236,7 +238,7 @@ export class ChannelTable {
       const channel: Channel = { ...spawned, ch, launch, legacy, pending: new PendingRequests(LINK_LIMITS.pendingBytes, identity), snapshot: new StreamSnapshot(),
         members: new Map(), aliases: new Set(identity ? [identity] : []), files: new Set(launch.sessionFile ? [launch.sessionFile] : []),
         decoder: new RpcFrameDecoder(), physical: [], commands: new Map(), internal: new Map(), ready, noteReady, readyTimer,
-        startup: Promise.resolve(), exited: false, opened: false, fullFallback: false };
+        startup: Promise.resolve(), exited: false, opened: false, fullFallback: false, supportsBashExcludeFromContext: false };
       this.channels.set(ch, channel);
       if (legacy === null) {
         channel.lifecycle = new ChannelLifecycle({ stop: reason => { this.deps.log(`channel ${ch}: stopping (${reason})`); this.stopChannel(channel, reason); }, onRunning: () => this.deps.runningChanged?.() });
@@ -269,6 +271,7 @@ export class ChannelTable {
 
   private async configure(channel: Channel): Promise<void> {
     const ready = await channel.ready; clearTimeout(channel.readyTimer);
+    channel.supportsBashExcludeFromContext = ready?.supportsBashExcludeFromContext === true;
     if (channel.exited) return;
     const supported = ready?.supportedProtocolVersions;
     const supportsV2 = Array.isArray(supported) && supported.includes(2);
