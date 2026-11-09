@@ -38,13 +38,15 @@ export async function GET(req: Request) {
   const from = parseTimestamp(url.searchParams.get("from"));
   const to = parseTimestamp(url.searchParams.get("to"));
   if (from === null || to === null) return invalidWindow();
-  const now = Date.now();
+  // A lone bound is rejected rather than ignored: the report only applies an
+  // explicit window when BOTH ends are present, so `from=<now-1d>` used to
+  // answer the plain 30-day report under its own cache key — a wrong answer
+  // that also paid for a full transcript scan per distinct value.
+  if ((from === undefined) !== (to === undefined)) return invalidWindow();
   // Every distinct from/to pair is its own cache key and its own full scan, so
   // an unbounded/backwards/open window would let one client explore the
   // transcript tree without limit. 400 days covers the UI's widest range.
   if (from !== undefined && to !== undefined && (from > to || to - from > MAX_USAGE_WINDOW_MS)) return invalidWindow();
-  if (from !== undefined && to === undefined && now - from > MAX_USAGE_WINDOW_MS) return invalidWindow();
-  if (to !== undefined && from === undefined && now - to > MAX_USAGE_WINDOW_MS) return invalidWindow();
 
   const forceRefresh = refreshParam === "true" || refreshParam === "1";
 
@@ -62,7 +64,9 @@ export async function GET(req: Request) {
     // Paths and database messages stay in the server log; the client gets a
     // stable code it can act on. Match on the code, not `instanceof`: a
     // re-evaluated module or a worker restart need not share class identity.
-    console.error("[api/usage]", error);
+    // Log the message only: the error object carries a stack and often a
+    // transcript path, neither of which belongs in the log.
+    console.error("[api/usage]", error instanceof Error ? error.message : String(error));
     const code = isRecord(error) && typeof error.code === "string" ? error.code : undefined;
     if (code === "usage_busy") {
       return Response.json({ error: "Usage scan busy", code: "usage_busy" }, { status: 503 });

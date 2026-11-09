@@ -189,11 +189,19 @@ export interface SyncStats {
  * sub-sessions — each bills its own model usage), into the usage database.
  * Artifact transcripts are attributed to the session they belong to. Only
  * files that are new, changed, or last synced by other parsing rules are parsed.
+ *
+ * `forceRefresh` drops every stored row first and re-syncs the whole corpus.
+ * The drop happens **inside this function's transaction**, not before it: a
+ * caller that deleted the rows outside could be killed (the worker's deadline)
+ * or fail midway and leave an empty database behind, which the next request
+ * would then cache as a valid zero-usage report. Here a failed or killed
+ * refresh rolls back and the previous rows survive untouched.
  */
 export function syncSessionFilesToDb(
   sessionFiles: string[],
   customModelsConfig: ModelsFileConfig = readModelsConfig(),
   customDb?: Database,
+  forceRefresh = false,
 ): SyncStats {
   const db = customDb || getUsageDatabase();
   const now = Date.now();
@@ -250,6 +258,16 @@ export function syncSessionFilesToDb(
   };
 
   try {
+    // 1. A forced refresh starts from an empty database. This runs inside the
+    // transaction below (opened here, before the first DELETE), so a refresh
+    // that fails or is killed rolls back to the rows it started with instead
+    // of leaving the database empty for the next reader to cache.
+    if (forceRefresh) {
+      ensureTransaction();
+      db.exec("DELETE FROM synced_files; DELETE FROM usage_records;");
+      syncedMap.clear();
+    }
+
     // 2. Incremental sync for new / modified files
     for (const { filePath, sessionFile } of transcripts) {
       let stats;
@@ -392,19 +410,15 @@ export async function getUsageReportFromDb(
   const projectFilter = options.project ? options.project.trim().toLowerCase() : undefined;
 
   const db = customDb || getUsageDatabase();
-  if (options.forceRefresh) {
-    try {
-      db.exec("DELETE FROM synced_files; DELETE FROM usage_records;");
-    } catch {
-      // Ignore
-    }
-  }
 
   // Sync latest sessions (and the helper transcripts in their artifacts
-  // directories) from disk before querying
+  // directories) from disk before querying. A forced refresh drops and
+  // re-syncs inside the sync's own transaction: deleting the rows here would
+  // leave an empty database behind if the scan were killed or failed, and the
+  // next request would cache that as a valid zero-usage report.
   const sessionsDir = getSessionsDir();
   const sessionFiles = existsSync(sessionsDir) ? await listSessionFiles(sessionsDir) : [];
-  syncSessionFilesToDb(sessionFiles, readModelsConfig(), db);
+  syncSessionFilesToDb(sessionFiles, readModelsConfig(), db, options.forceRefresh === true);
   collectUncountedUsage(db);
   const hasExplicitBounds =
     typeof options.from === "number" &&
