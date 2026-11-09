@@ -28,6 +28,25 @@ export const PUSH_RETRY_DELAYS_MS = [2_000, 10_000, 30_000];
  */
 export const PUSH_RETRACTION_TTL_MS = PUSH_RETRY_DELAYS_MS.reduce((total, delay) => total + delay, 0)
   + (PUSH_RETRY_DELAYS_MS.length + 1) * PUSH_TIMEOUT_MS;
+/** Default spacing of the repeats of an unanswered `input` notification. */
+export const INPUT_REMINDER_MS = 2 * 60 * 60 * 1000;
+/** A dialog is repeated at most this often before it stays quiet until it settles. */
+export const MAX_INPUT_REMINDERS = 12;
+
+/**
+ * Reminder spacing for this process, read on every dialog so tests and a
+ * changed environment need no restart. `OMP_WEB_INPUT_REMINDER_MS=0` disables
+ * reminders; unset or malformed values keep the default. A value above
+ * `2^31-1` is malformed too: it overflows `setTimeout`, which fires
+ * immediately, and the cap would burn through in milliseconds.
+ */
+export function inputReminderIntervalMs(): number | null {
+  const raw = process.env.OMP_WEB_INPUT_REMINDER_MS;
+  if (raw === undefined || raw.trim() === "") return INPUT_REMINDER_MS;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0 || value > 2_147_483_647) return INPUT_REMINDER_MS;
+  return value === 0 ? null : value;
+}
 
 // Apple's push service rejects VAPID subjects it cannot resolve (e.g. localhost mail).
 const VAPID_SUBJECT = "https://github.com/kahme247/ompweb";
@@ -144,6 +163,8 @@ export function routeNotification(event: NotificationEvent, presence: Notificati
   const deliveries: Delivery[] = [];
   for (const device of devices) {
     if (!device.prefs.enabled || !device.prefs.types[event.type]) continue;
+    // The first `input` notification is unaffected; only its repeats are optional.
+    if (event.reminder && device.prefs.inputReminder === false) continue;
     if (active.length > 0 && device.prefs.whenActive === "toast") {
       for (const tab of active) if (tab.deviceId === device.deviceId) deliveries.push({ kind: "toast", clientId: tab.clientId });
     } else if (device.subscription) {
@@ -162,7 +183,7 @@ function renderFor(event: NotificationEvent, locale: string): RenderedNotificati
   return renderNotification(event, (key, vars) => {
     const template = dictionary[key] ?? dictionaries.en[key] ?? key;
     return vars ? template.replace(/\{(\w+)\}/g, (match, name: string) => (name in vars ? String(vars[name]) : match)) : template;
-  });
+  }, locale);
 }
 
 /** `String()` of Node's multi-address connect failure is just "AggregateError"; name each address's cause instead. */
@@ -215,6 +236,8 @@ async function sendPush(device: NotificationDevice, event: NotificationEvent, re
         type: event.type,
         ...(event.requestId ? { requestId: event.requestId } : {}),
         ...(event.dialog ? { dialog: event.dialog } : {}),
+        ...(event.reminder ? { reminder: true } : {}),
+        ...(event.pendingSince ? { pendingSince: event.pendingSince } : {}),
       }), {
         TTL: PUSH_TTL_SECONDS,
         urgency: event.type === "input" || event.type === "error" ? "high" : "normal",
@@ -260,7 +283,8 @@ export function publishNotification(event: NotificationEvent): void {
   const presence = livePresence(Date.now());
   // The Notifications tab lists what a device asked for, received or not; one the user watched happen is already read.
   const { type } = event;
-  if (type !== "test" && devices.some((device) => device.prefs.enabled && device.prefs.types[type])) {
+  if (type !== "test" && devices.some((device) =>
+    device.prefs.enabled && device.prefs.types[type] && !(event.reminder && device.prefs.inputReminder === false))) {
     try {
       recordHistory(event, { read: isOnScreen(event, presence) });
     } catch (error) {

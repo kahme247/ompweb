@@ -51,6 +51,10 @@ export interface NotificationEvent {
   requestId?: string;
   /** `input` only: the dialog waiting for an answer, when it fits a push payload. */
   dialog?: NotificationDialog;
+  /** `input` only: a repeat of a question that is still unanswered (see `INPUT_REMINDER_MS`). */
+  reminder?: boolean;
+  /** `input` reminders only: ISO time the dialog opened, i.e. its first notification. */
+  pendingSince?: string;
 }
 
 /** One entry of the persisted notification history; `id` is the replace-tag `<sessionId>:<type>`. */
@@ -68,6 +72,8 @@ export interface NotificationPrefs {
   whenActive: "toast" | "system";
   /** UI locale, so pushes are written in the device's language. */
   locale: string;
+  /** Repeat an unanswered `input` notification instead of only the first one. */
+  inputReminder: boolean;
 }
 
 export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
@@ -75,6 +81,7 @@ export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
   types: { completed: true, input: true, error: true, modelSwitch: false },
   whenActive: "toast",
   locale: "en",
+  inputReminder: true,
 };
 
 /** Validate untrusted prefs (request bodies, localStorage); unknown fields fall back to defaults. */
@@ -90,6 +97,8 @@ export function parseNotificationPrefs(value: unknown): NotificationPrefs {
     types,
     whenActive: raw.whenActive === "system" ? "system" : "toast",
     locale: typeof raw.locale === "string" && /^[A-Za-z-]{2,10}$/.test(raw.locale) ? raw.locale : "en",
+    // Absent is the pre-reminder default: devices that never saved the toggle keep getting reminders.
+    inputReminder: raw.inputReminder !== false,
   };
 }
 
@@ -112,16 +121,40 @@ function clip(text: string, max = MAX_DETAIL): string {
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
+/**
+ * How long a dialog has been waiting, as an elapsed duration in the reader's
+ * language ("2 hours", "45 minutes"). A server-rendered clock time would be in
+ * the server's timezone and unreadable on a device in another one.
+ */
+function elapsedSince(pendingSince: string | undefined, locale: string | undefined, now: number): string {
+  if (!pendingSince) return "";
+  const at = new Date(pendingSince);
+  if (Number.isNaN(at.getTime())) return "";
+  const minutes = Math.max(0, Math.floor((now - at.getTime()) / 60_000));
+  const [value, unit] = minutes < 60
+    ? [minutes, "minute"]
+    : minutes < 60 * 24 ? [Math.floor(minutes / 60), "hour"] : [Math.floor(minutes / (60 * 24)), "day"];
+  try {
+    return new Intl.NumberFormat(locale, { style: "unit", unit, unitDisplay: "long" }).format(Math.max(1, value));
+  } catch {
+    return `${Math.max(1, value)} ${unit}${Math.max(1, value) === 1 ? "" : "s"}`;
+  }
+}
+
 /** Title, body, click target, and replace-tag for one event in the caller's language. */
-export function renderNotification(event: NotificationEvent, t: Translate): RenderedNotification {
+export function renderNotification(event: NotificationEvent, t: Translate, locale?: string, now = Date.now()): RenderedNotification {
   const detail = event.detail ? clip(event.detail) : "";
+  const reminder = event.type === "input" && event.reminder === true;
+  const since = reminder ? elapsedSince(event.pendingSince, locale, now) : "";
   let body: string;
   switch (event.type) {
     case "completed":
       body = t("notifications.completedBody");
       break;
     case "input":
-      body = detail ? t("notifications.inputBody", { detail }) : t("notifications.inputBodyNoDetail");
+      body = reminder && since
+        ? detail ? t("notifications.reminderBody", { since, detail }) : t("notifications.reminderBodyNoDetail", { since })
+        : detail ? t("notifications.inputBody", { detail }) : t("notifications.inputBodyNoDetail");
       break;
     case "error":
       body = detail ? t("notifications.errorBody", { detail }) : t("notifications.errorBodyNoDetail");
@@ -139,8 +172,9 @@ export function renderNotification(event: NotificationEvent, t: Translate): Rend
       body = t("notifications.testBody");
       break;
   }
+  const title = (event.sessionName && clip(event.sessionName, MAX_TITLE)) || t("notifications.untitledSession");
   return {
-    title: (event.sessionName && clip(event.sessionName, MAX_TITLE)) || t("notifications.untitledSession"),
+    title: reminder ? t("notifications.reminderTitle", { title }) : title,
     body,
     url: event.sessionId ? `/?session=${encodeURIComponent(event.sessionId)}` : "/",
     tag: `${event.sessionId}:${event.type}`,
@@ -152,9 +186,16 @@ const MODEL_SWITCH_NOTICE_SOURCES = new Set(["prewalk", "plan-yolo"]);
 
 /**
  * Extension UI dialogs the user answers in the chat (omp's rpc.md "Extension UI
+<<<<<<< HEAD
  * Sub-Protocol": these expect an `extension_ui_response`). `open_url` is
  * fire-and-forget — omp registers no resolver for it — so it is not a dialog
  * and takes no answer; it is only *blocking* in the sense that it is replayed.
+=======
+ * Sub-Protocol": dialog methods expect an `extension_ui_response`; `open_url`
+ * is fire-and-forget). Introduced by #319 (`feat/sidebar-awaiting-input`),
+ * which uses it for the "waiting for your answer" sidebar state; the input
+ * reminder arms only for these, because an `open_url` has no answer to wait for.
+>>>>>>> a5630ce4 (feat(notifications): repeat an unanswered question every two hours)
  */
 export const DIALOG_UI_METHODS: ReadonlySet<string> = new Set(["select", "confirm", "input", "editor", "ask"]);
 
@@ -177,7 +218,6 @@ const DIALOG_TEXT = { title: 160, message: 480, placeholder: 80, option: 160, qu
 const DIALOG_COUNTS = { options: 12, questions: 5, questionOptions: 9 };
 const DIALOG_ID_CHARS = 128;
 const MAX_DIALOG_BYTES = 1800;
-const DIALOG_METHODS: Record<string, true> = { select: true, confirm: true, input: true, editor: true, ask: true };
 const encoder = new TextEncoder();
 
 /** Flatten and clip one line of dialog text that is only displayed. */
@@ -245,7 +285,7 @@ function dialogQuestions(value: unknown): NotificationDialogQuestion[] | undefin
  */
 export function buildNotificationDialog(frame: Record<string, unknown>): NotificationDialog | undefined {
   const method = typeof frame.method === "string" ? frame.method : "";
-  if (!DIALOG_METHODS[method]) return undefined;
+  if (!DIALOG_UI_METHODS.has(method)) return undefined;
   // The id is echoed in the answer; never trim it into a different request.
   const requestId = typeof frame.id === "string" ? frame.id : "";
   if (!requestId || requestId.trim() !== requestId || requestId.length > DIALOG_ID_CHARS) return undefined;

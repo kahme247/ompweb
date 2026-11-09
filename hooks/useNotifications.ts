@@ -134,7 +134,8 @@ export function useNotifications({ sessionId, locale, onOpenSession }: { session
     const deliver = (kind: "toast" | "os", event: NotificationEvent) => {
       // The server has already recorded it.
       notificationHistory.add(event);
-      const rendered = renderNotification(event, translate);
+      // The reader's language, so a reminder's elapsed duration is written in it.
+      const rendered = renderNotification(event, translate, document.documentElement.lang || undefined);
       if (kind === "toast") {
         showToast(rendered, event.type, event.requestId);
         return;

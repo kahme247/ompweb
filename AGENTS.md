@@ -1830,6 +1830,18 @@ during the wait.
   rendered server-side in the device's locale. Browsers with saved settings (enabled or not) sync on load; never-configured browsers do not.
 - A crash notifies "Run failed" while a run is live or while background work
   started by it has not settled yet (`unsettled`, cleared by `session_settled`).
+- An unanswered `input` notification repeats while its dialog stays pending:
+  `INPUT_REMINDER_MS` (2 h) apart, at most `MAX_INPUT_REMINDERS` (12) times,
+  then it stays quiet until it settles. `OMP_WEB_INPUT_REMINDER_MS` overrides
+  the spacing for this process (`0` disables reminders; unset, negative,
+  non-numeric or above `2^31-1` keep the default — a larger value overflows
+  `setTimeout` and would fire immediately). Each device can turn the repeats
+  off with `prefs.inputReminder`; the first notification is unaffected. The
+  schedule is per request id and survives a host replay of the same id, so a
+  reconnecting host neither restarts the budget nor resets the "waiting for"
+  duration; only a real settlement drops it. The history entry is shared, so a
+  device that turned repeats off still sees the reminder rows another device
+  wanted.
 - The Settings test button pushes through the server for subscribed devices
   (502 with the push service's answer on failure) and shows a local
   notification otherwise, or a toast where none are allowed.

@@ -21,8 +21,8 @@ import { markShuttingDown, recordRunningSessions, resumeOnHostLink, takeInterrup
 import { RESUME_PROMPT } from "./hosts/host-resume";
 import { samePath } from "./paths";
 import { isRecord } from "./type-guards";
-import { BLOCKING_UI_METHODS, createNotificationDetector, DIALOG_UI_METHODS } from "./notification-events";
-import { publishNotification, publishNotificationDismiss, publishNotificationForgotten } from "./notification-hub";
+import { BLOCKING_UI_METHODS, createNotificationDetector, DIALOG_UI_METHODS, type NotificationEvent } from "./notification-events";
+import { MAX_INPUT_REMINDERS, inputReminderIntervalMs, publishNotification, publishNotificationDismiss, publishNotificationForgotten } from "./notification-hub";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./skill-diagnostics";
 import { eventWithToolResultImageUrls } from "./media-cache";
 import type {
@@ -441,6 +441,13 @@ export class AgentSessionWrapper {
   private uiExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Session id each `input` notification was published under, keyed by request id: omp can move the conversation to a new file before the dialog settles, and the retraction tag must still match. */
   private inputNotificationSessions = new Map<string, string>();
+  /** Repeats of a still-pending dialog, keyed by request id; the timer lives with this wrapper. */
+  private inputReminders = new Map<string, {
+    event: NotificationEvent;
+    pendingSince: string;
+    count: number;
+    timer: ReturnType<typeof setTimeout> | null;
+  }>();
   /** Dialogs omp-web itself raised (confirmFromServer): answered here, never forwarded to omp. */
   private serverUiRequests = new Map<string, (confirmed: boolean) => void>();
   private extensionStatuses = new Map<string, string>();
@@ -1201,8 +1208,105 @@ export class AgentSessionWrapper {
       if (notification.type === "input" && notification.requestId) {
         this.inputNotificationSessions.set(notification.requestId, notification.sessionId);
       }
-      publishNotification(this.movedFromIds.length ? { ...notification, aliases: this.movedFromIds } : notification);
+      const published = this.movedFromIds.length ? { ...notification, aliases: this.movedFromIds } : notification;
+      publishNotification(published);
+      // Only a question the user can answer is repeated; every settle path clears the timer.
+      if (notification.type === "input" && notification.requestId && this.isAnswerableDialog(notification.requestId)) {
+        this.armInputReminder(notification.requestId, published);
+      }
     }
+  }
+
+  /** Only a select/confirm/input/editor/ask dialog waits for an answer; `open_url` does not. */
+  private isAnswerableDialog(id: string): boolean {
+    const method = this.pendingUiRequests.get(id)?.method;
+    return typeof method === "string" && DIALOG_UI_METHODS.has(method);
+  }
+
+  /** Start (or restart) the repeat timer for one published `input` notification. */
+  private armInputReminder(requestId: string, event: NotificationEvent): void {
+    const previous = this.inputReminders.get(requestId);
+    clearTimeout(previous?.timer ?? undefined);
+    const delay = inputReminderIntervalMs();
+    if (delay === null) {
+      this.inputReminders.delete(requestId);
+      return;
+    }
+    // The budget is spent: the question stays quiet until it settles, however
+    // often a reconnecting host replays it.
+    if (previous && previous.count >= MAX_INPUT_REMINDERS) {
+      previous.event = event;
+      previous.timer = null;
+      return;
+    }
+    this.pruneForgottenInputReminders(delay);
+    const timer = setTimeout(() => this.fireInputReminder(requestId), delay);
+    timer.unref?.();
+    // A surviving entry keeps its count and opening time: a replay of the same
+    // request id is the same question, not a new one.
+    this.inputReminders.set(requestId, {
+      event,
+      pendingSince: previous?.pendingSince ?? new Date().toISOString(),
+      count: previous?.count ?? 0,
+      timer,
+    });
+  }
+
+  /**
+   * Drop the schedules of dialogs that were forgotten and never replayed. A
+   * schedule survives a forget so a reconnect keeps both the cap and the
+   * opening time; once the whole repeat budget has passed it would have been
+   * silent anyway, so the entry is only memory.
+   */
+  private pruneForgottenInputReminders(delay: number): void {
+    const cutoff = Date.now() - MAX_INPUT_REMINDERS * delay;
+    for (const [id, reminder] of this.inputReminders) {
+      if (reminder.timer !== null || this.pendingUiRequests.has(id)) continue;
+      if (Date.parse(reminder.pendingSince) >= cutoff) continue;
+      this.inputReminders.delete(id);
+    }
+  }
+
+  /** Publish one repeat and schedule the next, until the cap or a settle ends it. */
+  private fireInputReminder(requestId: string): void {
+    const reminder = this.inputReminders.get(requestId);
+    if (!reminder) return;
+    reminder.timer = null;
+    // The timer can fire after the dialog settled: never remind about a question
+    // that is gone. The schedule stays, so a replay of the same id resumes where
+    // it left off instead of restarting the budget.
+    if (!this.pendingUiRequests.has(requestId) || !this.isAnswerableDialog(requestId)) return;
+    // Election is rechecked on every fire: a former notifier must not keep
+    // reminding after another web server took over the host's notifications.
+    if (this.hostOwnedLifecycle && !isNotifier(this.host.id)) return;
+    reminder.count += 1;
+    publishNotification({
+      ...reminder.event,
+      ...(this.movedFromIds.length ? { aliases: this.movedFromIds } : {}),
+      reminder: true,
+      pendingSince: reminder.pendingSince,
+    });
+    const delay = inputReminderIntervalMs();
+    if (reminder.count >= MAX_INPUT_REMINDERS || delay === null) return;
+    const timer = setTimeout(() => this.fireInputReminder(requestId), delay);
+    timer.unref?.();
+    reminder.timer = timer;
+  }
+
+  /** Stop the timer of a dialog this wrapper no longer holds, keeping its schedule for a replay. */
+  private stopInputReminder(requestId: string): void {
+    const reminder = this.inputReminders.get(requestId);
+    if (!reminder) return;
+    clearTimeout(reminder.timer ?? undefined);
+    reminder.timer = null;
+  }
+
+  /** Drop a settled dialog's schedule: the question is over, so a later id reuse starts fresh. */
+  private clearInputReminder(requestId: string): void {
+    const reminder = this.inputReminders.get(requestId);
+    if (!reminder) return;
+    clearTimeout(reminder.timer ?? undefined);
+    this.inputReminders.delete(requestId);
   }
 
   private handleFrame(frame: RpcFrame): void {
@@ -1482,10 +1586,18 @@ export class AgentSessionWrapper {
     notifyRunningChange({ refreshSessionList });
   }
 
-  /** Forget a pending dialog, its expiry timer and the id its notification was published under. */
+  /**
+   * Forget a pending dialog, its expiry timer and the id its notification was
+   * published under. The repeat timer stops here, but its schedule
+   * (`pendingSince`, `count`) survives: a host replaying the same request id
+   * after a reconnect asks about the same question, so the cap must stay spent
+   * and the label must keep naming the real opening time. Only
+   * `settlePendingUiRequest` drops the schedule.
+   */
   private forgetPendingUiRequest(id: string): void {
     this.pendingUiRequests.delete(id);
     this.inputNotificationSessions.delete(id);
+    this.stopInputReminder(id);
     const timer = this.uiExpiryTimers.get(id);
     if (timer) {
       clearTimeout(timer);
@@ -1510,6 +1622,10 @@ export class AgentSessionWrapper {
     // Read before forgetting: the tag is the one the notification went out with.
     const publishedSession = this.inputNotificationSessions.get(id);
     this.forgetPendingUiRequest(id);
+    // A real settlement ends the question: its schedule must not survive into a
+    // later dialog that happens to reuse the id. A *forgotten* dialog keeps it,
+    // because the replay that follows is the same question (see armInputReminder).
+    if (reason === "settled") this.clearInputReminder(id);
     // One server publishes a notification and its retraction: a former
     // notifier must not close what the elected one still owns.
     if (publishedSession && (!this.hostOwnedLifecycle || isNotifier(this.host.id))) {
