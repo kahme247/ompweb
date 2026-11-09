@@ -277,9 +277,10 @@ function watchReplacement(wrapper: AgentSessionWrapper, command: Record<string, 
   // exact ID names this command's message whoever else writes meanwhile, so only text inference needs the sole window.
   const peers = wrapper.peerMessageCommands;
   const ownsWindow = () => clientMessageId !== null || (!competingPending && wrapper.getMessageCommandGeneration() === generation + 1 && wrapper.peerMessageCommands === peers);
-  // The text rules need omp's user attribution; an exact ID alone also identifies a displayed native custom message.
+  // The text rules need omp's user attribution. An exact ID identifies a native custom message by itself, but only a
+  // displayed one: the browser never shows a hidden message, so it cannot replace the pending row there.
   const isUserInput = (message: Record<string, unknown>) => message.role === "user"
-    || (message.role === "custom" && (message.attribution === "user" || (clientMessageId !== null && message.display !== false)));
+    || (message.role === "custom" && (clientMessageId !== null ? message.display !== false : message.attribution === "user"));
   const initialQueue = clientMessageId ? [] : queueTexts(baseline);
   let priorQueue = initialQueue;
   let echoDebt: number | undefined;
