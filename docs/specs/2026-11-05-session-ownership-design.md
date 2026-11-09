@@ -113,20 +113,36 @@ program a known launcher runs: `cmd[.exe] /c …`, `sh|bash|dash|zsh -c …`,
 `node|bun …`, optionally behind `env`/`nice`/`nohup`/`command`/`exec`/`time`
 (with `VAR=value` assignments and value-taking flags such as `nice -n 5`
 skipped). A quoted command string is re-split and walked the same way, so
-`sh -c "omp --resume <id>"` counts. A token that merely appears later is an
-argument of *that* program, so `grep -r <id> lib/omp`, `cp -r <id> …/omp`,
+`sh -c "omp --resume <id>"` counts. A quoted program path with spaces is the
+program, not a word of the string: `cmd.exe /c "C:\Program Files\omp\omp.cmd"
+--resume <id>` counts, and so does the whole-string form `cmd.exe /d /s /c
+"C:\Program Files\omp\omp.cmd --resume <id>"`. A token that merely appears later
+is an argument of *that* program, so `grep -r <id> lib/omp`, `cp -r <id> …/omp`,
 `grep -r <id> --exclude-dir=omp .`, `omp-web` and a path below `…/omp/` claim
-nothing. Matching "somewhere on the line" was the earlier rule, and it made an
-ordinary background `grep -r` a foreign owner — which slice 2 would turn into a
-refused send.
+nothing — including one quote level down, where the string is one token: `sh -c
+"grep -r <id> lib/omp"` and `cmd.exe /c "grep -r <id> C:\src\omp"` claim
+nothing either. Matching "somewhere on the line" was the earlier rule, and it
+made an ordinary background `grep -r` a foreign owner — which slice 2 would turn
+into a refused send. Matching a *basename* against the whole quoted string was
+the same mistake one level down: it read the string's last word as the program.
 
-**The POSIX scan asks for an unlimited width.** `ps -eo pid=,ppid=,uid=,args=`
-clips `args` — the last column — to the screen width, and `COLUMNS` overrides
-the pipe default when a daemon inherits it (tmux panes, some CI wrappers). A
-clipped command line loses the `--resume` value and the row reads as naming no
-session, the false `none` this slice exists to prevent, so the scan passes
-`-ww`; a command-line option wins over the environment, so no env plumbing is
-needed.
+One ambiguity survives, because `ps` and CIM drop the quoting that separated a
+program path with spaces from its arguments: a path-rooted command whose *last*
+argument is a relative path ending in `omp` (`sh -c "/usr/bin/less lib/omp"`)
+reads like the real `"/opt/my tools/omp"`. It costs a false foreign owner, never
+a false `none`, and needs the program path to be absolute and the argument to be
+the first non-flag token, so it is left as a documented limit rather than
+guessed at.
+
+**The POSIX scan asks `ps` for `-ww`.** `ps -eo pid=,ppid=,uid=,args=` clips
+`args` — the last column — to the screen width, and `COLUMNS` overrides the pipe
+default when a daemon inherits it (tmux panes, some CI wrappers). A clipped
+command line loses the `--resume` value and the row reads as naming no session,
+the false `none` this slice exists to prevent, so the scan passes `-ww`; a
+command-line option wins over the environment, so no env plumbing is needed.
+`-ww` is not literally unlimited: procps caps the width at `OUTBUF_SIZE`
+(131 072 columns). That is far above the 8 KiB command-line prefix this parser
+keeps, so no line it reads is clipped.
 
 **Every requested id is scanned.** An id whose file does not resolve — a session
 a foreign `omp` created after the 30 s list cache was warmed, or a file outside

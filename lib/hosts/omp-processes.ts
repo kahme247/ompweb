@@ -407,6 +407,41 @@ function skipLaunchPrefix(argv: string[], start: number): number {
   return index;
 }
 
+/** A path root: an absolute POSIX path, a drive or UNC path, or `./`/`../`. */
+const PATH_START_RE = /^(?:[A-Za-z]:[\\/]|\\\\|\/|\.{1,2}[\\/])/;
+/** A token that can continue a path across a space (`Program Files`), as
+ *  opposed to a flag (`--resume`), a new path (`/home/me/omp`) or `VAR=value`. */
+const PATH_CONTINUATION_RE = /^[^-\s\\/][^=]*$/;
+
+/**
+ * Whether a launcher's command string *names an omp entry as its program*.
+ *
+ * The string arrives unquoted from {@link splitCommandLine}, so a command with
+ * arguments is one token (`sh -c "omp --resume <id>"` → `omp --resume <id>`).
+ * Only a string that starts with a path can carry a program name with spaces
+ * in it (`"C:\Program Files\omp\omp.cmd" --resume <id>`): there the program is
+ * the path prefix, and its name must follow a separator — a bare word after a
+ * space (`/bin/echo omp`) is an argument of that program, not the program.
+ * The prefix stops at the first token that cannot continue a path, so a later
+ * argument (`/bin/cat /home/me/omp`) is never read as the program. A string
+ * that starts with a bare word is a command line whose program is its first
+ * token — walking it is {@link commandLineRunsOmp}'s job, and applying basename
+ * matching to the whole string is what made `sh -c "grep -r <id> lib/omp"` a
+ * foreign owner.
+ */
+function isOmpEntryCommandString(commandString: string): boolean {
+  if (!/\s/.test(commandString)) return isOmpEntryToken(commandString);
+  if (!PATH_START_RE.test(commandString)) return false;
+  const parts = commandString.split(/\s+/);
+  let prefix = parts[0]!;
+  for (let index = 1; index < parts.length; index += 1) {
+    const part = parts[index]!;
+    if (!PATH_CONTINUATION_RE.test(part)) break;
+    prefix = `${prefix} ${part}`;
+  }
+  return isOmpEntryToken(prefix);
+}
+
 /** Walk `argv` from the front: an omp entry at the head, or as the program a
  *  known launcher/wrapper runs. Bounded by {@link MAX_LAUNCHER_DEPTH} per
  *  command string, and by it again across a nested `sh -c "…"`. */
@@ -429,7 +464,7 @@ function commandLineRunsOmp(commandLine: string, depth = 0): boolean {
       index = skipLaunchPrefix(argv, index);
       const commandString = argv[index];
       if (commandString === undefined) return false;
-      return isOmpEntryToken(commandString) || commandLineRunsOmp(commandString, depth + 1);
+      return isOmpEntryCommandString(commandString) || commandLineRunsOmp(commandString, depth + 1);
     }
   }
   return false;
@@ -454,11 +489,14 @@ async function runScan(platform: NodeJS.Platform, run: ProcessScanRunner, uid: n
     // rather than resolving some binary from PATH.
     const resolved = psBin === undefined ? resolvePosixPsBin() : psBin;
     if (!resolved) throw new Error("no absolute ps binary");
-    // `-ww`: an unlimited output width. `args` is the last column, so a
-    // narrow terminal (`COLUMNS` exported in a tmux pane or CI wrapper) clips
-    // the `--resume` value and the row reads as naming no session — the exact
-    // false `none` this scan exists to prevent. An explicit option wins over
-    // the environment (procps `choose_dimensions`), so no env plumbing.
+    // `-ww`: procps caps the width at OUTBUF_SIZE (131 072 columns) instead of
+    // the screen width. `args` is the last column, so a narrow terminal
+    // (`COLUMNS` exported in a tmux pane or CI wrapper) clips the `--resume`
+    // value and the row reads as naming no session — the exact false `none`
+    // this scan exists to prevent. An explicit option wins over the
+    // environment (procps `choose_dimensions`), so no env plumbing. The cap is
+    // far above MAX_COMMAND_LINE_CHARS, so no line this parser keeps is
+    // clipped.
     processes = sameUserProcesses(parsePosixProcessList(await run(resolved, ["-ww", "-eo", "pid=,ppid=,uid=,args="])), uid);
   }
   // Parse the resume arguments once per process: one snapshot answers a whole

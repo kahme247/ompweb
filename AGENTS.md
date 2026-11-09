@@ -397,9 +397,13 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   launcher runs (`cmd[.exe] /c …`, `sh|bash -c …`, `node|bun …`, after
   `env`/`nice`/`nohup`) — so a token that merely appears as an argument
   (`grep -r <id> lib/omp`, `cp -r <id> …/omp`, `--exclude-dir=omp`) cannot
-  claim one, and on Windows a `.cmd`/node shim row counts too. The POSIX scan
-  asks `ps` for an unlimited width (`-ww`), because `args` is its last column
-  and a clipped command line would read as naming no session.
+  claim one, and on Windows a `.cmd`/node shim row counts too. A quoted
+  command string is re-split and walked the same way, so `sh -c "omp …"` counts
+  while `sh -c "grep -r <id> lib/omp"` does not; a quoted program path with
+  spaces (`"C:\Program Files\omp\omp.cmd"`) is still recognised. The POSIX scan
+  asks `ps` for `-ww`, which lifts the width to procps's 131 072-column cap
+  instead of the screen width, because `args` is its last column and a clipped
+  command line would read as naming no session.
   The daemon's own children are excluded by transport pid plus a bounded
   ppid-chain walk. Detection is advisory, not an atomic lock: a writer can start
   between the inspection and a later spawn.
