@@ -9,8 +9,10 @@ import { RpcCommandError, RpcCommandTimeoutError } from "@/lib/omp/rpc-process";
 
 /** Session-level failures a client retries instead of treating the request as
  *  applied: omp is busy, restarting or was reset, and the session keeps going.
- *  `session_slow` is the wrapper's answer once a command exceeds its timeout,
- *  `session_state_timeout` the status poll's. */
+ *  `session_slow` and `session_state_timeout` are the codes the wrapper and the
+ *  `get_state` dispatch use for "the completion is unknown"; this route answers
+ *  its own `RpcCommandTimeoutError` with `session_slow` below, and accepts the
+ *  rest from any wrapper that raises them, so a client sees one stable name. */
 const RETRIABLE_SESSION_CODES: Record<string, true> = {
   session_slow: true,
   session_state_timeout: true,
