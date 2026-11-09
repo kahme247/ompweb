@@ -1809,6 +1809,19 @@ during the wait.
   leak it); else if a visible tab with an open stream exists, `whenActive:
   "toast"` devices get a toast on their active tabs only; else push (subscribed
   devices) or in-page `showNotification` (tabs with an open stream).
+- A tab may declare its notification device with its stream
+  (`{kind: "notifications", clientId, deviceId}`); a malformed declaration is
+  refused at the channel boundary. Such a tab is reachable **without** a
+  presence report, which is how a native client with no push subscription
+  receives deliveries. Stream-only delivery is routed through that device's own
+  stored prefs, so the device must also be registered with
+  `PUT /api/notifications/devices` — declaring the id alone delivers nothing.
+  It never overrides the two rules above: a visible tab elsewhere still
+  silences the event, and a `whenActive: "toast"` device still gets only a
+  toast on its active tabs, so a background app can intentionally stay quiet.
+  The `deviceId` is syntax-checked, not bound to the caller's own device: any
+  authenticated tab of the same user may declare another device's id and would
+  then receive that device's `os` frames.
 - The server decides before pushing: a push that displays nothing is a silent
   push, and iOS revokes the permission for one while Chromium and Firefox
   substitute a generic card and eventually mute the origin. `public/sw.js`
@@ -1817,7 +1830,8 @@ during the wait.
   requestId}`) — never by a push. A device that is not reachable keeps the
   stale card until the next `input` push replaces it by tag or the app syncs.
 - Notifications have their own `notifications` channel (`clientId` = the
-  tab's notification client id), opened by `useNotifications` in `AppShell`,
+  tab's notification client id, `deviceId` = the device it belongs to when it
+  declares one), opened by `useNotifications` in `AppShell`,
   so a tab stays reachable on every view, Settings included. A tab on
   Settings is visible, so it also counts as active.
 - Prefs and push subscriptions are per device, in `localStorage` and mirrored to

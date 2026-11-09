@@ -131,7 +131,13 @@ and the same device with `whenActive: "system"` does get its frame. Rule 1
 still applies first: a visible tab showing the session silences everything.
 A stream that declares no device keeps the pre-device behaviour and receives
 no stream-only delivery; a malformed `deviceId` is refused by
-`parseEventStreamChannel` rather than silently ignored.
+`parseEventStreamChannel` rather than silently ignored. Declaring the id is
+not the opt-in: delivery is decided from the device's **stored** prefs, so a
+declared device that was never registered with
+`PUT /api/notifications/devices` receives nothing (there are no prefs to
+honour). The `deviceId` is syntax-checked only, not bound to the caller: any
+authenticated tab of the same user may declare another device's id and would
+then receive that device's `os` frames.
 
 The server decides before pushing, and the service worker always displays a
 push: iOS Safari revokes push permission for pushes that show nothing.
