@@ -655,6 +655,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // Persisted entries preceding a locally submitted run cannot supply its answer.
   // Empty on mount; null while a submitted run's boundary is still being read.
   const runPreviousEntryIdsRef = useRef<string[] | null>([]);
+  // The run being shown was never dispatched by this tab (a 503 `session_slow`
+  // on load). It may be settled, but never classified as an empty answer: the
+  // child may be blocked on non-run work, and "stopped without returning a
+  // response" would be a false failure.
+  const runUnclaimedRef = useRef(false);
   const slashCommandRunRef = useRef(false);
   // Bumped on every roster clear (run end): in-flight get_subagents/history
   // responses from the finished run must not merge into the cleared (or next
@@ -1033,10 +1038,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // out. The run must stay marked so the periodic reconcile poll settles it,
   // and the observer stream attaches (frames are the completion path once omp
   // answers again). The on-disk transcript is already loaded by the caller.
+  //
+  // A load that had no run marked starts one this tab never dispatched: there
+  // is no answer to claim missing, and the 503 may come from a child blocked on
+  // non-run work (resuming a huge session), so "stopped without returning a
+  // response" would be a false failure. The settle itself still runs, so the
+  // spinner clears.
+  //
+  // A run this tab dispatched keeps its claim: the same 503 is also reached by
+  // `retrySession`, `/reload`, an external `session_history_changed` and
+  // `finishPromptWithoutStream`, and suppressing the notice there would hide a
+  // genuinely failed run.
   const markSessionAliveStateUnknown = useCallback(() => {
     if (!agentRunningRef.current) {
       agentRunningRef.current = true;
       setAgentRunning(true);
+      runUnclaimedRef.current = true;
     }
     syncActionsRef.current?.subscribe(false);
   }, []);
@@ -2031,12 +2048,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // error — never leave the user with a disappeared spinner and no
         // explanation. Builtin slash commands are allowed to complete without
         // an assistant message, hence allowEmptyResponse above.
-        // A prompt whose ack timed out may have started late: do not claim it
-        // failed, repeat the localized hint instead (no error toast).
-        const message = maybeStartedRunRef.current
-          ? translate("agentSession.maybeStarted")
-          : translate("agentSession.responseFailed");
-        addNotice({ type: maybeStartedRunRef.current ? "warning" : "error", message });
+        // A run this tab never dispatched (a busy 503 on load) has no answer to
+        // claim missing: the child may have been blocked on non-run work.
+        if (runUnclaimedRef.current) {
+          runUnclaimedRef.current = false;
+        } else {
+          // A prompt whose ack timed out may have started late: do not claim it
+          // failed, repeat the localized hint instead (no error toast).
+          const message = maybeStartedRunRef.current
+            ? translate("agentSession.maybeStarted")
+            : translate("agentSession.responseFailed");
+          addNotice({ type: maybeStartedRunRef.current ? "warning" : "error", message });
+        }
       }
       catchUp.invalidate();
       eventCoalescer.reset();
@@ -2063,6 +2086,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       independentRunErrorRef.current = null;
       maybeStartedRunRef.current = false;
       slashCommandRunRef.current = false;
+      runUnclaimedRef.current = false;
       onAgentEnd?.();
     }
   }, [addNotice, addUnconfirmedRunErrorNotice, catchUp, eventCoalescer, clearLiveToolResults, clearTerminalReconcileTimer, loadSession, onAgentEnd, refreshSubagentHistory, resetSubagentActivityState, surfaceQuotaOnStream]);
@@ -2435,6 +2459,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         runErrorAssistantRef.current = null;
         independentRunErrorRef.current = null;
         maybeStartedRunRef.current = false;
+        runUnclaimedRef.current = false;
         break;
       case "agent_end": {
         // isTerminal === false means an async delivery resumes this run soon.
@@ -2527,6 +2552,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         independentRunErrorRef.current = null;
         maybeStartedRunRef.current = false;
         slashCommandRunRef.current = false;
+        runUnclaimedRef.current = false;
         if (endedSid) {
           void loadSession(endedSid, false, false, endedRunId);
           const endToken = beginAuthoritativeModelSync();
@@ -3269,6 +3295,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     runErrorAssistantRef.current = null;
     independentRunErrorRef.current = null;
     maybeStartedRunRef.current = false;
+    runUnclaimedRef.current = false;
     runPreviousEntryIdsRef.current = sessionIdRef.current ? null : [];
     agentRunningRef.current = true;
     slashCommandRunRef.current = isSlashCommandPrompt;

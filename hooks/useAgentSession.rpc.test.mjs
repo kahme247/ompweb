@@ -1812,6 +1812,75 @@ test("opening a chat whose state read answers 503 session_slow keeps the transcr
   assert.ok(lastEs(), "the observer stream attaches to receive the completion frames");
 });
 
+test("a busy 503 on load never claims the agent stopped without a response", async () => {
+  // The child can be blocked on non-run work (resuming a huge session), so a
+  // 503 says nothing about an answer. Settling it must clear the spinner
+  // silently instead of reporting an empty completion this tab never saw.
+  resetWorld();
+  const sid = "busy-open-silent";
+  primeSession(sid, [userMsg("u0", "saved history")]);
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === `/api/sessions/${sid}/state`,
+    produce: async () => ({
+      response: Response.json(
+        { running: false, alive: true, code: "session_slow", error: "omp is busy", silentForMs: 12_000 },
+        { status: 503 },
+      ),
+    }),
+  });
+  const w = await mountSession(sid);
+  assert.equal(w.latest.agentRunning, true, "the run stays marked so the reconcile poll settles it");
+  // The child answers the reconcile poll as idle: the run is over.
+  world.agents.set(sid, { running: false, state: {} });
+  await act(async () => {
+    window.dispatchEvent(new Event("online"));
+    await sleep(60);
+  });
+  await settle();
+  assert.equal(w.latest.agentRunning, false, "the settle still clears the spinner");
+  assert.deepEqual(
+    w.latest.notices.filter((n) => /stopped without returning a response/i.test(n.message)),
+    [],
+    "a run this tab never dispatched has no answer to claim missing",
+  );
+});
+
+test("a busy 503 during a run this tab dispatched keeps the empty-stop notice", async () => {
+  // The same 503 is reached by retrySession, /reload, an external
+  // session_history_changed and finishPromptWithoutStream. Marking those runs
+  // unclaimed would hide a genuinely failed run — the inverse of the bug.
+  resetWorld();
+  primeSession("s1", [userMsg("u0", "old question")]);
+  const { w } = await startRun("s1", "new question");
+  // The run's own settle reads the state, which answers busy instead.
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === "/api/sessions/s1/state",
+    produce: async () => ({
+      response: Response.json(
+        { running: true, alive: true, code: "session_slow", error: "omp is busy", silentForMs: 12_000 },
+        { status: 503 },
+      ),
+    }),
+  });
+  // retrySession loads with showLoading + state: the dispatched run is still marked.
+  await act(async () => { w.latest.retrySession(); await sleep(60); });
+  await settle();
+  assert.equal(w.latest.agentRunning, true, "the busy child keeps the run marked");
+  // The child answers the reconcile poll as idle without any saved answer.
+  world.agents.set("s1", { running: false, state: {} });
+  await act(async () => {
+    window.dispatchEvent(new Event("online"));
+    await sleep(60);
+  });
+  await settle();
+  assert.equal(w.latest.agentRunning, false, "the settle still clears the spinner");
+  assert.equal(
+    w.latest.notices.filter((n) => /stopped without returning a response/i.test(n.message)).length,
+    1,
+    "a run this tab dispatched must not lose its empty-stop notice to the busy 503",
+  );
+});
+
 test("a 503 state answer without a busy code stays a load failure", async () => {
   resetWorld();
   const sid = "broken-open";

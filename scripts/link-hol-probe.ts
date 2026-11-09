@@ -128,8 +128,10 @@ async function waitIdle(session: string, timeoutMs = IDLE_TIMEOUT_MS): Promise<v
   const deadline = Date.now() + timeoutMs;
   while (!stop.signal.aborted) {
     const { json } = await command(session, { type: "get_state" }, [400]);
-    // A get_state stuck behind megabytes on a slow link times out (5 s, session_state_timeout): poll again.
-    if (json.code !== "session_state_timeout") {
+    // A get_state stuck behind megabytes on a slow link times out (5 s): the
+    // wrapper answers `session_slow`, a 0.6.0 server `session_state_timeout`.
+    // Both mean "busy, ask again", so the poll retries.
+    if (json.code !== "session_slow" && json.code !== "session_state_timeout") {
       if (json.error) throw new Error(`get_state on ${session}: ${JSON.stringify(json).slice(0, 300)}`);
       if ((json.data as { isStreaming?: unknown } | undefined)?.isStreaming !== true) return;
     }
@@ -187,7 +189,7 @@ async function phase(name: string, load: () => Promise<void>, c: string): Promis
       while (running()) {
         const sent = performance.now();
         const { json } = await command(c, { type: "get_state" }, [400]);
-        if (json.code === "session_state_timeout") timeouts++;
+        if (json.code === "session_slow" || json.code === "session_state_timeout") timeouts++;
         else if (json.error) throw new Error(`get_state on ${c}: ${JSON.stringify(json).slice(0, 300)}`);
         small.push(performance.now() - sent);
         await sleep(SMALL_EVERY_MS);
