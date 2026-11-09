@@ -183,6 +183,8 @@ restart, without signing out of Windows.
 
 Forward WebSocket upgrades on `/api/events/link` (browsers) and `/api/hosts/link` (hosts); without the upgrade, a browser falls back to server-sent events after a few seconds. In nginx that means `proxy_http_version 1.1;`, `proxy_set_header Upgrade $http_upgrade;`, `proxy_set_header Connection "upgrade";`, and a `proxy_read_timeout` well above 30 s.
 
+A server-sent-events client keeps its stream alive with a comment frame every 30 s by default; `GET /api/events?heartbeat=<seconds>` (15 to 110) chooses another interval for that connection. A value outside that range falls back to the 30 s default. The proxy's read timeout must stay above the interval the client asks for: nginx's default `proxy_read_timeout` is 60 s, so a client selecting 110 s needs a timeout above 110 s (for example `proxy_read_timeout 120s;`), or the proxy drops the idle stream before its first keep-alive. `GET /api/app-info` tells a native client whether the server supports the query.
+
 ### Two services: the web server and the local daemon
 
 ompweb runs this machine's `omp` sessions through a small daemon, `ompweb host`,
