@@ -15,7 +15,7 @@ import type { SttAfter } from "@/lib/stt";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { ContextDetailPanel } from "./ComposerPanels";
 import { RecordingDeck } from "./RecordingDeck";
-import { beginDraftSubmission, clearDraft, consumeDraft, endDraftSubmission, getDraft, getDraftRevision, markDraftEdited, mergeRecoveredText, moveDraftSubmissions, recoverDraft, setDraft, subscribeDraftConsumption, subscribeDraftRecovery, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
+import { beginDraftSubmission, clearDraft, consumeDraft, endDraftSubmission, getDraft, getDraftRevision, isSameDraft, markDraftEdited, mergeRecoveredText, moveDraftSubmissions, recoverDraft, setDraft, subscribeDraftConsumption, subscribeDraftRecovery, type ChatDraft, type ChatDraftImage } from "@/lib/draft-store";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import type { AttachedImage, AttachedTextFile } from "./ChatInput-draft-attachments";
 import {
@@ -462,6 +462,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [attachedUploads, setAttachedUploads] = useState<AttachedUpload[]>(() => (
     draftKey ? draftUploadsToAttachedUploads(getDraft(draftKey)?.uploads) : []
   ));
+  useLayoutEffect(() => {
+    if (promptOnly && !value && !attachedImages.length && !attachedTextFiles.length && !attachedUploads.length) {
+      setPromptOnly(false);
+    }
+  }, [promptOnly, value, attachedImages.length, attachedTextFiles.length, attachedUploads.length, setPromptOnly]);
   const [attachError, setAttachError] = useState<string | null>(null);
   /** An informational note about the last batch (images that went As file). */
   const [attachNotice, setAttachNotice] = useState<string | null>(null);
@@ -1036,7 +1041,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       ...(promptOnlyRef.current ? { promptOnly: true } : {}),
       ...(uploads.length ? { uploads } : {}),
     };
-    if (JSON.stringify(current) === JSON.stringify(snapshot)) clearInput();
+    if (isSameDraft(current, snapshot)) clearInput();
   }), [clearInput]);
 
   useLayoutEffect(() => {

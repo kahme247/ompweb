@@ -1475,7 +1475,7 @@ test("a rejected attachment prompt retains its files rather than becoming a shel
     },
   }));
   fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
-  await waitFor(() => assert.deepEqual(getDraft(KEY), { value: "!!explain this", images: [], files: [file] }));
+  await waitFor(() => assert.deepEqual(getDraft(KEY), { value: "!!explain this", images: [], files: [file], promptOnly: true }));
   assert.equal(document.querySelector(".chat-input-shell").hasAttribute("data-shell"), false);
   fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
   await waitFor(() => assert.equal(submissions.length, 2));

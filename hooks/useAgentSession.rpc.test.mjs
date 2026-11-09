@@ -662,6 +662,30 @@ test("editing and resending a queued bang-prefixed prompt never runs its inline 
   assert.deepEqual(world.calls.filter((call) => call.body?.type === "bash").map((call) => call.body.command), ["printf example"]);
 });
 
+test("removing the last recovered image clears prompt-only mode for fresh shell input", async (t) => {
+  resetWorld();
+  const { clearDraft } = await import("@/lib/draft-store");
+  const sid = "cleared-image-prompt";
+  t.after(() => clearDraft(sid));
+  primeSession(sid, [userMsg("u0", "before")]);
+  world.agents.set(sid, { running: true, state: { queuedMessages: { steering: [], followUp: ["[Image]"] } } });
+  world.outboxHold = true;
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "remove_queued_message",
+    produce: async () => ({ value: { success: true, data: { removed: true, images: [{ data: "AAAA", mimeType: "image/png" }] } } }),
+  });
+  const view = ownRoot(render(React.createElement(ChatWindow, { session: sessionInfo(sid), newSessionCwd: null }), { wrapper: TestRoot }));
+  await settle();
+  await act(async () => { fireEvent.click(view.getByTitle("Edit this queued message")); });
+  await until(() => view.queryAllByRole("button", { name: /remove image/i }).length === 1, "the image-only prompt must be recovered");
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: /remove image/i })); });
+  await act(async () => { fireEvent.change(view.getByRole("textbox"), { target: { value: "!!printf example" } }); });
+  await act(async () => { fireEvent.keyDown(view.getByRole("textbox"), { key: "Enter" }); });
+  await until(() => world.outbox.length === 1 || world.calls.some((call) => call.body?.type === "bash"), "fresh input must be dispatched");
+  assert.deepEqual(world.calls.filter((call) => call.body?.type === "bash").map((call) => call.body.command), ["printf example"]);
+  assert.deepEqual(world.outbox, [], "clearing the recovered image must not leave fresh shell input in prompt mode");
+});
+
 test("a shell-queued outbox prompt and steer use queue_update without a phantom turn or reply notice", async () => {
   resetWorld();
   primeSession("bash-queue", [userMsg("u0", "q")]);

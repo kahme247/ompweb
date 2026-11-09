@@ -202,9 +202,15 @@ export function getDraftRevision(key: string): number {
   return drafts.has(key) ? revisions.byKey.get(key) ?? 0 : -1;
 }
 
+// Attachment payloads disappear on reload; keep a bang-prefixed prompt from turning into shell input with them.
+function requiresPromptMode(draft: ChatDraft): boolean {
+  return draft.promptOnly === true || (draft.value.trimStart().startsWith("!")
+    && (draft.images.length > 0 || draft.files.length > 0 || Boolean(draft.uploads?.length)));
+}
+
 /** Content equality by field, without re-encoding attachment payloads; absent and empty `uploads` are equal. */
 export function isSameDraft(a: ChatDraft | undefined, b: ChatDraft): boolean {
-  if (!a || a.value !== b.value || Boolean(a.promptOnly) !== Boolean(b.promptOnly) || a.images.length !== b.images.length || a.files.length !== b.files.length) return false;
+  if (!a || a.value !== b.value || requiresPromptMode(a) !== requiresPromptMode(b) || a.images.length !== b.images.length || a.files.length !== b.files.length) return false;
   const uploadsA = a.uploads ?? [];
   const uploadsB = b.uploads ?? [];
   return uploadsA.length === uploadsB.length
@@ -231,7 +237,7 @@ function cloneDraft(draft: ChatDraft): ChatDraft {
     value: draft.value,
     images: draft.images.map((image) => ({ ...image })),
     files: draft.files.map((file) => ({ ...file })),
-    ...(draft.promptOnly ? { promptOnly: true } : {}),
+    ...(requiresPromptMode(draft) ? { promptOnly: true } : {}),
     ...(draft.uploads?.length ? { uploads: draft.uploads.map((upload) => ({ ...upload })) } : {}),
   };
 }
@@ -289,10 +295,10 @@ export function setDraft(key: string, draft: ChatDraft): void {
   try {
     // Persist only text: attachment payloads can exhaust the tab's storage quota.
     // Mark prompt provenance before publishing its text; never restore that text as a shell command after reload.
-    if (draft.promptOnly) sessionStorage.setItem(PROMPT_STORAGE_PREFIX + key, "1");
+    if (next.promptOnly) sessionStorage.setItem(PROMPT_STORAGE_PREFIX + key, "1");
     if (draft.value) sessionStorage.setItem(STORAGE_PREFIX + key, draft.value);
     else sessionStorage.removeItem(STORAGE_PREFIX + key);
-    if (!draft.promptOnly) sessionStorage.removeItem(PROMPT_STORAGE_PREFIX + key);
+    if (!next.promptOnly) sessionStorage.removeItem(PROMPT_STORAGE_PREFIX + key);
     if (draft.uploads?.length) sessionStorage.setItem(UPLOADS_STORAGE_PREFIX + key, JSON.stringify(draft.uploads));
     else sessionStorage.removeItem(UPLOADS_STORAGE_PREFIX + key);
   } catch {
