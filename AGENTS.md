@@ -103,6 +103,7 @@ app/api/
   hosts/route.ts                  GET hosts (this machine first) | POST { label } → token once + login command | PATCH { id, label?, allowAgentStart? } (`local`: label only, empty resets to "This machine") | DELETE ?id= revoke (registry first, then close the link); 503 if hosts.json is unreadable
   hosts/link/route.ts             GET WebSocket upgrade (the `ompweb host` daemon; bearer checked before the upgrade, skipped by the `proxy.ts` gate) | POST 426 for pre-WebSocket daemons
   notifications/devices/route.ts  GET VAPID key + subscribed | PUT { deviceId, prefs, subscription? }
+  notifications/answer/route.ts   POST { sessionId, requestId, response } answer a pending dialog from a notification (never spawns omp)
   notifications/presence/route.ts POST { clientId, deviceId, visible, sessionId, seq }
   notifications/test/route.ts     POST { deviceId } send a test push (502 on push-service refusal)
   notifications/history/route.ts  GET entries | PATCH { ids } mark read | DELETE ?id= remove one, ?all=1 clear
@@ -1808,8 +1809,13 @@ during the wait.
   leak it); else if a visible tab with an open stream exists, `whenActive:
   "toast"` devices get a toast on their active tabs only; else push (subscribed
   devices) or in-page `showNotification` (tabs with an open stream).
-- The server decides before pushing: iOS revokes push permission for pushes
-  that display nothing, so `public/sw.js` always shows what it receives.
+- The server decides before pushing: a push that displays nothing is a silent
+  push, and iOS revokes the permission for one while Chromium and Firefox
+  substitute a generic card and eventually mute the origin. `public/sw.js`
+  therefore always shows what it receives, and a settled dialog is retracted on
+  the tab streams only (`{type: "notification-dismiss", tag, sessionId,
+  requestId}`) — never by a push. A device that is not reachable keeps the
+  stale card until the next `input` push replaces it by tag or the app syncs.
 - Notifications have their own `notifications` channel (`clientId` = the
   tab's notification client id), opened by `useNotifications` in `AppShell`,
   so a tab stays reachable on every view, Settings included. A tab on

@@ -15,6 +15,9 @@ self.addEventListener("push", (event) => {
   } catch {
     // Unreadable payload: still show something (iOS revokes silent pushes).
   }
+  const requestId = typeof data.requestId === "string"
+    ? data.requestId
+    : typeof data.dialog?.requestId === "string" ? data.dialog.requestId : "";
   const shown = {
     type: data.type === "error" ? "error" : "info",
     title: data.title || "omp web",
@@ -30,7 +33,7 @@ self.addEventListener("push", (event) => {
         badge: "/badge-96.png",
         tag: shown.tag || undefined,
         renotify: Boolean(shown.tag),
-        data: { url: data.url || "/", sessionId: shown.sessionId },
+        data: { url: data.url || "/", sessionId: shown.sessionId, ...(requestId ? { requestId } : {}) },
       });
       // Open tabs list it in their Notifications tab, like a notification the page showed itself.
       const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
