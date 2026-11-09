@@ -15,9 +15,15 @@ import type { SessionOwnership } from "./types";
 /** Hosts whose daemon answered 501 for the op: logged once, not on every refresh. */
 const unsupportedLogged = new Set<string>();
 
-/** Whether a host op failure means "this daemon cannot answer" rather than "the question was wrong". */
-function unsupported(error: unknown): boolean {
-  return !(error instanceof HostOpError) || error.status === 501 || error.status === 502 || error.status === 503 || error.status === 504;
+/**
+ * Whether a status means the *request* was wrong (a caller bug that must
+ * propagate) rather than the inspection being unable to answer. One rule for
+ * both wire shapes: a thrown `HostOpError` and an `OpResult` failure with the
+ * same status classify identically, so a daemon 500 cannot propagate in one
+ * shape and become `unknown` in the other.
+ */
+function callerBug(status: number): boolean {
+  return status >= 400 && status < 500 && status !== 408 && status !== 429;
 }
 
 /**
@@ -36,11 +42,13 @@ export async function sessionOwnershipOn(host: Host, ids: string[]): Promise<Ses
       if (result.ok) {
         // The host boundary already checked identity, order and length; keep the daemon's answer as is.
         out.push(...result.value);
+      } else if (callerBug(result.status)) {
+        throw new HostOpError(result.status, result.code, result.error);
       } else {
         out.push(...page.map((id) => ({ id, owner: "unknown" as const })));
       }
     } catch (error) {
-      if (!unsupported(error)) throw error;
+      if (error instanceof HostOpError && callerBug(error.status)) throw error;
       if (error instanceof HostOpError && error.status === 501 && !unsupportedLogged.has(host.id)) {
         unsupportedLogged.add(host.id);
         console.warn(`[omp-web] ${host.label} does not answer sessionOwnership yet (older daemon); session ownership there is unknown until it is updated`);
@@ -49,9 +57,4 @@ export async function sessionOwnershipOn(host: Host, ids: string[]): Promise<Ses
     }
   }
   return out;
-}
-
-/** The same answer keyed by id, for callers that look sessions up one at a time. */
-export async function sessionOwnershipById(host: Host, ids: string[]): Promise<Map<string, SessionOwnership>> {
-  return new Map((await sessionOwnershipOn(host, ids)).map((entry) => [entry.id, entry]));
 }

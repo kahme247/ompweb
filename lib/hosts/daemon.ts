@@ -286,8 +286,8 @@ export function runHostDaemon(options: DaemonOptions): { stop(): Promise<void>; 
         // The daemon is the only place where the three facts meet: its ChannelTable (which child is ours), the process
         // scan in this PID namespace and as this uid, and the transcript on the machine that owns the file.
         const ids = args.ids;
-        if (!Array.isArray(ids) || ids.length > LINK_LIMITS.ownershipIds || !ids.every(id => typeof id === "string" && isValidSessionId(id))) {
-          throw new HostOpError(400, "invalid_request", "sessionOwnership takes an array of at most " + LINK_LIMITS.ownershipIds + " session ids");
+        if (!Array.isArray(ids) || ids.length === 0 || ids.length > LINK_LIMITS.ownershipIds || !ids.every(id => typeof id === "string" && isValidSessionId(id))) {
+          throw new HostOpError(400, "invalid_request", "sessionOwnership takes a non-empty array of at most " + LINK_LIMITS.ownershipIds + " session ids");
         }
         return detectSessionOwnership(ids, {
           channel: (id, file) => channels.ownership(id, file),

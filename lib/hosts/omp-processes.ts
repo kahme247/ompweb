@@ -28,10 +28,16 @@ import { getWindowsExecutionEnv, resolvePowerShellBin } from "../windows-service
  * user's row is dropped. Windows cannot read another user's process owner
  * without PROCESS_QUERY_INFORMATION, which an unelevated daemon does not have,
  * and `process.getuid` is unavailable there: the scan keeps every row
- * (`sameUserProcesses(rows, null)`) and narrows by process name instead. That is
- * the documented process-identity limit — on Windows a same-machine process
- * named `omp` that names a session counts as a possible owner whatever account
- * started it.
+ * (`sameUserProcesses(rows, null)`) and narrows by process identity instead —
+ * `omp.exe`/`omp`, or a command line naming an omp entry (`isOmpProcess`), which
+ * also covers a `.cmd`/node shim launcher. That is the documented
+ * process-identity limit — on Windows a same-machine process named `omp` that
+ * names a session counts as a possible owner whatever account started it.
+ *
+ * A resume argument is only evidence on an omp row: `-r` is also `grep -r` and
+ * `rm -r`, and a POSIX scan lists every process of the user. The flags are the
+ * ones omp documents (`--resume`, `--restore`, `-r`), including a unique id
+ * prefix, which is how omp's `--resume` takes an id.
  *
  * The daemon's own children are excluded by pid, never by uid: `ChannelTable`
  * knows their transport pids, and a Windows `cmd.exe /c omp.cmd` wrapper puts
@@ -43,10 +49,13 @@ export interface OmpProcessInfo {
   /** The process that started it, where the OS reports one. */
   ppid?: number;
   commandLine: string;
+  /** The executable name where the OS reports one (Windows CIM `Name`); undefined from `ps`, which reports only the
+   *  command line. */
+  name?: string;
   /** Owning uid where the OS reports one (POSIX); undefined on Windows. */
   uid?: number;
-  /** `--resume` arguments, computed once per scan (see `listOmpProcesses`). */
-  resumeTargets?: string[];
+  /** Resume arguments, computed once per scan (see `listOmpProcesses`). */
+  resumeTargets?: ResumeArgument[];
 }
 
 /** How long one process scan is reused. Cheap enough to hide in a request,
@@ -65,6 +74,10 @@ const MAX_BARE_JOIN_TOKENS = 8;
 /** How far up a ppid chain an own-child check looks. The deepest real case is
  *  `cmd.exe` → `omp` on Windows; the rest is headroom for a launcher script. */
 const MAX_ANCESTOR_DEPTH = 8;
+/** The shortest session-id prefix a `--resume` value may be: omp accepts a
+ *  unique prefix, and four characters keep `rm -r 1111` from matching a whole
+ *  batch of unrelated ids. */
+const MIN_PREFIX_CHARS = 4;
 
 export type ProcessScanRunner = (file: string, args: string[]) => Promise<string>;
 
@@ -79,6 +92,12 @@ export interface OmpProcessScanOptions {
    * `null` (Windows, or an OS without uids) keeps every scanned process.
    */
   uid?: number | null;
+  /**
+   * The absolute `ps` a POSIX scan runs. Defaults to the first of
+   * `/bin/ps`/`/usr/bin/ps` that exists; `null` forces the "no absolute ps"
+   * failure, so a test can exercise the POSIX parse on Windows.
+   */
+  psBin?: string | null;
 }
 
 export interface OmpProcessScan {
@@ -137,12 +156,18 @@ export function parseWindowsProcessList(raw: string): OmpProcessInfo[] {
   const processes: OmpProcessInfo[] = [];
   for (const row of rows) {
     if (!row || typeof row !== "object") continue;
-    const record = row as { ProcessId?: unknown; ParentProcessId?: unknown; CommandLine?: unknown };
+    const record = row as { ProcessId?: unknown; ParentProcessId?: unknown; CommandLine?: unknown; Name?: unknown };
     const pid = typeof record.ProcessId === "number" ? record.ProcessId : Number(record.ProcessId);
     const commandLine = typeof record.CommandLine === "string" ? capCommandLine(record.CommandLine) : "";
     if (!Number.isInteger(pid) || pid <= 0) continue;
     const parent = typeof record.ParentProcessId === "number" ? record.ParentProcessId : Number(record.ParentProcessId);
-    processes.push(Number.isInteger(parent) && parent > 0 ? { pid, ppid: parent, commandLine } : { pid, commandLine });
+    const name = typeof record.Name === "string" && record.Name !== "" ? record.Name : undefined;
+    processes.push({
+      pid,
+      ...(Number.isInteger(parent) && parent > 0 ? { ppid: parent } : {}),
+      commandLine,
+      ...(name === undefined ? {} : { name }),
+    });
   }
   return processes;
 }
@@ -238,24 +263,47 @@ export function sameUserProcesses(processes: OmpProcessInfo[], uid: number | nul
   return uid === null ? processes : processes.filter((process) => process.uid === uid);
 }
 
-async function runScan(platform: NodeJS.Platform, run: ProcessScanRunner, uid: number | null): Promise<OmpProcessInfo[]> {
+/** An omp entry point named anywhere on a command line: the binary itself, a
+ *  Windows launcher (`omp.cmd`/`omp.bat`), a shim's JS entry (`omp.js`, or any
+ *  file below `@oh-my-pi`), so a `cmd.exe /c …\omp.cmd` or
+ *  `node …\@oh-my-pi\…` row is recognised as omp too. The name must start a
+ *  token or a path segment and end a token or a path segment, so `omp-web`,
+ *  `fake-omp.cmd` and `…/omp/foo` do not match. */
+const OMP_ENTRY_RE = /(?:^|[\s"'=\\/])omp(?:\.exe|\.cmd|\.bat|\.js|\.cjs|\.mjs)?(?=$|[\s"'])|[\\/]@?oh-my-pi[\\/]/i;
+
+/**
+ * Whether the row can be an omp process at all. A resume argument is only
+ * evidence when the process carrying it is omp: `-r` is also `grep -r`, `rm -r`
+ * and `tar -r`, and a POSIX scan lists every process of the user. Windows
+ * additionally recognises the shim shapes (`cmd.exe /c omp.cmd …`,
+ * `node …\@oh-my-pi\…\cli.js …`), which the old name filter missed.
+ */
+export function isOmpProcess(process: OmpProcessInfo): boolean {
+  const name = process.name?.toLowerCase();
+  if (name === "omp" || name === "omp.exe") return true;
+  return OMP_ENTRY_RE.test(process.commandLine);
+}
+
+async function runScan(platform: NodeJS.Platform, run: ProcessScanRunner, uid: number | null, psBin: string | null | undefined): Promise<OmpProcessInfo[]> {
   let processes: OmpProcessInfo[];
   if (platform === "win32") {
     // Ownership could be narrowed to this user with a `GetOwner` call per
     // process, but that needs PROCESS_QUERY_INFORMATION, which an unelevated
     // daemon lacks for another user's process — the query would cost a CIM
     // round trip per process and still answer "unknown". The name filter below
-    // stays the cheap narrowing: an arbitrary foreign process (a script named
-    // `sleep`, say) cannot name a session this way.
+    // stays the cheap narrowing. `node.exe`/`cmd.exe` are listed because a
+    // `.cmd` shim (which `wrapWindowsScript` supports) runs omp as a node
+    // process below cmd.exe; `isOmpProcess` keeps only rows whose command line
+    // names an omp entry, so the wider query costs one JSON parse, not trust.
     const command =
-      "Get-CimInstance Win32_Process -Filter \"Name='omp.exe' OR Name='omp'\" -ErrorAction SilentlyContinue | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress";
+      "Get-CimInstance Win32_Process -Filter \"Name='omp.exe' OR Name='omp' OR Name='node.exe' OR Name='cmd.exe'\" -ErrorAction SilentlyContinue | Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress";
     processes = parseWindowsProcessList(await run(resolvePowerShellBin(), ["-NoProfile", "-NonInteractive", "-Command", command]));
   } else {
-    const psBin = resolvePosixPsBin();
     // No absolute `ps`: report "unknown" (the caller keeps a known owner)
     // rather than resolving some binary from PATH.
-    if (!psBin) throw new Error("no absolute ps binary");
-    processes = sameUserProcesses(parsePosixProcessList(await run(psBin, ["-eo", "pid=,ppid=,uid=,args="])), uid);
+    const resolved = psBin === undefined ? resolvePosixPsBin() : psBin;
+    if (!resolved) throw new Error("no absolute ps binary");
+    processes = sameUserProcesses(parsePosixProcessList(await run(resolved, ["-eo", "pid=,ppid=,uid=,args="])), uid);
   }
   // Parse the resume arguments once per process: one snapshot answers a whole
   // batch of session ids.
@@ -280,7 +328,7 @@ export async function listOmpProcesses(options: OmpProcessScanOptions = {}): Pro
   }
   const scan = async (): Promise<OmpProcessScan> => {
     try {
-      const processes = await runScan(platform, run, uid);
+      const processes = await runScan(platform, run, uid, options.psBin);
       state.cache = { at: now, platform, runner: run, uid, processes };
       return { processes, ok: true, enabled: true };
     } catch {
@@ -307,51 +355,72 @@ function basenameAny(value: string): string {
 }
 
 /**
- * Values a `--resume` argument may carry: the exact token, or — on POSIX,
- * where `ps` loses the quoting — the space-joined tokens that follow it.
- * Work stays bounded (`MAX_BARE_JOIN_TOKENS` joins per occurrence), so a
- * hostile command line cannot turn this into a quadratic parse.
+ * The flags omp documents for opening an existing session (`omp --help`):
+ * `-r, --resume=<value>` and `--restore=<value>`, which resumes "as --resume
+ * does, then goes on with what its last process left unfinished". `--restore`
+ * is what a user reaches for after a crash — exactly when a second writer
+ * appears — so it must count as a resume argument too.
  */
-export function resumeArguments(commandLine: string): string[] {
+const RESUME_MARKERS = ["--resume", "--restore", "-r"] as const;
+
+/** One resume argument: the value it carried and the flag that carried it. */
+export interface ResumeArgument {
+  flag: typeof RESUME_MARKERS[number];
+  value: string;
+}
+
+/**
+ * Values a resume flag may carry: the exact token, or — on POSIX, where `ps`
+ * loses the quoting — the space-joined tokens that follow it. Work stays
+ * bounded (`MAX_RESUME_OCCURRENCES` occurrences, `MAX_BARE_JOIN_TOKENS` joins
+ * each), so a hostile command line cannot turn this into a quadratic parse.
+ */
+export function resumeArguments(commandLine: string): ResumeArgument[] {
   const text = capCommandLine(commandLine);
-  const values: string[] = [];
-  const marker = "--resume";
-  let searchFrom = 0;
+  const values: ResumeArgument[] = [];
   let occurrences = 0;
-  while (occurrences < MAX_RESUME_OCCURRENCES) {
-    const index = text.indexOf(marker, searchFrom);
-    if (index < 0) break;
-    searchFrom = index + marker.length;
-    // `--resume` must start an argument, not sit inside another token.
-    if (index > 0 && !/\s/.test(text[index - 1])) continue;
-    occurrences += 1;
-    let cursor = index + marker.length;
-    if (text[cursor] === "=") cursor += 1;
-    else if (cursor < text.length && !/\s/.test(text[cursor])) continue; // `--resumeX`
-    else while (cursor < text.length && /\s/.test(text[cursor])) cursor += 1;
-    if (cursor >= text.length) continue;
-    const quote = text[cursor];
-    if (quote === '"' || quote === "'") {
-      const end = text.indexOf(quote, cursor + 1);
-      values.push(end > cursor + 1 ? text.slice(cursor + 1, end) : text.slice(cursor + 1));
-      continue;
-    }
-    // Unquoted: the token itself plus the joins with the tokens after it. A
-    // path with spaces arrives quoted from Windows and unquoted from `ps`;
-    // joining stops at the next flag.
-    const tokens: string[] = [];
-    while (cursor < text.length && tokens.length < MAX_BARE_JOIN_TOKENS) {
-      let end = cursor;
-      while (end < text.length && !/\s/.test(text[end])) end += 1;
-      const token = text.slice(cursor, end);
-      if (token.startsWith("-")) break;
-      tokens.push(token);
-      values.push(tokens.join(" "));
-      while (end < text.length && /\s/.test(text[end])) end += 1;
-      cursor = end;
+  for (const marker of RESUME_MARKERS) {
+    let searchFrom = 0;
+    while (occurrences < MAX_RESUME_OCCURRENCES) {
+      const index = text.indexOf(marker, searchFrom);
+      if (index < 0) break;
+      searchFrom = index + marker.length;
+      // The marker must start an argument, not sit inside another token:
+      // `-r` occurs inside `--resume`/`--restore`, and `--resumeX` is a
+      // different flag.
+      if (index > 0 && !/\s/.test(text[index - 1])) continue;
+      let cursor = index + marker.length;
+      if (text[cursor] === "=") cursor += 1;
+      else if (cursor < text.length && !/\s/.test(text[cursor])) {
+        // `-r<id>` is omp's attached short-flag form; a long flag needs `=`
+        // or whitespace, so `--resumeX` is a different flag.
+        if (marker !== "-r") continue;
+      } else while (cursor < text.length && /\s/.test(text[cursor])) cursor += 1;
+      if (cursor >= text.length) continue;
+      occurrences += 1;
+      const quote = text[cursor];
+      if (quote === '"' || quote === "'") {
+        const end = text.indexOf(quote, cursor + 1);
+        values.push({ flag: marker, value: end > cursor + 1 ? text.slice(cursor + 1, end) : text.slice(cursor + 1) });
+        continue;
+      }
+      // Unquoted: the token itself plus the joins with the tokens after it. A
+      // path with spaces arrives quoted from Windows and unquoted from `ps`;
+      // joining stops at the next flag.
+      const tokens: string[] = [];
+      while (cursor < text.length && tokens.length < MAX_BARE_JOIN_TOKENS) {
+        let end = cursor;
+        while (end < text.length && !/\s/.test(text[end])) end += 1;
+        const token = text.slice(cursor, end);
+        if (token.startsWith("-")) break;
+        tokens.push(token);
+        values.push({ flag: marker, value: tokens.join(" ") });
+        while (end < text.length && /\s/.test(text[end])) end += 1;
+        cursor = end;
+      }
     }
   }
-  return values.filter((value) => value.length > 0);
+  return values.filter((argument) => argument.value.length > 0);
 }
 
 /** The session id a `--resume` value may carry: the value itself, or the
@@ -362,6 +431,25 @@ function sessionIdFromResumeValue(value: string): string {
   const stem = base.slice(0, -".jsonl".length);
   const underscore = stem.lastIndexOf("_");
   return underscore >= 0 ? stem.slice(underscore + 1) : stem;
+}
+
+/**
+ * omp's `--resume` takes "a session (by ID prefix, path, or picker if
+ * omitted)", so `omp --resume 11111111` names a session whose id starts with
+ * that prefix. Only a *unique* prefix is evidence: an ambiguous one leaves omp
+ * to pick, so claiming either session would be a guess. The value must look
+ * like a bare id prefix (hex and dashes, no path separator) and be at least
+ * {@link MIN_PREFIX_CHARS} long, or `-r /tmp/1111` would match by accident.
+ */
+function uniquePrefixHit(ids: ReadonlySet<string>, value: string): string | null {
+  if (value.length < MIN_PREFIX_CHARS || /[\\/]/.test(value) || !/^[0-9a-f][0-9a-f-]*$/i.test(value)) return null;
+  let hit: string | null = null;
+  for (const id of ids) {
+    if (!id.startsWith(value)) continue;
+    if (hit !== null) return null; // ambiguous: omp would have to pick
+    hit = id;
+  }
+  return hit;
 }
 
 /** True when `process` is this daemon's own child: its pid is known, or its
@@ -404,8 +492,10 @@ export function sessionIdsNamedByProcesses(
   const byId = new Map<string, string>();
   const byPath = new Map<string, string>();
   const byBase = new Map<string, string>();
+  const ids = new Set<string>();
   for (const candidate of candidates) {
     byId.set(candidate.id, candidate.id);
+    ids.add(candidate.id);
     if (!candidate.sessionFile) continue;
     byPath.set(comparableProjectPath(candidate.sessionFile), candidate.id);
     byBase.set(basenameAny(candidate.sessionFile), candidate.id);
@@ -413,21 +503,24 @@ export function sessionIdsNamedByProcesses(
   const byPid = new Map<number, OmpProcessInfo>();
   for (const process of processes) byPid.set(process.pid, process);
   const exclude = new Set(options.excludePids ?? []);
-  const ids = new Set<string>();
+  const named = new Set<string>();
   for (const process of processes) {
-    if (!process.commandLine.includes("--resume")) continue;
-    if (exclude.size > 0 && isOwnChild(process, byPid, exclude)) continue;
+    // `-r` is also `grep -r`, `rm -r` and `tar -r`, and a POSIX scan lists
+    // every process of the user: only an omp row may own a session.
+    if (!isOmpProcess(process)) continue;
     const values = process.resumeTargets ?? resumeArguments(process.commandLine);
+    if (values.length === 0) continue;
+    if (exclude.size > 0 && isOwnChild(process, byPid, exclude)) continue;
     let live: boolean | null = null;
-    for (const value of values) {
+    for (const { value } of values) {
       const pathHit = byPath.get(comparableProjectPath(value));
       const base = basenameAny(value);
-      const hit = pathHit ?? byBase.get(base) ?? byId.get(sessionIdFromResumeValue(value));
+      const hit = pathHit ?? byBase.get(base) ?? byId.get(sessionIdFromResumeValue(value)) ?? uniquePrefixHit(ids, value);
       if (!hit) continue;
       // Probe only on a hit (a syscall per candidate), once per process.
       live ??= options.isAlive ? options.isAlive(process.pid) : true;
-      if (live) ids.add(hit);
+      if (live) named.add(hit);
     }
   }
-  return ids;
+  return named;
 }

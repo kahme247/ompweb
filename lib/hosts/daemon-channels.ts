@@ -520,7 +520,7 @@ export class ChannelTable {
    * spawning, adopted, idle or running child is never reported as a foreign writer. `sessionFile` covers a channel that
    * knows the session only by its launch file (a new session whose `get_state` has not named it yet).
    */
-  ownership(id: string, sessionFile?: string | null): { owned: boolean; running?: boolean } {
+  ownership(id: string, sessionFile?: string | null): { owned: boolean; running?: boolean; sessionFile?: string } {
     const key = sessionFile ? comparableProjectPath(sessionFile) : "";
     for (const channel of this.channels.values()) {
       if (channel.exited) continue;
@@ -531,12 +531,15 @@ export class ChannelTable {
       // omp accepting the resume prompt and its `agent_start`. An idle child between turns is not running.
       // A legacy channel has no lifecycle, so its activity is unknown rather than idle.
       const running = channel.lifecycle ? channel.lifecycle.isRunning || channel.resuming === true : undefined;
-      return { owned: true, ...(running === undefined ? {} : { running }) };
+      // The launch file (or the one `get_state` named) lets the detector report `lastActivityAt` for our own child too.
+      const knownFile = channel.launch.sessionFile || [...channel.files][0];
+      return { owned: true, ...(running === undefined ? {} : { running }), ...(knownFile ? { sessionFile: knownFile } : {}) };
     }
     // A spawn still connecting has no channel yet, but its child is already ours. `spawning` is keyed by the identity
     // (session id) or the launch file, which is exactly what a caller asking about this session has.
     for (const spawnKey of this.spawning.keys()) {
-      if (spawnKey === id || (key !== "" && comparableProjectPath(spawnKey) === key)) return { owned: true, running: true };
+      if (spawnKey === id) return { owned: true, running: true };
+      if (key !== "" && comparableProjectPath(spawnKey) === key) return { owned: true, running: true, sessionFile: spawnKey };
     }
     return { owned: false };
   }

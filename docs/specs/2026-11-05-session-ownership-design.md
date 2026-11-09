@@ -56,7 +56,13 @@ reported: `false` would be a claim the inspection cannot establish.
 while idle between turns (`owner: "foreign"`, `running: false`). A fresh
 transcript without positive owner evidence is an activity hint, not proof of a
 live writer (`owner: "none"`, `running: true`, `source: "transcript"`); it never
-blocks a send by itself. Daemon-owned identity comes from `ChannelTable` alone —
+blocks a send by itself. Activity is reported only from evidence that can carry
+it: a tail window that parsed no complete record (one multi-MiB tool result fills
+the 64 KiB window) says nothing about the transcript's end, so `running` is
+omitted rather than reported `false`. A scan hit is re-checked against the OS
+(`process.kill(pid, 0)`), because the snapshot is cached for 10 s and a terminal
+`omp` closed a second ago would otherwise read as a live writer. Daemon-owned
+identity comes from `ChannelTable` alone —
 there is no main-side `host.pid` record, no recovery-file inference and no second
 detector.
 
@@ -64,20 +70,47 @@ detector.
 tail is read only for ids whose file changed inside the 60 s activity window.
 Main pages a list longer than 256 ids (`LINK_LIMITS.ownershipIds`) instead of
 silently skipping the rest, and a failed page does not stop the remaining pages.
+Resolving an id whose path is not cached costs the same one `listAllSessions()`
+scan the session list route pays (measured ~2.3 s cold, ~1 ms warm), so the first
+request after a list-cache expiry is slower than the rest; the 256-id bound
+bounds the reply, not that scan. It is shared with the list route through the
+same cache, so it is paid once, not per id.
 
-**Validation at the host boundary.** The daemon rejects a non-array, an empty or
-non-string id and more than 256 ids with 400 `invalid_request`. Main's
+**Validation at the host boundary.** The daemon rejects a non-array, an empty
+array, a non-string id and more than 256 ids with 400 `invalid_request`; the
+detector's own guard uses the same status and code, so one condition has one
+answer. Main's
 `validResult` rejects a daemon reply whose length, identity or order differs from
 the request, or whose `owner`/`running`/`source`/`lastActivityAt` has the wrong
 type, as 502 `host_bad_result`.
 
 **Windows process identity.** `process.getuid` does not exist on Windows, and
 reading another user's process owner needs `PROCESS_QUERY_INFORMATION`, which an
-unelevated daemon lacks. The Windows scan therefore narrows by process name
-(`omp.exe`/`omp`) and keeps every row: a same-machine process named `omp` that
-names a session counts as a possible owner whatever account started it. This is
-the documented limit, not an other-user exclusion; POSIX drops other-uid rows and
-a kept and a dropped row are both asserted (`lib/hosts/session-ownership.test.mjs`).
+unelevated daemon lacks. The Windows scan therefore keeps every row — a
+same-machine `omp` of any account counts as a possible owner — and narrows by
+process identity instead: a row counts only when its image is `omp.exe`/`omp` or
+its command line names an omp entry (`omp.cmd`, `omp.bat`, `omp.js`, a path below
+`@oh-my-pi`). That last rule is what makes a shim-launched omp visible: a `.cmd`
+launcher (which `wrapWindowsScript` supports) runs omp as a `node.exe` process
+below `cmd.exe`, so an image-name-only filter missed it entirely. This is the
+documented limit, not an other-user exclusion; POSIX drops other-uid rows and a
+kept and a dropped row are both asserted (`lib/hosts/session-ownership.test.mjs`).
+
+**Resume flags.** omp 18.12 documents `-r, --resume=<value>` ("by ID prefix,
+path, or picker if omitted") and `--restore=<value>`, which resumes "as --resume
+does, then goes on with what its last process left unfinished" — the flag a user
+reaches for after a crash, exactly when a second writer appears. All three are
+recognised, with `=`, a space or (`-r`) the attached form, and a *unique* id
+prefix is matched as omp would resolve it (an ambiguous or shorter-than-four
+prefix claims nothing). A resume argument is only evidence on an omp row:
+`-r` is also `grep -r`, `rm -r` and `tar -r`, and a POSIX scan lists every
+process of the user.
+
+**Every requested id is scanned.** An id whose file does not resolve — a session
+a foreign `omp` created after the 30 s list cache was warmed, or a file outside
+the sessions tree — still goes to the scan with no path. Dropping such ids made a
+live foreign writer answer a definite `none`, the one answer a caller may send
+into.
 
 **Detection is not a lock.** The inspection is read-only and not atomic with a
 later spawn: a writer can start between the two, so a `--resume` can still move a
