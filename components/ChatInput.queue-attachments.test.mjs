@@ -159,7 +159,7 @@ test("a stored Steer preference turns the primary button into Steer, which steer
   assertQueuedWithAttachments(calls[0], "look at this");
 });
 
-test("a catalog-owned goal with attachments is forwarded once the catalog answers", async () => {
+test("a refreshed catalog can replace a non-empty stale roster before an idle command dispatches", async () => {
   window.HTMLElement.prototype.scrollIntoView = () => {};
   const user = userEvent.setup();
   let release;
@@ -170,7 +170,7 @@ test("a catalog-owned goal with attachments is forwarded once the catalog answer
   const builtins = [];
   const { calls } = await renderWithAttachments({
     isStreaming: false,
-    slashCommands: [],
+    slashCommands: [{ name: "old-command", source: "builtin", description: "stale command" }],
     onBuiltinCommand: async (message) => {
       builtins.push(message);
       return { handled: false };
@@ -191,6 +191,38 @@ test("a catalog-owned goal with attachments is forwarded once the catalog answer
   assert.ok(calls[0].message.startsWith("/goal ship it"), "the command line leads the forwarded prompt");
   assert.match(calls[0].message, /Attached file: notes\.txt/, "attachments ride along");
   assert.deepEqual(builtins, [], "with attachments the command goes straight to the prompt");
+});
+
+test("a queued command waits for a refreshed non-empty catalog before choosing its owner", async () => {
+  const user = userEvent.setup();
+  let release;
+  let loads = 0;
+  const catalog = new Promise((resolve) => {
+    release = () => resolve([{ name: "goal", source: "extension", description: "extension goal" }]);
+  });
+  const builtins = [];
+  const { calls } = await renderWithAttachments({
+    attachments: false,
+    slashCommands: [{ name: "old-command", source: "builtin", description: "stale command" }],
+    onBuiltinCommand: async (message) => {
+      builtins.push(message);
+      return { handled: true };
+    },
+    onLoadSlashCommands: () => {
+      loads += 1;
+      return catalog;
+    },
+  });
+  await user.type(screen.getByRole("textbox"), "/goal ship it");
+  await user.keyboard("{Enter}");
+  await waitFor(() => assert.ok(loads >= 1), { timeout: 2000 });
+  assert.deepEqual(calls, [], "the old roster must not route the command");
+  assert.deepEqual(builtins, [], "the old roster must not invoke the client goal handler");
+  await act(async () => release());
+  await waitFor(() => assert.equal(calls.length, 1));
+  assert.equal(calls[0].name, "onFollowUp");
+  assert.equal(calls[0].message, "/goal ship it");
+  assert.deepEqual(builtins, []);
 });
 
 test("a delayed catalog dispatch never clears text typed after the original command", async () => {

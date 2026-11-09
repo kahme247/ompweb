@@ -34,9 +34,9 @@ function stateFromGoal(goal: Goal | null): GoalModeState | null {
 
 export function readGoalModeState(value: unknown): GoalModeState | null {
   if (!isRecord(value)) return null;
-  if (!("goal" in value)) return null;
   const goal = readGoal(value.goal);
-  // A present-but-malformed goal is not "no goal": refuse the snapshot.
+  // Only explicit null is "no goal"; missing, undefined or malformed values
+  // must not clear a valid displayed goal.
   if (value.goal !== null && !goal) return null;
   const enabled = value.enabled;
   const mode = asString(value.mode);
@@ -68,11 +68,15 @@ export function readGoalUpdatedEvent(value: unknown): GoalModeState | null | und
 
 export function readGoalCommandResponse(value: unknown): GoalCommandResponse | null {
   if (!isRecord(value)) return null;
-  if (!("goal" in value) && !("state" in value)) return null;
+  const hasGoal = "goal" in value;
+  const hasState = "state" in value;
+  if (!hasGoal && !hasState) return null;
   const state = readGoalModeState(value.state);
   const goal = readGoal(value.goal);
-  if (value.goal != null && !goal) return null;
-  if (value.state != null && !state) return null;
+  // Only explicit null is a clear. A present undefined or malformed value
+  // must not be normalized into a successful "no goal" response.
+  if (hasGoal && value.goal !== null && !goal) return null;
+  if (hasState && value.state !== null && !state) return null;
   if (goal && state && state.goal?.id !== goal.id) return null;
   if (state || goal) return { goal: goal ?? state?.goal ?? null, state: state ?? stateFromGoal(goal) };
   // Both null is a valid "no goal" answer (drop/get).

@@ -434,13 +434,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     [slashCommands],
   );
   // The catalog decides who owns a slash command. A pasted or dictated command
-  // can reach dispatch before the palette ever opened, so fetch it once before
-  // routing instead of deciding on an empty roster. Concurrent sends share the
-  // request; the gate stops a second Enter from dispatching while it waits.
+  // can reach dispatch before the palette's refresh finishes, so dispatch
+  // always asks for the latest roster. Concurrent sends share the request; the
+  // gate stops a second Enter from dispatching while it waits.
   const catalogRequestRef = useRef<Promise<Set<string>> | null>(null);
   const catalogGateRef = useRef(false);
   const resolveCommandCatalog = useCallback((): Promise<Set<string>> => {
-    if (ompCommandNames.size > 0 || !onLoadSlashCommands) return Promise.resolve(ompCommandNames);
+    if (!onLoadSlashCommands) return Promise.resolve(ompCommandNames);
     if (!catalogRequestRef.current) {
       const request = Promise.resolve()
         .then(() => onLoadSlashCommands())
@@ -1250,11 +1250,17 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const images = attachedImagesRef.current;
     const files = attachedTextFilesRef.current;
     const uploads = attachedUploadsRef.current;
-    const sendPrompt = (prompt: string) => onSend(
-      composeMessageWithTextAttachments(prompt, files),
-      images.length ? images : undefined,
-      ...uploadArgs(uploads),
-    );
+    const sendPrompt = (prompt: string): Promise<PromptSubmissionResult> => {
+      const composed = composeMessageWithTextAttachments(prompt, files);
+      if (rejectsOversizedPrompt(composed, images)) {
+        return Promise.resolve({ status: "rejected" });
+      }
+      return onSend(
+        composed,
+        images.length ? images : undefined,
+        ...uploadArgs(uploads),
+      );
+    };
     // Dictation inserts overrideText in the same batch as dispatch. It still
     // must match on completion; an override does not own subsequent typing.
     const stored = clearOnceStored(sentValue);
@@ -1274,7 +1280,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       stored.release();
       holdingRef.current = false;
     }
-  }, [onBuiltinCommand, onSend, clearOnceStored]);
+  }, [onBuiltinCommand, onSend, clearOnceStored, rejectsOversizedPrompt]);
 
   /** `/btw` asks a side question beside any run: never a prompt, never
    * queued. Attachments cannot ride along, so refuse and keep the draft
@@ -1299,7 +1305,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (submissionBlockedRef.current || holdingRef.current || (isStreaming && !shellCommand)) return;
     onAudioUnlock?.();
     let catalog = ompCommandNames;
-    if (msg.startsWith("/") && ompCommandNames.size === 0 && onLoadSlashCommands) {
+    if (msg.startsWith("/") && onLoadSlashCommands) {
       if (catalogGateRef.current) return;
       catalogGateRef.current = true;
       try {
@@ -1323,13 +1329,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFilesRef.current);
     if (msg.startsWith("/") && onBuiltinCommand) {
       const commandName = msg.slice(1).split(/\s+/)[0];
-      const expansion = catalog.has(commandName)
-        ? { kind: "not-web" as const }
-        : expandWebSlashCommand(msg);
-      if (expansion.kind === "expand") {
-        const expandedMessage = composeMessageWithTextAttachments(expansion.prompt, attachedTextFilesRef.current);
-        if (rejectsOversizedPrompt(expandedMessage, attachedImagesRef.current)) return;
-      }
       if (!catalog.has(commandName) && await runBuiltinCommand(msg, raw)) return;
     }
     if (submissionBlockedRef.current) return;
@@ -1815,7 +1814,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const msg = raw.trim();
     if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length && !attachedUploadsRef.current.length) return;
     let catalog = ompCommandNames;
-    if (msg.startsWith("/") && ompCommandNames.size === 0 && onLoadSlashCommands) {
+    if (msg.startsWith("/") && onLoadSlashCommands) {
       if (catalogGateRef.current) return;
       catalogGateRef.current = true;
       try {
