@@ -21,12 +21,14 @@ import { markShuttingDown, recordRunningSessions, resumeOnHostLink, takeInterrup
 import { RESUME_PROMPT } from "./hosts/host-resume";
 import { samePath } from "./paths";
 import { isRecord } from "./type-guards";
+import { readGoalModeState } from "./goal-state";
 import { BLOCKING_UI_METHODS, createNotificationDetector } from "./notification-events";
 import { publishNotification } from "./notification-hub";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./skill-diagnostics";
 import { eventWithToolResultImageUrls } from "./media-cache";
 import type {
   BashResultInfo,
+  GoalModeState,
   OmpModel,
   RpcAvailableSlashCommand,
   RpcSessionState,
@@ -36,7 +38,7 @@ import type {
 import type { AgentMessage, CrossSessionHostToolCall, CrossSessionHostToolEvent, ExitedRpcSession, ExtensionWidgetItem } from "./types";
 import { isLinkUp, type Host, type HostStatus, type SpawnRequest, type SpawnResult } from "./hosts/host";
 import { freezeHostLinks, getHost, hostOwnsLifecycle, isNotifier, lastUplinkAt, listHosts, orphanExit } from "./hosts/hub";
-import { HISTORY_MUTATING_COMMANDS, HostOpError, PEER_MESSAGE_FRAME } from "./hosts/link-protocol";
+import { HostOpError, isHistoryMutatingCommand, PEER_MESSAGE_FRAME } from "./hosts/link-protocol";
 import { LOCAL_HOST_ID } from "./hosts/registry";
 import type { OpResult } from "./hosts/session-ops";
 import { hostForSessionId, invalidateHostSessionList, listSessionsAllHosts, sessionSpawnTarget } from "./hosts/session-index";
@@ -169,6 +171,7 @@ const PASSTHROUGH_COMMANDS = new Set([
   "btw",
   "btw_cancel",
   "get_btw_history",
+  "goal",
 ]);
 
 // Outlasts omp's cold prediction-daemon start (up to 3 × 30s start rounds plus a
@@ -1262,6 +1265,16 @@ export class AgentSessionWrapper {
         patchEstimatedTokensAfter(event.result);
         this.invalidateSessionLists();
         break;
+      case "manual_compaction_start":
+        this.compacting = true;
+        break;
+      case "manual_compaction_end":
+        // `/compact` runs through omp's builtin; the client reads this event
+        // result for the banner, so patch it like the RPC response path.
+        this.compacting = false;
+        patchEstimatedTokensAfter(event.result);
+        this.invalidateSessionLists();
+        break;
       case "notice":
         if (event.source === "session-persistence") void this.followSessionMove();
         break;
@@ -2082,6 +2095,13 @@ export class AgentSessionWrapper {
       notifyRunningChange();
     }
     const skillDiagnostics = parseSkillDiagnosticsSnapshot(state.skillDiagnostics);
+    // `get_state.goal` is untrusted wire data. Preserve a valid null clear and
+    // omit a malformed snapshot instead of forwarding it to the banner.
+    const goal: GoalModeState | null | undefined = state.goal === undefined
+      ? undefined
+      : state.goal === null
+        ? null
+        : readGoalModeState(state.goal) ?? undefined;
     return {
       sessionId: state.sessionId,
       sessionFile: state.sessionFile ?? "",
@@ -2123,6 +2143,7 @@ export class AgentSessionWrapper {
       slowModeScope: state.slowModeScope,
       usageLimit: state.usageLimit,
       ...(skillDiagnostics ? { skillDiagnostics } : {}),
+      ...(goal !== undefined ? { goal } : {}),
       todoPhases: state.todoPhases ?? [],
       extensionStatuses: Array.from(this.extensionStatuses, ([key, text]) => ({ key, text })),
       extensionWidgets: Array.from(this.extensionWidgets.values()),
@@ -2511,7 +2532,9 @@ export class AgentSessionWrapper {
     if (typeof command.type === "string" && command.type.startsWith("abort")) {
       console.info("[omp-web] cancellation-command", JSON.stringify({ sessionId: this._sessionId, type: command.type, at: new Date().toISOString() }));
     }
-    const mutatesHistory = HISTORY_MUTATING_COMMANDS.has(command.type as string);
+    // Goal mutations change session state and the active tool set, so they
+    // must not race a history edit. The read-only `get` op stays available.
+    const mutatesHistory = isHistoryMutatingCommand(command);
     if (mutatesHistory && this.historyEditInFlight) {
       throw new WebRpcError("Wait for the history edit to finish", "session_busy");
     }

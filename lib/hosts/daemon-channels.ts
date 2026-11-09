@@ -6,7 +6,7 @@ import { readSessionHeaderSync } from "../omp/session-files";
 import { isValidSessionId } from "../session-file-references-core";
 import { isRecord } from "../type-guards";
 import type { DaemonLink } from "./daemon-link";
-import { HISTORY_MUTATING_COMMANDS, HostOpError, LINK_LIMITS, MESSAGE_COMMANDS, PEER_MESSAGE_FRAME, type HelloChannel, type HostUriScheme, type OpenChannelRequest, type OpenChannelResult, type Unsequenced, type UpMessage } from "./link-protocol";
+import { HostOpError, isHistoryMutatingCommand, LINK_LIMITS, MESSAGE_COMMANDS, PEER_MESSAGE_FRAME, type HelloChannel, type HostUriScheme, type OpenChannelRequest, type OpenChannelResult, type Unsequenced, type UpMessage } from "./link-protocol";
 import { PendingRequests } from "./pending-requests";
 import { StreamSnapshot } from "./stream-snapshot";
 import { ChannelLifecycle } from "./channel-lifecycle";
@@ -441,7 +441,7 @@ export class ChannelTable {
       }
       return;
     }
-    if (channel.editor !== undefined && channel.editor !== link.id && HISTORY_MUTATING_COMMANDS.has(frame.type)) {
+    if (channel.editor !== undefined && channel.editor !== link.id && isHistoryMutatingCommand(frame)) {
       if (typeof frame.id === "string") {
         this.deliver(channel, channel.members.get(link.id)!, { type: "stdout", ch, line: JSON.stringify({ type: "response", id: frame.id, command: frame.type,
           success: false, code: "session_busy", error: "Another web app is editing this session's history; retry once it finishes" }) }, true);

@@ -64,6 +64,12 @@ export const HISTORY_MUTATING_COMMANDS = new Set([
   "set_model", "cycle_model", "set_thinking_level", "cycle_thinking_level",
   "set_fast_mode", "set_slow_mode", "set_auto_compaction", "set_auto_retry", "abort_retry",
 ]);
+/** One history-edit fence shared by web wrappers and a daemon's peer links. */
+export function isHistoryMutatingCommand(command: { type?: unknown; op?: unknown }): boolean {
+  return typeof command.type === "string"
+    && (HISTORY_MUTATING_COMMANDS.has(command.type)
+      || (command.type === "goal" && command.op !== "get"));
+}
 /** Commands whose user message a peer's identical echo could be mistaken for. */
 export const MESSAGE_COMMANDS = new Set(["prompt", "steer", "follow_up", "followUp", "abort_and_prompt"]);
 /** Shared-channel marker a daemon puts in the other members' output when one link writes a message command. */

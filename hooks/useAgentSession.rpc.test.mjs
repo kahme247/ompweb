@@ -1188,7 +1188,7 @@ test("ISSUE #167 a command missing from omp's roster is reported, not run silent
   assert.equal(isUnknownSlashCommand("/Goal", known), true, "matching is case-insensitive both ways");
   assert.equal(isUnknownSlashCommand("/todo", known), false);
   assert.equal(isUnknownSlashCommand("/compact now", known), false);
-  // Builtins are hidden from the palette but still executed by omp.
+  // Builtins are shown in the palette and executed by omp.
   assert.equal(isUnknownSlashCommand("/shake", [...known, "shake"]), false);
   // No roster yet (or a failed fetch) is not evidence that anything is unknown.
   assert.equal(isUnknownSlashCommand("/guided-goal", []), false);
@@ -1199,6 +1199,341 @@ test("ISSUE #167 a command missing from omp's roster is reported, not run silent
   }
   assert.equal(slashCommandName("  /guided-goal ship it  "), "guided-goal");
   assert.equal(slashCommandName("/todo"), "todo");
+});
+
+const GOAL = {
+  id: "g1",
+  objective: "ship the export",
+  status: "active",
+  tokensUsed: 0,
+  timeUsedSeconds: 0,
+  createdAt: 1000,
+  updatedAt: 1000,
+};
+const goalState = (goal = GOAL) => ({ enabled: goal.status === "active", mode: "active", goal });
+
+test("GOAL /goal creates the goal and sends the objective as the first prompt", async () => {
+  resetWorld();
+  primeSession("goal-create", [userMsg("u0", "loaded question")]);
+  const w = await mountSession("goal-create");
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "goal",
+    produce: () => ({ value: { success: true, data: { goal: GOAL, state: goalState() } } }),
+  });
+
+  let command;
+  await act(async () => {
+    command = w.latest.handleBuiltinSlashCommand("/goal ship the export");
+    await sleep(30);
+  });
+  let result;
+  await act(async () => {
+    lastEs().open();
+    result = await command;
+  });
+  assert.equal(result.handled, true);
+  const goalCalls = world.calls.filter((call) => call.body?.type === "goal");
+  assert.deepEqual(goalCalls.map((call) => call.body), [{ type: "goal", op: "create", objective: "ship the export" }]);
+  const promptCalls = world.calls.filter((call) => call.body?.type === "prompt");
+  assert.deepEqual(promptCalls.map((call) => call.body), [{ type: "prompt", message: "ship the export" }]);
+  assert.equal(w.latest.goalState?.goal?.id, "g1");
+});
+
+for (const status of ["active", "paused", "dropped", "cleared", "replaced"]) {
+  test(`GOAL a delayed create reply respects the newer ${status} event`, async () => {
+    resetWorld();
+    const sid = `goal-create-race-${status}`;
+    primeSession(sid, [userMsg("u0", "loaded question")]);
+    const w = await mountSession(sid);
+    let release;
+    world.holds.push({
+      match: (method, _url, body) => method === "POST" && body?.type === "goal",
+      produce: () => new Promise((resolve) => {
+        release = () => resolve({ value: { success: true, data: { goal: GOAL, state: goalState() } } });
+      }),
+    });
+    let command;
+    await act(async () => {
+      command = w.latest.handleBuiltinSlashCommand("/goal ship the export");
+      await sleep(20);
+    });
+    const nextGoal = status === "cleared" ? null : {
+      ...GOAL,
+      id: status === "replaced" ? "g2" : GOAL.id,
+      status: status === "replaced" ? "active" : status,
+      updatedAt: 2000,
+    };
+    const nextState = nextGoal ? goalState(nextGoal) : null;
+    // Deliver the event and old reply in one React batch: dispatch must use
+    // the latest wire state, not the state captured by the last render.
+    await act(async () => {
+      w.latest.handleAgentEventRef.current({ type: "goal_updated", goal: nextGoal, state: nextState });
+      release();
+      await sleep(30);
+      lastEs()?.open();
+      await command;
+    });
+    // A dropped goal has nothing left to show, so the banner is already gone.
+    assert.deepEqual(w.latest.goalState, status === "dropped" ? null : nextState);
+    assert.deepEqual(
+      world.calls.filter((call) => call.body?.type === "prompt").map((call) => call.body.message),
+      status === "active" ? ["ship the export"] : [],
+      "only the still-active created goal may start its objective",
+    );
+  });
+}
+
+test("GOAL get_state and goal_updated both feed the banner", async () => {
+  resetWorld();
+  primeSession("goal-restore", [userMsg("u0", "loaded question")]);
+  world.agents.set("goal-restore", { running: false, state: { goal: goalState() } });
+  const w = await mountSession("goal-restore");
+  assert.equal(w.latest.goalState?.goal?.objective, "ship the export", "restored from get_state");
+
+  const paused = { ...GOAL, status: "paused", updatedAt: 2000 };
+  await act(async () => w.latest.handleAgentEventRef.current({ type: "goal_updated", goal: paused, state: goalState(paused) }));
+  assert.equal(w.latest.goalState?.goal?.status, "paused");
+
+  await act(async () => w.latest.handleAgentEventRef.current({ type: "goal_updated", goal: null, state: null }));
+  assert.equal(w.latest.goalState, null, "a cleared goal hides the banner");
+});
+
+for (const order of ["event then reply", "reply then event"]) {
+  test(`GOAL a dropped goal hides the banner when the ${order}`, async () => {
+    resetWorld();
+    const sid = `goal-drop-${order.replaceAll(" ", "-")}`;
+    primeSession(sid, [userMsg("u0", "loaded question")]);
+    world.agents.set(sid, { running: false, state: { goal: goalState() } });
+    const w = await mountSession(sid);
+    assert.equal(w.latest.goalState?.goal?.status, "active");
+
+    const dropped = { ...GOAL, status: "dropped", updatedAt: 2000 };
+    const emitDrop = () => w.latest.handleAgentEventRef.current({ type: "goal_updated", goal: dropped, state: goalState(dropped) });
+    let release;
+    world.holds.push({
+      match: (method, _url, body) => method === "POST" && body?.type === "goal",
+      produce: () => new Promise((resolve) => {
+        release = () => resolve({ value: { success: true, data: { goal: null, state: null } } });
+      }),
+    });
+    let action;
+    await act(async () => {
+      action = w.latest.handleGoalAction("drop");
+      await sleep(20);
+    });
+
+    if (order === "event then reply") {
+      await act(async () => emitDrop());
+      assert.equal(w.latest.goalState, null, "the drop event alone hides the banner");
+      await act(async () => { release(); await action; });
+    } else {
+      await act(async () => { release(); await action; });
+      assert.equal(w.latest.goalState, null, "the null reply alone hides the banner");
+      await act(async () => emitDrop());
+    }
+    assert.equal(w.latest.goalState, null, "no later event brings the dropped goal back");
+  });
+}
+
+test("GOAL a failed create reports omp's error and keeps the existing goal", async () => {
+  resetWorld();
+  primeSession("goal-conflict", [userMsg("u0", "loaded question")]);
+  world.agents.set("goal-conflict", { running: false, state: { goal: goalState() } });
+  const w = await mountSession("goal-conflict");
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "goal",
+    produce: () => ({ status: 400, value: { error: "A goal is already active. Drop it before creating another." } }),
+  });
+
+  const result = await act(async () => w.latest.handleBuiltinSlashCommand("/goal another"));
+  assert.equal(result.handled, true);
+  assert.match(result.error, /already active/);
+  assert.equal(w.latest.goalState?.goal?.id, "g1");
+});
+
+test("GOAL an empty create reply reports a failure and keeps the existing goal", async () => {
+  resetWorld();
+  primeSession("goal-empty", [userMsg("u0", "loaded question")]);
+  world.agents.set("goal-empty", { running: false, state: { goal: goalState() } });
+  const w = await mountSession("goal-empty");
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "goal",
+    produce: () => ({ value: { success: true, data: { goal: null, state: null } } }),
+  });
+
+  const result = await act(async () => w.latest.handleBuiltinSlashCommand("/goal ship the export"));
+  assert.equal(result.message, undefined, "no start notice without a goal");
+  assert.ok(result.error, "an empty create reply reports a failure");
+  assert.equal(w.latest.goalState?.goal?.id, "g1");
+});
+
+test("GOAL a success reply with no data does not announce a started goal", async () => {
+  resetWorld();
+  primeSession("goal-no-data", [userMsg("u0", "loaded question")]);
+  const w = await mountSession("goal-no-data");
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "goal",
+    produce: () => ({ value: { success: true } }),
+  });
+
+  const result = await act(async () => w.latest.handleBuiltinSlashCommand("/goal ship the export"));
+  assert.equal(result.message, undefined, "no start notice without data");
+  assert.ok(result.error, "a reply without data reports a failure");
+});
+
+test("GOAL a malformed goal_updated does not clear the banner", async () => {
+  resetWorld();
+  primeSession("goal-malformed", [userMsg("u0", "loaded question")]);
+  world.agents.set("goal-malformed", { running: false, state: { goal: goalState() } });
+  const w = await mountSession("goal-malformed");
+
+  await act(async () => w.latest.handleAgentEventRef.current({ type: "goal_updated", goal: null, state: { enabled: true } }));
+  assert.equal(w.latest.goalState?.goal?.id, "g1");
+});
+
+test("GOAL an omp command named goal wins over the client dispatch", async () => {
+  resetWorld();
+  primeSession("goal-shadow", [userMsg("u0", "loaded question")]);
+  const w = await mountSession("goal-shadow");
+  await act(async () => w.latest.handleAgentEventRef.current({
+    type: "available_commands_update",
+    commands: [{ name: "goal", source: "extension", description: "extension goal" }],
+  }));
+
+  const result = await act(async () => w.latest.handleBuiltinSlashCommand("/goal ship it"));
+  assert.deepEqual(result, { handled: false });
+  assert.equal(world.calls.some((call) => call.body?.type === "goal"), false, "no native goal RPC");
+});
+
+test("GOAL a late catalog snapshot cannot overwrite a newer ownership event", async () => {
+  resetWorld();
+  primeSession("goal-catalog-race", [userMsg("u0", "loaded question")]);
+  const w = await mountSession("goal-catalog-race");
+  let release;
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "get_commands",
+    produce: () => new Promise((resolve) => {
+      release = () => resolve({
+        value: { success: true, data: { commands: [{ name: "todo", source: "builtin" }] } },
+      });
+    }),
+  });
+
+  let loading;
+  await act(async () => {
+    loading = w.latest.loadSlashCommands();
+    await sleep(20);
+  });
+  await act(async () => w.latest.handleAgentEventRef.current({
+    type: "available_commands_update",
+    commands: [{ name: "goal", source: "extension", description: "new owner" }],
+  }));
+  await act(async () => {
+    release();
+    await loading;
+  });
+
+  assert.deepEqual(w.latest.slashCommands.map((command) => command.name), ["goal"]);
+  assert.deepEqual(await act(async () => w.latest.handleBuiltinSlashCommand("/goal ship it")), { handled: false });
+  assert.equal(world.calls.some((call) => call.body?.type === "goal"), false);
+});
+
+test("GOAL a failed catalog refresh preserves a newer ownership event", async (t) => {
+  resetWorld();
+  primeSession("goal-catalog-failure", [userMsg("u0", "loaded question")]);
+  const w = await mountSession("goal-catalog-failure");
+  t.mock.method(console, "error", () => {});
+  await act(async () => w.latest.handleAgentEventRef.current({
+    type: "available_commands_update",
+    commands: [{ name: "goal", source: "extension", description: "new owner" }],
+  }));
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "get_commands",
+    produce: async () => ({ status: 503, value: { error: "offline" } }),
+  });
+
+  let failure;
+  await act(async () => {
+    try {
+      await w.latest.loadSlashCommands();
+    } catch (error) {
+      failure = error;
+    }
+  });
+  assert.match(String(failure), /offline/);
+  assert.deepEqual(w.latest.slashCommands.map((command) => command.name), ["goal"]);
+  assert.deepEqual(await act(async () => w.latest.handleBuiltinSlashCommand("/goal ship it")), { handled: false });
+  assert.equal(world.calls.some((call) => call.body?.type === "goal"), false);
+});
+
+test("GOAL pause, resume and drop send the matching RPC and update the banner", async () => {
+  resetWorld();
+  primeSession("goal-actions", [userMsg("u0", "loaded question")]);
+  world.agents.set("goal-actions", { running: false, state: { goal: goalState() } });
+  const w = await mountSession("goal-actions");
+
+  const paused = { ...GOAL, status: "paused", updatedAt: 2000 };
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "goal",
+    produce: () => ({ value: { success: true, data: { goal: paused, state: goalState(paused) } } }),
+  });
+  await act(async () => w.latest.handleGoalAction("pause"));
+  assert.equal(w.latest.goalState?.goal?.status, "paused");
+
+  const resumed = { ...GOAL, updatedAt: 3000 };
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "goal",
+    produce: () => ({ value: { success: true, data: { goal: resumed, state: goalState(resumed) } } }),
+  });
+  await act(async () => w.latest.handleGoalAction("resume"));
+  assert.equal(w.latest.goalState?.goal?.status, "active");
+
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "goal",
+    produce: () => ({ value: { success: true, data: { goal: null, state: null } } }),
+  });
+  await act(async () => w.latest.handleGoalAction("drop"));
+  assert.equal(w.latest.goalState, null);
+
+  assert.deepEqual(
+    world.calls.filter((call) => call.body?.type === "goal").map((call) => call.body.op),
+    ["pause", "resume", "drop"],
+  );
+});
+
+test("GOAL an action reply cannot overwrite a newer goal_updated", async () => {
+  resetWorld();
+  primeSession("goal-action-race", [userMsg("u0", "loaded question")]);
+  world.agents.set("goal-action-race", { running: false, state: { goal: goalState() } });
+  const w = await mountSession("goal-action-race");
+
+  let release;
+  const responseGoal = { ...GOAL, updatedAt: 2000 };
+  world.holds.push({
+    match: (method, _url, body) => method === "POST" && body?.type === "goal",
+    produce: () => new Promise((resolve) => {
+      release = () => resolve({
+        value: { success: true, data: { goal: responseGoal, state: goalState(responseGoal) } },
+      });
+    }),
+  });
+  let action;
+  await act(async () => {
+    action = w.latest.handleGoalAction("pause");
+    await sleep(20);
+  });
+
+  const paused = { ...GOAL, status: "paused", updatedAt: 2000 };
+  await act(async () => {
+    w.latest.handleAgentEventRef.current({ type: "goal_updated", goal: paused, state: goalState(paused) });
+  });
+  await act(async () => {
+    release();
+    await action;
+  });
+
+  assert.equal(w.latest.goalState?.goal?.status, "paused");
+  assert.equal(w.latest.goalState?.goal?.updatedAt, 2000);
 });
 
 test("ISSUE #167 sending a TUI-only command warns once and still delivers the text", async () => {
@@ -2312,7 +2647,7 @@ test("a refused compact command cannot unlock compaction attached from another t
   });
   await act(async () => {
     const result = await w.latest.handleBuiltinSlashCommand("/compact");
-    assert.ok(result.error, "a second compaction is refused");
+    assert.equal(result.handled, false, "omp owns /compact; the web forwards it instead of compacting locally");
   });
   assert.equal(w.latest.isCompacting, true, "the rejected command does not own the attached compaction");
   await act(async () => { await w.latest.handleCompact(); });
@@ -2575,6 +2910,103 @@ function holdNext(match) {
   world.holds.push({ match, produce: () => new Promise((resolve) => { held.release = (value, status = 200) => resolve({ status, value }); }) });
   return held;
 }
+
+async function mountCompactionObserver(sid) {
+  primeSession(sid, [userMsg("u0", "q")]);
+  const w = await mountSession(sid);
+  world.agents.set(sid, { running: true, state: {} });
+  await deliverRunning([sid]);
+  await settle();
+  const es = lastEs();
+  await act(async () => {
+    es.open();
+    await sleep(30);
+  });
+  return { w, es };
+}
+
+test("manual compaction events preserve overlapping local compaction ownership in either settlement order", async () => {
+  resetWorld();
+  const sid = "manual-local-overlap";
+  const { w, es } = await mountCompactionObserver(sid);
+
+  const first = holdNext((method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "compact");
+  let firstCompaction;
+  await act(async () => {
+    firstCompaction = w.latest.handleCompact();
+    await sleep(30);
+  });
+  await act(async () => {
+    es.emit({ type: "manual_compaction_start" });
+    es.emit({ type: "manual_compaction_end" });
+  });
+  assert.equal(w.latest.isCompacting, true, "a native end cannot release the local command");
+  await act(async () => {
+    first.release({ success: true, data: {} });
+    await firstCompaction;
+  });
+  assert.equal(w.latest.isCompacting, false);
+
+  const second = holdNext((method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "compact");
+  let secondCompaction;
+  await act(async () => {
+    secondCompaction = w.latest.handleCompact();
+    await sleep(30);
+    es.emit({ type: "manual_compaction_start" });
+  });
+  await act(async () => {
+    second.release({ success: true, data: {} });
+    await secondCompaction;
+  });
+  assert.equal(w.latest.isCompacting, true, "the native compaction keeps ownership after the local command settles");
+  await act(async () => {
+    es.emit({ type: "manual_compaction_end" });
+  });
+  assert.equal(w.latest.isCompacting, false);
+});
+
+test("a remote manual compaction blocks a local compact command until its end event", async () => {
+  resetWorld();
+  const sid = "remote-manual-compact";
+  const { w, es } = await mountCompactionObserver(sid);
+  const compactCalls = () => callsTo("POST", `/api/agent/${sid}`).filter((call) => call.body?.type === "compact").length;
+
+  await act(async () => {
+    es.emit({ type: "manual_compaction_start" });
+  });
+  assert.equal(w.latest.isCompacting, true);
+  await act(async () => {
+    await w.latest.handleCompact();
+  });
+  assert.equal(compactCalls(), 0, "the remote owner prevents a competing compact command");
+
+  await act(async () => {
+    es.emit({ type: "manual_compaction_end" });
+  });
+  assert.equal(w.latest.isCompacting, false);
+});
+
+test("an auto-compaction end event cannot release an overlapping local compaction", async () => {
+  resetWorld();
+  const sid = "auto-local-overlap";
+  const { w, es } = await mountCompactionObserver(sid);
+  const compact = holdNext((method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "compact");
+  let compacting;
+  await act(async () => {
+    compacting = w.latest.handleCompact();
+    await sleep(30);
+  });
+  await act(async () => {
+    es.emit({ type: "auto_compaction_start" });
+    es.emit({ type: "auto_compaction_end" });
+  });
+  assert.equal(w.latest.isCompacting, true, "the local command still owns compaction");
+  await act(async () => {
+    compact.release({ success: true, data: {} });
+    await compacting;
+  });
+  assert.equal(w.latest.isCompacting, false);
+});
 
 test("an idle snapshot cannot release a manual compaction this tab is still sending", async () => {
   resetWorld();
@@ -6276,6 +6708,41 @@ test("a fresh chat's /btw question attaches one event stream instead of an obser
   assert.deepEqual(result, { handled: true });
   assert.equal(streamsBeforeOpen, 1, "the question owns the only stream");
   assert.equal(world.esInstances.length, 1);
+});
+
+test("a fresh chat dispatches /btw against the catalog loaded by the composer", async () => {
+  resetWorld();
+  const sid = "fresh-catalog-btw";
+  world.holds.push({
+    match: (method, url) => method === "POST" && url === "/api/agent/new",
+    produce: async () => ({ value: { sessionId: sid } }),
+  });
+  world.holds.push({
+    match: (method, url, body) => method === "POST" && url === `/api/agent/${sid}` && body?.type === "get_commands",
+    produce: async () => ({ value: { success: true, data: { commands: [] } } }),
+  });
+  holdBtwCommand("btw", async () => ({ value: { success: true, data: { record: btwRecord() } } }));
+  const w = await mountSession(null, undefined, { newSessionCwd: "/workspace", onSessionCreated: () => {} });
+
+  await act(async () => {
+    await w.latest.loadSlashCommands();
+  });
+  let asked;
+  await act(async () => {
+    asked = w.latest.handleBuiltinSlashCommand("/btw what is 2+2");
+    await sleep(30);
+  });
+  let result;
+  await act(async () => {
+    lastEs().open();
+    result = await asked;
+  });
+  w.unmount();
+
+  assert.deepEqual(result, { handled: true });
+  assert.equal(callsTo("POST", "/api/agent/new").length, 1, "catalog discovery and dispatch share one runtime");
+  const commands = callsTo("POST", `/api/agent/${sid}`).map((call) => call.body?.type);
+  assert.ok(commands.indexOf("get_commands") < commands.indexOf("btw"), "the authoritative catalog is loaded before client dispatch");
 });
 
 test("a first prompt rejected after promotion identifies the real-session recovery draft", async () => {

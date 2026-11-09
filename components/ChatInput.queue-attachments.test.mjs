@@ -39,6 +39,7 @@ function override(target, key, replacement) {
 
 beforeEach(() => {
   window.matchMedia = () => ({ matches: false, addEventListener() {}, removeEventListener() {} });
+  window.HTMLElement.prototype.scrollIntoView = () => {};
   globalThis.FileReader = TestFileReader;
   URL.createObjectURL ??= () => "blob:test";
   URL.revokeObjectURL ??= () => {};
@@ -50,6 +51,7 @@ afterEach(() => {
     clearDraft(KEY);
     localStorage.clear();
     delete window.matchMedia;
+    delete window.HTMLElement.prototype.scrollIntoView;
     globalThis.FileReader = previousFileReader;
     while (overrides.length) {
       const { target, key, original } = overrides.pop();
@@ -60,7 +62,7 @@ afterEach(() => {
 });
 
 /** A composer with an image and a text file attached through the picker path. */
-async function renderWithAttachments({ queued = true, queueCallbacks = true, ...props } = {}) {
+async function renderWithAttachments({ queued = true, queueCallbacks = true, attachments = true, ...props } = {}) {
   const calls = [];
   // Images are the last argument of every queue callback, which resolves
   // false when omp refused the message.
@@ -81,17 +83,19 @@ async function renderWithAttachments({ queued = true, queueCallbacks = true, ...
     ...props,
   };
   const view = render(React.createElement(ChatInput, inputProps));
-  await act(async () => {
-    ref.current.addFiles([
-      new File([Buffer.from(PNG, "base64")], "dot.png", { type: "image/png" }),
-      new File(["hello"], "notes.txt", { type: "text/plain" }),
-    ]);
-  });
-  await waitFor(() => {
-    const draft = getDraft(KEY);
-    assert.equal(draft?.images.length, 1, "the image is attached");
-    assert.equal(draft?.files.length, 1);
-  });
+  if (attachments) {
+    await act(async () => {
+      ref.current.addFiles([
+        new File([Buffer.from(PNG, "base64")], "dot.png", { type: "image/png" }),
+        new File(["hello"], "notes.txt", { type: "text/plain" }),
+      ]);
+    });
+    await waitFor(() => {
+      const draft = getDraft(KEY);
+      assert.equal(draft?.images.length, 1, "the image is attached");
+      assert.equal(draft?.files.length, 1);
+    });
+  }
   return {
     calls,
     ref,
@@ -155,17 +159,252 @@ test("a stored Steer preference turns the primary button into Steer, which steer
   assertQueuedWithAttachments(calls[0], "look at this");
 });
 
+test("a refreshed catalog can replace a non-empty stale roster before an idle command dispatches", async () => {
+  window.HTMLElement.prototype.scrollIntoView = () => {};
+  const user = userEvent.setup();
+  let release;
+  let loads = 0;
+  const catalog = new Promise((resolve) => {
+    release = () => resolve([{ name: "goal", source: "extension", description: "extension goal" }]);
+  });
+  const builtins = [];
+  const { calls } = await renderWithAttachments({
+    isStreaming: false,
+    slashCommands: [{ name: "old-command", source: "builtin", description: "stale command" }],
+    onBuiltinCommand: async (message) => {
+      builtins.push(message);
+      return { handled: false };
+    },
+    onLoadSlashCommands: () => {
+      loads += 1;
+      return catalog;
+    },
+  });
+  await user.type(screen.getByRole("textbox"), "/goal ship it");
+  await user.keyboard("{Enter}");
+  await waitFor(() => assert.ok(loads >= 1), { timeout: 2000 });
+  assert.equal(calls.length, 0, "nothing is dispatched before the catalog answers");
+  await act(async () => release());
+  await waitFor(() => assert.equal(calls.length, 1));
+  delete window.HTMLElement.prototype.scrollIntoView;
+  assert.equal(calls[0].name, "onSend", "omp owns the name once the catalog reports it");
+  assert.ok(calls[0].message.startsWith("/goal ship it"), "the command line leads the forwarded prompt");
+  assert.match(calls[0].message, /Attached file: notes\.txt/, "attachments ride along");
+  assert.deepEqual(builtins, [], "with attachments the command goes straight to the prompt");
+});
+
+test("a queued command waits for a refreshed non-empty catalog before choosing its owner", async () => {
+  const user = userEvent.setup();
+  let release;
+  let loads = 0;
+  const catalog = new Promise((resolve) => {
+    release = () => resolve([{ name: "goal", source: "extension", description: "extension goal" }]);
+  });
+  const builtins = [];
+  const { calls } = await renderWithAttachments({
+    attachments: false,
+    slashCommands: [{ name: "old-command", source: "builtin", description: "stale command" }],
+    onBuiltinCommand: async (message) => {
+      builtins.push(message);
+      return { handled: true };
+    },
+    onLoadSlashCommands: () => {
+      loads += 1;
+      return catalog;
+    },
+  });
+  await user.type(screen.getByRole("textbox"), "/goal ship it");
+  await user.keyboard("{Enter}");
+  await waitFor(() => assert.ok(loads >= 1), { timeout: 2000 });
+  assert.deepEqual(calls, [], "the old roster must not route the command");
+  assert.deepEqual(builtins, [], "the old roster must not invoke the client goal handler");
+  await act(async () => release());
+  await waitFor(() => assert.equal(calls.length, 1));
+  assert.equal(calls[0].name, "onFollowUp");
+  assert.equal(calls[0].message, "/goal ship it");
+  assert.deepEqual(builtins, []);
+});
+
+test("a delayed catalog dispatch never clears text typed after the original command", async () => {
+  const user = userEvent.setup();
+  let release;
+  const catalog = new Promise((resolve) => { release = resolve; });
+  const builtins = [];
+  await renderWithAttachments({
+    attachments: false,
+    isStreaming: false,
+    slashCommands: [],
+    onLoadSlashCommands: () => catalog,
+    onBuiltinCommand: async (message) => {
+      builtins.push(message);
+      return { handled: true };
+    },
+  });
+  const textbox = screen.getByRole("textbox");
+  await user.type(textbox, "/goal first");
+  await user.keyboard("{Enter}");
+  await user.clear(textbox);
+  await user.type(textbox, "newer draft");
+  await act(async () => release([]));
+  await waitFor(() => assert.deepEqual(builtins, ["/goal first"]));
+  assert.equal(textbox.value, "newer draft");
+  assert.equal(getDraft(KEY)?.value, "newer draft");
+});
+
+test("a failed catalog lookup retains the command and retries instead of guessing ownership", async () => {
+  const user = userEvent.setup();
+  let attempts = 0;
+  let failed = false;
+  let rejectFirst;
+  const first = new Promise((_, reject) => { rejectFirst = reject; });
+  const builtins = [];
+  await renderWithAttachments({
+    attachments: false,
+    isStreaming: false,
+    slashCommands: [],
+    onLoadSlashCommands: () => {
+      attempts += 1;
+      return failed ? [] : first;
+    },
+    onBuiltinCommand: async (message) => {
+      builtins.push(message);
+      return { handled: true };
+    },
+  });
+  const textbox = screen.getByRole("textbox");
+  await user.type(textbox, "/goal retry");
+  await user.keyboard("{Enter}");
+  await waitFor(() => assert.ok(attempts >= 1));
+  await act(async () => {
+    failed = true;
+    rejectFirst(new Error("catalog offline"));
+    await Promise.resolve();
+  });
+  assert.equal(textbox.value, "/goal retry");
+  assert.deepEqual(builtins, []);
+
+  await user.keyboard("{Enter}");
+  await waitFor(() => assert.deepEqual(builtins, ["/goal retry"]));
+  assert.ok(attempts >= 2);
+});
+
+test("an idle web slash command expands before its attachments are composed", async () => {
+  const { expandWebSlashCommand } = await import("@/lib/web-slash-commands");
+  const user = userEvent.setup();
+  const { calls } = await renderWithAttachments({
+    isStreaming: false,
+    onBuiltinCommand: async (message, sendPrompt) => {
+      const expansion = expandWebSlashCommand(message);
+      assert.equal(expansion.kind, "expand");
+      const result = await sendPrompt(expansion.prompt);
+      return { handled: true, retainInput: result.status !== "accepted" };
+    },
+  });
+  await user.type(screen.getByRole("textbox"), "/plan ship it");
+  await user.keyboard("{Enter}");
+  await waitFor(() => assert.equal(calls.length, 1));
+  assert.equal(calls[0].name, "onSend");
+  assertQueuedWithAttachments(calls[0], expandWebSlashCommand("/plan ship it").prompt);
+});
+
 test("a queued web slash command is expanded and keeps the attachments", async () => {
   const { expandWebSlashCommand } = await import("@/lib/web-slash-commands");
   window.HTMLElement.prototype.scrollIntoView = () => {};
   const user = userEvent.setup();
   const calls = await renderRunningWithAttachments();
-  await user.type(screen.getByRole("textbox"), "/goal ship it");
+  await user.type(screen.getByRole("textbox"), "/plan ship it");
   await user.keyboard("{Enter}");
   await waitFor(() => assert.equal(calls.length, 1));
   delete window.HTMLElement.prototype.scrollIntoView;
   assert.equal(calls[0].name, "onFollowUp", "a slash command is held like any follow-up; the server sends it as a prompt");
-  assertQueuedWithAttachments(calls[0], expandWebSlashCommand("/goal ship it").prompt);
+  assertQueuedWithAttachments(calls[0], expandWebSlashCommand("/plan ship it").prompt);
+});
+
+test("streaming hides client-only commands but keeps queueable web commands in the palette", async () => {
+  window.HTMLElement.prototype.scrollIntoView = () => {};
+  const user = userEvent.setup();
+  await renderWithAttachments({ attachments: false, isStreaming: true, slashCommands: [] });
+  await user.type(screen.getByRole("textbox"), "/");
+  await waitFor(() => assert.ok(screen.getByRole("option", { name: /\/plan\b/i })));
+  assert.equal(screen.queryByRole("option", { name: /\/goal\b/i }), null);
+  delete window.HTMLElement.prototype.scrollIntoView;
+});
+
+test("a queued /goal runs the native goal RPC instead of entering the prompt queue", async () => {
+  window.HTMLElement.prototype.scrollIntoView = () => {};
+  const user = userEvent.setup();
+  const builtins = [];
+  const calls = await renderRunningWithAttachments({
+    attachments: false,
+    onBuiltinCommand: async (message) => {
+      builtins.push(message);
+      return { handled: true };
+    },
+  });
+  await user.type(screen.getByRole("textbox"), "/goal ship it");
+  await user.keyboard("{Enter}");
+  await waitFor(() => assert.deepEqual(builtins, ["/goal ship it"]));
+  delete window.HTMLElement.prototype.scrollIntoView;
+  assert.equal(calls.length, 0, "no prompt is queued");
+  await waitFor(() => assert.equal(getDraft(KEY), null));
+});
+
+test("a queued /goal with attachments is refused and keeps the draft", async () => {
+  window.HTMLElement.prototype.scrollIntoView = () => {};
+  const user = userEvent.setup();
+  const builtins = [];
+  const calls = await renderRunningWithAttachments({
+    onBuiltinCommand: async (message) => {
+      builtins.push(message);
+      return { handled: true };
+    },
+  });
+  await user.type(screen.getByRole("textbox"), "/goal ship it");
+  await user.keyboard("{Enter}");
+  await waitFor(() => assert.equal(screen.getByRole("textbox").value, "/goal ship it"));
+  delete window.HTMLElement.prototype.scrollIntoView;
+  assert.deepEqual(builtins, [], "no goal RPC with attachments");
+  assert.equal(calls.length, 0, "no prompt is queued");
+  assert.equal(getDraft(KEY)?.images.length, 1);
+  assert.equal(getDraft(KEY)?.files.length, 1);
+});
+
+test("an idle /goal with attachments is refused and keeps the draft", async () => {
+  window.HTMLElement.prototype.scrollIntoView = () => {};
+  const user = userEvent.setup();
+  const builtins = [];
+  const calls = await renderRunningWithAttachments({
+    isStreaming: false,
+    onBuiltinCommand: async (message) => {
+      builtins.push(message);
+      return { handled: true };
+    },
+  });
+  await user.type(screen.getByRole("textbox"), "/goal ship it");
+  await user.keyboard("{Enter}");
+  await waitFor(() => assert.equal(screen.getByRole("textbox").value, "/goal ship it"));
+  delete window.HTMLElement.prototype.scrollIntoView;
+  assert.deepEqual(builtins, [], "no goal RPC with attachments");
+  assert.equal(calls.length, 0, "no prompt is sent");
+  assert.equal(getDraft(KEY)?.images.length, 1);
+  assert.equal(getDraft(KEY)?.files.length, 1);
+});
+
+test("a catalog-owned /goal is forwarded to onSend", async () => {
+  window.HTMLElement.prototype.scrollIntoView = () => {};
+  const user = userEvent.setup();
+  const calls = await renderRunningWithAttachments({
+    attachments: false,
+    isStreaming: false,
+    slashCommands: [{ name: "goal", source: "extension", description: "extension goal" }],
+    onBuiltinCommand: async () => ({ handled: false }),
+  });
+  await user.type(screen.getByRole("textbox"), "/goal ship it");
+  await user.keyboard("{Enter}");
+  await waitFor(() => assert.equal(calls.length, 1));
+  delete window.HTMLElement.prototype.scrollIntoView;
+  assert.equal(calls[0].name, "onSend");
+  assert.equal(calls[0].message, "/goal ship it");
 });
 
 test("a queued message stays in the composer until the outbox has it, and stays whole when refused", async () => {
@@ -577,7 +816,7 @@ test("recovered images past the attachment cap all stay in the composer", async 
 // Keep the real useDictation hook: only browser capture and the STT job API
 // are controlled. Polls expose status; only the owner's claim returns text
 // and the send intent, matching the server job boundary.
-function installPendingDictation({ holdUpload = false, holdClaim = false, after = "send" } = {}) {
+function installPendingDictation({ holdUpload = false, holdClaim = false, after = "send", text = "transcribed words" } = {}) {
   const uploads = [];
   const polls = [];
   const claims = [];
@@ -647,7 +886,7 @@ function installPendingDictation({ holdUpload = false, holdClaim = false, after 
       await claimReady;
       return response({
         status: "done",
-        text: "transcribed words",
+        text,
         after: claim.owner === uploads[0]?.owner ? after : undefined,
       });
     }
@@ -660,6 +899,63 @@ function installPendingDictation({ holdUpload = false, holdClaim = false, after 
     releaseClaim: () => releaseClaim?.(),
     complete: () => { done = true; },
   };
+}
+
+for (const change of ["immediate", "none", "text", "attachments", "pending attachment"]) {
+  test(`a dictated goal only clears its unchanged draft after success: ${change}`, async () => {
+    const dictation = installPendingDictation({ text: "/goal ship it" });
+    const user = userEvent.setup();
+    const commands = [];
+    let release;
+    const { ref, calls } = await renderWithAttachments({
+      attachments: false,
+      onBuiltinCommand: (message) => {
+        commands.push(message);
+        if (change === "immediate") return Promise.resolve({ handled: true });
+        return new Promise((resolve) => { release = () => resolve({ handled: true }); });
+      },
+    });
+    await user.click(screen.getByRole("button", { name: "Start dictation" }));
+    await user.click(screen.getByRole("button", { name: /^Queue$/ }));
+    await waitFor(() => assert.equal(dictation.uploads.length, 1));
+    dictation.complete();
+    await waitFor(() => assert.deepEqual(commands, ["/goal ship it"]), { timeout: 3000 });
+    if (change === "immediate") {
+      await waitFor(() => assert.equal(screen.getByRole("textbox").value, ""));
+      assert.equal(getDraft(KEY), null);
+      assert.deepEqual(calls, []);
+      return;
+    }
+    await waitFor(() => assert.equal(screen.getByRole("textbox").value, "/goal ship it"));
+
+    let finishRead;
+    if (change === "text") await user.type(screen.getByRole("textbox"), " newer draft");
+    if (change === "attachments") {
+      await act(async () => ref.current.addFiles([
+        new File([Buffer.from(PNG, "base64")], "new.png", { type: "image/png" }),
+        new File(["new contents"], "new.txt", { type: "text/plain" }),
+      ]));
+      await waitFor(() => assert.equal(getDraft(KEY)?.files.length, 1));
+    }
+    if (change === "pending attachment") {
+      const file = new File(["pending contents"], "pending.txt", { type: "text/plain" });
+      file.text = () => new Promise((resolve) => { finishRead = () => resolve("pending contents"); });
+      await act(async () => ref.current.addFiles([file]));
+    }
+    const beforeReply = getDraft(KEY);
+    await act(async () => release());
+    if (change === "none") {
+      assert.equal(screen.getByRole("textbox").value, "");
+      assert.equal(getDraft(KEY), null);
+    } else {
+      assert.deepEqual(getDraft(KEY), beforeReply, "success must not clear a changed or still-reading draft");
+      if (finishRead) {
+        await act(async () => finishRead());
+        await waitFor(() => assert.equal(getDraft(KEY)?.files[0]?.content, "pending contents"));
+      }
+    }
+    assert.deepEqual(calls, [], "the command never enters the prompt queue");
+  });
 }
 
 for (const isStreaming of [false, true]) {

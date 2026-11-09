@@ -38,8 +38,9 @@ import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-prese
 import { toast } from "@/components/ui/toast";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import { validateOutgoingPrompt } from "@/lib/image-attachments";
-import { createActiveGoal, parseActiveGoal, type ActiveGoal, type ActivePlan } from "@/lib/web-mode-state";
-import type { HostToolDefinition, HostUriSchemeDefinition, RpcAskDialogAnswer, RpcAvailableSlashCommand, SessionStatsInfo, SlowModeScope, TodoPhase, UsageLimitState } from "@/lib/pi-types";
+import { type ActivePlan } from "@/lib/web-mode-state";
+import { isStaleGoalState, readGoalCommandResponse, readGoalUpdatedEvent, withoutDroppedGoal } from "@/lib/goal-state";
+import type { GoalCommandResponse, GoalModeState, HostToolDefinition, HostUriSchemeDefinition, RpcAskDialogAnswer, RpcAvailableSlashCommand, SessionStatsInfo, SlowModeScope, TodoPhase, UsageLimitState } from "@/lib/pi-types";
 import { isRecord } from "@/lib/type-guards";
 import { subscribeSessionsChanged } from "@/lib/session-change-bus";
 import { EVENT_STREAM_CLOSED, EVENT_STREAM_OPEN, addToOutbox, dropFromOutbox, newOutboxId, openEventStream, subscribeOutbox, type EventStream, type LocalOutboxEntry } from "@/lib/event-stream";
@@ -104,6 +105,7 @@ import {
   streamReducer,
   isUnknownSlashCommand,
   slashCommandName,
+  slashCommandRosterNames,
   toSlashCommandInfo,
   toThinkingModelMeta,
 } from "./useAgentSession-stream";
@@ -234,7 +236,6 @@ export interface UseAgentSessionOptions {
   onSystemPromptChange?: (prompt: string | null) => void;
   /** Registers an action that lazily starts the session and loads its system prompt. */
   onSystemPromptLoaderChange?: (loader: (() => Promise<void>) | null) => void;
-  onSessionStatsPanelOpen?: () => void;
   setToolPreset?: (preset: "none" | "default" | "full") => void;
   /** Opens a file in the web UI's file viewer (used by the open_file host tool). */
   onOpenFile?: (filePath: string, name: string, source: WorkspaceFileSource) => void;
@@ -283,7 +284,7 @@ function unrecordedHeldBash<T extends { command: string; after: number }>(messag
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
     session, newSessionCwd, newSessionHostId, onAgentEnd, onSessionCreated, onSessionForked, onSessionMoved,
-    modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsPanelOpen,
+    modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange,
     onOpenFile, onOpenUrl,
   } = opts;
   const reducedMotion = usePrefersReducedMotion();
@@ -425,6 +426,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // but the unknown-command warning must not flag them (#167). Ref-only: it is
   // consulted at send time and must never re-render the composer.
   const knownSlashCommandNamesRef = useRef<string[]>([]);
+  const slashCommandsRef = useRef<SlashCommandInfo[]>([]);
+  /** Invalidates an older `get_commands` snapshot when a live catalog event wins. */
+  const slashCatalogVersionRef = useRef(0);
+  /** True once a `get_commands` reply actually arrived: until then an empty
+   *  roster means "not asked yet", not "omp owns nothing". */
+  const slashRosterLoadedRef = useRef(false);
+  const slashCommandsInFlightRef = useRef<Promise<SlashCommandInfo[]> | null>(null);
   const warnedSlashCommandsRef = useRef(new Set<string>());
   const [noticeState, dispatchNotice] = useReducer(noticeReducer, { visible: [], pending: [] });
   const [sessionStatsOverride, setSessionStatsOverride] = useState<SessionStatsInfo | null>(null);
@@ -505,11 +513,30 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (seq <= skillDiagnosticsAppliedSeqRef.current) return;
     publishSkillDiagnostics(seq, parseSkillDiagnosticsSnapshot(value) ?? null);
   }, [publishSkillDiagnostics]);
+  // Goal state has two live sources (goal_updated frames and get_state
+  // snapshots) plus command responses. A snapshot takes a sequence when it is
+  // requested and applies only if no newer frame/response arrived; an older
+  // updatedAt never overwrites a newer goal.
+  const goalSeqRef = useRef(0);
+  // Event handlers can run before React commits their state. Command
+  // continuations must still observe a pause/drop received in the same batch.
+  const goalStateRef = useRef<GoalModeState | null>(null);
+  const applyGoalSnapshot = useCallback((seq: number, value: GoalModeState | null) => {
+    if (seq !== goalSeqRef.current || isStaleGoalState(goalStateRef.current, value)) return;
+    goalStateRef.current = value;
+    setGoalState(withoutDroppedGoal(value));
+  }, []);
+  const publishGoalState = useCallback((value: GoalModeState | null) => {
+    goalSeqRef.current += 1;
+    if (isStaleGoalState(goalStateRef.current, value)) return;
+    goalStateRef.current = value;
+    setGoalState(withoutDroppedGoal(value));
+  }, []);
   const [subagents, setSubagents] = useState<SubagentInfo[]>([]);
   const [subagentEvents, setSubagentEvents] = useState<Record<string, SubagentActivityEvent[]>>({});
   const [subagentTranscriptVersions, setSubagentTranscriptVersions] = useState<Record<string, number>>({});
   const [todoPhases, setTodoPhases] = useState<TodoPhase[]>([]);
-  const [activeGoal, setActiveGoal] = useState<ActiveGoal | null>(null);
+  const [goalState, setGoalState] = useState<GoalModeState | null>(null);
   const [activePlan, setActivePlan] = useState<ActivePlan | null>(null);
   const [advisorActiveAt, setAdvisorActiveAt] = useState(0);
   // Advisor is a per-chat toggle (composer Sparkles + /advisor command), not a
@@ -570,6 +597,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     localCompactionsRef.current -= 1;
     compactionGenRef.current += 1;
     setCompacting(localCompactionsRef.current > 0 || autoCompactingRef.current);
+  }, [setCompacting]);
+  // A compaction omp started and this tab does not own (auto-compaction, or a
+  // manual one from another tab, the TUI, or a forwarded `/compact`). It holds
+  // the control across a local compaction settling, and its end is the only
+  // thing that releases it.
+  const beginNativeCompaction = useCallback(() => {
+    compactionGenRef.current += 1;
+    autoCompactingRef.current = true;
+    setCompacting(true);
+  }, [setCompacting]);
+  const endNativeCompaction = useCallback(() => {
+    compactionGenRef.current += 1;
+    autoCompactingRef.current = false;
+    if (localCompactionsRef.current === 0) setCompacting(false);
   }, [setCompacting]);
   // Set while an interrupt-and-reply (abort_and_prompt) is in flight: the
   // aborted turn's terminal agent_end must not tear down the new run that is
@@ -804,16 +845,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } satisfies SessionStatsInfo;
   }, [messages, sessionStatsOverride, contextUsage, data?.filePath, session?.id, session?.name]);
 
-  // Goal mode is web-hosted because omp's native /goal is TUI-only. Keep it
-  // scoped to its session so switching conversations never leaks objectives.
+  // Goal state is omp-owned and scoped to its session. Clear it immediately on
+  // a switch; loadSession/reconcile fill it from the new session's get_state,
+  // and the sequence prevents the previous session's late snapshot from
+  // reappearing.
   useEffect(() => {
-    const sid = session?.id;
     setActivePlan(null);
-    if (!sid) {
-      setActiveGoal(null);
-      return;
-    }
-    setActiveGoal(parseActiveGoal(sessionStorage.getItem(`omp-web:goal:${sid}`)));
+    // Promoting the empty new-chat runtime to its real id is the same
+    // conversation, not a switch: keep the goal that was just created.
+    if (session?.id && session.id === sessionIdRef.current) return;
+    goalSeqRef.current += 1;
+    goalStateRef.current = null;
+    setGoalState(null);
   }, [session?.id]);
 
   // A plan request is in progress only for its current agent turn.
@@ -1034,6 +1077,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       token: beginAuthoritativeModelSync(),
       queueRevision: ++queueSeqRef.current,
       skillDiagnosticsRevision: ++skillDiagnosticsSeqRef.current,
+      goalSnapshotSeq: goalSeqRef.current,
       response: fetch(`/api/sessions/${encodeURIComponent(sid)}/state`).then(async (stateRes) => {
         const agentState = await stateRes.json().catch(() => ({})) as { running: boolean; state?: AgentStateResponse; exited?: ExitedRpcSession; outbox?: OutboxEntry[]; outboxScope?: string; outboxSettledIds?: string[] };
         if (hookAliveRef.current && sessionIdRef.current === sid && contextRequestSeqRef.current === requestSeq
@@ -1094,7 +1138,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
 
       try {
-        const { token, queueRevision, skillDiagnosticsRevision } = stateRequest;
+        const { token, queueRevision, skillDiagnosticsRevision, goalSnapshotSeq } = stateRequest;
         const reply = await stateRequest.response;
         if (!reply) {
           if (showLoading) setLoading(false);
@@ -1136,6 +1180,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (liveState.extensionStatuses !== undefined) setExtensionStatuses(liveState.extensionStatuses ?? []);
           if (liveState.extensionWidgets !== undefined) setExtensionWidgets(liveState.extensionWidgets ?? []);
           if (liveState.todoPhases !== undefined) setTodoPhases(liveState.todoPhases ?? []);
+          if (liveState.goal !== undefined) applyGoalSnapshot(goalSnapshotSeq, liveState.goal ?? null);
           applyQueueStateSnapshot(queueRevision, liveState.queuedMessages);
         } else if (!agentState.running) {
           setSlowModeSupported(undefined);
@@ -1164,7 +1209,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Ensure the flag is cleared even if the pre-state early-return path was taken
       if (showLoading && includeState && !messagesLoaded) initialHydrationPendingRef.current = false;
     }
-  }, [catchUp, refreshSubagentHistory, applyAuthoritativeModel, beginAuthoritativeModelSync, applyQueueStateSnapshot, applySkillDiagnosticsSnapshot]);
+  }, [catchUp, refreshSubagentHistory, applyAuthoritativeModel, beginAuthoritativeModelSync, applyGoalSnapshot, applyQueueStateSnapshot, applySkillDiagnosticsSnapshot]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null, includePreCompaction = false): Promise<boolean> => {
     const seq = ++contextRequestSeqRef.current;
@@ -1309,33 +1354,41 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [ensureNewSession]);
 
   const loadSlashCommands = useCallback(async () => {
-    const sid = sessionIdRef.current ?? await ensureNewSession();
-    if (!sid) {
-      setSlashCommands([]);
-      knownSlashCommandNamesRef.current = [];
-      return [] as SlashCommandInfo[];
-    }
-    setSlashCommandsLoading(true);
+    if (slashCommandsInFlightRef.current) return slashCommandsInFlightRef.current;
+    const requestedVersion = slashCatalogVersionRef.current;
+    const request = (async () => {
+      const sid = sessionIdRef.current ?? await ensureNewSession();
+      if (!sid) {
+        throw new Error("No session is available for slash-command discovery");
+      }
+      setSlashCommandsLoading(true);
+      try {
+        const data = await sendAgentCommand<SlashCommandsResponse>(sid, { type: "get_commands" });
+        const available = Array.isArray(data?.commands) ? data.commands : [];
+        if (slashCatalogVersionRef.current !== requestedVersion) return slashCommandsRef.current;
+        // Keep every source, builtins included: omp runs them through the prompt
+        // path and they must not be reported as unknown (#167).
+        // A reply carrying no list is not evidence that nothing is known. An
+        // explicit empty list is authoritative once no newer event superseded it.
+        if (Array.isArray(data?.commands)) {
+          knownSlashCommandNamesRef.current = slashCommandRosterNames(available);
+          slashCommandsRef.current = available.map(toSlashCommandInfo);
+          setSlashCommands(slashCommandsRef.current);
+        }
+        slashRosterLoadedRef.current = true;
+        return slashCommandsRef.current;
+      } catch (e) {
+        console.error("Failed to load slash commands:", e);
+        throw e;
+      } finally {
+        setSlashCommandsLoading(false);
+      }
+    })();
+    slashCommandsInFlightRef.current = request;
     try {
-      const data = await sendAgentCommand<SlashCommandsResponse>(sid, { type: "get_commands" });
-      const available = Array.isArray(data?.commands) ? data.commands : [];
-      // Keep the builtins too: they are hidden from the palette but omp still
-      // runs them when typed, so they must not be reported as unknown (#167).
-      // A reply carrying no list is not evidence that nothing is known, so it
-      // must not erase a roster an earlier reply did supply.
-      if (available.length > 0) knownSlashCommandNamesRef.current = available.map((command) => command.name);
-      const commands = available
-        .map(toSlashCommandInfo)
-        .filter((c): c is SlashCommandInfo => c !== null);
-      setSlashCommands(commands);
-      return commands;
-    } catch (e) {
-      console.error("Failed to load slash commands:", e);
-      setSlashCommands([]);
-      knownSlashCommandNamesRef.current = [];
-      return [] as SlashCommandInfo[];
+      return await request;
     } finally {
-      setSlashCommandsLoading(false);
+      slashCommandsInFlightRef.current = null;
     }
   }, [ensureNewSession]);
 
@@ -1357,6 +1410,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const reconnectActionsRef = useRef<((sid: string) => void) | null>(null);
 
   const refreshAgentSnapshots = useCallback(async (sid: string) => {
+    const goalSnapshotSeq = goalSeqRef.current;
     const queueRevision = ++queueSeqRef.current;
     const skillDiagnosticsRevision = ++skillDiagnosticsSeqRef.current;
     try {
@@ -1365,10 +1419,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const data = await res.json() as { state?: AgentStateResponse };
       applyQueueStateSnapshot(queueRevision, data.state?.queuedMessages);
       applySkillDiagnosticsSnapshot(skillDiagnosticsRevision, data.state?.skillDiagnostics);
+      if (data.state?.goal !== undefined) applyGoalSnapshot(goalSnapshotSeq, data.state.goal ?? null);
     } catch {
       // The next live update or state snapshot heals these views.
     }
-  }, [applyQueueStateSnapshot, applySkillDiagnosticsSnapshot]);
+  }, [applyGoalSnapshot, applyQueueStateSnapshot, applySkillDiagnosticsSnapshot]);
 
   // A held-message stream ("connected" mode) was opened without asking omp whether a run is going; the running
   // channel treats an open stream as carrying the run, so the chat asks once that stream attaches (below).
@@ -2088,6 +2143,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const token = guard.tryAcquire();
     if (token === null) return;
     try {
+      const goalSnapshotSeq = goalSeqRef.current;
       const queueRevision = ++queueSeqRef.current;
       const skillDiagnosticsRevision = ++skillDiagnosticsSeqRef.current;
       const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
@@ -2100,6 +2156,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         || responseRunVersionRef.current !== responseVersion) return;
       const state = data.state;
       applySkillDiagnosticsSnapshot(skillDiagnosticsRevision, state?.skillDiagnostics);
+      if (state?.goal !== undefined) applyGoalSnapshot(goalSnapshotSeq, state.goal ?? null);
       if (!promptDispatchPendingRef.current && state?.responseObserved) runHadContentRef.current = true;
       // Manual compaction emits no completion event; native state releases
       // its controls independently of live transcript hydration. No state
@@ -2139,7 +2196,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         void reconcileAgentState(sid);
       }
     }
-  }, [applyNativeCompacting, applyQueueStateSnapshot, applySkillDiagnosticsSnapshot, finishPromptWithoutStream, refreshSubagentRoster]);
+  }, [applyGoalSnapshot, applyNativeCompacting, applyQueueStateSnapshot, applySkillDiagnosticsSnapshot, finishPromptWithoutStream, refreshSubagentRoster]);
 
   // Recovery net for missed SSE events: while a prompt or compaction runs, verify
   // against the server periodically and whenever the tab returns to the
@@ -2642,8 +2699,33 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       case "available_commands_update": {
         const commands = (event.commands as RpcAvailableSlashCommand[] | undefined) ?? [];
-        knownSlashCommandNamesRef.current = commands.map((command) => command.name);
-        setSlashCommands(commands.map(toSlashCommandInfo).filter((c): c is SlashCommandInfo => c !== null));
+        slashCatalogVersionRef.current += 1;
+        slashRosterLoadedRef.current = true;
+        knownSlashCommandNamesRef.current = slashCommandRosterNames(commands);
+        slashCommandsRef.current = commands.map(toSlashCommandInfo);
+        setSlashCommands(slashCommandsRef.current);
+        break;
+      }
+      case "goal_updated": {
+        const nextGoal = readGoalUpdatedEvent(event);
+        if (nextGoal !== undefined) publishGoalState(nextGoal);
+        break;
+      }
+      case "manual_compaction_start": {
+        // `/compact` runs through omp's builtin; this event also covers a
+        // compaction another tab, the TUI or a forwarded command started.
+        beginNativeCompaction();
+        setCompactError(null);
+        setCompactResult(null);
+        break;
+      }
+      case "manual_compaction_end": {
+        endNativeCompaction();
+        const compacted = readCompactResult(event.result, typeof event.mode === "string" ? event.mode : "manual");
+        if (compacted) setCompactResult(compacted);
+        else if (typeof event.errorMessage === "string" && event.errorMessage) setCompactError(event.errorMessage);
+        const sid = sessionIdRef.current;
+        if (sid) void loadSession(sid, true);
         break;
       }
       case "message_start":
@@ -2829,16 +2911,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setRetryInfo(null);
         break;
       case "auto_compaction_start":
-        compactionGenRef.current += 1;
-        autoCompactingRef.current = true;
-        setCompacting(true);
+        beginNativeCompaction();
         setCompactError(null);
         setCompactResult(null);
         break;
       case "auto_compaction_end":
-        compactionGenRef.current += 1;
-        autoCompactingRef.current = false;
-        if (localCompactionsRef.current === 0) setCompacting(false);
+        endNativeCompaction();
         if (event.errorMessage) {
           setCompactError(event.errorMessage as string);
           setCompactResult(null);
@@ -3004,7 +3082,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, addUnconfirmedRunErrorNotice, catchUp, eventCoalescer, clearLiveToolResults, clearTerminalReconcileTimer, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, reloadActiveSessionHistory, mergeSubagents, onAgentEnd, reconcileAgentState, refreshLiveModelState, refreshSubagentRoster, resetSubagentActivityState, applyAuthoritativeModel, applySkillDiagnosticsSnapshot, beginAuthoritativeModelSync, setCompacting, setLiveToolResult, surfaceQuotaOnStream, updateQueuedMessages, applyQueueStateSnapshot]);
+  }, [addNotice, addUnconfirmedRunErrorNotice, catchUp, eventCoalescer, clearLiveToolResults, clearTerminalReconcileTimer, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, reloadActiveSessionHistory, mergeSubagents, onAgentEnd, reconcileAgentState, refreshLiveModelState, refreshSubagentRoster, resetSubagentActivityState, applyAuthoritativeModel, applySkillDiagnosticsSnapshot, publishGoalState, beginAuthoritativeModelSync, beginNativeCompaction, endNativeCompaction, setLiveToolResult, surfaceQuotaOnStream, updateQueuedMessages, applyQueueStateSnapshot]);
   handleAgentEventRef.current = handleAgentEvent;
   syncActionsRef.current = {
     metadata: (context, version, hasLive = liveModelMeta !== null || currentModelOverride !== null) => {
@@ -4065,7 +4143,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [ensureEventsConnected, ensureNewSession, promoteNewSession, sendBtw]);
 
-  const handleBuiltinSlashCommand = useCallback(async (text: string): Promise<BuiltinSlashCommandResult> => {
+  const handleBuiltinSlashCommand = useCallback(async (
+    text: string,
+    sendPrompt?: (message: string) => Promise<PromptSubmissionResult>,
+  ): Promise<BuiltinSlashCommandResult> => {
     if (editInFlightRef.current) return { handled: true, retainInput: true };
     if (!text.startsWith("/")) return { handled: false };
     const match = text.match(/^\/([^\s]+)(?:\s+([\s\S]*))?$/);
@@ -4077,37 +4158,30 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!result.handled) return result;
       if (result.error) {
         addNotice({ type: "error", message: result.error });
-      } else if (result.action !== "openSessionStats") {
+      } else {
         addNotice({ type: "success", message: result.message ?? translate("agentSession.commandCompleted") });
       }
       return result;
     };
 
-    let ownsCompaction = false;
     try {
-      // Commands that talk to the runtime create it here. /btw <question> and the web
-      // prompt commands create it inside askBtw/handleSend, which attach their own stream.
+      // Commands that talk to the runtime create it here. /btw <question> and
+      // the web prompt commands create it inside askBtw/handleSend, which
+      // attach their own stream.
       const ensureRuntime = async () => sessionIdRef.current ?? await ensureNewSession();
+      // The catalog wins over every client handler, including the client-only
+      // names: an extension/skill command called `goal`, `btw`, `reload`,
+      // `name`, or `copy` must not be shadowed. A pasted or dictated command can
+      // reach dispatch before autocomplete ever fetched the roster, so ask once
+      // here rather than deciding on an empty list.
+      // ChatInput resolves the catalog before invoking this handler, including
+      // for a fresh chat (that lookup creates its runtime). Direct callers can
+      // still arrive here without a runtime; they create it in the selected
+      // command path, and later dispatches load its roster here.
+      if (!slashRosterLoadedRef.current && sessionIdRef.current) await loadSlashCommands();
+      if (!hookAliveRef.current) return { handled: true };
+      if (knownSlashCommandNamesRef.current.includes(commandName)) return { handled: false };
       switch (commandName) {
-        case "compact": {
-          const sid = await ensureRuntime();
-          if (!sid || isCompactingRef.current || isCompacting) return complete({ handled: true, error: translate("agentSession.noSessionToCompact") });
-          ownsCompaction = true;
-          beginLocalCompaction();
-          setCompactError(null);
-          setCompactResult(null);
-          const result = await sendAgentCommand<CompactCommandResult>(sid, {
-            type: "compact",
-            ...(args ? { customInstructions: args } : {}),
-          });
-          setCompactResult(readCompactResult(result, "manual"));
-          await loadSession(sid, true);
-          // loadSession resolves to null unless state was requested, so promote
-          // unconditionally — promoteNewSession no-ops for existing sessions and
-          // is idempotent via newSessionPromotedRef.
-          promoteNewSession();
-          return complete({ handled: true, message: translate("agentSession.compactedContext") });
-        }
 
         case "reload": {
           const sid = await ensureRuntime();
@@ -4131,17 +4205,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           return complete({ handled: true, message: translate("agentSession.sessionRenamed", { name: args }) });
         }
 
-        case "session": {
-          const sid = await ensureRuntime();
-          if (!sid) return complete({ handled: true, error: translate("agentSession.noActiveSession") });
-          const stats = await sendAgentCommand<SessionStatsInfo>(sid, { type: "get_session_stats" });
-          if (stats) {
-            setSessionStatsOverride(stats);
-          }
-          onSessionStatsPanelOpen?.();
-          return complete({ handled: true, action: "openSessionStats" });
-        }
-
         case "btw": {
           // `/btw` alone opens the history; with a question it asks one.
           if (!args) {
@@ -4163,17 +4226,49 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           return complete({ handled: true, message: translate("agentSession.copiedLastMessage") });
         }
 
-        default: {
-          // Web-native prompt commands (/goal, /plan, ...). omp's same-named
-          // builtins are TUI-only and never execute over RPC, so the palette
-          // shows these instead (CLIENT_BUILTIN_COMMAND_NAMES drops omp's
-          // copies). handleSend runs the full prompt pipeline — optimistic
-          // bubble, running state, settlement — with the expanded text.
-          // /advisor is gated on the per-chat composer toggle: refuse with a
-          // pointer to that toggle while the advisor is disabled.
-          if (commandName === "advisor" && !advisorEnabled) {
-            return complete({ handled: true, error: translate("agentSession.advisorDisabled") });
+        case "goal": {
+          const sid = await ensureRuntime();
+          if (!sid) return complete({ handled: true, error: translate("agentSession.noActiveSession") });
+          const objective = args.trim();
+          if (!objective) return complete({ handled: true, error: translate("agentSession.goalUsage") });
+          const goalSeq = goalSeqRef.current;
+          const result = await sendAgentCommand<GoalCommandResponse>(sid, {
+            type: "goal",
+            op: "create",
+            objective,
+          });
+          if (!hookAliveRef.current || sessionIdRef.current !== sid) return { handled: true };
+          const parsed = readGoalCommandResponse(result);
+          if (!parsed?.goal) {
+            return complete({ handled: true, error: translate("agentSession.goalCreateFailed") });
           }
+          // The create echo may precede HTTP, but a later pause/drop/replace
+          // must win over the reply and cancel its automatic first prompt.
+          if (goalSeq === goalSeqRef.current) publishGoalState(parsed.state);
+          const currentGoal = goalStateRef.current?.goal;
+          if (currentGoal?.id !== parsed.goal.id || currentGoal.status !== "active") return { handled: true };
+          // A goal created on the empty new-chat screen must adopt the real
+          // session so a reload opens it instead of a fresh composer.
+          promoteNewSession();
+          // The TUI's `/goal <objective>` both enters goal mode and submits
+          // the objective as the first prompt. `goal create` alone does not
+          // start a turn, so do the same here when idle. During a run the
+          // goal is created only; the objective joins the next turn.
+          if (!agentRunningRef.current) {
+            const sent = await handleSend(objective);
+            if (sent.status !== "accepted") {
+              return complete({ handled: true, error: translate("agentSession.goalStartFailed") });
+            }
+          }
+          return complete({ handled: true, message: translate("agentSession.goalStarted", { objective }) });
+        }
+
+        default: {
+          // Anything omp's RPC catalog owns (builtin, extension, custom, MCP
+          // prompt, file, skill) is executed by omp itself: send the original
+          // command line through the prompt pipeline. Never expand a name omp
+          // already reports — an extension command must win over a web
+          // convenience of the same name.
           const expansion = expandWebSlashCommand(text);
           if (expansion.kind === "not-web") return { handled: false };
           if (expansion.kind === "usage-error") {
@@ -4187,28 +4282,36 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             });
           }
           if (commandName === "plan") setActivePlan({ objective: args });
-          const sent = await handleSend(expansion.prompt);
+          const sent = await (sendPrompt ? sendPrompt(expansion.prompt) : handleSend(expansion.prompt));
           if (sent.status !== "accepted") {
             if (commandName === "plan") setActivePlan(null);
             return { handled: true, retainInput: true };
-          }
-          if (commandName === "goal") {
-            const goal = createActiveGoal(args);
-            setActiveGoal(goal);
-            const activeSessionId = sessionIdRef.current;
-            if (activeSessionId) sessionStorage.setItem(`omp-web:goal:${activeSessionId}`, JSON.stringify(goal));
           }
           return { handled: true };
         }
       }
     } catch (e) {
       return complete({ handled: true, error: e instanceof Error ? e.message : String(e) });
-    } finally {
-      if (ownsCompaction) {
-        endLocalCompaction();
-      }
     }
-  }, [addNotice, advisorEnabled, askBtw, beginLocalCompaction, endLocalCompaction, ensureNewSession, handleSend, isCompacting, loadModels, loadSession, loadSlashCommands, openBtwHistory, promoteNewSession, onSessionStatsPanelOpen]);
+  }, [addNotice, askBtw, ensureNewSession, handleSend, loadModels, loadSession, loadSlashCommands, openBtwHistory, promoteNewSession, publishGoalState]);
+
+  /** Pause/resume/drop the omp-owned goal. The banner disables its buttons while this runs. */
+  const handleGoalAction = useCallback(async (op: "pause" | "resume" | "drop") => {
+    const sid = sessionIdRef.current;
+    if (!sid) {
+      addNotice({ type: "error", message: translate("agentSession.noActiveSession") });
+      return;
+    }
+    try {
+      const goalSeq = goalSeqRef.current;
+      const result = await sendAgentCommand<GoalCommandResponse>(sid, { type: "goal", op });
+      if (!hookAliveRef.current || sessionIdRef.current !== sid || goalSeq !== goalSeqRef.current) return;
+      const parsed = readGoalCommandResponse(result);
+      if (parsed) publishGoalState(parsed.state);
+    } catch (e) {
+      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+    }
+  }, [addNotice, publishGoalState]);
 
   // A steer or follow-up is held in the outbox like a prompt: its held bubble becomes omp's queue chip (queue_update)
   // or, delivered at once, the user message omp echoes. A slash command keeps its text; the server sends it as a
@@ -4708,7 +4811,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     notices: noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     advisorActive: advisorActiveAt > 0, advisorEnabled, handleAdvisorChange,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
-    activeGoal, activePlan,
+    goalState, activePlan,
     isNew,
     // Refs
     sessionIdRef, messagesEndRef, scrollContainerRef,
@@ -4716,7 +4819,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Actions
     handleSend, handleAbort, handleFork, handleEdit, handleModelChange, handleFastModeChange, handleSlowModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply, setSkillStartupDiagnostics,
     retrySession: () => { const sid = sessionIdRef.current; if (sid) void loadSession(sid, true, true); },
-    handleCompact, handleHandoff, handleSteer, handleFollowUp, handleAbortCompaction,
+    handleCompact, handleHandoff, handleSteer, handleFollowUp, handleAbortCompaction, handleGoalAction,
     heldMessages, deleteHeldMessage,
     handleBuiltinSlashCommand, togglePreCompactionHistory,
     handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands, removeQueuedMessage, promoteQueuedToSteer, setActiveLeafId, setData, setMessages,
