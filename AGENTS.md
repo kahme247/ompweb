@@ -314,16 +314,16 @@ The table is static imports, not a runtime glob, so `bun build --compile` (`scri
   so a reload reattaching seconds later does not 409. Both are fed by
   `resetIdleTimer()`, the single activity choke point for `send()` and every
   child frame: adding a new call path must route activity through it.
-- **Goal mode (`{type:"goal", op}`)** is a passthrough command: the frame reaches
-  omp verbatim and every op answers `{goal, state}` (`GoalCommandReply`), both
+- **Goal mode (`{type:"goal", op}`)** is forwarded to omp verbatim through its
+  own dispatch case; every op answers `{goal, state}` (`GoalCommandReply`), both
   `null` once no goal is set — omp answers that after `drop`. `get_state` carries
   the same mode snapshot as its `goal` field (`GoalModeState`: `{enabled, mode,
   goal}`, `null` after a drop, absent on an omp that predates goal mode, which is
-  never invented here). `op:"get"` is live-only (`liveOnlyRefusal` in
-  `lib/agent-command.ts`): reading goal state must not resume a full omp child
-  for a saved session, so with no live wrapper it answers 409
-  `goal_state_unavailable`, and a live idle child is never replaced for it. The
-  mutating ops (`create`, `pause`, `resume`, `drop`) keep their start semantics.
+  never invented here). Only the mutating ops (`create`, `pause`, `resume`,
+  `drop`) may start a child; every other op — `get`, a missing op or a typo — is
+  live-only (`liveOnlyRefusal` in `lib/agent-command.ts`): with no live wrapper it
+  answers 409 `goal_state_unavailable` instead of resuming a full omp child, and a
+  live idle child is never replaced for it.
   `mode` stays `active` for a paused goal too; `enabled` is the field that says
   whether it runs. The web composer's `/goal` slash command is a client-side
   prompt expansion, not this transport.
