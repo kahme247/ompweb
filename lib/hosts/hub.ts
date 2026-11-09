@@ -993,8 +993,19 @@ function validResult(op: keyof SessionOps, result: unknown, args: unknown[]): bo
       return isRecord(value) && typeof value.cwd === "string" && typeof value.projectRoot === "string" && (value.projectKey === undefined || typeof value.projectKey === "string");
     case "exportSession":
       return isRecord(value) && typeof value.html === "string" && typeof value.fileName === "string";
-    case "readSession":
-      return isRecord(value) && isRecord(value.info) && isRecord(value.context);
+    case "readSession": {
+      const options = isRecord(args[1]) ? args[1] : {};
+      if (!isRecord(value) || !isRecord(value.info)) return false;
+      // A daemon that predates `?meta=1` ignores the option and answers the
+      // full transcript; the route derives the navigation shape from it.
+      if (isRecord(value.context)) return true;
+      if (options.meta !== true || value.context !== null) return false;
+      // Nothing to derive the navigation fields from: a null-context result
+      // must carry the tree, leaf and branch metadata itself (model may be null).
+      return Array.isArray(value.tree) && nullableString(value.leafId)
+        && (value.info.model === null || isRecord(value.info.model))
+        && typeof value.info.thinkingLevel === "string";
+    }
     case "readContext": {
       // The context route reads a different shape per mode.
       const options = isRecord(args[2]) ? args[2] : {};
