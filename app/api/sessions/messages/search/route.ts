@@ -41,6 +41,11 @@ function parseLimit(raw: string | null): number | null {
  * requests get `429` + `Retry-After` instead of starving the event loop, so a
  * client that paginates while another search runs can see that answer.
  *
+ * A cursor belongs to the listing snapshot its first page installed. When that
+ * snapshot is gone (the run was idle for five minutes, or newer runs evicted
+ * it), the route answers `409 cursor_expired` rather than paging a re-walked
+ * corpus that could skip or repeat hits; the client restarts the search.
+ *
  * A client that disconnects aborts `req.signal`; the scan stops at the next
  * chunk boundary, the slot is released, and no response body is written.
  */
@@ -92,6 +97,15 @@ export async function GET(req: Request): Promise<Response> {
       return new Response(null, { status: 499, headers: NO_STORE });
     }
     if (error instanceof SearchCursorError) {
+      // An expired snapshot is not a bad request: the cursor was valid, the
+      // run just outlived its listing. 409 tells the client to start over
+      // instead of "fix your cursor".
+      if (error.message === "cursor_expired") {
+        return Response.json(
+          { error: "Search cursor expired, start the search again", code: "cursor_expired" },
+          { status: 409, headers: NO_STORE },
+        );
+      }
       return badRequest(
         error.message === "cursor_query_mismatch" ? "Cursor belongs to another search" : "Invalid search cursor",
         error.message,

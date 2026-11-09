@@ -1076,6 +1076,21 @@ function scanSessionInfoCached(filePath: string): OmpSessionInfo | undefined {
 }
 
 /**
+ * Longest stretch of scanning before {@link listAllSessionInfos} hands the
+ * event loop back. A per-file scan is one stat plus two small window reads, so
+ * a slice of a few files stays well inside this; the point is that a 4,000-file
+ * corpus no longer blocks the loop for seconds (measured: 4.8 s cold, 0 ticks).
+ */
+const SESSION_LIST_SLICE_MS = 8;
+
+/** Let queued I/O and timers run before the next slice. */
+function yieldToEventLoop(): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setImmediate(resolve);
+  return promise;
+}
+
+/**
  * List all sessions across all project subdirectories (newest first). Only
  * `<sessionsDir>/<projectDir>/*.jsonl` files are scanned — per-session
  * artifacts directories (session file name minus .jsonl) are skipped because
@@ -1086,15 +1101,28 @@ function scanSessionInfoCached(filePath: string): OmpSessionInfo | undefined {
  * invalidates for free on every add/remove while turning repeated listing
  * requests (sidebar poll, page loads) into a single stat. Per-file scanning is
  * still memoized by scanSessionInfoCached on (size, mtimeMs).
+ *
+ * The per-file scan is synchronous (statSync + readSync + JSON parse), so the
+ * loop yields to the event loop every {@link SESSION_LIST_SLICE_MS}: a cold
+ * 4,000-file walk used to hold the loop for ~4.8 s, starving every other
+ * request (the message search measured exactly that). Yielding between files
+ * bounds the stall to one slice plus one file instead of the whole corpus.
  */
 export async function listAllSessionInfos(): Promise<OmpSessionInfo[]> {
   const sessionsRoot = getSessionsDir();
   const files = await listSessionFiles(sessionsRoot);
 
   const sessions: OmpSessionInfo[] = [];
-  for (const file of files) {
-    const info = scanSessionInfoCached(file);
+  let sliceStart = Date.now();
+  for (let index = 0; index < files.length; index++) {
+    const info = scanSessionInfoCached(files[index]);
     if (info) sessions.push(info);
+    // Checked every few files: Date.now() per file would be wasted work, and a
+    // slice of four still keeps the stall at a few milliseconds.
+    if ((index & 3) === 3 && Date.now() - sliceStart >= SESSION_LIST_SLICE_MS) {
+      await yieldToEventLoop();
+      sliceStart = Date.now();
+    }
   }
   sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
   return sessions;

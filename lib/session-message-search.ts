@@ -1,5 +1,5 @@
 import { createHash } from "crypto";
-import { open, stat } from "fs/promises";
+import { open } from "fs/promises";
 import { isRecord } from "./type-guards";
 import { listAllSessionInfos, type OmpSessionInfo } from "./omp/session-files";
 import { getSessionsDir } from "./omp/paths";
@@ -36,7 +36,17 @@ import { getSessionsDir } from "./omp/paths";
  *  - **A cursor is a snapshot.** Sessions created after the first page are
  *    not included, and a session that grows between pages is scanned only
  *    below the cursor offset, so lines appended in the meantime are not
- *    returned by that pagination run.
+ *    returned by that pagination run. The first page's session listing is
+ *    bound to the run: every page resolves the same snapshot, so a session
+ *    that another client's search re-walked into a different position can
+ *    neither be skipped nor returned twice. A run whose snapshot expired
+ *    (idle for five minutes, or evicted by newer runs) is refused with
+ *    `cursor_expired`; the client restarts the search instead of receiving a
+ *    silently incomplete answer.
+ *  - **The budget covers the whole page.** The listing walk is charged to the
+ *    same 5 s budget as the scan, and the walk yields to the event loop every
+ *    few milliseconds, so a cold 4,000-file corpus no longer blocks other
+ *    requests or hides its cost from the budget.
  *
  * A request may carry an `AbortSignal`; an aborted scan stops at the next
  * chunk/line boundary and throws `SearchAbortedError`, so the caller's slot is
@@ -113,6 +123,13 @@ export interface SessionSearchCursor {
   v: 1;
   /** Fingerprint of the query/option set the cursor belongs to. */
   q: string;
+  /**
+   * Id of the listing snapshot this run's first page installed. Every page of
+   * the run resolves this id, so a continuation can never page a corpus other
+   * than the one page 1 scanned — not even after another search re-walked the
+   * shared directory.
+   */
+  l: string;
   /**
    * Session id the scan resumes at. The id — not the session file path — is
    * what the cursor carries: a path would disclose the server's home
@@ -209,12 +226,14 @@ export function decodeSearchCursor(raw: string): SessionSearchCursor | undefined
   if (!isRecord(value)) return undefined;
   if (value.v !== 1) return undefined;
   if (typeof value.q !== "string" || !value.q) return undefined;
+  if (typeof value.l !== "string" || !value.l) return undefined;
   if (typeof value.sessionId !== "string" || !value.sessionId) return undefined;
   if (typeof value.offset !== "number" || !Number.isSafeInteger(value.offset) || value.offset < 0) return undefined;
   if (typeof value.modifiedMs !== "number" || !Number.isFinite(value.modifiedMs)) return undefined;
   return {
     v: 1,
     q: value.q,
+    l: value.l,
     sessionId: value.sessionId,
     offset: value.offset,
     modifiedMs: value.modifiedMs,
@@ -222,72 +241,79 @@ export function decodeSearchCursor(raw: string): SessionSearchCursor | undefined
 }
 
 /**
- * Cached session listing for the pages of one pagination run.
+ * Listing snapshots, one per pagination run.
  *
- * `listAllSessionInfos()` walks the session directory and stats every file
- * synchronously. On a 4,000-file corpus that is ~300 ms of blocked event loop
- * per call — paid again on every page of one pagination run, and *before* the
- * time budget starts, so the advertised budget covered only the cheap part.
+ * A page must never resolve its cursor against a listing other than the one
+ * its first page scanned. The corpus moves underneath a run — sessions are
+ * created, renamed and rewritten, and another client's search walks the same
+ * directory — so a page that re-walked (or reused a shared, re-walked entry)
+ * would answer from a *different* ordering: sessions between the two orderings
+ * are skipped, and a session that moved below the cursor is scanned twice.
+ * Both were reproducible with a real listing and scanner before this design.
  *
- * Every search installs the listing it scanned, and a cursor page reuses the
- * installed one. A continuation therefore always pages the same corpus its
- * first page saw — never a listing older than the search that issued the
- * cursor — and a run pays for the walk once instead of on every page. A fresh
- * search still walks unconditionally, so a session created a second ago is
- * found even where a write inside a project subdirectory leaves the sessions
- * root's mtime alone (Windows/NTFS; see `listSessionFiles`).
+ * The first page therefore walks once and installs the result under a fresh
+ * id; the cursor carries that id, and every continuation resolves it. Nothing
+ * another search does can replace or invalidate a run's snapshot. A snapshot
+ * is dropped only when it is evicted (LRU, {@link SEARCH_LISTING_SNAPSHOTS}
+ * runs) or unused for {@link SEARCH_LISTING_TTL_MS} — the TTL is sliding, so
+ * an actively paginated run never expires. A continuation whose snapshot is
+ * gone is refused with `cursor_expired` instead of guessing: walking a fresh
+ * corpus would silently skip or repeat hits, and an explicit restart is the
+ * only honest answer.
  *
- * The entry is keyed by the sessions root and that directory's mtime, and
- * bounded by a TTL for filesystems where a session write leaves the root mtime
- * alone. Each entry carries the sequence number claimed *before* its walk: a
- * walk that started earlier can finish later, and it must not replace a newer
- * listing another search installed meanwhile. One entry, on `globalThis` so
- * `bun --hot` re-evaluations share it.
+ * A fresh search still walks unconditionally, so a session created a second
+ * ago is found even where a write inside a project subdirectory leaves the
+ * sessions root's mtime alone (Windows/NTFS; see `listSessionFiles`). The map
+ * lives on `globalThis` so `bun --hot` re-evaluations share it.
  */
-const SEARCH_LISTING_CACHE_TTL_MS = 5 * 60_000;
+const SEARCH_LISTING_TTL_MS = 5 * 60_000;
+/** Concurrent pagination runs whose snapshots stay addressable. */
+const SEARCH_LISTING_SNAPSHOTS = 4;
 
-interface SearchListingCacheEntry {
-  /** Claimed before this entry's walk started; a higher number is newer. */
-  seq: number;
+interface SearchListingSnapshot {
+  id: string;
+  /** Sessions root the walk saw; a snapshot never crosses roots. */
   root: string;
-  rootMtimeMs: number;
+  /** Last use, for the sliding TTL and the LRU order. */
   at: number;
-  files: SessionSearchFile[];
+  files: readonly SessionSearchFile[];
 }
 
 interface SearchListingCacheHost {
-  __ompSessionSearchListing?: SearchListingCacheEntry;
-  __ompSessionSearchListingSeq?: number;
+  __ompSessionSearchListings?: Map<string, SearchListingSnapshot>;
+  /**
+   * Monotonic id generator. Deliberately NOT reset by
+   * {@link invalidateSessionSearchListing}: ids must never be reused, or a
+   * cursor from a dropped run could resolve a later run's snapshot and page a
+   * corpus it never scanned. Only the id counter survives an invalidation, and
+   * it carries no corpus state.
+   */
+  __ompSessionSearchListingIds?: number;
 }
 
 const listingCacheHost = globalThis as unknown as SearchListingCacheHost;
 
-/** Drop the pagination listing cache (tests and explicit invalidation). */
+/** Drop every pagination listing snapshot (tests and explicit invalidation). */
 export function invalidateSessionSearchListing(): void {
-  listingCacheHost.__ompSessionSearchListing = undefined;
+  listingCacheHost.__ompSessionSearchListings?.clear();
+}
+
+function getListingSnapshots(): Map<string, SearchListingSnapshot> {
+  if (!listingCacheHost.__ompSessionSearchListings) {
+    listingCacheHost.__ompSessionSearchListings = new Map();
+  }
+  return listingCacheHost.__ompSessionSearchListings;
 }
 
 /**
- * Claim the next listing sequence number. Called *before* a walk starts, so
- * two overlapping walks are ordered by when they began rather than when they
- * happened to finish.
+ * Newest first, equal mtimes ordered by session id. One order for the whole
+ * run: it is applied once, when the snapshot is installed, so every page of
+ * the run sees the identical sequence.
  */
-function claimListingSeq(): number {
-  const next = (listingCacheHost.__ompSessionSearchListingSeq ?? 0) + 1;
-  listingCacheHost.__ompSessionSearchListingSeq = next;
-  return next;
-}
-
-/**
- * Install a walked listing. A walk that began earlier (`seq` lower) must not
- * replace a newer listing another search installed while it was running: the
- * newer one describes a corpus at least as recent, and a cursor page may only
- * ever see a listing at least as new as the search that issued its cursor.
- */
-function installSessionSearchListing(entry: Omit<SearchListingCacheEntry, "seq">, seq: number): void {
-  const current = listingCacheHost.__ompSessionSearchListing;
-  if (current && current.seq > seq) return;
-  listingCacheHost.__ompSessionSearchListing = { seq, ...entry };
+function sortSessionSearchFiles(files: SessionSearchFile[]): SessionSearchFile[] {
+  return files.sort(
+    (a, b) => b.modifiedMs - a.modifiedMs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
 }
 
 /** Production file list: the same newest-first metadata the sidebar uses. */
@@ -303,63 +329,69 @@ async function loadSessionSearchFiles(): Promise<SessionSearchFile[]> {
   }));
 }
 
-/**
- * Walk the corpus and install it as the listing for this search's pages.
- *
- * The root mtime is sampled *before* the walk: a session created while the
- * walk runs then leaves the recorded mtime behind the real one, so the next
- * page re-walks instead of trusting a listing that predates the new session.
- */
-async function walkAndInstallSessionSearchListing(
-  now: () => number,
-  walk: () => Promise<SessionSearchFile[]>,
-  knownRootMtimeMs?: number,
-): Promise<SessionSearchFile[]> {
-  const root = getSessionsDir();
-  let rootMtimeMs = knownRootMtimeMs;
-  if (rootMtimeMs === undefined) {
-    try {
-      rootMtimeMs = (await stat(root)).mtimeMs;
-    } catch {
-      // No sessions directory: an empty corpus, and nothing to cache.
-    }
+/** Evict expired snapshots, then the oldest beyond the run cap. */
+function pruneListingSnapshots(map: Map<string, SearchListingSnapshot>, now: number): void {
+  for (const [id, snapshot] of map) {
+    if (now - snapshot.at >= SEARCH_LISTING_TTL_MS) map.delete(id);
   }
-  const seq = claimListingSeq();
-  const files = await walk();
-  if (rootMtimeMs !== undefined) {
-    installSessionSearchListing({ root, rootMtimeMs, at: now(), files }, seq);
+  while (map.size > SEARCH_LISTING_SNAPSHOTS) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) break;
+    map.delete(oldest);
   }
-  return files;
 }
 
 /**
- * Listing for a cursor page: the installed one when it still describes this
- * sessions root, otherwise a fresh walk that becomes the new cache entry.
- * Either answer is at least as new as the search that issued the cursor,
- * because the fresh search installed its own listing before answering.
+ * Install a corpus as a new run's listing and return its id. The array is
+ * sorted here, once, and stored as-is: pages read it, never mutate it.
  */
-export async function loadSessionSearchFilesForPage(
+export function installSessionSearchListing(
+  now: () => number,
+  files: SessionSearchFile[],
+): { id: string; files: readonly SessionSearchFile[] } {
+  const map = getListingSnapshots();
+  const next = (listingCacheHost.__ompSessionSearchListingIds ?? 0) + 1;
+  listingCacheHost.__ompSessionSearchListingIds = next;
+  const id = `l${next}`;
+  const sorted = sortSessionSearchFiles(files);
+  map.set(id, { id, root: getSessionsDir(), at: now(), files: sorted });
+  pruneListingSnapshots(map, now());
+  return { id, files: sorted };
+}
+
+/**
+ * Walk the corpus and install it as a new run's listing. The walk itself is
+ * the caller's: production passes {@link loadSessionSearchFiles}, tests pass a
+ * stub, and both end up as one immutable snapshot.
+ */
+export async function startSessionSearchListing(
   now: () => number,
   walk: () => Promise<SessionSearchFile[]> = loadSessionSearchFiles,
-): Promise<SessionSearchFile[]> {
-  const root = getSessionsDir();
-  let rootMtimeMs: number;
-  try {
-    rootMtimeMs = (await stat(root)).mtimeMs;
-  } catch {
-    invalidateSessionSearchListing();
-    return [];
+): Promise<{ id: string; files: readonly SessionSearchFile[] }> {
+  return installSessionSearchListing(now, await walk());
+}
+
+/**
+ * The listing a continuation pages: exactly the snapshot its first page
+ * installed, or `undefined` when that snapshot is gone. Never a re-walk.
+ */
+export function resumeSessionSearchListing(
+  id: string,
+  now: () => number,
+): readonly SessionSearchFile[] | undefined {
+  const map = getListingSnapshots();
+  const snapshot = map.get(id);
+  if (!snapshot) return undefined;
+  if (snapshot.root !== getSessionsDir() || now() - snapshot.at >= SEARCH_LISTING_TTL_MS) {
+    map.delete(id);
+    return undefined;
   }
-  const cached = listingCacheHost.__ompSessionSearchListing;
-  if (
-    cached &&
-    cached.root === root &&
-    cached.rootMtimeMs === rootMtimeMs &&
-    now() - cached.at < SEARCH_LISTING_CACHE_TTL_MS
-  ) {
-    return cached.files;
-  }
-  return walkAndInstallSessionSearchListing(now, walk, rootMtimeMs);
+  // Re-insert as the most recently used entry: the sliding TTL and the LRU
+  // order both follow actual pagination, not the walk that started the run.
+  map.delete(id);
+  snapshot.at = now();
+  map.set(id, snapshot);
+  return snapshot.files;
 }
 
 interface Segment {
@@ -408,27 +440,38 @@ export async function searchSessionMessages(options: SessionSearchOptions): Prom
   // Equal mtimes are ordered by session id so the vanished-session fallback
   // below can tell "older" from "same age but already handled" without the
   // cursor having to carry a file path.
-  // The deadline is armed *after* the listing: enumerating a large session
-  // directory must not consume the scan budget, or the first page would come
-  // back empty with a cursor that never advances.
   //
-  // A fresh search walks the corpus and installs it as the listing its cursor
-  // pages will reuse, so a run pays for the walk once. Installing here — not
-  // only when a page asks for a listing — is what keeps a continuation from
-  // paging a listing older than the search that issued its cursor.
-  const listSessions = options.listSessions;
-  const files = (options.sessions
-    ? [...options.sessions]
-    : await (listSessions
-      ? () => (cursor
-        ? loadSessionSearchFilesForPage(now, listSessions)
-        : walkAndInstallSessionSearchListing(now, listSessions))
-      : cursor
-        ? () => loadSessionSearchFilesForPage(now)
-        : () => walkAndInstallSessionSearchListing(now, loadSessionSearchFiles))())
-    .sort((a, b) => b.modifiedMs - a.modifiedMs || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-  throwIfAborted(signal);
+  // The corpus is bound to the run: a first page walks once and installs the
+  // result under a fresh listing id, the cursor carries that id, and every
+  // continuation resolves exactly that snapshot. Nothing another search does
+  // to the shared directory can change what this run pages, so a page can
+  // neither skip a session that was reordered above it nor rescan one that
+  // moved below it.
+  //
+  // The deadline is armed *before* the walk. The walk itself is bounded by the
+  // yielding listing (see `listAllSessionInfos`), so it no longer blocks the
+  // event loop for seconds; charging it to the budget keeps the page's total
+  // time bounded too, and the first page still returns hits instead of an
+  // empty page with a cursor that never advances.
   const deadline = now() + Math.max(1, options.budgetMs ?? SEARCH_TIME_BUDGET_MS);
+  const listSessions = options.listSessions;
+  let files: readonly SessionSearchFile[];
+  let listingId: string;
+  if (options.sessions) {
+    const installed = installSessionSearchListing(now, [...options.sessions]);
+    files = installed.files;
+    listingId = installed.id;
+  } else if (cursor) {
+    const resumed = resumeSessionSearchListing(cursor.l, now);
+    if (!resumed) throw new SearchCursorError("cursor_expired");
+    files = resumed;
+    listingId = cursor.l;
+  } else {
+    const installed = await startSessionSearchListing(now, listSessions ?? loadSessionSearchFiles);
+    files = installed.files;
+    listingId = installed.id;
+  }
+  throwIfAborted(signal);
 
   let startIndex = 0;
   let startOffset: number | undefined;
@@ -465,6 +508,7 @@ export async function searchSessionMessages(options: SessionSearchOptions): Prom
   const cursorFor = (file: SessionSearchFile, offset: number): SessionSearchCursor => ({
     v: 1,
     q: key,
+    l: listingId,
     sessionId: file.id,
     offset,
     modifiedMs: file.modifiedMs,
