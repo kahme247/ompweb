@@ -119,6 +119,20 @@ For each event:
      show it with `registration.showNotification` (or a toast when the
      browser no longer allows notifications).
 
+A tab may declare its notification device on the `notifications` channel
+(`{kind: "notifications", clientId, deviceId}`). Such a tab is reachable
+without a presence report, which is how a native client with no push
+subscription receives `{kind: "os"}` frames while its app is in the
+background. Stream-only delivery fills only the gap presence leaves:
+**it never overrides the `whenActive: "toast"` rule**. While another device
+has an active tab, a stream-only tab of a `toast` device stays quiet — the
+background app intentionally shows nothing while the user is at the desk —
+and the same device with `whenActive: "system"` does get its frame. Rule 1
+still applies first: a visible tab showing the session silences everything.
+A stream that declares no device keeps the pre-device behaviour and receives
+no stream-only delivery; a malformed `deviceId` is refused by
+`parseEventStreamChannel` rather than silently ignored.
+
 The server decides before pushing, and the service worker always displays a
 push: iOS Safari revokes push permission for pushes that show nothing.
 

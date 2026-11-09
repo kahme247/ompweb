@@ -64,6 +64,8 @@ interface HubState {
   presence: Map<string, NotificationPresence>;
   /** Open SSE streams per tab. Independent of presence: streams reconnect, overlap, and close while the tab stays put. */
   streams: Map<string, Set<Send>>;
+  /** The notification device each tab declared with its stream. Absent for tabs that predate the field: those keep the pre-device behaviour (no stream-only delivery). */
+  streamDevices: Map<string, string>;
   /** `<sessionId>:<requestId>` → when it was retracted. A push retry of a settled dialog must deliver nothing (see `publishNotificationDismiss`). */
   retractions: Map<string, number>;
   /**
@@ -80,9 +82,10 @@ declare global {
 }
 
 function hub(): HubState {
-  const state = (globalThis.__ompNotificationHub ??= { presence: new Map(), streams: new Map(), retractions: new Map(), temporaryRetractions: new Map() });
+  const state = (globalThis.__ompNotificationHub ??= { presence: new Map(), streams: new Map(), streamDevices: new Map(), retractions: new Map(), temporaryRetractions: new Map() });
   // `bun --hot` keeps this object across a re-evaluation: a state created by
   // the previous module instance may predate a field added here.
+  state.streamDevices ??= new Map();
   state.retractions ??= new Map();
   state.temporaryRetractions ??= new Map();
   return state;
@@ -109,16 +112,32 @@ export function reportPresence(report: Omit<NotificationPresence, "lastSeen">): 
   presence.set(report.clientId, { ...report, lastSeen: Date.now() });
 }
 
-/** Attach a tab's SSE stream. Returns the detach callback. */
-export function attachNotificationClient(clientId: string, send: Send): () => void {
-  const { streams } = hub();
-  const own = streams.get(clientId) ?? new Set();
+/** Attach a tab's SSE stream. `deviceId` is the notification device this tab
+ *  belongs to (the web tab's stored device id); a stream without one is
+ *  reachable but never receives stream-only deliveries, exactly like before
+ *  device routing existed. Returns the detach callback. */
+export function attachNotificationClient(clientId: string, send: Send, deviceId?: string): () => void {
+  const state = hub();
+  const own = state.streams.get(clientId) ?? new Set();
   own.add(send);
-  streams.set(clientId, own);
+  state.streams.set(clientId, own);
+  if (deviceId) state.streamDevices.set(clientId, deviceId);
   return () => {
     own.delete(send);
-    if (own.size === 0 && streams.get(clientId) === own) streams.delete(clientId);
+    if (own.size === 0 && state.streams.get(clientId) === own) {
+      state.streams.delete(clientId);
+      state.streamDevices.delete(clientId);
+    }
   };
+}
+
+/** Reachable tabs with the device each one declared (`undefined` when it did
+ *  not declare one). The map doubles as the reachability set. */
+function reachableTabs(): Map<string, string | undefined> {
+  const state = hub();
+  const reachable = new Map<string, string | undefined>();
+  for (const clientId of state.streams.keys()) reachable.set(clientId, state.streamDevices.get(clientId));
+  return reachable;
 }
 
 // ---------------------------------------------------------------- routing
@@ -130,26 +149,56 @@ function isOnScreen(event: NotificationEvent, presence: NotificationPresence[]):
 }
 
 /**
- * Decide where one event goes. `reachable` holds the tabs with an open stream.
+ * Decide where one event goes. `reachable` maps each tab with an open stream
+ * to the notification device it declared (`undefined` when it declared none).
  * 1. A visible tab is showing the session: nothing, for every device.
  * 2. The user is active in some reachable tab and the device prefers toasts:
  *    toast to that device's active tabs only (other devices stay quiet).
  * 3. Otherwise a system notification: push when the device has a
  *    subscription, else in-page on each of its reachable tabs.
+ *
+ * A stream without a live presence entry is reachable but **not visible**.
+ * Native clients (no push subscription) keep their `notifications` stream open
+ * without presence reports, so rule 3 also delivers to stream-only tabs — but
+ * only through the device the tab declared: that device's own preferences
+ * decide, and a device a push already covers gets no frame. A stream that
+ * declared no device keeps the pre-device behaviour (no stream-only delivery).
+ * Presence keeps its kill-switch: rule 1 still suppresses everything while a
+ * visible tab shows the session, and rule 2 still wins over stream-only
+ * delivery for a device whose `whenActive` is `toast`, so a background app
+ * stays quiet while the user is at another tab. Stream-only delivery never
+ * overrides that precedence; it only fills the gap presence leaves.
  */
-export function routeNotification(event: NotificationEvent, presence: NotificationPresence[], reachable: ReadonlySet<string>, devices: NotificationDevice[]): Delivery[] {
+export function routeNotification(event: NotificationEvent, presence: NotificationPresence[], reachable: ReadonlyMap<string, string | undefined>, devices: NotificationDevice[]): Delivery[] {
   if (event.type === "test") return [];
   if (isOnScreen(event, presence)) return [];
+  const presenceById = new Map(presence.map((tab) => [tab.clientId, tab]));
+  // Stream-only tabs grouped by the device that owns them.
+  const streamOnlyByDevice = new Map<string, string[]>();
+  for (const [clientId, deviceId] of reachable) {
+    if (!deviceId || presenceById.has(clientId)) continue;
+    const owned = streamOnlyByDevice.get(deviceId) ?? [];
+    owned.push(clientId);
+    streamOnlyByDevice.set(deviceId, owned);
+  }
   const active = presence.filter((tab) => tab.visible && reachable.has(tab.clientId));
   const deliveries: Delivery[] = [];
+  const seen = new Set<string>();
+  const deliver = (delivery: Delivery) => {
+    const key = delivery.kind === "push" ? `push:${delivery.deviceId}` : `${delivery.kind}:${delivery.clientId}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    deliveries.push(delivery);
+  };
   for (const device of devices) {
     if (!device.prefs.enabled || !device.prefs.types[event.type]) continue;
     if (active.length > 0 && device.prefs.whenActive === "toast") {
-      for (const tab of active) if (tab.deviceId === device.deviceId) deliveries.push({ kind: "toast", clientId: tab.clientId });
+      for (const tab of active) if (tab.deviceId === device.deviceId) deliver({ kind: "toast", clientId: tab.clientId });
     } else if (device.subscription) {
-      deliveries.push({ kind: "push", deviceId: device.deviceId });
+      deliver({ kind: "push", deviceId: device.deviceId });
     } else {
-      for (const tab of presence) if (tab.deviceId === device.deviceId && reachable.has(tab.clientId)) deliveries.push({ kind: "os", clientId: tab.clientId });
+      for (const tab of presence) if (tab.deviceId === device.deviceId && reachable.has(tab.clientId)) deliver({ kind: "os", clientId: tab.clientId });
+      for (const clientId of streamOnlyByDevice.get(device.deviceId) ?? []) deliver({ kind: "os", clientId });
     }
   }
   return deliveries;
@@ -267,7 +316,7 @@ export function publishNotification(event: NotificationEvent): void {
       console.warn("[notifications] history write failed:", error);
     }
   }
-  const reachable = new Set(state.streams.keys());
+  const reachable = reachableTabs();
   for (const delivery of routeNotification(event, presence, reachable, devices)) {
     if (delivery.kind === "push") {
       const device = devices.find((entry) => entry.deviceId === delivery.deviceId);

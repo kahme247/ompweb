@@ -264,6 +264,12 @@ export function recordHistory(event: NotificationEvent, { at = Date.now(), read 
  * Mark entries read. With `requestId`, only an entry whose stored event still
  * names that request is marked: a newer dialog of the same tag replaced the
  * entry, and that one is still waiting for an answer.
+ *
+ * `IS` rather than `=`: an entry recorded before request ids existed has no
+ * `requestId` at all, so `json_extract` yields NULL, and NULL `IS` a string is
+ * false — such an entry is left unread by a request-scoped read. (NULL `IS
+ * NULL` would be true, but `requestId` is never passed as NULL: the
+ * `undefined` case takes the tag-only `mark` path above.)
  */
 export function markHistoryRead(ids: string[], requestId?: string): void {
   const database = db();
