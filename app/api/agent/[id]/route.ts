@@ -37,13 +37,10 @@ export async function POST(
 
 // GET /api/agent/[id] - Get current agent state
 export async function GET(
-  req: Request,
+  _req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  // Default stays the full shape; `?systemPrompt=0` drops the ~13 KB prompt
-  // from the 15 s state poll. Any other value (including "1") keeps it.
-  const includeSystemPrompt = new URL(req.url).searchParams.get("systemPrompt") !== "0";
 
   try {
     const session = getRpcSession(id);
@@ -51,13 +48,7 @@ export async function GET(
       return Response.json({ running: false, alive: false });
     }
     try {
-      // Through the wrapper's command path, not a dedicated method: that is
-      // the contract every wrapper fake implements, and `dispatchCommand`
-      // already honors `systemPrompt: false`.
-      const state = await session.send({
-        type: "get_state",
-        ...(includeSystemPrompt ? {} : { systemPrompt: false }),
-      });
+      const state = await session.send({ type: "get_state" });
       return Response.json({ running: session.isRunning(), alive: true, state });
     } catch (error) {
       // omp being slow is not the run ending: answer 503 so clients retry the
@@ -65,6 +56,9 @@ export async function GET(
       // this tree raises (`session_slow`) and 0.6.0's own
       // `session_state_timeout` mean the same thing to a client.
       if (error instanceof WebRpcError && (error.code === "session_slow" || error.code === "session_state_timeout")) {
+        // The liveness watchdog disposes a child that stayed silent past its
+        // threshold; that child is gone, so the busy answer would be a lie.
+        if (!session.isAlive()) return Response.json({ running: false, alive: false });
         return Response.json(
           {
             error: error.message,

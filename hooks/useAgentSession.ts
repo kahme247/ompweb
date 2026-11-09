@@ -215,17 +215,6 @@ function currentRunAssistant(context: SessionData["context"], previousEntryIds: 
     }
   }
   return null;
-/** A state GET answers 503 when omp is alive but its event loop is blocked by
- *  a large session (`session_slow`, and 0.6.0's own `session_state_timeout`).
- *  That is "still running, retry later" — never a load failure. */
-async function isBusySessionResponse(res: Response): Promise<boolean> {
-  if (res.status !== 503) return false;
-  try {
-    const body = await res.json() as { code?: unknown };
-    return body?.code === "session_slow" || body?.code === "session_state_timeout";
-  } catch {
-    return false;
-  }
 }
 
 export interface UseAgentSessionOptions {
@@ -1005,7 +994,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
       if (!res.ok) return;
-      const agentState = await res.json() as { running: boolean; state?: AgentStateResponse };
+      const agentState = await res.json() as { running: boolean; alive?: boolean; state?: AgentStateResponse };
       if (!hookAliveRef.current || sessionIdRef.current !== sid) return;
       applySkillDiagnosticsSnapshot(skillDiagnosticsRevision, agentState.state?.skillDiagnostics);
       const applied = applyAuthoritativeModel(toThinkingModelMeta(agentState.state?.model), token);
@@ -1020,8 +1009,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setFastModeEnabled(agentState.state.fastModeEnabled);
       }
       setFastModeActive(agentState.state?.fastModeActive);
-      // No omp process: back to the catalog fallback.
-      setSlowModeSupported(agentState.running ? (agentState.state?.slowModeSupported ?? false) : undefined);
+      // No omp process: back to the catalog fallback. `alive`, not `running`:
+      // an idle live child still knows whether this session's model supports
+      // Slow mode, and reading it as absent showed an enabled setting as
+      // disabled and sent the wrong toggle value. An older server/daemon
+      // answers without `alive`, where `running` is the only liveness signal.
+      setSlowModeSupported((agentState.alive ?? agentState.running) ? (agentState.state?.slowModeSupported ?? false) : undefined);
       setSlowModeEnabled(agentState.state?.slowModeEnabled ?? false);
       setSlowModeScope(agentState.state?.slowModeScope);
       setUsageLimit(agentState.state?.usageLimit);
@@ -1064,7 +1057,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       queueRevision: ++queueSeqRef.current,
       skillDiagnosticsRevision: ++skillDiagnosticsSeqRef.current,
       response: fetch(`/api/sessions/${encodeURIComponent(sid)}/state`).then(async (stateRes) => {
-        const agentState = await stateRes.json().catch(() => ({})) as { running: boolean; state?: AgentStateResponse; exited?: ExitedRpcSession; outbox?: OutboxEntry[]; outboxScope?: string; outboxSettledIds?: string[] };
+        const agentState = await stateRes.json().catch(() => ({})) as { running: boolean; alive?: boolean; state?: AgentStateResponse; code?: unknown; exited?: ExitedRpcSession; outbox?: OutboxEntry[]; outboxScope?: string; outboxSettledIds?: string[] };
         if (hookAliveRef.current && sessionIdRef.current === sid && contextRequestSeqRef.current === requestSeq
           && promptRunIdRef.current === requestRun && (fenceRunId === undefined || promptRunIdRef.current === fenceRunId)) {
           if (typeof agentState.outboxScope === "string") rememberOutboxScope(agentState.outboxScope);
@@ -1133,8 +1126,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (!stateRes.ok) {
           // A busy child (503 `session_slow` / `session_state_timeout`) is not
           // a failed load: the transcript above is the on-disk copy, the run
-          // keeps going and the state is merely unknown right now.
-          if (await isBusySessionResponse(stateRes)) {
+          // keeps going and the state is merely unknown right now. The code
+          // comes from the body already parsed above — a Response body can be
+          // read only once, and re-reading it threw, turning the busy path into
+          // an HTTP 503 load failure.
+          if (stateRes.status === 503 && (agentState.code === "session_slow" || agentState.code === "session_state_timeout")) {
             if (!hookAliveRef.current || sessionIdRef.current !== sid
               || contextRequestSeqRef.current !== requestSeq || promptRunIdRef.current !== requestRun) {
               return null;
@@ -1166,7 +1162,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (modelApplied && liveState.thinkingLevel !== undefined) setThinkingLevel(normalizeThinkingLevel(liveState.thinkingLevel));
           if (liveState.fastModeEnabled !== undefined) setFastModeEnabled(liveState.fastModeEnabled);
           setFastModeActive(liveState.fastModeActive);
-          setSlowModeSupported(agentState.running ? (liveState.slowModeSupported ?? false) : undefined);
+          // `alive`, not `running`: an idle live child still knows its model's Slow support.
+          setSlowModeSupported((agentState.alive ?? agentState.running) ? (liveState.slowModeSupported ?? false) : undefined);
           setSlowModeEnabled(liveState.slowModeEnabled ?? false);
           setSlowModeScope(liveState.slowModeScope);
           setUsageLimit(liveState.usageLimit);
@@ -1179,7 +1176,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (liveState.extensionWidgets !== undefined) setExtensionWidgets(liveState.extensionWidgets ?? []);
           if (liveState.todoPhases !== undefined) setTodoPhases(liveState.todoPhases ?? []);
           applyQueueStateSnapshot(queueRevision, liveState.queuedMessages);
-        } else if (!agentState.running) {
+        } else if (!(agentState.alive ?? agentState.running)) {
           setSlowModeSupported(undefined);
           applyQueueStateSnapshot(queueRevision, null);
         }
@@ -1301,14 +1298,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           ...(advisorEnabled ? { advisor: true } : {}),
         }),
       });
-      const body = await res.json().catch(() => ({})) as { sessionId?: unknown; error?: string; code?: string; hostOffline?: boolean; delivery?: string };
+      const body = await res.json().catch(() => ({})) as { sessionId?: unknown; error?: string; code?: string; hostOffline?: boolean; delivery?: string; maybeStarted?: boolean };
       const offline = res.status === 503 && body.hostOffline === true;
-      if (!res.ok && !offline) throw new Error(body.error || body.code ? formatApiError(body) : `HTTP ${res.status}`);
+      // A command timeout keeps the spawned child (HTTP 400 `session_slow` with
+      // its id): the preset may already be applied and a prompt it carried may
+      // already run, so a retry must adopt it instead of spawning a second one.
+      const slow = body.code === "session_slow";
+      if (!res.ok && !offline && !slow) throw new Error(body.error || body.code ? formatApiError(body) : `HTTP ${res.status}`);
       // A host that dropped after the spawn keeps the session (503 with its id):
       // adopt it, so a retry sends there instead of starting a second session.
       const realId = typeof body.sessionId === "string" && body.sessionId ? body.sessionId : null;
       if (!realId) {
         if (offline) throw new HostOfflineError(formatApiError(body), body.delivery === "unknown");
+        if (slow) throw new Error(formatApiError(body));
         return null;
       }
       sessionIdRef.current = realId;
@@ -1328,6 +1330,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         observeCreatedSessionRef.current?.(realId);
       }
       if (offline) throw new HostOfflineError(formatApiError(body), body.delivery === "unknown");
+      // Adopted above: the id is kept, so the caller's retry targets this child.
+      if (slow) throw new Error(formatApiError(body));
       return realId;
     })();
 

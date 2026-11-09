@@ -16,26 +16,6 @@ export type UsageLimitState =
 
 export type SlowModeScope = "session" | "global";
 
-/** omp's goal record (`goal` command reply, `goal_updated`, `get_state.goal.goal`). */
-export interface GoalInfo {
-  id: string;
-  objective: string;
-  /** `active` / `paused`; completed and dropped goals answer `null` instead. */
-  status: string;
-  tokenBudget?: number;
-  tokensUsed: number;
-  timeUsedSeconds: number;
-  createdAt: number;
-  updatedAt: number;
-}
-
-/** Mirror of omp's GoalModeState: the `goal` reply and the `goal` field of `get_state`. */
-export interface GoalModeState {
-  enabled: boolean;
-  mode: string;
-  goal: GoalInfo | null;
-}
-
 export interface ModelLike {
   id: string;
   provider: string;
@@ -122,8 +102,6 @@ export interface RpcSessionState {
   tokensPerSecond?: number | null;
   /** Structured skill resolution diagnostics; absent on older OMP builds. */
   skillDiagnostics?: SkillDiagnosticsSnapshot;
-  /** omp goal mode; absent on older OMP builds (never invented here). */
-  goal?: GoalModeState | null;
 }
 
 /**
@@ -149,8 +127,7 @@ export interface WebSessionState {
   queuedMessageCount: number;
   queuedMessages: QueuedMessages;
   contextUsage: ContextUsage | null;
-  /** Absent when the client asked for the prompt-less shape (`?systemPrompt=0`). */
-  systemPrompt?: string;
+  systemPrompt: string;
   thinkingLevel: string;
   fastModeEnabled: boolean;
   fastModeActive?: boolean;
@@ -163,8 +140,6 @@ export interface WebSessionState {
   /** Parsed public diagnostics DTO; absent means unsupported or malformed. */
   skillDiagnostics?: SkillDiagnosticsSnapshot;
   todoPhases: TodoPhase[];
-  /** omp goal mode snapshot; omitted when the child predates the `goal` field. */
-  goal?: GoalModeState | null;
   extensionStatuses: Array<{ key: string; text: string }>;
   extensionWidgets: Array<{ key: string; lines: string[]; placement: "aboveEditor" | "belowEditor" }>;
 }
@@ -248,16 +223,6 @@ export interface RpcAskDialogAnswer {
   selectedOptions: string[];
   customInput?: string;
 }
-
-/**
- * One answer to a blocking extension dialog. Exactly one variant is sent, both
- * by the web dialog (ExtensionDialog) and by the notification answer endpoint.
- */
-export type ExtensionUiResponse =
-  | { value: string }
-  | { confirmed: boolean }
-  | { cancelled: true }
-  | { answers: RpcAskDialogAnswer[] };
 
 /**
  * omp's rpc-ui extension UI request frames, including the methods missing from

@@ -190,7 +190,10 @@ async function fetchStub(url, init = {}) {
   for (let i = 0; i < world.holds.length; i++) {
     if (world.holds[i].match(method, u, body)) {
       const h = world.holds.splice(i, 1)[0];
-      const { status = 200, value } = await h.produce();
+      const produced = await h.produce();
+      // A hold may hand back a real Response (a body that can be read once).
+      if (produced.response) return produced.response;
+      const { status = 200, value } = produced;
       return jsonResponse(status, value);
     }
   }
@@ -1784,6 +1787,41 @@ test("a failed transcript reload is retried instead of being classified as an em
   assert.equal(w.latest.agentRunning, false);
   assert.ok(w.latest.messages.some((m) => m.role === "assistant" && m.content[0]?.text === "Saved answer"));
   assert.deepEqual(w.latest.notices.filter((n) => n.type === "error"), []);
+});
+
+test("opening a chat whose state read answers 503 session_slow keeps the transcript and shows the run, not a load failure", async () => {
+  resetWorld();
+  const sid = "busy-open";
+  primeSession(sid, [userMsg("u0", "saved history")]);
+  // A real Response: its body can be read exactly once, so a second read (the
+  // bug that turned this path into an HTTP 503 load failure) throws here.
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === `/api/sessions/${sid}/state`,
+    produce: async () => ({
+      response: Response.json(
+        { running: true, alive: true, code: "session_slow", error: "omp is busy", silentForMs: 12_000 },
+        { status: 503 },
+      ),
+    }),
+  });
+  const w = await mountSession(sid);
+  assert.equal(w.latest.loading, false);
+  assert.equal(w.latest.error, null, "a busy child is not a failed load");
+  assert.ok(w.latest.messages.some((m) => m.role === "user" && m.content === "saved history"), "the on-disk transcript stays");
+  assert.equal(w.latest.agentRunning, true, "the run stays marked so the reconcile poll settles it");
+  assert.ok(lastEs(), "the observer stream attaches to receive the completion frames");
+});
+
+test("a 503 state answer without a busy code stays a load failure", async () => {
+  resetWorld();
+  const sid = "broken-open";
+  primeSession(sid, [userMsg("u0", "saved history")]);
+  world.holds.push({
+    match: (method, url) => method === "GET" && url === `/api/sessions/${sid}/state`,
+    produce: async () => ({ status: 503, value: { error: "Host is offline", hostOffline: true } }),
+  });
+  const w = await mountSession(sid);
+  assert.equal(w.latest.agentRunning, false);
 });
 
 for (const recovered of ["answer", "empty", "absent wrapper"]) {
