@@ -66,6 +66,13 @@ interface HubState {
   streams: Map<string, Set<Send>>;
   /** `<sessionId>:<requestId>` → when it was retracted. A push retry of a settled dialog must deliver nothing (see `publishNotificationDismiss`). */
   retractions: Map<string, number>;
+  /**
+   * The same, for a settlement a replay may undo: a resync forgets a dialog
+   * whose replayed frame can restore the very same request id. The retraction
+   * still closes what is on screen and stops a sleeping retry, and publishing
+   * that request id again lifts it (see `publishNotification`).
+   */
+  temporaryRetractions: Map<string, number>;
 }
 
 declare global {
@@ -73,10 +80,11 @@ declare global {
 }
 
 function hub(): HubState {
-  const state = (globalThis.__ompNotificationHub ??= { presence: new Map(), streams: new Map(), retractions: new Map() });
+  const state = (globalThis.__ompNotificationHub ??= { presence: new Map(), streams: new Map(), retractions: new Map(), temporaryRetractions: new Map() });
   // `bun --hot` keeps this object across a re-evaluation: a state created by
   // the previous module instance may predate a field added here.
   state.retractions ??= new Map();
+  state.temporaryRetractions ??= new Map();
   return state;
 }
 
@@ -210,9 +218,13 @@ async function sendPushPayload(
  * that settles a dialog (answer, cancel, expiry, process exit) records one,
  * and `sendPush` asks before every attempt: a retry that wakes up after
  * another client answered must never re-deliver a question nobody can answer.
+ * A temporary retraction (a resync that forgot the dialog) counts the same way
+ * until the request is published again.
  */
 function isRetracted(sessionId: string, requestId: string, now: number): boolean {
-  const at = hub().retractions.get(`${sessionId}:${requestId}`);
+  const state = hub();
+  const key = `${sessionId}:${requestId}`;
+  const at = state.retractions.get(key) ?? state.temporaryRetractions.get(key);
   return at !== undefined && now - at <= PUSH_RETRACTION_TTL_MS;
 }
 
@@ -282,6 +294,10 @@ export function isApplePushEndpoint(endpoint: string): boolean {
 /** Never throws: callers publish from the RPC frame path, and a store failure must not cost them the frame. */
 export function publishNotification(event: NotificationEvent): void {
   const state = hub();
+  // A replayed dialog (resync after a lost link) restores a request a resync
+  // had temporarily retracted: it is pending again, so its notification and
+  // its pushes must go out as for any other question.
+  if (event.type === "input" && event.requestId) state.temporaryRetractions.delete(`${event.sessionId}:${event.requestId}`);
   let devices: NotificationDevice[] = [];
   try {
     devices = listDevices();
@@ -325,6 +341,24 @@ export function publishNotification(event: NotificationEvent): void {
  * Never throws: callers run on the RPC frame path.
  */
 export function publishNotificationDismiss(sessionId: string, requestId: string): void {
+  retract(sessionId, requestId, "permanent");
+}
+
+/**
+ * Retract a dialog this server only *forgot*: a resync dropped the pending
+ * request, and the replayed frames may restore the very same request id.
+ * Everything a retraction does happens (open tabs close it, a sleeping push
+ * retry stops, the history entry becomes read), but the record is temporary:
+ * publishing that request id again lifts it, so a replayed question is
+ * announced and pushed like a new one instead of being suppressed for the
+ * retraction TTL. A dialog that is really gone is never replayed, and its
+ * notification stays closed.
+ */
+export function publishNotificationForgotten(sessionId: string, requestId: string): void {
+  retract(sessionId, requestId, "temporary");
+}
+
+function retract(sessionId: string, requestId: string, kind: "permanent" | "temporary"): void {
   const tag = `${sessionId}:input`;
   const state = hub();
   const now = Date.now();
@@ -332,7 +366,18 @@ export function publishNotificationDismiss(sessionId: string, requestId: string)
   for (const [key, at] of state.retractions) {
     if (now - at > PUSH_RETRACTION_TTL_MS) state.retractions.delete(key);
   }
-  state.retractions.set(`${sessionId}:${requestId}`, now);
+  for (const [key, at] of state.temporaryRetractions) {
+    if (now - at > PUSH_RETRACTION_TTL_MS) state.temporaryRetractions.delete(key);
+  }
+  const key = `${sessionId}:${requestId}`;
+  if (kind === "permanent") {
+    state.temporaryRetractions.delete(key);
+    state.retractions.set(key, now);
+  } else if (!state.retractions.has(key)) {
+    // A permanent settlement of the same request wins: a replay of an answered
+    // dialog must not reopen its notification.
+    state.temporaryRetractions.set(key, now);
+  }
   // Only the entry of this request is read: a newer dialog of the same tag
   // replaced it in the history, and that one is still waiting for an answer.
   try {

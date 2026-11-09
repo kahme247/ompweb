@@ -22,7 +22,7 @@ import { RESUME_PROMPT } from "./hosts/host-resume";
 import { samePath } from "./paths";
 import { isRecord } from "./type-guards";
 import { BLOCKING_UI_METHODS, createNotificationDetector } from "./notification-events";
-import { publishNotification, publishNotificationDismiss } from "./notification-hub";
+import { publishNotification, publishNotificationDismiss, publishNotificationForgotten } from "./notification-hub";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./skill-diagnostics";
 import { eventWithToolResultImageUrls } from "./media-cache";
 import type {
@@ -129,7 +129,7 @@ export class WebRpcError extends Error {
   }
 }
 
-/** Shape check for an ask-dialog `answers` payload; omp validates the content. */
+/** Shape check for an ask-dialog `answers` payload. */
 export function isAskAnswers(value: unknown): boolean {
   return Array.isArray(value) && value.every((answer: unknown) =>
     isRecord(answer)
@@ -137,6 +137,45 @@ export function isAskAnswers(value: unknown): boolean {
     && Array.isArray(answer.selectedOptions)
     && answer.selectedOptions.every((option: unknown) => typeof option === "string")
     && (answer.customInput === undefined || typeof answer.customInput === "string"));
+}
+
+/**
+ * Why `answers` cannot answer `questions`, or null when they can. Mirrors omp's
+ * `parseAskDialogResponse` (rpc-mode.ts), which throws on any mismatch: one
+ * answer per question in request order, each naming its own question, only
+ * labels that question offers, no label twice, and a single-select question
+ * takes either one option or free text, never both. omp trims `customInput`, so
+ * blank free text counts as absent. Checking here keeps a rejected payload from
+ * consuming the pending dialog, which would leave the ask tool failed.
+ */
+export function askAnswersProblem(answers: unknown, questions: unknown): string | null {
+  if (!Array.isArray(questions)) return "the pending ask carries no questions";
+  if (!Array.isArray(answers)) return "answers must be an array";
+  if (answers.length !== questions.length) return `answers must carry ${questions.length} entries in question order`;
+  for (const [index, raw] of questions.entries()) {
+    const question = isRecord(raw) ? raw : {};
+    const id = typeof question.id === "string" ? question.id : "";
+    const answer = answers[index];
+    if (!isRecord(answer)) return `answer ${index} must be an object`;
+    if (answer.id !== id) return `answer ${index} must have id ${JSON.stringify(id)}`;
+    const options = Array.isArray(question.options) ? question.options : [];
+    const labels = options.flatMap((option) => (isRecord(option) && typeof option.label === "string" ? [option.label] : []));
+    const selected = answer.selectedOptions;
+    if (!Array.isArray(selected)) return `answer ${JSON.stringify(id)} must carry a selectedOptions array`;
+    const chosen: string[] = [];
+    for (const label of selected) {
+      if (typeof label !== "string" || !labels.includes(label)) return `answer ${JSON.stringify(id)} selected unknown option ${JSON.stringify(label)}`;
+      if (chosen.includes(label)) return `answer ${JSON.stringify(id)} selected ${JSON.stringify(label)} twice`;
+      chosen.push(label);
+    }
+    const custom = answer.customInput;
+    if (custom !== undefined && typeof custom !== "string") return `answer ${JSON.stringify(id)} customInput must be a string`;
+    const text = typeof custom === "string" ? custom.trim() : "";
+    if (question.multi !== true && (chosen.length > 1 || (chosen.length > 0 && text !== ""))) {
+      return `answer ${JSON.stringify(id)} is single-select but carries more than one answer`;
+    }
+  }
+  return null;
 }
 
 // Commands forwarded to omp verbatim (request shape already matches rpc-types).
@@ -752,9 +791,13 @@ export class AgentSessionWrapper {
       if (this.hostOwnedLifecycle) {
         this.clearLiveSnapshots();
         this.recoveringUpdates = false;
+        // The frames that were lost may have answered a dialog, and the replay
+        // that follows may restore it: forget it now (its notification must not
+        // keep offering an answer this server no longer holds), but as a
+        // *forgotten* settlement, so the replayed request is published again.
         for (const id of [...this.pendingUiRequests.keys()]) {
           if (this.serverUiRequests.has(id)) continue;
-          this.forgetPendingUiRequest(id);
+          this.settlePendingUiRequest(id, "forgotten");
           this.emit({ type: "extension_ui_request", id: `cancel:${id}`, method: "cancel", targetId: id });
         }
       }
@@ -1454,8 +1497,15 @@ export class AgentSessionWrapper {
    * A pending dialog is settled (answered, cancelled, expired or its child is
    * gone): forget it and retract the `input` notification it produced, so no
    * other tab or device keeps offering an answer to a question that is gone.
+   *
+   * `forgotten` is the same for a dialog this server only *dropped*: a resync
+   * lost it, and the frames the host replays can restore the very same request
+   * id. The notification is retracted now (nothing on screen may keep offering
+   * an answer to a question this server no longer holds), but the retraction is
+   * temporary, so a replay of that request announces and pushes it again
+   * instead of being suppressed for the retraction TTL.
    */
-  private settlePendingUiRequest(id: string): boolean {
+  private settlePendingUiRequest(id: string, reason: "settled" | "forgotten" = "settled"): boolean {
     if (!this.pendingUiRequests.has(id)) return false;
     // Read before forgetting: the tag is the one the notification went out with.
     const publishedSession = this.inputNotificationSessions.get(id);
@@ -1463,7 +1513,8 @@ export class AgentSessionWrapper {
     // One server publishes a notification and its retraction: a former
     // notifier must not close what the elected one still owns.
     if (publishedSession && (!this.hostOwnedLifecycle || isNotifier(this.host.id))) {
-      publishNotificationDismiss(publishedSession, id);
+      if (reason === "forgotten") publishNotificationForgotten(publishedSession, id);
+      else publishNotificationDismiss(publishedSession, id);
     }
     return true;
   }
@@ -1481,8 +1532,9 @@ export class AgentSessionWrapper {
     if (!pending) return "alreadySettled";
     const method = typeof pending.method === "string" ? pending.method : "";
     if (method === "ask") {
-      // A pending ask accepts only its answers or a cancel; anything else would
-      // drop it from reconnect replay while omp rejects the payload.
+      // A pending ask accepts only its answers or a cancel; the answers
+      // themselves are checked against this dialog's questions in
+      // dispatchCommand, the one funnel every answer passes through.
       if (!("cancelled" in response) && !("answers" in response && isAskAnswers(response.answers))) {
         throw new WebRpcError("Invalid ask dialog answers", "invalid_ask_answers");
       }
@@ -2862,11 +2914,15 @@ export class AgentSessionWrapper {
 
       case "extension_ui_response": {
         const { id, ...rest } = command as { id: string; [key: string]: unknown };
-        const pendingAsk = this.pendingUiRequests.get(id)?.method === "ask";
+        const pending = this.pendingUiRequests.get(id);
+        const pendingAsk = pending?.method === "ask";
         // A pending ask accepts only its answers or a cancel; anything else would
-        // drop it from reconnect replay while omp rejects the payload.
-        if (("answers" in rest || pendingAsk) && !isAskAnswers(rest.answers) && !(pendingAsk && rest.cancelled === true)) {
-          throw new WebRpcError("Invalid ask dialog answers", "invalid_ask_answers");
+        // drop it from reconnect replay while omp rejects the payload. The
+        // answers are checked against that dialog's questions, as omp does.
+        if (("answers" in rest || pendingAsk) && !(pendingAsk && rest.cancelled === true)) {
+          if (!isAskAnswers(rest.answers)) throw new WebRpcError("Invalid ask dialog answers", "invalid_ask_answers");
+          const problem = pendingAsk ? askAnswersProblem(rest.answers, pending.questions) : null;
+          if (problem) throw new WebRpcError(`Invalid ask dialog answers: ${problem}`, "invalid_ask_answers");
         }
         const wasPending = this.settlePendingUiRequest(id);
         const serverRequest = this.serverUiRequests.get(id);

@@ -157,13 +157,54 @@ push: iOS Safari revokes push permission for pushes that show nothing.
 
 | Route | Method | Purpose |
 |---|---|---|
-| `/api/agent/running/events?clientId=` | GET | existing SSE stream, now also `{type: "notification", kind, event}` |
+| `/api/agent/running/events?clientId=` | GET | existing SSE stream, now also `{type: "notification", kind, event}` and `{type: "notification-dismiss", tag, sessionId, requestId}` |
 | `/api/notifications/presence` | POST | presence report |
 | `/api/notifications/devices?deviceId=` | GET | VAPID public key, whether this device has a subscription |
 | `/api/notifications/devices` | PUT | `{deviceId, prefs, subscription?}`; an omitted subscription keeps the stored one |
 | `/api/notifications/test` | POST | `{deviceId}`: a test push; 502 with the push service's answer when it fails |
+| `/api/notifications/answer` | POST | `{sessionId, requestId, response}`: answer a pending blocking dialog from a notification |
 
 All routes sit behind the existing password gate and origin check.
+
+### Answering from a notification
+
+A blocking dialog (`confirm`, `select`, `input`, `editor`, `ask`) is carried in
+the `input` notification's `dialog` field, in the SSE frame, the history entry
+and the push body, so a client can offer its answer without an open chat tab.
+`POST /api/notifications/answer` takes `{sessionId, requestId, response}` with
+exactly one response variant: `{confirmed}`, `{value}`, `{cancelled: true}`, or
+`{answers}` for an `ask`. The body is capped at 64 KiB and read with
+`parseJsonWithinLimit`.
+
+- The route looks the session up in the live registry (also through the aliases
+  omp's session moves left) and never spawns omp: an unknown or exited session
+  answers `200 {status: "sessionGone"}`, and a request id that is not pending
+  answers `200 {status: "alreadySettled"}`. Neither is an error.
+- The answer is checked against the pending dialog first, so a payload the
+  dialog cannot take is a 400 and leaves the question answerable: a `select`
+  takes one of its own labels, a `confirm` a confirmation, an `input`/`editor`
+  a value, and an `ask` its answers. An `ask` payload is validated with omp's
+  own rules (`parseAskDialogResponse` in `rpc-mode.ts`): one answer per
+  question in request order, each answer naming its own question id, only
+  labels that question offers, no label twice, and a single-select question
+  takes either one label or free text — never both. `customInput` is trimmed
+  before it counts, as omp trims it. A cancel is always accepted.
+- An accepted answer goes through the same `extension_ui_response` command the
+  desktop dialog sends, so it resolves a server-owned confirmation and applies
+  the offline/restarting gate: a host that is offline answers 503
+  `{hostOffline: true}` and a restarting session 400 `session_restarting`,
+  never `answered`. The dialog is settled only after the answer was admitted.
+- Settling a dialog retracts its notification everywhere: every reachable tab
+  gets `{type: "notification-dismiss", tag, sessionId, requestId}`, subscribed
+  devices get a `dismiss` push (never to Apple's endpoint, which revokes the
+  permission for a push that shows nothing), and the history entry of exactly
+  that request becomes read. A newer dialog of the same tag keeps its own
+  unread entry. A push retry that wakes after the settlement delivers nothing.
+- A resync that dropped a dialog (a linked host discarding buffered output)
+  retracts it too, but as a *forgotten* settlement: the retraction is
+  temporary, so if the host replays the same request id the question is
+  announced and pushed again instead of being suppressed. A permanent
+  settlement of the same request is never lifted by that.
 
 ## Settings: Notifications tab
 
