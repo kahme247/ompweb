@@ -2,6 +2,7 @@ import { execFile, spawn } from "child_process";
 import { resolveOmpBin, wrapWindowsScript } from "./omp-cli";
 import { createChildProcessEnvironment } from "../project-command-env";
 import { isUpdateDisabled } from "../update-policy";
+import { resolveTaskkillBin } from "../windows-service";
 
 export interface OmpUpdateStatus {
   currentVersion: string | null;
@@ -28,9 +29,13 @@ export function scaleOmpUpdateCheckTimeoutForTests(scale: number): void {
 
 /** Run a raw `omp update [args]` subcommand. Install durability
  * (lease/status/retry) lives in lib/self-update.ts. */
-export function runOmpUpdate(args: string[], timeoutMs = OMP_UPDATE_CHECK_TIMEOUT_MS * checkTimeoutScale): Promise<string> {
+export function runOmpUpdate(args: string[], timeoutMs = OMP_UPDATE_CHECK_TIMEOUT_MS): Promise<string> {
   const bin = resolveOmpBin();
   if (!bin) return Promise.reject(new Error("omp binary not found. Install oh-my-pi or set OMP_WEB_OMP_BIN."));
+  // The test-only scale is applied here, not in the default parameter: a
+  // default expression is evaluated per call, but keeping production's
+  // deadline out of the test hook's reach makes the hook's scope obvious.
+  const deadlineMs = timeoutMs * checkTimeoutScale;
   const { promise, resolve, reject } = Promise.withResolvers<string>();
   const target = wrapWindowsScript(bin, ["update", ...args]);
   // The deadline is handled here rather than by `execFile`'s `timeout`: that
@@ -48,7 +53,7 @@ export function runOmpUpdate(args: string[], timeoutMs = OMP_UPDATE_CHECK_TIMEOU
     clearTimeout(deadline);
     if (error) {
       if (timedOut) {
-        reject(new Error(`Command failed: ${target.file} ${target.args.join(" ")} (timed out after ${timeoutMs} ms)`));
+        reject(new Error(`Command failed: ${target.file} ${target.args.join(" ")} (timed out after ${deadlineMs} ms)`));
         return;
       }
       reject(new Error((stderr || stdout || error.message).trim().slice(-1000)));
@@ -71,7 +76,7 @@ export function runOmpUpdate(args: string[], timeoutMs = OMP_UPDATE_CHECK_TIMEOU
         }
       }
     }, 1000).unref();
-  }, timeoutMs);
+  }, deadlineMs);
   return promise;
 }
 
@@ -95,7 +100,10 @@ function killProcessTree(pid: number | undefined): void {
     return;
   }
   try {
-    const reaper = spawn("taskkill", ["/pid", String(pid), "/t", "/f"], { windowsHide: true, stdio: "ignore" });
+    // Absolute path: a bare `taskkill` resolves through PATH, which an omp
+    // session's sanitized environment or a user PATH without System32 can
+    // break — exactly when a wedged check needs reaping.
+    const reaper = spawn(resolveTaskkillBin(), ["/pid", String(pid), "/t", "/f"], { windowsHide: true, stdio: "ignore" });
     reaper.once("error", () => {
       try {
         process.kill(pid, "SIGKILL");
